@@ -16,12 +16,12 @@ import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import type { ViewNavigation } from "../navigation.js";
+import type { View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { periodLabel } from "../usage-view-model.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { UsageView } from "./UsageView.js";
+import { USAGE_SKELETON_DELAY_MS, UsageView } from "./UsageView.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
 domWindow.localStorage.setItem("wollipog.hide-account-emails", "true");
@@ -943,7 +943,7 @@ test("a people list that fails to load still leaves Budget and History open to c
   const page = await renderBudgetHistory({ usersFail: true });
   try {
     await chooseBreakdown(page.container, "By Person");
-    assert.equal(page.container.querySelector('.usage-state.error[role="alert"]')?.textContent, "Unable to list people");
+    assert.equal(page.container.querySelector('.notice.t-danger[role="alert"] .notice-body')?.textContent, "Unable to list people");
     assert.match(page.container.querySelector(".usage-person-head")?.textContent ?? "", /\$25\.00 per UTC day/);
     assert.ok(page.button(page.container, "Change Budget…"));
     await page.open();
@@ -1022,7 +1022,12 @@ test("aggregation switches ignore stale responses and show request failures with
   holdWeek = false;
   failWeek = true;
   await act(async () => { option("Week").click(); await settleLoad(); await Promise.resolve(); });
-  assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Weekly usage is temporarily unavailable/);
+  const alert = () => container.querySelector('[role="alert"]');
+  assert.match(alert()?.textContent ?? "", /Couldn't Load Usage/);
+  assert.doesNotMatch(alert()?.textContent ?? "", /Weekly usage is temporarily unavailable/, "the raw message waits behind Show Details");
+  const showDetails = [...alert()!.querySelectorAll("button")].find((node) => node.textContent === "Show Details") as HTMLButtonElement;
+  await act(async () => { showDetails.click(); await Promise.resolve(); });
+  assert.match(alert()?.textContent ?? "", /Weekly usage is temporarily unavailable/);
   assertNoDomNode(container.querySelector(".usage-chart-section"),
     "a failed aggregation request never leaves the previous chart under the new selected label");
 
@@ -1071,6 +1076,8 @@ test("a late failed request cannot overwrite the newer selection's loading state
 
   await act(async () => { option("Week").click(); await settleLoad(); });
   await act(async () => { option("Day").click(); await settleLoad(); });
+  // Nothing to keep on screen, so the skeleton and its status line follow after 300ms (§12.3).
+  await act(async () => { await advanceTimeouts(USAGE_SKELETON_DELAY_MS); });
   assert.deepEqual(pending.map((request) => request.granularity), ["week", "day"],
     "the Week request is still in flight when the newer Day request starts");
   const [weekly, daily] = pending;
@@ -1266,7 +1273,8 @@ async function renderWithFleet(client: ApiClient, runners: readonly RunnerView[]
     createSocket: () => socket,
     close() {},
   };
-  const navigation: ViewNavigation = { current: () => ({ name: "usage" }), push() {}, listen: () => () => {} };
+  const pushed: View[] = [];
+  const navigation: ViewNavigation = { current: () => ({ name: "usage" }), push: (view) => { pushed.push(view); }, listen: () => () => {} };
   await act(async () => {
     root.render(
       <ApiProvider client={client}>
@@ -1284,6 +1292,8 @@ async function renderWithFleet(client: ApiClient, runners: readonly RunnerView[]
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   return {
     container,
+    socket,
+    pushed,
     unmount: async () => { await act(async () => root.unmount()); container.remove(); },
   };
 }
@@ -1595,4 +1605,312 @@ test("the facts strip has no heading, and in Tokens mode it keeps the Cost headl
   ]);
   assert.equal(facts(container).at(-1)![1], costHeadline, "Estimated Cost reads exactly as the Cost headline did");
   await cleanup();
+});
+
+// ---- One state at a time, each with an action that helps (#3016) ----
+
+/** A window with nothing in it: no buckets, no tokens and no cost. */
+const emptyWindow = (granularity: UsageAggregationGranularity = "day"): UsageAggregationResponse => ({
+  ...response([], granularity),
+  totals: amountOf(0, 0),
+});
+
+/** UsageView without a store, over `client`, with its first aggregation settled. */
+const renderStandalone = async (client: ApiClient) => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+  return { container, unmount: async () => { await act(async () => root.unmount()); container.remove(); } };
+};
+
+const apiPanel = (container: HTMLElement) => container.querySelector("#usage-api-panel") as HTMLElement;
+const buttonNamed = (scope: Element, name: string) =>
+  [...scope.querySelectorAll("button")].find((node) => node.textContent?.trim() === name) as HTMLButtonElement | undefined;
+
+test("an empty window is said once, in one empty state with the toolbar above it, and Show Last 365 Days loads that range (#3016)", async () => {
+  const requested: number[] = [];
+  const client = {
+    ...usageClient(emptyWindow()),
+    usage: async (query: { days: number; granularity?: UsageAggregationGranularity }) => {
+      requested.push(query.days);
+      return emptyWindow(query.granularity ?? "day");
+    },
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const panel = apiPanel(container);
+
+  assert.equal(panel.querySelectorAll(".state").length, 1, "exactly one state");
+  assert.equal(panel.querySelector(".state-title")?.textContent, "No Usage in the Last 30 Days");
+  assert.equal(panel.querySelector(".state-body")?.textContent,
+    "Usage is recorded each time an agent finishes a turn on a connected machine. Try a longer range, or start a session.");
+  assert.ok(panel.querySelector(".state .state-icon svg"), "the state carries the Usage icon");
+  assert.ok(panel.querySelector(".usage-toolbar"), "the toolbar stays");
+  assert.doesNotMatch(panel.textContent ?? "", /\$0\.00/, "no zero headline");
+  assertNoDomNode(panel.querySelector(".usage-overview"), "no overview");
+  assertNoDomNode(panel.querySelector(".usage-chart-svg"), "no chart");
+  assertNoDomNode(panel.querySelector("dl.facts"), "no facts");
+  assertNoDomNode(panel.querySelector("table"), "no breakdown table");
+  assertNoDomNode(panel.querySelector('[role="alert"]'), "no error beside the empty state");
+  assertNoDomNode(buttonNamed(panel, "Go to Sessions") ?? null, "without a store there is nowhere to go");
+
+  await act(async () => { buttonNamed(panel, "Show Last 365 Days")!.click(); await settleLoad(); await Promise.resolve(); });
+  assert.equal(requested.at(-1), 365, "Show Last 365 Days loads the longest range");
+  assert.equal(panel.querySelector(".state-title")?.textContent, "No Usage in the Last 365 Days");
+  assert.equal(buttonNamed(panel, "Show Last 365 Days"), undefined, "the longest range offers no longer one");
+  assert.match(panel.querySelector(".state-body")?.textContent ?? "", /Start a session to record some\.$/);
+  assert.ok(panel.querySelector('button[aria-label="Range: Last 365 Days"]'), "the Range menu shows the new range");
+  await unmount();
+});
+
+test("under a store the empty state's Go to Sessions opens Sessions (#3016)", async () => {
+  const view = await renderWithFleet(usageClient(emptyWindow()), fleet);
+  await act(async () => { buttonNamed(apiPanel(view.container), "Go to Sessions")!.click(); await Promise.resolve(); });
+  assert.deepEqual(view.pushed.at(-1), { name: "inbox" });
+  await view.unmount();
+});
+
+test("a failed load shows Couldn't Load Usage with Retry, the raw message only behind Show Details, and never the empty state (#3016)", async () => {
+  let fail = false;
+  let calls = 0;
+  const client = {
+    ...usageClient(emptyWindow()),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      calls += 1;
+      if (fail) throw new Error("connect ECONNREFUSED 127.0.0.1:4317");
+      return emptyWindow(query.granularity ?? "day");
+    },
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const panel = apiPanel(container);
+  assert.equal(panel.querySelector(".state-title")?.textContent, "No Usage in the Last 30 Days");
+
+  // A refresh of the same range that fails replaces the empty state rather than joining it.
+  fail = true;
+  await chooseRange(container, 30);
+  await act(async () => { await drain(); });
+  const alert = () => panel.querySelector('[role="alert"]');
+  assert.equal(alert()?.querySelector(".notice-title")?.textContent, "Couldn't Load Usage");
+  assert.equal(alert()?.querySelector(".notice-body")?.textContent, "Wollipog didn't answer. Recording continues, and nothing is lost.");
+  assert.doesNotMatch(panel.textContent ?? "", /ECONNREFUSED/, "the raw message waits behind Show Details");
+  assert.equal(panel.querySelectorAll(".state").length, 0, "the empty state never shows with the error");
+  await act(async () => { buttonNamed(alert()!, "Show Details")!.click(); await Promise.resolve(); });
+  assert.match(alert()?.textContent ?? "", /connect ECONNREFUSED 127\.0\.0\.1:4317/);
+
+  fail = false;
+  const before = calls;
+  await act(async () => { buttonNamed(alert()!, "Retry")!.click(); await drain(); });
+  assert.equal(calls, before + 1, "Retry asks again at once");
+  assertNoDomNode(alert(), "a successful retry clears the error");
+  assert.equal(panel.querySelector(".state-title")?.textContent, "No Usage in the Last 30 Days");
+  await unmount();
+});
+
+test("an offline machine and 12 unpriced turns are one warning notice with View Machines and Refresh Rates (#3016)", async () => {
+  let usageCalls = 0;
+  let pricingCalls = 0;
+  const usage: UsageAggregationResponse = {
+    ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
+    totals: amountOf(100, 1, { costSource: "unpriced", unpricedRecords: 12 }),
+    pricing: { status: "fresh", source: "https://rates.example/table.json", fetchedAt: 1, knownModels: 10 },
+  };
+  const client = {
+    ...usageClient(usage),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      usageCalls += 1;
+      return { ...usage, granularity: query.granularity ?? "day" };
+    },
+    refreshUsagePricing: async () => {
+      pricingCalls += 1;
+      return { pricing: usage.pricing };
+    },
+  } as unknown as ApiClient;
+  const offlineFleet = [{ ...fleet[0]!, status: "offline" }, fleet[1]!] as RunnerView[];
+  const view = await renderWithFleet(client, offlineFleet);
+  const panel = apiPanel(view.container);
+
+  const notices = [...panel.querySelectorAll(".notice")];
+  assert.equal(notices.length, 1, "one notice");
+  const notice = notices[0]!;
+  assert.ok(notice.classList.contains("t-warning"), "a warning");
+  assert.equal(notice.querySelector(".notice-title")?.textContent, "Some Usage Is Missing");
+  assert.deepEqual([...notice.querySelectorAll(".notice-body > p")].map((node) => node.textContent), [
+    "Build Box is offline, so usage it hasn't reported yet isn't counted.",
+    "12 turns have no price because no rate is known for their model.",
+  ]);
+  assert.doesNotMatch(notice.textContent ?? "", /build-01/, "the machine is named by its display name, never its hostname");
+  assert.equal(notice.compareDocumentPosition(panel.querySelector(".usage-overview")! as never) & 4, 4,
+    "the notice sits above the overview");
+
+  const usageBefore = usageCalls;
+  await act(async () => { buttonNamed(notice, "Refresh Rates")!.click(); await drain(); await drain(); });
+  assert.equal(pricingCalls, 1, "Refresh Rates asks for new rates once");
+  assert.equal(usageCalls, usageBefore + 1, "and reloads the window");
+
+  await act(async () => { buttonNamed(notice, "View Machines")!.click(); await Promise.resolve(); });
+  assert.deepEqual(view.pushed.at(-1), { name: "runners", section: "machines" });
+  await view.unmount();
+});
+
+test("a Refresh Rates failure says so and keeps its reason behind Show Details (#3016)", async () => {
+  const usage: UsageAggregationResponse = {
+    ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
+    totals: amountOf(100, 1, { costSource: "unpriced", unpricedRecords: 3 }),
+  };
+  const client = {
+    ...usageClient(usage),
+    refreshUsagePricing: async () => { throw new Error("usage pricing is unavailable"); },
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const notice = () => apiPanel(container).querySelector(".notice")!;
+  assertNoDomNode(buttonNamed(notice(), "View Machines") ?? null, "no machine is offline");
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); });
+  assert.match(notice().querySelector(".notice-body")?.textContent ?? "", /Rates couldn't be refreshed\.$/);
+  assert.doesNotMatch(notice().textContent ?? "", /usage pricing is unavailable/);
+  await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+  assert.match(notice().textContent ?? "", /usage pricing is unavailable/);
+  await unmount();
+});
+
+for (const status of ["cached", "unavailable"] as const) {
+  test(`a refresh the plane answers with ${status} rates is a failure too, and still reloads (#3016)`, async () => {
+    let usageCalls = 0;
+    const usage: UsageAggregationResponse = {
+      ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
+      totals: amountOf(100, 1, { costSource: "unpriced", unpricedRecords: 3 }),
+    };
+    const client = {
+      ...usageClient(usage),
+      usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+        usageCalls += 1;
+        return { ...usage, granularity: query.granularity ?? "day" };
+      },
+      // An upstream timeout: HTTP 200 with whatever rates the plane still has.
+      refreshUsagePricing: async () => ({
+        pricing: { status, source: "https://rates.example/table.json", fetchedAt: status === "cached" ? 1 : null, knownModels: 0 },
+      }),
+    } as unknown as ApiClient;
+    const { container, unmount } = await renderStandalone(client);
+    const notice = () => apiPanel(container).querySelector(".notice")!;
+    const before = usageCalls;
+    await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+    assert.equal(usageCalls, before + 1, "the window reloads either way");
+    assert.match(notice().querySelector(".notice-body")?.textContent ?? "", /Rates couldn't be refreshed\.$/);
+    await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+    assert.match(notice().textContent ?? "",
+      new RegExp(`https://rates\\.example/table\\.json didn't return a usable rate table, so the rates are still ${status}\\.`));
+    await unmount();
+  });
+}
+
+test("Refresh Rates against a plane with rate fetching turned off says so (#3016)", async () => {
+  const usage: UsageAggregationResponse = {
+    ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
+    totals: amountOf(100, 1, { costSource: "unpriced", unpricedRecords: 3 }),
+  };
+  const client = {
+    ...usageClient(usage),
+    refreshUsagePricing: async () => ({ pricing: { status: "unavailable", source: "disabled", fetchedAt: null, knownModels: 0 } }),
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const notice = () => apiPanel(container).querySelector(".notice")!;
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+  assert.match(notice().textContent ?? "", /Rate fetching is turned off on this control plane\./);
+  await unmount();
+});
+
+test("a first load shows the overview's skeleton only after 300ms; a refetch keeps the figures under aria-busy (#3016)", async () => {
+  const pending: Array<(value: UsageAggregationResponse) => void> = [];
+  const client = {
+    ...usageClient(emptyWindow()),
+    usage: () => new Promise<UsageAggregationResponse>((resolve) => { pending.push(resolve); }),
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const panel = apiPanel(container);
+  const loadingLine = () => [...panel.querySelectorAll('[role="status"]')].find((node) => node.textContent === "Loading usage…");
+  assert.equal(pending.length, 1, "the first request is in flight");
+
+  await act(async () => { await advanceTimeouts(USAGE_SKELETON_DELAY_MS - USAGE_DEBOUNCE_MS - 10); });
+  assert.equal(loadingLine(), undefined, "nothing new under 300ms");
+  assertNoDomNode(panel.querySelector(".usage-skeleton-chart"));
+
+  await act(async () => { await advanceTimeouts(10); });
+  assert.ok(loadingLine(), "the status line says what is coming");
+  const skeleton = panel.querySelector(".usage-skeleton-chart")!.closest('[aria-hidden="true"]')!;
+  assert.ok(skeleton.querySelector(".usage-skeleton-figure"), "the headline figure");
+  assert.equal(skeleton.querySelectorAll(".usage-skeleton-legend > .skeleton-bar").length, 3, "three legend lines");
+  assert.equal(skeleton.querySelectorAll(".usage-skeleton-chart > .skeleton-bar").length, 30, "the chart's columns");
+
+  await act(async () => { pending.shift()!(response([bucket(Date.UTC(2026, 0, 1), 6, 0.06)])); await drain(); });
+  assertNoDomNode(panel.querySelector(".usage-skeleton-chart"), "the skeleton gives way to the figures");
+  assert.equal(panel.querySelector(".usage-headline-value")?.textContent, "$0.06");
+
+  await chooseRange(container, 30);
+  await act(async () => { await advanceTimeouts(USAGE_SKELETON_DELAY_MS); });
+  assert.equal(panel.querySelector(".usage-headline-value")?.textContent, "$0.06", "a refetch keeps the previous figures");
+  assert.equal(panel.querySelector(".usage-overview")!.closest("[aria-busy]")?.getAttribute("aria-busy"), "true");
+  assertNoDomNode(panel.querySelector(".usage-skeleton-chart"), "and never shows the skeleton");
+  await act(async () => { pending.shift()!(response([bucket(Date.UTC(2026, 0, 1), 6, 0.06)])); await drain(); });
+  assert.equal(panel.querySelector(".usage-overview")!.closest("[aria-busy]")?.getAttribute("aria-busy"), "false");
+  await unmount();
+});
+
+test("while disconnected the last figures stay, dimmed, under Reconnecting…, and they reload once it is back (#3016)", async () => {
+  let calls = 0;
+  let unreachable = false;
+  const usage = response([bucket(Date.UTC(2026, 0, 1), 6, 0.06)]);
+  const client = {
+    ...usageClient(usage),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => {
+      calls += 1;
+      if (unreachable) throw new Error("Failed to fetch");
+      return { ...usage, granularity: query.granularity ?? "day" };
+    },
+  } as unknown as ApiClient;
+  const view = await renderWithFleet(client, fleet);
+  const panel = apiPanel(view.container);
+  assertNoDomNode(panel.querySelector(".is-stale"));
+
+  await act(async () => { view.socket.onclose?.({ code: 1006 }); await drain(); });
+  const reconnecting = [...panel.querySelectorAll('[role="status"]')].find((node) => node.textContent === "Reconnecting…");
+  assert.ok(reconnecting, "one Reconnecting… line");
+  const stale = panel.querySelector(".is-stale");
+  assert.ok(stale, "the last figures are dimmed");
+  assert.equal(stale!.querySelector(".usage-headline-value")?.textContent, "$0.06", "and still there");
+  assert.equal(stale!.contains(reconnecting!), false, "the Reconnecting… line itself is not dimmed");
+  assertNoDomNode(panel.querySelector('[role="alert"]'), "never an error while disconnected");
+
+  // A request that fails while the plane is unreachable leaves the dimmed figures, not an error.
+  unreachable = true;
+  await chooseRange(view.container, 30);
+  await act(async () => { await drain(); });
+  assertNoDomNode(panel.querySelector('[role="alert"]'), "a failure while disconnected is not an error");
+  assert.equal(panel.querySelector(".is-stale .usage-headline-value")?.textContent, "$0.06");
+
+  unreachable = false;
+  const before = calls;
+  await act(async () => {
+    await advanceTimeouts(30_000);
+    view.socket.onopen?.();
+    view.socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
+      runners: fleet, boxes: [], sessions: [], runs: [], pods: [],
+    } as unknown as UiSnapshotMessage);
+    await drain();
+  });
+  assertNoDomNode(panel.querySelector(".is-stale"), "back online the figures are current again");
+  assert.ok(calls > before, "and are reloaded");
+  await view.unmount();
+});
+
+test("an empty window while disconnected shows only Reconnecting…, never the empty state (#3016)", async () => {
+  const view = await renderWithFleet(usageClient(emptyWindow()), fleet);
+  const panel = apiPanel(view.container);
+  await act(async () => { view.socket.onclose?.({ code: 1006 }); await drain(); });
+  assert.equal(panel.querySelector(".state.offline")?.textContent, "Reconnecting…");
+  assertNoDomNode(panel.querySelector(".state-title"), "no No Usage title while disconnected");
+  await view.unmount();
 });

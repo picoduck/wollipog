@@ -17352,8 +17352,6 @@ button.review-finding-location {
    About stay. */
 .usage-toolbar > .btn { flex: 0 1 auto; min-width: 0; }
 .usage-toolbar > .btn > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
-.usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
-.usage-state.error { color: var(--red); }
 /* Subscriptions (#3014, §5.1, §5.5, §11.6): "{N} Accounts" over one surface per account, a row per
    usage window, then the sources with no windows folded into one disclosure. */
 .subscriptions {
@@ -17652,8 +17650,29 @@ button.review-finding-location {
 /* An SVG fill, not a background, so forced colors keeps it like the bars it names. */
 .usage-series-swatch rect { fill: var(--usage-series); }
 
-.usage-notice { display: grid; gap: 4px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-dim); font-size: var(--text-sm); }
-.usage-notice p { margin: 0; }
+/* What the totals leave out (#3016): one warning notice above the overview, or above the empty
+   state. */
+.usage-coverage { margin: 0 0 var(--space-5); }
+/* The one status line over a first load's skeleton (§12.3). */
+.usage-status-line { margin: 0 0 var(--space-3); color: var(--text-dim); font: var(--type-small); }
+/* The first load's placeholder (§12.3): the overview's own grid, a headline figure and three legend
+   lines beside the chart's columns, so nothing moves when the figures arrive. */
+.skeleton-bar.usage-skeleton-figure { width: 60%; height: var(--space-8); }
+.skeleton-bar.usage-skeleton-caption { width: 80%; }
+.usage-skeleton-legend { display: grid; gap: var(--space-3); margin-top: var(--space-3); }
+.usage-skeleton-legend > .skeleton-bar { width: 100%; }
+.usage-skeleton-chart {
+  display: flex;
+  align-items: flex-end;
+  gap: var(--space-1);
+  height: 260px;
+  min-width: 0;
+  border-bottom: 1px solid var(--border);
+}
+.usage-skeleton-chart > .skeleton-bar { flex: 1 1 0; width: auto; height: 40%; }
+.usage-skeleton-chart > .skeleton-bar:nth-child(3n) { height: 65%; }
+.usage-skeleton-chart > .skeleton-bar:nth-child(5n) { height: 25%; }
+.usage-skeleton-chart > .skeleton-bar:nth-child(7n) { height: 85%; }
 
 /* The overview (§2.3): the headline column beside the chart, stacked when the main column is
    under 900px. Stacked, the column keeps its width so a driver's value stays near its name; a
@@ -17714,7 +17733,6 @@ button.review-finding-location {
 }
 
 .usage-chart { position: relative; display: grid; gap: 8px; min-width: 0; }
-.usage-chart-empty { padding: 40px 0; color: var(--text-dim); text-align: center; }
 .usage-chart-svg { display: block; max-width: 100%; height: 260px; overflow: visible; }
 .usage-chart-grid { stroke: var(--border); stroke-width: 1; }
 .usage-chart-baseline { stroke: var(--border-strong); stroke-width: 1; }

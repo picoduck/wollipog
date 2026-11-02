@@ -12,6 +12,8 @@ import {
   bucketStart,
   bucketStepMs,
   coverageMessages,
+  coverageNeedsRates,
+  coverageSentence,
   dailyBudgetReached,
   DRIVER_ORDER,
   DRIVER_PRESENTATION,
@@ -26,6 +28,7 @@ import {
   subscriptionPlanLabel,
   todaySpendUsd,
   usageDriverLabels,
+  usageIsEmpty,
   usageRestingSummary,
   usageWindowCaption,
 } from "./usage-view-model.js";
@@ -359,25 +362,44 @@ test("axis helpers produce clean ticks and bounded, end-anchored labels", () => 
   );
 });
 
-test("coverage messages name offline machines, unpriced records, and rate-table state", () => {
+test("coverage items name offline machines, unpriced turns and rate-table state, in that order (#3016)", () => {
   assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: { status: "fresh", source: "x", fetchedAt: 1, knownModels: 2 } }), []);
-  const messages = coverageMessages({
-    offlineMachines: ["Build Box"], unpricedRecords: 3,
+  const items = coverageMessages({
+    offlineMachines: ["Build Box"], unpricedRecords: 12, legacyClaudeCostRecords: 2,
     pricing: { status: "cached", source: "x", fetchedAt: 1, knownModels: 2 },
   });
-  assert.equal(messages.length, 3);
-  assert.match(messages[0]!, /Build Box is offline/);
-  assert.match(messages[1]!, /3 usage records could not be fully priced/);
-  assert.match(messages[2]!, /could not be refreshed/);
-  assert.match(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: { status: "unavailable", source: "disabled", fetchedAt: null, knownModels: 0 } })[0]!, /No model rate table/);
+  assert.deepEqual(items, [
+    { kind: "offline-machines", machines: ["Build Box"] },
+    { kind: "unpriced", records: 12 },
+    { kind: "legacy-claude", records: 2 },
+    { kind: "rates-cached" },
+  ]);
+  assert.deepEqual(items.map(coverageSentence), [
+    "Build Box is offline, so usage it hasn't reported yet isn't counted.",
+    "12 turns have no price because no rate is known for their model.",
+    "Some older Claude Code costs were recorded in a way that can count a resumed session's spending more than once.",
+    "Rates couldn't be updated, so costs use the last rates Wollipog loaded.",
+  ]);
+  assert.equal(coverageNeedsRates(items), true);
+  assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: { status: "unavailable", source: "disabled", fetchedAt: null, knownModels: 0 } }),
+    [{ kind: "rates-unavailable" }]);
   assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: undefined }), [], "a pre-v103 plane sends no pricing block");
+  assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 0 }), []);
 });
 
-test("historical Claude records disclose possible duplicate spending without relabeling new estimates", () => {
-  const messages = coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 2 });
-  assert.equal(messages.length, 1);
-  assert.match(messages[0]!, /Resumed spending may be counted more than once/);
-  assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 0 }), []);
+test("coverage sentences agree with their count, and only pricing gaps offer new rates (#3016)", () => {
+  assert.equal(coverageSentence({ kind: "offline-machines", machines: ["Build Box", "Studio Mac"] }),
+    "Build Box and Studio Mac are offline, so usage they haven't reported yet isn't counted.");
+  assert.equal(coverageSentence({ kind: "unpriced", records: 1 }), "1 turn has no price because no rate is known for its model.");
+  assert.equal(coverageSentence({ kind: "unpriced", records: 1200 }), "1,200 turns have no price because no rate is known for their model.");
+  assert.equal(coverageNeedsRates([{ kind: "offline-machines", machines: ["Build Box"] }, { kind: "legacy-claude", records: 1 }]), false);
+  assert.equal(coverageNeedsRates([{ kind: "rates-unavailable" }]), true);
+});
+
+test("a window is empty only with no processed tokens and no cost (#3016)", () => {
+  assert.equal(usageIsEmpty(amount()), true);
+  assert.equal(usageIsEmpty(amount({ inputTokens: 1 })), false);
+  assert.equal(usageIsEmpty(amount({ costUsd: 0.01 })), false);
 });
 
 test("a time table row names only its period; the column header says UTC (#3013)", () => {

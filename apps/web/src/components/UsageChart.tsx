@@ -180,9 +180,8 @@ export function UsageChart({
     return () => document.removeEventListener("pointerdown", clearOutside, true);
   }, [active?.via]);
 
-  if (columns.length === 0) {
-    return <div className="usage-chart usage-chart-empty" role="note">No usage was observed in this period.</div>;
-  }
+  // An empty window never reaches the chart: the page says so once, in its empty state (#3016).
+  if (columns.length === 0) return null;
 
   const releasePointer = (event: ReactPointerEvent) => {
     if (event.pointerType === "touch") return;
