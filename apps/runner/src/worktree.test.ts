@@ -6011,6 +6011,56 @@ test("a resuming launch claims its captured worktree just as a fresh start does"
   }
 });
 
+test("startup schedules each cleanup record once and a later periodic sweep retries pending records", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cleanup-startup-once-"));
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  store.create({
+    sessionId: "s_cleanup_live", agentId: "claude", workspaceId: "repo", repoPath: root,
+    worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+    context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+    config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    seq: 0, createdAt: 1, updatedAt: 1,
+  });
+  const journal = new WorktreeCleanupJournal(dataDir);
+  const records: WorktreeCleanupRecord[] = [
+    { sessionId: "s_cleanup_live", removalMode: "safe" },
+    { sessionId: "s_cleanup_gone", removalMode: "safe" },
+    { sessionId: "s_cleanup_force", removalMode: "force", checkpointGenerationDisposable: true },
+  ].map((record) => ({ ...record, repoPath: root, worktreePath: join(root, record.sessionId),
+    context: { kind: "native" } } as WorktreeCleanupRecord));
+  for (const record of records) journal.add(record);
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+  const calls: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const internals = manager as unknown as {
+    reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
+  };
+  // Leave the durable records pending and hold the startup attempts open so the old duplicate
+  // sweep is observable even when both paths would otherwise finish successfully.
+  internals.reapWorktree = async (record) => { calls.push(record.sessionId); await gate; };
+  const reconcile = manager.reconcileWorktreePullRequests.bind(manager);
+  let startupPass!: Promise<void>;
+  manager.reconcileWorktreePullRequests = (options) => (startupPass = reconcile(options));
+  try {
+    manager.reconcileStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, records.map((record) => record.sessionId),
+      "startup PR reconciliation must not schedule a second attempt, including for a deleted row");
+    release();
+    await startupPass;
+    await manager.reconcileWorktreePullRequests();
+    assert.deepEqual(calls, [...records, ...records.filter((record) => record.removalMode === "safe")]
+      .map((record) => record.sessionId), "later sweeps still retry every pending safe record");
+  } finally {
+    release();
+    await startupPass;
+    manager.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a deferred retirement survives a runner restart and converges on the periodic sweep", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-deferred-restart-"));
   const dataDir = join(root, "data");
