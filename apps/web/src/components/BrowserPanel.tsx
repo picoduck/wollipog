@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ArtifactUploadNotice } from "./ArtifactUploadNotice.js";
+import { InfoPopover } from "./InfoPopover.js";
 import { Notice } from "./Notice.js";
 import { TabList } from "./Tabs.js";
 import { State } from "./State.js";
@@ -17,6 +18,7 @@ import { useTimelineClock } from "../timeline-clock.js";
 import { ArtifactPreviewBar, ArtifactPreviewBody, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
+import { PanelHeaderActions } from "./RightPanel.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
 import { ArtifactGallery } from "./ArtifactGallery.js";
 import type { BrowserArtifactRequest } from "./right-panel-state.js";
@@ -187,6 +189,12 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
   // with its rows and scroll there again on Back.
   return (
     <>
+      {/* The header's action slot (§4.9). About Browser stays while an artifact's page is pushed, as
+          a tool's actions do, since what it says is about the whole tool. Actions of an open page
+          belong before it, so About keeps the slot's trailing end. */}
+      <PanelHeaderActions>
+        <BrowserAboutPopover />
+      </PanelHeaderActions>
       {!preview && (
         <TabList label="Browser" className="browser-tabs" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
           <button
@@ -309,6 +317,26 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
         />
       )}
     </>
+  );
+}
+
+/**
+ * About Browser (#3039): what the tool shows and what stays private, including the artifact upload
+ * preference the Artifacts tab's notice points to. It stays when that notice is dismissed.
+ */
+function BrowserAboutPopover() {
+  return (
+    <InfoPopover tool="Browser">
+      <p>
+        Artifacts are the reports, screenshots and logs the agent saves. Wollipog can store them privately on this
+        control plane, so you can view them remotely.
+      </p>
+      <p>
+        Uploads are manual by default. Change that under Artifact Uploads in Settings › Behavior. Dismissing the
+        notice in Artifacts doesn't change it.
+      </p>
+      <p>Web Preview opens pages in an isolated frame with no access to your session, device token or cookies.</p>
+    </InfoPopover>
   );
 }
 

@@ -5930,6 +5930,9 @@ body.shell-dock-dragging * {
 }
 /* Under an open artifact's page (#2914) the list stays mounted, hidden, as every tool's does (§4.9). */
 .browser-artifacts[hidden] { display: none; }
+/* The upload notice (#3039) keeps Upload Settings on its sentence's first line, the sentence wrapping
+   beside it, so on a phone the notice is two lines rather than a sentence over a button row. */
+.notice.compact.artifact-upload-notice .notice-body { flex-basis: 0; }
 /* The address row is one line at every panel width: the field gives up width, never the buttons. */
 .browser-address > :not(.browser-address-field) { flex: none; }
 .browser-address-field { flex: 1; }

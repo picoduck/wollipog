@@ -8,14 +8,19 @@ import { ApiProvider } from "../api-context.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
 import { instanceStorageKey } from "../instance-storage.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
+import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import type { View } from "../navigation.js";
+import { StoreProvider } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime } from "../ui-transport.js";
 import { ArtifactUploadSettings } from "./ArtifactUploadSettings.js";
 import { ArtifactUploadNotice, ARTIFACT_UPLOAD_NOTICE_KEY } from "./ArtifactUploadNotice.js";
 
 const dom = new Window({ url: "http://localhost/" });
+installDomTestCleanup(dom);
 for (const [name, value] of Object.entries({
   window: dom, document: dom.document, navigator: dom.navigator, localStorage: dom.localStorage,
   HTMLElement: dom.HTMLElement, HTMLButtonElement: dom.HTMLButtonElement,
-  Event: dom.Event, Node: dom.Node, React, IS_REACT_ACT_ENVIRONMENT: true,
+  Event: dom.Event, MouseEvent: dom.MouseEvent, Node: dom.Node, React, IS_REACT_ACT_ENVIRONMENT: true,
   requestAnimationFrame: dom.requestAnimationFrame.bind(dom), cancelAnimationFrame: dom.cancelAnimationFrame.bind(dom),
   getComputedStyle: dom.getComputedStyle.bind(dom),
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -165,6 +170,39 @@ test("a late save from another instance cannot replace the active instance's pre
     assert.equal(container.querySelector("button")?.getAttribute("aria-label"), "Artifact Uploads: Use External Hosting");
     assertNoDomNode(container.querySelector(".setting-row-saved"), "the other instance's save is not confirmed here");
   } finally { await act(async () => root.unmount()); container.remove(); }
+});
+
+test("the notice is one compact sentence with Upload Settings and Dismiss, and Upload Settings opens Behavior without saving (#3039)", async () => {
+  const put = api.updateArtifactUploadSettings;
+  let saves = 0;
+  api.updateArtifactUploadSettings = async (input) => { saves++; return input; };
+  dom.localStorage.clear();
+  const pushed: View[] = [];
+  const connection: UiConnectionRuntime = {
+    instanceId: "artifact-notice", runtimeKey: "artifact-notice",
+    createSocket: () => ({ readyState: UI_SOCKET_OPEN, onopen: null, onmessage: null, onclose: null, onerror: null, send() {}, close() {} }),
+    close() {},
+  };
+  const navigation = { current: (): View => ({ name: "inbox" }), push: (view: View) => { pushed.push(view); }, listen: () => () => {} };
+  const container = document.createElement("div"); document.body.append(container); const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider><StoreProvider connection={connection} navigation={navigation}><ArtifactUploadNotice /></StoreProvider></ApiProvider>));
+    const note = container.querySelector<HTMLElement>("[role=note]")!;
+    assert.equal(note.getAttribute("aria-label"), "Private Artifact Uploads");
+    assert.ok(note.classList.contains("compact"), "the compact notice (§13.2)");
+    assertNoDomNode(note.querySelector(".notice-title"), "no title line");
+    assert.equal(note.querySelector(".notice-body")?.textContent?.trim(), "Artifacts can be stored privately.",
+      "one sentence; the explanation is About Browser's");
+    const link = [...note.querySelectorAll<HTMLAnchorElement>("a")].find((anchor) => anchor.textContent === "Upload Settings")!;
+    assert.ok(link, "Upload Settings is the notice's action");
+    assert.equal(link.className, "btn sm");
+    assert.equal(link.getAttribute("href"), "/settings/behavior");
+    assert.ok(note.querySelector('button[aria-label="Dismiss Artifact Upload Notice"]'));
+    await act(async () => link.dispatchEvent(new MouseEvent("click", { bubbles: true, cancelable: true, button: 0 })));
+    assert.deepEqual(pushed.at(-1), { name: "settings", section: "behavior" }, "Upload Settings opens Settings › Behavior");
+    assert.ok(container.querySelector("[role=note]"), "opening the setting doesn't dismiss the notice");
+    assert.equal(saves, 0, "nor change the preference");
+  } finally { await act(async () => root.unmount()); container.remove(); api.updateArtifactUploadSettings = put; dom.localStorage.clear(); }
 });
 
 test("discovery links to Behavior and dismissal persists only for its instance without saving upload preferences", async () => {
