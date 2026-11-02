@@ -12796,9 +12796,11 @@ export class SessionsService {
       return;
     }
     if (command.state === "failed" && command.errorCode === "COMMAND_CANCELLED" &&
-        this.db.workflowDecisionByOccurrence(resume.occurrenceId)?.status === "consumed") {
+        this.db.workflowDecisionResumeRecalled(resume.occurrenceId, commandId)) {
       // Recalled from the runner's queue once its requester consumed the decision (#3982): nothing
-      // is owed any more, so the resume did not fail and the row has nothing left to retry.
+      // is owed any more, so the resume did not fail and the row has nothing left to retry. A
+      // decision consumed any other way, such as an approved scope change, keeps a cancelled
+      // resume failed and its row retryable.
       this.db.setWorkflowDecisionResume(resume.occurrenceId, "abandoned", null, now);
       this.db.dismissTerminalSessionPromptCommand(command.sessionId, commandId, now);
       this.hub.sessionChangedById(command.sessionId);

@@ -25425,6 +25425,22 @@ test("a child that consumes its decision inside the resolving turn is not resume
     assert.equal(receipt(owed.commandId, "failed", 2), true);
     assert.equal(f.resumeState(unread.occurrenceId), "failed");
     assert.equal(svc.workflowDecision(child.id, unread.occurrenceId).data?.status, "approved");
+
+    // Consumption that is not the requester's own, as when an approved scope change or a parent's
+    // verification settles the decision, recalls nothing: a runner cancellation of that resume
+    // for its own reasons stays failed, and its row stays available to retry.
+    const settledElsewhere = requestDeletion("settled-elsewhere");
+    f.approve(settledElsewhere.occurrenceId);
+    const [unrecalled] = f.resolutionPrompts(settledElsewhere.occurrenceId);
+    assert.ok(unrecalled);
+    assert.equal(receipt(unrecalled.commandId, "queued", 1), true);
+    assert.ok(db.consumeWorkflowDecision(settledElsewhere.occurrenceId, Date.now()));
+    assert.equal(receipt(unrecalled.commandId, "failed", 2), true);
+    assert.equal(recalls().length, 1);
+    assert.equal(f.resumeState(settledElsewhere.occurrenceId), "failed",
+      "a consumed decision alone does not prove the requester read the outcome");
+    assert.equal(db.getSession(child.id)?.pendingPrompts?.some((prompt) => prompt.commandId === unrecalled.commandId), true,
+      "the failed row stays available to retry");
   } finally { db.close(); }
 });
 
