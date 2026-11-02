@@ -66,6 +66,27 @@ test("the head, vote and findings must agree with the contract", () => {
   }), { ...context, scopeFiles: [...context.scopeFiles, "gone.ts"] }), []);
 });
 
+test("finding anchors accept deleted scope and PR context paths in a delta round", () => {
+  const delta = { headSha: HEAD, scopeFiles: ["notes.md"], contextFiles: ["gone.ts"], isTracked: () => false };
+  const value = report({
+    vote: "DOWNVOTE", findings: [{ ...blocker, file: "gone.ts", line: null }],
+    examined_changed_files: ["notes.md"], not_examined_changed_files: [], context_files_examined: ["gone.ts"],
+  });
+  assert.deepEqual(validateReviewReport(value, delta), []);
+  assert.deepEqual(validateReviewReport(value, { ...delta, scopeFiles: ["notes.md", "gone.ts"], contextFiles: [] }),
+    ['changed-file coverage mismatch; missing=["gone.ts"], extra=[]']);
+  assert.deepEqual(validateReviewReport({ ...value, examined_changed_files: ["notes.md", "gone.ts"] }, {
+    ...delta, scopeFiles: ["notes.md", "gone.ts"], contextFiles: [],
+  }), []);
+  assert.deepEqual(validateReviewReport({ ...value, context_files_examined: [] }, { ...delta, contextFiles: [] }),
+    ["findings[0].file is not a repository path"]);
+  for (const path of ["/gone.ts", "../gone.ts", "./gone.ts", "src/../gone.ts"]) {
+    assert.deepEqual(validateReviewReport({
+      ...value, findings: [{ ...blocker, file: path, line: null }], context_files_examined: [],
+    }, { ...delta, contextFiles: [path] }), ["findings[0].file is not a repository path"], path);
+  }
+});
+
 test("coverage classifies every in-scope file exactly once, compared exactly", () => {
   assert.match(validateReviewReport(report({ not_examined_changed_files: [] }), context)[0]!, /missing=\["src\/b\.ts"\], extra=\[\]/u);
   assert.match(validateReviewReport(report({ examined_changed_files: ["src/a.ts", "./src/x.ts"] }), context).join("; "),
