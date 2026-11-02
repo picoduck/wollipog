@@ -363,7 +363,7 @@ test("chart and time breakdown share Hour, Day, and Week while unavailable hours
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   assert.deepEqual(calls.at(-1), { days: 30, granularity: "week" });
   assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
-  assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Weekly Cost/);
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /^Weekly cost/);
   assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Weekly Usage in UTC");
   assert.match(container.querySelector(".usage-table tbody th")?.textContent ?? "", /Sep 21, 2026 00:00–Sep 27, 2026 23:59 UTC/);
 
@@ -736,9 +736,9 @@ test("aggregation switches ignore stale responses and show request failures with
   await act(async () => { option("Week").click(); await settleLoad(); });
   assert.ok(releaseWeek, "the weekly request is in flight");
   await act(async () => { option("Day").click(); await settleLoad(); await Promise.resolve(); });
-  assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Daily Cost/);
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /^Daily cost/);
   await act(async () => { releaseWeek!(response([bucket(at, 6, 0.06)], "week")); await Promise.resolve(); });
-  assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Daily Cost/,
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /^Daily cost/,
     "the late weekly response cannot replace the newer daily request");
 
   holdWeek = false;
@@ -806,7 +806,7 @@ test("a late failed request cannot overwrite the newer selection's loading state
   assert.equal(loadingShown(), false, "loading ends when the Day request resolves");
   assert.equal(container.querySelector("[aria-busy]")?.getAttribute("aria-busy"), "false");
   assert.equal(option("Day").getAttribute("aria-checked"), "true");
-  assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Daily Cost/);
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /^Daily cost/);
   assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Daily Usage in UTC");
   assert.deepEqual(
     [...container.querySelectorAll(".usage-table tbody th")].map((cell) => cell.textContent ?? ""),
@@ -851,8 +851,9 @@ test("an unsplit response from an older plane is shown honestly and the window c
     await Promise.resolve();
   });
 
-  // The headline names the response's 7-day window although the default range control says 30d.
-  assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
+  // The headline names the response's 7-day window although the default range control says 30d,
+  // with the year on both dates because the window crosses one.
+  assert.equal(container.querySelector(".usage-headline-note")?.textContent, "Estimated API cost, Dec 27, 2025 – Jan 2, 2026");
   // The Codex caveat waits in About These Numbers, which says it once Codex has usage.
   await act(async () => {
     container.querySelector<HTMLButtonElement>('.usage-toolbar > button[aria-haspopup="dialog"]')!.click();
@@ -927,9 +928,144 @@ test("a pre-v103 response without seriesByDriver still renders", async () => {
     await Promise.resolve();
   });
 
-  assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 1 day/);
+  assert.equal(container.querySelector(".usage-headline-note")?.textContent, "Estimated API cost, Jan 2");
   assertNoDomNode(container.querySelector('[role="alert"]'));
   assert.doesNotMatch(container.textContent ?? "", /Codex App Server records/);
   await act(async () => root.unmount());
   container.remove();
+});
+
+/** Renders the API Usage tab over one fixed aggregation response and waits for it to load. */
+const renderOverview = async (data: UsageAggregationResponse) => {
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({ ...data, granularity: query.granularity ?? data.granularity }),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+  });
+  await act(async () => {
+    await settleLoad();
+    await Promise.resolve();
+  });
+  const cleanup = async () => {
+    await act(async () => root.unmount());
+    container.remove();
+  };
+  return { container, cleanup };
+};
+
+/** A two-driver window, split per day, so the chart has a real legend to draw. */
+const splitWindow = (since: number, through: number, coverageStartedAt: number): UsageAggregationResponse => {
+  const day = Math.floor((through - 1) / 86_400_000) * 86_400_000;
+  const claude = bucket(day, 4_000, 4);
+  const codex = bucket(day, 1_000, 1);
+  return {
+    ...response([bucket(day, 5_000, 5)], "day"),
+    since,
+    through,
+    retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt },
+    totals: { ...bucket(day, 5_000, 5), cachedInputTokens: 2_000, outputTokens: 300, cacheSavingsUsd: 0.25 },
+    seriesByDriver: [{ ...claude, driver: "claude-code" }, { ...codex, driver: "codex-app-server" }],
+    byDriver: [
+      { key: "claude-code", ...claude },
+      { key: "codex-app-server", ...codex },
+    ].map(({ bucketTs: _ignored, ...row }) => row),
+  };
+};
+
+const chooseMetric = async (container: HTMLElement, name: "Cost" | "Tokens") => {
+  const radio = [...container.querySelectorAll('[role="radiogroup"][aria-label="Metric"] [role="radio"]')]
+    .find((candidate) => candidate.textContent === name) as HTMLButtonElement | undefined;
+  assert.ok(radio, `the Metric control offers ${name}`);
+  await act(async () => {
+    radio.click();
+    await Promise.resolve();
+  });
+};
+
+const facts = (container: HTMLElement) => [...container.querySelectorAll("dl.facts.strip > div")]
+  .map((pair) => [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]);
+
+test("a 30-day range clamped to yesterday's start of recording says so, never a count of one day", async () => {
+  const DAY = 86_400_000;
+  const through = Date.UTC(2026, 8, 26, 9, 30);
+  const coverageStartedAt = Date.UTC(2026, 8, 25, 15, 20);
+  const { container, cleanup } = await renderOverview(splitWindow(Math.floor(coverageStartedAt / DAY) * DAY, through, coverageStartedAt));
+
+  assert.equal(container.querySelector(".usage-headline-note")?.textContent, "Estimated API cost since Sep 25, when recording started");
+  await chooseMetric(container, "Tokens");
+  assert.equal(container.querySelector(".usage-headline-note")?.textContent, "Processed tokens since Sep 25, when recording started");
+  // No caption anywhere on the page counts a single day, in either form.
+  assert.doesNotMatch(container.textContent ?? "", /\b1 days?\b/);
+  await cleanup();
+});
+
+test("a full 30-day window names both of its end dates", async () => {
+  const { container, cleanup } = await renderOverview(splitWindow(Date.UTC(2026, 7, 5), Date.UTC(2026, 8, 3, 18), Date.UTC(2026, 0, 1)));
+
+  assert.equal(container.querySelector(".usage-headline-note")?.textContent, "Estimated API cost, Aug 5 – Sep 3");
+  await chooseMetric(container, "Tokens");
+  assert.equal(container.querySelector(".usage-headline-note")?.textContent, "Processed tokens, Aug 5 – Sep 3");
+  await cleanup();
+});
+
+test("the driver list is the chart's only legend, and the chart has no heading of its own", async () => {
+  const { container, cleanup } = await renderOverview(splitWindow(Date.UTC(2026, 7, 5), Date.UTC(2026, 8, 3, 18), Date.UTC(2026, 0, 1)));
+
+  const list = container.querySelector('.usage-overview ul[aria-label="By Driver"]');
+  assert.ok(list, "the driver list is in the overview");
+  assert.deepEqual(
+    [...list.querySelectorAll(".usage-driver-row")].map((row) => [
+      row.querySelector(".usage-series-swatch")?.className,
+      row.querySelector(".usage-driver-name")?.textContent,
+      row.querySelector(".usage-driver-share")?.textContent,
+      row.querySelector("strong")?.textContent,
+    ]),
+    [
+      ["usage-series-swatch usage-series-1", "Claude Code", "80%", "$4.00"],
+      ["usage-series-swatch usage-series-2", "Codex", "20%", "$1.00"],
+    ],
+  );
+  assert.equal(container.querySelectorAll("ul").length, 1, "the page lists the driver series once");
+  assertNoDomNode(container.querySelector(".usage-legend"), "the chart draws no legend of its own");
+  assertNoDomNode(container.querySelector(".usage-chart-section h3"), "the chart has no heading of its own");
+  // Its accessible name still says what it plots.
+  assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /^Daily cost by driver; /);
+
+  // The readout keys each driver with the same swatch, never a line key.
+  const hit = container.querySelector(".usage-chart-hit") as SVGRectElement;
+  await act(async () => {
+    hit.dispatchEvent(new domWindow.FocusEvent("focus", { bubbles: false }) as never);
+    hit.dispatchEvent(new domWindow.Event("focusin", { bubbles: true }) as never);
+    await Promise.resolve();
+  });
+  assert.equal(container.querySelectorAll(".usage-chart-readout dt .usage-series-swatch").length, 2);
+  assertNoDomNode(container.querySelector(".usage-series-key"), "the readout has no line keys");
+  await cleanup();
+});
+
+test("the facts strip has no heading, and in Tokens mode it keeps the Cost headline's dollar figure", async () => {
+  const { container, cleanup } = await renderOverview(splitWindow(Date.UTC(2026, 7, 5), Date.UTC(2026, 8, 3, 18), Date.UTC(2026, 0, 1)));
+
+  assert.equal(container.querySelectorAll("dl.facts.strip").length, 1);
+  assert.doesNotMatch(container.textContent ?? "", /Totals/);
+  const costHeadline = container.querySelector(".usage-headline-value")?.textContent;
+  assert.equal(costHeadline, "$5.00");
+  assert.deepEqual(facts(container).map(([label]) => label), ["Processed Tokens", "Cached Input", "Uncached Input", "Output", "Cache Savings"]);
+
+  await chooseMetric(container, "Tokens");
+  assert.notEqual(container.querySelector(".usage-headline-value")?.textContent, costHeadline);
+  assert.deepEqual(facts(container).map(([label]) => label), [
+    "Processed Tokens", "Cached Input", "Uncached Input", "Output", "Cache Savings", "Estimated Cost",
+  ]);
+  assert.equal(facts(container).at(-1)![1], costHeadline, "Estimated Cost reads exactly as the Cost headline did");
+  await cleanup();
 });

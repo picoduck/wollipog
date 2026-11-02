@@ -2351,10 +2351,6 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
         sm.reconcileStore();
         assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
 
-        const newerBytes = readFileSync(resetFile, "utf8");
-        assert.throws(() => handle.failed("stale failure"), /changed concurrently/u);
-        assert.throws(() => handle.completed(), /changed concurrently/u);
-        assert.equal(readFileSync(resetFile, "utf8"), newerBytes, "stale terminal calls cannot overwrite the newer reset receipt");
         const retry = journal.claim(message);
         assert.equal(retry.kind, "reclaimed", "failed persistence must release the old local handle");
         if (retry.kind !== "reclaimed") return assert.fail("answer was not reclaimable");
@@ -2369,6 +2365,13 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
           failed: (error, code) => { retry.handle.failed(error, code); },
           uncertain: (error) => { retry.handle.uncertain(error); },
         });
+        const newerBytes = readFileSync(resetFile, "utf8");
+        for (const stale of [() => handle.failed("stale failure"), () => handle.completed(),
+          () => handle.uncertain("stale uncertainty"), () => handle.queued(), () => handle.started()]) {
+          assert.throws(stale, /changed concurrently/u);
+          assert.equal(readFileSync(resetFile, "utf8"), newerBytes, "stale callbacks cannot overwrite the newer receipt");
+          assert.equal(journal.claim(message).kind, "duplicate", "queued retry retains local ownership");
+        }
         assert.equal(entry.queue.length, 1);
         assert.match(entry.queue[0].text, /Question: Which path\?\nAnswer: Patch/u);
         entry.running = false;
