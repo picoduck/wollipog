@@ -6,6 +6,7 @@ import type {
   UsageBreakdown,
   UsageDriverTimeBucket,
   UsageTimeBucket,
+  UserCostWindows,
 } from "@wollipog/protocol";
 
 /**
@@ -15,7 +16,8 @@ import type {
  */
 
 export type UsageMetric = "cost" | "tokens";
-export type UsageBreakdownMode = "model" | UsageAggregationGranularity;
+/** The Breakdown's tabs (#3013). `time` follows Group By, so it is By Hour, By Day or By Week. */
+export type UsageBreakdownTab = "time" | "model" | "agent" | "machine" | "person";
 
 /** Fixed categorical slot per driver. Colour follows the entity, never its rank: a driver keeps
  * its slot whether or not the others have usage in the window. Slots map to `--usage-series-N`. */
@@ -245,6 +247,110 @@ export function bucketLabel(
     return `${fullUtcDate(bucketTs)} 00:00–${fullUtcDate(end)} 23:59 UTC${isPartial ? " (Partial)" : ""}`;
   }
   return `${fullUtcDate(bucketTs)} · 00:00–23:59 UTC`;
+}
+
+/** A time table row's name. The column header says the zone, "Day (UTC)", so the row says only
+ * which period: "Sep 3, 2026", "Sep 3, 2026 · 14:00", or "Sep 14–20, 2026" for a week. */
+export function periodLabel(
+  bucketTs: number,
+  granularity: UsageAggregationGranularity,
+  bounds?: Pick<UsageAggregationResponse, "since" | "through">,
+): string {
+  if (granularity === "hour") return `${fullUtcDate(bucketTs)} · ${utcHour(bucketTs)}:00`;
+  if (granularity === "day") return fullUtcDate(bucketTs);
+  const end = bucketTs + 6 * 86_400_000;
+  const lastYear = new Date(end).getUTCFullYear();
+  const range = new Date(bucketTs).getUTCFullYear() !== lastYear
+    ? `${fullUtcDate(bucketTs)}–${fullUtcDate(end)}`
+    : `${shortUtcWeek(bucketTs)}, ${lastYear}`;
+  const isPartial = bounds !== undefined && (bounds.since > bucketTs || bounds.through < bucketTs + 7 * 86_400_000);
+  return isPartial ? `${range} (Partial)` : range;
+}
+
+/** Rows the time table shows before "Show All 30 Days". */
+export const PERIOD_ROWS_SHOWN = 7;
+
+/** Two amounts as one, field by field. Each field is additive by construction (`processedTokens`
+ * is derived per row so it sums), and a sum is unpriced if either part is, as the plane resolves it. */
+export function addUsageAmounts(a: UsageAmount, b: UsageAmount): UsageAmount {
+  return {
+    inputTokens: a.inputTokens + b.inputTokens,
+    outputTokens: a.outputTokens + b.outputTokens,
+    costUsd: a.costUsd + b.costUsd,
+    uncachedInputTokens: a.uncachedInputTokens + b.uncachedInputTokens,
+    cachedInputTokens: a.cachedInputTokens + b.cachedInputTokens,
+    cacheCreationTokens: a.cacheCreationTokens + b.cacheCreationTokens,
+    reasoningTokens: a.reasoningTokens + b.reasoningTokens,
+    cacheSavingsUsd: a.cacheSavingsUsd + b.cacheSavingsUsd,
+    processedTokens: processedTokens(a) + processedTokens(b),
+    costSource: a.costSource === "unpriced" || b.costSource === "unpriced" ? "unpriced"
+      : a.costSource === "modelPriced" || b.costSource === "modelPriced" ? "modelPriced" : "providerReported",
+    unpricedRecords: a.unpricedRecords + b.unpricedRecords,
+  };
+}
+
+/** The plane's remainder row past its 20 largest. */
+export const OTHER_BREAKDOWN_KEY = "Other";
+
+export interface BreakdownRow {
+  key: string;
+  name: string;
+  amount: UsageAmount;
+  /** Share of the window's total for the ACTIVE metric. */
+  share: number;
+}
+
+/**
+ * A By Model, By Agent or By Machine table's rows: named, largest first by the active metric, and
+ * "Other" last whatever its size, since it is not one thing to rank.
+ */
+export function breakdownRows(
+  rows: readonly UsageBreakdown[],
+  nameOf: (key: string) => string,
+  metric: UsageMetric,
+  totals: UsageAmount,
+): BreakdownRow[] {
+  const total = metricValue(totals, metric);
+  return rows
+    .map(({ key, ...amount }) => ({
+      key,
+      name: key === OTHER_BREAKDOWN_KEY ? key : nameOf(key),
+      amount,
+      share: total > 0 ? metricValue(amount, metric) / total : 0,
+    }))
+    .sort((a, b) => Number(a.key === OTHER_BREAKDOWN_KEY) - Number(b.key === OTHER_BREAKDOWN_KEY) ||
+      metricValue(b.amount, metric) - metricValue(a.amount, metric));
+}
+
+/**
+ * The plane keys an agent's usage as "agent id / model" ("claude-code / claude-fable-5-1"). By
+ * Agent compares agents, so each key is cut at its FIRST " / " (a model id may hold one, an agent
+ * id never does) and an agent's models are summed into one row. A later protocol field can replace
+ * the split; until then older planes keep working.
+ */
+export function agentBreakdown(rows: readonly UsageBreakdown[]): UsageBreakdown[] {
+  const byAgent = new Map<string, UsageBreakdown>();
+  for (const { key, ...amount } of rows) {
+    const cut = key.indexOf(" / ");
+    const agentId = key === OTHER_BREAKDOWN_KEY || cut < 0 ? key : key.slice(0, cut);
+    const current = byAgent.get(agentId);
+    byAgent.set(agentId, { key: agentId, ...(current ? addUsageAmounts(current, amount) : amount) });
+  }
+  return [...byAgent.values()];
+}
+
+/** Whole micro-dollars, the precision the daily-budget gate compares at. */
+const micros = (usd: number) => Math.round(usd * 1_000_000);
+
+/** A person's spend today as the daily-budget gate counts it: settled spend plus the open estimate
+ * of their running turns (#3196). */
+export function todaySpendUsd(row: Pick<UserCostWindows, "todayUsd" | "todayEstimateUsd">): number {
+  return micros(row.todayUsd + (row.todayEstimateUsd ?? 0)) / 1_000_000;
+}
+
+/** At or over the daily budget, the point at which the gate pauses the person's new turns. */
+export function dailyBudgetReached(row: Pick<UserCostWindows, "todayUsd" | "todayEstimateUsd" | "dailyBudgetUsd">): boolean {
+  return row.dailyBudgetUsd != null && row.dailyBudgetUsd > 0 && micros(todaySpendUsd(row)) >= micros(row.dailyBudgetUsd);
 }
 
 /** Indexes of the columns that get an axis label: never more than `limit`, always the ends. */

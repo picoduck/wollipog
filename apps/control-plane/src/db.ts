@@ -19495,8 +19495,17 @@ export class ControlPlaneDb {
       todayUsd: this.userCostSinceMicrousd(organizationId, userId, dayStart) / 1_000_000,
       last7DaysUsd: this.userCostSinceMicrousd(organizationId, userId, dayStart - 6 * 86_400_000) / 1_000_000,
       last30DaysUsd: this.userCostSinceMicrousd(organizationId, userId, dayStart - 29 * 86_400_000) / 1_000_000,
-      dailyBudgetUsd: this.getUsageDailyBudget(organizationId).perUserUsd,
+      ...this.dailyBudgetWindow(organizationId, userId, this.getUsageDailyBudget(organizationId).perUserUsd, now),
     };
+  }
+
+  /** The budget a cost window repeats and, while one is set, the open live estimate of the user's
+   * running turns, which the daily-budget gate adds to today's settled spend (#3196). */
+  private dailyBudgetWindow(organizationId: string, userId: string, budget: number | null, now: number):
+    Pick<UserCostWindows, "dailyBudgetUsd" | "todayEstimateUsd"> {
+    if (budget == null) return { dailyBudgetUsd: null };
+    const estimate = this.ownerLiveCostUsd(organizationId, userId, now);
+    return estimate > 0 ? { dailyBudgetUsd: budget, todayEstimateUsd: estimate } : { dailyBudgetUsd: budget };
   }
 
   /** Every user with usage in the last 30 days, most spend today first. One aggregate pass with
@@ -19537,7 +19546,7 @@ export class ControlPlaneDb {
       todayUsd: Number(row.today) / 1_000_000,
       last7DaysUsd: Number(row.week) / 1_000_000,
       last30DaysUsd: Number(row.month) / 1_000_000,
-      dailyBudgetUsd: budget,
+      ...this.dailyBudgetWindow(organizationId, row.owner_id, budget, now),
     }));
   }
 

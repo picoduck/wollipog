@@ -3,18 +3,23 @@ import { test } from "node:test";
 import type { UsageAmount, UsageDriverTimeBucket, UsageTimeBucket } from "@wollipog/protocol";
 import {
   activeDrivers,
+  agentBreakdown,
   axisLabel,
   axisLabelIndexes,
+  breakdownRows,
   buildColumns,
   bucketLabel,
   coverageMessages,
+  dailyBudgetReached,
   driverRows,
   formatCompactTokens,
   formatMoney,
   formatShare,
   niceScale,
+  periodLabel,
   processedTokens,
   subscriptionPlanLabel,
+  todaySpendUsd,
   windowDays,
 } from "./usage-view-model.js";
 
@@ -147,4 +152,54 @@ test("historical Claude records disclose possible duplicate spending without rel
   assert.equal(messages.length, 1);
   assert.match(messages[0]!, /Resumed spending may be counted more than once/);
   assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 0 }), []);
+});
+
+test("a time table row names only its period; the column header says UTC (#3013)", () => {
+  assert.equal(periodLabel(Date.UTC(2026, 8, 3, 14), "hour"), "Sep 3, 2026 · 14:00");
+  assert.equal(periodLabel(Date.UTC(2026, 8, 3), "day"), "Sep 3, 2026");
+  assert.equal(periodLabel(Date.UTC(2026, 8, 14), "week"), "Sep 14–20, 2026");
+  assert.equal(periodLabel(Date.UTC(2026, 8, 28), "week"), "Sep 28–Oct 4, 2026");
+  assert.equal(periodLabel(Date.UTC(2025, 11, 29), "week"), "Dec 29, 2025–Jan 4, 2026");
+  assert.equal(periodLabel(Date.UTC(2026, 8, 14), "week", { since: Date.UTC(2026, 8, 17), through: Date.UTC(2026, 8, 21) }),
+    "Sep 14–20, 2026 (Partial)");
+});
+
+test("By Agent cuts each key at its first ' / ' and sums an agent's models (#3013)", () => {
+  const rows = agentBreakdown([
+    { key: "claude / claude-fable-5-1", ...amount({ inputTokens: 10, costUsd: 1 }) },
+    { key: "codex / gpt-5.5 / preview", ...amount({ inputTokens: 5, costUsd: 0.5 }) },
+    { key: "claude / claude-sonnet-5-5", ...amount({ inputTokens: 20, costUsd: 2, costSource: "unpriced", unpricedRecords: 1 }) },
+    { key: "unassigned", ...amount({ inputTokens: 1 }) },
+    { key: "Other", ...amount({ inputTokens: 2 }) },
+  ]);
+  assert.deepEqual(rows.map((row) => [row.key, row.inputTokens, row.costUsd, row.costSource]), [
+    ["claude", 30, 3, "unpriced"],
+    ["codex", 5, 0.5, "providerReported"],
+    ["unassigned", 1, 0, "providerReported"],
+    ["Other", 2, 0, "providerReported"],
+  ]);
+});
+
+test("breakdown rows are named, ranked by the active metric, and keep Other last (#3013)", () => {
+  const totals = amount({ inputTokens: 100, costUsd: 10 });
+  const input = [
+    { key: "Other", ...amount({ inputTokens: 60, costUsd: 6 }) },
+    { key: "a", ...amount({ inputTokens: 10, costUsd: 3 }) },
+    { key: "b", ...amount({ inputTokens: 30, costUsd: 1 }) },
+  ];
+  const byCost = breakdownRows(input, (key) => key.toUpperCase(), "cost", totals);
+  assert.deepEqual(byCost.map((row) => [row.name, row.share]), [["A", 0.3], ["B", 0.1], ["Other", 0.6]]);
+  const byTokens = breakdownRows(input, (key) => key.toUpperCase(), "tokens", totals);
+  assert.deepEqual(byTokens.map((row) => [row.name, row.share]), [["B", 0.3], ["A", 0.1], ["Other", 0.6]]);
+});
+
+test("the daily budget is reached at settled spend plus running-turn estimates, as the gate counts it (#3013)", () => {
+  const person = { todayUsd: 24, dailyBudgetUsd: 25 };
+  assert.equal(dailyBudgetReached(person), false);
+  assert.equal(dailyBudgetReached({ ...person, todayEstimateUsd: 0.75 }), false);
+  assert.equal(dailyBudgetReached({ ...person, todayEstimateUsd: 1 }), true, "at the budget is reached");
+  assert.equal(dailyBudgetReached({ todayUsd: 0.1, todayEstimateUsd: 0.2, dailyBudgetUsd: 0.3 }), true,
+    "compared in whole micro-dollars, so float sums never fall a hair short");
+  assert.equal(todaySpendUsd({ todayUsd: 0.1, todayEstimateUsd: 0.2 }), 0.3);
+  assert.equal(dailyBudgetReached({ todayUsd: 100, dailyBudgetUsd: null }), false, "no budget, nothing to reach");
 });

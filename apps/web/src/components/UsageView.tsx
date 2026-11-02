@@ -1,27 +1,35 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
+  BoxView,
+  RunnerView,
   SubscriptionUsageBucket,
   SubscriptionUsageResponse,
   SubscriptionUsageSourceView,
   UsageAggregationGranularity,
   UsageAggregationResponse,
+  UsageAmount,
   UsageDailyBudgetPolicy,
   UsageRetentionPolicy,
   UserCostWindows,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { agentDisplayName } from "../agent-presentation.js";
+import { runnerDisplay } from "../runners.js";
 import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { redactPersonalIdentifiers } from "../personal-identifiers.js";
-import { useHasStore, useStoreSelector } from "../store.js";
+import { useHasStore, useOptionalStoreSelector, useStoreSelector } from "../store.js";
 import {
   DRIVER_PRESENTATION,
+  PERIOD_ROWS_SHOWN,
   seriesClass,
   activeDrivers,
+  agentBreakdown,
+  breakdownRows,
   buildColumns,
-  bucketLabel,
   coverageMessages,
+  dailyBudgetReached,
   driverLabel,
   driverRows,
   formatCompactTokens,
@@ -29,10 +37,13 @@ import {
   formatMoney,
   formatShare,
   metricValue,
+  periodLabel,
   processedTokens,
   subscriptionPlanLabel,
+  todaySpendUsd,
   windowDays,
-  type UsageBreakdownMode,
+  type BreakdownRow,
+  type UsageBreakdownTab,
   type UsageMetric,
 } from "../usage-view-model.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
@@ -48,6 +59,7 @@ import { safeExternalHref } from "../external-href.js";
 import { CountBadge } from "./CountBadge.js";
 import { ChevronDownIcon } from "./Icons.js";
 import { InfoPopover } from "./InfoPopover.js";
+import { ListFoot } from "./ListFoot.js";
 import { handleRovingChoiceKeyDown, useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import { TabList } from "./Tabs.js";
@@ -166,6 +178,173 @@ function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void
   return null;
 }
 
+interface UsageNames {
+  model: (id: string) => string;
+  agent: (id: string) => string;
+  machine: (id: string) => string;
+}
+
+/**
+ * The names people gave what the plane reports by id (#3013): a model's catalog display name, an
+ * agent's name from the runners that list it, and a machine's name. Without a store (a harness
+ * page) or for an id no runner lists, the id itself.
+ */
+function usageNames(runners: ReadonlyMap<string, RunnerView> | undefined, boxes: ReadonlyMap<string, BoxView> | undefined): UsageNames {
+  const fleet = [...(runners?.values() ?? [])];
+  const boxByRunner = new Map([...(boxes?.values() ?? [])].map((box) => [box.runnerId, box]));
+  const models = new Map<string, string>();
+  for (const runner of fleet) {
+    for (const agent of runner.agents) {
+      for (const model of agent.capabilities?.models ?? []) {
+        if (model.displayName && !models.has(model.id)) models.set(model.id, model.displayName);
+      }
+    }
+  }
+  return {
+    model: (id) => id === "unknown" ? "Unknown Model" : models.get(id) ?? id,
+    agent: (id) => {
+      if (id === "unassigned") return "Unassigned";
+      for (const runner of fleet) {
+        const agent = runner.agents.find((candidate) => candidate.id === id);
+        if (agent) return agentDisplayName(agent, runner.agents);
+      }
+      return id;
+    },
+    machine: (id) => runnerDisplay(runners?.get(id), boxByRunner.get(id), id).name,
+  };
+}
+
+function useUsageNames(): UsageNames {
+  const runners = useOptionalStoreSelector((state) => state.runners);
+  const boxes = useOptionalStoreSelector((state) => state.boxes);
+  return useMemo(() => usageNames(runners, boxes), [runners, boxes]);
+}
+
+/** Tokens or cost in a breakdown row. The active metric's figure is the row's total, beside the name
+ * on a phone; the other is line 2's figure, which says its unit there ("3.25M tokens"). */
+function FigureCell({ amount, figure, lead }: { amount: UsageAmount; figure: UsageMetric; lead: boolean }) {
+  // The plane marks a row unpriced when ANY of its records was; only a row with no priced cost at
+  // all says so instead of a figure, and a partly priced one keeps its figure with the reason.
+  const unpriced = figure === "cost" && amount.costSource === "unpriced" && amount.costUsd === 0;
+  const partial = figure === "cost" && !unpriced && amount.unpricedRecords > 0;
+  return (
+    <td
+      className={`num ${lead ? "cell-status" : "cell-meta cell-dim"}`}
+      title={partial ? "Some of this usage could not be priced; its cost is excluded." : undefined}
+    >
+      {unpriced ? "Unpriced" : figure === "cost" ? formatMoney(amount.costUsd) : formatCompactTokens(processedTokens(amount))}
+      {!lead && !unpriced && <span className="usage-cell-unit">{figure === "cost" ? " estimated" : " tokens"}</span>}
+    </td>
+  );
+}
+
+/** By Model, By Agent and By Machine: one comparison of the same shape, named by its tab. */
+function DimensionTable({ labelledBy, nameLabel, rows, metric }: {
+  labelledBy: string;
+  nameLabel: string;
+  rows: readonly BreakdownRow[];
+  metric: UsageMetric;
+}) {
+  return (
+    <div className="table-wrap usage-table-wrap">
+      <table className="table usage-table" aria-labelledby={labelledBy}>
+        <thead>
+          <tr>
+            <th scope="col" className="col-name">{nameLabel}</th>
+            <th scope="col" className="num">Share</th>
+            <th scope="col" className="num">Tokens</th>
+            <th scope="col" className="num">Cost</th>
+          </tr>
+        </thead>
+        <tbody>
+          {rows.length === 0 ? (
+            <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
+          ) : rows.map((row) => (
+            <tr key={row.key}>
+              <th scope="row" title={row.name}>{row.name}</th>
+              <td className="num cell-meta cell-dim usage-share">
+                <span className="cell-label" aria-hidden="true">Share: </span>{formatShare(row.share)}
+              </td>
+              <FigureCell amount={row.amount} figure="tokens" lead={metric === "tokens"} />
+              <FigureCell amount={row.amount} figure="cost" lead={metric === "cost"} />
+            </tr>
+          ))}
+        </tbody>
+      </table>
+    </div>
+  );
+}
+
+/** By Person: spend over the standard windows, and today's against the daily budget. */
+function PersonTable({ users }: { users: readonly UserCostWindows[] }) {
+  const reachedMeta = statusMeta("usageBudget", "reached");
+  const estimated = users.some((row) => (row.todayEstimateUsd ?? 0) > 0);
+  return (
+    <>
+      <div className="table-wrap usage-table-wrap">
+        <table className="table usage-table" aria-labelledby="usage-breakdown-person-tab">
+          <thead>
+            <tr>
+              <th scope="col" className="col-name">Person</th>
+              <th scope="col" className="num">Today</th>
+              <th scope="col" className="num">Last 7 Days</th>
+              <th scope="col" className="num">Last 30 Days</th>
+            </tr>
+          </thead>
+          <tbody>
+            {users.length === 0 ? (
+              <tr><td colSpan={4} className="usage-empty">No one has usage in the last 30 days.</td></tr>
+            ) : users.map((row) => {
+              const budget = row.dailyBudgetUsd != null && row.dailyBudgetUsd > 0 ? row.dailyBudgetUsd : null;
+              const spent = todaySpendUsd(row);
+              const reached = dailyBudgetReached(row);
+              const includesEstimate = (row.todayEstimateUsd ?? 0) > 0;
+              return (
+                <tr key={row.userId}>
+                  <th scope="row">
+                    <span className="usage-person">
+                      <PersonalIdentifier value={row.userName} label="User Name" />
+                      {reached && <StatusBadge meta={reachedMeta} />}
+                    </span>
+                  </th>
+                  <td
+                    className="num cell-meta usage-person-today"
+                    title={includesEstimate ? "Includes an estimate for running turns." : undefined}
+                  >
+                    {formatMoney(spent)}
+                    {budget != null && <span className="cell-dim"> of {formatMoney(budget)}</span>}
+                    <span className="usage-cell-unit"> today</span>
+                    {budget != null && (
+                      <span
+                        className={reached ? "meter t-warning" : "meter"}
+                        role="progressbar"
+                        aria-label="Daily Budget Used"
+                        aria-valuemin={0}
+                        aria-valuemax={budget}
+                        aria-valuenow={Math.min(spent, budget)}
+                        aria-valuetext={`${formatMoney(spent)} of ${formatMoney(budget)}`}
+                      >
+                        <span style={{ width: `${Math.min(100, (spent / budget) * 100)}%` }} />
+                      </span>
+                    )}
+                  </td>
+                  <td className="num cell-meta cell-dim">
+                    <span className="cell-label" aria-hidden="true">Last 7 Days: </span>{formatMoney(row.last7DaysUsd)}
+                  </td>
+                  <td className="num cell-status">
+                    <span className="cell-label" aria-hidden="true">Last 30 Days: </span>{formatMoney(row.last30DaysUsd)}
+                  </td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </div>
+      {estimated && <p className="usage-headline-note usage-tables-note">Today includes an estimate for running turns.</p>}
+    </>
+  );
+}
+
 /**
  * Usage and Cost (#3010): API Usage at `/usage`, Subscriptions at `/usage/subscriptions`. In the
  * shell the tab is the route and `onSelectTab` navigates; a standalone render keeps it locally.
@@ -189,13 +368,14 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   const [days, setDays] = useState(30);
   const [metric, setMetric] = useState<UsageMetric>("cost");
   const [granularity, setGranularity] = useState<UsageAggregationGranularity>("day");
-  const [breakdown, setBreakdown] = useState<UsageBreakdownMode>("day");
+  // The Breakdown tab chooses only the dimension; Group By is the one aggregation control (#3013).
+  const [breakdownTab, setBreakdownTab] = useState<UsageBreakdownTab>("time");
+  // The range and grouping whose time table shows every row; any other one shows the newest 7.
+  const [allPeriodsFor, setAllPeriodsFor] = useState<string | null>(null);
   const [supportedGranularities, setSupportedGranularities] = useState<readonly UsageAggregationGranularity[] | null>(null);
   const [capabilityCheckFailed, setCapabilityCheckFailed] = useState(false);
   const granularityRef = useRef(granularity);
-  const breakdownRef = useRef(breakdown);
   granularityRef.current = granularity;
-  breakdownRef.current = breakdown;
   const [data, setData] = useState<UsageAggregationResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -258,7 +438,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       if (legacyHourlyFallback) {
         setHourlyAvailability({ range, available: false });
         setGranularity((current) => current === "hour" ? "day" : current);
-        setBreakdown((current) => current === "hour" ? "day" : current);
       }
     } catch (cause) {
       if (generation !== requestGeneration.current) return;
@@ -267,7 +446,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
         handingOffToDay = true;
         setHourlyAvailability({ range, available: false });
         setGranularity((current) => current === "hour" ? "day" : current);
-        setBreakdown((current) => current === "hour" ? "day" : current);
         return;
       }
       setCapabilityCheckFailed(true);
@@ -394,7 +572,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       daysRef.current = nextRange;
       setDays(nextRange);
       setGranularity(nextGranularity);
-      if (breakdownRef.current !== "model") setBreakdown(nextGranularity);
       setSaveStatus("Usage aggregate retention saved.");
       if (nextRange === currentDays && nextGranularity === currentGranularity) {
         // The write is done; what follows is a refresh, and saying otherwise describes finished
@@ -416,13 +593,12 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     () => (data ? buildColumns(data.series, data.seriesByDriver ?? [], drivers, metric) : []),
     [data, drivers, metric],
   );
-  const models = useMemo(() => {
-    if (!data) return [];
-    const total = metricValue(data.totals, metric);
-    return [...(data.byModel ?? [])]
-      .sort((a, b) => metricValue(b, metric) - metricValue(a, metric))
-      .map((row) => ({ ...row, share: total > 0 ? metricValue(row, metric) / total : 0 }));
-  }, [data, metric]);
+  const names = useUsageNames();
+  const dimensionRows = useMemo(() => data ? {
+    model: breakdownRows(data.byModel ?? [], names.model, metric, data.totals),
+    agent: breakdownRows(agentBreakdown(data.byAgent), names.agent, metric, data.totals),
+    machine: breakdownRows(data.byRunner, names.machine, metric, data.totals),
+  } : null, [data, metric, names]);
   const perDriverByBucket = useMemo(() => {
     const map = new Map<number, Map<string, UsageAggregationResponse["seriesByDriver"][number]>>();
     for (const row of data?.seriesByDriver ?? []) {
@@ -440,6 +616,26 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     (data.seriesByDriver ?? []).some((row) => row.driver === "codex-app-server")
   ));
   const periodNoun = data ? GRANULARITY_LABEL[data.granularity].noun : GRANULARITY_LABEL[granularity].noun;
+  const breakdownTabs: ReadonlyArray<{ id: UsageBreakdownTab; label: string }> = [
+    { id: "time", label: `By ${periodNoun}` },
+    { id: "model", label: "By Model" },
+    { id: "agent", label: "By Agent" },
+    { id: "machine", label: "By Machine" },
+    { id: "person", label: "By Person" },
+  ];
+  // The time table shows the newest 7 periods until Show All; a new range or grouping starts there
+  // again, while a refresh of the same one keeps what was shown.
+  const periodsKey = `${days}:${data?.granularity ?? granularity}`;
+  const showAllPeriods = allPeriodsFor === periodsKey;
+  const periodRows = data ? (showAllPeriods ? data.series : data.series.slice(0, PERIOD_ROWS_SHOWN)) : [];
+  const hiddenPeriods = data ? data.series.length - periodRows.length : 0;
+  const revealedPeriodRef = useRef<HTMLTableCellElement>(null);
+  const focusRevealedPeriod = useRef(false);
+  useEffect(() => {
+    if (!showAllPeriods || !focusRevealedPeriod.current) return;
+    focusRevealedPeriod.current = false;
+    revealedPeriodRef.current?.focus();
+  }, [showAllPeriods]);
   // Hour is OMITTED, never disabled, when the range is longer than hourly retention or the plane
   // reports this range already rolled into days; the Range menu says which ranges allow it.
   const hourlyUnavailableByRange = Boolean(knownRetention && days > knownRetention.hourlyDays);
@@ -480,10 +676,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     </MenuItem>
   ));
   const weekNote = weekUnsupported ? <MenuNote>{WEEK_UPGRADE_NOTE}</MenuNote> : null;
-  const selectGranularity = (next: UsageAggregationGranularity) => {
-    setGranularity(next);
-    setBreakdown((current) => current === "model" ? current : next);
-  };
+  const selectGranularity = (next: UsageAggregationGranularity) => setGranularity(next);
   const selectRange = (next: string) => {
     const range = Number(next);
     daysRef.current = range;
@@ -492,10 +685,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       : granularity;
     // Re-selecting the current range is a REFRESH, which is why this is not a no-op — and
     // it is deliberate rather than incidental, so it does not wait for the debounce.
-    if (nextGranularity !== granularity) {
-      setGranularity(nextGranularity);
-      if (breakdown !== "model") setBreakdown(nextGranularity);
-    }
+    if (nextGranularity !== granularity) setGranularity(nextGranularity);
     if (days === range && nextGranularity === granularity) void load(range, granularity);
     else setDays(range);
   };
@@ -806,9 +996,9 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                     metric={metric}
                     granularity={data.granularity}
                     bounds={{ since: data.since, through: data.through }}
-                    tableHint={breakdown === data.granularity
-                      ? `the ${periodNoun} table below lists every value.`
-                      : `select ${periodNoun} under Breakdown for a table of every value.`}
+                    tableHint={breakdownTab === "time"
+                      ? `the By ${periodNoun} table below lists every value.`
+                      : `choose By ${periodNoun} under Breakdown for a table of every value.`}
                   />
                 </div>
               </section>
@@ -824,187 +1014,146 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                 </dl>
               </section>
 
-              <section className="usage-breakdown-section" aria-labelledby="usage-breakdown-heading">
-                <div className="usage-breakdown-heading">
-                  <h3 id="usage-breakdown-heading">Breakdown</h3>
-                  <SegmentedControl
-                    label="Usage Breakdown"
-                    value={breakdown}
-                    options={[
-                      { value: "model", label: "Model" },
-                      ...granularityOptions,
-                    ]}
-                    onChange={(next) => {
-                      setBreakdown(next);
-                      if (next !== "model") setGranularity(next);
-                    }}
-                  />
-                </div>
-                {breakdown === "model" ? (
-                  <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-model-caption">
-                    <table className="table usage-table">
-                      <caption id="usage-model-caption">Usage by Model</caption>
-                      <thead><tr>
-                        <th scope="col" className="col-name">Model</th>
-                        <th scope="col" className="num">Cost</th>
-                        <th scope="col" className="num">Share</th>
-                        <th scope="col" className="num">Tokens</th>
-                      </tr></thead>
-                      <tbody>
-                        {models.length === 0 ? (
-                          <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
-                        ) : models.map((row) => (
-                          <tr key={row.key}>
-                            <th scope="row">{row.key}{row.costSource === "unpriced" ? " · unpriced" : ""}</th>
-                            <td className="num cell-status">{formatMoney(row.costUsd)}</td>
-                            <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Share: </span>{formatShare(row.share)}</td>
-                            <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Tokens: </span>{formatCompactTokens(processedTokens(row))}</td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                ) : (
-                  <div
-                    className="table-wrap usage-table-wrap"
-                    // A scroll region needs to be REACHABLE. The max-height that makes the sticky header
-                    // work also gives this its own scrollbar, and a plain overflow div is not in the
-                    // sequential focus order in WebKit — so a keyboard user tabbed past it.
-                    tabIndex={0}
-                    role="region"
-                    aria-labelledby="usage-table-caption"
-                  >
-                    <table className="table usage-table">
-                      <caption id="usage-table-caption">{GRANULARITY_LABEL[data.granularity].adjective} Usage in UTC</caption>
-                      <thead>
-                        <tr>
-                          <th scope="col" className="col-name">{periodNoun}</th>
-                          {drivers.map((driver) => <th scope="col" className="num" key={driver}>{driverLabel(driver)}</th>)}
-                          <th scope="col" className="num">Total</th>
-                          <th scope="col" className="num">{metric === "cost" ? "Tokens" : "Cost"}</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {data.series.length === 0 ? (
-                          <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
-                        ) : data.series.map((bucket) => (
-                          <tr key={bucket.bucketTs}>
-                            <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity, data)}</th>
-                            {drivers.map((driver) => {
-                              const split = perDriverByBucket.get(bucket.bucketTs);
-                              const cell = split?.get(driver);
-                              // No split for the bucket at all means the plane never sent one; a
-                              // missing driver inside a split means that driver had nothing.
-                              // In the narrow two-line layout the drivers join line 2, each named,
-                              // since there is no detail view to find them in.
+              <section className="usage-tables-section" aria-labelledby="usage-breakdown-heading">
+                <h3 id="usage-breakdown-heading">Breakdown</h3>
+                <TabList label="Breakdown" onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
+                  {breakdownTabs.map(({ id, label }) => (
+                    <button
+                      key={id}
+                      id={`usage-breakdown-${id}-tab`}
+                      type="button"
+                      role="tab"
+                      aria-selected={breakdownTab === id}
+                      aria-controls="usage-breakdown-panel"
+                      tabIndex={breakdownTab === id ? 0 : -1}
+                      className="tab"
+                      onClick={() => setBreakdownTab(id)}
+                    >
+                      {label}
+                    </button>
+                  ))}
+                </TabList>
+                <div id="usage-breakdown-panel" role="tabpanel" aria-labelledby={`usage-breakdown-${breakdownTab}-tab`}>
+                  {breakdownTab === "time" && (
+                    <>
+                      <div className="table-wrap usage-table-wrap">
+                        <table className="table usage-table usage-period-table" aria-labelledby="usage-breakdown-time-tab">
+                          <thead>
+                            <tr>
+                              <th scope="col" className="col-name">{periodNoun} (UTC)</th>
+                              {drivers.map((driver) => <th scope="col" className="num cell-extra" key={driver}>{driverLabel(driver)}</th>)}
+                              <th scope="col" className="num">Total</th>
+                              <th scope="col" className="num usage-period-trailing">{metric === "cost" ? "Tokens" : "Cost"}</th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {data.series.length === 0 ? (
+                              <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
+                            ) : periodRows.map((bucket, index) => {
+                              const trailing = metric === "cost"
+                                ? `${formatCompactTokens(processedTokens(bucket))} tokens`
+                                : `${formatMoney(bucket.costUsd)} estimated`;
                               return (
-                                <td className="num cell-meta cell-dim" data-driver={driver} key={driver}>
-                                  <span className="cell-label" aria-hidden="true">{driverLabel(driver)}: </span>
-                                  {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
-                                </td>
+                                <tr key={bucket.bucketTs}>
+                                  <th
+                                    scope="row"
+                                    // The first row Show All reveals takes focus, so the reader
+                                    // continues where the table grew.
+                                    ref={index === PERIOD_ROWS_SHOWN ? revealedPeriodRef : undefined}
+                                    tabIndex={index === PERIOD_ROWS_SHOWN ? -1 : undefined}
+                                  >
+                                    <span className="usage-period">{periodLabel(bucket.bucketTs, data.granularity, data)}</span>
+                                    {/* In the compact tier the trailing column folds under the date,
+                                        so the agent headers keep their names (§14). */}
+                                    <span className="usage-period-meta">{trailing}</span>
+                                  </th>
+                                  {drivers.map((driver) => {
+                                    const split = perDriverByBucket.get(bucket.bucketTs);
+                                    const cell = split?.get(driver);
+                                    // No split for the bucket at all means the plane never sent one; a
+                                    // missing driver inside a split means that driver had nothing.
+                                    return (
+                                      <td className="num cell-extra cell-dim" data-driver={driver} key={driver}>
+                                        {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
+                                      </td>
+                                    );
+                                  })}
+                                  <td className="num cell-status">{formatMetric(metricValue(bucket, metric), metric)}</td>
+                                  <td className="num cell-meta cell-dim usage-period-trailing">
+                                    {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
+                                    <span className="usage-cell-unit">{metric === "cost" ? " tokens" : " estimated"}</span>
+                                  </td>
+                                </tr>
                               );
                             })}
-                            <td className="num cell-status">{formatMetric(metricValue(bucket, metric), metric)}</td>
-                            <td className="num cell-meta cell-dim">
-                              <span className="cell-label" aria-hidden="true">{metric === "cost" ? "Tokens" : "Cost"}: </span>
-                              {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
-                            </td>
-                          </tr>
-                        ))}
-                      </tbody>
-                    </table>
-                  </div>
-                )}
-              </section>
-
-              <div className="usage-breakdowns">
-                {(["Agent", "Runner"] as const).map((label) => {
-                  const list = label === "Agent" ? data.byAgent : data.byRunner;
-                  return (
-                    <section className="runner-card usage-breakdown" key={label}>
-                      <h3>By {label}</h3>
-                      {list.length === 0 ? <p>No usage.</p> : (
-                        <ul>{list.slice(0, 20).map((row) => (
-                          <li key={row.key}><span>{row.key}</span><strong>{formatMetric(metricValue(row, metric), metric)}</strong></li>
-                        ))}</ul>
+                          </tbody>
+                        </table>
+                      </div>
+                      {hiddenPeriods > 0 && (
+                        <ListFoot>
+                          <button
+                            type="button"
+                            className="btn ghost"
+                            onClick={() => {
+                              focusRevealedPeriod.current = true;
+                              setAllPeriodsFor(periodsKey);
+                            }}
+                          >
+                            {`Show All ${data.series.length} ${periodNoun}s`}
+                          </button>
+                        </ListFoot>
                       )}
-                    </section>
-                  );
-                })}
-              </div>
-
-              {users && (
-                <section className="usage-users-section" aria-labelledby="usage-users-heading">
-                  <div className="usage-breakdown-heading">
-                    <div>
-                      <h3 id="usage-users-heading">By User</h3>
-                      <p className="usage-headline-note">
-                        {dailyBudget?.perUserUsd != null
-                          ? `Each user may spend ${formatMoney(dailyBudget.perUserUsd)} per UTC day across their sessions; new turns pause past it.`
-                          : "No per-user daily budget is set."}
-                      </p>
-                    </div>
-                    {data.canManageRetention && (
-                      <form
-                        className="usage-daily-budget"
-                        onSubmit={(event) => { event.preventDefault(); void saveDailyBudget(); }}
-                      >
-                        <label>
-                          Daily Budget per User ($)
-                          <input
-                            type="number"
-                            min="0"
-                            step="0.5"
-                            placeholder="none"
-                            value={dailyBudgetDraft}
-                            onChange={(event) => setDailyBudgetDraft(event.target.value)}
-                          />
-                        </label>
-                        <button type="submit" className="btn primary" disabled={dailyBudgetSaving}>
-                          {dailyBudgetSaving ? "Saving…" : "Save Daily Budget"}
-                        </button>
-                      </form>
-                    )}
-                  </div>
-                  {dailyBudgetStatus && (
-                    <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
+                    </>
                   )}
-                  <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-users-caption">
-                    <table className="table usage-table">
-                      <caption id="usage-users-caption">Cost by User in UTC Days</caption>
-                      <thead>
-                        <tr>
-                          <th scope="col" className="col-name">User</th>
-                          <th scope="col" className="num">Today</th>
-                          <th scope="col" className="num">Last 7 Days</th>
-                          <th scope="col" className="num">Last 30 Days</th>
-                        </tr>
-                      </thead>
-                      <tbody>
-                        {users.length === 0 ? (
-                          <tr><td colSpan={4} className="usage-empty">No user-owned usage in the last 30 days.</td></tr>
-                        ) : users.map((row) => {
-                          const over = row.dailyBudgetUsd != null && row.todayUsd >= row.dailyBudgetUsd;
-                          return (
-                            <tr key={row.userId}>
-                              <th scope="row"><PersonalIdentifier value={row.userName} label="User Name" />{over ? " · paused by daily budget" : ""}</th>
-                              <td className="num cell-status">
-                                <span className="cell-label" aria-hidden="true">Today: </span>
-                                {formatMoney(row.todayUsd)}
-                                {row.dailyBudgetUsd != null && (
-                                  <span className="cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
-                                )}
-                              </td>
-                              <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 7 Days: </span>{formatMoney(row.last7DaysUsd)}</td>
-                              <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 30 Days: </span>{formatMoney(row.last30DaysUsd)}</td>
-                            </tr>
-                          );
-                        })}
-                      </tbody>
-                    </table>
-                  </div>
-                </section>
-              )}
+                  {dimensionRows && breakdownTab === "model" && (
+                    <DimensionTable labelledBy="usage-breakdown-model-tab" nameLabel="Model" rows={dimensionRows.model} metric={metric} />
+                  )}
+                  {dimensionRows && breakdownTab === "agent" && (
+                    <DimensionTable labelledBy="usage-breakdown-agent-tab" nameLabel="Agent" rows={dimensionRows.agent} metric={metric} />
+                  )}
+                  {dimensionRows && breakdownTab === "machine" && (
+                    <DimensionTable labelledBy="usage-breakdown-machine-tab" nameLabel="Machine" rows={dimensionRows.machine} metric={metric} />
+                  )}
+                  {breakdownTab === "person" && (
+                    <>
+                      <div className="usage-person-head">
+                        <p className="usage-headline-note">
+                          {dailyBudget?.perUserUsd != null
+                            ? `Each person can spend ${formatMoney(dailyBudget.perUserUsd)} per UTC day. When they reach it, their new turns pause until midnight UTC.`
+                            : "No daily budget is set."}
+                        </p>
+                        {data.canManageRetention && (
+                          <form
+                            className="usage-daily-budget"
+                            onSubmit={(event) => { event.preventDefault(); void saveDailyBudget(); }}
+                          >
+                            <label>
+                              Daily Budget per User ($)
+                              <input
+                                type="number"
+                                min="0"
+                                step="0.5"
+                                placeholder="none"
+                                value={dailyBudgetDraft}
+                                onChange={(event) => setDailyBudgetDraft(event.target.value)}
+                              />
+                            </label>
+                            <button type="submit" className="btn primary" disabled={dailyBudgetSaving}>
+                              {dailyBudgetSaving ? "Saving…" : "Save Daily Budget"}
+                            </button>
+                          </form>
+                        )}
+                      </div>
+                      {dailyBudgetStatus && (
+                        <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
+                      )}
+                      {users ? <PersonTable users={users} /> : !dailyBudgetFailed && (
+                        <div className="usage-state" role="status">Loading people…</div>
+                      )}
+                    </>
+                  )}
+                </div>
+              </section>
 
               {data.canManageRetention && (
                 <section className="runner-card usage-retention" aria-labelledby="usage-retention-heading">

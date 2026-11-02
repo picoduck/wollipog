@@ -4,12 +4,23 @@ import test from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { SubscriptionUsageResponse, UsageAggregationGranularity, UsageAggregationResponse } from "@wollipog/protocol";
+import type {
+  RunnerView,
+  SubscriptionUsageResponse,
+  UiSnapshotMessage,
+  UsageAggregationGranularity,
+  UsageAggregationResponse,
+  UsageAmount,
+  UserCostWindows,
+} from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
-import { bucketLabel } from "../usage-view-model.js";
+import type { ViewNavigation } from "../navigation.js";
+import { StoreProvider } from "../store.js";
+import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
+import { periodLabel } from "../usage-view-model.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { UsageView } from "./UsageView.js";
 
@@ -136,6 +147,19 @@ const chooseRange = async (container: HTMLElement, days: number) => {
 /** The visible options of a segmented control, by label. */
 const optionLabels = (container: HTMLElement, group: string) =>
   [...container.querySelectorAll(`[role="radiogroup"][aria-label="${group}"] [role="radio"]`)].map((node) => node.textContent?.trim() ?? "");
+/** The Breakdown's tab row (#3013). */
+const breakdownTabs = (container: HTMLElement) =>
+  [...container.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Breakdown"] [role="tab"]')];
+const breakdownTabLabels = (container: HTMLElement) => breakdownTabs(container).map((tab) => tab.textContent?.trim() ?? "");
+const selectedBreakdownTab = (container: HTMLElement) =>
+  breakdownTabs(container).find((tab) => tab.getAttribute("aria-selected") === "true")?.textContent?.trim();
+const chooseBreakdown = async (container: HTMLElement, label: string) => {
+  const tab = breakdownTabs(container).find((candidate) => candidate.textContent?.trim() === label);
+  assert.ok(tab, `the Breakdown has a ${label} tab`);
+  await act(async () => { tab!.click(); await Promise.resolve(); });
+};
+/** The time table's row names, without the figure folded under them in the compact tier. */
+const periodLabels = (container: HTMLElement) => [...container.querySelectorAll(".usage-period")].map((node) => node.textContent ?? "");
 
 test("UsageView keeps the control-plane newest-first order after a refresh", async () => {
   const olderDay = Date.UTC(2025, 11, 30);
@@ -183,12 +207,12 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     await Promise.resolve();
   });
   assertNoDomNode(container.querySelector(".subscription-usage"), "subscription allowances wait in their own tab");
-  const rowLabels = () => [...container.querySelectorAll("tbody th")].map((cell) => cell.textContent ?? "");
-  assert.deepEqual(rowLabels(), [bucketLabel(newerDay, "day"), bucketLabel(olderDay, "day")]);
+  const rowLabels = () => periodLabels(container);
+  assert.deepEqual(rowLabels(), [periodLabel(newerDay, "day"), periodLabel(olderDay, "day")]);
 
   // Choosing the current range again is a refresh.
   await chooseRange(container, 30);
-  assert.deepEqual(rowLabels(), dailySeries.map((bucket) => bucketLabel(bucket.bucketTs, "day")));
+  assert.deepEqual(rowLabels(), dailySeries.map((bucket) => periodLabel(bucket.bucketTs, "day")));
 
   for (const days of [7, 90, 365]) {
     const label = `Last ${days} Days`;
@@ -200,7 +224,7 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     });
     assert.deepEqual(
       rowLabels(),
-      dailySeries.map((bucket) => bucketLabel(bucket.bucketTs, "day")),
+      dailySeries.map((bucket) => periodLabel(bucket.bucketTs, "day")),
       `${label} keeps every bucket newest-first`,
     );
   }
@@ -236,7 +260,7 @@ test("with 14 days of hourly retention, Group By omits Hour past 14 days and the
     .filter((node) => node.textContent?.trim() === "Hour");
 
   assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"]);
-  assert.deepEqual(optionLabels(container, "Usage Breakdown"), ["Model", "Day", "Week"]);
+  assert.deepEqual(breakdownTabLabels(container), ["By Day", "By Model", "By Agent", "By Machine", "By Person"]);
   assert.equal(disabledHour().length, 0);
   assert.deepEqual(await rangeItems(container), [
     { label: "Last 7 Days", description: "Hour grouping is available for ranges up to 14 days." },
@@ -279,7 +303,6 @@ test("a plane without weekly support has no Week, and the Range menu ends with w
   await act(async () => { await settleLoad(); await Promise.resolve(); });
 
   assert.deepEqual(optionLabels(container, "Group By"), ["Hour", "Day"]);
-  assert.deepEqual(optionLabels(container, "Usage Breakdown"), ["Model", "Hour", "Day"]);
   const menu = await openRangeMenu(container);
   const last = menu.lastElementChild;
   assert.ok(last?.classList.contains("menu-note"), "the Range menu ends with a note");
@@ -331,7 +354,7 @@ test("About These Numbers holds the caveats: estimate, rate source, coverage dat
   container.remove();
 });
 
-test("chart and time breakdown share Hour, Day, and Week while unavailable hours are omitted", async () => {
+test("Group By is the one aggregation control: it renames the time tab, and a Breakdown tab never re-aggregates", async () => {
   const calls: Array<{ days: number; granularity: UsageAggregationGranularity }> = [];
   const at = Date.UTC(2026, 8, 21);
   const client = {
@@ -359,24 +382,42 @@ test("chart and time breakdown share Hour, Day, and Week while unavailable hours
   // This range's hours were already rolled into days.
   assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"]);
 
-  await act(async () => { option("Usage Breakdown", "Week").click(); });
+  assertNoDomNode(container.querySelector('[role="radiogroup"][aria-label="Usage Breakdown"]'), "the Breakdown has no aggregation control of its own");
+  assert.equal(selectedBreakdownTab(container), "By Day");
+  assert.equal(container.querySelector(".usage-table thead th")?.textContent, "Day (UTC)");
+
+  await act(async () => { option("Group By", "Week").click(); });
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   assert.deepEqual(calls.at(-1), { days: 30, granularity: "week" });
-  assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
   assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Weekly Cost/);
-  assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Weekly Usage in UTC");
-  assert.match(container.querySelector(".usage-table tbody th")?.textContent ?? "", /Sep 21, 2026 00:00–Sep 27, 2026 23:59 UTC/);
+  assert.deepEqual(breakdownTabLabels(container), ["By Week", "By Model", "By Agent", "By Machine", "By Person"]);
+  assert.equal(container.querySelector(".usage-table thead th")?.textContent, "Week (UTC)");
+  assert.deepEqual(periodLabels(container), [periodLabel(at, "week", { since: 0, through: Date.UTC(2026, 0, 2) })]);
+  assert.match(periodLabels(container)[0]!, /^Sep 21–27, 2026/);
 
+  // Every other tab changes the dimension only: no request, and the chart keeps its aggregation.
+  const requests = calls.length;
+  for (const label of ["By Model", "By Agent", "By Machine", "By Person", "By Week"]) {
+    await chooseBreakdown(container, label);
+    await act(async () => { await settleLoad(); await Promise.resolve(); });
+    assert.equal(selectedBreakdownTab(container), label);
+    assert.equal(calls.length, requests, `${label} does not re-aggregate`);
+    assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
+    assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Weekly Cost/);
+  }
+
+  await chooseBreakdown(container, "By Model");
   await act(async () => { option("Group By", "Day").click(); });
   await act(async () => { await settleLoad(); await Promise.resolve(); });
-  assert.equal(option("Usage Breakdown", "Day").getAttribute("aria-checked"), "true");
-  assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Daily Usage in UTC");
+  assert.equal(selectedBreakdownTab(container), "By Model", "Group By leaves the chosen tab alone");
+  assert.equal(breakdownTabLabels(container)[0], "By Day");
+  await chooseBreakdown(container, "By Day");
+  assert.deepEqual(periodLabels(container), [periodLabel(at, "day")]);
 
   await chooseRange(container, 90);
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   // Past hourly retention Hour is omitted from both, never drawn disabled.
   assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"]);
-  assert.deepEqual(optionLabels(container, "Usage Breakdown"), ["Model", "Day", "Week"]);
   assert.deepEqual((await rangeItems(container)).map((item) => item.description), [
     "Hour grouping is available for ranges up to 30 days.",
     "Hour grouping is available for ranges up to 30 days.",
@@ -444,7 +485,7 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
     { days: 90, granularity: "day" },
   ]);
   assert.equal(option("Group By", "Day").getAttribute("aria-checked"), "true");
-  assert.equal(option("Usage Breakdown", "Day").getAttribute("aria-checked"), "true");
+  assert.equal(breakdownTabLabels(container)[0], "By Day");
   assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"], "Hour is omitted, not disabled");
   assertNoDomNode(container.querySelector('[role="alert"]'));
 
@@ -601,7 +642,7 @@ test("an unavailable Hour response cannot replace a newer Week selection during 
   await act(async () => { await settleLoad(); });
 
   assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
-  assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(breakdownTabLabels(container)[0], "By Week");
   assert.equal(calls.at(-1), "week");
   assertNoDomNode(container.querySelector('[role="alert"]'));
 
@@ -643,7 +684,7 @@ test("a retention save preserves aggregation changes made while the request is i
   await act(async () => { option("Group By", "Week").click(); await settleLoad(); });
   await act(async () => { finishRetention!(); await settleLoad(); });
   assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
-  assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(breakdownTabLabels(container)[0], "By Week");
 
   await act(async () => root.unmount());
   container.remove();
@@ -807,11 +848,8 @@ test("a late failed request cannot overwrite the newer selection's loading state
   assert.equal(container.querySelector("[aria-busy]")?.getAttribute("aria-busy"), "false");
   assert.equal(option("Day").getAttribute("aria-checked"), "true");
   assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Daily Cost/);
-  assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Daily Usage in UTC");
-  assert.deepEqual(
-    [...container.querySelectorAll(".usage-table tbody th")].map((cell) => cell.textContent ?? ""),
-    [bucketLabel(newerDay, "day")],
-  );
+  assert.equal(breakdownTabLabels(container)[0], "By Day");
+  assert.deepEqual(periodLabels(container), [periodLabel(newerDay, "day")]);
 
   await act(async () => root.unmount());
   container.remove();
@@ -1116,7 +1154,7 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.doesNotMatch(codexCoverage?.textContent ?? "", /protocol|v\d/i);
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /not split by driver/);
   assertNoDomNode(container.querySelector(".usage-legend"), "no legend claims a split that does not exist");
-  const dayTable = container.querySelector(".usage-breakdown-section table")!;
+  const dayTable = container.querySelector(".usage-tables-section table")!;
   const driverCells = [...dayTable.querySelectorAll("tbody tr")].flatMap((row) => [...row.querySelectorAll("td[data-driver]")].slice(0, 2));
   assert.ok(driverCells.length >= 4);
   // The value, without the cell's own label (shown only in the narrow two-line layout).
@@ -1133,10 +1171,14 @@ test("an unsplit response from an older plane is shown honestly and the window c
   assert.match(readout, /Not split by this control plane/);
   assert.match(readout, /Total/);
 
-  const usersText = container.querySelector(".usage-users-section")?.textContent ?? "";
-  assert.match(usersText, /Ada · paused by daily budget/);
-  assert.match(usersText, /\$21\.50 of \$20\.00/);
-  assert.match(usersText, /Each user may spend \$20\.00 per UTC day/);
+  await chooseBreakdown(container, "By Person");
+  const panel = container.querySelector("#usage-breakdown-panel")!;
+  assert.match(panel.textContent ?? "", /Each person can spend \$20\.00 per UTC day\. When they reach it, their new turns pause until midnight UTC\./);
+  const ada = [...panel.querySelectorAll("tbody tr")].find((row) => row.querySelector("th")?.textContent?.includes("Ada"))!;
+  assert.deepEqual([...ada.querySelectorAll(".status")].map((badge) => badge.textContent), ["Budget Reached"]);
+  assert.match(ada.textContent ?? "", /\$21\.50 of \$20\.00/);
+  assert.ok(ada.querySelector(".meter.t-warning"), "a reached budget's meter takes the warning tone");
+  assert.doesNotMatch(panel.textContent ?? "", /paused by daily budget/);
 
   await act(async () => root.unmount());
   container.remove();
@@ -1181,4 +1223,252 @@ test("a pre-v103 response without seriesByDriver still renders", async () => {
   assert.doesNotMatch(container.textContent ?? "", /Codex App Server records/);
   await act(async () => root.unmount());
   container.remove();
+});
+
+// ---- The Breakdown's tabs (#3013) ----
+
+const amountOf = (inputTokens: number, costUsd: number, over: Partial<UsageAmount> = {}): UsageAmount => {
+  const { bucketTs: _ignored, ...row } = bucket(0, inputTokens, costUsd);
+  return { ...row, ...over };
+};
+
+/** The fleet a store would hold: two named machines, their agents and the models they offer. */
+const fleet: RunnerView[] = [
+  {
+    runnerId: "runner-build", hostname: "build-01", displayName: "Build Box", os: "linux", version: "1", status: "online",
+    workspaces: [], connectedAt: 1, lastSeen: 1,
+    agents: [{
+      id: "claude", name: "Claude Code", command: "claude", args: [], env: {}, driver: "claude-code", available: true,
+      capabilities: { models: [{ id: "claude-fable-5-1", displayName: "Fable 5.1" }], effortLevels: [] },
+    }],
+  },
+  {
+    runnerId: "runner-studio", hostname: "studio", displayName: "Studio Mac", os: "macos", version: "1", status: "online",
+    workspaces: [], connectedAt: 1, lastSeen: 1,
+    agents: [{
+      id: "codex", name: "Codex App Server", command: "codex", args: [], env: {}, driver: "codex-app-server", available: true,
+      capabilities: { models: [{ id: "gpt-5.5-codex", displayName: "GPT-5.5-Codex" }], effortLevels: [] },
+    }],
+  },
+] as unknown as RunnerView[];
+
+class FleetSocket implements UiSocket {
+  readonly readyState = UI_SOCKET_OPEN;
+  onopen: (() => void) | null = null;
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: ((event: { code: number }) => void) | null = null;
+  onerror: (() => void) | null = null;
+  send() {}
+  close() {}
+  push(message: UiSnapshotMessage) { this.onmessage?.({ data: JSON.stringify(message) }); }
+}
+
+let fleetSequence = 0;
+/** UsageView under a store that knows `runners`, as it renders in the shell. */
+async function renderWithFleet(client: ApiClient, runners: readonly RunnerView[]) {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  const socket = new FleetSocket();
+  fleetSequence += 1;
+  const connection: UiConnectionRuntime = {
+    instanceId: `usage-fleet-${fleetSequence}`,
+    runtimeKey: `usage-fleet-${fleetSequence}:1`,
+    createSocket: () => socket,
+    close() {},
+  };
+  const navigation: ViewNavigation = { current: () => ({ name: "usage" }), push() {}, listen: () => () => {} };
+  await act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <StoreProvider connection={connection} navigation={navigation}><UsageView /></StoreProvider>
+      </ApiProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push({
+      type: "snapshot",
+      capabilities: { sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false },
+      runners, boxes: [], sessions: [], runs: [], pods: [],
+    } as unknown as UiSnapshotMessage);
+  });
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+  return {
+    container,
+    unmount: async () => { await act(async () => root.unmount()); container.remove(); },
+  };
+}
+
+const usageClient = (usage: UsageAggregationResponse, users: UserCostWindows[] = [], perUserUsd: number | null = null) => ({
+  ...api,
+  subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+  refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+  usageDailyBudget: async () => ({ dailyBudget: { perUserUsd, updatedAt: null } }),
+  usageUsers: async () => ({ users }),
+  usage: async (query: { granularity?: UsageAggregationGranularity }) => ({ ...usage, granularity: query.granularity ?? "day" }),
+} as unknown as ApiClient);
+
+/** Each body row of the open Breakdown table, as its cells' text. */
+const breakdownCells = (container: HTMLElement) => [...container.querySelectorAll("#usage-breakdown-panel tbody tr")]
+  .map((row) => [...row.children].map((cell) => cell.textContent ?? ""));
+
+test("By Agent and By Machine name what they count, and By Model uses the catalog's names (#3013)", async () => {
+  const usage: UsageAggregationResponse = {
+    ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
+    totals: amountOf(100, 10),
+    // Claude ran two models; the plane keys each "agent / model".
+    byAgent: [
+      { key: "claude / claude-fable-5-1", ...amountOf(40, 4) },
+      { key: "codex / gpt-5.5-codex", ...amountOf(30, 3) },
+      { key: "claude / claude-sonnet-5-5", ...amountOf(20, 2) },
+      { key: "Other", ...amountOf(5, 0.5) },
+      { key: "aider / gpt-5.5", ...amountOf(5, 0.5) },
+    ],
+    byRunner: [
+      { key: "runner-studio", ...amountOf(30, 3) },
+      { key: "runner-build", ...amountOf(60, 6) },
+      { key: "runner-gone", ...amountOf(10, 1) },
+    ],
+    byModel: [
+      { key: "claude-fable-5-1", ...amountOf(40, 4) },
+      { key: "gpt-5.5-codex", ...amountOf(30, 3) },
+      { key: "local-llama", ...amountOf(30, 0, { costSource: "unpriced", unpricedRecords: 3 }) },
+    ],
+  };
+  const view = await renderWithFleet(usageClient(usage), fleet);
+  try {
+    await chooseBreakdown(view.container, "By Agent");
+    const agents = breakdownCells(view.container);
+    assert.deepEqual(agents.map((row) => row[0]), ["Claude Code", "Codex App Server", "aider", "Other"],
+      "an agent's models sum into one row, an unlisted agent keeps its id, and Other stays last");
+    // The cell label and the unit are drawn only on a phone's line 2; the text holds them throughout.
+    assert.deepEqual(agents[0]!.slice(1, 4), ["Share: 60%", "60 tokens", "$6.00"]);
+    assert.ok(agents.flat().every((cell) => !cell.includes(" / ")), "no cell joins an agent id and a model");
+    assert.equal(view.container.querySelector("#usage-breakdown-panel table")?.getAttribute("aria-labelledby"), "usage-breakdown-agent-tab");
+    assert.deepEqual([...view.container.querySelectorAll("#usage-breakdown-panel thead th")].map((cell) => cell.textContent),
+      ["Agent", "Share", "Tokens", "Cost"]);
+
+    await chooseBreakdown(view.container, "By Machine");
+    const machines = breakdownCells(view.container);
+    assert.deepEqual(machines.map((row) => row[0]), ["Build Box", "Studio Mac", "runner-gone"],
+      "a machine the store knows is named; one it does not keeps its id");
+    assert.ok(machines.flat().every((cell) => !/runner-(build|studio)/.test(cell)));
+
+    await chooseBreakdown(view.container, "By Model");
+    const models = breakdownCells(view.container);
+    assert.deepEqual(models.map((row) => row[0]), ["Fable 5.1", "GPT-5.5-Codex", "local-llama"]);
+    assert.equal(models[2]![3], "Unpriced", "an unpriced row says so in its Cost cell, not after its name");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("the time table shows the newest 7 periods and Show All, which shows the rest without an inner scroll (#3013)", async () => {
+  const end = Date.UTC(2026, 8, 30);
+  const series = Array.from({ length: 30 }, (_, index) => bucket(end - index * 86_400_000, 10 + index, 0.1 + index / 100));
+  const client = usageClient({
+    ...response(series, "day"),
+    since: end - 29 * 86_400_000,
+    through: end + 86_400_000,
+    byDriver: [{ key: "claude-code", ...amountOf(1000, 10) }],
+  });
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+    await act(async () => { await settleLoad(); await Promise.resolve(); });
+    assert.deepEqual(periodLabels(container), series.slice(0, 7).map((row) => periodLabel(row.bucketTs, "day")));
+    assertNoDomNode(container.querySelector('#usage-breakdown-panel [role="region"]'), "the table is not a scroll region");
+    const showAll = [...container.querySelectorAll<HTMLButtonElement>(".list-foot button")];
+    assert.deepEqual(showAll.map((button) => button.textContent), ["Show All 30 Days"]);
+    assert.ok(showAll[0]!.classList.contains("ghost"));
+
+    await act(async () => { showAll[0]!.click(); await Promise.resolve(); });
+    assert.equal(periodLabels(container).length, 30);
+    assertNoDomNode(container.querySelector(".list-foot"), "everything is shown");
+    assert.equal(domWindow.document.activeElement?.textContent?.startsWith(periodLabel(series[7]!.bucketTs, "day")), true,
+      "focus lands on the first row Show All revealed");
+
+    // Tokens: the figures are tokens and the trailing column is Cost.
+    const tokens = [...container.querySelectorAll<HTMLButtonElement>('[role="radiogroup"][aria-label="Metric"] [role="radio"]')]
+      .find((node) => node.textContent?.trim() === "Tokens")!;
+    await act(async () => { tokens.click(); await Promise.resolve(); });
+    assert.deepEqual([...container.querySelectorAll(".usage-table thead th")].map((cell) => cell.textContent),
+      ["Day (UTC)", "Claude Code", "Total", "Cost"]);
+    const first = container.querySelector(".usage-table tbody tr")!;
+    assert.equal(first.querySelector(".cell-status")?.textContent, "10");
+    assert.equal(first.querySelector(".usage-period-trailing")?.textContent, "$0.10 estimated");
+    assert.equal(first.querySelector(".usage-period-meta")?.textContent, "$0.10 estimated");
+
+    // A new range starts at the newest 7 again.
+    await chooseRange(container, 90);
+    await act(async () => { await settleLoad(); await Promise.resolve(); });
+    assert.equal(periodLabels(container).length, 7);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a person at the daily budget, settled plus running turns, shows one Budget Reached badge and a warning meter (#3013)", async () => {
+  const people: UserCostWindows[] = [
+    { userId: "u-ada", userName: "Ada", todayUsd: 26.4, last7DaysUsd: 112.2, last30DaysUsd: 401.7, dailyBudgetUsd: 25 },
+    // Under the budget on settled spend alone; the gate counts her running turn too.
+    { userId: "u-grace", userName: "Grace", todayUsd: 24, todayEstimateUsd: 1.25, last7DaysUsd: 61.3, last30DaysUsd: 240.1, dailyBudgetUsd: 25 },
+    { userId: "u-linus", userName: "Linus", todayUsd: 9.8, last7DaysUsd: 4.5, last30DaysUsd: 38.9, dailyBudgetUsd: 25 },
+  ];
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<ApiProvider client={usageClient(response([]), people, 25)}><UsageView /></ApiProvider>));
+    await act(async () => { await settleLoad(); await Promise.resolve(); });
+    await chooseBreakdown(container, "By Person");
+    const panel = container.querySelector("#usage-breakdown-panel")!;
+    assert.match(panel.textContent ?? "",
+      /Each person can spend \$25\.00 per UTC day\. When they reach it, their new turns pause until midnight UTC\./);
+    assert.deepEqual([...panel.querySelectorAll("thead th")].map((cell) => cell.textContent), ["Person", "Today", "Last 7 Days", "Last 30 Days"]);
+    const row = (name: string) => [...panel.querySelectorAll("tbody tr")].find((candidate) => candidate.querySelector("th")?.textContent?.includes(name))!;
+    for (const name of ["Ada", "Grace"]) {
+      assert.deepEqual([...row(name).querySelectorAll(".status")].map((badge) => badge.textContent), ["Budget Reached"], name);
+      assert.ok(row(name).querySelector(".status.t-warning") || row(name).querySelector(".status")?.className.includes("warning"),
+        `${name}'s badge is the warning tone`);
+      const meter = row(name).querySelector('.meter[role="progressbar"]')!;
+      assert.ok(meter.classList.contains("t-warning"), `${name}'s meter takes the warning tone`);
+    }
+    assert.match(row("Ada").textContent ?? "", /\$26\.40 of \$25\.00/);
+    assert.match(row("Grace").textContent ?? "", /\$25\.25 of \$25\.00/);
+    assert.equal(row("Grace").querySelector(".usage-person-today")?.getAttribute("title"), "Includes an estimate for running turns.");
+    assert.match(panel.textContent ?? "", /Today includes an estimate for running turns\./);
+    assert.equal(row("Linus").querySelectorAll(".status").length, 0);
+    const linusMeter = row("Linus").querySelector('.meter[role="progressbar"]')!;
+    assert.equal(linusMeter.classList.contains("t-warning"), false);
+    assert.equal(linusMeter.getAttribute("aria-valuetext"), "$9.80 of $25.00");
+    assert.doesNotMatch(panel.textContent ?? "", /paused by daily budget/);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("without a daily budget By Person says so and draws no meter or badge (#3013)", async () => {
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  try {
+    const people: UserCostWindows[] = [
+      { userId: "u-ada", userName: "Ada", todayUsd: 26.4, last7DaysUsd: 112.2, last30DaysUsd: 401.7, dailyBudgetUsd: null },
+    ];
+    await act(async () => root.render(<ApiProvider client={usageClient(response([]), people)}><UsageView /></ApiProvider>));
+    await act(async () => { await settleLoad(); await Promise.resolve(); });
+    await chooseBreakdown(container, "By Person");
+    const panel = container.querySelector("#usage-breakdown-panel")!;
+    assert.match(panel.textContent ?? "", /No daily budget is set\./);
+    assertNoDomNode(panel.querySelector(".meter"));
+    assertNoDomNode(panel.querySelector(".status"));
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
 });
