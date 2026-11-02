@@ -3139,6 +3139,99 @@ test("directory changes refresh dashboards in place; only a member's own access 
   assert.equal(refused.code, 1008);
 });
 
+test("saving your own name ends the default name and reconnects no dashboard (#3001)", { timeout: 30_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-own-name-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const secondOwnerToken = "own-name-second-owner-token";
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.createIdentityMember({
+    userId: "usr_own_name_grace", displayName: "Grace", organizationId: identity.organizationId, role: "owner", now: 1,
+  });
+  seed.createDevice({
+    id: "dev_own_name_grace", name: "Grace Device", tokenHash: hashToken(secondOwnerToken),
+    userId: "usr_own_name_grace", organizationId: identity.organizationId, now: 2,
+  });
+  seed.close();
+
+  let output = "";
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "apps/control-plane/src/index.ts"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const capture = (chunk: unknown) => {
+    output = (output + String(chunk)).slice(-32_768);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const json = { "content-type": "application/json" };
+  type Context = { userId: string; userName: string; defaultName?: true };
+  const contextOf = async (token: string) =>
+    ((await (await fetchWithBearer(`${httpBase}/api/identity`, token)).json()) as { context: Context }).context;
+
+  const before = await contextOf(ownerToken);
+  assert.equal(before.userName, "Owner");
+  assert.equal(before.defaultName, true);
+  assert.equal("defaultName" in await contextOf(secondOwnerToken), false, "only the bootstrap owner is asked");
+
+  // Another owner changing the bootstrap owner's access, with the name unchanged, does not save it.
+  const roleOnly = await fetchWithBearer(`${httpBase}/api/identity/users/${before.userId}`, secondOwnerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Owner", role: "owner" }),
+  });
+  assert.equal(roleOnly.status, 200);
+  assert.equal((await contextOf(ownerToken)).defaultName, true);
+
+  const socket = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, ownerToken));
+  const dashboard = { refreshes: 0, closed: null as number | null };
+  socket.on("message", (raw) => {
+    if ((JSON.parse(raw.toString()) as { type?: string }).type === "identity_directory_changed") dashboard.refreshes++;
+  });
+  socket.once("close", (code) => { dashboard.closed = code; });
+  t.after(() => socket.close());
+
+  // Saving your own name, even the same "Owner", sends only the name and ends the default.
+  const saved = await fetchWithBearer(`${httpBase}/api/identity/users/${before.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Owner" }),
+  });
+  assert.equal(saved.status, 200);
+  const membership = ((await saved.json()) as { membership: { userName: string; role: string; userStatus: string } }).membership;
+  assert.deepEqual([membership.userName, membership.role, membership.userStatus], ["Owner", "owner", "active"]);
+  await waitForValue(() => dashboard.refreshes, (count) => count === 1, "the dashboard to refresh in place");
+  const after = await contextOf(ownerToken);
+  assert.equal(after.userName, "Owner");
+  assert.equal("defaultName" in after, false);
+
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/users/${before.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Misko" }),
+  });
+  assert.equal(renamed.status, 200);
+  await waitForValue(() => dashboard.refreshes, (count) => count === 2, "the dashboard to refresh after the rename");
+  await delay(250);
+  assert.equal(dashboard.closed, null, "renaming yourself closes no dashboard");
+  assert.equal((await contextOf(ownerToken)).userName, "Misko");
+});
+
 test("renaming a team is audited and reconnects no UI client, unlike a membership change (#3000)", { timeout: 30_000 }, async (t) => {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-team-rename-"));

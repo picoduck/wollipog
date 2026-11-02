@@ -11,8 +11,8 @@ export function canAdminister(context: Pick<IdentityContext, "role">): boolean {
   return context.role === "owner" || context.role === "admin";
 }
 
-/** Whether a People row is the signed-in person's own: it says "You" and is never managed from the
- * list (#2997). Renaming yourself from this row builds on it (#3001). */
+/** Whether a People row is the signed-in person's own: it says "You" and never opens Manage Person
+ * (#2997); an owner or admin renames themselves from it instead (#3001). */
 export function isOwnRow(
   member: Pick<OrganizationMembershipView, "userId">,
   context: Pick<IdentityContext, "userId">,
@@ -22,18 +22,20 @@ export function isOwnRow(
 
 /**
  * What a People row's trailing slot holds, so no row ever shows a disabled Manage button (#2997):
- * - `you`: your own row, which says "You" instead;
+ * - `edit-own-name`: an owner's or admin's own row, which says "You", has Edit Name… and opens Your
+ *   Name (#3001);
+ * - `you`: an operator's or viewer's own row, which says "You" and opens nothing;
  * - `owner-locked`: an owner's row seen by an admin, which says "Only owners can change an owner";
  * - `manage`: Manage…, and the row opens Manage Person;
  * - `none`: operators and viewers manage no one, so the row opens nothing.
  */
-export type PersonRowAction = "you" | "owner-locked" | "manage" | "none";
+export type PersonRowAction = "edit-own-name" | "you" | "owner-locked" | "manage" | "none";
 
 export function personRowAction(
   member: Pick<OrganizationMembershipView, "userId" | "role">,
   context: Pick<IdentityContext, "userId" | "role">,
 ): PersonRowAction {
-  if (isOwnRow(member, context)) return "you";
+  if (isOwnRow(member, context)) return canAdminister(context) ? "edit-own-name" : "you";
   if (!canAdminister(context)) return "none";
   if (member.role === "owner" && context.role !== "owner") return "owner-locked";
   return "manage";

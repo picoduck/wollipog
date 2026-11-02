@@ -10,12 +10,13 @@ import {
   revokeDeviceMessage,
 } from "./people-device-rows.js";
 
-test("your own row is yours whatever your role, and never managed from the list", () => {
+test("your own row is yours whatever your role; owners and admins edit their name from it (#3001)", () => {
   for (const role of ["owner", "admin", "operator", "viewer"] as const) {
     const context = { userId: "me", role };
     assert.equal(isOwnRow({ userId: "me" }, context), true);
     assert.equal(isOwnRow({ userId: "other" }, context), false);
-    assert.equal(personRowAction({ userId: "me", role }, context), "you");
+    assert.equal(personRowAction({ userId: "me", role }, context),
+      role === "owner" || role === "admin" ? "edit-own-name" : "you");
   }
 });
 

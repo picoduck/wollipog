@@ -1,9 +1,10 @@
 # Multi-user identity and resource ownership
 
 The control plane now has a local-first collaboration boundary. A fresh or upgraded personal
-deployment bootstraps one `Personal organization` and one `Local owner`; existing paired-device
+deployment bootstraps one `Personal organization` and one owner named `Owner`; existing paired-device
 tokens, runners, workspaces, and sessions are migrated into that organization without replacing
-credentials or changing resource ids. This is an additive foundation, not an external identity
+credentials or changing resource ids. The owner's default name is the same fixed word on every
+install, never the computer's account or host name, because every member sees it (#3001). This is an additive foundation, not an external identity
 provider. Expiring transcript capabilities, authenticated artifact exports, runner-specific
 credential rotation, and runner-local secret references build on this identity boundary; account
 federation remains outside the current local-first deployment model.
@@ -94,13 +95,20 @@ automation, workflow, and reconciliation audits.
 
 The Connections page includes **People and Devices**. Owners/admins can create members, assign
 roles, suspend/reactivate access, create teams, update team membership, and pair a device directly
-to an active member. The last active owner cannot be demoted or suspended. Owners alone can grant or alter
+to an active member. An owner or admin renames themselves from their own row (**Your Name**), which
+sends only `displayName`; nobody changes their own access level there. The last active owner cannot be demoted or suspended. Owners alone can grant or alter
 owner access. A team that still owns a runner, workspace, or session cannot be deleted until those
 resources are reassigned.
 
 The REST surface is:
 
-- `GET /api/identity` — current context plus organization directory and teams;
+- `GET /api/identity` — current context plus organization directory and teams. The context carries
+  `defaultName: true` only for the bootstrap owner while their name is still the default `Owner`.
+  It is set when the default is written: on a new install, or by the one-time startup rename of an
+  owner still named exactly `Local owner` (when the marker column is added). It is cleared the first
+  time that member's name is saved through `PATCH /api/identity/users/:userId`: by themselves, even
+  unchanged, or by another owner giving them a different name. People shows the **Set Your Name**
+  notice to that member alone while it is set;
 - `POST/PATCH /api/identity/users...` — member lifecycle;
 - `POST/PUT/DELETE /api/identity/teams...` — team lifecycle and membership;
 - `GET /api/identity/mutation-audit` — bounded recent mutation attribution;

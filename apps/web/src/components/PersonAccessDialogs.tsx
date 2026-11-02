@@ -2,6 +2,7 @@ import { useEffect, useId, useRef, useState, type RefObject } from "react";
 import type { OrganizationMembershipView, OrganizationRole, UserStatus } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import { titleCaseLabel } from "../format.js";
 import { accountLabelText, isPersonalIdentifier } from "../personal-identifiers.js";
 import { Modal } from "./common.js";
 import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
@@ -16,6 +17,9 @@ import { ChoiceRows } from "./ui/ChoiceControls.js";
 const NAME_MAX_LENGTH = 80;
 const NAME_HELPER = "Enter the person's name.";
 const NAME_REQUIRED = "Enter the person's name.";
+/** Your Name's own words (#3001): it is your name, not a person's. */
+const OWN_NAME_HELPER = "Enter your name.";
+const OWN_NAME_REQUIRED = "Enter your name.";
 const NAME_TOO_LONG = `Use ${NAME_MAX_LENGTH} characters or fewer.`;
 const OWNER_REFUSED = "Only an owner can change owner access.";
 
@@ -59,9 +63,9 @@ export function AccessLevelChoices({
 }
 
 /** Why a draft is not a name the server accepts, or null when it is. */
-function nameProblem(draft: string): string | null {
+function nameProblem(draft: string, required = NAME_REQUIRED): string | null {
   const trimmed = draft.trim();
-  if (!trimmed) return NAME_REQUIRED;
+  if (!trimmed) return required;
   if (trimmed.length > NAME_MAX_LENGTH) return NAME_TOO_LONG;
   return null;
 }
@@ -78,6 +82,7 @@ function PersonNameField({
   error,
   inputRef,
   masked,
+  helper = NAME_HELPER,
 }: {
   value: string;
   onChange: (value: string) => void;
@@ -85,6 +90,7 @@ function PersonNameField({
   error: string | null;
   inputRef: RefObject<HTMLInputElement | null>;
   masked?: { hidden: boolean; onToggle: () => void };
+  helper?: string;
 }) {
   const id = useId();
   const helperId = `${id}-helper`;
@@ -123,7 +129,7 @@ function PersonNameField({
         ? <FieldError id={errorId}>{error}</FieldError>
         : (
           <p className="field-helper" id={helperId}>
-            {hidden ? "Hidden because it looks like an email address." : NAME_HELPER}
+            {hidden ? "Hidden because it looks like an email address." : helper}
           </p>
         )}
     </div>
@@ -286,11 +292,17 @@ function pairedDevicesText(count: number): string {
  * itself as a separate action. Suspend Access… is the footer's destructive tertiary and confirms
  * first (§7.3, §7.4), as Revoke Device and Delete Team do; a suspended person's dialog opens with a
  * notice whose Restore Access applies at once, since restoring is not destructive.
+ *
+ * With `self`, it is Your Name (#3001): an owner or admin renaming themselves from their own row. It
+ * holds the Name field only, with their access level as a read-only fact, and Save Changes sends the
+ * name alone. While the name is still the server's default, saving it unchanged still sends it, which
+ * is what ends the default.
  */
 export function ManagePersonDialog({
   actorRole,
   member,
   pairedDevices,
+  self,
   onClose,
   onSaved,
 }: {
@@ -298,6 +310,8 @@ export function ManagePersonDialog({
   member: OrganizationMembershipView;
   /** How many of the loaded paired devices belong to this person; omitted where devices are not shown. */
   pairedDevices?: number | null;
+  /** The signed-in person's own row, and whether their name is still the default. */
+  self?: { defaultName: boolean };
   onClose: () => void;
   onSaved: () => Promise<void>;
 }) {
@@ -306,6 +320,7 @@ export function ManagePersonDialog({
   const formId = useId();
   const noticeId = useId();
   const devicesId = useId();
+  const nameRequired = self ? OWN_NAME_REQUIRED : NAME_REQUIRED;
   // An email-shaped name stays out of the editable field until the admin deliberately shows it, and
   // out of the title and sentences altogether.
   const nameIsPersonal = isPersonalIdentifier(member.userName);
@@ -362,7 +377,7 @@ export function ManagePersonDialog({
   const save = async () => {
     if (workingRef.current) return;
     // An edit made while the name was shown stays after Hide Name, so the draft is always checked.
-    const problem = nameProblem(displayName);
+    const problem = nameProblem(displayName, nameRequired);
     setEdited(true);
     if (problem) {
       showNameError(problem);
@@ -370,7 +385,7 @@ export function ManagePersonDialog({
     }
     setNameError(null);
     const nextName = displayName.trim();
-    if (nextName === member.userName && role === member.role) {
+    if (nextName === member.userName && role === member.role && !self?.defaultName) {
       onClose();
       return;
     }
@@ -378,13 +393,14 @@ export function ManagePersonDialog({
     setSaving(true);
     setFailure(null);
     try {
-      // Status is its own confirmed action and never rides along with a save.
-      await api.updateIdentityMember(member.userId, { displayName: nextName, role });
+      // Status is its own confirmed action and never rides along with a save; your own access level
+      // is not yours to change, so Your Name sends the name alone.
+      await api.updateIdentityMember(member.userId, { displayName: nextName, ...(self ? {} : { role }) });
     } catch (cause) {
       workingRef.current = false;
       setSaving(false);
       if (refusedName(cause)) {
-        showNameError(nameProblem(displayName) ?? NAME_TOO_LONG);
+        showNameError(nameProblem(displayName, nameRequired) ?? NAME_TOO_LONG);
         return;
       }
       setFailure(saveFailure(cause, "Couldn't Save Changes", "Wollipog didn't save the change. Nothing changed; try again."));
@@ -450,14 +466,15 @@ export function ManagePersonDialog({
     void onSaved();
   };
 
-  const suspended = status === "suspended";
-  const describedBy = [suspended ? noticeId : null, pairedDevices != null ? devicesId : null].filter(Boolean).join(" ");
+  const suspended = !self && status === "suspended";
+  const showDevices = !self && pairedDevices != null;
+  const describedBy = [suspended ? noticeId : null, showDevices ? devicesId : null].filter(Boolean).join(" ");
   return (
     <Modal
-      title={`Manage ${accountLabelText(member.userName, "Person")}`}
+      title={self ? "Your Name" : `Manage ${accountLabelText(member.userName, "Person")}`}
       onClose={close}
       describedBy={describedBy || undefined}
-      tertiary={suspended ? undefined : (
+      tertiary={suspended || self ? undefined : (
         <button ref={suspendRef} type="button" className="btn ghost danger" onClick={() => void suspend()} disabled={working}>
           <UserXIcon />
           <span>Suspend Access…</span>
@@ -499,12 +516,13 @@ export function ManagePersonDialog({
           value={displayName}
           inputRef={nameRef}
           error={nameError}
+          helper={self ? OWN_NAME_HELPER : NAME_HELPER}
           onChange={(next) => {
             setDisplayName(next);
             setEdited(true);
-            if (nameError) setNameError(nameProblem(next));
+            if (nameError) setNameError(nameProblem(next, nameRequired));
           }}
-          onBlur={() => { if (edited && !workingRef.current) setNameError(nameProblem(displayName)); }}
+          onBlur={() => { if (edited && !workingRef.current) setNameError(nameProblem(displayName, nameRequired)); }}
           masked={nameIsPersonal ? {
             hidden: !nameShown,
             // No focus move: a keyboard reveal keeps focus on the toggle so Enter can hide it again.
@@ -514,8 +532,16 @@ export function ManagePersonDialog({
             },
           } : undefined}
         />
-        <AccessLevelChoices actorRole={actorRole} value={role} onChange={setRole} />
-        {pairedDevices != null && (
+        {self ? (
+          <>
+            <dl className="facts">
+              <dt>Access Level</dt>
+              <dd>{titleCaseLabel(member.role)}</dd>
+            </dl>
+            <p className="facts-note">You can't change your own access level.</p>
+          </>
+        ) : <AccessLevelChoices actorRole={actorRole} value={role} onChange={setRole} />}
+        {showDevices && (
           <dl className="facts">
             <dt>Paired Devices</dt>
             <dd id={devicesId}>{pairedDevicesText(pairedDevices)}</dd>

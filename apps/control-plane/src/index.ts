@@ -2945,6 +2945,10 @@ app.patch("/api/identity/users/:userId", async (req, reply) => {
       displayName,
       role,
       status,
+      // Saving your own name, even unchanged, or giving someone a new one ends the default name
+      // (#3001). Another person's unchanged name riding along with an access change does not.
+      nameSaved: typeof body.displayName === "string" &&
+        (userId === principal.userId || displayName !== existing.userName),
       now: Date.now(),
     });
     if (!membership) return reply.code(404).send({ error: "member not found" });

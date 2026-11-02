@@ -4,6 +4,11 @@ import { matchWorkspaceId } from "./workspace-match.js";
 
 export { PERSONAL_ORGANIZATION_ID } from "@wollipog/protocol";
 export const LOCAL_OWNER_USER_ID = "usr_local_owner";
+/** The bootstrap owner's name on every install until they choose one (#3001): a fixed word, so
+ * nothing about the computer or its user reaches the other members. */
+export const BOOTSTRAP_OWNER_NAME = "Owner";
+/** The placeholder installs gave the bootstrap owner before #3001, renamed once at startup. */
+export const LEGACY_BOOTSTRAP_OWNER_NAME = "Local owner";
 
 export interface HumanPrincipal {
   kind: "human";
