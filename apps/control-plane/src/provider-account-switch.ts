@@ -1,3 +1,4 @@
+import { providerForDriver as providerForSessionAccountSwitch } from "@wollipog/protocol";
 import type {
   ProviderAccountDefinition,
   ProviderAuthenticationAccountOption,
@@ -10,13 +11,7 @@ import type {
   SubscriptionUsageSourceView,
 } from "@wollipog/protocol";
 
-export function providerForSessionAccountSwitch(
-  driver: SessionView["driver"],
-): "claude" | "codex" | null {
-  if (driver === "claude-code") return "claude";
-  if (driver === "codex" || driver === "codex-app-server") return "codex";
-  return null;
-}
+export { providerForSessionAccountSwitch };
 
 /** Every same-Machine, same-provider account for an Authentication Required card. Unlike the
  * headroom chooser, recovery never hides an account: one that needs sign-in or whose status is

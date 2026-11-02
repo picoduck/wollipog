@@ -8,6 +8,7 @@
  * git/gh can't wedge a request.
  */
 
+import { safeHttpUrl } from "@wollipog/protocol";
 import { execFile } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +43,8 @@ import type {
   AgentContext,
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
+
+export { safeHttpUrl };
 
 /** A git-action failure the UI reacts to by code (stale diff / index conflict → refetch). */
 export class GitOpError extends Error {
@@ -2109,17 +2112,6 @@ export async function forgeSummary(
     };
     forgeSummaryCache.set(key, { at: Date.now(), value });
     return value;
-  }
-}
-
-/** Forge metadata is untrusted input. Only publish absolute web URLs to dashboard clients. */
-export function safeHttpUrl(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
   }
 }
 
