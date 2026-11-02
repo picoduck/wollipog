@@ -1,15 +1,18 @@
 # Browser CI Budget
 
-The #3628 [duration profile and redistribution](ci-browser-shards.md) recalculates
-the projected non-install envelope at 1710 seconds, including shard-1 production.
-The existing measured 2020-second envelope remains the conservative sizing floor
-pending natural redistributed runs. Adding #3649's 480 seconds of bounded cache
-and verification phases plus 75 seconds of enforcement gives
-`720 + max(2020, 1710) + 480 + 180 + 480 + 180 = 4060s <= 4080s`.
-The redistribution itself needs no increase; the explicit cache phases derive
-the new finite deadline. Historical phase evidence remains intact.
+The [November 2 natural-run reconciliation](ci-browser-shards-2026-11-02.md)
+extends evidence through 2026-11-02T15:00:00Z (1012 first attempts, 44 reruns).
+The maximum coherent measured non-install remainder is 2453s, rounded
+to 2460s. The latest successful natural group remeasures all five shards;
+the 2078s #3644 group and historical October 18 evidence remain recorded.
+Unexplained job/step timestamp conflicts are retained as unmeasured allocation,
+not interpreted as test workload or silently corrected by subtracting an hour.
+`720 + 2460 + 480 + 180 + 480 + 180 = 4500s <= 4500s`
+derives **75 minutes**, retaining 180s residual reserve.
+This is an envelope for coherent measured phases, not a certification of unknown
+allocation or future workloads. Five jobs and weights remain unchanged.
 
-The browser job retains five shards and a finite **68-minute** budget. The
+The browser job retains five shards and a finite **75-minute** budget. The
 2026-10-18 remeasurement replaces the stale 1,448-second non-install envelope with
 2,016 seconds. The prior 49-minute limit cannot reserve three minutes beyond the
 configured attempts, measured remainder, enforcement and failure diagnostics.
@@ -97,18 +100,18 @@ Production checks and cleanup remain included.
 | Allowance | Seconds | Basis |
 | --- | --- | --- |
 | Active Install Attempts | 720 | Two configured six-minute attempts on either exclusive path. |
-| Non-Install Work | 2020 | Fresh maximum 2016, rounded upward to ten seconds. |
+| Non-Install Work | 2460 | Coherent natural maximum 2453, rounded upward to ten seconds. |
 | System-Package Cache and Verification | 480 | Resolve 2m, restore 2m, launch verification 1m, collect 1m, save 2m (#3649). |
 | Timeout Enforcement | 180 | 15 per install attempt, cache/verification phase and diagnostic step, above the observed 12-second overrun. |
 | Failure Diagnostics | 480 | Sanitization/upload: one minute each; linux baseline regeneration: four minutes; upload/summary: one minute each. All five skip on success. |
 | Required Reserve | 180 | Three minutes beyond the full modeled path. |
-| Total | 4060 | 67m40s; rounded up to 68m (4080s). |
+| Total | 4500 | 75m (4500s), the smallest whole-minute cap. |
 
-`720 + 480 + 2020 + 180 + 480 + 180 = 4060 <= 4080`. Residual modeled reserve is
-**200 seconds** after installs, cache/verification, rounded remainder, enforcement and diagnostics.
-At the former 59 minutes the new full model would be short by **520 seconds**.
+`720 + 480 + 2460 + 180 + 480 + 180 = 4500 <= 4500`. Residual modeled reserve is
+**180 seconds** after installs, cache/verification, rounded remainder, enforcement and diagnostics.
+At the former 59 minutes the new full model would be short by **960 seconds**.
 Even without failure diagnostics, the new model needs
-`720 + 480 + 2020 + 105 + 180 = 3505` seconds.
+`720 + 480 + 2460 + 105 + 180 = 3945` seconds.
 
 Count the cache-hit **or** cache-miss path, not both. A second failed attempt still
 fails. Cold browser-download installation remains unmeasured; attempt bounds
@@ -125,7 +128,7 @@ The Chromium job has a narrow exception to the general 60-minute workflow ceilin
 the package cache adds 480 seconds of explicit step bounds and 75 seconds of
 timeout enforcement to the existing measured model. The same five
 concurrent browser jobs perform unchanged normal execution work. A hang can hold
-each runner nine minutes longer than at 59 minutes. Adding shards competes for
+each runner 16 minutes longer than at 59 minutes. Adding shards competes for
 more of the shared 20-job pool; rebalancing five needs per-file/test durations
 and a fresh all-shard baseline before justifying a smaller budget. Assertions,
 coverage, flaky handling, test retries, setup recovery, admission, cancellation,
@@ -164,7 +167,7 @@ GITHUB_TOKEN=$(gh auth token) node scripts/merge-queue-wait-report.mjs --repo pi
 
 `scripts/workflow-browser-budget.test.mjs` derives both attempt paths and diagnostic
 allowances from the workflow, and the remainder from the fixture. It rejects
-tested reduced budgets through 67 minutes, longer attempts or cache phases,
+tested reduced budgets through 74 minutes, longer attempts or cache phases,
 omitted production/cleanup, inconsistent sums, and missing or duplicated full-run
 shards. These checks catch lost modeled reserve and inconsistent shard coverage;
 they do not predict the duration of future workloads or require a Git checkout.
@@ -173,7 +176,7 @@ existing contract pins matrix/denominator agreement. Inert shell checks retain
 successful recovery, apt/dpkg cleanup order, and second-install/repair failure
 propagation; success and cancellation do not trigger retry.
 
-The 2016-second measured remainder is a dated snapshot. Natural-run margin
+The 2453-second coherent natural measured remainder is a dated snapshot. Natural-run margin
 evidence triggers remeasurement: collect the five consecutive complete runs
 below, retaining phase timings and at least 180 seconds spare on every shard.
 If a shard loses that margin, remeasure all five shards and revisit the finite
@@ -184,7 +187,7 @@ authors must not edit a provenance hash to imply a measurement that never happen
 Local checks and PR/merge-group CI do not complete #2700. Observe **five consecutive
 naturally occurring complete main or merge-group runs containing this change**,
 all five browser shards successful with at least 180 seconds spare:
-`active <= 3900s` at the current 68-minute limit. The earlier 59-minute model
+`active <= 4320s` at the current 75-minute limit. The earlier 59-minute model
 used a 3360-second threshold; its observations are historical, not evidence for
 the revised setup model. Read exact first-attempt metadata for each run:
 

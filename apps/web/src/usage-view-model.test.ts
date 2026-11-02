@@ -9,17 +9,24 @@ import {
   breakdownRows,
   buildColumns,
   bucketLabel,
+  bucketStart,
+  bucketStepMs,
   coverageMessages,
   dailyBudgetReached,
+  DRIVER_ORDER,
+  DRIVER_PRESENTATION,
   driverRows,
   formatCompactTokens,
   formatMoney,
   formatShare,
   niceScale,
+  OTHER_AGENTS_LABEL,
   periodLabel,
   processedTokens,
   subscriptionPlanLabel,
   todaySpendUsd,
+  usageDriverLabels,
+  usageRestingSummary,
   usageWindowCaption,
 } from "./usage-view-model.js";
 
@@ -77,19 +84,38 @@ test("driver rows keep slot order, skip Other, and share the active metric", () 
   assert.deepEqual(driverRows({ byDriver, totals }, "tokens").map((row) => [row.driver, row.share]), [["claude-code", 0.9], ["acp", 0.1]]);
 });
 
-test("columns stack drivers in slot order, ascend in time, and fall back to bucket totals without a split", () => {
+const DAY = 86_400_000;
+/** A daily axis whose exclusive end is a midnight, so a 30-day range is exactly 30 buckets. */
+const dailyAxis = (through: number, rangeDays = 30, coverageStartedAt = 0) => ({
+  granularity: "day" as const, since: Math.max(through - rangeDays * DAY, Math.floor(coverageStartedAt / DAY) * DAY),
+  through, coverageStartedAt, rangeDays,
+});
+
+test("Claude Code takes the blue slot, Codex the orange and ACP the purple, stacked in an explicit order", () => {
+  assert.deepEqual(
+    Object.fromEntries(Object.entries(DRIVER_PRESENTATION).map(([driver, { slot }]) => [driver, slot])),
+    { "claude-code": 2, "codex-app-server": 1, acp: 4, codex: 3, pi: 5 },
+  );
+  assert.deepEqual(DRIVER_ORDER, ["claude-code", "codex-app-server", "pi", "acp", "codex"]);
+  assert.deepEqual(new Set(DRIVER_ORDER), new Set(Object.keys(DRIVER_PRESENTATION)), "every driver stacks exactly once");
+});
+
+test("columns stack drivers in DRIVER_ORDER, ascend in time, and fall back to bucket totals without a split", () => {
+  const through = Date.UTC(2026, 8, 4);
+  const [d1, d2, d3] = [through - 3 * DAY, through - 2 * DAY, through - DAY];
   const series: UsageTimeBucket[] = [
-    { bucketTs: 2, ...amount({ costUsd: 5 }) },
-    { bucketTs: 1, ...amount({ costUsd: 3 }) },
-    { bucketTs: 3, ...amount({ costUsd: 7 }) },
+    { bucketTs: d2, ...amount({ costUsd: 5 }) },
+    { bucketTs: d1, ...amount({ costUsd: 3 }) },
+    { bucketTs: d3, ...amount({ costUsd: 7 }) },
   ];
   const split: UsageDriverTimeBucket[] = [
-    { bucketTs: 2, driver: "acp", ...amount({ costUsd: 1 }) },
-    { bucketTs: 2, driver: "claude-code", ...amount({ costUsd: 4 }) },
-    { bucketTs: 1, driver: "claude-code", ...amount({ costUsd: 3 }) },
+    { bucketTs: d2, driver: "acp", ...amount({ costUsd: 1 }) },
+    { bucketTs: d2, driver: "claude-code", ...amount({ costUsd: 4 }) },
+    { bucketTs: d1, driver: "claude-code", ...amount({ costUsd: 3 }) },
   ];
-  const columns = buildColumns(series, split, ["claude-code", "acp"], "cost");
-  assert.deepEqual(columns.map((column) => column.bucketTs), [1, 2, 3]);
+  const axis = dailyAxis(through, 3);
+  const columns = buildColumns(series, split, ["claude-code", "acp"], "cost", axis);
+  assert.deepEqual(columns.map((column) => column.bucketTs), [d1, d2, d3]);
   assert.deepEqual(columns[1]!.bands, [
     { driver: "claude-code", value: 4, from: 0, to: 4 },
     { driver: "acp", value: 1, from: 4, to: 5 },
@@ -98,7 +124,136 @@ test("columns stack drivers in slot order, ascend in time, and fall back to buck
   assert.deepEqual(columns[0]!.bands.map((band) => band.value), [3, 0], "a missing driver inside a split is a zero band");
   assert.equal(columns[2]!.total, 7, "a bucket with no per-driver split keeps its total height");
   assert.deepEqual(columns[2]!.bands, [], "and presents no per-driver values, because none are known");
-  assert.equal(buildColumns(series, [], ["claude-code"], "cost").every((column) => column.bands.length === 0), true);
+  assert.equal(buildColumns(series, [], ["claude-code"], "cost", axis).every((column) => column.bands.length === 0), true);
+  assert.deepEqual(buildColumns([], [], ["claude-code"], "cost", axis), [], "a window with no usage has nothing to draw");
+});
+
+test("usage on 3 of 30 days draws 30 columns spanning the whole range, 27 of them at zero", () => {
+  const through = Date.UTC(2026, 8, 4);
+  const used = [through - 30 * DAY + 4 * DAY, through - 12 * DAY, through - DAY];
+  const series = used.map((bucketTs, index) => ({ bucketTs, ...amount({ costUsd: index + 1, inputTokens: 10 }) }));
+  const split = series.map((bucket) => ({ ...bucket, driver: "claude-code" as const }));
+  const columns = buildColumns(series, split, ["claude-code", "codex-app-server"], "cost", dailyAxis(through));
+  assert.equal(columns.length, 30);
+  assert.equal(columns[0]!.bucketTs, through - 30 * DAY, "the axis starts where the range does");
+  assert.equal(columns.at(-1)!.bucketTs, through - DAY, "and ends on the window's last day");
+  assert.ok(columns.every((column, index) => index === 0 || column.bucketTs - columns[index - 1]!.bucketTs === DAY), "one column per day");
+  assert.equal(columns.filter((column) => column.total === 0).length, 27);
+  assert.ok(columns.every((column) => column.recorded));
+  const quiet = columns.find((column) => column.total === 0)!;
+  assert.deepEqual(quiet.bands.map((band) => [band.driver, band.value]), [["claude-code", 0], ["codex-app-server", 0]],
+    "a quiet day still lists each driver at zero");
+  // A plane that never splits by driver claims no per-driver zeros for a quiet day either.
+  assert.ok(buildColumns(series, [], ["claude-code"], "cost", dailyAxis(through)).every((column) => column.bands.length === 0));
+});
+
+test("buckets before recording started are unrecorded, and the axis still spans the chosen range", () => {
+  const through = Date.UTC(2026, 8, 4);
+  const coverageStartedAt = through - 10 * DAY;
+  const series = [{ bucketTs: through - 2 * DAY, ...amount({ costUsd: 2 }) }];
+  // The plane clamps `since` to the start of recording; the chosen range still reaches 30 days back.
+  const columns = buildColumns(series, [], [], "cost", dailyAxis(through, 30, coverageStartedAt));
+  assert.equal(columns.length, 30);
+  assert.deepEqual(columns.map((column) => column.recorded), [...Array(20).fill(false), ...Array(10).fill(true)]);
+  // Recording that started part way through a day records that whole day's bucket.
+  const midDay = buildColumns(series, [], [], "cost", dailyAxis(through, 30, coverageStartedAt + 15 * 3_600_000));
+  assert.equal(midDay.filter((column) => !column.recorded).length, 20);
+  // Without the range the axis starts at the clamped window, so nothing is unrecorded.
+  const { rangeDays: _range, ...unranged } = dailyAxis(through, 30, coverageStartedAt);
+  assert.equal(buildColumns(series, [], [], "cost", unranged).length, 10);
+});
+
+test("hourly and weekly axes step by their bucket, and weeks start on the plane's Monday", () => {
+  const through = Date.UTC(2026, 8, 3, 14, 30);
+  const hourly = buildColumns(
+    [{ bucketTs: Date.UTC(2026, 8, 3, 9), ...amount({ costUsd: 1 }) }], [], [], "cost",
+    { granularity: "hour", since: Date.UTC(2026, 8, 2, 14), through, coverageStartedAt: 0, rangeDays: 1 },
+  );
+  assert.equal(hourly.length, 25, "a 24-hour range ending part way through an hour holds 25 hour buckets");
+  assert.equal(hourly[0]!.bucketTs, Date.UTC(2026, 8, 2, 14));
+  assert.equal(hourly.at(-1)!.bucketTs, Date.UTC(2026, 8, 3, 14));
+  assert.equal(bucketStart(Date.UTC(2026, 8, 3, 14, 30), "week"), Date.UTC(2026, 7, 31), "Sep 3, 2026 is in the week of Monday Aug 31");
+  assert.equal(bucketStart(Date.UTC(2026, 7, 31), "week"), Date.UTC(2026, 7, 31));
+  assert.equal(bucketStart(Date.UTC(1970, 0, 1), "week"), Date.UTC(1969, 11, 29), "day zero, a Thursday, is in the week of Monday Dec 29");
+  const weekly = buildColumns(
+    [{ bucketTs: Date.UTC(2026, 7, 24), ...amount({ costUsd: 1 }) }], [], [], "cost",
+    { granularity: "week", since: Date.UTC(2026, 7, 5), through, coverageStartedAt: 0, rangeDays: 30 },
+  );
+  assert.deepEqual(weekly.map((column) => column.bucketTs),
+    [Date.UTC(2026, 7, 3), Date.UTC(2026, 7, 10), Date.UTC(2026, 7, 17), Date.UTC(2026, 7, 24), Date.UTC(2026, 7, 31)],
+    "partial edge weeks are columns too");
+  assert.equal(bucketStepMs("week"), 7 * DAY);
+});
+
+test("a malformed window is bounded, and a bucket off the axis grid is still drawn", () => {
+  const through = Date.UTC(2026, 8, 4);
+  const offGrid = through - DAY + 3_600_000;
+  const columns = buildColumns([{ bucketTs: offGrid, ...amount({ costUsd: 1 }) }], [], [], "cost",
+    { granularity: "day", since: 0, through, coverageStartedAt: 0 });
+  assert.ok(columns.length <= 4_001, "an axis from 1970 is cut to a bounded number of buckets");
+  assert.equal(columns.find((column) => column.bucketTs === offGrid)?.total, 1, "filling never drops a bucket the plane sent");
+  assert.ok(columns.every((column, index) => index === 0 || column.bucketTs > columns[index - 1]!.bucketTs), "still in time order");
+});
+
+test("the resting readout gives the recorded average and the peak with its date", () => {
+  const through = Date.UTC(2026, 8, 4);
+  const coverageStartedAt = through - 4 * DAY;
+  const series = [
+    { bucketTs: through - 3 * DAY, ...amount({ costUsd: 4, inputTokens: 4_000 }) },
+    { bucketTs: through - DAY, ...amount({ costUsd: 12, inputTokens: 1_000 }) },
+  ];
+  const columns = buildColumns(series, [], [], "cost", dailyAxis(through, 30, coverageStartedAt));
+  // Four recorded days, $16 in all: the 26 Not Recorded days are not zero usage.
+  assert.deepEqual(usageRestingSummary(columns, "cost", "day"), { average: "Daily average $4.00", peak: "Peak $12.00 on Sep 3" });
+  const tokens = buildColumns(series, [], [], "tokens", dailyAxis(through, 30, coverageStartedAt));
+  assert.deepEqual(usageRestingSummary(tokens, "tokens", "day"), { average: "Daily average 1.25K", peak: "Peak 4K on Sep 1" });
+  const hour = [{ bucketTs: Date.UTC(2026, 8, 3, 14), total: 2, bands: [], recorded: true }];
+  assert.equal(usageRestingSummary(hour, "cost", "hour").peak, "Peak $2.00 on Sep 3 at 14:00");
+  assert.equal(usageRestingSummary(hour, "cost", "hour").average, "Hourly average $2.00");
+  const week = [{ bucketTs: Date.UTC(2026, 7, 31), total: 2, bands: [], recorded: true }];
+  assert.deepEqual(usageRestingSummary(week, "cost", "week"), { average: "Weekly average $2.00", peak: "Peak $2.00 in the week of Aug 31" });
+  assert.equal(usageRestingSummary([{ ...week[0]!, total: 0 }], "cost", "week").peak, null, "no usage has no peak");
+});
+
+test("one ACP agent names the ACP series; anything less certain reads Other Agents, never ACP", () => {
+  const acp = amount({ costUsd: 2, inputTokens: 200 });
+  const data = (byAgent: Array<{ key: string } & UsageAmount>) => ({
+    byDriver: [{ key: "claude-code", ...amount({ costUsd: 5, inputTokens: 500 }) }, { key: "acp", ...acp }],
+    byAgent: [{ key: "claude", ...amount({ costUsd: 5, inputTokens: 500 }) }, ...byAgent],
+  });
+  const agents = [
+    { id: "claude", driver: "claude-code" as const, name: "Claude Code" },
+    { id: "gemini", name: "Gemini CLI" },
+    { id: "goose", driver: "acp" as const, name: "Goose" },
+  ];
+  const labels = usageDriverLabels(data([{ key: "gemini / gemini-3-pro", ...acp }]), agents);
+  assert.equal(labels.acp, "Gemini CLI", "the plane's `<agent id> / <model>` key resolves to its agent, and no driver is ACP");
+  assert.equal(labels["claude-code"], "Claude Code");
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...acp }]), agents).acp, "Gemini CLI", "a row with no model is keyed by the id alone");
+  // One agent across two models is still one agent; its rows add up to the ACP total.
+  const [pro, flash] = [amount({ costUsd: 1.5, inputTokens: 150 }), amount({ costUsd: 0.5, inputTokens: 50 })];
+  assert.equal(usageDriverLabels(data([{ key: "gemini / gemini-3-pro", ...pro }, { key: "gemini / gemini-3-flash", ...flash }]), agents).acp,
+    "Gemini CLI");
+  // A row two advertised ids could both claim is attributed to neither, so the named agent no
+  // longer accounts for the whole ACP total.
+  assert.equal(
+    usageDriverLabels(data([{ key: "gemini / gemini-3-pro", ...pro }, { key: "gemini / nightly / x", ...flash }]),
+      [...agents, { id: "gemini / nightly", name: "Gemini Nightly" }]).acp,
+    OTHER_AGENTS_LABEL,
+  );
+  assert.equal(usageDriverLabels(data([{ key: "gemini / gemini-3-pro", ...pro }, { key: "unassigned", ...flash }]), agents).acp,
+    OTHER_AGENTS_LABEL, "usage with no agent may be ACP usage");
+  // The same agent on a second machine under the same name is still one agent.
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...acp }]), [...agents, { id: "gemini", name: "Gemini CLI" }]).acp, "Gemini CLI");
+  const half = amount({ costUsd: 1, inputTokens: 100 });
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...half }, { key: "goose", ...half }]), agents).acp, OTHER_AGENTS_LABEL);
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...half }, { key: "Other", ...half }]), agents).acp, OTHER_AGENTS_LABEL,
+    "ACP usage folded into the remainder may be another agent's");
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...half }, { key: "retired", ...half }]), agents).acp, OTHER_AGENTS_LABEL,
+    "ACP usage by an agent no runner advertises may be another agent's");
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...acp }]), [...agents, { id: "gemini", name: "Gemini (Nightly)" }]).acp,
+    OTHER_AGENTS_LABEL, "an id two machines name differently has no one name");
+  assert.equal(usageDriverLabels(data([{ key: "gemini", ...acp }]), []).acp, OTHER_AGENTS_LABEL, "with no runners, no agent is known");
 });
 
 test("the headline caption names the response's real dates, not the last clicked range", () => {
@@ -162,6 +317,32 @@ test("axis helpers produce clean ticks and bounded, end-anchored labels", () => 
   assert.equal(thirty[0], 0);
   assert.equal(thirty.at(-1), 29);
   assert.ok(thirty.length <= 8);
+  // 33 columns at a 5-label limit step by 8: 0, 8, 16, 24 and the last, 32, a whole step from 24.
+  // With 30 columns the 24 would sit 5 from the last, inside one step, so it is skipped.
+  assert.deepEqual(axisLabelIndexes(33, 5), [0, 8, 16, 24, 32]);
+  assert.deepEqual(axisLabelIndexes(29, 5), [0, 7, 14, 21, 28]);
+  assert.deepEqual(axisLabelIndexes(30, 5), [0, 8, 16, 29], "a step label within one step of the last is skipped");
+  assert.deepEqual(axisLabelIndexes(30, 5, 14), [0, 8, 29], "a wider end-anchored label clears more columns");
+  assert.deepEqual(axisLabelIndexes(2, 8, 3), [1], "two columns too close for two labels keep only the last");
+  assert.deepEqual(axisLabelIndexes(1), [0]);
+  assert.deepEqual(axisLabelIndexes(0), []);
+  for (let count = 1; count <= 400; count += 1) {
+    for (const limit of [2, 3, 5, 8, 13]) {
+      for (const lastClearance of [1, 2, 5]) {
+        const indexes = axisLabelIndexes(count, limit, lastClearance);
+        const step = count <= limit ? 1 : Math.ceil((count - 1) / (limit - 1));
+        const where = `count ${count}, limit ${limit}, clearance ${lastClearance}`;
+        assert.equal(indexes.at(-1), count - 1, `${where}: the last column is always labelled`);
+        assert.ok(indexes.length <= Math.max(limit, 1), `${where}: at most the limit`);
+        for (let index = 1; index < indexes.length; index += 1) {
+          assert.ok(indexes[index]! - indexes[index - 1]! >= step, `${where}: two labels closer than a step`);
+        }
+        if (indexes.length > 1) {
+          assert.ok(indexes.at(-1)! - indexes.at(-2)! >= lastClearance, `${where}: a label inside the last one's clearance`);
+        }
+      }
+    }
+  }
   assert.equal(axisLabel(Date.UTC(2026, 8, 3, 14), "hour"), "Sep 3 · 14:00");
   assert.equal(axisLabel(Date.UTC(2026, 8, 3), "day"), "Sep 3");
   assert.equal(axisLabel(Date.UTC(2026, 8, 14), "week"), "Sep 14–20");
