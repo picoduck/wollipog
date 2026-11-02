@@ -25,10 +25,10 @@ const SURFACES: Array<{
     email: "morgan.lee@example.com",
   },
   {
-    name: "a Usage subscription row",
+    name: "a Usage subscription account",
     open: async (page) => {
       await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
-      return page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-account");
+      return page.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-plan-head");
     },
     reveal: "Show Account Email",
     email: "codex@example.com",

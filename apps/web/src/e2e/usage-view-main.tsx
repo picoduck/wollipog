@@ -24,9 +24,11 @@ import "../styles.css";
  * flags: `?theme=light|dark`, `?empty=1` for a window with no usage, `?unpriced=1` for a partially
  * unpriced window with a cached rate table, `?subscriptions=1` for the Claude subscription cards,
  * `?tab=subscriptions` to open the Subscriptions tab, `?hourlyDays=14` for shorter hourly
- * retention, `?noWeek=1` for a plane without weekly aggregation, and `?coverage=recent` for recording
+ * retention, `?noWeek=1` for a plane without weekly aggregation, `?coverage=recent` for recording
  * that started yesterday, so the 30-day window is clamped to its first day, `?coverageDays=10` for
- * recording that started ten days ago, and `?sparse=1` for usage on only three of the 30 days.
+ * recording that started ten days ago, `?sparse=1` for usage on only three of the 30 days, and
+ * `?refreshFailed=2` for a subscription refresh where two of three machines failed. A refresh takes
+ * 600ms, so it can be seen.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -204,14 +206,16 @@ const subscription: SubscriptionUsageResponse = {
       buckets: [
         { id: "codex:primary", label: "Codex — Weekly", usedPercent: 42, remainingPercent: 58,
           windowDurationMinutes: 10_080, resetsAt: SUBSCRIPTION_NOW + 6 * DAY, status: "available" },
+        // A used-up window (#3014): Exhausted, with a danger meter.
         { id: "codex_spark:primary", label: "GPT-5.3-Codex-Spark — 5-Hour Window",
-          usedPercent: 0, remainingPercent: 100, windowDurationMinutes: 300,
-          resetsAt: SUBSCRIPTION_NOW + 5 * 3_600_000, status: "available" },
+          usedPercent: 100, remainingPercent: 0, windowDurationMinutes: 300,
+          resetsAt: SUBSCRIPTION_NOW + 5 * 3_600_000, status: "exhausted" },
         { id: "codex_spark:secondary", label: "GPT-5.3-Codex-Spark — Weekly",
           usedPercent: 0, remainingPercent: 100, windowDurationMinutes: 10_080,
           resetsAt: SUBSCRIPTION_NOW + 7 * DAY, status: "available" },
       ],
       credits: { hasCredits: false, balance: "0" },
+      spendControls: [{ id: "monthly", label: "Monthly Limit", used: "$12", limit: "$50" }],
     },
     {
       ...claudeSource, sourceId: "4e9ca361dace7ad20c621d0eadac54f0",
@@ -250,6 +254,19 @@ const subscription: SubscriptionUsageResponse = {
         "subscription sessions carry them; API-key, Bedrock, and Vertex sessions never do.",
       buckets: [],
     },
+    // Two more sources with no windows (#3014): a machine that went offline before it reported,
+    // and a Codex sign-in with an API key. With the one above they fold into one disclosure.
+    {
+      ...claudeSource, runnerId: "r-laptop", runnerName: "laptop", runnerStatus: "offline",
+      sourceId: "0f3ad6b1c2e94d7f8a5b6c7d8e9f0a1b", agentId: "claude", agentName: "Claude Code",
+      state: "unavailable", freshness: "stale", fetchedAt: SUBSCRIPTION_NOW - 26 * 3_600_000, buckets: [],
+    },
+    {
+      runnerId: "r-ci", runnerName: "ci-runner", runnerStatus: "online", provider: "codex",
+      freshness: "fresh", fetchedAt: SUBSCRIPTION_NOW, sourceId: "1a2b3c4d5e6f708192a3b4c5d6e7f809",
+      agentId: "codex", agentName: "Codex App Server", state: "not_applicable",
+      detail: "Codex is using API-key billing; subscription allowances do not apply.", buckets: [],
+    },
   ],
   staleAfterMs: 600_000,
   generatedAt: END,
@@ -287,7 +304,11 @@ const client = {
   }),
   usage: async (input: { granularity?: UsageAggregationGranularity }) => aggregateResponse(input.granularity ?? "day"),
   subscriptionUsage: async () => subscription,
-  refreshSubscriptionUsage: async () => subscription,
+  refreshSubscriptionUsage: async () => {
+    await new Promise((resolve) => setTimeout(resolve, 600));
+    const failed = Number(params.get("refreshFailed") ?? 0);
+    return { ...subscription, refresh: { attempted: 3, failed } };
+  },
 } as unknown as ApiClient;
 
 /** The tab is `?tab=subscriptions`, pushed like the shell's route so Back returns to the last tab. */
