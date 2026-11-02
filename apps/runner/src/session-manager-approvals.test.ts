@@ -2291,6 +2291,7 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
       let resetFile = "";
       let resetBytes = "";
       let flushFailed = false;
+      let uncertainCalls = 0;
       const originalFlush = (journal as any).fsyncDirectory.bind(journal);
       t.mock.method(journal as any, "fsyncDirectory", (directory: string) => {
         if (writingReset && !flushFailed) {
@@ -2325,6 +2326,7 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
         completed: () => { handle.completed(); },
         failed: (error, code) => { handle.failed(error, code); },
         uncertain: (error) => {
+          uncertainCalls += 1;
           // Match index.ts's best-effort terminal persistence, while proving its stale write
           // cannot terminalize the newer queued reset.
           assert.equal(resetFlushFails, true);
@@ -2335,6 +2337,7 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
         await new Promise<void>((resolve) => setImmediate(resolve));
       }
       assert.equal(injected, true);
+      assert.equal(uncertainCalls, resetFlushFails ? 1 : 0, "a failed reset must settle through the stale uncertain callback");
       assert.equal(providerCalls, 0);
       assert.equal(journal.read("journal_answer")?.state, "queued");
       if (resetFlushFails) {
