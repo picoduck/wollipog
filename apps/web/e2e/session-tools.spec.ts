@@ -9,9 +9,11 @@ import { waitForSessionPreview } from "./session-readiness.js";
  */
 const FIXTURE = "/command-inbox-projects-e2e.html?scenario=session-tools&fullShell=1";
 
-async function openTools(page: Page, width: number, height = 860) {
+async function openTools(page: Page, width: number, height = 860, {
+  query = "", review = "9 uncommitted changes, 1 required finding",
+}: { query?: string; review?: string } = {}) {
   await page.setViewportSize({ width, height });
-  await page.goto(FIXTURE);
+  await page.goto(`${FIXTURE}${query}`);
   await page.evaluate(() => localStorage.clear());
   await page.reload();
   await page.getByRole("button", { name: /Alpha Session/ }).first().click();
@@ -21,7 +23,7 @@ async function openTools(page: Page, width: number, height = 860) {
   await expect(page.locator(".composer-input")).toBeAttached();
   await page.getByRole("button", { name: "Side Panel", exact: true }).click();
   await expect(tools(page)).toBeVisible();
-  await expect(row(page, "review").locator(".row-sub")).toHaveText("9 uncommitted changes, 1 required finding");
+  await expect(row(page, "review").locator(".row-sub")).toHaveText(review);
 }
 
 const tools = (page: Page) => page.locator("#right-panel .session-tools");
@@ -93,6 +95,28 @@ test.describe("with a mouse", () => {
     // The older runner's reasons are full sentences; the rows keep their height.
     await olderRunner(page);
     expectRowHeights((await layout(page)).rows, 56);
+  });
+
+  test("with the work committed, Review names the branch's commits on one line at a 320px panel and opens on Branch (#3035)", async ({ page }) => {
+    await openTools(page, 1440, 860, { query: "&committed=1", review: "3 commits ahead of main, 1 required finding" });
+    const handle = page.getByRole("separator", { name: "Resize Panel" });
+    await handle.focus();
+    await page.keyboard.press("End");
+    await expect(handle).toHaveAttribute("aria-valuenow", "320");
+    const review = row(page, "review");
+    expect((await review.boundingBox())!.height).toBe(56);
+    // One line that gives way to an ellipsis, never a wrap: the fact is a single line box tall.
+    const fact = await review.locator(".row-sub").evaluate((element) => {
+      const style = getComputedStyle(element);
+      return {
+        whiteSpace: style.whiteSpace, textOverflow: style.textOverflow,
+        lines: Math.round(element.getBoundingClientRect().height / parseFloat(style.lineHeight)),
+      };
+    });
+    expect(fact).toEqual({ whiteSpace: "nowrap", textOverflow: "ellipsis", lines: 1 });
+    await review.click();
+    await expect(page.locator('#right-panel [role="radiogroup"][aria-label="Scope"] [role="radio"][aria-checked="true"]'))
+      .toHaveText("Branch");
   });
 
   test("on an older runner Files and Terminal keep a visible reason, a hollow tile and full opacity under one neutral notice (#2844)", async ({ page }) => {

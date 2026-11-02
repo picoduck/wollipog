@@ -375,6 +375,29 @@ type OrchestratorMcpLaunch = {
  */
 export const CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC = 10_860;
 
+/**
+ * Keeps the `wollipog` tools out of Codex code mode (#4023). Models whose catalog entry sets
+ * `tool_mode = "code_mode_only"` (every GPT-6 model in codex-cli 0.164.0 and 0.165.0) see MCP tools
+ * only inside the `exec` tool. `exec` yields its cell back to the model while a call still runs.
+ * To get the result, the model must call `wait` on the cell, and every `wait` that yields again
+ * is another full-context model request. `wait` blocks for the `yield_time_ms` the model asks for,
+ * and real models ask for short ones: in campaign rollouts on codex-cli 0.164.0, `wait` asked for
+ * 60 seconds, often between one-minute sleeps. A blocking `wait_pull_request` thus cost one model
+ * request a minute for the whole wait.
+ *
+ * Naming the namespace here offers the server's tools to the model as ordinary direct tools again,
+ * so a wait blocks in one tool call exactly as it does without code mode. Measured on codex-cli
+ * 0.165.0 (`pnpm probe:codex-mcp-wait -- --code-mode`): nothing else in the request changes, it is
+ * a no-op for a model without code mode or with the hybrid `code_mode` mode, and a user's own
+ * `features.code_mode = true` stays enabled. The field is under development and Codex refuses its
+ * whole configuration when `features.code_mode` holds a field it does not know, so the runner adds
+ * this only after a live `codex mcp list --json` read with it succeeds, and always directly after
+ * its own `wollipog` entry, which is how a resume recognises it. A `-c` array replaces the user's
+ * own `direct_only_tool_namespaces` rather than merging, so a launch whose configuration already
+ * names that list keeps it and goes without this setting.
+ */
+export const CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING = 'features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]';
+
 function codexMcpLaunch(mcp: OrchestratorMcpLaunch): Record<string, unknown> {
   return {
     command: mcp.command,
@@ -659,11 +682,44 @@ export function stripSessionCodexMcpArgs(args: readonly string[]): string[] {
     if ((flag === "-c" || flag === "--config") && typeof value === "string" &&
         namesReservedCodexMcpServer(value) && value.includes(SESSION_CODEX_MCP_MARKER)) {
       if (inline === undefined) i++;
+      i += codexDirectToolsArgLength(args, i + 1);
       continue;
     }
     result.push(arg);
   }
   return result;
+}
+
+/** How many arguments `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING` occupies at `index`, or 0 when it is not
+ * there. Strips call this only directly after the runner's own entry, which is the one place the
+ * runner puts it, so a user's own identical setting anywhere else is never removed. */
+function codexDirectToolsArgLength(args: readonly string[], index: number): number {
+  const arg = args[index];
+  if (arg === "-c" || arg === "--config") return args[index + 1] === CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING ? 2 : 0;
+  return arg === `--config=${CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING}` ? 1 : 0;
+}
+
+/** A `wollipog` entry the runner built, in any of its shapes: the session or additive entry
+ * (`mcp_servers.wollipog=...`) or the coupled preset's whole table (`mcp_servers={ "wollipog" = ... }`).
+ * Each carries one of the runner's environment markers, which a user's own entry never does. */
+function isRunnerCodexMcpEntry(value: string): boolean {
+  const marked = value.includes(SESSION_CODEX_MCP_MARKER) || value.includes(ADDITIVE_CODEX_MCP_MARKER);
+  return marked && (namesReservedCodexMcpServer(value) || value.startsWith('mcp_servers={ "wollipog" = '));
+}
+
+/**
+ * `args` with `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING` inserted directly after the runner's own
+ * `wollipog` entry, or unchanged when the launch carries no such entry or already has the setting
+ * there. Callers launch the result only after Codex has loaded it (#4023).
+ */
+export function withCodexDirectWollipogTools(args: readonly string[]): string[] {
+  for (let index = args.length - 2; index >= 0; index--) {
+    if ((args[index] === "-c" || args[index] === "--config") && isRunnerCodexMcpEntry(args[index + 1]!)) {
+      if (codexDirectToolsArgLength(args, index + 2) > 0) return [...args];
+      return [...args.slice(0, index + 2), "-c", CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING, ...args.slice(index + 2)];
+    }
+  }
+  return [...args];
 }
 
 export interface CodexMcpInventoryEntry {
@@ -897,6 +953,10 @@ export function stripAdditiveOrchestratorLaunchArgs(
           (value.startsWith("developer_instructions=") && value.includes(ORCHESTRATOR_INSTRUCTIONS_PREFIX)));
     if (injected) {
       if (inline === undefined) i++;
+      // Agent Control adds the direct-tools setting directly after the entry when Codex loads it.
+      if (driver !== "pi" && driver !== "claude-code" && namesReservedCodexMcpServer(value!)) {
+        i += codexDirectToolsArgLength(args, i + 1);
+      }
       continue;
     }
     result.push(arg);

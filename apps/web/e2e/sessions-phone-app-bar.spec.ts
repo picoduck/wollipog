@@ -2,7 +2,7 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /**
  * The phone Sessions app bar (#2211, docs/design-system.md §15.1): one 48px bar with the group
- * picker, Search, ⋯ and New Session in place of the page header, its action row and the group
+ * picker, Search, New Session and ⋯ in place of the page header, its action row and the group
  * tabs, measured in a real browser. The harness mounts the real InboxView with ten groups on two
  * machines, a running session, sessions with recent activity and idle ones.
  */

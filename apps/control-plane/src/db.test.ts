@@ -9856,6 +9856,38 @@ test("per-user cost windows and the daily budget read the owner-scoped buckets i
   assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).dailyBudgetUsd, 20);
   assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd]), [["usr_local_owner", 1.5]]);
   assert.deepEqual(db.sessionOwnerUser("sess-1"), { organizationId: "org_personal", userId: "usr_local_owner" });
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).todayEstimateUsd, undefined, "no turn is running");
+
+  // A running turn's open estimate is what the daily-budget gate adds to today's settled spend
+  // (#3196), so the windows carry it beside the settled figure while a budget is set.
+  db.raw().prepare("UPDATE sessions SET status='running', live_cost_usd=2.25, live_settling=0, live_observed_at=? WHERE id='sess-1'").run(now - 60_000);
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).todayEstimateUsd, 2.25);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.todayUsd, row.todayEstimateUsd]), [[1.5, 2.25]],
+    "the settled figure stays settled; the estimate is its own field");
+  db.setUsageDailyBudget("org_personal", null, now);
+  assert.equal(db.listUserCostWindows("org_personal", now)[0]!.todayEstimateUsd, undefined, "without a budget there is nothing to gate");
+  db.setUsageDailyBudget("org_personal", 20, now);
+
+  // Someone with no settled usage at all, whose first turn is running: the gate already counts its
+  // estimate, so the table lists them, ahead of a person whose settled spend today is lower.
+  db.createSession(newSession({ id: "sess-2", driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_first_turn' WHERE session_id='sess-2'").run();
+  db.raw().prepare("UPDATE sessions SET status='running', live_cost_usd=21, live_settling=0, live_observed_at=? WHERE id='sess-2'").run(now - 60_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd, row.todayEstimateUsd ?? 0, row.last30DaysUsd]), [
+    ["usr_first_turn", 0, 21, 0],
+    ["usr_local_owner", 1.5, 2.25, 13.5],
+  ]);
+  // A turn the day before is not today's spend, and a settling window is already in the ledger.
+  db.raw().prepare("UPDATE sessions SET live_observed_at=? WHERE id='sess-2'").run(now - 86_400_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"]);
+  db.raw().prepare("UPDATE sessions SET live_observed_at=?, live_settling=1 WHERE id='sess-2'").run(now - 60_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"]);
+  db.setUsageDailyBudget("org_personal", null, now);
+  db.raw().prepare("UPDATE sessions SET live_settling=0 WHERE id='sess-2'").run();
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"],
+    "without a budget the table lists settled usage only");
+  db.setUsageDailyBudget("org_personal", 20, now);
+  db.raw().prepare("UPDATE sessions SET status='idle', live_cost_usd=0, live_observed_at=NULL WHERE id IN ('sess-1','sess-2')").run();
 
   // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
   // windows must read them from usage_daily rather than lose them.

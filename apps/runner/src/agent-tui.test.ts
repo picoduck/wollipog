@@ -9,7 +9,12 @@ import { provisionAgentControl } from "./agent-control.js";
 import { CODEX_EXEC_RETIRED_REASON, PROTOCOL_VERSION } from "@wollipog/protocol";
 import { waitForPendingKills } from "./spawn.js";
 import { openWindowsConpty } from "./windows-conpty.js";
-import { SESSION_CODEX_MCP_MARKER, orchestratorLaunchArgs, sessionCodexMcpServerArg } from "./orchestrator-preset.js";
+import {
+  CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING,
+  SESSION_CODEX_MCP_MARKER,
+  orchestratorLaunchArgs,
+  sessionCodexMcpServerArg,
+} from "./orchestrator-preset.js";
 
 function meta(overrides: Partial<SessionMeta> = {}): SessionMeta {
   return {
@@ -349,7 +354,8 @@ test("an ordinary Codex TUI launches without the structured launch's session wol
   });
   const user = ["-c", "model=\"o3\"", "-c", 'mcp_servers.wollipog={ command = "mine" }'];
   for (const driver of ["codex-app-server"] as const) {
-    const launch = await prepareAgentTuiLaunch(meta({ driver, command: "codex", args: [...user, "-c", entry] }), {
+    const launch = await prepareAgentTuiLaunch(meta({ driver, command: "codex",
+      args: [...user, "-c", entry, "-c", CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING] }), {
       controlPlaneProtocolVersion: PROTOCOL_VERSION,
       provision: () => assert.fail("ordinary TUI must not reprovision"),
       prepareScratch: async () => assert.fail("ordinary TUI must not prepare scratch"),
@@ -363,6 +369,8 @@ test("an ordinary Codex TUI launches without the structured launch's session wol
     const argv = JSON.stringify(launch.args);
     assert.equal(argv.split("mcp_servers.wollipog=").length - 1, 1, `${driver}: the user's own entry is kept`);
     assert.ok(argv.includes("model="), `${driver}: unrelated user settings are kept`);
+    assert.equal(argv.includes("direct_only_tool_namespaces"), false,
+      `${driver}: the entry's code-mode setting (#4023) leaves with it`);
   }
 });
 

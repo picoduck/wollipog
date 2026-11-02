@@ -6580,6 +6580,9 @@ export interface UserCostWindows {
   last30DaysUsd: number;
   /** The organization's per-user daily budget, repeated for convenience; null ⇒ none. */
   dailyBudgetUsd: number | null;
+  /** While a daily budget is set, the open live estimate of the user's running turns, which the
+   * daily-budget gate adds to `todayUsd` (#3196). Absent when there is none, or from older planes. */
+  todayEstimateUsd?: number;
 }
 
 /** Provenance for the rate table so the UI can be honest about how good the estimates are. */
@@ -10415,6 +10418,11 @@ export interface SteerSessionMessage {
   images?: PromptImageInput[];
   /** Stable queue identity only. Every promotion action still receives a fresh submissionId. */
   promotePromptId?: string;
+  /** #4022: the control plane's own prompt-outbox command whose running turn the child's
+   * controlling Orchestrator may steer with direct text. Server-derived, never taken from an API
+   * body; the runner admits it only when it names the exact durable command that started the active
+   * turn. A runner that predates this field ignores it and keeps refusing durable turns. */
+  controllingOrchestratorCommandId?: string;
 }
 
 /** Explicit user resolution for an uncertain delivery, or durable acknowledgement of rejection. */

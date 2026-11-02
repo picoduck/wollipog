@@ -42,6 +42,17 @@ test("a signed-out or unavailable agent is never chosen, nor selectable", () => 
   assert.deepEqual(defaultRunAgentIds(agents), ["opencode"]);
 });
 
+test("an unverified agent is never selectable, and an available native harness replaces its ACP duplicate", () => {
+  assert.deepEqual(selectableRunAgentIds([
+    agent("claude", "claude-code"),
+    agent("config", "acp", { name: "Config agent", available: undefined }),
+  ]), ["claude"]);
+  assert.deepEqual(selectableRunAgentIds([
+    agent("claude-acp", "acp", { name: "Claude Code (ACP)" }),
+    agent("claude-native", "claude-code", { name: "Claude Code" }),
+  ]), ["claude-native"]);
+});
+
 const definition = (nodes: WorkflowDefinition["nodes"]): WorkflowDefinition => ({
   workflowId: "wf", version: 3, source: "custom", name: "Build", maxTransitions: 4, edges: [],
   createdBy: { kind: "system" }, createdAt: 1, nodes,

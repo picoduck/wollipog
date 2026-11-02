@@ -10,18 +10,22 @@ import { State } from "./State.js";
  * that says so and lets the person turn it on where they are.
  *
  * The route still parses, so a bookmark never silently becomes the Inbox, and the page keeps its
- * header: it is the shell's anchor and the focus rescue's target (§4.2). Turn On goes through the
+ * header, description included: it is the shell's anchor and the focus rescue's target (§4.2), and
+ * at the working page's height nothing moves when the feature mounts. Turn On goes through the
  * same setter as Settings › Experimental, so the rail, the palette and this page all update from
  * the one store, and the feature mounts in place without a navigation.
  */
 export function ExperimentGate({
   experiment,
   pageTitle,
+  pageDescription,
   onOpenSettings,
   children,
 }: {
   experiment: ExperimentId;
   pageTitle: string;
+  /** The destination's description (`viewDescription`), so the header stays put on Turn On. */
+  pageDescription?: string;
   onOpenSettings: () => void;
   children: ReactNode;
 }) {
@@ -41,7 +45,7 @@ export function ExperimentGate({
   const copy = EXPERIMENT_COPY[experiment];
   return (
     <div className="page">
-      <PageHeader title={pageTitle} />
+      <PageHeader title={pageTitle} description={pageDescription} />
       <State
         pageLevel
         className="experiment-off"
@@ -54,7 +58,7 @@ export function ExperimentGate({
               turnedOnHere.current = true;
               setFlag(experiment, true);
             }}>
-              Turn On
+              Turn On {copy.name}
             </button>
             <button type="button" className="btn" onClick={onOpenSettings}>
               Open Experimental Settings

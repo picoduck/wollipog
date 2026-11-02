@@ -15,7 +15,7 @@ import { useApi } from "../api-context.js";
 import { normalizeBrowserUrl } from "../artifact-preview.js";
 import { handleRovingChoiceKeyDown } from "./interactions.js";
 import { useTimelineClock } from "../timeline-clock.js";
-import { ArtifactPreviewBar, ArtifactPreviewBody, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
+import { ArtifactPageActions, ArtifactPreviewBody, ArtifactPreviewMeta, ArtifactRow, useArtifactPreview } from "./ArtifactPreview.js";
 import { usePanelScratchChoice, usePanelScratchScope, usePanelScratchText } from "../right-panel-scratch.js";
 import { PanelPageTitle, usePanelPages } from "./PanelPages.js";
 import { PanelHeaderActions } from "./RightPanel.js";
@@ -184,15 +184,16 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
   // The tabs sit directly above the panel's slots, so their underline rests on a hairline (§10.1);
   // each tab's content is a PanelToolLayout of its own: Web Preview puts its address row in the
   // toolbar slot, and both scroll in the one scroller. An open artifact is a page over the Artifacts
-  // tab (#2914): the panel header carries its Back and title, so the tabs give way to it, its bar
-  // (Enlarge and Download) takes the toolbar slot, and the list waits hidden in the same scroller,
+  // tab (#2914): the panel header carries its Back, its title and its actions, so the tabs give way
+  // to it, its meta line opens the scroller (#3036), and the list waits hidden in the same scroller,
   // with its rows and scroll there again on Back.
   return (
     <>
-      {/* The header's action slot (§4.9). About Browser stays while an artifact's page is pushed, as
-          a tool's actions do, since what it says is about the whole tool. Actions of an open page
-          belong before it, so About keeps the slot's trailing end. */}
+      {/* The header's action slot (§4.9): an open artifact's Enlarge and Download (#3036), then About
+          Browser. About stays while the page is pushed, as a tool's actions do, since what it says is
+          about the whole tool, and keeps the slot's trailing end, where it sits over the list too. */}
       <PanelHeaderActions>
+        {preview && <ArtifactPageActions key={preview.artifact.artifactId} model={preview} onEnlarge={openGallery} />}
         <BrowserAboutPopover />
       </PanelHeaderActions>
       {!preview && (
@@ -232,7 +233,7 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
           setUrl={setOpenUrl}
         />
       ) : (
-        <PanelToolLayout toolbar={preview && <ArtifactPreviewBar key={preview.artifact.artifactId} model={preview} onEnlarge={openGallery} />}>
+        <PanelToolLayout>
           <div
             id="browser-artifacts-panel"
             role="tabpanel"
@@ -296,8 +297,8 @@ function BrowserPanelBody({ session, openArtifact = null, onOpenArtifactHandled 
               </>
             )}
           </div>
-          {/* The open artifact (#2855): the meta line and the body, under its title in the panel
-              header. The page takes focus on its title as it opens (§4.9). */}
+          {/* The open artifact (#2855): the meta line and the body, directly under the panel header
+              that carries its title and actions. The page takes focus on its title as it opens (§4.9). */}
           {preview && (
             <div key={preview.artifact.artifactId} className="browser-artifacts">
               <PanelPageTitle>{preview.artifact.name}</PanelPageTitle>

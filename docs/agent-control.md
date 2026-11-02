@@ -524,6 +524,18 @@ successful replies, and ambiguous steering errors identify the exact submission 
 and Dismiss path. Agent reads and resolution have the same descendant scope and visibility checks
 as `prompt_session`; an agent cannot use them on itself, ancestors, siblings, or unrelated sessions.
 
+A turn started by a durable command refuses ordinary steering. One exception (#4022): a child's
+controlling Orchestrator can steer `prompt_session` text into a running turn that the control plane
+started from its own prompt outbox (an assignment, an Orchestrator prompt, a decision resume, or a
+continuation). The sender must be the child's immediate parent and also its outermost
+policy-bearing Orchestrator. The control plane passes the exact started command to the runner, and
+the runner admits the steer only when that command started the active turn. Turns started by an
+automation, recovered answers, recovery continuations, nested Orchestrators, grandparents and
+people keep the existing refusal, and every other steering guard still applies. The steering
+attempt gets its own receipt, and the outbox command still settles at its own turn boundary. A
+refused steer still falls back to the queue, and so does every steer on a runner that predates this
+exception.
+
 Queue Again explicitly admits one ordinary queued message; it cannot prove that an uncertain
 provider write was never delivered. Inspect the attempt and session events before choosing an
 action. A `resolution.state` of `pending` means recovery is staged, including while the runner is
@@ -642,6 +654,38 @@ at 300 seconds. The setting sits inside the `wollipog` entry alone: no other MCP
 configuration changes, and other Wollipog tools keep their own shorter bounds (control-plane
 requests 30 seconds, `wait_session` one hour).
 
+**Code mode (#4023).** Some models put Codex in code mode: every GPT-6 model in codex-cli 0.164.0
+and 0.165.0 sets `tool_mode = "code_mode_only"` in its catalog entry. Those models reach MCP tools
+only from an `exec` script cell. `exec` hands a still-running cell back to the model. To get the
+result, the model then has to call `wait` on the cell, which blocks for the `yield_time_ms` it
+asks for. Real models asked for about a minute at a time, often with sleeps in between. One long
+`wait_pull_request` call therefore cost one full-context model request a minute. In one campaign
+child, 531 of 616 requests were spent this way. The runner adds
+`-c features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]` directly after its own entry.
+Codex then offers the `wollipog` tools as ordinary direct tools again, outside `exec`, so a wait
+blocks in one tool call with no model request. This holds for sessions and for native-host
+Orchestrators that start from their worktree or repository. Measured on codex-cli 0.165.0, the setting has no effect without code mode,
+with the hybrid `code_mode` mode, or with a user's own `features.code_mode = true` (which stays
+enabled). Codex refuses its whole configuration when `features.code_mode` contains a field it does
+not know. So the runner adds the setting only when a `codex mcp list --json` read with it still
+loads the `wollipog` entry. On a Codex without the field, the launch is exactly what it was before,
+and the runner log says so. Resume removes the setting only when it directly follows the runner's
+own entry; a user's identical setting anywhere else is kept.
+
+A `-c` array replaces the configured value rather than merging into it, so the setting would drop
+namespaces a user already keeps out of code mode. The runner therefore adds nothing if the launch
+arguments or a Codex configuration file it can read already name `direct_only_tool_namespaces`.
+Those files are the Codex home's `config.toml`, and each `.codex/config.toml` from the launch
+directory up and from every directory a `-C`/`--cd` argument names. They also include
+`/etc/codex/config.toml` and `managed_config.toml`. A mention in a profile or a comment counts too.
+The log then says to add `"mcp__wollipog"` to that list. Two kinds of Orchestrator get no setting
+and keep today's behavior, because the runner cannot read the configuration that applies:
+- A preset Orchestrator with Strict Project Isolation, which starts from a session scratch
+  directory chosen after this check.
+- A target-local WSL Orchestrator, which is launched inside its distribution. A session or Orchestrator whose tools stay inside
+`exec` should follow the shipped skill's code-mode guidance: one call, then one long `wait`, never
+short polls.
+
 **What a session without the Orchestrator role gains.** The entry starts the same
 `--agent-control-mcp` re-entry Claude sessions already run, with the same session-scoped transport
 the injected CLI already uses: a token-file path, or in `provider` mode the relay coordinates
@@ -677,7 +721,10 @@ and disables the rest.
 `pnpm probe:codex-mcp-wait` re-measures this against a real `codex app-server`, a scripted local
 model, and a stub `wait_pull_request` behind the exact entry the runner builds. It counts every
 model request while the call blocks and can show the default cutoff (`--default-limit`) and the
-reviewer request (`--without-approval`).
+reviewer request (`--without-approval`). `--code-mode` runs the same wait for a code-mode-only
+model, with the direct-tools setting and without it. On codex-cli 0.165.0, a 150-second wait made
+no model request with the setting. Without it, the call ran from an `exec` cell that two model
+requests polled.
 
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
@@ -1396,6 +1443,25 @@ Known limits of the `provider`-mode form:
   `socat`, and would confine writes and network for every session, so it is not used. The
   command-text veto remains the only control over READING the directory; what the directory no
   longer does, on native Linux, is decide the guard's verdict.
+
+### Parameter Operators in the Hook-State Veto
+
+The hook-state command-text veto refuses shell parameter operators it cannot inspect (#4031),
+including pattern removal/substitution, substring/length, default/alternate/assignment/error,
+case conversion, indirection/name enumeration and `@` transformations (including prompt expansion).
+Only plain identifiers, positional digits and single special parameters retain the existing
+variable treatment. Operator expressions refuse even in non-path positions such as `echo ${#x}`;
+this conservative restriction avoids emulating Bash and covers partial operands and nested forms.
+Single-quoted or escaped literal text and already admitted inert copy-only heredoc bodies retain
+their existing treatment. No new command allowance is introduced.
+
+Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
+includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as
+described above; native Windows and WSL launches must likewise not assume a filesystem deny unless
+their selected isolation boundary enforces one. OS-isolated launches retain the veto as defense in
+depth. It is not a sandbox: plain unknown variables remain opaque, quoted command substitution
+(#3322) and script-file indirection remain limitations; #1336 tracks the OS boundary. The separate
+misleading managed-worktree refusal wording tracked under #1734 is unchanged here.
 
 ## Typed Parent Control Decisions
 

@@ -590,13 +590,11 @@ test("the Multi-Agent Run and Pod create actions are page header primaries", () 
   assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
     /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
-  // One `.btn.primary` with a `+` icon; on a phone it is the 44px `+` alone, and its label stays
-  // in the accessibility tree (clipped, never display: none) so the name still matches.
-  assert.match(pageHeader, /className="btn primary page-primary"[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
+  // One `.btn.primary` with a `+` icon; on a phone it is the quiet `+` icon button alone, and its
+  // label stays in the accessibility tree (clipped, never display: none) so the name still matches.
+  assert.match(pageHeader, /className=\{phone \? "icon-btn page-primary" : "btn primary page-primary"\}[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.page-primary-label \{[^}]*clip-path: inset\(50%\)/);
   assert.doesNotMatch(css, /\.page-primary-label \{[^}]*display: none/);
-  assert.match(css, /\.page-primary \{[^}]*width: var\(--control-h\);/,
-    "the phone primary is one square control height, 44px on touch");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

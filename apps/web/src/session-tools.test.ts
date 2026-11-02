@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import { RIGHT_PANEL_MODES } from "./right-panel.js";
-import type { PendingApproval, SessionView } from "@wollipog/protocol";
+import type { GitStatusInfo, PendingApproval, SessionView } from "@wollipog/protocol";
+import { commitsAheadFact, reviewSummaryFacts } from "./components/ReviewSummary.js";
 import {
   NO_REQUESTS_FACT,
   SESSION_TOOL_GROUPS,
@@ -100,7 +101,7 @@ test("Terminal's fact from the watched list counts open shells, and a failed ref
 });
 
 test("Review's fact counts uncommitted changes as Review's summary does, then required findings (#2844)", () => {
-  const changes = (files: number, staged = 0, truncated = false) => ({ files, staged, truncated });
+  const changes = (files: number, staged = 0, truncated = false) => ({ files, staged, truncated, branch: null });
   assert.equal(reviewFact(changes(9), 1), "9 uncommitted changes, 1 required finding");
   assert.equal(reviewFact(changes(1), 0), "1 uncommitted change");
   assert.equal(reviewFact(changes(9, 1), 1), "1 of 9 changes staged, 1 required finding");
@@ -109,6 +110,24 @@ test("Review's fact counts uncommitted changes as Review's summary does, then re
   assert.equal(reviewFact(changes(0), 3), "No changes yet, 3 required findings");
   assert.equal(reviewFact("checking", 0), "Checking for changes…");
   assert.equal(reviewFact("unknown", 1), "See what this session changed, 1 required finding");
+});
+
+test("Review's fact names the branch's commits in its summary's words when nothing is uncommitted (#3035)", () => {
+  const status = (ahead: number) => ({ ahead, baseRef: "origin/main", upstreamBranch: "origin/fix" });
+  const changes = (files: number, ahead: number, staged = 0) => ({
+    files, staged, truncated: false, branch: commitsAheadFact(status(ahead)),
+  });
+  // Clean worktree, branch ahead: the fact Review's summary states, word for word.
+  assert.equal(reviewFact(changes(0, 3), 1), "3 commits ahead of main, 1 required finding");
+  assert.ok(reviewSummaryFacts({ ...status(3), files: [] } as unknown as GitStatusInfo).includes("3 commits ahead of main"));
+  assert.equal(reviewFact(changes(0, 1), 0), "1 commit ahead of main");
+  // Uncommitted files: as before, whatever the branch's commit count.
+  assert.equal(reviewFact(changes(9, 3), 1), "9 uncommitted changes, 1 required finding");
+  assert.equal(reviewFact(changes(9, 3, 1), 0), "1 of 9 changes staged");
+  // Clean worktree, nothing ahead (or an older runner reporting 0): "No changes yet".
+  assert.equal(commitsAheadFact(status(0)), null);
+  assert.equal(reviewFact(changes(0, 0), 0), "No changes yet");
+  assert.equal(reviewFact(changes(0, 0), 1), "No changes yet, 1 required finding");
 });
 
 test("the other tools' facts read in sentence case (#2844)", () => {

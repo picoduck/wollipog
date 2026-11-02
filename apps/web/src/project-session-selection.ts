@@ -159,14 +159,6 @@ export function projectLocationForSessionPreset(
     location.runnerId === preset.runnerId && location.workspaceId === preset.workspaceId) ?? null;
 }
 
-export function projectSelectionLabel(project: ProjectView, duplicateName: boolean): string {
-  if (!duplicateName) return project.name;
-  const location = project.locations.find((candidate) => candidate.isDefault) ?? project.locations[0];
-  return location
-    ? `${project.name} — ${location.path} · ${location.runnerId}`
-    : `${project.name} — ${project.id.slice(-6)}`;
-}
-
 export interface ProjectSessionPlacement {
   runnerId: string;
   workspaceId: string;
@@ -190,25 +182,4 @@ export function projectSessionPlacement(
     projectId: project.id,
     projectLocationId: location.id,
   };
-}
-
-/** Explain why a Project-aware run cannot launch yet. No Project deliberately leaves runner and
- * workspace validation to the caller so legacy placement behavior stays unchanged. */
-export function projectRunPlacementIssue(
-  projectsSupported: boolean,
-  projectSelection: string,
-  project: ProjectView | null,
-  location: ProjectLocationView | null,
-  runners: ReadonlyMap<string, RunnerView>,
-): string | null {
-  if (!projectsSupported || projectSelection === NO_PROJECT_SELECTION) return null;
-  if (!projectSelection) return "Choose a Project or No Project.";
-  if (!project) return "The selected Project is no longer available. Choose another Project.";
-  if (project.locations.length === 0) return "This Project has no Locations. Add a Location before starting a run.";
-  if (!project.locations.some((candidate) => isLaunchableProjectLocation(candidate, runners))) {
-    return "No Project Locations are currently available.";
-  }
-  if (!location) return "Choose an available Project Location.";
-  if (!isLaunchableProjectLocation(location, runners)) return "The selected Project Location is unavailable.";
-  return null;
 }

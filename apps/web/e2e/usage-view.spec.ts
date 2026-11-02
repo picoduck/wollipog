@@ -15,17 +15,20 @@ test.use({ reducedMotion: "reduce" });
 
 const SHOT = "test-results/usage-view";
 
-test("desktop: metric, chart interaction, and shared Hour, Day, and Week controls", async ({ page }) => {
+test("desktop: metric, chart interaction, and Group By as the one aggregation control", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html");
   const headline = page.locator(".usage-headline-value");
   await expect(headline).toContainText("$");
   await page.screenshot({ path: `${SHOT}/desktop-dark-cost.png`, fullPage: true });
-  const breakdown = page.getByRole("radiogroup", { name: "Usage Breakdown" });
+  const breakdown = page.getByRole("tablist", { name: "Breakdown" });
   const aggregation = page.getByRole("radiogroup", { name: "Group By" });
+  const tableHead = page.locator(".usage-tables-section .usage-table thead th");
+  await expect(page.getByRole("radiogroup", { name: "Usage Breakdown" })).toHaveCount(0);
   await aggregation.getByRole("radio", { name: "Hour" }).click();
   await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly cost");
-  await expect(breakdown.getByRole("radio", { name: "Hour" })).toHaveAttribute("aria-checked", "true");
+  await expect(breakdown.getByRole("tab").first()).toHaveText("By Hour");
+  await expect(tableHead.first()).toHaveText("Hour (UTC)");
   await expect(page.locator(".usage-chart-axis").first()).toContainText("· 03:00");
 
   const cost = await headline.textContent();
@@ -33,7 +36,7 @@ test("desktop: metric, chart interaction, and shared Hour, Day, and Week control
   await expect(headline).not.toHaveText(cost ?? "");
   await expect(headline).toContainText("M");
   await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly processed tokens");
-  await expect(page.locator(".usage-breakdown-section .usage-table thead")).toContainText("Cost");
+  await expect(tableHead.last()).toHaveText("Cost");
   await page.screenshot({ path: `${SHOT}/desktop-dark-tokens.png`, fullPage: true });
   await page.getByRole("radio", { name: "Cost" }).click();
 
@@ -55,36 +58,132 @@ test("desktop: metric, chart interaction, and shared Hour, Day, and Week control
   await expect(page.getByRole("list", { name: "By Driver" }).getByRole("listitem")).toHaveCount(3);
   await expect(page.locator(".usage-legend, .usage-series-key")).toHaveCount(0);
 
-  await breakdown.getByRole("radio", { name: "Model" }).click();
-  await expect(page.locator(".usage-breakdown-section .usage-table caption")).toHaveText("Usage by Model");
-  await expect(page.locator(".usage-table tbody th").first()).toContainText("claude-fable-5-1");
+  // A Breakdown tab changes only the dimension; the chart keeps its aggregation.
+  await breakdown.getByRole("tab", { name: "By Model" }).click();
+  await expect(tableHead.first()).toHaveText("Model");
+  await expect(page.locator(".usage-table tbody th").first()).toHaveText("Fable 5.1");
+  await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly cost");
+  await expect(aggregation.getByRole("radio", { name: "Hour" })).toHaveAttribute("aria-checked", "true");
   await page.screenshot({ path: `${SHOT}/desktop-dark-model.png`, fullPage: true });
-  await breakdown.getByRole("radio", { name: "Week" }).click();
+  await aggregation.getByRole("radio", { name: "Week" }).click();
   await expect(page.locator(".usage-chart-svg title")).toContainText("Weekly cost");
-  await expect(page.locator(".usage-breakdown-section .usage-table caption")).toContainText("Weekly Usage in UTC");
-  await expect(aggregation.getByRole("radio", { name: "Week" })).toHaveAttribute("aria-checked", "true");
+  await expect(breakdown.getByRole("tab").first()).toHaveText("By Week");
+  await expect(breakdown.getByRole("tab", { name: "By Model" })).toHaveAttribute("aria-selected", "true");
+  await breakdown.getByRole("tab", { name: "By Week" }).click();
+  await expect(tableHead.first()).toHaveText("Week (UTC)");
   await page.screenshot({ path: `${SHOT}/desktop-dark-week.png`, fullPage: true });
 
   await aggregation.getByRole("radio", { name: "Day" }).click();
-  await expect(breakdown.getByRole("radio", { name: "Day" })).toHaveAttribute("aria-checked", "true");
-  await expect(page.locator(".usage-breakdown-section .usage-table caption")).toContainText("Daily Usage in UTC");
+  await expect(breakdown.getByRole("tab").first()).toHaveText("By Day");
+  await expect(tableHead.first()).toHaveText("Day (UTC)");
+  // Seven rows, then Show All; the table never scrolls inside the page.
+  const rows = page.locator(".usage-tables-section .usage-table tbody tr");
+  await expect(rows).toHaveCount(7);
+  await page.getByRole("button", { name: "Show All 30 Days" }).click();
+  await expect(rows).toHaveCount(30);
+  const innerScroll = await page.locator(".usage-tables-section .table-wrap").evaluate((wrap) => wrap.scrollHeight > wrap.clientHeight + 1);
+  expect(innerScroll).toBe(false);
 });
 
-test("per-user daily budget: the By User table names who is paused and admins can change the amount", async ({ page }) => {
+test("By Agent and By Machine show the names the store knows, never an agent / model key", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html");
-  const section = page.locator(".usage-users-section");
-  await expect(section).toContainText("Ada · paused by daily budget");
-  await expect(section).toContainText("$26.40 of $25.00");
-  await expect(section).toContainText("Each user may spend $25.00 per UTC day");
-  await section.scrollIntoViewIfNeeded();
-  await page.screenshot({ path: `${SHOT}/desktop-dark-users.png`, fullPage: true });
+  const breakdown = page.getByRole("tablist", { name: "Breakdown" });
+  const names = page.locator(".usage-tables-section .usage-table tbody th");
+  await breakdown.getByRole("tab", { name: "By Agent" }).click();
+  await expect(names).toHaveText(["Claude Code", "Codex App Server", "Gemini CLI"]);
+  await expect(page.locator(".usage-tables-section .usage-table tbody")).not.toContainText(" / ");
+  await breakdown.getByRole("tab", { name: "By Machine" }).click();
+  await expect(names).toHaveText(["Build Box", "Studio Mac"]);
+});
+
+test("By Person: one Budget Reached badge and a warning meter, and admins can change the amount", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 1000 });
+  await page.goto("/usage-view-e2e.html");
+  await page.getByRole("tablist", { name: "Breakdown" }).getByRole("tab", { name: "By Person" }).click();
+  const panel = page.locator("#usage-breakdown-panel");
+  await expect(panel).toContainText(
+    "Each person can spend $25.00 per UTC day. When they reach it, their new turns pause until midnight UTC.");
+  const ada = panel.locator("tbody tr").filter({ hasText: "Ada" });
+  await expect(ada.locator(".status")).toHaveText(["Budget Reached"]);
+  await expect(ada.locator(".meter.t-warning")).toBeVisible();
+  await expect(ada).toContainText("$26.40 of $25.00");
+  await expect(panel).not.toContainText("paused by daily budget");
+  // Grace's running turn counts toward today, as the daily-budget gate counts it.
+  await expect(panel.locator("tbody tr").filter({ hasText: "Grace" })).toContainText("$11.05 of $25.00");
+  await expect(panel).toContainText("Today includes an estimate for running turns.");
+  await page.screenshot({ path: `${SHOT}/desktop-dark-person.png`, fullPage: true });
 
   await page.getByLabel("Daily Budget per User ($)").fill("30");
   await page.getByRole("button", { name: "Save Daily Budget" }).click();
-  await expect(section).toContainText("Daily budget saved.");
-  await expect(section).not.toContainText("paused by daily budget");
-  await expect(section).toContainText("$26.40 of $30.00");
+  await expect(panel).toContainText("Daily budget saved.");
+  await expect(panel.locator(".status")).toHaveCount(0);
+  await expect(ada).toContainText("$26.40 of $30.00");
+});
+
+const BREAKDOWN_TABS = ["By Day", "By Model", "By Agent", "By Machine", "By Person"] as const;
+
+test("at 390px every Breakdown tab's rows put the name and the total on line 1 and nothing is cut off sideways", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/usage-view-e2e.html");
+  const breakdown = page.getByRole("tablist", { name: "Breakdown" });
+  for (const label of BREAKDOWN_TABS) {
+    await breakdown.getByRole("tab", { name: label }).click();
+    const rows = page.locator(".usage-tables-section .usage-table tbody tr");
+    await expect(rows.first()).toBeVisible();
+    const layout = await rows.evaluateAll((all) => all.map((row) => {
+      const name = row.firstElementChild!.getBoundingClientRect();
+      const total = row.querySelector(".cell-status")!;
+      const totalBox = total.getBoundingClientRect();
+      const meta = [...row.querySelectorAll<HTMLElement>(".cell-meta")].filter((cell) => cell.offsetParent !== null);
+      return {
+        text: row.textContent,
+        sameLine: Math.abs((name.top + name.bottom) / 2 - (totalBox.top + totalBox.bottom) / 2) < 6,
+        totalWhole: total.scrollWidth <= total.clientWidth + 1,
+        metaBelow: meta.every((cell) => cell.getBoundingClientRect().top >= name.bottom - 1),
+        inside: [...row.children].every((cell) => cell.getBoundingClientRect().right <= document.documentElement.clientWidth + 0.5),
+        hiddenAgents: [...row.querySelectorAll<HTMLElement>("[data-driver]")].every((cell) => cell.offsetParent === null),
+      };
+    }));
+    for (const row of layout) {
+      expect(row, `${label}: ${row.text}`).toEqual(expect.objectContaining({
+        sameLine: true, totalWhole: true, metaBelow: true, inside: true, hiddenAgents: true,
+      }));
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
+  }
+  // Line 2 says its unit, since the header row is not on screen.
+  await breakdown.getByRole("tab", { name: "By Day" }).click();
+  await expect(page.locator(".usage-tables-section tbody .usage-period-trailing").first()).toHaveText(/tokens$/);
+  await breakdown.getByRole("tab", { name: "By Person" }).click();
+  await expect(page.locator(".usage-person-today").first()).toHaveText(/^\$26\.40 of \$25\.00 today$/);
+});
+
+test("at 834px the time table folds its trailing column under the date and keeps the agent headers whole", async ({ page }) => {
+  await page.setViewportSize({ width: 834, height: 1112 });
+  await page.goto("/usage-view-e2e.html");
+  const table = page.locator(".usage-tables-section .usage-table");
+  await expect(table.locator("thead th.usage-period-trailing")).toBeHidden();
+  await expect(table.locator(".usage-period-meta").first()).toBeVisible();
+  await expect(table.locator(".usage-period-meta").first()).toHaveText(/tokens$/);
+  const headers = await table.locator("thead th.cell-extra").evaluateAll((cells) => cells.map((cell) => ({
+    text: cell.textContent,
+    // DejaVu on CI is wider than this host's face: a header needs room to spare, not just to fit.
+    spare: cell.clientWidth - cell.scrollWidth,
+  })));
+  expect(headers.map((header) => header.text)).toEqual(["Claude Code", "Codex", "ACP"]);
+  for (const header of headers) expect(header.spare, header.text ?? "").toBeGreaterThanOrEqual(0);
+  const widths = await table.locator("thead th.cell-extra").evaluateAll((cells) => cells.map((cell) => {
+    const range = document.createRange();
+    range.selectNodeContents(cell);
+    const style = getComputedStyle(cell);
+    return cell.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight) - range.getBoundingClientRect().width;
+  }));
+  for (const width of widths) expect(width).toBeGreaterThanOrEqual(12);
+
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await expect(table.locator("thead th.usage-period-trailing")).toBeVisible();
+  await expect(table.locator(".usage-period-meta").first()).toBeHidden();
 });
 
 test("light theme and the coverage notice for unpriced records and a cached rate table", async ({ page }) => {
