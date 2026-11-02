@@ -84,11 +84,20 @@ Bundles**, a dependency of the required **Typecheck, Test & Sidecar Bundle** agg
 merge groups and rolling main validation; it is not an advisory Platform Isolation check.
 To repeat locally after `pnpm --filter @wollipog/runner build:binary`, run
 `node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs <absolute-runner-binary>`.
-This guard smoke establishes Linux x64 packaged behavior; the six native release legs still build
-their own artifacts and run their existing entry-point checks.
+The same guard smoke also runs in **Verify Windows Packaged Guard** in `platform-isolation.yml`,
+reusing the Windows x64 SEA built by **Verify Windows Release CLI Dispatch**. That workflow is
+advisory, so its Windows result must be checked separately before claiming Windows verification.
+The six native release legs still build their own artifacts and run their existing entry-point checks.
 The step retains its established name for health and release evidence consumers. The portable
 local suite in `scripts/test-suites.mjs` intentionally keeps its faster bundle-only check; run
 the full build and packaged verifier above to reproduce this additional required CI coverage.
+
+The Windows v0.27.0 report in #1338 described guard re-entry starting the daemon and looking for
+`runner.config.json` in the probe directory. PR #1883 (commit `662d40fa535823b747f2dcc995aa8fe4f07c4243`,
+for #1339) corrected the shared `resolveRunnerEntry` dispatcher to read application arguments at
+`argv[2]`, including in SEA binaries where `argv[1]` repeats the executable. That dispatcher includes
+`--managed-worktree-guard`, so the source fix covers this mode too. The packaged Windows smoke
+checks this path directly; source inspection alone does not prove a particular released asset works.
 
 Each matrix job also publishes the **headless control plane**: the exact injected and signed
 sidecar bytes are copied to `apps/control-plane/dist-bin/wollipog-control-plane-<triple>[.exe]`,
