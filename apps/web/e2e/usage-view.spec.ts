@@ -15,6 +15,19 @@ test.use({ reducedMotion: "reduce" });
 
 const SHOT = "test-results/usage-view";
 
+/** A CSS colour as the page computes it ("rgb(248, 81, 73)"), for comparing against a token. */
+async function resolvedColor(page: Page, value: string): Promise<string> {
+  return page.evaluate((color) => {
+    const probe = document.createElement("span");
+    probe.style.color = color;
+    document.body.append(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    return computed;
+  }, value);
+}
+const resolvedRed = (page: Page) => resolvedColor(page, "var(--red)");
+
 test("desktop: metric, chart interaction, and Group By as the one aggregation control", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html");
@@ -163,6 +176,10 @@ test("Budget and History: -5 and 500 show inline errors, send nothing and raise 
   ]);
   await expect(dialog.locator(".modal-foot")).toContainText("Fix 2 fields to save.");
   await expect(budget).toBeFocused();
+  // Both invalid fields draw the --red edge once the field transition settles (§8.5).
+  const red = await resolvedRed(page);
+  await expect(budget).toHaveCSS("border-top-color", red);
+  await expect(hourly).toHaveCSS("border-top-color", red);
   // No native constraint: the form is noValidate and the fields carry no min or max.
   for (const field of [budget, hourly]) {
     expect(await field.evaluate((input: HTMLInputElement) => input.validationMessage)).toBe("");
@@ -178,6 +195,12 @@ test("Budget and History: a shorter period asks Shorten Usage History stacked on
   const dialog = page.getByRole("dialog", { name: "Budget and History" });
   await dialog.getByLabel("Hourly Detail").fill("14");
   await expect(dialog.locator(".field-warn")).toHaveText("Shorter than now (30 days). Older hourly detail will be deleted.");
+  // A warning is not an error: no aria-invalid, and the edge settles to the ordinary outline.
+  const hourly = dialog.getByLabel("Hourly Detail");
+  await dialog.getByLabel("Daily Totals").focus();
+  await expect(hourly).not.toHaveAttribute("aria-invalid", /.*/);
+  await expect(hourly).toHaveCSS("border-top-color", await resolvedColor(page, "var(--control-outline)"));
+  await expect(hourly).not.toHaveCSS("border-top-color", await resolvedRed(page));
   await dialog.getByRole("button", { name: "Save Changes" }).click();
   const confirmation = page.getByRole("dialog", { name: "Shorten Usage History" });
   await expect(confirmation).toContainText(/Hourly detail older than 14 days is deleted now, so hourly charts will start at .+\. Daily totals are not affected\. This can't be undone\./);
