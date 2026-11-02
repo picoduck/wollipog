@@ -19,7 +19,8 @@ const DESTINATIONS = [
   { path: "/connections", title: "Connections", tabs: true },
   { path: "/skills", title: "Agent Skills", description: true },
   { path: "/archived", title: "Archived Sessions", description: true, max: 960 },
-  { path: "/usage", title: "Usage and Cost", description: true, max: 1200 },
+  // API Usage and Subscriptions are header tabs (#3010).
+  { path: "/usage", title: "Usage and Cost", description: true, tabs: true, max: 1200 },
   { path: "/settings", title: "Settings", description: true },
 ] as const;
 
@@ -109,7 +110,7 @@ test.describe("at 1440×900", () => {
         ["/automations", "Automations", "Run a prompt on a schedule, from a webhook, or from a chat message."],
         ["/runs", "Multi-Agent Runs", "Give one task to several agents and compare what each one does."],
         ["/pods", "Pods", "Agents that share notes and a worktree while they work toward one objective."],
-        ["/usage", "Usage and Cost", "What your agents spent, by day, agent and project."],
+        ["/usage", "Usage and Cost", "What your sessions would cost at API rates and what's left on each subscription."],
       ] as const) {
         await openDestination(page, path, title);
         await expect(page.locator(".page-header .page-desc"), `${title} at ${width}px`).toHaveText(description);

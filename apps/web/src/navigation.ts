@@ -22,7 +22,7 @@ export type View =
   | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
   | { name: "automation"; id: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
-  | { name: "usage" }
+  | { name: "usage"; tab?: UsageTab }
   /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
   | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
   | { name: "projects"; id?: string; pane?: ProjectsPane }
@@ -165,6 +165,12 @@ export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automation
 export type AutomationsTab = "outbound";
 
 /**
+ * Usage and Cost's tabs (#3010): API Usage at `/usage`, and Subscriptions at `/usage/subscriptions`.
+ * Absent is API Usage.
+ */
+export type UsageTab = "subscriptions";
+
+/**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
  * the Library Overview. A skill id wins over a pane, so a view never names both. `/skills` itself
  * shows the list with the default detail; `/skills/overview` is the same content as its own route,
@@ -246,7 +252,7 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
   {
     id: "usage",
     name: "Usage and Cost",
-    description: "What your agents spent, by day, agent and project.",
+    description: "What your sessions would cost at API rates and what's left on each subscription.",
     group: "records",
   },
 ];
@@ -444,7 +450,7 @@ export function viewPath(view: View): string {
         : view.tab === "outbound" ? "/automations/outbound" : "/automations";
     case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
-    case "usage": return "/usage";
+    case "usage": return view.tab === "subscriptions" ? "/usage/subscriptions" : "/usage";
     case "archived": return "/archived";
     case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
@@ -574,6 +580,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "skills", id };
   }
   if (path === "/usage") return { name: "usage" };
+  if (path === "/usage/subscriptions") return { name: "usage", tab: "subscriptions" };
   if (path === "/archived") return { name: "archived" };
   // No section: a phone shows the section index, and wider layouts open the first section (§6.1, §6.2).
   if (path === "/settings") return { name: "settings" };

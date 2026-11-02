@@ -47,6 +47,7 @@ const routes: Array<[View, string]> = [
   [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
   [{ name: "skills", pane: "overview" }, "/skills/overview"],
   [{ name: "usage" }, "/usage"],
+  [{ name: "usage", tab: "subscriptions" }, "/usage/subscriptions"],
   [{ name: "projects" }, "/projects"],
   [{ name: "projects", pane: "overview" }, "/projects/overview"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],
@@ -231,14 +232,15 @@ test("page descriptions use short sentence-case copy in user terms", () => {
       runners: undefined,
       skills: "Write a skill once, then choose which machines and agents get it.",
       archived: "Archived sessions keep their transcripts. Restore one to keep working.",
-      usage: "What your agents spent, by day, agent and project.",
+      usage: "What your sessions would cost at API rates and what's left on each subscription.",
     },
   );
   for (const item of GLOBAL_VIEW_ITEMS) {
     if (item.description === undefined) continue;
     assert.ok(item.description.length <= 80, `${item.name}: ${item.description.length} characters`);
-    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it.
-    assert.match(item.description, item.id === "archived" ? /^[A-Z][^A-Z]*\. [A-Z][^A-Z]*\.$/u : /^[A-Z][^A-Z]*\.$/u,
+    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it. An
+    // established acronym keeps its capitals (AGENTS.md, UI Copy).
+    assert.match(item.description.replace(/\bAPI\b/g, "api"), item.id === "archived" ? /^[A-Z][^A-Z]*\. [A-Z][^A-Z]*\.$/u : /^[A-Z][^A-Z]*\.$/u,
       `${item.name} uses sentence case`);
     for (const term of RETIRED_TERMS) {
       assert.ok(!item.description.toLowerCase().includes(term), `${item.name} uses the retired term "${term}"`);

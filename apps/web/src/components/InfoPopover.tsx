@@ -2,6 +2,7 @@ import { useLayoutEffect, useState, type ReactNode } from "react";
 import { InfoIcon } from "./Icons.js";
 import { useDismissiblePopover } from "./interactions.js";
 import { MenuSurface } from "./Menu.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 /**
  * A panel tool's About popover (docs/design-system.md §4.9, §9.2; #2856): the explanation a tool
@@ -13,19 +14,38 @@ import { MenuSurface } from "./Menu.js";
  * Its content is a short sentence-case `children` and an optional `.facts` list. Beside a field's
  * label (Time Zone's About Time Zones, #2971) its button is the small `.icon-btn.sm`.
  */
-export function InfoPopover({
-  tool,
-  facts,
-  size,
-  children,
-}: {
+interface InfoPopoverProps {
   /** The tool's name, Title Case: the button and the popover are "About <tool>". */
   tool: string;
   facts?: readonly { term: string; value: ReactNode }[];
   /** `sm` beside a field's label. */
   size?: "sm";
+  /**
+   * At a toolbar's trailing end (Usage and Cost's About These Numbers, #3010): a ghost button with
+   * the icon and its name on desktop, the icon alone on phones.
+   */
+  labelled?: boolean;
   children: ReactNode;
-}) {
+}
+
+export function InfoPopover({ labelled = false, ...props }: InfoPopoverProps) {
+  // Only a labelled one follows the width; an icon is an icon at every width, so the rest never
+  // subscribe to the viewport.
+  return labelled ? <LabelledInfoPopover {...props} /> : <InfoPopoverControl {...props} showLabel={false} />;
+}
+
+function LabelledInfoPopover(props: Omit<InfoPopoverProps, "labelled">) {
+  const phone = useIsMobile();
+  return <InfoPopoverControl {...props} showLabel={!phone} />;
+}
+
+function InfoPopoverControl({
+  tool,
+  facts,
+  size,
+  showLabel,
+  children,
+}: Omit<InfoPopoverProps, "labelled"> & { showLabel: boolean }) {
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "info-popover");
   const name = `About ${tool}`;
@@ -38,9 +58,9 @@ export function InfoPopover({
       <button
         ref={popover.triggerRef}
         type="button"
-        className={size ? `icon-btn ${size}` : "icon-btn"}
-        title={name}
-        aria-label={name}
+        className={showLabel ? "btn ghost" : size ? `icon-btn ${size}` : "icon-btn"}
+        title={showLabel ? undefined : name}
+        aria-label={showLabel ? undefined : name}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? popover.panelId : undefined}
@@ -48,6 +68,7 @@ export function InfoPopover({
         onKeyDown={popover.onTriggerKeyDown}
       >
         <InfoIcon />
+        {showLabel && name}
       </button>
       {open && (
         <MenuSurface

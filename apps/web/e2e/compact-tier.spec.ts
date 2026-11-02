@@ -159,31 +159,25 @@ async function checkPageContent(page: Page, where: string) {
   await checkArchivedTable(page, where, { folded: true, minSession: 200 });
 
   await open(page, "path=%2Fusage", "Usage and Cost");
+  // API Usage's one toolbar (#3010): Metric, Range, Group By and About These Numbers on one row.
   const usage = await page.evaluate(() => {
     const box = (element: Element) => element.getBoundingClientRect();
-    const card = document.querySelector(".usage-api-controls")!;
-    const description = card.querySelector(".usage-api-controls-heading p")!;
-    const controls = [...card.querySelectorAll(".usage-desktop-controls > .seg")];
-    const style = getComputedStyle(description);
-    const context = document.createElement("canvas").getContext("2d")!;
-    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const text = description.textContent!;
+    const toolbar = document.querySelector(".usage-toolbar")!;
+    const controls = [...toolbar.children].filter((child) => !child.classList.contains("sr-only"));
     const overlaps = (a: DOMRect, b: DOMRect) =>
       Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5;
     return {
-      count: controls.length,
+      names: controls.map((control) => control.getAttribute("aria-label") ?? control.textContent),
       rows: new Set(controls.map((control) => Math.round(box(control).top))).size,
-      overlapping: controls.flatMap((a, i) => [description, ...controls.slice(i + 1)]
-        .filter((b) => overlaps(box(a), box(b))).map((b) => `${a.getAttribute("aria-label")} / ${b.textContent}`)),
-      escape: Math.max(...controls.map((control) => box(control).right)) - box(card).right,
-      charactersPerLine: box(description).width / (context.measureText(text).width / text.length),
+      overlapping: controls.flatMap((a, i) => controls.slice(i + 1)
+        .filter((b) => overlaps(box(a), box(b))).map((b) => `${a.textContent} / ${b.textContent}`)),
+      escape: Math.max(...controls.map((control) => box(control).right)) - box(toolbar).right,
     };
   });
-  expect(usage.count).toBe(3);
-  expect(usage.rows, `${where}: the Usage controls stay on one row`).toBe(1);
+  expect(usage.names).toEqual(["Metric", "Range: Last 30 Days", "Group By", "About These Numbers"]);
+  expect(usage.rows, `${where}: the Usage toolbar stays on one row`).toBe(1);
   expect(usage.overlapping, `${where}: the Usage controls overlap`).toEqual([]);
-  expectGeometry(usage.escape, `${where}: the Usage controls stay inside their card`).toBeLessThanOrEqual(0.51);
-  expect(usage.charactersPerLine, `${where}: the Usage description keeps a readable measure`).toBeGreaterThanOrEqual(30);
+  expectGeometry(usage.escape, `${where}: the Usage controls stay inside the page`).toBeLessThanOrEqual(0.51);
 }
 
 for (const width of [761, 834, 940, 1099]) {

@@ -918,7 +918,9 @@ export function Shell() {
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
-          {view.name === "usage" && <UsageView />}
+          {view.name === "usage" && (
+            <UsageView tab={view.tab} onSelectTab={(tab) => navigate(tab ? { name: "usage", tab } : { name: "usage" })} />
+          )}
           {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
           {view.name === "settings" && (
             <SettingsView

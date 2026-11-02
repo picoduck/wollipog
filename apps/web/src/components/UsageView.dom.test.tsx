@@ -111,6 +111,32 @@ const bucket = (bucketTs: number, inputTokens: number, costUsd: number): UsageAg
 
 const settleLoad = () => advanceTimeouts(USAGE_DEBOUNCE_MS);
 
+/** The toolbar's Range menu, portalled to <body> while open. */
+const rangeMenu = () => domWindow.document.body.querySelector('[role="menu"][aria-label="Range"]') as unknown as HTMLElement | null;
+const menuText = (item: Element) => item.querySelector(".menu-text")?.textContent ?? "";
+const openRangeMenu = async (container: HTMLElement) => {
+  if (!rangeMenu()) {
+    const trigger = container.querySelector<HTMLButtonElement>('button[aria-label^="Range: "]');
+    assert.ok(trigger, "the toolbar has a Range menu button");
+    await act(async () => { trigger!.click(); await Promise.resolve(); });
+  }
+  assert.ok(rangeMenu(), "the Range menu opens");
+  return rangeMenu()!;
+};
+/** Each Range item's label and second line, in order. */
+const rangeItems = async (container: HTMLElement) => [...(await openRangeMenu(container)).querySelectorAll('[role="menuitemradio"]')]
+  .map((item) => ({ label: menuText(item), description: item.querySelector(".menu-desc")?.textContent ?? null }));
+/** Chooses "Last {days} Days" from the Range menu, which closes it. */
+const chooseRange = async (container: HTMLElement, days: number) => {
+  const item = [...(await openRangeMenu(container)).querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')]
+    .find((candidate) => menuText(candidate) === `Last ${days} Days`);
+  assert.ok(item, `the Range menu offers Last ${days} Days`);
+  await act(async () => { item!.click(); await Promise.resolve(); await Promise.resolve(); });
+};
+/** The visible options of a segmented control, by label. */
+const optionLabels = (container: HTMLElement, group: string) =>
+  [...container.querySelectorAll(`[role="radiogroup"][aria-label="${group}"] [role="radio"]`)].map((node) => node.textContent?.trim() ?? "");
+
 test("UsageView keeps the control-plane newest-first order after a refresh", async () => {
   const olderDay = Date.UTC(2025, 11, 30);
   const newerDay = Date.UTC(2025, 11, 31);
@@ -156,29 +182,18 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     await settleLoad();
     await Promise.resolve();
   });
-  const subscriptionUsage = container.querySelector(".subscription-usage");
-  const apiControls = container.querySelector(".usage-api-controls");
-  assert.equal(subscriptionUsage?.nextElementSibling, apiControls,
-    "subscription allowances precede the controls for API-equivalent usage");
-  assert.match(apiControls?.textContent ?? "", /Subscription allowances above are unaffected/);
+  assertNoDomNode(container.querySelector(".subscription-usage"), "subscription allowances wait in their own tab");
   const rowLabels = () => [...container.querySelectorAll("tbody th")].map((cell) => cell.textContent ?? "");
   assert.deepEqual(rowLabels(), [bucketLabel(newerDay, "day"), bucketLabel(olderDay, "day")]);
 
-  const selectedRange = [...container.querySelectorAll("button")]
-    .find((button) => (button.textContent ?? "").trim() === "30d") as HTMLButtonElement;
-  await act(async () => {
-    selectedRange.click();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
+  // Choosing the current range again is a refresh.
+  await chooseRange(container, 30);
   assert.deepEqual(rowLabels(), dailySeries.map((bucket) => bucketLabel(bucket.bucketTs, "day")));
 
-  for (const label of ["7d", "90d", "365d"]) {
-    const range = [...container.querySelectorAll("button")]
-      .find((button) => (button.textContent ?? "").trim() === label) as HTMLButtonElement;
-    await act(async () => {
-      range.click();
-    });
+  for (const days of [7, 90, 365]) {
+    const label = `Last ${days} Days`;
+    await chooseRange(container, days);
+    assert.equal(container.querySelector('button[aria-label^="Range: "]')?.textContent, label);
     await act(async () => {
       await settleLoad();
       await Promise.resolve();
@@ -197,7 +212,126 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
   container.remove();
 });
 
-test("chart and time breakdown share Hour, Day, and Week while retention explains unavailable hours", async () => {
+test("with 14 days of hourly retention, Group By omits Hour past 14 days and the Range menu says where it is", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { days: number; granularity?: UsageAggregationGranularity }) => ({
+      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
+      retention: { hourlyDays: 14, dailyDays: 365, coverageStartedAt: 0 },
+      hourlyDataAvailable: query.days <= 14,
+    }),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+  // No Hour option is ever drawn disabled: it is there or it is not.
+  const disabledHour = () => [...container.querySelectorAll('[role="radio"][aria-disabled="true"]')]
+    .filter((node) => node.textContent?.trim() === "Hour");
+
+  assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"]);
+  assert.deepEqual(optionLabels(container, "Usage Breakdown"), ["Model", "Day", "Week"]);
+  assert.equal(disabledHour().length, 0);
+  assert.deepEqual(await rangeItems(container), [
+    { label: "Last 7 Days", description: "Hour grouping is available for ranges up to 14 days." },
+    { label: "Last 30 Days", description: null },
+    { label: "Last 90 Days", description: null },
+    { label: "Last 365 Days", description: null },
+  ]);
+  assert.equal(rangeMenu()!.querySelector('[aria-checked="true"]') && menuText(rangeMenu()!.querySelector('[aria-checked="true"]')!), "Last 30 Days");
+
+  await chooseRange(container, 7);
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+  assertNoDomNode(rangeMenu(), "a choice closes the Range menu");
+  assert.deepEqual(optionLabels(container, "Group By"), ["Hour", "Day", "Week"]);
+  assert.equal(disabledHour().length, 0);
+  // Nothing about Hour or retention is left on the page while the menu is closed.
+  assert.doesNotMatch(container.textContent ?? "", /Hour grouping|retained/);
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("a plane without weekly support has no Week, and the Range menu ends with why", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({
+      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
+      supportedGranularities: ["hour", "day"],
+      hourlyDataAvailable: true,
+    }),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+
+  assert.deepEqual(optionLabels(container, "Group By"), ["Hour", "Day"]);
+  assert.deepEqual(optionLabels(container, "Usage Breakdown"), ["Model", "Hour", "Day"]);
+  const menu = await openRangeMenu(container);
+  const last = menu.lastElementChild;
+  assert.ok(last?.classList.contains("menu-note"), "the Range menu ends with a note");
+  assert.equal(last?.textContent, "Week grouping needs a newer version of Wollipog.");
+  assertNoDomNode(container.querySelector(".menu-note"), "the note lives only in the menu");
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("About These Numbers holds the caveats: estimate, rate source, coverage date without a time, privacy", async () => {
+  const at = Date.UTC(2026, 8, 21);
+  const client = {
+    ...api,
+    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageUsers: async () => ({ users: [] }),
+    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({
+      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
+      retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: Date.UTC(2026, 6, 1, 14, 30) },
+      pricing: { status: "fresh", source: "https://example.com/rates.json", fetchedAt: at, knownModels: 10 },
+    }),
+  } as unknown as ApiClient;
+  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
+  domWindow.document.body.append(container as never);
+  const root = createRoot(container);
+  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+  assert.doesNotMatch(container.textContent ?? "", /published API rates|Recording started|Only totals/,
+    "no caveat is on screen until About These Numbers opens");
+
+  const about = container.querySelector<HTMLButtonElement>('.usage-toolbar > button[aria-haspopup="dialog"]');
+  assert.equal(about?.textContent, "About These Numbers", "a visible label on desktop");
+  await act(async () => { about!.click(); await Promise.resolve(); });
+  const dialog = domWindow.document.body.querySelector('[role="dialog"][aria-label="About These Numbers"]');
+  assert.ok(dialog, "the popover opens");
+  const text = dialog!.textContent ?? "";
+  assert.match(text, /These are estimates at published API rates, not a bill\. Subscription plans are not billed this way\./);
+  assert.match(text, /Recording started Jul 1, 2026\. Earlier usage isn't in these charts\./);
+  assert.doesNotMatch(text, /14:30|2:30/, "the coverage date has no time of day");
+  assert.match(text, /Only totals are stored: no prompts, file paths, tool inputs or session content\./);
+  assert.doesNotMatch(text, /Codex App Server/, "the Codex sentence waits for Codex usage");
+  const link = dialog!.querySelector("a");
+  assert.equal(link?.getAttribute("href"), "https://example.com/rates.json");
+  assert.equal(dialog!.querySelector("dt")?.textContent, "Rate Source");
+
+  await act(async () => root.unmount());
+  container.remove();
+});
+
+test("chart and time breakdown share Hour, Day, and Week while unavailable hours are omitted", async () => {
   const calls: Array<{ days: number; granularity: UsageAggregationGranularity }> = [];
   const at = Date.UTC(2026, 8, 21);
   const client = {
@@ -222,27 +356,33 @@ test("chart and time breakdown share Hour, Day, and Week while retention explain
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
 
-  assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
-  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+  // This range's hours were already rolled into days.
+  assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"]);
 
   await act(async () => { option("Usage Breakdown", "Week").click(); });
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   assert.deepEqual(calls.at(-1), { days: 30, granularity: "week" });
-  assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
   assert.match(container.querySelector(".usage-chart-section h3")?.textContent ?? "", /Weekly Cost/);
   assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Weekly Usage in UTC");
   assert.match(container.querySelector(".usage-table tbody th")?.textContent ?? "", /Sep 21, 2026 00:00–Sep 27, 2026 23:59 UTC/);
 
-  await act(async () => { option("Usage Aggregation", "Day").click(); });
+  await act(async () => { option("Group By", "Day").click(); });
   await act(async () => { await settleLoad(); await Promise.resolve(); });
   assert.equal(option("Usage Breakdown", "Day").getAttribute("aria-checked"), "true");
   assert.equal(container.querySelector("#usage-table-caption")?.textContent, "Daily Usage in UTC");
 
-  await act(async () => { option("Usage Range", "90d").click(); });
+  await chooseRange(container, 90);
   await act(async () => { await settleLoad(); await Promise.resolve(); });
-  assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
-  assert.equal(option("Usage Breakdown", "Hour").getAttribute("aria-disabled"), "true");
-  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained for 30 days.*30 days or less/);
+  // Past hourly retention Hour is omitted from both, never drawn disabled.
+  assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"]);
+  assert.deepEqual(optionLabels(container, "Usage Breakdown"), ["Model", "Day", "Week"]);
+  assert.deepEqual((await rangeItems(container)).map((item) => item.description), [
+    "Hour grouping is available for ranges up to 30 days.",
+    "Hour grouping is available for ranges up to 30 days.",
+    null,
+    null,
+  ]);
 
   await act(async () => root.unmount());
   container.remove();
@@ -282,8 +422,9 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
   const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
-  await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
-  await act(async () => { option("Usage Range", "90d").click(); await settleLoad(); });
+  await act(async () => { option("Group By", "Hour").click(); await settleLoad(); });
+  await chooseRange(container, 90);
+  await act(async () => { await settleLoad(); });
   assert.ok(rejectUnavailableHour, "the unavailable Hour request is in flight");
   await act(async () => {
     rejectUnavailableHour!(new ApiError(
@@ -302,10 +443,9 @@ test("an Hour request that discovers rolled data switches to Day and disables Ho
     { days: 90, granularity: "hour" },
     { days: 90, granularity: "day" },
   ]);
-  assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
+  assert.equal(option("Group By", "Day").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Breakdown", "Day").getAttribute("aria-checked"), "true");
-  assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
-  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
+  assert.deepEqual(optionLabels(container, "Group By"), ["Day", "Week"], "Hour is omitted, not disabled");
   assertNoDomNode(container.querySelector('[role="alert"]'));
 
   await act(async () => root.unmount());
@@ -341,37 +481,21 @@ test("an older plane's implicit Day fallback disables Hour without showing an er
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
 
-  const week = option("Usage Aggregation", "Week");
-  assert.equal(week.getAttribute("aria-disabled"), "true");
-  const weekDescription = week.getAttribute("aria-describedby");
-  assert.ok(weekDescription);
-  assert.equal(domWindow.document.getElementById(weekDescription!)?.textContent ?? "",
-    "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week.");
-  const callCount = calls.length;
-  await act(async () => { week.click(); await settleLoad(); });
-  assert.equal(calls.length, callCount, "an older plane never receives an unsupported Week request");
-  const note = container.querySelector(".usage-granularity-note")?.textContent ?? "";
-  assert.match(note, /Weekly aggregation requires a newer version of Wollipog\. Update Wollipog to use Week\./);
+  // An older plane cannot aggregate by week, so Week is not offered at all and the Range menu says why.
+  assert.deepEqual(optionLabels(container, "Group By"), ["Hour", "Day"]);
+  const note = (await openRangeMenu(container)).lastElementChild?.textContent ?? "";
+  assert.equal(note, "Week grouping needs a newer version of Wollipog.");
   assert.doesNotMatch(note, /control plane/i, "docs/design-system.md §17.2 retires the term");
-  assert.equal(
-    container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
-    "usage-week-capability-note",
-    "the compact mobile picker is associated with the upgrade explanation",
-  );
-  const compactAggregation = container.querySelector('[aria-label="Usage Aggregation: Day"]') as HTMLButtonElement;
-  await act(async () => { compactAggregation.click(); await Promise.resolve(); });
-  const compactWeek = [...container.querySelectorAll('[role="option"]')]
-    .find((node) => node.textContent?.includes("Week"));
-  assert.equal(compactWeek?.querySelectorAll(".ui-select-option-desc").length, 0,
-    "the compact option does not duplicate its disabled explanation as a description");
-  assert.equal(compactWeek?.querySelectorAll(".ui-select-option-reason").length, 1);
+  await act(async () => { rangeMenu()!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never); });
 
-  await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
+  const callCount = calls.length;
+  await act(async () => { option("Group By", "Hour").click(); await settleLoad(); });
   await act(async () => { await settleLoad(); });
-  assert.equal(option("Usage Aggregation", "Day").getAttribute("aria-checked"), "true");
-  assert.equal(option("Usage Aggregation", "Hour").getAttribute("aria-disabled"), "true");
+  assert.ok(calls.length > callCount, "Hour was requested");
+  assert.ok(!calls.includes("week"), "an older plane never receives an unsupported Week request");
+  assert.equal(option("Group By", "Day").getAttribute("aria-checked"), "true");
+  assert.deepEqual(optionLabels(container, "Group By"), ["Day"], "the implicit Day fallback omits Hour");
   assertNoDomNode(container.querySelector('[role="alert"]'));
-  assert.match(container.querySelector(".usage-granularity-note")?.textContent ?? "", /retained as daily buckets/);
 
   await act(async () => root.unmount());
   container.remove();
@@ -393,7 +517,7 @@ test("Week names Wollipog while its availability is still being checked", async 
   await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
   await act(async () => { await settleLoad(); });
 
-  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Usage Aggregation"] [role="radio"]')]
+  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Group By"] [role="radio"]')]
     .find((node) => node.textContent?.trim() === "Week") as HTMLButtonElement;
   assert.equal(week.getAttribute("aria-disabled"), "true");
   const descriptionId = week.getAttribute("aria-describedby");
@@ -424,17 +548,13 @@ test("an initial usage failure gives unavailable Week an actionable retry explan
   await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
 
-  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Usage Aggregation"] [role="radio"]')]
+  const week = [...container.querySelectorAll('[role="radiogroup"][aria-label="Group By"] [role="radio"]')]
     .find((node) => node.textContent?.trim() === "Week") as HTMLButtonElement;
   assert.equal(week.getAttribute("aria-disabled"), "true");
   const descriptionId = week.getAttribute("aria-describedby");
   assert.ok(descriptionId);
-  assert.match(domWindow.document.getElementById(descriptionId!)?.textContent ?? "", /Retry by choosing a range/);
-  assert.match(container.querySelector("#usage-week-capability-note")?.textContent ?? "", /could not be checked/);
-  assert.equal(
-    container.querySelector('[aria-label="Usage Aggregation: Day"]')?.getAttribute("aria-describedby"),
-    "usage-week-capability-note",
-  );
+  assert.match(domWindow.document.getElementById(descriptionId!)?.textContent ?? "", /could not be checked\. Retry by choosing a range/);
+  assert.equal(week.getAttribute("title"), "Weekly availability could not be checked. Retry by choosing a range.");
   const callCount = calls;
   await act(async () => { week.click(); await settleLoad(); });
   assert.equal(calls, callCount, "failed capability discovery still cannot submit a Week request");
@@ -471,16 +591,16 @@ test("an unavailable Hour response cannot replace a newer Week selection during 
   const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
 
-  await act(async () => { option("Usage Aggregation", "Hour").click(); await settleLoad(); });
+  await act(async () => { option("Group By", "Hour").click(); await settleLoad(); });
   assert.ok(rejectHour, "the Hour request is in flight");
   await act(async () => {
-    option("Usage Aggregation", "Week").click();
+    option("Group By", "Week").click();
     rejectHour!(new ApiError("rolled", 400, "USAGE_HOURLY_DATA_UNAVAILABLE"));
     await Promise.resolve();
   });
   await act(async () => { await settleLoad(); });
 
-  assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
   assert.equal(calls.at(-1), "week");
   assertNoDomNode(container.querySelector('[role="alert"]'));
@@ -520,9 +640,9 @@ test("a retention save preserves aggregation changes made while the request is i
 
   await act(async () => { save.click(); await Promise.resolve(); });
   assert.ok(finishRetention, "the retention write is in flight");
-  await act(async () => { option("Usage Aggregation", "Week").click(); await settleLoad(); });
+  await act(async () => { option("Group By", "Week").click(); await settleLoad(); });
   await act(async () => { finishRetention!(); await settleLoad(); });
-  assert.equal(option("Usage Aggregation", "Week").getAttribute("aria-checked"), "true");
+  assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
   assert.equal(option("Usage Breakdown", "Week").getAttribute("aria-checked"), "true");
 
   await act(async () => root.unmount());
@@ -609,7 +729,7 @@ test("aggregation switches ignore stale responses and show request failures with
   const root = createRoot(container);
   await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
   await act(async () => { await settleLoad(); await Promise.resolve(); });
-  const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Usage Aggregation"]')!;
+  const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Group By"]')!;
   const option = (label: string) => [...aggregation().querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === label) as HTMLButtonElement;
 
@@ -663,7 +783,7 @@ test("a late failed request cannot overwrite the newer selection's loading state
   const root = createRoot(container);
   await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
   await act(async () => { await settleLoad(); });
-  const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Usage Aggregation"]')!;
+  const aggregation = () => container.querySelector('[role="radiogroup"][aria-label="Group By"]')!;
   const option = (label: string) => [...aggregation().querySelectorAll("[role=radio]")]
     .find((node) => node.textContent?.trim() === label) as HTMLButtonElement;
   // Compare text, not nodes: a failing `assert.equal` on a happy-dom node inspects its whole graph.
@@ -768,7 +888,21 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
     await Promise.resolve();
   });
   const pageText = () => container.textContent ?? "";
-  assert.match(pageText(), /Subscription Usage/);
+  const tab = (key: string) => container.querySelector<HTMLButtonElement>(`#usage-${key}-tab`)!;
+  // The allowance cards wait in their tab; the tab counts the windows that need the user.
+  assert.doesNotMatch(pageText(), /15% Remaining/);
+  assert.equal(tab("api").getAttribute("aria-selected"), "true");
+  assert.equal(tab("subscriptions").getAttribute("aria-label"), "Subscriptions, 1 Need Attention");
+  assert.equal(tab("subscriptions").querySelector(".count-badge")?.className, "count-badge");
+  await act(async () => { tab("subscriptions").click(); await Promise.resolve(); });
+  assert.equal(tab("subscriptions").getAttribute("aria-selected"), "true");
+  assertNoDomNode(container.querySelector(".usage-toolbar"), "the API toolbar belongs to API Usage");
+  assert.equal(
+    tab("subscriptions").querySelector(".count-badge")?.textContent,
+    String([...container.querySelectorAll("#usage-subscriptions-panel .subscription-bucket .status")]
+      .filter((badge) => /Approaching Limit|Exhausted/.test(badge.textContent ?? "")).length),
+    "the count is the number of Approaching Limit and Exhausted badges in the tab",
+  );
   assert.match(pageText(), /15% Remaining/);
   // State words carry no glyph prefix; the badge's tone and dot carry the severity.
   assert.match(pageText(), /Approaching Limit/);
@@ -792,6 +926,8 @@ test("Subscription Usage shows remaining allowance, local and relative resets, s
   assert.equal(refreshTargets[0], undefined);
   assert.match(pageText(), /0% Remaining/);
   assert.match(pageText(), /Exhausted/);
+  assert.equal(tab("subscriptions").querySelector(".count-badge")?.className, "count-badge danger",
+    "the count turns danger while any window is exhausted");
   assert.doesNotMatch(pageText(), /[⚠⛔]/);
   assert.match(pageText(), /Subscription usage refreshed/);
   const refreshAccount = [...container.querySelectorAll("button")]
@@ -847,7 +983,7 @@ test("a subscription row's masked account says what it hides after an Account la
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+    root.render(<ApiProvider client={client}><UsageView tab="subscriptions" /></ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
@@ -902,7 +1038,7 @@ test("a window the provider never measured is marked absent, not shown as a valu
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
+    root.render(<ApiProvider client={client}><UsageView tab="subscriptions" /></ApiProvider>);
   });
   await act(async () => {
     await settleLoad();
@@ -966,7 +1102,12 @@ test("an unsplit response from an older plane is shown honestly and the window c
 
   // The headline names the response's 7-day window although the default range control says 30d.
   assert.match(container.querySelector(".usage-headline-note")?.textContent ?? "", /last 7 days/);
-  const codexCoverage = [...container.querySelectorAll(".usage-coverage")]
+  // The Codex caveat waits in About These Numbers, which says it once Codex has usage.
+  await act(async () => {
+    container.querySelector<HTMLButtonElement>('.usage-toolbar > button[aria-haspopup="dialog"]')!.click();
+    await Promise.resolve();
+  });
+  const codexCoverage = [...domWindow.document.body.querySelectorAll('[aria-label="About These Numbers"] p')]
     .find((node) => node.textContent?.includes("Codex App Server"));
   assert.equal(
     codexCoverage?.textContent,

@@ -17309,24 +17309,19 @@ button.review-finding-location {
 }
 
 /* Usage accounting ------------------------------------------------------- */
-.usage-coverage, .usage-privacy, .usage-retention p { color: var(--text-dim); }
-.usage-range { display: flex; flex-wrap: wrap; gap: 6px; }
-/* The description takes the line and the three controls follow as one unbroken group: beside the
-   description while it keeps 220px (about 30 characters), otherwise on their own line below it,
-   left-aligned. The group wraps inside only if it is wider than the card. */
-.usage-api-controls { display: flex; flex-wrap: wrap; align-items: flex-start; gap: 12px 18px; margin: 0 0 16px; padding: 14px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
-.usage-api-controls-heading { flex: 1 1 220px; min-width: 0; }
-.usage-api-controls-heading h3 { margin: 0; }
-.usage-api-controls-heading p { margin: 5px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
-.usage-mobile-controls { display: none; }
-.usage-granularity-notes { display: grid; flex-basis: 100%; gap: 4px; }
-.usage-granularity-note { margin: 0; color: var(--text-dim); font-size: var(--text-sm); }
+.usage-retention p { color: var(--text-dim); }
+/* API Usage's one toolbar (#3010, §4.7): Metric, Range and Group By, then About These Numbers at the
+   trailing end. On phones Range and Group By are one menu button, so the row never wraps. */
+.usage-toolbar { margin-bottom: var(--space-5); }
+.usage-toolbar > :last-child { margin-left: auto; }
+/* The range button gives way first on a narrow phone: its label ends in an ellipsis, the caret and
+   About stay. */
+.usage-toolbar > .btn { flex: 0 1 auto; min-width: 0; }
+.usage-toolbar > .btn > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
 .usage-state.error { color: var(--red); }
 .subscription-usage { margin: 0 0 24px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
-.subscription-usage-heading { display: flex; align-items: flex-start; justify-content: space-between; gap: 16px; }
-.subscription-usage-heading h3 { margin: 0; }
-.subscription-usage-heading p { margin: 5px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
+.subscription-usage-heading { display: flex; align-items: flex-start; justify-content: flex-end; gap: 16px; }
 .subscription-usage-status { margin-top: 10px; color: var(--text-dim); font-size: var(--text-sm); }
 .subscription-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
 .subscription-source { padding: 14px; min-width: 0; }
@@ -17352,7 +17347,6 @@ button.review-finding-location {
 .subscription-bucket.unmeasured dd strong { font-size: var(--text-xs); font-weight: 650; color: var(--text-dim); }
 .subscription-bucket.warning dd strong { color: var(--yellow); }
 .subscription-bucket.exhausted dd strong { color: var(--red); }
-.usage-coverage { margin: 0 0 14px; font-size: 12px; }
 .usage-table-wrap:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
 .usage-table-wrap {
   overflow: auto;
@@ -17401,7 +17395,6 @@ button.review-finding-location {
 .usage-series-swatch { width: 10px; height: 10px; }
 .usage-series-key { width: 12px; height: 2px; }
 
-.usage-api-controls > .toolbar { flex: 0 1 auto; flex-wrap: wrap; }
 .usage-notice { display: grid; gap: 4px; margin: 0 0 14px; padding: 10px 14px; border: 1px solid var(--border); border-radius: var(--radius-md); color: var(--text-dim); font-size: var(--text-sm); }
 .usage-notice p { margin: 0; }
 
@@ -17461,7 +17454,6 @@ button.review-finding-location {
 .usage-retention label { display: grid; gap: 6px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
 .usage-retention input { width: 100%; }
 .usage-save-status { grid-column: 1 / -1; color: var(--text-dim); font-size: 12px; }
-.usage-privacy { margin: 14px 0 0; font-size: 11px; }
 
 @media (max-width: 700px) {
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
@@ -17473,17 +17465,6 @@ button.review-finding-location {
     row-gap: var(--space-1);
   }
   .subscription-source > .facts > div + div > dt { margin-top: var(--space-2); }
-  .subscription-usage-heading { align-items: stretch; flex-direction: column; }
-}
-
-@media (max-width: 760px) {
-  .usage-api-controls { display: grid; grid-template-columns: minmax(0, 1fr); padding: 12px; }
-  .usage-desktop-controls { display: none; }
-  .usage-mobile-controls { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 8px; }
-  .usage-compact-field { display: grid; gap: 4px; min-width: 0; }
-  .usage-compact-field > span { color: var(--text-dim); font-size: var(--text-xs); font-weight: 600; }
-  .usage-compact-field .ui-select { width: 100%; min-width: 0; }
-  .usage-compact-field .ui-select-trigger { width: 100%; min-width: 0; padding-inline: 8px; }
 }
 
 @media (max-width: 340px) {
@@ -18324,12 +18305,6 @@ a.tab { text-decoration: none; }
 .seg.block {
   display: grid;
   width: 100%;
-}
-@media (max-width: 760px) {
-  .seg.usage-range {
-    display: grid;
-    width: 100%;
-  }
 }
 .ui-select-option.is-active,
 .ui-searchable-combobox-list .ui-inline-listbox-option.is-active { background: var(--bg-elev-3); }

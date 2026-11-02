@@ -167,6 +167,10 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      menu's §9.1 radio-like MenuItem rows (No Workspace and one per workspace) with the trailing
      check: a menu that files the session, not a form choice. */
   ["components/SessionDetail.tsx", "raw-radiogroup", 3],
+  // Usage and Cost's Range menu and the phone's Range and Group By sheet (#3010) are §9.1 radio-like
+  // menus: one MenuItem row per range or grouping with the trailing check, applied at once to the
+  // view. Metric and desktop Group By stay SegmentedControls.
+  ["components/UsageView.tsx", "raw-radiogroup", 2],
 ];
 
 /**
@@ -177,7 +181,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
  * accepted a file that rendered one primitive while keeping seven bespoke controls.
  */
 const FULLY_MIGRATED = [
-  "components/UsageView.tsx",
   "components/ProjectList.tsx",
   "components/NewSessionDialog.tsx",
 ];

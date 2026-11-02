@@ -192,7 +192,7 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./runners.ts",
     "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again."],
   ["./components/UsageView.tsx", "Checking whether this version of Wollipog supports weekly aggregation."],
-  ["./components/UsageView.tsx", "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week."],
+  ["./components/UsageView.tsx", "Week grouping needs a newer version of Wollipog."],
   // The transcript column's earlier-activity failure and unpaired-device state (#2579).
   ["./components/SessionDetail.tsx",
     "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it."],

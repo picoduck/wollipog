@@ -10,7 +10,7 @@ test("account labels and controls remain readable on narrow usage cards", async 
 
   for (const width of [320, 390, 600, 701, 875, 1280]) {
     await page.setViewportSize({ width, height: 900 });
-    await page.goto("/usage-view-e2e.html?subscriptions=1");
+    await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
 
     const card = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
     const account = card.locator(".subscription-account");
@@ -93,7 +93,7 @@ test.describe("touch", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
   test("the account email reveal keeps a 44px touch target around its compact glyph (#1648)", async ({ page }) => {
-    await page.goto("/usage-view-e2e.html?subscriptions=1");
+    await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
     const card = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
     const reveal = card.getByRole("button", { name: "Show Account Email" });
     await expect(reveal).toBeVisible();
