@@ -583,6 +583,30 @@ test("a mixed-model session names the unpriced model and states its cost as a lo
   await view.cleanup();
 });
 
+test("a running Claude turn's live usage is its own row, so the rows add up to the Total", async () => {
+  const liveUsage = { tokensIn: 10, tokensOut: 5, costUsd: 0.02 };
+  const ledger: SessionUsageResponse = {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 10, uncachedInputTokens: 10, outputTokens: 5, cachedInputTokens: 1000,
+      processedTokens: 1015, costUsd: 0.01, costSource: "modelPriced" }),
+    byModel: [{ model: "claude-fable-5-1", ...amount({ processedTokens: 1015, costUsd: 0.01, costSource: "modelPriced" }) }],
+  };
+  const view = await mount(session({ driver: "claude-code", tokensIn: 10, tokensOut: 5, costUsd: 0.01, liveUsage }), ledger);
+  await view.open();
+  assert.deepEqual(table(view.popover()!).slice(1), [
+    ["Fable 5.1", "1K", "$0.01"],
+    ["Running Turn", "15", "$0.02"],
+    ["Total", "1K", "$0.03"],
+  ]);
+  await view.cleanup();
+
+  // A running turn whose model has no rate yet is not free.
+  const unrated = await mount(session({ driver: "claude-code", tokensIn: 10, tokensOut: 5, costUsd: 0.01, liveUsage: { ...liveUsage, costUsd: 0 } }), ledger);
+  await unrated.open();
+  assert.deepEqual(table(unrated.popover()!)[2], ["Running Turn", "15", "Unpriced"]);
+  await unrated.cleanup();
+});
+
 test("a session that has processed nothing renders no control", async () => {
   const view = await mount(session({ tokensIn: 0, tokensOut: 0, costUsd: 0 }), null);
   assertNoDomNode(view.button());

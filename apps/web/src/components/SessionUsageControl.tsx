@@ -93,6 +93,7 @@ function SessionCostFigures({ session, models, detail }: {
   // zeroes under a model named "unknown".
   const tokensReported = totals.processedTokens > 0;
   const basis = !totals.detailed ? inputTokenBasis(session.driver) : undefined;
+  const live = session.liveUsage && session.liveUsage.tokensIn + session.liveUsage.tokensOut > 0 ? session.liveUsage : null;
 
   return (
     <>
@@ -132,6 +133,16 @@ function SessionCostFigures({ session, models, detail }: {
                 <td className="num">{!priced || row.costSource === "unpriced" ? UNPRICED : formatCost(row.costUsd) || "$0.00"}</td>
               </tr>
             ))}
+            {/* A running Claude turn's completed requests are in the totals but in no ledger row
+                yet (#3086), so they get their own row and the rows still add up to the Total. */}
+            {live && (
+              <tr>
+                <th scope="row" className="cell-dim">Running Turn</th>
+                <td className="num cell-dim">{formatTokens(live.tokensIn + live.tokensOut)}</td>
+                {/* A live estimate of zero means the turn's model has no rate yet, not that it is free. */}
+                <td className="num cell-dim">{!priced || live.costUsd <= 0 ? UNPRICED : formatCost(live.costUsd)}</td>
+              </tr>
+            )}
           </tbody>
           <tfoot>
             <tr>
