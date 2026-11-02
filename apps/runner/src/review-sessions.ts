@@ -293,6 +293,9 @@ export interface ReviewPromptInput {
   /** Full by default; a delta reviews since `since`, a rebase reviews the range-diff. */
   mode?: ReviewAttemptRound["mode"];
   since?: string;
+  /** A delta over a merge of the moved base branch: the patch is the pull request's own diff of
+   * the scoped files, not every change since `since`. */
+  mergedBase?: boolean;
   rebasedFrom?: { baseSha: string; headSha: string };
   fullReason?: string;
   /** Other files the pull request changes, for context only. */
@@ -303,7 +306,11 @@ export interface ReviewPromptInput {
 
 /** The mode line of a review prompt. */
 function reviewModeText(input: ReviewPromptInput): string {
-  if (input.mode === "delta") return `follow-up round: only the changes since ${input.since}`;
+  if (input.mode === "delta") {
+    return input.mergedBase
+      ? `follow-up round: the files whose pull request changes moved since ${input.since}, which merged the base branch; the patch is the pull request's own diff of those files`
+      : `follow-up round: only the changes since ${input.since}`;
+  }
   if (input.mode === "rebase") {
     return `rebase epoch: the range-diff from ${input.rebasedFrom?.baseSha}..${input.rebasedFrom?.headSha}`;
   }
@@ -580,10 +587,36 @@ export class ReviewSessionLauncher {
       const prFiles = await names(`${baseSha}...${policy.headSha}`);
       let scopeFiles = prFiles;
       let patch: string | null;
+      let mergedBase = false;
       if (mode === "delta") {
-        scopeFiles = await names(planned.since!, policy.headSha);
-        if (!scopeFiles.length) refuseReview(REVIEW_ROUND_REFUSALS.unchanged);
-        patch = await diff([], planned.since!, policy.headSha).catch(() => null);
+        const since = planned.since!;
+        const mergeBase = async (revision: string) =>
+          (await git(["merge-base", "--end-of-options", baseSha, revision], 30_000)).trim();
+        const sinceBase = await mergeBase(since).catch(() => null);
+        const headBase = await mergeBase(policy.headSha);
+        if (!sinceBase || sinceBase === headBase) {
+          // No base-branch commits arrived since the reviewed head (or that is unproven): the delta
+          // is every change since it.
+          scopeFiles = await names(since, policy.headSha);
+          if (!scopeFiles.length) refuseReview(REVIEW_ROUND_REFUSALS.unchanged);
+          patch = await diff([], since, policy.headSha).catch(() => null);
+        } else {
+          // The branch merged a moved base (#3980): scope only files whose base-relative pull request
+          // diff changed, that is, files the pull request changes at either head whose content or
+          // merge-base content moved between them. That keeps conflict resolutions, files both sides
+          // touched and changes the pull request dropped, and leaves out only files the base branch
+          // alone changed. Without rename detection, both paths of a rename are compared.
+          const paths = async (...revisions: string[]) =>
+            (await diff(["--name-only", "-z", "--no-renames"], ...revisions)).split("\0").filter(Boolean);
+          const changed = new Set([...await paths(since, policy.headSha), ...await paths(sinceBase, headBase)]);
+          const own = new Set([...await paths(sinceBase, since), ...await paths(headBase, policy.headSha)]);
+          scopeFiles = [...own].filter((path) => changed.has(path)).sort();
+          if (!scopeFiles.length) refuseReview(REVIEW_ROUND_REFUSALS.unchanged);
+          mergedBase = true;
+          // The pull request's own diff of those files, without the base branch's changes.
+          patch = await git(["--literal-pathspecs", "diff", "--no-color", "--no-ext-diff", "--no-textconv",
+            "--end-of-options", headBase, policy.headSha, "--", ...scopeFiles]).catch(() => null);
+        }
       } else if (mode === "rebase") {
         const touched = new Set(await names(planned.rebasedFrom!.headSha, policy.headSha));
         scopeFiles = prFiles.filter((path) => touched.has(path));
@@ -607,6 +640,7 @@ export class ReviewSessionLauncher {
         brief, repository: policy.pullRequest.repository, number: policy.pullRequest.number,
         baseSha, headSha: policy.headSha, changedFiles: scopeFiles, patch, mode,
         ...(round.since ? { since: round.since } : {}),
+        ...(mergedBase ? { mergedBase } : {}),
         ...(round.rebasedFrom ? { rebasedFrom: round.rebasedFrom } : {}),
         ...(mode === "full" && policy.fullReason ? { fullReason: policy.fullReason } : {}),
         contextFiles,
