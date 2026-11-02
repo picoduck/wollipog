@@ -1,3 +1,4 @@
+import { providerForDriver } from "@wollipog/protocol";
 import { existsSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import type {
@@ -8,6 +9,8 @@ import type {
 } from "@wollipog/protocol";
 import type { RunnerConfigAgent, RunnerProviderAccount } from "./config.js";
 import type { SessionMeta } from "./session-store.js";
+
+export { providerForDriver };
 
 export interface BoundProviderAccount {
   id: string;
@@ -43,12 +46,6 @@ export function bindSessionProviderAccount(
   // home. Do not silently move its transcript and credentials when that session restarts.
   if (prior) return undefined;
   return resolveAccount?.(spec);
-}
-
-export function providerForDriver(driver: AgentDriverKind): "claude" | "codex" | null {
-  if (driver === "claude-code") return "claude";
-  if (driver === "codex" || driver === "codex-app-server") return "codex";
-  return null;
 }
 
 /** Whether one background provider process can address the configured credential home without
