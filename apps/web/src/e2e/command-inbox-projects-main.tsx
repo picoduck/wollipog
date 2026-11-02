@@ -1081,9 +1081,13 @@ for (const value of model.sessions) {
   });
 }
 if (SESSION_TOOLS) {
-  // Nine uncommitted changes, none staged, and no operation in progress.
+  // Nine uncommitted changes, none staged, and no operation in progress; with `committed=1`, all of
+  // the work committed instead: a clean worktree three commits ahead of main (#3035).
   const alpha = gitFixtures.get("session-alpha")!;
-  Object.assign(alpha.status, {
+  Object.assign(alpha.status, FIXTURE_QUERY.get("committed") === "1" ? {
+    files: [], hasChanges: false, ahead: 3, stagedCount: 0, modifiedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    operation: null, addedLines: 0, deletedLines: 0,
+  } : {
     files: Array.from({ length: 9 }, (_, index) => ({ status: "M", path: `src/session-tools/file-${index + 1}.ts` })),
     hasChanges: true, stagedCount: 0, modifiedCount: 9, untrackedCount: 0, conflictedCount: 0, operation: null,
   });

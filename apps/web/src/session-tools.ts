@@ -106,15 +106,17 @@ export const SIDE_CHAT_FACT = "Ask a question without interrupting the agent";
  * Review: the uncommitted change count from the session's one git status reader, as Review's own
  * summary counts it (a capped list reads "50+", and staging reads "1 of 9 changes staged"), and the
  * required findings still open, the number Review's findings section shows in its "N Required" badge.
+ * With nothing uncommitted, `branch` is the work Review opens on instead (#3035): its summary's
+ * "3 commits ahead of main", or null when Review opens on an empty Uncommitted.
  */
 export function reviewFact(
-  changes: { files: number; truncated: boolean; staged: number } | "checking" | "unknown",
+  changes: { files: number; truncated: boolean; staged: number; branch: string | null } | "checking" | "unknown",
   requiredFindings: number,
 ): string {
   let first: string;
   if (changes === "checking") first = "Checking for changes…";
   else if (changes === "unknown") first = "See what this session changed";
-  else if (changes.files === 0) first = "No changes yet";
+  else if (changes.files === 0) first = changes.branch ?? "No changes yet";
   else {
     const total = `${changes.files}${changes.truncated ? "+" : ""}`;
     const noun = changes.files === 1 && !changes.truncated ? "change" : "changes";

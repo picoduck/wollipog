@@ -3,7 +3,15 @@ import { after, before, beforeEach, test } from "node:test";
 import React, { act, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { ChildSessionRegistryPage, DescendantRequestView, GitStatusInfo, ReviewFindingSummary, SessionView } from "@wollipog/protocol";
+import type {
+  ChildSessionRegistryPage,
+  DescendantRequestView,
+  GitDiffInfo,
+  GitDiffScope,
+  GitStatusInfo,
+  ReviewFindingSummary,
+  SessionView,
+} from "@wollipog/protocol";
 import type { TimelineItem } from "../timeline.js";
 import { RightPanel, useRightPanelState, type RightPanelState } from "./RightPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
@@ -33,6 +41,8 @@ let required = 0;
 let registry: ChildSessionRegistryPage | null = null;
 let registryReads = 0;
 let findingReads = 0;
+/** The scopes Review read diffs for, in order: its first is the scope it opened on. */
+let diffScopes: GitDiffScope[] = [];
 const summary = (): ReviewFindingSummary => ({
   total: required, unresolved: required, requiredUnresolved: required, sent: 0, resolved: 0, dismissed: 0,
   completion: required > 0 ? "blocked" : "complete",
@@ -47,6 +57,14 @@ const client = {
     return { findings: [], summary: summary() };
   },
   sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
+  gitDiff: async (_id: string, scope: GitDiffScope) => {
+    diffScopes.push(scope);
+    const none = { filesChanged: 0, insertions: 0, deletions: 0 };
+    return { diff: {
+      scope, files: [], diffHash: "a".repeat(64), fineDiffHash: "b".repeat(64), stats: none, stagedFiles: [],
+      unstagedFiles: [], stagedDiffHash: "c".repeat(64), unstagedDiffHash: "d".repeat(64), stagedStats: none, unstagedStats: none,
+    } as unknown as GitDiffInfo };
+  },
 } as ApiClient;
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -96,6 +114,7 @@ beforeEach(() => {
   coarsePointer = false;
   required = 0;
   findingReads = 0;
+  diffScopes = [];
   registry = null;
   registryReads = 0;
 });
@@ -124,10 +143,10 @@ const runningAgent: TimelineItem[] = [
   { kind: "tool_call", id: 1, toolCallId: "agent", title: "Audit Agent", text: "", toolKind: "agent", status: "in_progress", startedAt: 10 },
 ];
 
-function gitWith(files: number, staged = 0, observation = 1): GitStatus {
+function gitWith(files: number, staged = 0, observation = 1, ahead = 0): GitStatus {
   return {
     status: {
-      branch: "fix", hasChanges: files > 0, ahead: 0, remoteUrl: null, stagedCount: staged,
+      branch: "fix", hasChanges: files > 0, ahead, baseRef: "origin/main", remoteUrl: null, stagedCount: staged,
       files: Array.from({ length: files }, (_, index) => ({ path: `src/file-${index}.ts`, status: "M" })),
     } as unknown as GitStatusInfo,
     observation,
@@ -263,6 +282,38 @@ test("Review counts changes and required findings, and follows staging and a res
     assert.equal(fact(panel.container, "review"), "1 of 9 changes staged");
     assert.ok(findingReads > reads, "the findings summary is read again after the status read");
     assert.ok(row(panel.container, "review"), "the list stayed open throughout");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("with nothing uncommitted Review names the branch's commits, follows a commit while open, and opens on Branch (#3035)", async () => {
+  required = 1;
+  const worktreeSession = { ...session, useWorktree: true } as SessionView;
+  const panel = await mount({ git: gitWith(2, 0, 1, 2), session: worktreeSession });
+  try {
+    // Uncommitted files read as before, whatever the branch's commit count.
+    assert.equal(fact(panel.container, "review"), "2 uncommitted changes, 1 required finding");
+    // Committing them is a new status read: nothing uncommitted, one more commit ahead.
+    await panel.setProps({ git: gitWith(0, 0, 2, 3) });
+    assert.equal(fact(panel.container, "review"), "3 commits ahead of main, 1 required finding");
+    assert.ok(row(panel.container, "review"), "the list stayed open throughout");
+    await act(async () => row(panel.container, "review")!.click());
+    await settle();
+    assert.equal(panel.state.mode, "review");
+    assert.equal(diffScopes[0], "all_branch", "Review opens on Branch, the work the row named");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("Review reads \"No changes yet\" with nothing uncommitted and nothing ahead, or outside a worktree (#3035)", async () => {
+  const panel = await mount({ git: gitWith(0, 0, 1, 0), session: { ...session, useWorktree: true } as SessionView });
+  try {
+    assert.equal(fact(panel.container, "review"), "No changes yet");
+    // A session working in place opens Review on Uncommitted, so its commits are not the row's fact.
+    await panel.setProps({ git: gitWith(0, 0, 2, 3), session: { ...session, useWorktree: false } as SessionView });
+    assert.equal(fact(panel.container, "review"), "No changes yet");
   } finally {
     await panel.dispose();
   }
