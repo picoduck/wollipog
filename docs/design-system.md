@@ -2776,10 +2776,14 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
   (`PanelPageTitle`) take the switcher's place, and that Back is the one back control at every width,
   a 400px panel and a 390px phone alike. The Artifacts and Web Preview tabs give way to the page, and
   the list waits mounted and hidden under it. Escape pops the page as Back does; focus returns to the
-  artifact's row (`data-panel-page-key`) with the list scrolled where it was. Under the header, the
-  panel's toolbar slot holds `.art-bar`, a 48px `.toolbar` (§4.4) of **Enlarge** (`Maximize2`, for an
-  image or HTML preview once shown) and **Download** at its trailing edge, with no back and no title
-  of its own, so it stays put while the meta line and the body scroll. Being a page, an open artifact
+  artifact's row (`data-panel-page-key`) with the list scrolled where it was. The page's actions
+  render in the header's action slot through `PanelHeaderActions` (§4.9, #3036), after the title and
+  before Expand Panel and Close Panel: **Enlarge** (`Maximize2`, for an image or HTML preview once
+  shown), then **Download** as an `.icon-btn` named "Download" that opens the menu below, then the
+  tool's own **About Browser**, which keeps the slot's trailing end as it does over the list. The
+  title truncates first; on a phone the actions follow it in the sheet's one bar, each a 44px target,
+  and Download's menu opens as a sheet. The page has no bar of its own: the meta line follows the
+  header directly and scrolls with the body. Being a page, an open artifact
   clears on a tool switch or when the panel closes, and the Browser reopens on its list; the tab, the
   address and the open page stay in panel scratch (#1202). Run detail opens the same preview in a
   `Modal` of size `lg` (a sheet on phones, §7.5), whose title is the artifact's name, with Enlarge
@@ -2787,7 +2791,8 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
 - **Meta line.** `.art-meta` (§11.3): the kind (`labelFor`), the size (`formatBytes`), who saved it
   by name ("Claude", "You", a member's name or Wollipog; never a session or user id) and, once the
   bytes match their checksum, `ShieldCheck` **Verified**. The MIME type and the hash are not shown.
-- **Download.** A `.btn` menu (§9.1): **Download Original File**, whose description is the one
+- **Download.** A menu (§9.1), opened from the Browser header's icon button and elsewhere from a `.btn`
+  labelled Download (Run detail's footer, a transcript row): **Download Original File**, whose description is the one
   warning ("Not redacted. It may contain secrets or personal data."), and **Copy Checksum**, which
   copies the full SHA-256. No paragraph under the meta line repeats the warning.
 - **Bodies.** Markdown with the shared renderer, without a leading H1 that repeats the title; text
