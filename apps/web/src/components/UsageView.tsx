@@ -1,8 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
-  SubscriptionUsageBucket,
-  SubscriptionUsageResponse,
-  SubscriptionUsageSourceView,
   UsageAggregationGranularity,
   UsageAggregationResponse,
   UsageDailyBudgetPolicy,
@@ -11,9 +8,6 @@ import type {
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { statusMeta, type StatusMeta } from "../status-meta.js";
-import { StatusBadge } from "./StatusBadge.js";
-import { redactPersonalIdentifiers } from "../personal-identifiers.js";
 import { useHasStore, useStoreSelector } from "../store.js";
 import {
   DRIVER_PRESENTATION,
@@ -30,23 +24,21 @@ import {
   formatShare,
   metricValue,
   processedTokens,
-  subscriptionPlanLabel,
   windowDays,
   type UsageBreakdownMode,
   type UsageMetric,
 } from "../usage-view-model.js";
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
-import { AccountIdentifier } from "./AccountIdentifier.js";
-import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { SegmentedControl, type SegmentedOption } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PageHeader } from "./PageHeader.js";
 import { destination, type UsageTab } from "../navigation.js";
-import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
 import { safeExternalHref } from "../external-href.js";
 import { CountBadge } from "./CountBadge.js";
-import { ChevronDownIcon } from "./Icons.js";
+import { Spinner } from "./common.js";
+import { ChevronDownIcon, RefreshIcon } from "./Icons.js";
+import { SubscriptionsTab, useSubscriptionUsage } from "./SubscriptionsTab.js";
 import { InfoPopover } from "./InfoPopover.js";
 import { handleRovingChoiceKeyDown, useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
@@ -63,26 +55,6 @@ const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adj
   day: { noun: "Day", adjective: "Daily" },
   week: { noun: "Week", adjective: "Weekly" },
 };
-
-/** A provider's availability in the shared usage vocabulary. A stale reading is still the last known
- * value, so it says so instead of claiming the provider is available now. */
-function usageSourceMeta(source: SubscriptionUsageSourceView): StatusMeta {
-  if (source.freshness === "stale" && source.state === "available") return statusMeta("usage", "stale");
-  return statusMeta("usage", source.state === "unavailable"
-    ? "temporarily_unavailable"
-    : source.state === "unauthenticated" ? "sign_in_required" : source.state);
-}
-
-function remainingFor(bucket: SubscriptionUsageBucket): number | undefined {
-  return bucket.remainingPercent ?? (bucket.usedPercent === undefined ? undefined : Math.max(0, 100 - bucket.usedPercent));
-}
-
-/** Which badge a subscription window carries, if any. The window's card and the Subscriptions
- * tab's count both read it, so the count is always the number of badges in that tab. */
-function bucketAttention(bucket: SubscriptionUsageBucket): "exhausted" | "approaching_limit" | null {
-  if (bucket.status === "exhausted" || remainingFor(bucket) === 0) return "exhausted";
-  return bucket.status === "warning" ? "approaching_limit" : null;
-}
 
 /** "Mon D, YYYY" in UTC, the zone every bucket on the page is cut in. */
 function coverageDate(timestamp: number): string {
@@ -170,9 +142,11 @@ function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void
  * Usage and Cost (#3010): API Usage at `/usage`, Subscriptions at `/usage/subscriptions`. In the
  * shell the tab is the route and `onSelectTab` navigates; a standalone render keeps it locally.
  */
-export function UsageView({ tab: routeTab, onSelectTab }: {
+export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   tab?: UsageTab;
   onSelectTab?: (tab: UsageTab | undefined) => void;
+  /** The empty Subscriptions tab's Open Connections; without it the link navigates by its href. */
+  onOpenConnections?: () => void;
 } = {}) {
   const [localTab, setLocalTab] = useState<UsageTab | undefined>(routeTab);
   const tab = onSelectTab ? routeTab : localTab;
@@ -182,7 +156,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     else setLocalTab(next);
   };
   const phone = useIsMobile();
-  const privacy = useAccountEmailPrivacy();
   const { confirm } = useFeedback();
   const api = useApi();
   const hasStore = useHasStore();
@@ -218,12 +191,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   const [dailyBudgetStatus, setDailyBudgetStatus] = useState<string | null>(null);
   const [dailyBudgetFailed, setDailyBudgetFailed] = useState(false);
   const [dailyBudgetSaving, setDailyBudgetSaving] = useState(false);
-  const [subscriptionData, setSubscriptionData] = useState<SubscriptionUsageResponse | null>(null);
-  const [subscriptionLoading, setSubscriptionLoading] = useState(true);
-  const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
-  const [subscriptionRefreshing, setSubscriptionRefreshing] = useState<string | null>(null);
-  const [subscriptionRefreshStatus, setSubscriptionRefreshStatus] = useState<string | null>(null);
-  const [subscriptionNow, setSubscriptionNow] = useState(Date.now());
+  const subscriptions = useSubscriptionUsage();
   // Which operation is actually in flight. `saving` spans the PUT and the refresh that follows it,
   // and the ranges are unavailable throughout — but the REASON differs, and a version that said
   // "saving retention" during the refresh described work that had already completed.
@@ -285,22 +253,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     return () => window.clearTimeout(timer);
   }, [days, granularity, load]);
 
-  const loadSubscriptions = useCallback(async () => {
-    setSubscriptionLoading(true);
-    setSubscriptionError(null);
-    try {
-      setSubscriptionData(await api.subscriptionUsage());
-    } catch (cause) {
-      setSubscriptionError(cause instanceof Error ? cause.message : "Unable to load subscription usage");
-    } finally {
-      setSubscriptionLoading(false);
-    }
-  }, [api]);
-
-  useEffect(() => {
-    void loadSubscriptions();
-  }, [loadSubscriptions]);
-
   const loadUsers = useCallback(async () => {
     try {
       const [budget, list] = await Promise.all([api.usageDailyBudget(), api.usageUsers()]);
@@ -338,33 +290,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       setDailyBudgetStatus(cause instanceof Error ? cause.message : "Unable to save the daily budget");
     } finally {
       setDailyBudgetSaving(false);
-    }
-  };
-
-  useEffect(() => {
-    const timer = window.setInterval(() => setSubscriptionNow(Date.now()), 30_000);
-    return () => window.clearInterval(timer);
-  }, []);
-
-  const refreshSubscriptions = async (target?: { runnerId: string; providerAccountId: string }) => {
-    setSubscriptionRefreshing(target ? `${target.runnerId}:${target.providerAccountId}` : "*");
-    setSubscriptionError(null);
-    setSubscriptionRefreshStatus(null);
-    try {
-      const refreshed = await api.refreshSubscriptionUsage(target);
-      setSubscriptionData(refreshed);
-      setSubscriptionNow(Date.now());
-      setSubscriptionRefreshStatus(
-        refreshed.refresh?.attempted === 0
-          ? "No online supported Machines were available to refresh. Last-known values are unchanged."
-          : refreshed.refresh?.failed
-            ? `${refreshed.refresh.failed} of ${refreshed.refresh.attempted} Machine refreshes failed. Last-known values remain visible.`
-            : "Subscription usage refreshed.",
-      );
-    } catch (cause) {
-      setSubscriptionError(cause instanceof Error ? cause.message : "Unable to refresh subscription usage");
-    } finally {
-      setSubscriptionRefreshing(null);
     }
   };
 
@@ -501,9 +426,7 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   };
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
-  const attention = (subscriptionData?.sources ?? [])
-    .flatMap((source) => source.buckets.map(bucketAttention))
-    .filter((badge) => badge !== null);
+  const attention = subscriptions.attention;
   const attentionTone = attention.includes("exhausted") ? "danger" : "warning";
   const rateSource = safeExternalHref(data?.pricing?.source);
   const coverageStartedAt = data?.retention.coverageStartedAt ?? knownRetention?.coverageStartedAt;
@@ -605,6 +528,12 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       <PageHeader
         title={destination("usage").name}
         description={destination("usage").description}
+        // On phones Refresh All leaves the tab's head for the app bar's More Actions (#3014).
+        menu={phone && tab === "subscriptions" && (subscriptions.data?.sources.length ?? 0) > 0 ? [{
+          label: "Refresh Subscriptions",
+          icon: subscriptions.refreshing ? <Spinner decorative /> : <RefreshIcon size={16} />,
+          onClick: () => void subscriptions.refresh(),
+        }] : []}
         tabs={(
           <TabList label={destination("usage").name} onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
             {tabs.map(({ id, key, label, count }) => (
@@ -630,130 +559,8 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       />
 
       {tab === "subscriptions" ? (
-        <section id="usage-subscriptions-panel" role="tabpanel" aria-labelledby="usage-subscriptions-tab" className="subscription-usage">
-          <div className="subscription-usage-heading">
-            <button
-              type="button"
-              className="btn ghost"
-              disabled={subscriptionRefreshing !== null}
-              onClick={() => void refreshSubscriptions()}
-            >
-              {subscriptionRefreshing === "*" ? "Refreshing…" : "Refresh"}
-            </button>
-          </div>
-          {subscriptionLoading && !subscriptionData && <div className="usage-state" role="status">Loading subscription usage…</div>}
-          {subscriptionError && <div className="usage-state error" role="alert">{subscriptionError}</div>}
-          {subscriptionRefreshStatus && <div className="subscription-usage-status" role="status">{subscriptionRefreshStatus}</div>}
-          {subscriptionData && subscriptionData.sources.length === 0 && (
-            <div className="usage-state">No Codex or Claude subscription sources are configured on the Machines you can access.</div>
-          )}
-          {subscriptionData && subscriptionData.sources.length > 0 && (
-            <div className="subscription-source-grid">
-              {subscriptionData.sources.map((source) => (
-                <article className="runner-card subscription-source" key={`${source.runnerId}:${source.sourceId}`}>
-                  <header>
-                    <div>
-                      <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${subscriptionPlanLabel(source.plan)}` : ""}</h4>
-                      <p>{source.agentName} on {source.runnerName}</p>
-                      {source.accountLabel && (
-                        <p className="subscription-account">
-                          <strong>Account:</strong>{" "}
-                          {/* Without an account binding the label is the provider-reported email. */}
-                          <AccountIdentifier
-                            identity={`${source.runnerId}:${source.sourceId}:${source.providerAccountId ?? ""}`}
-                            value={source.accountLabel}
-                            label="Account Email"
-                            kind="email"
-                            {...(source.providerAccountId ? {} : { sensitive: true })}
-                          />
-                        </p>
-                      )}
-                    </div>
-                    <StatusBadge meta={usageSourceMeta(source)} />
-                    {source.freshness === "stale" && source.state !== "available" && (
-                      // An old reading of any other state is still old; say so beside it.
-                      <StatusBadge tone="neutral" noDot label="Stale" title="This is the last reading the provider reported." />
-                    )}
-                    {source.provider === "codex" && source.providerAccountId && (
-                      <button
-                        type="button"
-                        className="btn ghost sm"
-                        disabled={subscriptionRefreshing !== null}
-                        onClick={() => void refreshSubscriptions({
-                          runnerId: source.runnerId,
-                          providerAccountId: source.providerAccountId!,
-                        })}
-                      >
-                        {subscriptionRefreshing === `${source.runnerId}:${source.providerAccountId}` ? "Refreshing…" : "Refresh Account"}
-                      </button>
-                    )}
-                  </header>
-                  {source.detail && <p className="subscription-detail">{privacy.hide ? redactPersonalIdentifiers(source.detail) : source.detail}</p>}
-                  {source.buckets.length > 0 && (
-                    <dl className="facts">
-                      {source.buckets.map((bucket) => {
-                        const remaining = remainingFor(bucket);
-                        const badge = bucketAttention(bucket);
-                        const warning = badge === "approaching_limit";
-                        const exhausted = badge === "exhausted";
-                        // A window the provider never measured must not put a non-value where every
-                        // sibling shows a percentage, or it reads as a figure that failed to parse.
-                        // The dash marks the measurement as absent and the reset time — the only
-                        // fact there is — takes the prominent slot instead.
-                        const measured = remaining !== undefined;
-                        const resetTitle = bucket.resetsAt ? new Date(bucket.resetsAt).toLocaleString() : "";
-                        const resetText = bucket.resetsAt
-                          ? `${subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · ${resetTitle}`
-                          : "";
-                        return (
-                          <div
-                            // Kept as one template literal: the stylesheet guardrail scans these
-                            // statically for class producers and does not see an array join.
-                            className={`subscription-bucket${exhausted ? " exhausted" : warning ? " warning" : ""}${measured ? "" : " unmeasured"}`}
-                            key={bucket.id}
-                          >
-                            <dt>{bucket.label}</dt>
-                            <dd>
-                              {measured ? (
-                                <><strong>{Math.round(remaining)}% Remaining</strong><span>{Math.round(bucket.usedPercent ?? 100 - remaining)}% Used</span></>
-                              ) : (
-                                <span className="subscription-unmeasured">
-                                  <span aria-hidden="true">—</span>
-                                  <span className="sr-only">Utilization Not Reported</span>
-                                </span>
-                              )}
-                              {exhausted && <StatusBadge meta={statusMeta("usage", "exhausted")} />}
-                              {!exhausted && warning && <StatusBadge meta={statusMeta("usage", "approaching_limit")} />}
-                              {bucket.resetsAt && (
-                                measured
-                                  ? <span title={resetTitle}>{resetText}</span>
-                                  : <strong title={resetTitle}>{resetText}</strong>
-                              )}
-                            </dd>
-                          </div>
-                        );
-                      })}
-                    </dl>
-                  )}
-                  {source.credits && (
-                    <p className="subscription-detail">
-                      Credits: {source.credits.unlimited ? "Unlimited" : source.credits.balance ?? (source.credits.hasCredits ? "Available" : "None")}
-                    </p>
-                  )}
-                  {source.spendControls?.map((control) => (
-                    <p className="subscription-detail" key={control.id}>
-                      {control.reached && <><StatusBadge meta={statusMeta("usage", "limit_reached")} />{" "}</>}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
-                      {control.resetsAt ? ` · ${subscriptionResetLabel(control.resetsAt, subscriptionNow)}` : ""}
-                    </p>
-                  ))}
-                  <footer>
-                    Last provider update: {new Date(source.fetchedAt).toLocaleString()}
-                    {source.runnerStatus === "offline" ? " · Machine Offline" : ""}
-                  </footer>
-                </article>
-              ))}
-            </div>
-          )}
+        <section id="usage-subscriptions-panel" role="tabpanel" aria-labelledby="usage-subscriptions-tab" className="subscriptions">
+          <SubscriptionsTab usage={subscriptions} phone={phone} onOpenConnections={onOpenConnections} />
         </section>
       ) : (
         <div id="usage-api-panel" role="tabpanel" aria-labelledby="usage-api-tab">

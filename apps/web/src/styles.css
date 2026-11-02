@@ -17313,33 +17313,199 @@ button.review-finding-location {
 .usage-toolbar > .btn > span { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .usage-state { padding: 28px; color: var(--text-dim); text-align: center; }
 .usage-state.error { color: var(--red); }
-.subscription-usage { margin: 0 0 24px; padding: 16px; border: 1px solid var(--border); border-radius: var(--radius); background: var(--bg-elev); }
-.subscription-usage-heading { display: flex; align-items: flex-start; justify-content: flex-end; gap: 16px; }
-.subscription-usage-status { margin-top: 10px; color: var(--text-dim); font-size: var(--text-sm); }
-.subscription-source-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; margin-top: 14px; }
-.subscription-source { padding: 14px; min-width: 0; }
-.subscription-source > header { display: flex; flex-wrap: wrap; align-items: flex-start; justify-content: space-between; gap: 10px; }
-.subscription-source > header > div { flex: 1 1 16rem; min-width: 0; }
-.subscription-source > header > .btn { white-space: nowrap; }
-.subscription-source h4 { margin: 0; }
-.subscription-source header p, .subscription-source footer { margin: 4px 0 0; color: var(--text-dim); font-size: var(--text-xs); }
-.subscription-source .subscription-account { overflow-wrap: anywhere; }
-.subscription-account strong { color: var(--text); font-weight: 650; }
-.subscription-source footer { margin-top: 12px; }
-.subscription-detail { margin: 10px 0 0; color: var(--text-dim); font-size: var(--text-sm); }
-.subscription-source > .facts { margin-top: var(--space-3); }
-.subscription-bucket dt { font-size: var(--text-sm); font-weight: 650; }
-.subscription-bucket dd { display: grid; gap: 2px; margin: 0; font-size: var(--text-xs); color: var(--text-dim); }
-.subscription-bucket dd strong { color: var(--text); font-size: var(--text-md); }
-/* An unmeasured window: the dash sits at the dim weight of a missing value, never the size and
-   colour `dd strong` gives a real percentage, so the eye reads it as absent rather than as zero.
-   The promoted reset time keeps `strong`, which is what that window does have to say. Declared
-   BEFORE the status rules on purpose — they carry equal specificity, so this governs size and
-   weight while a warning or exhausted window still overrides the colour. */
-.subscription-unmeasured { color: var(--text-dim); font-size: var(--text-md); line-height: 1.2; }
-.subscription-bucket.unmeasured dd strong { font-size: var(--text-xs); font-weight: 650; color: var(--text-dim); }
-.subscription-bucket.warning dd strong { color: var(--yellow); }
-.subscription-bucket.exhausted dd strong { color: var(--red); }
+/* Subscriptions (#3014, §5.1, §5.5, §11.6): "{N} Accounts" over one surface per account, a row per
+   usage window, then the sources with no windows folded into one disclosure. */
+.subscriptions {
+  display: grid;
+  gap: var(--space-4);
+  min-width: 0;
+}
+.subscriptions-heading {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+}
+.subscriptions-updated {
+  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+}
+.subscription-plans {
+  display: grid;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.subscription-plan { container-type: inline-size; }
+/* The title and its one badge, the meta line under them, and the account's controls at the end. */
+.subscription-plan-head {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  padding: var(--space-3) var(--space-4);
+}
+.subscription-plan-heading {
+  display: flex;
+  grid-column: 1;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.subscription-plan-title {
+  min-width: 0;
+  margin: 0;
+  overflow: hidden;
+  font: var(--type-title);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subscription-plan-heading > .status { flex: none; }
+.subscription-plan-meta {
+  display: flex;
+  grid-column: 1;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-width: 0;
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.subscription-plan-machine,
+.subscription-plan-account {
+  display: inline-flex;
+  align-items: center;
+  gap: var(--space-1);
+  min-width: 0;
+}
+.subscription-plan-machine > svg,
+.subscription-plan-account > svg { flex: none; }
+/* 8px apart, so each small icon button keeps its 44px touch target (§2.8). */
+.subscription-plan-actions {
+  display: flex;
+  grid-column: 2;
+  grid-row: 1 / span 2;
+  align-items: center;
+  gap: var(--space-2);
+}
+.subscription-windows {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+/* One window: its name (and badge), the meter of what is left, "N% left" and the reset. The columns
+   are fixed, so the meters of every account line up. */
+.subscription-window {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) minmax(4rem, 10rem) 4.5rem 9.5rem;
+  align-items: center;
+  gap: var(--space-1) var(--space-3);
+  min-height: var(--row-h);
+  padding: var(--space-2) var(--space-4);
+  box-shadow: inset 0 1px 0 var(--border);
+}
+.subscription-window-name {
+  display: flex;
+  grid-column: 1;
+  align-items: center;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.subscription-window-label {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.subscription-window-name > .status { flex: none; }
+.subscription-window > .meter { grid-column: 2; }
+.subscription-window-left {
+  grid-column: 3;
+  font-variant-numeric: tabular-nums;
+  text-align: right;
+  white-space: nowrap;
+}
+/* An unmeasured window says so where the meter and its figure would be. */
+.subscription-window.unmeasured > .subscription-window-left {
+  grid-column: 2 / span 2;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-align: left;
+}
+.subscription-window-reset {
+  grid-column: 4;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+/* A narrow surface puts the name on its own line and the meter, figure and reset under it. */
+@container (max-width: 520px) {
+  .subscription-window {
+    grid-template-columns: minmax(0, 1fr) auto auto;
+  }
+  .subscription-window-name { grid-column: 1 / -1; }
+  .subscription-window > :not(.subscription-window-name) { grid-row: 2; }
+  .subscription-window > .meter { grid-column: 1; }
+  .subscription-window-left { grid-column: 2; }
+  .subscription-window.unmeasured > .subscription-window-left { grid-column: 1 / span 2; }
+  .subscription-window-reset { grid-column: 3; }
+}
+/* The quiet end of a surface: the provider's note, then credits and spend controls on one line. */
+.subscription-plan-note,
+.subscription-plan-extras {
+  margin: 0;
+  padding: var(--space-2) var(--space-4) var(--space-3);
+  box-shadow: inset 0 1px 0 var(--border);
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.subscription-plan-note + .subscription-plan-extras {
+  padding-top: 0;
+  box-shadow: none;
+}
+.subscription-plan-extras {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--space-1) var(--space-3);
+}
+.subscription-unavailable-list {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.subscription-unavailable-row {
+  display: flex;
+  align-items: center;
+  gap: var(--space-3);
+  min-height: var(--row-h-2);
+  padding: var(--space-2) var(--space-4);
+}
+.subscription-unavailable-row + .subscription-unavailable-row { box-shadow: inset 0 1px 0 var(--border); }
+.subscription-unavailable-text {
+  display: grid;
+  flex: 1;
+  gap: var(--space-0-5);
+  min-width: 0;
+}
+.subscription-unavailable-name { font: var(--type-body-strong); }
+.subscription-unavailable-reason {
+  overflow-wrap: anywhere;
+  color: var(--text-dim);
+  font: var(--type-small);
+}
+.subscription-unavailable-row > .status { flex: none; }
+/* Loading (§12.3): three two-line skeleton rows in one surface. */
+.subscription-skeleton-row {
+  height: var(--row-h-2);
+  flex-direction: column;
+  align-items: flex-start;
+  justify-content: center;
+  gap: var(--space-2);
+}
 .usage-table-wrap:focus-visible { outline: var(--focus-width) solid var(--focus); outline-offset: 2px; }
 .usage-table-wrap {
   overflow: auto;
@@ -17451,13 +17617,6 @@ button.review-finding-location {
 @media (max-width: 700px) {
   .usage-breakdowns { grid-template-columns: minmax(0, 1fr); }
   .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
-  .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
-  /* A narrow card stacks each window's label over its figures, as it always has. */
-  .subscription-source > .facts {
-    grid-template-columns: minmax(0, 1fr);
-    row-gap: var(--space-1);
-  }
-  .subscription-source > .facts > div + div > dt { margin-top: var(--space-2); }
 }
 
 @media (max-width: 340px) {

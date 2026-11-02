@@ -2690,7 +2690,10 @@ pointers only; its tooltip names the chord.
 - `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention. The
   context window is warning from 75% and danger from 90%, and its ring takes the same tone classes
   on `.context-control`; below 75% the ring's fill is the neutral `--text-dim` on a `--bg-elev-3`
-  track.
+  track. A subscription window fills by what is left (`usageLeftPercent()`, "N% left"): warning
+  (Approaching Limit) under 25% left or when the provider warns, danger (Exhausted) when nothing is
+  left. Switch Account and Usage's Subscriptions tab read it through one `usageWindowAttention()`,
+  so a window never reads differently in the two (#3014).
 - The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
   and a Title Case `aria-label`. A meter that compares a level across rows, such as All Machines'
   Capacity (§6.1, #2986), is instead `role="img"` named by its level in sentence case ("29 of 40

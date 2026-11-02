@@ -255,116 +255,140 @@ test("the Subscriptions tab counts its Approaching Limit and Exhausted badges", 
   const tab = page.getByRole("tab", { name: /^Subscriptions/ });
   await tab.click();
   await expect(page).toHaveURL(/tab=subscriptions/);
-  const badges = page.locator("#usage-subscriptions-panel .subscription-bucket .status")
+  const badges = page.locator("#usage-subscriptions-panel .subscription-window .status")
     .filter({ hasText: /^(Approaching Limit|Exhausted)$/ });
-  const count = await badges.count();
-  expect(count).toBeGreaterThan(0);
-  await expect(tab.locator(".count-badge")).toHaveText(String(count));
-  await expect(tab).toHaveAccessibleName(`Subscriptions, ${count} Need Attention`);
+  await expect(badges).toHaveCount(3);
+  await expect(tab.locator(".count-badge")).toHaveText("3");
+  await expect(tab).toHaveAccessibleName("Subscriptions, 3 Need Attention");
   await page.screenshot({ path: `${SHOT}/desktop-1440-dark-subscriptions.png`, fullPage: true });
   await page.goBack();
   await expect(page.getByRole("tab", { name: "API Usage" })).toHaveAttribute("aria-selected", "true");
 });
 
-test("subscription cards show provider allowances in presentation order (#223, #224)", async ({ page }) => {
+test("each account is one surface with a row per window, in the provider's order (#223, #224, #3014)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
-  const cards = page.locator(".subscription-source");
-  await expect(cards).toHaveCount(4);
+  const panel = page.locator("#usage-subscriptions-panel");
+  await expect(panel.locator(".section-title")).toHaveText("3 Accounts");
+  await expect(panel.locator(".section-head")).toContainText(/Updated \d{1,2}:\d\d/);
+  const surfaces = panel.locator(".subscription-plan");
+  await expect(surfaces).toHaveCount(3);
 
   // #223: the runner normalizes the account-wide Codex group before model-specific groups, and
-  // the shared desktop/mobile renderer preserves that order without matching display labels.
-  const codex = cards.filter({ hasText: "Codex App Server on build-box" });
-  await expect(codex.locator("h4")).toHaveText("Codex — Pro");
+  // the renderer preserves that order without matching display labels.
+  const codex = surfaces.filter({ hasText: "Codex App Server on build-box" });
+  await expect(codex.locator(".subscription-plan-title")).toHaveText("Codex Pro");
   await expect(codex.getByRole("button", { name: "Refresh Account" })).toBeVisible();
-  await expect(codex.locator(".subscription-bucket dt")).toHaveText([
+  await expect(codex.locator(".subscription-window-label")).toHaveText([
     "Codex — Weekly",
     "GPT-5.3-Codex-Spark — 5-Hour Window",
     "GPT-5.3-Codex-Spark — Weekly",
   ]);
+  const exhausted = codex.locator(".subscription-window").nth(1);
+  await expect(exhausted.locator(".status")).toHaveText("Exhausted");
+  await expect(exhausted.locator(".meter")).toHaveClass("meter t-danger");
+  await expect(exhausted.locator(".subscription-window-left")).toHaveText("0% left");
+  // Credits and spend controls are one quiet line at the end.
+  await expect(codex.locator(".subscription-plan-extras")).toHaveText("Credits: 0Monthly Limit: $12 of $50");
+  // A healthy account wears no badge.
+  await expect(codex.locator(".subscription-plan-head .status")).toHaveCount(0);
 
-  // A current Claude build: every window it tracks is listed independently, with real percentages
-  // rather than the bare "Allowance Reported" fallback.
-  const current = cards.filter({ hasText: "Claude Code on build-box" }).first();
-  await expect(current.locator("h4")).toHaveText("Claude — Max");
+  const current = surfaces.filter({ hasText: "Claude Code on build-box" }).first();
+  await expect(current.locator(".subscription-plan-title")).toHaveText("Claude Max");
   // #1648: account emails are masked by default and revealed only by an explicit action.
-  await expect(current.locator(".subscription-account")).not.toContainText("primary@example.com");
+  await expect(current.locator(".subscription-plan-account")).not.toContainText("primary@example.com");
   await current.getByRole("button", { name: "Show Account Email" }).click();
-  await expect(current.locator(".subscription-account .pid-value")).toHaveText("primary@example.com");
+  await expect(current.locator(".subscription-plan-account .pid-value")).toHaveText("primary@example.com");
   await expect(current.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
-  const buckets = current.locator(".subscription-bucket");
-  await expect(buckets).toHaveCount(3);
-  await expect(buckets.nth(0)).toContainText("Five-Hour Window");
-  await expect(buckets.nth(0)).toContainText("17% Remaining");
-  await expect(buckets.nth(0)).toContainText("83% Used");
-  await expect(buckets.nth(0)).toContainText("Approaching Limit");
-  await expect(buckets.nth(1)).toContainText("Weekly — All Models");
-  await expect(buckets.nth(1)).toContainText("54% Remaining");
-  await expect(buckets.nth(2)).toContainText("Weekly — Extra Usage");
-  await expect(buckets.nth(2)).toContainText("88% Remaining");
-  await expect(current).not.toContainText("Allowance Reported");
+  const windows = current.locator(".subscription-window");
+  await expect(windows).toHaveCount(3);
+  await expect(windows.locator(".subscription-window-left")).toHaveText(["17% left", "54% left", "88% left"]);
+  await expect(windows.nth(0).locator(".status")).toHaveText("Approaching Limit");
+  await expect(windows.nth(0).locator(".meter")).toHaveClass("meter t-warning");
+  await expect(windows.nth(0).locator(".subscription-window-reset")).toHaveText(/^Resets in \d hours?$/);
+  // The full reset time is the tooltip, to the minute.
+  await expect(windows.nth(0).locator(".subscription-window-reset")).toHaveAttribute("title", /\d:\d\d [AP]M$/);
+  await expect(current).not.toContainText(/Remaining|Used/);
 
-  // A build that reports resets but no utilization says so, instead of reading as a source that
-  // has not answered yet.
-  const resetOnly = cards.filter({ hasText: "Claude Code (Ubuntu)" }).first();
-  await expect(resetOnly.locator(".subscription-account")).not.toContainText("alternate@example.com");
-  await expect(resetOnly.getByRole("button", { name: "Show Account Email" })).toBeVisible();
-  await expect(resetOnly.getByRole("button", { name: "Refresh Account" })).toHaveCount(0);
-  await expect(resetOnly).toContainText("without utilization percentages");
-  await expect(resetOnly).not.toContainText("after the first provider response");
-
-  // #872: the unmeasured window marks its missing percentage rather than putting a non-value
-  // where every sibling shows one, and its reset time becomes the prominent fact instead.
-  const unmeasured = resetOnly.locator(".subscription-bucket.unmeasured");
+  // A build that reports resets but no utilization says so on each window.
+  const resetOnly = surfaces.filter({ hasText: "Claude Code (Ubuntu)" }).first();
+  const unmeasured = resetOnly.locator(".subscription-window.unmeasured");
   await expect(unmeasured).toHaveCount(2);
-  await expect(resetOnly).not.toContainText("Allowance Reported");
-  await expect(unmeasured.first().locator(".subscription-unmeasured")).toHaveText("—Utilization Not Reported");
-  await expect(unmeasured.first().locator("dd strong")).toContainText("Resets in");
+  await expect(unmeasured.locator(".subscription-window-left")).toHaveText(["No percentage reported", "No percentage reported"]);
+  await expect(unmeasured.locator(".subscription-window-reset")).toHaveText([/^Resets in /, /^Resets in /]);
+  await expect(unmeasured.nth(1).locator(".status")).toHaveText("Approaching Limit");
+  await expect(resetOnly).toContainText("without utilization percentages");
 
-  // A status-only warning is still unmeasured, and its promoted reset keeps the warning colour:
-  // the size rule is declared before the status rules so only weight and size come from it.
-  const warned = unmeasured.nth(1);
-  await expect(warned).toHaveClass(/warning/);
-  await expect(warned).toContainText("Approaching Limit");
-  const warnColour = await warned.locator("dd strong").evaluate((el) => getComputedStyle(el).color);
-  const plainColour = await unmeasured.first().locator("dd strong").evaluate((el) => getComputedStyle(el).color);
-  expect(warnColour).not.toBe(plainColour);
-  // A measured window is untouched: its percentage keeps the prominent slot.
-  await expect(buckets.nth(0)).not.toHaveClass(/unmeasured/);
-  await expect(buckets.nth(0).locator("dd strong").first()).toHaveText("17% Remaining");
+  // The sources with no windows fold into one line.
+  const unavailable = panel.locator("details.disclosure");
+  await expect(unavailable.locator("summary")).toHaveText("3 Sources Unavailable");
+  await expect(unavailable.locator(".subscription-unavailable-row").first()).toBeHidden();
+  await unavailable.locator("summary").click();
+  await expect(unavailable.locator(".subscription-unavailable-name")).toHaveText([
+    "Claude Code (Debian) on build-box",
+    "Claude Code on laptop",
+    "Codex App Server on ci-runner",
+  ]);
+  await expect(unavailable.locator(".subscription-unavailable-row").nth(1)).toContainText(/The machine is offline\. Last update .+\./);
+  await expect(unavailable.locator(".subscription-unavailable-row .status")).toHaveText(["Unavailable", "Offline", "Not Applicable"]);
+  await panel.screenshot({ path: `${SHOT}/subscriptions-dark.png` });
 
-  // A source that answered without allowance headers gets its own explanation.
-  const noHeaders = cards.filter({ hasText: "Claude Code (Debian)" }).first();
-  await expect(noHeaders.locator(".subscription-account")).toHaveCount(0);
-  await expect(noHeaders).toContainText("Temporarily Unavailable");
-  await expect(noHeaders).toContainText("answered without reporting subscription allowances");
-  await expect(noHeaders).not.toContainText("after the first provider response");
-
-  await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-dark.png` });
   await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&theme=light");
-  await expect(current.locator(".subscription-bucket").first()).toContainText("17% Remaining");
-  await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-light.png` });
-
-  await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
-  const mobileCurrent = page.locator(".subscription-source").filter({ hasText: "Claude Code on build-box" }).first();
-  // A reload starts hidden again, including on the mobile layout.
-  await expect(mobileCurrent.locator(".subscription-account")).not.toContainText("primary@example.com");
-  await expect(mobileCurrent.getByRole("button", { name: "Show Account Email" })).toBeVisible();
-  await expect(mobileCurrent.locator("h4")).toHaveText("Claude — Max");
-  await expect(mobileCurrent).toBeVisible();
-  await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-mobile.png` });
+  await expect(page.locator(".subscription-window-left").first()).toHaveText("58% left");
+  await page.locator("#usage-subscriptions-panel").screenshot({ path: `${SHOT}/subscriptions-light.png` });
 });
 
-test("a missing selected installation appears as one unsupported usage source", async ({ page }) => {
+test("Refresh All keeps its label and width while busy, and the result is a toast (#3014)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&refreshFailed=2");
+  const refresh = page.getByRole("button", { name: "Refresh All" });
+  const before = (await refresh.boundingBox())!;
+  await refresh.click();
+  await expect(refresh).toHaveAttribute("aria-busy", "true");
+  await expect(refresh).toHaveText("Refresh All");
+  const busy = (await refresh.boundingBox())!;
+  expect(busy.width).toBe(before.width);
+  await expect(refresh).not.toHaveAttribute("aria-busy");
+  await expect(page.locator(".toast")).toContainText("2 of 3 machines couldn't refresh. The last known values are still shown.");
+  await expect(page.locator("#usage-subscriptions-panel")).not.toContainText("couldn't refresh");
+});
+
+test("on a phone Refresh All is the app bar's Refresh Subscriptions (#3014)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
+  await expect(page.locator(".subscription-plan").first()).toBeVisible();
+  await expect(page.getByRole("button", { name: "Refresh All" })).toHaveCount(0);
+  await page.getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Refresh Subscriptions" }).click();
+  await expect(page.locator(".toast")).toContainText("Subscriptions refreshed.");
+});
+
+test("an empty tab points to Connections and offers no refresh (#3014)", async ({ page }) => {
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/usage-view-e2e.html?tab=subscriptions");
+    const panel = page.locator("#usage-subscriptions-panel");
+    await expect(panel).toContainText("No Subscriptions Connected");
+    await expect(panel.getByRole("link", { name: "Open Connections" })).toHaveAttribute("href", "/connections/machines");
+    await expect(page.getByRole("button", { name: /Refresh/ })).toHaveCount(0);
+    await expect(page.getByRole("button", { name: "More Actions" })).toHaveCount(0);
+  }
+});
+
+test("a missing selected installation appears as one unsupported source", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&selectedUnavailable=1");
-  const codex = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
+  await expect(page.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" })).toHaveCount(0);
+  const unavailable = page.locator("#usage-subscriptions-panel details.disclosure");
+  await expect(unavailable.locator("summary")).toHaveText("4 Sources Unavailable");
+  await unavailable.locator("summary").click();
+  const codex = unavailable.locator(".subscription-unavailable-row").filter({ hasText: "Codex App Server on build-box" });
   await expect(codex).toHaveCount(1);
   await expect(codex).toContainText("The selected harness installation is unavailable");
-  await codex.screenshot({ path: `${SHOT}/selected-installation-unavailable-desktop.png` });
+  await expect(codex.locator(".status")).toHaveText("Unsupported");
+  await unavailable.screenshot({ path: `${SHOT}/selected-installation-unavailable-desktop.png` });
 
   await page.setViewportSize({ width: 390, height: 844 });
   await expect(codex).toBeVisible();
-  await codex.screenshot({ path: `${SHOT}/selected-installation-unavailable-mobile.png` });
+  await unavailable.screenshot({ path: `${SHOT}/selected-installation-unavailable-mobile.png` });
 });

@@ -16,9 +16,28 @@ export function usageLeftPercent(bucket: SubscriptionUsageBucket): number | unde
 }
 
 /**
+ * The badge a usage window needs, if any, in the usage vocabulary (§11.2): Exhausted when nothing is
+ * left or the provider says so, Approaching Limit when the provider warns or less than
+ * `ACCOUNT_USAGE_WARNING_PERCENT` is left. Switch Account's meters and the Subscriptions tab both
+ * read it, so one window never reads differently in the two places.
+ */
+export function usageWindowAttention(bucket: SubscriptionUsageBucket): "exhausted" | "approaching_limit" | null {
+  const left = usageLeftPercent(bucket);
+  if (bucket.status === "exhausted" || left === 0) return "exhausted";
+  if (bucket.status === "warning" || (left !== undefined && left < ACCOUNT_USAGE_WARNING_PERCENT)) return "approaching_limit";
+  return null;
+}
+
+/** A usage window's `.meter` class with its tone (§11.6): danger when exhausted, warning when close. */
+export function usageMeterClass(bucket: SubscriptionUsageBucket): string {
+  const attention = usageWindowAttention(bucket);
+  return attention === "exhausted" ? "meter t-danger" : attention === "approaching_limit" ? "meter t-warning" : "meter";
+}
+
+/**
  * One 6px `.meter` per usage window, each under "<Window> · N% left" in tabular figures (§11.6).
- * A window with less than a quarter left is drawn in the warning tone; a reading that is no longer
- * current says "Last Known" rather than passing for today's headroom.
+ * A window takes the tone of its `usageWindowAttention()`; a reading that is no longer current says
+ * "Last Known" rather than passing for today's headroom.
  */
 export function AccountUsageMeters({ buckets, stale = false }: {
   buckets: readonly SubscriptionUsageBucket[];
@@ -35,7 +54,7 @@ export function AccountUsageMeters({ buckets, stale = false }: {
             </span>
             {left !== undefined && (
               <span
-                className={`meter${left < ACCOUNT_USAGE_WARNING_PERCENT ? " t-warning" : ""}`}
+                className={usageMeterClass(bucket)}
                 role="progressbar"
                 aria-valuemin={0}
                 aria-valuemax={100}
