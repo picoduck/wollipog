@@ -150,20 +150,20 @@ test.describe("at 1440×900", () => {
     }
   });
 
-  test("a crashed tabbed destination keeps its working header, so nothing below it moves", async ({ page }) => {
-    for (const [path, title, module, width] of [
-      ["/automations", "Automations", "AutomationsView", 1440],
-      ["/usage", "Usage and Cost", "UsageView", 1440],
-      ["/connections", "Connections", "RunnersView", 1440],
-      // Settings shows its section tabs only in the compact tier.
-      ["/settings", "Settings", "SettingsView", 1024],
-      // A phone's app bar keeps the tab row under it too.
-      ["/automations", "Automations", "AutomationsView", 390],
-      ["/usage", "Usage and Cost", "UsageView", 390],
-      ["/connections", "Connections", "RunnersView", 390],
-      // Sessions is in the shell's own bundle, so its view throws while rendering instead.
-      ["/inbox", "Sessions", "InboxView", 1440],
-    ] as const) {
+  for (const [path, title, module, width] of [
+    ["/automations", "Automations", "AutomationsView", 1440],
+    ["/usage", "Usage and Cost", "UsageView", 1440],
+    ["/connections", "Connections", "RunnersView", 1440],
+    // Settings shows its section tabs only in the compact tier.
+    ["/settings", "Settings", "SettingsView", 1024],
+    // A phone's app bar keeps the tab row under it too.
+    ["/automations", "Automations", "AutomationsView", 390],
+    ["/usage", "Usage and Cost", "UsageView", 390],
+    ["/connections", "Connections", "RunnersView", 390],
+    // Sessions is in the shell's own bundle, so its view throws while rendering instead.
+    ["/inbox", "Sessions", "InboxView", 1440],
+  ] as const) {
+    test(`a crashed ${title} at ${width}px keeps its working header, so nothing below it moves`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await openDestination(page, path, title);
       const header = page.locator(".page-header");
@@ -191,9 +191,8 @@ test.describe("at 1440×900", () => {
       await expect(header.locator(".page-tabs")).toHaveText("");
       await expect(header.locator(".page-tabs").getByRole("tab")).toHaveCount(0);
       await expect(header.locator(".page-tabs").getByRole("link")).toHaveCount(0);
-      await page.unroute(url);
-    }
-  });
+    });
+  }
 
   test("Settings content is a form-width column that scrolls with the page, once", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 420 });
