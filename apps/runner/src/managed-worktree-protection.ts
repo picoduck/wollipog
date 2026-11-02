@@ -3044,7 +3044,9 @@ export function commandTargetsGuardState(
       // opaque variables: that would lose both HOME handling and tracked assignments (#4031).
       // Refuse the entire reading, including non-path uses, rather than emulate Bash expansion.
       // This also covers partial operands, assignment values and nested operator expressions.
-      if (!/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!_-])$/u.test(name)) {
+      // An empty name is shell-quote's sentinel for a bare `$` or `$(`, not an operator
+      // expression. Keep its original unresolved reading; command substitution is out of scope.
+      if (name !== "" && !/^(?:[A-Za-z_][A-Za-z0-9_]*|[0-9]+|[@*#?$!_-])$/u.test(name)) {
         throw new UnclassifiableCommandError("shell parameter operators cannot be inspected");
       }
       return name === "HOME" ? homedir() : reference(name);

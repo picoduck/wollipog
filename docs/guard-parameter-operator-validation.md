@@ -8,58 +8,19 @@ The protection suite has no direct veto calls. Counts are calls, not unique comm
 
 | Corpus | Calls | Base Refused / Allowed | Head Refused / Allowed | Allow to Refuse | Refuse to Allow |
 | --- | ---: | ---: | ---: | ---: | ---: |
-| Existing | 9363 | 7637 / 1726 | 7677 / 1686 | 40 | 0 |
-| New operators and controls | 150 | 7 / 143 | 98 / 52 | 91 | 0 |
+| Existing | 9363 | 7637 / 1726 | 7640 / 1723 | 3 | 0 |
+| New operators and controls | 159 | 9 / 150 | 100 / 59 | 91 | 0 |
 
-The existing changes are generated inputs for which shell-quote invokes the callback with an
-empty or otherwise non-plain parameter name (including a bare dollar). These extra refusals are
-intentional: the callback accepts only the explicitly enumerated plain-parameter grammar.
-Repeated commands account for the difference between call counts and the distinct listings below.
+The three existing changes are generated inputs for which shell-quote returns a non-plain name
+starting with digits and continuing with letters (`6u`, `0u`, `7Td`). Their extra refusals are
+intentional. The empty-name sentinel is not a parameter expression: bare dollar/command substitution
+syntax retains its original unresolved reading. Repeated commands account for differences between
+call counts and distinct listings below.
 
 Every distinct existing allow-to-refuse command (JSON strings preserve exact escaping):
 
 ```json
-[
-  "{$/=8{g",
-  "tkhf%$",
-  "I$]5\\78<",
-  "a$.",
-  "$",
-  "mX$|",
-  "r|$",
-  ">$,",
-  "$^@",
-  "vlv$6u@",
-  "L$|",
-  "Z#$))$MnWX",
-  "$ ]2|`c",
-  "5rHBc$0u;r",
-  "1}!KR$",
-  "i=J c$|F",
-  "_#r@-$",
-  "iVM\\q1\"&o$",
-  "#$'",
-  "rfQ-OdT9~$",
-  ",[$",
-  " I=<2$y9$",
-  "|Ed_F;)]n$",
-  "C ;I'^L`$",
-  "r1Ss$",
-  "`ZV=\"-`$",
-  "M6<$7Td",
-  "$=rs",
-  "$.ticpUU",
-  "0h$}Ym*",
-  "^%$",
-  "$<bin",
-  "D4NR&J$&D{",
-  "$+y7;uqcZ",
-  "Jq$>x8kx",
-  "N6B7$\"J",
-  "+Gv}o[2$",
-  "If$%WXz?",
-  "%2eL#tG,$"
-]
+["vlv$6u@", "5rHBc$0u;r", "M6<$7Td"]
 ```
 
 Every distinct new allow-to-refuse command:
@@ -135,7 +96,7 @@ adds only a throwing validation branch before the old callback return: it cannot
 
 The new tests build a synthetic HOME/project/data/hooks tree and symlink aliases per reaching
 case. All POSIX Bash witnesses passed locally, including read and write cases. Native Windows
-still executes guard assertions and uses junction aliases, skipping only Bash witnesses;
+still executes guard assertions and uses junction aliases, skipping Bash witnesses; older Bash versions skip only witnesses for unsupported syntax, after guard assertions;
 case-insensitive alias duplicates are avoided. Drive-letter, mixed-case, backslash and WSL
 operand forms are refused before filesystem resolution. The existing platform path classifier
 and case folding are unchanged. This Linux run is not a claim of native Windows or WSL execution;

@@ -6,6 +6,16 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { commandTargetsGuardState } from "./managed-worktree-protection.js";
 
+const bash = spawnSync("bash", ["--version"], { encoding: "utf8" });
+const bashVersion = /version (\d+)\.(\d+)/u.exec(bash.stdout ?? "");
+function supportsWitness(label: string, major: number, minor: number): boolean {
+  const minimum = label === "@k" ? [5, 2]
+    : ["@U", "@u", "@L", "@K"].includes(label) ? [5, 1]
+    : label.startsWith("@") ? [4, 4]
+    : ["^", "^^", ",", ",,"].includes(label) ? [4, 0] : [3, 2];
+  return major > minimum[0]! || (major === minimum[0] && minor >= minimum[1]!);
+}
+
 // Each expression produces `alias` (or the relative hook path), not just an arbitrary value.
 const cases = [
   ["HOME trim", "cat ${HOME%/}/data/hooks/file"],
@@ -65,8 +75,12 @@ for (const [label, command] of cases) {
     } finally {
       if (previous === undefined) delete process.env[envName]; else process.env[envName] = previous;
     }
-    if (process.platform === "win32" || spawnSync("bash", ["--version"]).error) {
+    if (process.platform === "win32" || bash.status !== 0 || !bashVersion) {
       t.diagnostic("Bash reachability witness unavailable; guard assertion still ran");
+      return;
+    }
+    if (!supportsWitness(label, Number(bashVersion[1]), Number(bashVersion[2]))) {
+      t.diagnostic(`Bash ${bashVersion[1]}.${bashVersion[2]} lacks ${label}; guard assertion still ran`);
       return;
     }
     const result = spawnSync("bash", ["--noprofile", "--norc", "-c", actual], {
@@ -83,6 +97,29 @@ test("operator non-path uses deliberately fail closed; plain parameters and iner
     assert.notEqual(commandTargetsGuardState(command, "/project", "/state/hooks"), null, command);
   for (const command of ["echo $UNKNOWNVAR", "echo ${plain}", "echo ${1}", "echo ${?}", "echo '${x:-ok}'", "echo \\${x:-ok}"])
     assert.equal(commandTargetsGuardState(command, "/project", "/state/hooks"), null, command);
+});
+
+test("Bash witness version gates retain supported older-shell witnesses", () => {
+  assert.equal(supportsWitness("substring", 3, 2), true);
+  assert.equal(supportsWitness("^^", 3, 2), false);
+  assert.equal(supportsWitness("^^", 4, 0), true);
+  assert.equal(supportsWitness("@Q", 4, 3), false);
+  assert.equal(supportsWitness("@Q", 4, 4), true);
+  assert.equal(supportsWitness("@U", 5, 0), false);
+  assert.equal(supportsWitness("@U", 5, 1), true);
+  assert.equal(supportsWitness("@k", 5, 1), false);
+  assert.equal(supportsWitness("@k", 5, 2), true);
+});
+
+test("empty tokenizer names retain base behavior for non-operator dollar syntax", () => {
+  for (const command of [
+    'echo "$(pwd)"', 'cd "$(git rev-parse --show-toplevel)"', 'grep -E "^foo$" f',
+    "printf $'a\\tb'", 'echo $#', 'T=$(mktemp -d)',
+    'git commit -m "$(cat <<\'EOF\'\nmsg\nEOF\n)"',
+  ]) assert.equal(commandTargetsGuardState(command, "/project", "/state/hooks"), null, command);
+  // Preserving the sentinel must not suppress direct or relative state access in substitutions.
+  for (const command of ['cat $(echo ../state/hooks/file)', 'cat "$(cat /state/hooks/file)"'])
+    assert.notEqual(commandTargetsGuardState(command, "/project", "/state/hooks"), null, command);
 });
 
 test("operators refuse before platform path resolution, including drive/backslash and WSL paths", () => {
