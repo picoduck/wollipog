@@ -7,6 +7,7 @@ import {
   type AgentDefinition,
 } from "@wollipog/protocol";
 import {
+  CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING,
   CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
   SESSION_CODEX_MCP_MARKER,
   additiveCodexMcpServerArg,
@@ -28,6 +29,7 @@ import {
   stripOrchestratorLaunchArgs,
   stripSessionCodexMcpArgs,
   supportsClaudeAgentAcpOrchestrator,
+  withCodexDirectWollipogTools,
   withOrchestratorAdditiveRole,
   withOrchestratorPreset,
   type OrchestratorIsolationMode,
@@ -1088,6 +1090,39 @@ test("only the runner's own session entry is stripped, in every argument form", 
   // An Orchestrator entry is not a session entry.
   const orchestrator = additiveCodexMcpServerArg(mcp);
   assert.deepEqual(stripSessionCodexMcpArgs(["-c", orchestrator]), ["-c", orchestrator]);
+});
+
+test("the code-mode direct-tools setting follows only the runner's own entry and leaves with it (#4023)", () => {
+  const direct = CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING;
+  assert.equal(direct, 'features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]');
+  const session = sessionCodexMcpServerArg({ command: "/runner", args: [], env: { [SESSION_CODEX_MCP_MARKER]: "1" } });
+  const user = ["-c", "model=\"o3\"", "-c", 'mcp_servers.wollipog={ command = "mine" }'];
+
+  // Inserted directly after the runner's entry, in every shape, and never twice.
+  const sessionArgs = withCodexDirectWollipogTools([...user.slice(0, 2), "-c", session, "--search"]);
+  assert.deepEqual(sessionArgs, [...user.slice(0, 2), "-c", session, "-c", direct, "--search"]);
+  assert.deepEqual(withCodexDirectWollipogTools(sessionArgs), sessionArgs, "idempotent");
+  const additive = additiveOrchestratorLaunchArgs("codex-app-server", mcp);
+  const additiveArgs = withCodexDirectWollipogTools(additive);
+  const entryIndex = additiveArgs.findIndex((arg) => arg.startsWith("mcp_servers.wollipog="));
+  assert.deepEqual(additiveArgs.slice(entryIndex + 1, entryIndex + 3), ["-c", direct]);
+  const preset = withCodexDirectWollipogTools(orchestratorLaunchArgs("codex-app-server", mcp));
+  assert.deepEqual(preset.slice(-2), ["-c", direct], "after the preset's whole-table entry");
+  // A user's own entry is not the runner's: nothing is added for it.
+  assert.deepEqual(withCodexDirectWollipogTools(user), user);
+
+  // Each strip removes the setting together with its own entry, in every argument form, and never
+  // a user's identical setting anywhere else.
+  const userDirect = ["-c", direct, "-c", "model=\"o3\""];
+  for (const form of [["-c", direct], ["--config", direct], [`--config=${direct}`]]) {
+    const args = [...userDirect, "-c", session, ...form];
+    assert.deepEqual(stripSessionCodexMcpArgs(args), userDirect);
+    const additiveForm = [...userDirect, "-c", additiveCodexMcpServerArg(mcp), ...form];
+    assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(additiveForm, "codex-app-server"), userDirect);
+  }
+  assert.deepEqual(stripAdditiveOrchestratorLaunchArgs(additiveArgs, "codex"), []);
+  assert.deepEqual(stripOrchestratorLaunchArgs(preset, "codex-app-server"), [],
+    "the preset removes every features override it may have added");
 });
 
 test("the Codex MCP inventory parser keeps only decision fields and rejects anything else", () => {

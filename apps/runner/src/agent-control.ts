@@ -13,6 +13,7 @@ import {
   rmSync,
   writeFileSync,
 } from "node:fs";
+import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import {
   RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -59,6 +60,7 @@ import {
   orchestratorLaunchArgs,
   stripAdditiveOrchestratorLaunchArgs,
   stripOrchestratorLaunchArgs,
+  withCodexDirectWollipogTools,
   withoutPiIntegrationIsolationArgs,
   supportsClaudeAgentAcpOrchestrator,
   supportsNativeOrchestratorBoundary,
@@ -860,6 +862,119 @@ export function provisionAgentControl(
     }, host.readCodexMcpInventory, log, config.onProcess);
   }
   log(`agent control ${spec.sessionId}: CLI${["claude-code", "pi"].includes(spec.driver ?? "") || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
+  if (codexDriver && orchestrator && host.readCodexMcpInventory) {
+    return provisionOrchestratorCodexDirectTools(spec, presetPermissions && strictProjectIsolation,
+      host.readCodexMcpInventory, log, config.onProcess);
+  }
+}
+
+type CodexInventoryLaunch = Pick<SessionLaunchSpec, "sessionId" | "command" | "args" | "env" | "context"> &
+  Partial<Pick<SessionLaunchSpec, "workspacePath">> & { repoPath?: string; worktreePath?: string | null };
+
+/** `codex mcp list --json` for `args` at `cwd`, parsed; `null` when the read fails or its output is
+ * not that inventory. */
+function codexInventoryReader(
+  spec: CodexInventoryLaunch,
+  cwd: string,
+  read: typeof readCodexMcpInventory,
+  onProcess?: (proof: Promise<boolean>) => void,
+): (args: string[], env?: Record<string, string>) => Promise<ReturnType<typeof parseCodexMcpInventory>> {
+  return async (args, env = spec.env) => {
+    if (read !== readCodexMcpInventory) onProcess?.(Promise.resolve(false));
+    try {
+      return parseCodexMcpInventory(await read({ command: spec.command, args, env, context: spec.context, onProcess }, cwd));
+    } catch { return null; }
+  };
+}
+
+const CODEX_DIRECT_ONLY_KEY = "direct_only_tool_namespaces";
+
+/**
+ * Whether the launch arguments, or a Codex configuration file this runner can read, already name
+ * `direct_only_tool_namespaces`. Codex replaces an array named by a `-c` override rather than
+ * merging into it, so adding `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING` would silently drop namespaces
+ * the user chose. The runner keeps their list instead (#4023). The files are the ones Codex layers:
+ * the Codex home's `config.toml`, each `.codex/config.toml` from the launch directory up, and the
+ * system and managed files under `/etc/codex`. They are searched for the key's name and nothing is
+ * logged from them. A mention anywhere, including a profile or a comment, counts, so the runner can
+ * only ever add less. Project files are searched from the launch directory and from every directory
+ * a `-C`/`--cd` argument names, because Codex reads its project configuration from the latter.
+ */
+function codexConfigNamesDirectOnlyNamespaces(
+  spec: CodexInventoryLaunch,
+  cwd: string,
+  hostEnv: NodeJS.ProcessEnv = process.env,
+): boolean {
+  if (spec.args.some((arg) => arg.includes(CODEX_DIRECT_ONLY_KEY))) return true;
+  const env = { ...hostEnv, ...spec.env };
+  const files = [
+    join(env.CODEX_HOME || join(env.HOME || homedir(), ".codex"), "config.toml"),
+    "/etc/codex/config.toml",
+    "/etc/codex/managed_config.toml",
+  ];
+  for (const start of [cwd, ...codexDirectoryArgs(spec.args)]) {
+    for (let dir = resolve(cwd, start); ; dir = dirname(dir)) {
+      files.push(join(dir, ".codex", "config.toml"));
+      if (dirname(dir) === dir) break;
+    }
+  }
+  return files.some((file) => {
+    try { return readFileSync(file, "utf8").includes(CODEX_DIRECT_ONLY_KEY); } catch { return false; }
+  });
+}
+
+/** Every directory a Codex `-C <dir>`, `-C<dir>`, `--cd <dir>` or `--cd=<dir>` argument names. */
+function codexDirectoryArgs(args: readonly string[]): string[] {
+  const dirs: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if ((arg === "-C" || arg === "--cd") && typeof args[index + 1] === "string") dirs.push(args[++index]!);
+    else if (arg.startsWith("--cd=")) dirs.push(arg.slice("--cd=".length));
+    else if (arg.startsWith("-C") && arg.length > 2) dirs.push(arg.slice(arg[2] === "=" ? 3 : 2));
+  }
+  return dirs;
+}
+
+/** Why a launch carries its `wollipog` entry without `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING`. */
+function directToolsSkipped(userList: boolean): string {
+  return userList
+    ? `the Codex configuration already sets ${CODEX_DIRECT_ONLY_KEY}, which is kept; add "mcp__wollipog" to it to keep the wollipog tools out of code mode`
+    : "this Codex installation did not load the setting that keeps the wollipog tools out of code mode";
+}
+
+/**
+ * Keep an Orchestrator's `wollipog` tools out of Codex code mode (#4023), which matters most there:
+ * a supervising Orchestrator waits on its children's merge queues. Its entry is part of the launch
+ * already, so this adds only `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING`, and only when Codex still loads
+ * the launch with it and no user list would be replaced. Any other result leaves the launch exactly
+ * as it was, so a Codex without the setting starts as it did before.
+ *
+ * A preset Orchestrator with Strict Project Isolation is launched from a session scratch directory
+ * that is chosen after this runs, so neither the inventory read nor the configuration search can
+ * see the directory Codex will actually read. It goes without the setting (`scratchLaunch`).
+ */
+async function provisionOrchestratorCodexDirectTools(
+  spec: CodexInventoryLaunch,
+  scratchLaunch: boolean,
+  read: typeof readCodexMcpInventory,
+  log: (message: string) => void,
+  onProcess?: (proof: Promise<boolean>) => void,
+): Promise<void> {
+  const candidate = withCodexDirectWollipogTools(spec.args);
+  const cwd = spec.worktreePath ?? spec.repoPath ?? spec.workspacePath;
+  if (candidate.length === spec.args.length) return;
+  if (scratchLaunch || !cwd) {
+    log(`agent control ${spec.sessionId}: wollipog tools left as Codex offers them (the launch directory is not known yet, so its Codex configuration cannot be checked)`);
+    return;
+  }
+  const userList = codexConfigNamesDirectOnlyNamespaces(spec, cwd);
+  const loaded = !userList &&
+    (await codexInventoryReader(spec, cwd, read, onProcess)(candidate))?.find((server) => server.name === "wollipog");
+  if (!loaded || !loaded.enabled) {
+    log(`agent control ${spec.sessionId}: wollipog tools left as Codex offers them (${directToolsSkipped(userList)})`);
+    return;
+  }
+  spec.args = candidate;
 }
 
 /**
@@ -878,11 +993,15 @@ export function provisionAgentControl(
  *      `CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC`. Anything else (an older Codex, a managed policy) leaves
  *      the launch as it was.
  *
+ * The second read includes `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING` directly after the entry, so the
+ * tools stay out of Codex code mode (#4023). A Codex that refuses that setting is read once more
+ * with the entry alone, which then launches exactly as before. So is a launch whose configuration
+ * already has its own `direct_only_tool_namespaces`, which the setting would replace.
+ *
  * Every refusal keeps the launch unchanged and the CLI available, and the runner log says why.
  */
 async function provisionSessionCodexMcp(
-  spec: Pick<SessionLaunchSpec, "sessionId" | "command" | "args" | "env" | "context"> &
-    Partial<Pick<SessionLaunchSpec, "workspacePath">> & { repoPath?: string; worktreePath?: string | null },
+  spec: CodexInventoryLaunch,
   mcp: Parameters<typeof sessionCodexMcpServerArg>[0],
   read: typeof readCodexMcpInventory,
   log: (message: string) => void,
@@ -895,27 +1014,27 @@ async function provisionSessionCodexMcp(
   }
   const cwd = spec.worktreePath ?? spec.repoPath ?? spec.workspacePath;
   if (!cwd) return keepCliOnly("the launch has no working directory to read Codex configuration from");
-  const launch = { command: spec.command, args: spec.args, env: spec.env, context: spec.context, onProcess };
-  const inventory = async (candidate: typeof launch) => {
-    if (read !== readCodexMcpInventory) onProcess?.(Promise.resolve(false));
-    try { return parseCodexMcpInventory(await read(candidate, cwd)); } catch { return null; }
-  };
-  const existing = await inventory(launch);
+  const inventory = codexInventoryReader(spec, cwd, read, onProcess);
+  const existing = await inventory(spec.args);
   if (!existing) return keepCliOnly("the Codex MCP inventory could not be read");
   if (existing.some((server) => server.name === "wollipog")) {
     return keepCliOnly("the user's own MCP server named wollipog is kept");
   }
   const entry = sessionCodexMcpServerArg(mcp);
   const env = { ...spec.env, [SESSION_CODEX_MCP_MARKER]: "1" };
-  const added = (await inventory({ ...launch, args: [...spec.args, "-c", entry], env }))
-    ?.find((server) => server.name === "wollipog");
-  if (!added?.enabled || added.command !== mcp.command ||
-      added.toolTimeoutSec !== CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC) {
-    return keepCliOnly("this Codex installation did not load the entry as configured");
-  }
+  const loads = async (args: string[]) => {
+    const added = (await inventory(args, env))?.find((server) => server.name === "wollipog");
+    return !!added?.enabled && added.command === mcp.command &&
+      added.toolTimeoutSec === CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC;
+  };
+  const withEntry = [...spec.args, "-c", entry];
+  const userList = codexConfigNamesDirectOnlyNamespaces(spec, cwd);
+  const direct = userList ? null : withCodexDirectWollipogTools(withEntry);
+  const args = direct && await loads(direct) ? direct : await loads(withEntry) ? withEntry : null;
+  if (!args) return keepCliOnly("this Codex installation did not load the entry as configured");
   spec.env = env;
-  spec.args = [...spec.args, "-c", entry];
-  log(`agent control ${spec.sessionId}: CLI and MCP provisioned`);
+  spec.args = args;
+  log(`agent control ${spec.sessionId}: CLI and MCP provisioned${args === direct ? "" : ` (${directToolsSkipped(userList)})`}`);
 }
 
 export function removeAgentControlFiles(sessionId: string, configDir: string): void {

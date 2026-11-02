@@ -17,6 +17,7 @@ export const PROBES = [
   { id: "diagnostics", script: runner + "codex-diagnostics-probe.ts", minimum: 3, timeout: 90_000, documentation: "docs/DRIVERS.md#openai-inference-transport" },
   { id: "mcp-wait", script: runner + "codex-mcp-wait-probe.ts", minimum: 1, timeout: 35 * 60_000, documentation: "docs/DRIVERS.md; skills/using-wollipog/SKILL.md" },
   { id: "mcp-controls", script: runner + "codex-mcp-wait-probe.ts", minimum: 3, args: ["--seconds", "310", "--entry", "orchestrator", "--default-limit", "--without-approval"], timeout: 25 * 60_000, documentation: "docs/DRIVERS.md; skills/using-wollipog/SKILL.md" },
+  { id: "mcp-code-mode", script: runner + "codex-mcp-wait-probe.ts", minimum: 2, args: ["--seconds", "310", "--code-mode"], timeout: 20 * 60_000, documentation: "docs/agent-control.md; skills/using-wollipog/SKILL.md" },
 ];
 export const EXCLUSIONS = [{ command: "probe:codex-inference-transport", reason: "Requires real account authentication and external model traffic; excluded from this credential-free suite. Optional transport diagnostics are measured separately; real WebSocket success is never inferred." }];
 
