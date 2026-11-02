@@ -51,7 +51,6 @@ import { AccountIdentifier } from "./AccountIdentifier.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { SegmentedControl, type SegmentedOption } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
-import { useFeedback } from "./FeedbackProvider.js";
 import { PageHeader } from "./PageHeader.js";
 import { destination, type UsageTab } from "../navigation.js";
 import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
@@ -64,6 +63,7 @@ import { handleRovingChoiceKeyDown, useAccessibleMenu } from "./interactions.js"
 import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import { TabList } from "./Tabs.js";
 import { useIsMobile } from "./useIsMobile.js";
+import { BudgetHistoryDialog } from "./BudgetHistoryDialog.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
@@ -362,7 +362,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   };
   const phone = useIsMobile();
   const privacy = useAccountEmailPrivacy();
-  const { confirm } = useFeedback();
   const api = useApi();
   const hasStore = useHasStore();
   const [days, setDays] = useState(30);
@@ -379,11 +378,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   const [data, setData] = useState<UsageAggregationResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
-  const [hourlyDays, setHourlyDays] = useState("30");
-  const [dailyDays, setDailyDays] = useState("365");
-  const [saving, setSaving] = useState(false);
-  const [saveStatus, setSaveStatus] = useState<string | null>(null);
-  const [saveFailed, setSaveFailed] = useState(false);
   const requestGeneration = useRef(0);
   const daysRef = useRef(days);
   const [knownRetention, setKnownRetention] = useState<UsageRetentionPolicy | null>(null);
@@ -394,23 +388,15 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
   const [offlineMachines, setOfflineMachines] = useState<string[]>([]);
   const [users, setUsers] = useState<UserCostWindows[] | null>(null);
   const [dailyBudget, setDailyBudget] = useState<UsageDailyBudgetPolicy | null>(null);
-  const [dailyBudgetDraft, setDailyBudgetDraft] = useState("");
-  const [dailyBudgetStatus, setDailyBudgetStatus] = useState<string | null>(null);
-  const [dailyBudgetFailed, setDailyBudgetFailed] = useState(false);
-  const [dailyBudgetSaving, setDailyBudgetSaving] = useState(false);
+  const [usersError, setUsersError] = useState<string | null>(null);
+  // Budget and History (#3015): open, and whether Change Budget… opened it at the budget field.
+  const [budgetHistory, setBudgetHistory] = useState<{ focusBudget: boolean } | null>(null);
   const [subscriptionData, setSubscriptionData] = useState<SubscriptionUsageResponse | null>(null);
   const [subscriptionLoading, setSubscriptionLoading] = useState(true);
   const [subscriptionError, setSubscriptionError] = useState<string | null>(null);
   const [subscriptionRefreshing, setSubscriptionRefreshing] = useState<string | null>(null);
   const [subscriptionRefreshStatus, setSubscriptionRefreshStatus] = useState<string | null>(null);
   const [subscriptionNow, setSubscriptionNow] = useState(Date.now());
-  // Which operation is actually in flight. `saving` spans the PUT and the refresh that follows it,
-  // and the ranges are unavailable throughout — but the REASON differs, and a version that said
-  // "saving retention" during the refresh described work that had already completed.
-  const [savingPhase, setSavingPhase] = useState<"write" | "refresh">("write");
-  const savingReason = savingPhase === "write"
-    ? "Unavailable while saving retention"
-    : "Unavailable while usage reloads";
 
   const load = useCallback(async (range: number, requestedGranularity: UsageAggregationGranularity) => {
     const generation = ++requestGeneration.current;
@@ -433,8 +419,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       if (next.hourlyDataAvailable !== undefined) {
         setHourlyAvailability({ range, available: next.hourlyDataAvailable });
       }
-      setHourlyDays(String(next.retention.hourlyDays));
-      setDailyDays(String(next.retention.dailyDays));
       if (legacyHourlyFallback) {
         setHourlyAvailability({ range, available: false });
         setGranularity((current) => current === "hour" ? "day" : current);
@@ -483,41 +467,16 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     try {
       const [budget, list] = await Promise.all([api.usageDailyBudget(), api.usageUsers()]);
       setDailyBudget(budget.dailyBudget);
-      setDailyBudgetDraft(budget.dailyBudget.perUserUsd == null ? "" : String(budget.dailyBudget.perUserUsd));
       setUsers(list.users);
+      setUsersError(null);
     } catch (cause) {
-      setDailyBudgetFailed(true);
-      setDailyBudgetStatus(cause instanceof Error ? cause.message : "Unable to load per-user usage");
+      setUsersError(cause instanceof Error ? cause.message : "Unable to load per-user usage");
     }
   }, [api]);
 
   useEffect(() => {
     void loadUsers();
   }, [loadUsers]);
-
-  const saveDailyBudget = async () => {
-    const trimmed = dailyBudgetDraft.trim();
-    const value = trimmed === "" ? null : Number(trimmed);
-    if (value !== null && (!Number.isFinite(value) || value <= 0)) {
-      setDailyBudgetFailed(true);
-      setDailyBudgetStatus("Enter a positive dollar amount, or leave it empty to remove the budget.");
-      return;
-    }
-    setDailyBudgetSaving(true);
-    setDailyBudgetStatus(null);
-    setDailyBudgetFailed(false);
-    try {
-      const result = await api.updateUsageDailyBudget(value);
-      setDailyBudget(result.dailyBudget);
-      setDailyBudgetStatus(result.dailyBudget.perUserUsd == null ? "Daily budget removed." : "Daily budget saved.");
-      await loadUsers();
-    } catch (cause) {
-      setDailyBudgetFailed(true);
-      setDailyBudgetStatus(cause instanceof Error ? cause.message : "Unable to save the daily budget");
-    } finally {
-      setDailyBudgetSaving(false);
-    }
-  };
 
   useEffect(() => {
     const timer = window.setInterval(() => setSubscriptionNow(Date.now()), 30_000);
@@ -546,45 +505,23 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
     }
   };
 
-  const saveRetention = async () => {
-    if (!data) return;
-    const nextHourly = Number(hourlyDays);
-    const nextDaily = Number(dailyDays);
-    if ((nextHourly < data.retention.hourlyDays || nextDaily < data.retention.dailyDays) && !await confirm({
-      title: "Shorten Usage Retention",
-      message: "Usage totals older than the new retention periods are permanently removed. This cannot be undone.",
-      confirmLabel: "Shorten Retention",
-      tone: "danger",
-    })) return;
-    setSaving(true);
-    setSavingPhase("write");
-    setSaveStatus(null);
-    setSaveFailed(false);
-    try {
-      const result = await api.updateUsageRetention({ hourlyDays: nextHourly, dailyDays: nextDaily });
-      setKnownRetention(result.retention);
-      const currentDays = daysRef.current;
-      const nextRange = [...RANGES].reverse().find((range) => range <= Math.min(currentDays, result.retention.dailyDays)) ?? RANGES[0];
-      const currentGranularity = granularityRef.current;
-      const nextGranularity = currentGranularity === "hour" && nextRange > result.retention.hourlyDays
-        ? "day"
-        : currentGranularity;
-      daysRef.current = nextRange;
-      setDays(nextRange);
-      setGranularity(nextGranularity);
-      setSaveStatus("Usage aggregate retention saved.");
-      if (nextRange === currentDays && nextGranularity === currentGranularity) {
-        // The write is done; what follows is a refresh, and saying otherwise describes finished
-        // work as still in progress.
-        setSavingPhase("refresh");
-        await load(nextRange, nextGranularity);
-      }
-    } catch (cause) {
-      setSaveFailed(true);
-      setSaveStatus(cause instanceof Error ? cause.message : "Unable to save retention");
-    } finally {
-      setSaving(false);
-    }
+  /** A saved budget shows in By Person's sentence at once, and its rows reload with the new limit. */
+  const budgetSaved = (budget: UsageDailyBudgetPolicy) => {
+    setDailyBudget(budget);
+    void loadUsers();
+  };
+
+  /** Saved history narrows the range and Group By to what is still kept, then reloads the usage. */
+  const retentionSaved = (retention: UsageRetentionPolicy) => {
+    setKnownRetention(retention);
+    const currentDays = daysRef.current;
+    const nextRange = [...RANGES].reverse().find((range) => range <= Math.min(currentDays, retention.dailyDays)) ?? RANGES[0];
+    const currentGranularity = granularityRef.current;
+    const nextGranularity = currentGranularity === "hour" && nextRange > retention.hourlyDays ? "day" : currentGranularity;
+    daysRef.current = nextRange;
+    setDays(nextRange);
+    setGranularity(nextGranularity);
+    if (nextRange === currentDays && nextGranularity === currentGranularity) void load(nextRange, nextGranularity);
   };
 
   const drivers = useMemo(() => (data ? activeDrivers(data.byDriver) : []), [data]);
@@ -718,8 +655,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
           label={`${days} Days, ${GRANULARITY_LABEL[granularity].adjective}`}
           ariaLabel={`Range and Group By: ${days} Days, ${GRANULARITY_LABEL[granularity].adjective}`}
           menuLabel="Range and Group By"
-          disabled={saving}
-          title={saving ? savingReason : undefined}
           keepOpen
         >
           {(choose) => (
@@ -753,8 +688,6 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
             label={`Last ${days} Days`}
             ariaLabel={`Range: Last ${days} Days`}
             menuLabel="Range"
-            disabled={saving}
-            title={saving ? savingReason : undefined}
           >
             {(choose) => <>{rangeItems(choose)}{weekNote}</>}
           </UsageMenuButton>
@@ -795,6 +728,13 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
       <PageHeader
         title={destination("usage").name}
         description={destination("usage").description}
+        // On a phone the secondary is in the app bar's More Actions (§3.3).
+        secondary={tab !== "subscriptions" && data?.canManageRetention ? [{
+          label: "Budget and History…",
+          onClick: () => setBudgetHistory({ focusBudget: false }),
+          disabled: !dailyBudget || !knownRetention,
+          ...(!dailyBudget ? { title: usersError ? "The daily budget couldn't be loaded." : "Loading the daily budget…" } : {}),
+        }] : undefined}
         tabs={(
           <TabList label={destination("usage").name} onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
             {tabs.map(({ id, key, label, count }) => (
@@ -1111,32 +1051,14 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                             ? `Each person can spend ${formatMoney(dailyBudget.perUserUsd)} per UTC day. When they reach it, their new turns pause until midnight UTC.`
                             : "No daily budget is set."}
                         </p>
-                        {data.canManageRetention && (
-                          <form
-                            className="usage-daily-budget"
-                            onSubmit={(event) => { event.preventDefault(); void saveDailyBudget(); }}
-                          >
-                            <label>
-                              Daily Budget per User ($)
-                              <input
-                                type="number"
-                                min="0"
-                                step="0.5"
-                                placeholder="none"
-                                value={dailyBudgetDraft}
-                                onChange={(event) => setDailyBudgetDraft(event.target.value)}
-                              />
-                            </label>
-                            <button type="submit" className="btn primary" disabled={dailyBudgetSaving}>
-                              {dailyBudgetSaving ? "Saving…" : "Save Daily Budget"}
-                            </button>
-                          </form>
+                        {data.canManageRetention && dailyBudget && knownRetention && (
+                          <button type="button" className="btn sm" onClick={() => setBudgetHistory({ focusBudget: true })}>
+                            Change Budget…
+                          </button>
                         )}
                       </div>
-                      {dailyBudgetStatus && (
-                        <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
-                      )}
-                      {users ? <PersonTable users={users} /> : !dailyBudgetFailed && (
+                      {usersError && <div className="usage-state error" role="alert">{usersError}</div>}
+                      {users ? <PersonTable users={users} /> : !usersError && (
                         <div className="usage-state" role="status">Loading people…</div>
                       )}
                     </>
@@ -1144,18 +1066,19 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                 </div>
               </section>
 
-              {data.canManageRetention && (
-                <section className="runner-card usage-retention" aria-labelledby="usage-retention-heading">
-                  <div><h3 id="usage-retention-heading">Usage Aggregate Retention</h3><p>This affects usage buckets only—not transcripts, audit logs, provider state, or session budget totals.</p></div>
-                  <label>Hourly Buckets (Days)<input type="number" min="1" max="90" value={hourlyDays} onChange={(event) => setHourlyDays(event.target.value)} /></label>
-                  <label>Daily Buckets (Days)<input type="number" min="30" max="3650" value={dailyDays} onChange={(event) => setDailyDays(event.target.value)} /></label>
-                  <button type="button" className="btn primary" disabled={saving} onClick={() => void saveRetention()}>{saving ? "Saving…" : "Save Retention"}</button>
-                  {saveStatus && <div className="usage-save-status" role={saveFailed ? "alert" : "status"}>{saveStatus}</div>}
-                </section>
-              )}
             </div>
           )}
         </div>
+      )}
+      {budgetHistory && dailyBudget && knownRetention && (
+        <BudgetHistoryDialog
+          budget={dailyBudget}
+          retention={knownRetention}
+          focusBudget={budgetHistory.focusBudget}
+          onBudgetSaved={budgetSaved}
+          onRetentionSaved={retentionSaved}
+          onClose={() => setBudgetHistory(null)}
+        />
       )}
     </section>
   );

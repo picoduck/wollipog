@@ -7565,8 +7565,9 @@ body.shell-dock-dragging * {
    New Subscription (#2973) counts the events it will send: "2 events selected".
    New Pod (#2982) says what Create Pod waits for: "Choose at least 2 sessions." or "Enter a name."
    New Multi-Agent Run (#2978) says what its primary waits for, in the order the fields read:
-   "Enter a task to continue.", "Choose a project to continue." or "Choose at least one agent." */
-.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason) {
+   "Enter a task to continue.", "Choose a project to continue." or "Choose at least one agent."
+   Budget and History (#3015) counts the fields still to fix, desktop only: "Fix 2 fields to save." */
+.modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason, .budget-history-reason) {
   flex: 0 1 auto;
   min-width: 0;
   margin: 0 auto 0 0;
@@ -7577,7 +7578,7 @@ body.shell-dock-dragging * {
    buttons and wraps there, rather than pushing the primary onto a second row. */
 .modal-foot > :is(.snooze-blocked-reason, .orchestrator-policy-reason) { flex: 1 1 0; }
 @media (max-width: 760px) {
-  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason) { flex-basis: 100%; }
+  .modal-foot > :is(.session-move-reason, .switch-account-reason, .choose-account-reason, .guardrails-reason, .handoff-reason, .snooze-blocked-reason, .open-request-reason, .agent-session-find-reason, .new-session-reason, .access-change-reason, .add-location-reason, .orchestrator-policy-reason, .new-project-reason, .pod-turns-reason, .pod-merge-reason, .run-follow-up-reason, .outbound-subscription-dialog-count, .new-pod-reason, .pod-member-reason, .new-run-reason, .budget-history-reason) { flex-basis: 100%; }
 }
 /* Switch Account (#2149): one dim sentence about what moves, then the Accounts head and its rows. */
 .switch-account-rule {
@@ -17357,7 +17358,6 @@ button.review-finding-location {
 }
 
 /* Usage accounting ------------------------------------------------------- */
-.usage-retention p { color: var(--text-dim); }
 /* API Usage's one toolbar (#3010, §4.7): Metric, Range and Group By, then About These Numbers at the
    trailing end. On phones Range and Group By are one menu button, so the row never wraps. */
 .usage-toolbar { margin-bottom: var(--space-5); }
@@ -17430,15 +17430,36 @@ button.review-finding-location {
 .usage-person > :first-child { min-width: 0; overflow: hidden; text-overflow: ellipsis; }
 .usage-person > .status { flex: none; }
 .usage-person-today > .meter { margin-top: var(--space-1); }
+/* By Person's budget sentence, with Change Budget… beside it for owners and admins (#3015). */
 .usage-person-head {
   display: flex;
-  align-items: flex-start;
+  align-items: center;
   justify-content: space-between;
   flex-wrap: wrap;
   gap: var(--space-3);
   margin-bottom: var(--space-3);
 }
 .usage-person-head > p { margin: 0; }
+/* Budget and History (#3015, §7.2, §8.1): two sections, each a --type-section heading over its
+   fields, the second 24px under the first. */
+.budget-history-form { gap: var(--space-4); }
+.budget-history-section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--space-3);
+  min-width: 0;
+}
+.budget-history-section + .budget-history-section { margin-top: var(--space-2); }
+.budget-history-section > h3 {
+  margin: 0;
+  color: var(--text);
+  font: var(--type-section);
+}
+.budget-history-note {
+  margin: 0;
+  color: var(--text-dim);
+  font: var(--type-body);
+}
 /* A main column of 1099px or less (and a phone wider than a row's 560px): the time table's trailing
    column moves under the date as a second line, so the per-agent headers keep their names. */
 @container app (max-width: 1099px) {
@@ -17557,23 +17578,11 @@ button.review-finding-location {
 .usage-chart-readout-period { font-weight: 650; }
 .usage-chart-readout-hint, .usage-chart-readout-total dt { color: var(--text-dim); }
 
-
-.usage-daily-budget { display: flex; align-items: flex-end; gap: 10px; flex-wrap: wrap; }
-.usage-daily-budget label { display: grid; gap: 4px; font-size: var(--text-sm); color: var(--text-dim); }
-.usage-daily-budget input { width: 120px; }
-
 @media (max-width: 860px) {
   .usage-chart-svg { height: 260px; }
 }
-.usage-retention { display: grid; grid-template-columns: minmax(220px, 1fr) repeat(2, minmax(130px, 180px)) auto; align-items: end; gap: 14px; margin-top: 18px; padding: 16px; }
-.usage-retention h3 { margin: 0; }
-.usage-retention p { margin: 5px 0 0; font-size: 12px; }
-.usage-retention label { display: grid; gap: 6px; color: var(--text-dim); font-size: 12px; font-weight: 600; }
-.usage-retention input { width: 100%; }
-.usage-save-status { grid-column: 1 / -1; color: var(--text-dim); font-size: 12px; }
 
 @media (max-width: 700px) {
-  .usage-retention { grid-template-columns: minmax(0, 1fr); align-items: stretch; }
   .subscription-source-grid { grid-template-columns: minmax(0, 1fr); }
   /* A narrow card stacks each window's label over its figures, as it always has. */
   .subscription-source > .facts {

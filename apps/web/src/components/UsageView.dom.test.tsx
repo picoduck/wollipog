@@ -651,99 +651,314 @@ test("an unavailable Hour response cannot replace a newer Week selection during 
   container.remove();
 });
 
-test("a retention save preserves aggregation changes made while the request is in flight", async () => {
+/** A Usage page over `usage`, with the budget and retention writes the dialog makes recorded. */
+const renderBudgetHistory = async ({
+  canManage = true,
+  perUserUsd = 25 as number | null,
+  updateUsageDailyBudget = async (value: number | null) => ({ dailyBudget: { perUserUsd: value, updatedAt: 1 } }),
+  updateUsageRetention = async (input: { hourlyDays: number; dailyDays: number }) => ({ retention: { ...input, coverageStartedAt: 0 } }),
+}: {
+  canManage?: boolean;
+  perUserUsd?: number | null;
+  updateUsageDailyBudget?: (value: number | null) => Promise<{ dailyBudget: { perUserUsd: number | null; updatedAt: number } }>;
+  updateUsageRetention?: (input: { hourlyDays: number; dailyDays: number }) => Promise<{ retention: { hourlyDays: number; dailyDays: number; coverageStartedAt: number } }>;
+} = {}) => {
   const at = Date.UTC(2026, 8, 21);
-  let finishRetention: (() => void) | undefined;
-  const retained = { hourlyDays: 30, dailyDays: 365, coverageStartedAt: 0 };
+  const writes: Array<["budget", number | null] | ["retention", { hourlyDays: number; dailyDays: number }]> = [];
+  let budget = perUserUsd;
+  const usageQueries: string[] = [];
   const client = {
     ...api,
     subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
     refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
-    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
+    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: budget, updatedAt: null } }),
     usageUsers: async () => ({ users: [] }),
-    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({
-      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
-      canManageRetention: true,
-    }),
-    updateUsageRetention: async () => await new Promise<{ retention: typeof retained }>((resolve) => {
-      finishRetention = () => resolve({ retention: retained });
-    }),
-  } as unknown as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => root.render(<ApiProvider client={client}><UsageView /></ApiProvider>));
-  await act(async () => { await settleLoad(); });
-  const group = (label: string) => container.querySelector(`[role="radiogroup"][aria-label="${label}"]`)!;
-  const option = (label: string, value: string) => [...group(label).querySelectorAll("[role=radio]")]
-    .find((node) => node.textContent?.trim() === value) as HTMLButtonElement;
-  const save = [...container.querySelectorAll("button")]
-    .find((button) => button.textContent?.trim() === "Save Retention") as HTMLButtonElement;
-
-  await act(async () => { save.click(); await Promise.resolve(); });
-  assert.ok(finishRetention, "the retention write is in flight");
-  await act(async () => { option("Group By", "Week").click(); await settleLoad(); });
-  await act(async () => { finishRetention!(); await settleLoad(); });
-  assert.equal(option("Group By", "Week").getAttribute("aria-checked"), "true");
-  assert.equal(breakdownTabLabels(container)[0], "By Week");
-
-  await act(async () => root.unmount());
-  container.remove();
-});
-
-test("shortening retention asks in the in-app confirmation dialog, and only Shorten Retention saves", async () => {
-  const at = Date.UTC(2026, 8, 21);
-  const writes: { hourlyDays: number; dailyDays: number }[] = [];
-  const client = {
-    ...api,
-    subscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
-    refreshSubscriptionUsage: async () => ({ sources: [], staleAfterMs: 600_000, generatedAt: Date.now() }),
-    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
-    usageUsers: async () => ({ users: [] }),
-    usage: async (query: { granularity?: UsageAggregationGranularity }) => ({
-      ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"),
-      canManageRetention: true,
-    }),
+    usage: async (query: { days?: number; granularity?: UsageAggregationGranularity }) => {
+      usageQueries.push(`${query.days}:${query.granularity}`);
+      return { ...response([bucket(at, 6, 0.06)], query.granularity ?? "day"), canManageRetention: canManage };
+    },
+    updateUsageDailyBudget: async (value: number | null) => {
+      writes.push(["budget", value]);
+      const result = await updateUsageDailyBudget(value);
+      budget = result.dailyBudget.perUserUsd;
+      return result;
+    },
     updateUsageRetention: async (input: { hourlyDays: number; dailyDays: number }) => {
-      writes.push(input);
-      return { retention: { ...input, coverageStartedAt: 0 } };
+      writes.push(["retention", input]);
+      return await updateUsageRetention(input);
     },
   } as unknown as ApiClient;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   await act(async () => root.render(<ApiProvider client={client}><FeedbackProvider><UsageView /></FeedbackProvider></ApiProvider>));
-  await act(async () => { await settleLoad(); });
-  // Dialogs are portalled to <body>, outside the view's container.
-  const dialog = () => domWindow.document.body.querySelector('[role="dialog"]') as unknown as HTMLElement | null;
-  const dialogButton = (name: string) => {
-    const button = [...dialog()!.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent === name);
-    assert.ok(button, `expected ${name} in the confirmation`);
-    return button;
+  await act(async () => { await settleLoad(); await Promise.resolve(); });
+  const body = domWindow.document.body as unknown as HTMLElement;
+  const dialogs = () => [...body.querySelectorAll<HTMLElement>('[role="dialog"]')];
+  const dialog = (title: string) => dialogs().find((candidate) => candidate.querySelector(".modal-title")?.textContent === title) ?? null;
+  const button = (scope: ParentNode, name: string) => {
+    const found = [...scope.querySelectorAll<HTMLButtonElement>("button")].find((candidate) => candidate.textContent?.trim() === name);
+    assert.ok(found, `expected a ${name} button`);
+    return found!;
   };
-  const hourly = [...container.querySelectorAll("label")]
-    .find((label) => label.textContent?.startsWith("Hourly Buckets"))!.querySelector("input")!;
-  const save = [...container.querySelectorAll("button")]
-    .find((button) => button.textContent?.trim() === "Save Retention") as HTMLButtonElement;
+  const field = (label: string) => {
+    const owner = dialog("Budget and History")!;
+    const labelNode = [...owner.querySelectorAll("label")].find((candidate) => candidate.textContent === label);
+    assert.ok(labelNode, `expected a ${label} field`);
+    return domWindow.document.getElementById(labelNode!.htmlFor) as unknown as HTMLInputElement;
+  };
+  const type = async (label: string, value: string) => {
+    await act(async () => { fireDomEvent.change(field(label), { target: { value } }); });
+  };
+  const leave = async (label: string) => {
+    await act(async () => { field(label).dispatchEvent(new domWindow.FocusEvent("focusout", { bubbles: true }) as unknown as Event); });
+  };
+  const open = async () => {
+    await act(async () => { button(container, "Budget and History…").click(); await Promise.resolve(); });
+    assert.ok(dialog("Budget and History"), "Budget and History opens");
+  };
+  const save = async () => {
+    await act(async () => { button(dialog("Budget and History")!, "Save Changes").click(); await drain(); await drain(); });
+  };
+  const toast = () => body.querySelector(".toast");
+  return {
+    container, body, writes, usageQueries, dialog, button, field, type, leave, open, save, toast,
+    unmount: async () => { await act(async () => root.unmount()); container.remove(); },
+  };
+};
 
-  await act(async () => { fireDomEvent.change(hourly, { target: { value: "7" } }); });
-  await act(async () => { save.click(); await Promise.resolve(); });
-  assert.ok(dialog(), "the confirmation is the app's dialog, not the browser's");
-  assert.match(dialog()!.textContent ?? "", /Shorten Usage Retention[\s\S]*permanently removed/);
-  assert.equal(dialogButton("Cancel").className, "btn");
-  assert.equal(dialogButton("Shorten Retention").className, "btn danger");
+test("an owner opens Budget and History from the header and By Person; a member sees the sentence only (#3015)", async () => {
+  for (const canManage of [true, false]) {
+    const page = await renderBudgetHistory({ canManage });
+    try {
+      const header = page.container.querySelector(".page-header")!;
+      const headerAction = [...header.querySelectorAll("button")].find((candidate) => candidate.textContent === "Budget and History…");
+      assert.equal(Boolean(headerAction), canManage, `the header's Budget and History… (canManage ${canManage})`);
+      await chooseBreakdown(page.container, "By Person");
+      const head = page.container.querySelector(".usage-person-head")!;
+      assert.match(head.textContent ?? "", /Each person can spend \$25\.00 per UTC day\./);
+      const change = [...head.querySelectorAll("button")].find((candidate) => candidate.textContent === "Change Budget…");
+      assert.equal(Boolean(change), canManage, `By Person's Change Budget… (canManage ${canManage})`);
+      if (change) assert.equal(change.className, "btn sm");
+      // The page holds no form and no field of its own, and no primary button outside the dialog.
+      assertNoDomNode(page.container.querySelector("form, input"));
+      assertNoDomNode(page.container.querySelector(".btn.primary"));
+      assert.doesNotMatch(page.container.textContent ?? "", /Retention|Save Daily Budget/);
+    } finally {
+      await page.unmount();
+    }
+  }
+});
 
-  await act(async () => { dialogButton("Cancel").click(); await drain(); });
-  assertNoDomNode(dialog());
-  assert.deepEqual(writes, [], "Cancel keeps the current retention");
+test("Budget and History's fields, and Change Budget… opening it in the budget field (#3015)", async () => {
+  const page = await renderBudgetHistory();
+  try {
+    await page.open();
+    const dialog = page.dialog("Budget and History")!;
+    assert.equal(dialog.querySelector(".modal-desc")?.textContent, "Applies to everyone who uses this Wollipog.");
+    assert.deepEqual([...dialog.querySelectorAll("h3")].map((heading) => heading.textContent), ["Daily Budget", "History Kept"]);
+    const budget = page.field("Daily Budget per Person (Optional)");
+    assert.equal(budget.value, "25");
+    assert.equal(budget.closest(".input-affix")?.querySelector(".input-affix-text")?.textContent, "$");
+    assert.equal(page.field("Hourly Detail").value, "30");
+    assert.equal(page.field("Daily Totals").value, "365");
+    for (const label of ["Daily Budget per Person (Optional)", "Hourly Detail", "Daily Totals"]) {
+      const input = page.field(label);
+      assert.equal(input.hasAttribute("min") || input.hasAttribute("max"), false, `${label} has no min or max`);
+      assert.ok(input.classList.contains("w-xs") || input.closest(".w-xs"), `${label} is a 96px field`);
+    }
+    assert.equal(dialog.querySelector("form")?.noValidate, true);
+    const helpers = [...dialog.querySelectorAll(".field-helper")].map((helper) => helper.textContent);
+    assert.deepEqual(helpers, [
+      "New turns pause for the rest of the UTC day once a person reaches it. Leave empty for no limit.",
+      "1 to 90 days.",
+      "30 to 3,650 days.",
+    ]);
+    assert.match(dialog.textContent ?? "", /Only usage charts use this history\. Transcripts and audit logs are kept separately\./);
+    assert.equal(page.button(dialog, "Save Changes").className.includes("primary"), true);
+    await act(async () => { page.button(dialog, "Cancel").click(); await drain(); });
+    assertNoDomNode(page.dialog("Budget and History"));
 
-  await act(async () => { save.click(); await Promise.resolve(); });
-  await act(async () => { dialogButton("Shorten Retention").click(); await settleLoad(); });
-  assertNoDomNode(dialog());
-  assert.deepEqual(writes, [{ hourlyDays: 7, dailyDays: 365 }]);
+    await chooseBreakdown(page.container, "By Person");
+    await act(async () => { page.button(page.container, "Change Budget…").click(); await drain(); });
+    assert.equal(domWindow.document.activeElement, page.field("Daily Budget per Person (Optional)") as never);
+  } finally {
+    await page.unmount();
+  }
+});
 
-  await act(async () => root.unmount());
-  container.remove();
+test("-5 and 500 show both inline errors on Save Changes, send nothing and say Fix 2 fields to save (#3015)", async () => {
+  const page = await renderBudgetHistory();
+  try {
+    await page.open();
+    await page.type("Daily Budget per Person (Optional)", "-5");
+    await page.type("Hourly Detail", "500");
+    // Nothing shows while typing; an edited field shows its error once it is left.
+    assertNoDomNode(page.dialog("Budget and History")!.querySelector(".field-error"));
+    await page.save();
+    const dialog = page.dialog("Budget and History")!;
+    assert.deepEqual(page.writes, [], "nothing is sent");
+    const budget = page.field("Daily Budget per Person (Optional)");
+    const hourly = page.field("Hourly Detail");
+    for (const [input, message] of [
+      [budget, "Enter an amount of at least $0.01, or leave it empty for no limit."],
+      [hourly, "Enter 1 to 90 days."],
+    ] as const) {
+      assert.equal(input.getAttribute("aria-invalid"), "true");
+      const error = domWindow.document.getElementById(input.getAttribute("aria-describedby")!.split(" ")[0]!);
+      assert.ok(error?.classList.contains("field-error"), "aria-describedby names the error");
+      assert.equal(error?.textContent, message);
+    }
+    // The error replaces the helper.
+    assert.equal([...dialog.querySelectorAll(".field-helper")].some((helper) => helper.textContent === "1 to 90 days."), false);
+    assert.equal(page.field("Daily Totals").getAttribute("aria-invalid"), null);
+    assert.equal(dialog.querySelector(".modal-foot .budget-history-reason")?.textContent, "Fix 2 fields to save.");
+    assert.equal(domWindow.document.activeElement, budget as never, "focus moves to the first invalid field");
+
+    // A valid value clears its error as it is typed, and the count follows.
+    await page.type("Hourly Detail", "14");
+    assert.equal(page.field("Hourly Detail").getAttribute("aria-invalid"), null);
+    assert.equal(dialog.querySelector(".budget-history-reason")?.textContent, "Fix 1 field to save.");
+    await page.type("Daily Budget per Person (Optional)", "");
+    assertNoDomNode(dialog.querySelector(".budget-history-reason"));
+
+    // Daily Totals' range follows Hourly Detail, and its error shows on leaving it after an edit.
+    await page.type("Hourly Detail", "60");
+    await page.type("Daily Totals", "45");
+    await page.leave("Daily Totals");
+    assert.equal(dialog.querySelector(".field-error")?.textContent, "Enter 60 to 3,650 days.");
+  } finally {
+    await page.unmount();
+  }
+});
+
+test("a shorter period warns, then asks Shorten Usage History; Cancel keeps every value and returns to Save Changes (#3015)", async () => {
+  const page = await renderBudgetHistory();
+  try {
+    await page.open();
+    await page.type("Daily Budget per Person (Optional)", "30");
+    await page.type("Hourly Detail", "14");
+    const dialog = page.dialog("Budget and History")!;
+    const warning = dialog.querySelector(".field-warn");
+    assert.equal(warning?.textContent, "Shorter than now (30 days). Older hourly detail will be deleted.");
+    assert.ok(page.field("Hourly Detail").getAttribute("aria-describedby")!.includes(warning!.querySelector("span")!.id));
+
+    await page.save();
+    const confirmation = page.dialog("Shorten Usage History");
+    assert.ok(confirmation, "the confirmation opens over the dialog");
+    assert.ok(page.dialog("Budget and History"), "the dialog stays open under it");
+    assert.match(confirmation!.textContent ?? "",
+      /Hourly detail older than 14 days is deleted now, so hourly charts will start at [A-Z][a-z]{2} \d{1,2}(, \d{4})?\. Daily totals are not affected\. This can't be undone\./);
+    assert.equal(page.button(confirmation!, "Shorten History").className, "btn danger");
+    assert.deepEqual(page.writes, [], "nothing is sent before the confirmation");
+
+    await act(async () => { page.button(confirmation!, "Cancel").click(); await advanceTimeouts(0); });
+    assertNoDomNode(page.dialog("Shorten Usage History"));
+    assert.equal(page.field("Daily Budget per Person (Optional)").value, "30");
+    assert.equal(page.field("Hourly Detail").value, "14");
+    assert.equal(domWindow.document.activeElement, page.button(page.dialog("Budget and History")!, "Save Changes") as never);
+    assert.deepEqual(page.writes, []);
+
+    await page.save();
+    await act(async () => { page.button(page.dialog("Shorten Usage History")!, "Shorten History").click(); await drain(); await drain(); });
+    assert.deepEqual(page.writes, [["budget", 30], ["retention", { hourlyDays: 14, dailyDays: 365 }]], "the budget, then the retention");
+    assertNoDomNode(page.dialog("Budget and History"));
+    assert.equal(page.toast()?.querySelector(".toast-message")?.textContent, "Budget and history saved.");
+    assert.equal(page.toast()?.querySelector(".toast-detail")?.textContent,
+      "Daily budget $30.00 per person. Hourly detail 14 days, daily totals 365 days.");
+  } finally {
+    await page.unmount();
+  }
+});
+
+test("when the retention fails after the budget saved, the notice says so and a retry sends only the retention (#3015)", async () => {
+  let failRetention = true;
+  const page = await renderBudgetHistory({
+    updateUsageRetention: async (input) => {
+      if (failRetention) throw new ApiError("dailyDays must be between max(hourlyDays, 30) and 3650", 400, "BAD_REQUEST");
+      return { retention: { ...input, coverageStartedAt: 0 } };
+    },
+  });
+  try {
+    await page.open();
+    await page.type("Daily Budget per Person (Optional)", "40");
+    await page.type("Daily Totals", "400");
+    await page.save();
+    const dialog = page.dialog("Budget and History")!;
+    assert.ok(dialog, "the dialog stays open");
+    const notice = dialog.querySelector('.notice.t-danger[role="alert"]')!;
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Couldn't Save Changes");
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "The daily budget was saved. History wasn't changed.");
+    assert.doesNotMatch(notice.textContent ?? "", /dailyDays must be/, "the server's words wait behind Show Details");
+    await act(async () => { page.button(notice, "Show Details").click(); });
+    assert.match(notice.textContent ?? "", /dailyDays must be between/);
+    // The notice sits at the body's end, directly above the footer (§7.3).
+    assert.equal(dialog.querySelector(".modal-body form")?.lastElementChild, notice as never);
+
+    // By Person already shows the budget that saved.
+    await act(async () => { page.button(dialog, "Cancel").click(); await drain(); });
+    await chooseBreakdown(page.container, "By Person");
+    assert.match(page.container.querySelector(".usage-person-head")?.textContent ?? "", /\$40\.00 per UTC day/);
+
+    failRetention = false;
+    await page.open();
+    await page.type("Daily Totals", "400");
+    await page.save();
+    assert.deepEqual(page.writes, [
+      ["budget", 40],
+      ["retention", { hourlyDays: 30, dailyDays: 400 }],
+      ["retention", { hourlyDays: 30, dailyDays: 400 }],
+    ]);
+    assertNoDomNode(page.dialog("Budget and History"));
+  } finally {
+    await page.unmount();
+  }
+});
+
+test("a budget failure saves nothing else and says the budget wasn't saved (#3015)", async () => {
+  const page = await renderBudgetHistory({
+    updateUsageDailyBudget: async () => { throw new ApiError("Daily cost budgets cannot be enabled while a user-owned Agent TUI is running", 409, "CONFLICT"); },
+  });
+  try {
+    await page.open();
+    await page.type("Daily Budget per Person (Optional)", "40");
+    await page.save();
+    const notice = page.dialog("Budget and History")!.querySelector(".notice.t-danger")!;
+    assert.equal(notice.querySelector(".notice-body")?.textContent, "The daily budget wasn't saved.");
+    await page.type("Daily Totals", "400");
+    assertNoDomNode(page.dialog("Budget and History")!.querySelector(".notice"), "an edit clears the failure");
+    await page.save();
+    assert.equal(page.dialog("Budget and History")!.querySelector(".notice-body")?.textContent, "Nothing was changed.");
+    assert.deepEqual(page.writes.map(([kind]) => kind), ["budget", "budget"], "history is never sent after the budget failed");
+  } finally {
+    await page.unmount();
+  }
+});
+
+test("saved history narrows Group By to what is still kept, and an emptied budget removes the limit (#3015)", async () => {
+  const page = await renderBudgetHistory();
+  try {
+    const group = page.container.querySelector('[role="radiogroup"][aria-label="Group By"]')!;
+    const option = (value: string) => [...group.querySelectorAll<HTMLButtonElement>("[role=radio]")]
+      .find((node) => node.textContent?.trim() === value);
+    await act(async () => { option("Hour")!.click(); await settleLoad(); });
+    assert.equal(option("Hour")!.getAttribute("aria-checked"), "true");
+    await page.open();
+    await page.type("Daily Budget per Person (Optional)", "");
+    await page.type("Hourly Detail", "14");
+    await page.save();
+    await act(async () => { page.button(page.dialog("Shorten Usage History")!, "Shorten History").click(); await drain(); await settleLoad(); });
+    assert.deepEqual(page.writes, [["budget", null], ["retention", { hourlyDays: 14, dailyDays: 365 }]]);
+    assert.equal(page.toast()?.querySelector(".toast-detail")?.textContent, "No daily budget. Hourly detail 14 days, daily totals 365 days.");
+    assert.equal(option("Hour"), undefined, "Hour is omitted past 14 days of hourly detail");
+    assert.equal(option("Day")!.getAttribute("aria-checked"), "true");
+    await act(async () => { await settleLoad(); });
+    assert.equal(page.usageQueries.at(-1), "30:day");
+    await chooseBreakdown(page.container, "By Person");
+    assert.match(page.container.querySelector(".usage-person-head")?.textContent ?? "", /No daily budget is set\./);
+  } finally {
+    await page.unmount();
+  }
 });
 
 test("aggregation switches ignore stale responses and show request failures without mislabeled old data", async () => {
