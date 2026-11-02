@@ -1608,7 +1608,7 @@ const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
   { id: "run-art-log", kind: "test_log", name: "e2e shard 3 of 5.log", mimeType: "text/plain", ageMinutes: 14,
     author: { kind: "agent", id: "session-alpha" },
     body: async () => runArtifactText.encode(Array.from({ length: 60 }, (_, index) => `12:04:${String(index).padStart(2, "0")} ✔ checkout.spec.ts › case ${index + 1} (${(index % 9) + 3}ms)`).join("\n")) },
-  { id: "run-art-html", kind: "html_preview", name: "Order summary preview", mimeType: "text/html", ageMinutes: 20,
+  { id: "run-art-html", kind: "html_preview", name: "Order summary preview for the redesigned checkout flow", mimeType: "text/html", ageMinutes: 20,
     author: { kind: "agent", id: "session-alpha" },
     body: async () => runArtifactText.encode("<!doctype html><style>body{font:14px system-ui;margin:24px}h1{font-size:20px}</style><h1>Order Summary</h1><p>3 items · $42.00</p>") },
   { id: "run-art-verdict", kind: "verdict", name: "Gate verdict", mimeType: "application/json", ageMinutes: 31,

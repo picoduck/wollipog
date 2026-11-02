@@ -264,31 +264,30 @@ for (const [label, viewport, touch, maxHeight] of [
 }
 
 /**
- * An opened artifact (#2855; docs/design-system.md §11.9): a 48px bar of Enlarge and Download, a plain
- * meta line, Download's menu carrying the warning, the bodies and their states, at the panel's 400px
- * and on a 390px phone. It is a page of the side panel (#2914), whose header carries its Back and
- * title; this fixture's header is a stand-in, so those are covered in artifact-panel-back.spec.ts.
+ * An opened artifact (#2855; docs/design-system.md §11.9): Enlarge and Download in the header's action
+ * slot (#3036), a plain meta line, Download's menu carrying the warning, the bodies and their states,
+ * at the panel's 400px and on a 390px phone. It is a page of the side panel (#2914), whose header
+ * carries its Back and title; this fixture's header is a stand-in, so those and the header's row are
+ * covered in artifact-panel-back.spec.ts.
  */
 async function openArtifact(page: Page, name: string) {
   await page.locator(".browser-artifact-list .row").filter({ hasText: name }).click();
-  await expect(page.locator(".rpanel-toolbar > .art-bar")).toBeVisible();
+  await expect(page.locator(".art-meta")).toBeVisible();
   await expect(page.locator(".browser-artifact-list")).toBeHidden();
 }
+const headerActions = (page: Page) => page.locator(".rpanel-head .rpanel-actions");
 
 for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px phone", 390, true]] as const) {
   test.describe(`an artifact preview in ${label}`, () => {
     test.use({ hasTouch: touch, isMobile: touch });
 
-    test("a 48px bar holds Download at its trailing edge, with no back and no title of its own", async ({ page }) => {
+    test("Download joins the header's actions before About Browser, and the page has no bar of its own", async ({ page }) => {
       await openBrowser(page, width);
       await openArtifact(page, "Review of the Browser panel rebuild");
-      const bar = page.locator(".rpanel-toolbar > .art-bar");
-      const barBox = (await bar.boundingBox())!;
-      expect(barBox.height).toBe(48);
+      await expect(page.locator(".rpanel-toolbar")).toHaveCount(0);
       await expect(page.getByRole("button", { name: /^Back/u })).toHaveCount(0);
-      await expect(bar.locator("h2")).toHaveCount(0);
-      const download = (await bar.getByRole("button", { name: "Download" }).boundingBox())!;
-      expect(barBox.x + barBox.width - (download.x + download.width), "Download sits at the bar's trailing padding").toBeLessThanOrEqual(17);
+      expect(await headerActions(page).locator(":scope > button").evaluateAll((buttons) => buttons.map((button) => button.getAttribute("aria-label"))))
+        .toEqual(["Download", "About Browser"]);
       await expect(page.getByRole("tablist", { name: "Browser" })).toHaveCount(0);
       await expect(page.locator(".art-meta")).toContainText("Review report");
       await expect(page.locator(".art-meta .art-verified")).toHaveText("Verified");
@@ -300,7 +299,7 @@ for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px p
       await openBrowser(page, width);
       await openArtifact(page, "verdict.json");
       await expect(page.getByText("Not redacted.", { exact: false })).toHaveCount(0);
-      await page.locator(".art-bar").getByRole("button", { name: "Download" }).click();
+      await headerActions(page).getByRole("button", { name: "Download" }).click();
       const original = page.getByRole("menuitem", { name: "Download Original File" });
       await expect(original).toHaveAccessibleDescription("Not redacted. It may contain secrets or personal data.");
       await expect(page.getByRole("menuitem", { name: "Copy Checksum" })).toBeVisible();
@@ -313,7 +312,7 @@ for (const [label, width, touch] of [["a 400px panel", 1440, false], ["a 390px p
       await openBrowser(page, width);
       await openArtifact(page, "Settings at 390px, dark theme.png");
       await expect(page.locator(".art-checker img")).toBeVisible();
-      const enlarge = page.locator(".art-bar").getByRole("button", { name: "Enlarge" });
+      const enlarge = headerActions(page).getByRole("button", { name: "Enlarge" });
       await enlarge.click();
       // The viewer the transcript opens too (#3924), over the Browser's loaded list.
       const dialog = page.getByRole("dialog", { name: "Settings at 390px, dark theme.png" });

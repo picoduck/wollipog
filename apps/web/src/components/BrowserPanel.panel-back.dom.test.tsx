@@ -163,7 +163,7 @@ async function pressEscape() {
 
 describe("an open artifact is a page with the panel header's Back as its one back control (#2914)", () => {
   for (const phone of [false, true]) {
-    test(`on a ${phone ? "phone" : "desktop panel"}, Back to Browser and the title lead the header, and the bar has neither`, async () => {
+    test(`on a ${phone ? "phone" : "desktop panel"}, Back to Browser and the title lead the header, its actions follow, and the page has no bar`, async () => {
       const view = await openPanel(phone);
       try {
         const head = view.panel.querySelector(".rpanel-head")!;
@@ -176,9 +176,14 @@ describe("an open artifact is a page with the panel header's Back as its one bac
         assert.equal(pageTitle(view.panel).textContent, log.name, "the page's title is in the header");
         assert.ok(focused(pageTitle(view.panel)), "the title takes focus as the page opens");
         assertNoDomNode(head.querySelector(".rpanel-switcher"), "the title takes the switcher's place");
-        const bar = view.panel.querySelector(".rpanel-toolbar > .art-bar")!;
-        assert.deepEqual([...bar.querySelectorAll(":scope > button")].map((button) => button.textContent?.trim()), ["Download"],
-          "the bar keeps Download (and Enlarge, for media) and draws no back");
+        // #3036: Download (and Enlarge, for media) join About Browser in the header's action slot,
+        // before Expand Panel and Close Panel, and the page draws no bar of its own.
+        assert.deepEqual([...head.querySelectorAll("button")].map((button) => button.getAttribute("aria-label")),
+          phone
+            ? ["Back to Browser", "Download", "About Browser"]
+            : ["Back to Browser", "Download", "About Browser", "Expand Panel", "Close Panel"]);
+        assert.ok(head.querySelector(".rpanel-actions > button.icon-btn[aria-label='Download'][aria-haspopup='menu']"));
+        assertNoDomNode(view.panel.querySelector(".rpanel-toolbar"), "no bar between the header and the meta line");
         assert.equal([...view.panel.querySelectorAll(".rpanel-body *")].filter((node) => shown(node) && node.textContent === log.name).length, 0,
           "the title is shown once");
         assertNoDomNode(view.panel.querySelector('[role="tablist"][aria-label="Browser"]'), "the tabs give way to the page");
@@ -236,7 +241,7 @@ describe("an open artifact is a page with the panel header's Back as its one bac
       assert.equal(pageTitle(view.panel).hidden, true, "no page is pushed");
       assert.deepEqual(backs(view.panel), []);
       assert.ok(shown(row(view.panel)), "the Browser shows its list");
-      assertNoDomNode(view.panel.querySelector(".art-bar"), "and no preview");
+      assertNoDomNode(view.panel.querySelector(".art-meta"), "and no preview");
       assert.equal(tab("Artifacts").getAttribute("aria-selected"), "true", "the tab is kept");
       await act(async () => tab("Web Preview").click());
       assert.equal(view.panel.querySelector<HTMLInputElement>("#browser-url")!.value, "http://preview.test/dashboard", "the address is kept");
