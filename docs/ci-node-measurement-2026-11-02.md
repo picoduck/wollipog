@@ -297,9 +297,6 @@ The top-20 projection leaves other import/startup costs unmeasured.
 Real database/media/process coverage, shard imbalance, browser execution and
 runner waits remain bottlenecks. No verified cheap improvement is established.
 
-
-
-
 ## Delivery Assessment
 
 - AC 1: original profile/inventory delivered; the complete-window projection
