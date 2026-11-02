@@ -300,9 +300,8 @@ position and state, failed jobs with run links, and whether it merged.
   and a confirmed queue entry instead of waiting on the merge queue. Queues can take hours, and
   each repeated wait in a turn re-reads the conversation. The parent watches the queue and prompts
   the child when the pull request merges or leaves it. In that new turn, reconcile the armed
-  `pr_merge` and finish cleanup after merge; this also satisfies the Codex App Server rule that
-  reconciliation happens in a later turn than enqueueing. Without a supervising Orchestrator,
-  keep waiting until `merged`.
+  `pr_merge` if its occurrence is still unconsumed, and finish cleanup after merge. Without a
+  supervising Orchestrator, keep waiting until `merged`.
 - `queue_ejected` also covers an entry GitHub removed before the call started, for example on a
   merge-group check timeout between two waits: when the latest merge-queue event removed the current
   head and the pull request is still open, `mergeQueueRemoval` gives GitHub's `reason` (such as
