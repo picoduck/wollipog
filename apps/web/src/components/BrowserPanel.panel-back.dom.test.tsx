@@ -255,3 +255,61 @@ describe("an open artifact is a page with the panel header's Back as its one bac
     }
   });
 });
+
+describe("About Browser is the header's, and the Artifacts tab's notice is one compact line (#3039)", () => {
+  const about = (panel: Element) => panel.querySelector<HTMLButtonElement>('.rpanel-head .rpanel-actions button[aria-label="About Browser"]');
+  const note = (panel: Element) => panel.querySelector<HTMLElement>('[role="note"][aria-label="Private Artifact Uploads"]');
+  const headNames = (panel: Element) => [...panel.querySelectorAll(".rpanel-head button")].map((button) => button.getAttribute("aria-label") ?? "");
+  const tab = (panel: Element, name: string) => [...panel.querySelectorAll<HTMLButtonElement>('[role="tablist"][aria-label="Browser"] [role="tab"]')]
+    .find((candidate) => candidate.textContent?.startsWith(name))!;
+  const popover = () => domWindow.document.querySelector('[role="dialog"][aria-label="About Browser"]') as unknown as HTMLElement | null;
+
+  test("About Browser sits in the action slot before Expand Panel, on both tabs and while an artifact's page is pushed", async () => {
+    const view = await openPanel(false);
+    try {
+      const names = headNames(view.panel);
+      assert.ok(names.includes("About Browser") && names.indexOf("About Browser") < names.indexOf("Expand Panel"), names.join(", "));
+      assert.equal(about(view.panel)?.getAttribute("title"), "About Browser");
+      assert.equal(about(view.panel)?.getAttribute("aria-haspopup"), "dialog");
+      await act(async () => tab(view.panel, "Web Preview").click());
+      assert.ok(about(view.panel), "on Web Preview");
+      await act(async () => tab(view.panel, "Artifacts").click());
+      await openArtifact(view.panel);
+      assert.ok(about(view.panel), "while an artifact's page is pushed");
+      assert.equal(view.panel.querySelectorAll('button[aria-label="About Browser"]').length, 1, "once");
+    } finally {
+      await view.dispose();
+    }
+  });
+
+  test("its popover holds the full explanation, which the notice never repeats, and stays once the notice is dismissed", async () => {
+    const view = await openPanel(false);
+    try {
+      const notice = note(view.panel)!;
+      assert.ok(notice, "the notice shows until it is dismissed");
+      assert.ok(notice.closest("#browser-artifacts-panel"), "on the Artifacts tab");
+      assert.equal(notice.querySelector(".notice-body")?.textContent?.trim(), "Artifacts can be stored privately.");
+      await act(async () => about(view.panel)!.click());
+      assert.ok(popover(), "About Browser opens its popover");
+      const text = popover()!.textContent ?? "";
+      for (const fact of ["privately on this control plane", "view them remotely", "Uploads are manual by default",
+        "Settings › Behavior", "Dismissing the notice in Artifacts doesn't change it"]) {
+        assert.ok(text.includes(fact), `the popover says: ${fact}`);
+      }
+      const noticeText = notice.textContent ?? "";
+      for (const sentence of text.split(/(?<=\.)\s+/u).map((part) => part.trim()).filter(Boolean)) {
+        assert.ok(!noticeText.includes(sentence), `the notice doesn't repeat: ${sentence}`);
+      }
+      await pressEscape();
+      assertNoDomNode(popover(), "Escape closes it");
+      assert.equal(view.state.open, true, "and only it");
+
+      await act(async () => notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Artifact Upload Notice"]')!.click());
+      assertNoDomNode(note(view.panel), "Dismiss hides the notice");
+      await act(async () => about(view.panel)!.click());
+      assert.ok(popover(), "About Browser stays after dismissal");
+    } finally {
+      await view.dispose();
+    }
+  });
+});

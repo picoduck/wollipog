@@ -125,7 +125,9 @@ export function validateReviewReport(report: unknown, context: ReviewReportConte
   if (value.schema_version !== 2) errors.push("unsupported report schema_version");
   if (value.reviewed_head !== context.headSha) errors.push("reviewed_head does not identify the pinned head");
   const scope = new Set(context.scopeFiles);
-  const inRepository = (path: string) => canonicalReviewPath(path) && (scope.has(path) || context.isTracked?.(path) !== false);
+  const contextFiles = new Set(context.contextFiles ?? []);
+  const inRepository = (path: string) => canonicalReviewPath(path)
+    && (scope.has(path) || contextFiles.has(path) || context.isTracked?.(path) !== false);
   let blocking = 0;
   value.findings.forEach((finding, index) => {
     const where = `findings[${index}]`;
@@ -155,7 +157,6 @@ export function validateReviewReport(report: unknown, context: ReviewReportConte
   if (!value.findings.length && !value.examined_changed_files.length && scope.size) {
     errors.push("a review with no findings must examine at least one changed file");
   }
-  const contextFiles = new Set(context.contextFiles ?? []);
   const outside = value.context_files_examined.filter((path) =>
     !canonicalReviewPath(path) || (!scope.has(path) && !contextFiles.has(path) && context.isTracked?.(path) === false));
   if (outside.length) errors.push(`context_files_examined has non-repository paths: ${JSON.stringify(outside.slice(0, 5))}`);

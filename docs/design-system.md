@@ -708,8 +708,12 @@ Rules
   Board View" / "Switch to List View", "Show Navigation Labels" / "Hide Navigation Labels"). An empty
   query shows Recent, Go To and Actions. A session matched by title and by transcript is one row,
   with the snippet as its third line. Sessions show a status dot, transcript hits a file-text icon,
-  destinations their own icon. Transcript search starts at three characters (a hint row says so),
-  keeps earlier hits until new ones arrive and shows "Searching transcripts…" meanwhile; no results
+  destinations their own icon. A session's second line names the status its dot shows, so a pending
+  request reads as the Sessions list says it ("Approval Required"), not as its lifecycle. A Recent
+  row trails line 1 with its last-activity time ("4m ago", `--text-faint`, tabular, §5.2). On fine
+  pointers the field ends with an Esc keycap (§11.5), and with an empty query the footer's trailing
+  end says "Transcripts are searched from 3 characters." Transcript search starts at three
+  characters (a hint row says so for a one- or two-character query), keeps earlier hits until new ones arrive and shows "Searching transcripts…" meanwhile; no results
   is §12.2's sentence with Clear Search and Search Archived Sessions. Desktop: 640px, 96px from the
   top, `--radius-lg`, `--elev-3`, a 48px search bar, the active row in `--surface-selected` with a
   2px accent bar, and a 36px key-hint footer on fine pointers. At 760px and below it fills the
@@ -1333,7 +1337,10 @@ Rules
   focus-within; on coarse pointers always visible or behind the row's ⋯.
 - A description equal to the name (case-insensitive) is not shown.
 - Group headers inside a list: `--type-label` in `--text-dim`, 32px tall, Title Case exactly as
-  written, optional count in `--text-faint`. Not sticky unless the list is long (>30).
+  written, optional plain count in `--text-faint` at the header's trailing edge, in line with the
+  rows' trailing badges. Groups follow each other with no margin: the header is the gap. Not sticky
+  unless the list is long (>30). In a master-detail list pane (Agent Skills) the rows bleed their
+  12px inset into the gutter, so row text and group labels start at the filter field's left edge.
 - **Thread families (#896, #2215)** in the Sessions list. A parent row's chevron is the §5.5 one: a
   14px `ChevronRight` in `--text-dim` inside a 28px `.icon-btn.sm` (36px to look and 44px to hit on
   touch), in the row's leading padding and centred on line one, turning 90° while the thread is open
@@ -2882,11 +2889,13 @@ the same notice with Reload and Copy Error Details; a page-level error is center
 
 - **A crashed view** (`ErrorBoundary`) is titled with the destination's name, "Automations Couldn't
   Be Shown" ("This Session" inside a session), over "Part of this page failed to display. Nothing was
-  changed." Its actions are **Reload Page** (primary) and **Copy Error Details**; Show Details opens a
-  code well with the error message and the first three component frames, which is also what Copy
-  copies. There is no Try Again: re-rendering the same data crashes the same way. The route's page
-  header stays above it, and navigating elsewhere clears it. Archived Sessions keeps its `.page`
-  list container when it crashes, matching its normal 960px rows.
+  changed." Its actions are **Reload Page** (primary, with the 14px `RefreshCw` icon, §3.1) and
+  **Copy Error Details**; Show Details opens a code well with the error message and the first three
+  component frames, which is also what Copy copies. There is no Try Again: re-rendering the same data
+  crashes the same way. The route's page header stays above it, in the route's own container
+  (`viewPageWidth`), so the header's hairline does not move: `.page.wide` for Usage and Cost,
+  `.page.full` for Sessions, Projects, Agent Skills, Connections › Machines and Settings, and `.page`
+  elsewhere. Archived Sessions keeps its `.page` list container, matching its normal 960px rows.
 - **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
   Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
 - **A turned-off experiment's route** is not an error: it keeps its page header, and below it an
@@ -3508,7 +3517,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Element | Phone behavior |
 | --- | --- |
 | Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
-| More | A real bottom sheet with a scrim and a "More" title; rows 48px with icons; Settings last after a separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
+| More | A real bottom sheet with a scrim and a 48px "More" title row over a 1px `--border` hairline; rows 48px with icons; the title and the rows' content start at the 16px gutter, as in every menu sheet; Settings last after a full-width separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
 | App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
 | Master-detail | Two routes (§6.2). |

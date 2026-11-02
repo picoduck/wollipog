@@ -194,6 +194,24 @@ for (const theme of ["dark", "light"] as const) {
     await expect(sheet.locator(".menu-head-title")).toHaveText("More");
     const close = await box(sheet.getByRole("menuitem", { name: "Close More" }));
     expect([Math.round(close.width), Math.round(close.height)], "a 44px Close").toEqual([44, 44]);
+    // The title and the rows' content start at the 16px phone gutter, and a full-width 1px hairline
+    // separates the 48px title row from the rows.
+    const titleText = await sheet.locator(".menu-head-title").evaluate((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return range.getBoundingClientRect().x;
+    });
+    expectGeometry(Math.abs(titleText - 16), "the title at the 16px gutter").toBeLessThanOrEqual(0.61);
+    const firstIcon = await box(sheet.locator(".menu-item .menu-icon").first());
+    expectGeometry(Math.abs(firstIcon.x - 16), "the first row's content at the 16px gutter").toBeLessThanOrEqual(0.61);
+    const head = sheet.locator(".menu-head");
+    const headBox = await box(head);
+    expect(await style(head, "border-bottom-width")).toBe("1px");
+    expect(await style(head, "border-bottom-color")).toBe(await tokenColor(page, "--border"));
+    expectGeometry(Math.abs(headBox.height - 49), "a 48px title row over its 1px hairline").toBeLessThanOrEqual(0.61);
+    expectGeometry(Math.abs(headBox.width - 390), "the hairline spans the sheet").toBeLessThanOrEqual(0.61);
+    expectGeometry(Math.abs((await box(sheet.locator(".menu-item").first())).y - (headBox.y + headBox.height)),
+      "the rows start under the hairline").toBeLessThanOrEqual(0.61);
     // Opened by a tap, the sheet holds focus itself: nothing inside is ringed.
     expect(await sheet.evaluate((element) => document.activeElement === element)).toBe(true);
     expect(await style(sheet, "outline-color")).toBe(TRANSPARENT);

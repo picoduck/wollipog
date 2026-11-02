@@ -5956,6 +5956,9 @@ body.shell-dock-dragging * {
 }
 /* Under an open artifact's page (#2914) the list stays mounted, hidden, as every tool's does (§4.9). */
 .browser-artifacts[hidden] { display: none; }
+/* The upload notice (#3039) keeps Upload Settings on its sentence's first line, the sentence wrapping
+   beside it, so on a phone the notice is two lines rather than a sentence over a button row. */
+.notice.compact.artifact-upload-notice .notice-body { flex-basis: 0; }
 /* The address row is one line at every panel width: the field gives up width, never the buttons. */
 .browser-address > :not(.browser-address-field) { flex: none; }
 .browser-address-field { flex: 1; }
@@ -11808,10 +11811,12 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
     padding: 0 var(--space-2);
     font: var(--type-title);
   }
+  /* Spanning the sheet, so the rows scroll under it, with the title at the 16px phone gutter where
+     every other sheet's title and its rows' content start. */
   .menu-head.persistent {
     top: 0;
     margin: 0 calc(-1 * var(--space-2));
-    padding: 0 var(--space-2);
+    padding: 0 var(--space-2) 0 var(--space-4);
   }
   /* Sheet rows read at the phone's reading size, like the dialog sheet's body. */
   .menu-item { font-size: var(--text-md); }
@@ -14913,8 +14918,13 @@ button.review-finding-location {
 @media (forced-colors: active) {
   .palette-bar-icon { color: inherit; }
 }
-.palette-cancel {
+.palette-cancel,
+.palette-esc {
   flex: none;
+}
+/* The Esc keycap names a key a touch screen does not have (§11.5); Cancel stays there. */
+@media (pointer: coarse) {
+  .palette-esc { display: none; }
 }
 .palette-input {
   flex: 1;
@@ -15002,6 +15012,24 @@ button.review-finding-location {
   color: var(--text-dim);
   font: var(--type-small);
 }
+/* A Recent row's first line: the title, then its time at the trailing edge (§5.2). */
+.palette-line {
+  display: flex;
+  align-items: baseline;
+  gap: var(--space-2);
+  min-width: 0;
+}
+.palette-line > .palette-label {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+.palette-time {
+  flex: none;
+  color: var(--text-faint);
+  font: var(--type-small);
+  font-variant-numeric: tabular-nums;
+  white-space: nowrap;
+}
 .palette-snippet b {
   color: var(--text);
   font-weight: var(--weight-semibold);
@@ -15049,6 +15077,16 @@ button.review-finding-location {
   height: 36px;
   padding: 0 var(--space-4);
   border-top: 1px solid var(--border);
+}
+/* With an empty query, when transcript search starts, at the footer's trailing end. */
+.palette-foot-note {
+  min-width: 0;
+  margin-left: auto;
+  overflow: hidden;
+  color: var(--text-dim);
+  font: var(--type-small);
+  text-overflow: ellipsis;
+  white-space: nowrap;
 }
 /* The hints name keys a touch screen does not have (§11.5). */
 @media (pointer: coarse) {
@@ -15260,6 +15298,11 @@ button.review-finding-location {
      sheet opens focused on itself, which draws no ring. */
   .rail-more-sheet:focus { outline: 2px solid transparent; }
   .rail-more-sheet .menu-head-title { font: var(--type-title); }
+  /* A 48px title row above its 1px hairline, as a dialog sheet's head is (§7.5). */
+  .rail-more-sheet .menu-head {
+    min-height: calc(var(--bar-h) + 1px);
+    border-bottom: 1px solid var(--border);
+  }
   .rail-more-close {
     width: 44px;
     height: 44px;
@@ -15725,10 +15768,26 @@ button.review-finding-location {
 /* SkillList.tsx. The list pane's head (§6): the filter takes the width, View Options sits at its
    end. */
 .skill-list-filter { flex: 1 1 auto; }
+/* Optical bleed (§4.5): the body reaches 12px into the gutter, the rows' own inset, so row text and
+   group labels start at the filter's left edge rather than 12px further in. */
+.skill-list-body { margin-left: calc(-1 * var(--space-3)); }
+@media (max-width: 760px) {
+  .skill-list-body {
+    margin-left: 0;
+    padding-left: calc(var(--page-gutter) - var(--space-3));
+  }
+}
+/* The foot's hairline is not a row: it starts at the filter's edge, while its Orphaned Copies row
+   bleeds with the others. */
+.skill-list-body > .list-foot { margin-left: var(--space-3); }
+.skill-list-body > .list-foot > .skill-list-orphans {
+  width: calc(100% + var(--space-3));
+  margin-left: calc(-1 * var(--space-3));
+}
+/* Groups follow each other directly: the 32px header is the gap. */
 .skill-list-group { display: grid; }
-.skill-list-group + .skill-list-group { margin-top: var(--space-3); }
 /* Group headers inside a list (§5.2): --type-label in --text-dim, 32px, Title Case as written, with
-   a plain count (§11.4). */
+   a plain count (§11.4) at the trailing edge, in line with the rows' badges. */
 .skill-list-group-title {
   display: flex;
   align-items: center;
@@ -15741,6 +15800,7 @@ button.review-finding-location {
   text-transform: none;
 }
 .skill-list-group-count {
+  margin-left: auto;
   color: var(--text-faint);
   font: var(--type-micro);
   font-variant-numeric: tabular-nums;

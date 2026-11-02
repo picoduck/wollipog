@@ -80,7 +80,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { backLabel, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";
 import { useRoutedSessionLookup } from "./routed-session-lookup.js";
@@ -872,6 +872,7 @@ export function Shell() {
             resetKey={viewPath(view)}
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
+            pageWidth={viewPageWidth(view)}
           >
           <Suspense fallback={<LazyRouteLoading title={viewTitle(view, entityTitle)} pending={pendingRouteTitleFocus} />}>
           <LazyRouteFocusRecovery path={path} pending={pendingRouteTitleFocus} />

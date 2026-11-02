@@ -245,6 +245,15 @@ test("an empty query shows Recent, Go To and Actions; arrows move across section
     .find((option) => option.querySelector(".palette-label")?.textContent === "Sessions")!;
   assert.equal(sessions.querySelector("kbd")?.textContent, "1", "a destination shows its digit");
   assert.equal(ui.doc.querySelectorAll(".palette-kind").length, 0);
+  const recentRow = [...ui.doc.querySelectorAll<HTMLElement>('[role="option"]')]
+    .find((option) => option.querySelector(".palette-label")?.textContent === "Other work")!;
+  const time = recentRow.querySelector(".palette-line > time.palette-time");
+  assert.equal(time?.getAttribute("dateTime"), new Date(1).toISOString(), "a Recent row trails line 1 with its last activity");
+  assert.match(time?.textContent ?? "", / ago$/);
+  assertNoDomNode(sessions.querySelector(".palette-time"), "a destination has no time");
+  assert.equal(ui.doc.querySelector(".palette-bar > kbd.palette-esc")?.textContent, "Esc", "the field ends with the key that closes it");
+  assert.equal(ui.doc.querySelector(".palette-foot-note")?.textContent, "Transcripts are searched from 3 characters.",
+    "an empty query says when transcript search starts");
 
   // The active row walks from Recent into Go To with one listbox's aria-activedescendant.
   const active = () => ui.doc.getElementById(ui.input().getAttribute("aria-activedescendant")!)!;
@@ -304,7 +313,9 @@ test("transcript search: a hint under three characters, a searching row, and ear
   await ui.key(ui.doc.body, "k", { ctrlKey: true });
   await ui.type("lo");
   assert.match(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Type 3 or more characters to search transcripts\./);
+  assertNoDomNode(ui.doc.querySelector(".palette-foot-note"), "the hint row replaces the footer's empty-query note");
   assert.deepEqual(ui.sections(), [["Sessions", ["Fix the login bug"]]]);
+  assertNoDomNode(ui.doc.querySelector(".palette-time"), "a title match has no time");
 
   await ui.type("login");
   assert.match(ui.doc.querySelector('.palette [role="status"]')!.textContent!, /Searching transcripts…/);

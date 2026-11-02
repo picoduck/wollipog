@@ -19,6 +19,7 @@ import { loadRecentSessions } from "../recent-sessions.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { useIsMobile, useIsTouchOnly } from "./useIsMobile.js";
 import { VIEW_ICONS } from "./Rail.js";
+import { RelativeTime } from "./RelativeTime.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { Spinner } from "./common.js";
 import {
@@ -353,6 +354,8 @@ export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: 
               }
             }}
           />
+          {/* The key that closes it, at the field's trailing edge; hidden on coarse pointers (§11.5). */}
+          <kbd className="palette-esc" aria-hidden="true">Esc</kbd>
           {isMobile && (
             <button type="button" className="btn ghost palette-cancel" onClick={onClose}>Cancel</button>
           )}
@@ -381,7 +384,14 @@ export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: 
                     >
                       <span className="palette-icon" aria-hidden="true"><EntryIcon entry={entry} /></span>
                       <span className="palette-body">
-                        <span className="palette-label">{entry.label}</span>
+                        {entry.at === undefined ? <span className="palette-label">{entry.label}</span> : (
+                          <span className="palette-line">
+                            <span className="palette-label">{entry.label}</span>
+                            <time className="palette-time" dateTime={new Date(entry.at).toISOString()}>
+                              <RelativeTime at={entry.at} />
+                            </time>
+                          </span>
+                        )}
                         {entry.detail && <span className="palette-detail">{entry.detail}</span>}
                         {entry.snippet && <span className="palette-detail palette-snippet">{renderSnippet(entry.snippet)}</span>}
                       </span>
@@ -423,6 +433,9 @@ export function CommandPalette({ initialQuery = "", onClose, onOpenShortcuts }: 
           <span className="shortcut-hint"><kbd>↑</kbd><kbd>↓</kbd><span className="shortcut-hint-label">Move</span></span>
           <span className="shortcut-hint"><kbd>Enter</kbd><span className="shortcut-hint-label">Open</span></span>
           <span className="shortcut-hint"><kbd>Esc</kbd><span className="shortcut-hint-label">Close</span></span>
+          {query === "" && (
+            <span className="palette-foot-note">Transcripts are searched from {TRANSCRIPT_QUERY_MIN} characters.</span>
+          )}
         </div>
       </div>
     </div>

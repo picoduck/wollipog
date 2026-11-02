@@ -192,6 +192,78 @@ test.describe("on a phone", () => {
 });
 
 /**
+ * The Artifacts tab's upload notice and About Browser (#3039; §13.2 Compact, §4.9 About): until it is
+ * dismissed the notice is one sentence with Upload Settings on its first line, at most two lines, so
+ * five artifact rows still show without scrolling; the explanation is About Browser's, a popover
+ * under its button on a desktop and a bottom sheet on a phone. The heights leave slack for CI's
+ * wider fonts: here the notice is 58px in a 400px panel and 66px on a phone.
+ */
+for (const [label, viewport, touch, maxHeight] of [
+  ["a 400px panel", { width: 1440, height: 900 }, false, 64],
+  ["a 390px phone", { width: 390, height: 844 }, true, 72],
+] as const) {
+  test.describe(`the upload notice and About Browser in ${label}`, () => {
+    test.use({ hasTouch: touch, isMobile: touch });
+
+    test("the notice is at most two lines, its action on the first, and five rows show without scrolling", async ({ page }) => {
+      await openBrowser(page, viewport.width);
+      await page.setViewportSize(viewport);
+      const notice = page.getByRole("note", { name: "Private Artifact Uploads" });
+      await expect(notice.locator(".notice-body")).toHaveText("Artifacts can be stored privately.");
+      await expect(notice.getByRole("link", { name: "Upload Settings" })).toHaveAttribute("href", "/settings/behavior");
+      await expect(page.locator(".browser-artifact-list .row")).toHaveCount(5);
+      const measured = await notice.evaluate((element) => {
+        const body = element.querySelector(".notice-body")!;
+        const range = document.createRange();
+        range.selectNodeContents(body);
+        const lines = new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
+        const top = (selector: string) => element.querySelector(selector)!.getBoundingClientRect().top;
+        return { height: element.getBoundingClientRect().height, lines, actionTop: top(".notice-actions"), bodyTop: top(".notice-body") };
+      });
+      expect(measured.height).toBeLessThanOrEqual(maxHeight);
+      expect(measured.lines).toBeLessThanOrEqual(2);
+      expect(measured.actionTop, "Upload Settings shares the sentence's first line").toBeCloseTo(measured.bodyTop, 0);
+      const visible = await page.evaluate(() => {
+        const scroller = document.querySelector(".rpanel-scroll")!.getBoundingClientRect();
+        return [...document.querySelectorAll(".browser-artifact-list .row")]
+          .filter((row) => row.getBoundingClientRect().bottom <= scroller.bottom + 0.5).length;
+      });
+      expect(visible).toBeGreaterThanOrEqual(5);
+    });
+
+    test("About Browser holds the explanation, as a popover on a desktop and a bottom sheet on a phone", async ({ page }) => {
+      await openBrowser(page, viewport.width);
+      await page.setViewportSize(viewport);
+      const about = page.locator(".rpanel-head").getByRole("button", { name: "About Browser", exact: true });
+      await expect(about).toHaveAttribute("title", "About Browser");
+      await about.click();
+      const dialog = page.getByRole("dialog", { name: "About Browser" });
+      await expect(dialog).toContainText("Uploads are manual by default.");
+      await expect(dialog).toContainText("privately on this control plane");
+      const grabber = dialog.locator(".sheet-grabber");
+      if (touch) {
+        await expect(grabber).toBeVisible();
+        await expect.poll(async () => {
+          const box = (await dialog.boundingBox())!;
+          return [Math.round(box.width), Math.round(box.y + box.height)];
+        }).toEqual([viewport.width, viewport.height]);
+      } else {
+        await expect(grabber).toBeHidden();
+        const [dialogBox, aboutBox] = [(await dialog.boundingBox())!, (await about.boundingBox())!];
+        expect(dialogBox.y).toBeGreaterThan(aboutBox.y + aboutBox.height);
+      }
+      await page.keyboard.press("Escape");
+      await expect(dialog).toHaveCount(0);
+      await expect(about).toBeFocused();
+      await page.getByRole("button", { name: "Dismiss Artifact Upload Notice" }).click();
+      await expect(page.getByRole("note", { name: "Private Artifact Uploads" })).toHaveCount(0);
+      await about.click();
+      await expect(dialog).toContainText("Dismissing the notice in Artifacts doesn't change it.");
+    });
+  });
+}
+
+/**
  * An opened artifact (#2855; docs/design-system.md §11.9): a 48px bar of Enlarge and Download, a plain
  * meta line, Download's menu carrying the warning, the bodies and their states, at the panel's 400px
  * and on a 390px phone. It is a page of the side panel (#2914), whose header carries its Back and
