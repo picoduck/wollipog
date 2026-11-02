@@ -69,7 +69,7 @@ function fixture(t: TestContext) {
     }
   }
   const scope: Record<string, any> = {
-    ws: null, registered: true, controlPlanePeerRefused: false, controlPlaneProtocolVersion: PROTOCOL_VERSION,
+    ws: null, republishWindow: null, registered: true, controlPlanePeerRefused: false, controlPlaneProtocolVersion: PROTOCOL_VERSION,
     automaticAccountSwitchConfigurationSynchronized: true,
     heartbeatPongObserved: false, missedHeartbeatPongs: 3,
     sessions: { setAutomaticAccountSwitchAuthorityReady() {}, liveSessionIds: () => [] },
