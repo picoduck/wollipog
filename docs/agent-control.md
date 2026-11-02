@@ -651,8 +651,8 @@ asks for. Real models asked for about a minute at a time, often with sleeps in b
 child, 531 of 616 requests were spent this way. The runner adds
 `-c features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]` directly after its own entry.
 Codex then offers the `wollipog` tools as ordinary direct tools again, outside `exec`, so a wait
-blocks in one tool call with no model request. This holds for sessions and native-host
-Orchestrators alike. Measured on codex-cli 0.165.0, the setting has no effect without code mode,
+blocks in one tool call with no model request. This holds for sessions and for native-host
+Orchestrators that start from their worktree or repository. Measured on codex-cli 0.165.0, the setting has no effect without code mode,
 with the hybrid `code_mode` mode, or with a user's own `features.code_mode = true` (which stays
 enabled). Codex refuses its whole configuration when `features.code_mode` contains a field it does
 not know. So the runner adds the setting only when a `codex mcp list --json` read with it still
@@ -663,11 +663,14 @@ own entry; a user's identical setting anywhere else is kept.
 A `-c` array replaces the configured value rather than merging into it, so the setting would drop
 namespaces a user already keeps out of code mode. The runner therefore adds nothing if the launch
 arguments or a Codex configuration file it can read already name `direct_only_tool_namespaces`.
-Those files are the Codex home's `config.toml`, each `.codex/config.toml` from the launch
-directory up, and `/etc/codex/config.toml` and `managed_config.toml`. A mention in a profile or a
-comment counts too. The log then says to add `"mcp__wollipog"` to that list. A target-local WSL
-Orchestrator is launched inside its distribution, where the runner reads no Codex configuration.
-It gets no setting and keeps today's behavior. A session or Orchestrator whose tools stay inside
+Those files are the Codex home's `config.toml`, and each `.codex/config.toml` from the launch
+directory up and from every directory a `-C`/`--cd` argument names. They also include
+`/etc/codex/config.toml` and `managed_config.toml`. A mention in a profile or a comment counts too.
+The log then says to add `"mcp__wollipog"` to that list. Two kinds of Orchestrator get no setting
+and keep today's behavior, because the runner cannot read the configuration that applies:
+- A preset Orchestrator with Strict Project Isolation, which starts from a session scratch
+  directory chosen after this check.
+- A target-local WSL Orchestrator, which is launched inside its distribution. A session or Orchestrator whose tools stay inside
 `exec` should follow the shipped skill's code-mode guidance: one call, then one long `wait`, never
 short polls.
 

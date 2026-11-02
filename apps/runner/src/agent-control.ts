@@ -863,7 +863,8 @@ export function provisionAgentControl(
   }
   log(`agent control ${spec.sessionId}: CLI${["claude-code", "pi"].includes(spec.driver ?? "") || (orchestrator && spec.driver === "acp") ? " and MCP" : ""} provisioned`);
   if (codexDriver && orchestrator && host.readCodexMcpInventory) {
-    return provisionOrchestratorCodexDirectTools(spec, host.readCodexMcpInventory, log, config.onProcess);
+    return provisionOrchestratorCodexDirectTools(spec, presetPermissions && strictProjectIsolation,
+      host.readCodexMcpInventory, log, config.onProcess);
   }
 }
 
@@ -896,7 +897,8 @@ const CODEX_DIRECT_ONLY_KEY = "direct_only_tool_namespaces";
  * the Codex home's `config.toml`, each `.codex/config.toml` from the launch directory up, and the
  * system and managed files under `/etc/codex`. They are searched for the key's name and nothing is
  * logged from them. A mention anywhere, including a profile or a comment, counts, so the runner can
- * only ever add less.
+ * only ever add less. Project files are searched from the launch directory and from every directory
+ * a `-C`/`--cd` argument names, because Codex reads its project configuration from the latter.
  */
 function codexConfigNamesDirectOnlyNamespaces(
   spec: CodexInventoryLaunch,
@@ -910,13 +912,27 @@ function codexConfigNamesDirectOnlyNamespaces(
     "/etc/codex/config.toml",
     "/etc/codex/managed_config.toml",
   ];
-  for (let dir = resolve(cwd); ; dir = dirname(dir)) {
-    files.push(join(dir, ".codex", "config.toml"));
-    if (dirname(dir) === dir) break;
+  for (const start of [cwd, ...codexDirectoryArgs(spec.args)]) {
+    for (let dir = resolve(cwd, start); ; dir = dirname(dir)) {
+      files.push(join(dir, ".codex", "config.toml"));
+      if (dirname(dir) === dir) break;
+    }
   }
   return files.some((file) => {
     try { return readFileSync(file, "utf8").includes(CODEX_DIRECT_ONLY_KEY); } catch { return false; }
   });
+}
+
+/** Every directory a Codex `-C <dir>`, `-C<dir>`, `--cd <dir>` or `--cd=<dir>` argument names. */
+function codexDirectoryArgs(args: readonly string[]): string[] {
+  const dirs: string[] = [];
+  for (let index = 0; index < args.length; index++) {
+    const arg = args[index]!;
+    if ((arg === "-C" || arg === "--cd") && typeof args[index + 1] === "string") dirs.push(args[++index]!);
+    else if (arg.startsWith("--cd=")) dirs.push(arg.slice("--cd=".length));
+    else if (arg.startsWith("-C") && arg.length > 2) dirs.push(arg.slice(arg[2] === "=" ? 3 : 2));
+  }
+  return dirs;
 }
 
 /** Why a launch carries its `wollipog` entry without `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING`. */
@@ -932,16 +948,25 @@ function directToolsSkipped(userList: boolean): string {
  * already, so this adds only `CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING`, and only when Codex still loads
  * the launch with it and no user list would be replaced. Any other result leaves the launch exactly
  * as it was, so a Codex without the setting starts as it did before.
+ *
+ * A preset Orchestrator with Strict Project Isolation is launched from a session scratch directory
+ * that is chosen after this runs, so neither the inventory read nor the configuration search can
+ * see the directory Codex will actually read. It goes without the setting (`scratchLaunch`).
  */
 async function provisionOrchestratorCodexDirectTools(
   spec: CodexInventoryLaunch,
+  scratchLaunch: boolean,
   read: typeof readCodexMcpInventory,
   log: (message: string) => void,
   onProcess?: (proof: Promise<boolean>) => void,
 ): Promise<void> {
   const candidate = withCodexDirectWollipogTools(spec.args);
   const cwd = spec.worktreePath ?? spec.repoPath ?? spec.workspacePath;
-  if (candidate.length === spec.args.length || !cwd) return;
+  if (candidate.length === spec.args.length) return;
+  if (scratchLaunch || !cwd) {
+    log(`agent control ${spec.sessionId}: wollipog tools left as Codex offers them (the launch directory is not known yet, so its Codex configuration cannot be checked)`);
+    return;
+  }
   const userList = codexConfigNamesDirectOnlyNamespaces(spec, cwd);
   const loaded = !userList &&
     (await codexInventoryReader(spec, cwd, read, onProcess)(candidate))?.find((server) => server.name === "wollipog");

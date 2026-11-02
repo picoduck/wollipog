@@ -299,7 +299,8 @@ position and state, failed jobs with run links, and whether it merged.
   status message then re-sends the whole conversation as a model request, so polling a long wait
   costs about as much as active work. The tool can still be reachable only from `exec`: with a
   Codex too old for the setting, when your Codex configuration already has its own
-  `direct_only_tool_namespaces` list (add `"mcp__wollipog"` to it), or in a WSL Orchestrator. Then
+  `direct_only_tool_namespaces` list (add `"mcp__wollipog"` to it), or in an Orchestrator that
+  starts from a scratch directory (Strict Project Isolation) or runs inside WSL. Then
   make one call from one cell, followed by one `wait` on that cell with `yield_time_ms` as long as
   the wait's own timeout. Do not alternate short waits with sleeps. A campaign child can instead
   end its turn and let the parent watch.

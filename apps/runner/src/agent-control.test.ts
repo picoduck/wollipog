@@ -1406,10 +1406,18 @@ test("a Codex session without the Orchestrator role gains the wollipog MCP serve
     const userListHome = join(root, "user-list-home");
     mkdirSync(userListHome, { recursive: true });
     writeFileSync(join(userListHome, "config.toml"), '[features.code_mode]\ndirect_only_tool_namespaces = ["mcp__mine"]\n');
+    // A project Codex reads through `-C`/`--cd` counts too, though the launch directory has none.
+    const otherProject = join(root, "other-project");
+    mkdirSync(join(otherProject, ".codex"), { recursive: true });
+    writeFileSync(join(otherProject, ".codex", "config.toml"), '[features.code_mode]\ndirect_only_tool_namespaces = ["mcp__mine"]\n');
     const userLists: Array<[string, string, string[]]> = [
       ["the Codex home's config.toml", userListHome, userArgs],
       ["a launch argument", join(root, "codex-home"),
         [...userArgs, "-c", 'features.code_mode.direct_only_tool_namespaces=["mcp__mine"]']],
+      ["-C <dir>", join(root, "codex-home"), [...userArgs, "-C", otherProject]],
+      ["-C<dir>", join(root, "codex-home"), [...userArgs, `-C${otherProject}`]],
+      ["--cd <dir>", join(root, "codex-home"), [...userArgs, "--cd", otherProject]],
+      ["--cd=<dir>", join(root, "codex-home"), [...userArgs, `--cd=${otherProject}`]],
     ];
     for (const [name, home, args] of userLists) {
       const inventory = fakeCodexMcpInventory([mine]);
@@ -1475,7 +1483,8 @@ test("a Codex Orchestrator keeps its wollipog tools out of code mode only when C
         launch.args = [...userArgs];
         launch.env.CODEX_HOME = join(root, "codex-home");
         launch.config = config;
-        launch.orchestrator = { strictProjectIsolation: shape === "preset" };
+        // Without Strict Project Isolation the preset launches from the worktree, as checked here.
+        launch.orchestrator = { strictProjectIsolation: false };
         const logs: string[] = [];
         await provisionAgentControl(launch, control, (line) => logs.push(line), host);
         const name = `${shape}${refuses ? " on a Codex that refuses the setting" : ""}`;
@@ -1495,6 +1504,25 @@ test("a Codex Orchestrator keeps its wollipog tools out of code mode only when C
         await provisionAgentControl(launch, control, () => {}, host);
         assert.deepEqual(launch.args, once, `${name}: resume is idempotent`);
       }
+    }
+
+    // A strict preset Orchestrator launches from a scratch directory chosen later, whose Codex
+    // configuration cannot be checked here: it goes without the setting, and nothing is probed.
+    {
+      const inventory = fakeCodexMcpInventory([]);
+      const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+        platform: "linux", readCodexMcpInventory: inventory.read };
+      const launch = Object.assign(spec("codex-app-server"), { worktreePath: "/repo/.worktrees/o" });
+      launch.sessionId = "s_strict_preset";
+      launch.config = { permissionMode: "orchestrator" };
+      launch.orchestrator = { strictProjectIsolation: true };
+      launch.env.CODEX_HOME = join(root, "codex-home");
+      const logs: string[] = [];
+      await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+      assert.ok(launch.args.some((arg) => arg.startsWith('mcp_servers={ "wollipog" = ')));
+      assert.equal(launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), false);
+      assert.equal(inventory.reads.length, 0);
+      assert.match(logs.at(-1)!, /launch directory is not known yet/u);
     }
 
     // A project's own `.codex/config.toml` above the launch directory names a list: it is kept.
