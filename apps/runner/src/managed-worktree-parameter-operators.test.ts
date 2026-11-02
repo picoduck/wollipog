@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, sep } from "node:path";
