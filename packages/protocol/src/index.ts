@@ -1,3 +1,4 @@
+export * from "./shared-predicates.js";
 import { isProviderHomeRecoveryCause, PROVIDER_HOME_RECOVERY_CAUSE_CODES, type ProviderHomeRecoveryCause, type ProviderHomeBlockingProcess } from "./provider-home-recovery.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } from "./orchestrator-review-policy.js";
 export * from "./orchestrator-review-policy.js";
