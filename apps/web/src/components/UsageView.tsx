@@ -800,7 +800,8 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                 </div>
               </section>
 
-              <dl className="facts strip usage-facts">
+              {/* Tokens mode carries a sixth fact, which a compact column wraps to three by two. */}
+              <dl className={`facts strip usage-facts${metric === "tokens" ? " usage-facts-six" : ""}`}>
                 <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
                 <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
                 <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>

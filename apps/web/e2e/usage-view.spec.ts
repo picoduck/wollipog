@@ -266,9 +266,16 @@ test("recent coverage: the caption says when recording started instead of counti
   await expect(page.locator("main")).not.toContainText(/\b1 days?\b/);
 });
 
-test("at 834px the overview stacks and six facts wrap to three columns by two rows", async ({ page }) => {
+test("at 834px the overview stacks, five facts keep one row and six wrap to three columns by two rows", async ({ page }) => {
   await page.setViewportSize({ width: 834, height: 1000 });
   await page.goto("/usage-view-e2e.html");
+  // Cost mode's five facts never wrap into a row with an empty cell.
+  await expect(page.locator(".usage-facts dt")).toHaveCount(5);
+  const five = await factBoxes(page);
+  expect(new Set(five.map((fact) => Math.round(fact.pair.top))).size).toBe(1);
+  expect(five.filter((fact) => fact.truncated)).toEqual([]);
+  await page.screenshot({ path: `${SHOT}/compact-834-dark-cost.png`, fullPage: true });
+
   await page.getByRole("radio", { name: "Tokens" }).click();
   await expect(page.locator(".usage-facts dt")).toHaveCount(6);
   const headline = (await page.locator(".usage-headline").boundingBox())!;

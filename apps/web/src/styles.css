@@ -17428,13 +17428,15 @@ button.review-finding-location {
 .usage-driver-row strong { margin-left: var(--space-3); font-weight: 500; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .usage-breakdown-section h3 { margin: 0 0 10px; font-size: var(--text-md); }
 .usage-facts { margin-bottom: var(--space-5); }
-/* Six facts in a compact column wrap to three by two rather than squeezing their labels; each
-   row's first fact starts flush and the second row gets its own hairline. Phones turn the strip
-   into rows (§5.4) and have no app container. */
+/* In a compact column the strip never leaves an empty cell: five facts keep one row, and six
+   wrap to three by two rather than squeezing their labels, each row's first fact flush and the
+   second row under its own hairline. Phones turn the strip into rows (§5.4) and have no app
+   container. */
 @container app (max-width: 1099px) {
-  .usage-facts.strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
-  .usage-facts.strip > div:nth-child(3n + 1) { padding-left: 0; border-left: 0; }
-  .usage-facts.strip > div:nth-child(n + 4) { border-top: 1px solid var(--border); }
+  .usage-facts.strip { grid-template-columns: repeat(5, minmax(0, 1fr)); }
+  .usage-facts-six.strip { grid-template-columns: repeat(3, minmax(0, 1fr)); }
+  .usage-facts-six.strip > div:nth-child(3n + 1) { padding-left: 0; border-left: 0; }
+  .usage-facts-six.strip > div:nth-child(n + 4) { border-top: 1px solid var(--border); }
 }
 
 .usage-chart { position: relative; display: grid; gap: 8px; min-width: 0; }
