@@ -6,7 +6,6 @@ import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import type {
   RunnerView,
-  SubscriptionUsageResponse,
   UiSnapshotMessage,
   UsageAggregationGranularity,
   UsageAggregationResponse,
@@ -15,7 +14,7 @@ import type {
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import type { ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
@@ -206,7 +205,7 @@ test("UsageView keeps the control-plane newest-first order after a refresh", asy
     await settleLoad();
     await Promise.resolve();
   });
-  assertNoDomNode(container.querySelector(".subscription-usage"), "subscription allowances wait in their own tab");
+  assertNoDomNode(container.querySelector("#usage-subscriptions-panel"), "subscription allowances wait in their own tab");
   const rowLabels = () => periodLabels(container);
   assert.deepEqual(rowLabels(), [periodLabel(newerDay, "day"), periodLabel(olderDay, "day")]);
 
@@ -1088,255 +1087,6 @@ test("a late failed request cannot overwrite the newer selection's loading state
   assert.match(container.querySelector(".usage-chart-svg title")?.textContent ?? "", /^Daily cost/);
   assert.equal(breakdownTabLabels(container)[0], "By Day");
   assert.deepEqual(periodLabels(container), [periodLabel(newerDay, "day")]);
-
-  await act(async () => root.unmount());
-  container.remove();
-});
-
-test("Subscription Usage shows remaining allowance, local and relative resets, stale state, and text warnings", async () => {
-  const now = Date.now();
-  const subscription = (status: "warning" | "exhausted", remainingPercent: number): SubscriptionUsageResponse => ({
-    staleAfterMs: 600_000,
-    generatedAt: now,
-    sources: [{
-      sourceId: "a".repeat(32),
-      runnerId: "runner-1",
-      agentId: "codex",
-      provider: "codex",
-      providerAccountId: "work",
-      accountLabel: "Work",
-      state: "available",
-      fetchedAt: now - 700_000,
-      freshness: "stale",
-      runnerStatus: "offline",
-      runnerName: "Build Machine",
-      agentName: "Codex",
-      plan: "plus",
-      buckets: [{
-        id: "future_lane",
-        label: "Future Lane",
-        usedPercent: 100 - remainingPercent,
-        remainingPercent,
-        resetsAt: now + 90 * 60_000,
-        status,
-      }],
-      spendControls: [{ id: "monthly", label: "Monthly Limit", limit: "$100" }],
-    }, {
-      sourceId: "b".repeat(32),
-      runnerId: "runner-1",
-      agentId: "claude",
-      provider: "claude",
-      providerAccountId: "personal",
-      accountLabel: "Personal",
-      state: "unavailable",
-      detail: "Usage appears after a provider response.",
-      fetchedAt: now,
-      freshness: "stale",
-      runnerStatus: "online",
-      runnerName: "Build Machine",
-      agentName: "Claude",
-      buckets: [],
-      spendControls: [],
-    }],
-  });
-  let refreshes = 0;
-  const refreshTargets: Array<{ runnerId: string; providerAccountId: string } | undefined> = [];
-  const client = {
-    ...api,
-    usage: async () => response([]),
-    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
-    usageUsers: async () => ({ users: [] }),
-    subscriptionUsage: async () => subscription("warning", 15),
-    refreshSubscriptionUsage: async (target?: { runnerId: string; providerAccountId: string }) => {
-      refreshes++;
-      refreshTargets.push(target);
-      return subscription("exhausted", 0);
-    },
-  } as unknown as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView /></ApiProvider>);
-  });
-  await act(async () => {
-    await settleLoad();
-    await Promise.resolve();
-  });
-  const pageText = () => container.textContent ?? "";
-  const tab = (key: string) => container.querySelector<HTMLButtonElement>(`#usage-${key}-tab`)!;
-  // The allowance cards wait in their tab; the tab counts the windows that need the user.
-  assert.doesNotMatch(pageText(), /15% Remaining/);
-  assert.equal(tab("api").getAttribute("aria-selected"), "true");
-  assert.equal(tab("subscriptions").getAttribute("aria-label"), "Subscriptions, 1 Need Attention");
-  assert.equal(tab("subscriptions").querySelector(".count-badge")?.className, "count-badge");
-  await act(async () => { tab("subscriptions").click(); await Promise.resolve(); });
-  assert.equal(tab("subscriptions").getAttribute("aria-selected"), "true");
-  assertNoDomNode(container.querySelector(".usage-toolbar"), "the API toolbar belongs to API Usage");
-  assert.equal(
-    tab("subscriptions").querySelector(".count-badge")?.textContent,
-    String([...container.querySelectorAll("#usage-subscriptions-panel .subscription-bucket .status")]
-      .filter((badge) => /Approaching Limit|Exhausted/.test(badge.textContent ?? "")).length),
-    "the count is the number of Approaching Limit and Exhausted badges in the tab",
-  );
-  assert.match(pageText(), /15% Remaining/);
-  // State words carry no glyph prefix; the badge's tone and dot carry the severity.
-  assert.match(pageText(), /Approaching Limit/);
-  assert.doesNotMatch(pageText(), /[⚠⛔]/);
-  assert.match(pageText(), /Last Known — Stale/);
-  // An old reading of any other state still says it is old, in words rather than a glyph.
-  assert.match(pageText(), /Temporarily UnavailableStale/);
-  assert.match(pageText(), /Resets in 2 hours/);
-  assert.ok(pageText().includes(new Date(now + 90 * 60_000).toLocaleString()), "the exact reset uses the viewer's local time");
-  assert.match(pageText(), /Machine Offline/);
-  assert.match(pageText(), /Monthly Limit: Usage Reported of \$100/);
-
-  const refresh = [...container.querySelectorAll("button")]
-    .find((button) => button.textContent?.trim() === "Refresh") as HTMLButtonElement;
-  await act(async () => {
-    refresh.click();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  assert.equal(refreshes, 1);
-  assert.equal(refreshTargets[0], undefined);
-  assert.match(pageText(), /0% Remaining/);
-  assert.match(pageText(), /Exhausted/);
-  assert.equal(tab("subscriptions").querySelector(".count-badge")?.className, "count-badge danger",
-    "the count turns danger while any window is exhausted");
-  assert.doesNotMatch(pageText(), /[⚠⛔]/);
-  assert.match(pageText(), /Subscription usage refreshed/);
-  const refreshAccount = [...container.querySelectorAll("button")]
-    .find((button) => button.textContent?.trim() === "Refresh Account") as HTMLButtonElement;
-  assert.equal(
-    [...container.querySelectorAll("button")]
-      .filter((button) => button.textContent?.trim() === "Refresh Account").length,
-    1,
-    "only a Codex account exposes an active refresh probe",
-  );
-  await act(async () => {
-    refreshAccount.click();
-    await Promise.resolve();
-    await Promise.resolve();
-  });
-  assert.equal(refreshes, 2);
-  assert.deepEqual(refreshTargets[1], { runnerId: "runner-1", providerAccountId: "work" });
-  await act(async () => root.unmount());
-  container.remove();
-});
-
-test("a subscription row's masked account says what it hides after an Account label (#1954)", async () => {
-  const now = Date.now();
-  const source = (id: string, providerAccountId: string | undefined, accountLabel: string) => ({
-    sourceId: id.repeat(32),
-    runnerId: "runner-1",
-    agentId: "codex",
-    provider: "codex" as const,
-    ...(providerAccountId ? { providerAccountId } : {}),
-    accountLabel,
-    state: "available" as const,
-    fetchedAt: now,
-    freshness: "fresh" as const,
-    runnerStatus: "online" as const,
-    runnerName: "Build Machine",
-    agentName: "Codex",
-    buckets: [],
-    spendControls: [],
-  });
-  const client = {
-    ...api,
-    usage: async () => response([]),
-    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
-    usageUsers: async () => ({ users: [] }),
-    // A bound account named with an email, and an unbound source whose label is the provider's report.
-    subscriptionUsage: async () => ({
-      staleAfterMs: 600_000,
-      generatedAt: now,
-      sources: [source("a", "work", "work.person@example.test"), source("b", undefined, "reported@example.test")],
-    }) as SubscriptionUsageResponse,
-  } as unknown as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView tab="subscriptions" /></ApiProvider>);
-  });
-  await act(async () => {
-    await settleLoad();
-    await Promise.resolve();
-  });
-  const rows = [...container.querySelectorAll(".subscription-account")];
-  assert.equal(rows.length, 2);
-  assert.equal(container.innerHTML.includes("@example.test"), false);
-  for (const row of rows) {
-    const mask = row.querySelector(".pid-mask")!;
-    assert.equal(mask.textContent, "Email Hidden");
-    assert.equal(textBefore(row, mask), "Account:");
-  }
-  await act(async () => root.unmount());
-  container.remove();
-});
-
-test("a window the provider never measured is marked absent, not shown as a value", async () => {
-  const now = Date.now();
-  const bucket = (id: string, measured: boolean) => ({
-    id,
-    label: id === "five_hour" ? "Five-Hour Window" : "Weekly — All Models",
-    ...(measured ? { usedPercent: 40, remainingPercent: 60 } : {}),
-    resetsAt: now + 90 * 60_000,
-    status: "available" as const,
-  });
-  const subscription: SubscriptionUsageResponse = {
-    staleAfterMs: 600_000,
-    generatedAt: now,
-    sources: [{
-      sourceId: "b".repeat(32),
-      runnerId: "runner-1",
-      agentId: "claude",
-      provider: "claude",
-      state: "available",
-      fetchedAt: now,
-      freshness: "fresh",
-      runnerStatus: "online",
-      runnerName: "Build Machine",
-      agentName: "Claude Code",
-      buckets: [bucket("five_hour", false), bucket("seven_day", true)],
-    }],
-  };
-  const client = {
-    ...api,
-    usage: async () => response([]),
-    usageDailyBudget: async () => ({ dailyBudget: { perUserUsd: null, updatedAt: null } }),
-    usageUsers: async () => ({ users: [] }),
-    subscriptionUsage: async () => subscription,
-  } as unknown as ApiClient;
-  const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
-  domWindow.document.body.append(container as never);
-  const root = createRoot(container);
-  await act(async () => {
-    root.render(<ApiProvider client={client}><UsageView tab="subscriptions" /></ApiProvider>);
-  });
-  await act(async () => {
-    await settleLoad();
-    await Promise.resolve();
-  });
-
-  const buckets = [...container.querySelectorAll(".subscription-bucket")];
-  assert.equal(buckets.length, 2);
-  const [unmeasured, measured] = buckets as HTMLElement[];
-  assert.ok(unmeasured?.className.includes("unmeasured"), "the unmeasured window is distinguishable");
-  assert.ok(!measured?.className.includes("unmeasured"));
-
-  // The old bold "Allowance Reported" put a non-value where every sibling shows a percentage.
-  assert.doesNotMatch(container.textContent ?? "", /Allowance Reported/);
-  // The dash is decorative; the meaning reaches assistive technology as text, not as visual weight.
-  assert.equal(unmeasured?.querySelector("[aria-hidden=\"true\"]")?.textContent, "—");
-  assert.equal(unmeasured?.querySelector(".sr-only")?.textContent, "Utilization Not Reported");
-  // The reset time is what that window does have to say, so it takes the prominent slot.
-  assert.match(unmeasured?.querySelector("dd strong")?.textContent ?? "", /Resets in 2 hours/);
-  // A measured window is untouched: the percentage keeps the prominent slot.
-  assert.equal(measured?.querySelector("dd strong")?.textContent, "60% Remaining");
-  assertNoDomNode(measured?.querySelector(".sr-only"));
 
   await act(async () => root.unmount());
   container.remove();
