@@ -20,12 +20,9 @@ test("desktop: metric, chart interaction, and shared Hour, Day, and Week control
   await page.goto("/usage-view-e2e.html");
   const headline = page.locator(".usage-headline-value");
   await expect(headline).toContainText("$");
-  await expect(page.locator(".usage-coverage", { hasText: "Codex App Server" })).toContainText(
-    "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.",
-  );
   await page.screenshot({ path: `${SHOT}/desktop-dark-cost.png`, fullPage: true });
   const breakdown = page.getByRole("radiogroup", { name: "Usage Breakdown" });
-  const aggregation = page.getByRole("radiogroup", { name: "Usage Aggregation" });
+  const aggregation = page.getByRole("radiogroup", { name: "Group By" });
   await aggregation.getByRole("radio", { name: "Hour" }).click();
   await expect(page.locator(".usage-chart-section h3")).toContainText("Hourly Cost");
   await expect(breakdown.getByRole("radio", { name: "Hour" })).toHaveAttribute("aria-checked", "true");
@@ -106,47 +103,172 @@ test.describe("with a touch pointer", () => {
   // The 44px trigger size is a touch size, keyed to the pointer rather than the viewport (#1799).
   test.use({ hasTouch: true });
 
-  test("mobile: subscription usage precedes compact API controls and every control stays reachable", async ({ page }) => {
+  test("mobile: one toolbar row of Metric, the range sheet's button and the About icon, each reachable", async ({ page }) => {
     await page.setViewportSize({ width: 390, height: 844 });
     await page.goto("/usage-view-e2e.html");
-    const subscription = page.locator(".subscription-usage");
-    const controls = page.locator(".usage-api-controls");
-    const compact = page.locator(".usage-mobile-controls");
-    await expect(subscription).toBeVisible();
-    await expect(controls).toBeVisible();
-    await expect(compact).toBeVisible();
-    await expect(page.locator(".usage-desktop-controls")).toBeHidden();
-    const positions = await Promise.all([subscription, controls, page.locator(".usage-overview")]
-      .map(async (locator) => (await locator.boundingBox())!.y));
-    expect(positions[0]).toBeLessThan(positions[1]);
-    expect(positions[1]).toBeLessThan(positions[2]);
-    const triggers = compact.locator(".ui-select-trigger");
-    await expect(triggers).toHaveCount(3);
-    for (const box of await triggers.evaluateAll((nodes) => nodes.map((node) => {
-      const { width, height } = node.getBoundingClientRect();
-      return { width, height };
-    }))) {
-      expect(box.height).toBeGreaterThanOrEqual(44);
-      expect(box.width).toBeGreaterThanOrEqual(44);
-    }
+    const toolbar = page.locator(".usage-toolbar");
+    const metric = toolbar.getByRole("radiogroup", { name: "Metric" });
+    const range = toolbar.getByRole("button", { name: "Range and Group By: 30 Days, Daily" });
+    const about = toolbar.getByRole("button", { name: "About These Numbers" });
+    await expect(range).toHaveText("30 Days, Daily");
+    await expect(about).toHaveText("");
+    // One row, in this order; DejaVu on CI is wider than this host's face, so only the order and
+    // the row are pinned, not exact widths.
+    const boxes = await Promise.all([metric, range, about].map(async (locator) => (await locator.boundingBox())!));
+    expect(new Set(boxes.map((box) => Math.round(box.y + box.height / 2))).size).toBe(1);
+    expect(boxes[0]!.x + boxes[0]!.width).toBeLessThanOrEqual(boxes[1]!.x);
+    expect(boxes[1]!.x + boxes[1]!.width).toBeLessThanOrEqual(boxes[2]!.x);
+    for (const box of boxes) expect(box.height).toBeGreaterThanOrEqual(44);
+    await expect(page.getByRole("radiogroup", { name: "Group By" })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
     await expect(page.locator(".usage-headline-value")).toBeVisible();
-    await page.getByRole("button", { name: "Usage Metric: Cost" }).click();
-    await page.getByRole("option", { name: "Tokens" }).click();
+
+    await metric.getByRole("radio", { name: "Tokens" }).click();
     await expect(page.locator(".usage-headline-value")).toContainText("M");
-    await page.getByRole("button", { name: "Usage Aggregation: Day" }).click();
-    await page.getByRole("option", { name: "Week" }).click();
+    // The button opens one sheet with a Range and a Group By section.
+    await range.click();
+    const sheet = page.getByRole("menu", { name: "Range and Group By" });
+    await expect(sheet).toBeVisible();
+    await expect(sheet.locator(".menu-label")).toHaveText(["Range", "Group By"]);
+    await page.screenshot({ path: `${SHOT}/mobile-dark-range-sheet.png` });
+    await sheet.getByRole("menuitemradio", { name: "Week" }).click();
     await expect(page.locator(".usage-chart-section h3")).toContainText("Weekly Processed Tokens");
+    await expect(page.getByRole("button", { name: "Range and Group By: 30 Days, Weekly" })).toBeVisible();
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
     await page.setViewportSize({ width: 320, height: 844 });
     expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(320);
     await page.setViewportSize({ width: 390, height: 844 });
     await page.screenshot({ path: `${SHOT}/mobile-dark-tokens.png`, fullPage: true });
   });
+
+  test("mobile: About These Numbers is a bottom sheet that Escape closes without leaving the page", async ({ page }) => {
+    await page.setViewportSize({ width: 390, height: 844 });
+    await page.goto("/usage-view-e2e.html");
+    const about = page.locator(".usage-toolbar").getByRole("button", { name: "About These Numbers" });
+    await about.click();
+    const sheet = page.getByRole("dialog", { name: "About These Numbers" });
+    await expect(sheet).toBeVisible();
+    const box = (await sheet.boundingBox())!;
+    expect(Math.round(box.x)).toBe(0);
+    expect(Math.round(box.y + box.height)).toBe(844);
+    await expect(sheet).toContainText("Recording started Jul 1, 2026.");
+    await page.screenshot({ path: `${SHOT}/mobile-dark-about.png` });
+    await page.keyboard.press("Escape");
+    await expect(sheet).toBeHidden();
+    await expect(page).toHaveURL(/usage-view-e2e\.html$/);
+    await expect(about).toBeFocused();
+  });
+});
+
+test("at 1440px the header, the tabs and the toolbar are all that sit above the overview", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?unpriced=0");
+  await expect(page.locator(".usage-headline-value")).toContainText("$");
+  const above = await page.evaluate(() => {
+    const overview = document.querySelector(".usage-overview")!.getBoundingClientRect().top;
+    // Every visible element with text of its own that starts above the overview.
+    const ownText = (node: Element) => [...node.childNodes]
+      .filter((child) => child.nodeType === Node.TEXT_NODE).map((child) => child.textContent).join("").trim();
+    return [...document.querySelectorAll<HTMLElement>("body *")]
+      .filter((node) => ownText(node) !== "" && !node.closest(".sr-only"))
+      .filter((node) => {
+        const rect = node.getBoundingClientRect();
+        return rect.width > 0 && rect.height > 0 && rect.top < overview && getComputedStyle(node).visibility !== "hidden";
+      })
+      .map((node) => ({ text: ownText(node), region: node.closest(".page-header") ? "header" : node.closest(".usage-toolbar") ? "toolbar" : "other" }));
+  });
+  expect(above.filter((item) => item.region === "other"), "nothing but the header and the toolbar sits above the overview").toEqual([]);
+  expect(above.map((item) => item.text)).toEqual(expect.arrayContaining(["Usage and Cost", "API Usage", "Subscriptions", "Cost", "Tokens", "Last 30 Days", "Hour", "Day", "Week", "About These Numbers"]));
+  await expect(page.getByText(/published API rates|Recording started|Only totals are stored/)).toHaveCount(0);
+  await page.screenshot({ path: `${SHOT}/desktop-1440-dark-api.png` });
+
+  // The caveats are one click away and leave again on Escape.
+  const about = page.getByRole("button", { name: "About These Numbers" });
+  await about.click();
+  const popover = page.getByRole("dialog", { name: "About These Numbers" });
+  await expect(popover).toContainText("These are estimates at published API rates, not a bill. Subscription plans are not billed this way.");
+  await expect(popover).toContainText("Recording started Jul 1, 2026. Earlier usage isn't in these charts.");
+  await expect(popover).not.toContainText(/\d{1,2}:\d{2}/);
+  await expect(popover).toContainText("Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.");
+  await expect(popover).toContainText("Only totals are stored: no prompts, file paths, tool inputs or session content.");
+  await expect(popover.getByRole("link", { name: "raw.githubusercontent.com" })).toHaveAttribute("href", /^https:\/\/raw\.githubusercontent\.com\//);
+  await page.screenshot({ path: `${SHOT}/desktop-1440-dark-about.png` });
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
+  await expect(about).toBeFocused();
+
+  // The Range menu: radio items within daily retention, the ones that allow Hour saying so.
+  await page.getByRole("button", { name: "Range: Last 30 Days" }).click();
+  const menu = page.getByRole("menu", { name: "Range" });
+  await expect(menu.getByRole("menuitemradio")).toHaveCount(4);
+  await expect(menu.getByRole("menuitemradio", { name: "Last 30 Days" })).toHaveAttribute("aria-checked", "true");
+  await expect(menu.getByRole("menuitemradio", { name: "Last 7 Days" })).toHaveAccessibleDescription("Hour grouping is available for ranges up to 30 days.");
+  await page.screenshot({ path: `${SHOT}/desktop-1440-dark-range.png` });
+  await menu.getByRole("menuitemradio", { name: "Last 90 Days" }).click();
+  await expect(menu).toBeHidden();
+  await expect(page.getByRole("button", { name: "Range: Last 90 Days" })).toBeVisible();
+  // Past hourly retention Hour is omitted, never shown disabled.
+  await expect(page.getByRole("radiogroup", { name: "Group By" }).getByRole("radio")).toHaveText(["Day", "Week"]);
+});
+
+test("with 14 days of hourly retention Hour appears only on Last 7 Days", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage-view-e2e.html?hourlyDays=14");
+  const groupBy = page.getByRole("radiogroup", { name: "Group By" });
+  await expect(groupBy.getByRole("radio")).toHaveText(["Day", "Week"]);
+  await page.getByRole("button", { name: "Range: Last 30 Days" }).click();
+  await page.getByRole("menu", { name: "Range" }).getByRole("menuitemradio", { name: "Last 7 Days" }).click();
+  await expect(groupBy.getByRole("radio")).toHaveText(["Hour", "Day", "Week"]);
+  await expect(page.locator('[role="radio"][aria-disabled="true"]', { hasText: "Hour" })).toHaveCount(0);
+});
+
+test("against a plane without weekly support Group By has no Week and the Range menu ends with why", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage-view-e2e.html?noWeek=1");
+  await expect(page.getByRole("radiogroup", { name: "Group By" }).getByRole("radio")).toHaveText(["Hour", "Day"]);
+  await page.getByRole("button", { name: "Range: Last 30 Days" }).click();
+  await expect(page.locator(".menu > :last-child")).toHaveText("Week grouping needs a newer version of Wollipog.");
+  await page.screenshot({ path: `${SHOT}/desktop-dark-range-no-week.png` });
+});
+
+test("the tabs are the URL: switching pushes it and Back returns to the previous tab", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/command-inbox-projects-e2e.html?fullShell=1&history=1&path=%2Fusage%2Fsubscriptions");
+  const tabs = page.getByRole("tablist", { name: "Usage and Cost" });
+  await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
+  await expect(page.locator(".usage-toolbar")).toHaveCount(0);
+
+  await tabs.getByRole("tab", { name: "API Usage" }).click();
+  await expect(tabs.getByRole("tab", { name: "API Usage" })).toHaveAttribute("aria-selected", "true");
+  await expect(page).toHaveURL(/path=%2Fusage(&|$)/);
+  await expect(page.locator(".usage-toolbar")).toBeVisible();
+
+  await page.goBack();
+  await expect(page).toHaveURL(/path=%2Fusage%2Fsubscriptions/);
+  await expect(tabs.getByRole("tab", { name: /^Subscriptions/ })).toHaveAttribute("aria-selected", "true");
+});
+
+test("the Subscriptions tab counts its Approaching Limit and Exhausted badges", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?subscriptions=1");
+  const tab = page.getByRole("tab", { name: /^Subscriptions/ });
+  await tab.click();
+  await expect(page).toHaveURL(/tab=subscriptions/);
+  const badges = page.locator("#usage-subscriptions-panel .subscription-bucket .status")
+    .filter({ hasText: /^(Approaching Limit|Exhausted)$/ });
+  const count = await badges.count();
+  expect(count).toBeGreaterThan(0);
+  await expect(tab.locator(".count-badge")).toHaveText(String(count));
+  await expect(tab).toHaveAccessibleName(`Subscriptions, ${count} Need Attention`);
+  await page.screenshot({ path: `${SHOT}/desktop-1440-dark-subscriptions.png`, fullPage: true });
+  await page.goBack();
+  await expect(page.getByRole("tab", { name: "API Usage" })).toHaveAttribute("aria-selected", "true");
 });
 
 test("subscription cards show provider allowances in presentation order (#223, #224)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
-  await page.goto("/usage-view-e2e.html?subscriptions=1");
+  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
   const cards = page.locator(".subscription-source");
   await expect(cards).toHaveCount(4);
 
@@ -219,12 +341,12 @@ test("subscription cards show provider allowances in presentation order (#223, #
   await expect(noHeaders).not.toContainText("after the first provider response");
 
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-dark.png` });
-  await page.goto("/usage-view-e2e.html?subscriptions=1&theme=light");
+  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&theme=light");
   await expect(current.locator(".subscription-bucket").first()).toContainText("17% Remaining");
   await page.locator(".subscription-source-grid").screenshot({ path: `${SHOT}/subscription-claude-light.png` });
 
   await page.setViewportSize({ width: 390, height: 844 });
-  await page.goto("/usage-view-e2e.html?subscriptions=1");
+  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
   const mobileCurrent = page.locator(".subscription-source").filter({ hasText: "Claude Code on build-box" }).first();
   // A reload starts hidden again, including on the mobile layout.
   await expect(mobileCurrent.locator(".subscription-account")).not.toContainText("primary@example.com");
@@ -236,7 +358,7 @@ test("subscription cards show provider allowances in presentation order (#223, #
 
 test("a missing selected installation appears as one unsupported usage source", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto("/usage-view-e2e.html?subscriptions=1&selectedUnavailable=1");
+  await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1&selectedUnavailable=1");
   const codex = page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" });
   await expect(codex).toHaveCount(1);
   await expect(codex).toContainText("The selected harness installation is unavailable");

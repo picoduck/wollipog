@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState, type ReactNode } from "react";
 import type {
   SubscriptionUsageBucket,
   SubscriptionUsageResponse,
@@ -38,18 +38,26 @@ import {
 import { PersonalIdentifier } from "./PersonalIdentifier.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
-import { SegmentedControl, Select } from "./ui/ChoiceControls.js";
+import { SegmentedControl, type SegmentedOption } from "./ui/ChoiceControls.js";
 import { UsageChart } from "./UsageChart.js";
 import { useFeedback } from "./FeedbackProvider.js";
 import { PageHeader } from "./PageHeader.js";
-import { destination } from "../navigation.js";
+import { destination, type UsageTab } from "../navigation.js";
 import { subscriptionResetLabel } from "../account-unavailable-reasons.js";
+import { safeExternalHref } from "../external-href.js";
+import { CountBadge } from "./CountBadge.js";
+import { ChevronDownIcon } from "./Icons.js";
+import { InfoPopover } from "./InfoPopover.js";
+import { handleRovingChoiceKeyDown, useAccessibleMenu } from "./interactions.js";
+import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
+import { TabList } from "./Tabs.js";
+import { useIsMobile } from "./useIsMobile.js";
 
 const RANGES = [7, 30, 90, 365] as const;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
 const WEEK_CHECKING_REASON = "Checking whether this version of Wollipog supports weekly aggregation.";
 const WEEK_CHECK_FAILED_REASON = "Weekly availability could not be checked. Retry by choosing a range.";
-const WEEK_UPGRADE_REASON = "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week.";
+const WEEK_UPGRADE_NOTE = "Week grouping needs a newer version of Wollipog.";
 const GRANULARITY_LABEL: Record<UsageAggregationGranularity, { noun: string; adjective: string }> = {
   hour: { noun: "Hour", adjective: "Hourly" },
   day: { noun: "Day", adjective: "Daily" },
@@ -69,6 +77,83 @@ function remainingFor(bucket: SubscriptionUsageBucket): number | undefined {
   return bucket.remainingPercent ?? (bucket.usedPercent === undefined ? undefined : Math.max(0, 100 - bucket.usedPercent));
 }
 
+/** Which badge a subscription window carries, if any. The window's card and the Subscriptions
+ * tab's count both read it, so the count is always the number of badges in that tab. */
+function bucketAttention(bucket: SubscriptionUsageBucket): "exhausted" | "approaching_limit" | null {
+  if (bucket.status === "exhausted" || remainingFor(bucket) === 0) return "exhausted";
+  return bucket.status === "warning" ? "approaching_limit" : null;
+}
+
+/** "Mon D, YYYY" in UTC, the zone every bucket on the page is cut in. */
+function coverageDate(timestamp: number): string {
+  return new Date(timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
+}
+
+/** A range in the Range menu and the phone's Range and Group By sheet: "Last 30 Days". */
+interface RangeChoice {
+  range: number;
+  /** Set on a range that allows Hour: "Hour grouping is available for ranges up to 14 days." */
+  description?: string;
+}
+
+/**
+ * The toolbar's menu buttons (§4.7, §9.1): Range on desktop, and on phones the one button that
+ * opens Range and Group By as a sheet. Its items are radio rows; a choice applies at once.
+ */
+function UsageMenuButton({ label, ariaLabel, menuLabel, disabled, title, keepOpen = false, children }: {
+  label: string;
+  ariaLabel: string;
+  menuLabel: string;
+  disabled?: boolean;
+  title?: string;
+  /** The phone sheet stays open after a choice, so its other section can be set too and the
+   * button behind it answers both (§15.1, as the Board's Filters sheet does). */
+  keepOpen?: boolean;
+  children: (choose: (apply: () => void) => void) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  const menu = useAccessibleMenu(open, setOpen, "usage-menu", "item", { reachUnavailable: true });
+  const choose = (apply: () => void) => {
+    if (!keepOpen) {
+      menu.close(false);
+      menu.triggerRef.current?.focus();
+    }
+    apply();
+  };
+  return (
+    <>
+      <button
+        ref={menu.triggerRef}
+        type="button"
+        className="btn"
+        disabled={disabled}
+        title={title}
+        aria-label={ariaLabel}
+        aria-haspopup="menu"
+        aria-expanded={open}
+        aria-controls={open ? menu.menuId : undefined}
+        onClick={menu.toggle}
+        onKeyDown={menu.onTriggerKeyDown}
+      >
+        <span>{label}</span>
+        <ChevronDownIcon size={14} />
+      </button>
+      {open && (
+        <MenuSurface
+          surfaceRef={menu.menuRef}
+          anchor={{ trigger: menu.triggerRef }}
+          id={menu.menuId}
+          label={menuLabel}
+          onDismiss={() => menu.close(true)}
+          onKeyDown={menu.onMenuKeyDown}
+        >
+          {children(choose)}
+        </MenuSurface>
+      )}
+    </>
+  );
+}
+
 /** Reports the offline Machines the viewer can see. Mounted only under a store; a standalone
  * render (tests, harness pages) has no fleet and shows no machine notice. */
 function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void }) {
@@ -81,7 +166,22 @@ function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void
   return null;
 }
 
-export function UsageView() {
+/**
+ * Usage and Cost (#3010): API Usage at `/usage`, Subscriptions at `/usage/subscriptions`. In the
+ * shell the tab is the route and `onSelectTab` navigates; a standalone render keeps it locally.
+ */
+export function UsageView({ tab: routeTab, onSelectTab }: {
+  tab?: UsageTab;
+  onSelectTab?: (tab: UsageTab | undefined) => void;
+} = {}) {
+  const [localTab, setLocalTab] = useState<UsageTab | undefined>(routeTab);
+  const tab = onSelectTab ? routeTab : localTab;
+  const selectTab = (next: UsageTab | undefined) => {
+    if (next === tab) return;
+    if (onSelectTab) onSelectTab(next);
+    else setLocalTab(next);
+  };
+  const phone = useIsMobile();
   const privacy = useAccountEmailPrivacy();
   const { confirm } = useFeedback();
   const api = useApi();
@@ -340,47 +440,46 @@ export function UsageView() {
     (data.seriesByDriver ?? []).some((row) => row.driver === "codex-app-server")
   ));
   const periodNoun = data ? GRANULARITY_LABEL[data.granularity].noun : GRANULARITY_LABEL[granularity].noun;
+  // Hour is OMITTED, never disabled, when the range is longer than hourly retention or the plane
+  // reports this range already rolled into days; the Range menu says which ranges allow it.
   const hourlyUnavailableByRange = Boolean(knownRetention && days > knownRetention.hourlyDays);
   const hourlyDataAvailable = hourlyAvailability?.range === days ? hourlyAvailability.available : undefined;
   const hourlyUnavailable = hourlyUnavailableByRange || hourlyDataAvailable === false;
-  const hourlyUnavailableReason = hourlyUnavailableByRange && knownRetention
-    ? `Hourly aggregation is retained for ${knownRetention.hourlyDays} days. Choose a range of ${knownRetention.hourlyDays} days or less.`
-    : hourlyDataAvailable === false
-      ? "Hourly data for this range has already been retained as daily buckets. Choose Day or Week."
-      : undefined;
-  const weekUnavailable = supportedGranularities !== null && !supportedGranularities.includes("week");
-  const weekDisabled = supportedGranularities === null || weekUnavailable;
-  const weekDisabledReason = supportedGranularities === null
-    ? capabilityCheckFailed ? WEEK_CHECK_FAILED_REASON : WEEK_CHECKING_REASON
-    : WEEK_UPGRADE_REASON;
-  const weekCapabilityNote = weekUnavailable
-    ? WEEK_UPGRADE_REASON
-    : supportedGranularities === null && capabilityCheckFailed
-      ? WEEK_CHECK_FAILED_REASON
-      : undefined;
-  const granularityOptions = (["hour", "day", "week"] as const).map((value) => ({
-    value,
-    label: GRANULARITY_LABEL[value].noun,
-    disabled: (value === "hour" && hourlyUnavailable) || (value === "week" && weekDisabled),
-    disabledReason: value === "hour" && hourlyUnavailable
-      ? hourlyUnavailableReason
-      : value === "week" && weekDisabled
-        ? weekDisabledReason
-        : undefined,
-  }));
-  const desktopGranularityOptions = granularityOptions.map((option) => ({
-    ...option,
-    description: option.value === "week" && weekDisabled ? weekDisabledReason : undefined,
-  }));
-  const rangeOptions = RANGES
+  // Week is omitted once the plane is known not to support it, and the Range menu ends with why.
+  // Until the first response says, it shows disabled with the reason.
+  const weekUnsupported = supportedGranularities !== null && !supportedGranularities.includes("week");
+  const weekPendingReason = supportedGranularities !== null
+    ? undefined
+    : capabilityCheckFailed ? WEEK_CHECK_FAILED_REASON : WEEK_CHECKING_REASON;
+  const granularityOptions: SegmentedOption<UsageAggregationGranularity>[] = (["hour", "day", "week"] as const)
+    .filter((value) => !(value === "hour" && hourlyUnavailable) && !(value === "week" && weekUnsupported))
+    .map((value) => value === "week" && weekPendingReason
+      ? { value, label: GRANULARITY_LABEL[value].noun, disabled: true, disabledReason: weekPendingReason, description: weekPendingReason }
+      : { value, label: GRANULARITY_LABEL[value].noun });
+  const hourDescription = knownRetention
+    ? `Hour grouping is available for ranges up to ${knownRetention.hourlyDays} days.`
+    : undefined;
+  const rangeChoices: RangeChoice[] = RANGES
     .filter((range) => !knownRetention || range <= knownRetention.dailyDays)
     .map((range) => ({
-      value: String(range),
-      label: `${range}d`,
-      title: `Last ${range} Days`,
-      disabled: saving,
-      disabledReason: saving ? savingReason : undefined,
+      range,
+      description: knownRetention && range <= knownRetention.hourlyDays &&
+        !(hourlyAvailability?.range === range && !hourlyAvailability.available)
+        ? hourDescription
+        : undefined,
     }));
+  const rangeItems = (choose: (apply: () => void) => void) => rangeChoices.map((choice) => (
+    <MenuItem
+      key={choice.range}
+      role="menuitemradio"
+      checked={days === choice.range}
+      description={choice.description}
+      onClick={() => choose(() => selectRange(String(choice.range)))}
+    >
+      Last {choice.range} Days
+    </MenuItem>
+  ));
+  const weekNote = weekUnsupported ? <MenuNote>{WEEK_UPGRADE_NOTE}</MenuNote> : null;
   const selectGranularity = (next: UsageAggregationGranularity) => {
     setGranularity(next);
     setBreakdown((current) => current === "model" ? current : next);
@@ -402,483 +501,522 @@ export function UsageView() {
   };
   const onOfflineNames = useCallback((names: string[]) => setOfflineMachines(names), []);
 
+  const attention = (subscriptionData?.sources ?? [])
+    .flatMap((source) => source.buckets.map(bucketAttention))
+    .filter((badge) => badge !== null);
+  const attentionTone = attention.includes("exhausted") ? "danger" : "warning";
+  const rateSource = safeExternalHref(data?.pricing?.source);
+  const coverageStartedAt = data?.retention.coverageStartedAt ?? knownRetention?.coverageStartedAt;
+  const tabs = [
+    { id: undefined, key: "api", label: "API Usage", count: 0 },
+    { id: "subscriptions", key: "subscriptions", label: "Subscriptions", count: attention.length },
+  ] as const;
+
+  const toolbar = (
+    <div className="toolbar usage-toolbar">
+      <SegmentedControl<UsageMetric>
+        label="Metric"
+        value={metric}
+        options={[
+          { value: "cost", label: "Cost", title: "Show API-equivalent cost" },
+          { value: "tokens", label: "Tokens", title: "Show processed tokens" },
+        ]}
+        onChange={setMetric}
+      />
+      {phone ? (
+        <UsageMenuButton
+          label={`${days} Days, ${GRANULARITY_LABEL[granularity].adjective}`}
+          ariaLabel={`Range and Group By: ${days} Days, ${GRANULARITY_LABEL[granularity].adjective}`}
+          menuLabel="Range and Group By"
+          disabled={saving}
+          title={saving ? savingReason : undefined}
+          keepOpen
+        >
+          {(choose) => (
+            <>
+              <div role="group" aria-label="Range">
+                <MenuLabel>Range</MenuLabel>
+                {rangeItems(choose)}
+              </div>
+              <div role="group" aria-label="Group By">
+                <MenuLabel>Group By</MenuLabel>
+                {granularityOptions.map((option) => (
+                  <MenuItem
+                    key={option.value}
+                    role="menuitemradio"
+                    checked={granularity === option.value}
+                    aria-disabled={option.disabled || undefined}
+                    description={option.disabledReason}
+                    onClick={() => { if (!option.disabled) choose(() => selectGranularity(option.value)); }}
+                  >
+                    {option.label}
+                  </MenuItem>
+                ))}
+              </div>
+              {weekNote}
+            </>
+          )}
+        </UsageMenuButton>
+      ) : (
+        <>
+          <UsageMenuButton
+            label={`Last ${days} Days`}
+            ariaLabel={`Range: Last ${days} Days`}
+            menuLabel="Range"
+            disabled={saving}
+            title={saving ? savingReason : undefined}
+          >
+            {(choose) => <>{rangeItems(choose)}{weekNote}</>}
+          </UsageMenuButton>
+          <SegmentedControl
+            label="Group By"
+            value={granularity}
+            options={granularityOptions}
+            onChange={selectGranularity}
+          />
+        </>
+      )}
+      <InfoPopover
+        tool="These Numbers"
+        labelled
+        facts={rateSource ? [{
+          term: "Rate Source",
+          value: <a href={rateSource} target="_blank" rel="noreferrer">{new URL(rateSource).host}</a>,
+        }] : undefined}
+      >
+        <p>These are estimates at published API rates, not a bill. Subscription plans are not billed this way.</p>
+        {coverageStartedAt !== undefined && (
+          <p>Recording started {coverageDate(coverageStartedAt)}. Earlier usage isn't in these charts.</p>
+        )}
+        {includesCodexAppServer && (
+          <p>
+            Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each
+            turn, so it is incomplete. Usage recorded since then counts every response.
+          </p>
+        )}
+        <p>Only totals are stored: no prompts, file paths, tool inputs or session content.</p>
+      </InfoPopover>
+    </div>
+  );
+
   return (
     <section className="page wide" aria-labelledby="page-title">
       {hasStore && <OfflineMachineWatcher onNames={onOfflineNames} />}
-      <PageHeader title={destination("usage").name} description={destination("usage").description} />
-
-      <section className="subscription-usage" aria-labelledby="subscription-usage-heading">
-        <div className="subscription-usage-heading">
-          <div>
-            <h3 id="subscription-usage-heading">Subscription Usage</h3>
-            <p>Provider allowance windows for signed-in Codex and Claude subscriptions. This does not include API-key billing.</p>
-          </div>
-          <button
-            type="button"
-            className="btn ghost"
-            disabled={subscriptionRefreshing !== null}
-            onClick={() => void refreshSubscriptions()}
-          >
-            {subscriptionRefreshing === "*" ? "Refreshing…" : "Refresh"}
-          </button>
-        </div>
-        {subscriptionLoading && !subscriptionData && <div className="usage-state" role="status">Loading subscription usage…</div>}
-        {subscriptionError && <div className="usage-state error" role="alert">{subscriptionError}</div>}
-        {subscriptionRefreshStatus && <div className="subscription-usage-status" role="status">{subscriptionRefreshStatus}</div>}
-        {subscriptionData && subscriptionData.sources.length === 0 && (
-          <div className="usage-state">No Codex or Claude subscription sources are configured on the Machines you can access.</div>
+      <PageHeader
+        title={destination("usage").name}
+        description={destination("usage").description}
+        tabs={(
+          <TabList label={destination("usage").name} onKeyDown={(event) => handleRovingChoiceKeyDown(event, "tab")}>
+            {tabs.map(({ id, key, label, count }) => (
+              <button
+                key={key}
+                id={`usage-${key}-tab`}
+                type="button"
+                role="tab"
+                aria-selected={tab === id}
+                aria-controls={`usage-${key}-panel`}
+                // The badge is aria-hidden, so the count joins the name in words.
+                aria-label={count > 0 ? `${label}, ${count} Need Attention` : undefined}
+                tabIndex={tab === id ? 0 : -1}
+                className="tab"
+                onClick={() => selectTab(id)}
+              >
+                {label}
+                <CountBadge count={count} tone={attentionTone} />
+              </button>
+            ))}
+          </TabList>
         )}
-        {subscriptionData && subscriptionData.sources.length > 0 && (
-          <div className="subscription-source-grid">
-            {subscriptionData.sources.map((source) => (
-              <article className="runner-card subscription-source" key={`${source.runnerId}:${source.sourceId}`}>
-                <header>
-                  <div>
-                    <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${subscriptionPlanLabel(source.plan)}` : ""}</h4>
-                    <p>{source.agentName} on {source.runnerName}</p>
-                    {source.accountLabel && (
-                      <p className="subscription-account">
-                        <strong>Account:</strong>{" "}
-                        {/* Without an account binding the label is the provider-reported email. */}
-                        <AccountIdentifier
-                          identity={`${source.runnerId}:${source.sourceId}:${source.providerAccountId ?? ""}`}
-                          value={source.accountLabel}
-                          label="Account Email"
-                          kind="email"
-                          {...(source.providerAccountId ? {} : { sensitive: true })}
-                        />
+      />
+
+      {tab === "subscriptions" ? (
+        <section id="usage-subscriptions-panel" role="tabpanel" aria-labelledby="usage-subscriptions-tab" className="subscription-usage">
+          <div className="subscription-usage-heading">
+            <button
+              type="button"
+              className="btn ghost"
+              disabled={subscriptionRefreshing !== null}
+              onClick={() => void refreshSubscriptions()}
+            >
+              {subscriptionRefreshing === "*" ? "Refreshing…" : "Refresh"}
+            </button>
+          </div>
+          {subscriptionLoading && !subscriptionData && <div className="usage-state" role="status">Loading subscription usage…</div>}
+          {subscriptionError && <div className="usage-state error" role="alert">{subscriptionError}</div>}
+          {subscriptionRefreshStatus && <div className="subscription-usage-status" role="status">{subscriptionRefreshStatus}</div>}
+          {subscriptionData && subscriptionData.sources.length === 0 && (
+            <div className="usage-state">No Codex or Claude subscription sources are configured on the Machines you can access.</div>
+          )}
+          {subscriptionData && subscriptionData.sources.length > 0 && (
+            <div className="subscription-source-grid">
+              {subscriptionData.sources.map((source) => (
+                <article className="runner-card subscription-source" key={`${source.runnerId}:${source.sourceId}`}>
+                  <header>
+                    <div>
+                      <h4>{source.provider === "codex" ? "Codex" : "Claude"}{source.plan ? ` — ${subscriptionPlanLabel(source.plan)}` : ""}</h4>
+                      <p>{source.agentName} on {source.runnerName}</p>
+                      {source.accountLabel && (
+                        <p className="subscription-account">
+                          <strong>Account:</strong>{" "}
+                          {/* Without an account binding the label is the provider-reported email. */}
+                          <AccountIdentifier
+                            identity={`${source.runnerId}:${source.sourceId}:${source.providerAccountId ?? ""}`}
+                            value={source.accountLabel}
+                            label="Account Email"
+                            kind="email"
+                            {...(source.providerAccountId ? {} : { sensitive: true })}
+                          />
+                        </p>
+                      )}
+                    </div>
+                    <StatusBadge meta={usageSourceMeta(source)} />
+                    {source.freshness === "stale" && source.state !== "available" && (
+                      // An old reading of any other state is still old; say so beside it.
+                      <StatusBadge tone="neutral" noDot label="Stale" title="This is the last reading the provider reported." />
+                    )}
+                    {source.provider === "codex" && source.providerAccountId && (
+                      <button
+                        type="button"
+                        className="btn ghost sm"
+                        disabled={subscriptionRefreshing !== null}
+                        onClick={() => void refreshSubscriptions({
+                          runnerId: source.runnerId,
+                          providerAccountId: source.providerAccountId!,
+                        })}
+                      >
+                        {subscriptionRefreshing === `${source.runnerId}:${source.providerAccountId}` ? "Refreshing…" : "Refresh Account"}
+                      </button>
+                    )}
+                  </header>
+                  {source.detail && <p className="subscription-detail">{privacy.hide ? redactPersonalIdentifiers(source.detail) : source.detail}</p>}
+                  {source.buckets.length > 0 && (
+                    <dl className="facts">
+                      {source.buckets.map((bucket) => {
+                        const remaining = remainingFor(bucket);
+                        const badge = bucketAttention(bucket);
+                        const warning = badge === "approaching_limit";
+                        const exhausted = badge === "exhausted";
+                        // A window the provider never measured must not put a non-value where every
+                        // sibling shows a percentage, or it reads as a figure that failed to parse.
+                        // The dash marks the measurement as absent and the reset time — the only
+                        // fact there is — takes the prominent slot instead.
+                        const measured = remaining !== undefined;
+                        const resetTitle = bucket.resetsAt ? new Date(bucket.resetsAt).toLocaleString() : "";
+                        const resetText = bucket.resetsAt
+                          ? `${subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · ${resetTitle}`
+                          : "";
+                        return (
+                          <div
+                            // Kept as one template literal: the stylesheet guardrail scans these
+                            // statically for class producers and does not see an array join.
+                            className={`subscription-bucket${exhausted ? " exhausted" : warning ? " warning" : ""}${measured ? "" : " unmeasured"}`}
+                            key={bucket.id}
+                          >
+                            <dt>{bucket.label}</dt>
+                            <dd>
+                              {measured ? (
+                                <><strong>{Math.round(remaining)}% Remaining</strong><span>{Math.round(bucket.usedPercent ?? 100 - remaining)}% Used</span></>
+                              ) : (
+                                <span className="subscription-unmeasured">
+                                  <span aria-hidden="true">—</span>
+                                  <span className="sr-only">Utilization Not Reported</span>
+                                </span>
+                              )}
+                              {exhausted && <StatusBadge meta={statusMeta("usage", "exhausted")} />}
+                              {!exhausted && warning && <StatusBadge meta={statusMeta("usage", "approaching_limit")} />}
+                              {bucket.resetsAt && (
+                                measured
+                                  ? <span title={resetTitle}>{resetText}</span>
+                                  : <strong title={resetTitle}>{resetText}</strong>
+                              )}
+                            </dd>
+                          </div>
+                        );
+                      })}
+                    </dl>
+                  )}
+                  {source.credits && (
+                    <p className="subscription-detail">
+                      Credits: {source.credits.unlimited ? "Unlimited" : source.credits.balance ?? (source.credits.hasCredits ? "Available" : "None")}
+                    </p>
+                  )}
+                  {source.spendControls?.map((control) => (
+                    <p className="subscription-detail" key={control.id}>
+                      {control.reached && <><StatusBadge meta={statusMeta("usage", "limit_reached")} />{" "}</>}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
+                      {control.resetsAt ? ` · ${subscriptionResetLabel(control.resetsAt, subscriptionNow)}` : ""}
+                    </p>
+                  ))}
+                  <footer>
+                    Last provider update: {new Date(source.fetchedAt).toLocaleString()}
+                    {source.runnerStatus === "offline" ? " · Machine Offline" : ""}
+                  </footer>
+                </article>
+              ))}
+            </div>
+          )}
+        </section>
+      ) : (
+        <div id="usage-api-panel" role="tabpanel" aria-labelledby="usage-api-tab">
+          {toolbar}
+          {loading && !data && <div className="usage-state" role="status">Loading usage…</div>}
+          {error && <div className="usage-state error" role="alert">{error}</div>}
+          {data && (
+            /* Refetches keep the previous render in place instead of flashing a skeleton: the frame
+               holds and the numbers update where they stand. */
+            <div aria-busy={loading}>
+              {notices.length > 0 && (
+                <div className="usage-notice" role="note" aria-label="Coverage">
+                  {notices.map((notice) => <p key={notice}>{notice}</p>)}
+                </div>
+              )}
+
+              <section className="usage-overview" aria-label="Overview">
+                <div className="usage-headline">
+                  <span className="usage-headline-value">{formatMetric(metricValue(data.totals, metric), metric)}</span>
+                  <span className="usage-headline-note">
+                    {metric === "cost" ? "API-equivalent estimate · " : "Processed tokens · "}last {windowDays(data)} days
+                  </span>
+                  <ul className="usage-driver-list" aria-label="By Driver">
+                    {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
+                    {rows.map((row) => (
+                      <li className="usage-driver-row" key={row.driver}>
+                        <div>
+                          <span>
+                            <span className={`usage-series-swatch ${seriesClass(row.driver)}`} aria-hidden="true" />
+                            {DRIVER_PRESENTATION[row.driver].label}
+                          </span>
+                          <strong>{formatMetric(metricValue(row.amount, metric), metric)}</strong>
+                        </div>
+                        <small>
+                          {formatShare(row.share)} of {metric === "cost" ? "cost" : "tokens"} · {
+                            metric === "cost"
+                              ? `${formatCompactTokens(processedTokens(row.amount))} tokens`
+                              : formatMoney(row.amount.costUsd)
+                          }
+                        </small>
+                      </li>
+                    ))}
+                  </ul>
+                </div>
+                <div className="usage-chart-section">
+                  <h3>{GRANULARITY_LABEL[data.granularity].adjective} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
+                  <UsageChart
+                    columns={columns}
+                    drivers={drivers}
+                    metric={metric}
+                    granularity={data.granularity}
+                    bounds={{ since: data.since, through: data.through }}
+                    tableHint={breakdown === data.granularity
+                      ? `the ${periodNoun} table below lists every value.`
+                      : `select ${periodNoun} under Breakdown for a table of every value.`}
+                  />
+                </div>
+              </section>
+
+              <section className="usage-totals-section" aria-labelledby="usage-totals-heading">
+                <h3 id="usage-totals-heading">Totals</h3>
+                <dl className="facts strip">
+                  <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
+                  <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
+                  <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>
+                  <div><dt>Output</dt><dd>{formatCompactTokens(data.totals.outputTokens)}</dd></div>
+                  <div><dt>Cache Savings</dt><dd>{formatMoney(data.totals.cacheSavingsUsd)}</dd></div>
+                </dl>
+              </section>
+
+              <section className="usage-breakdown-section" aria-labelledby="usage-breakdown-heading">
+                <div className="usage-breakdown-heading">
+                  <h3 id="usage-breakdown-heading">Breakdown</h3>
+                  <SegmentedControl
+                    label="Usage Breakdown"
+                    value={breakdown}
+                    options={[
+                      { value: "model", label: "Model" },
+                      ...granularityOptions,
+                    ]}
+                    onChange={(next) => {
+                      setBreakdown(next);
+                      if (next !== "model") setGranularity(next);
+                    }}
+                  />
+                </div>
+                {breakdown === "model" ? (
+                  <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-model-caption">
+                    <table className="table usage-table">
+                      <caption id="usage-model-caption">Usage by Model</caption>
+                      <thead><tr>
+                        <th scope="col" className="col-name">Model</th>
+                        <th scope="col" className="num">Cost</th>
+                        <th scope="col" className="num">Share</th>
+                        <th scope="col" className="num">Tokens</th>
+                      </tr></thead>
+                      <tbody>
+                        {models.length === 0 ? (
+                          <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
+                        ) : models.map((row) => (
+                          <tr key={row.key}>
+                            <th scope="row">{row.key}{row.costSource === "unpriced" ? " · unpriced" : ""}</th>
+                            <td className="num cell-status">{formatMoney(row.costUsd)}</td>
+                            <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Share: </span>{formatShare(row.share)}</td>
+                            <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Tokens: </span>{formatCompactTokens(processedTokens(row))}</td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                ) : (
+                  <div
+                    className="table-wrap usage-table-wrap"
+                    // A scroll region needs to be REACHABLE. The max-height that makes the sticky header
+                    // work also gives this its own scrollbar, and a plain overflow div is not in the
+                    // sequential focus order in WebKit — so a keyboard user tabbed past it.
+                    tabIndex={0}
+                    role="region"
+                    aria-labelledby="usage-table-caption"
+                  >
+                    <table className="table usage-table">
+                      <caption id="usage-table-caption">{GRANULARITY_LABEL[data.granularity].adjective} Usage in UTC</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col" className="col-name">{periodNoun}</th>
+                          {drivers.map((driver) => <th scope="col" className="num" key={driver}>{driverLabel(driver)}</th>)}
+                          <th scope="col" className="num">Total</th>
+                          <th scope="col" className="num">{metric === "cost" ? "Tokens" : "Cost"}</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {data.series.length === 0 ? (
+                          <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
+                        ) : data.series.map((bucket) => (
+                          <tr key={bucket.bucketTs}>
+                            <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity, data)}</th>
+                            {drivers.map((driver) => {
+                              const split = perDriverByBucket.get(bucket.bucketTs);
+                              const cell = split?.get(driver);
+                              // No split for the bucket at all means the plane never sent one; a
+                              // missing driver inside a split means that driver had nothing.
+                              // In the narrow two-line layout the drivers join line 2, each named,
+                              // since there is no detail view to find them in.
+                              return (
+                                <td className="num cell-meta cell-dim" data-driver={driver} key={driver}>
+                                  <span className="cell-label" aria-hidden="true">{driverLabel(driver)}: </span>
+                                  {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
+                                </td>
+                              );
+                            })}
+                            <td className="num cell-status">{formatMetric(metricValue(bucket, metric), metric)}</td>
+                            <td className="num cell-meta cell-dim">
+                              <span className="cell-label" aria-hidden="true">{metric === "cost" ? "Tokens" : "Cost"}: </span>
+                              {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                )}
+              </section>
+
+              <div className="usage-breakdowns">
+                {(["Agent", "Runner"] as const).map((label) => {
+                  const list = label === "Agent" ? data.byAgent : data.byRunner;
+                  return (
+                    <section className="runner-card usage-breakdown" key={label}>
+                      <h3>By {label}</h3>
+                      {list.length === 0 ? <p>No usage.</p> : (
+                        <ul>{list.slice(0, 20).map((row) => (
+                          <li key={row.key}><span>{row.key}</span><strong>{formatMetric(metricValue(row, metric), metric)}</strong></li>
+                        ))}</ul>
+                      )}
+                    </section>
+                  );
+                })}
+              </div>
+
+              {users && (
+                <section className="usage-users-section" aria-labelledby="usage-users-heading">
+                  <div className="usage-breakdown-heading">
+                    <div>
+                      <h3 id="usage-users-heading">By User</h3>
+                      <p className="usage-headline-note">
+                        {dailyBudget?.perUserUsd != null
+                          ? `Each user may spend ${formatMoney(dailyBudget.perUserUsd)} per UTC day across their sessions; new turns pause past it.`
+                          : "No per-user daily budget is set."}
                       </p>
+                    </div>
+                    {data.canManageRetention && (
+                      <form
+                        className="usage-daily-budget"
+                        onSubmit={(event) => { event.preventDefault(); void saveDailyBudget(); }}
+                      >
+                        <label>
+                          Daily Budget per User ($)
+                          <input
+                            type="number"
+                            min="0"
+                            step="0.5"
+                            placeholder="none"
+                            value={dailyBudgetDraft}
+                            onChange={(event) => setDailyBudgetDraft(event.target.value)}
+                          />
+                        </label>
+                        <button type="submit" className="btn primary" disabled={dailyBudgetSaving}>
+                          {dailyBudgetSaving ? "Saving…" : "Save Daily Budget"}
+                        </button>
+                      </form>
                     )}
                   </div>
-                  <StatusBadge meta={usageSourceMeta(source)} />
-                  {source.freshness === "stale" && source.state !== "available" && (
-                    // An old reading of any other state is still old; say so beside it.
-                    <StatusBadge tone="neutral" noDot label="Stale" title="This is the last reading the provider reported." />
+                  {dailyBudgetStatus && (
+                    <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
                   )}
-                  {source.provider === "codex" && source.providerAccountId && (
-                    <button
-                      type="button"
-                      className="btn ghost sm"
-                      disabled={subscriptionRefreshing !== null}
-                      onClick={() => void refreshSubscriptions({
-                        runnerId: source.runnerId,
-                        providerAccountId: source.providerAccountId!,
-                      })}
-                    >
-                      {subscriptionRefreshing === `${source.runnerId}:${source.providerAccountId}` ? "Refreshing…" : "Refresh Account"}
-                    </button>
-                  )}
-                </header>
-                {source.detail && <p className="subscription-detail">{privacy.hide ? redactPersonalIdentifiers(source.detail) : source.detail}</p>}
-                {source.buckets.length > 0 && (
-                  <dl className="facts">
-                    {source.buckets.map((bucket) => {
-                      const remaining = remainingFor(bucket);
-                      const warning = bucket.status === "warning";
-                      const exhausted = bucket.status === "exhausted" || remaining === 0;
-                      // A window the provider never measured must not put a non-value where every
-                      // sibling shows a percentage, or it reads as a figure that failed to parse.
-                      // The dash marks the measurement as absent and the reset time — the only
-                      // fact there is — takes the prominent slot instead.
-                      const measured = remaining !== undefined;
-                      const resetTitle = bucket.resetsAt ? new Date(bucket.resetsAt).toLocaleString() : "";
-                      const resetText = bucket.resetsAt
-                        ? `${subscriptionResetLabel(bucket.resetsAt, subscriptionNow)} · ${resetTitle}`
-                        : "";
-                      return (
-                        <div
-                          // Kept as one template literal: the stylesheet guardrail scans these
-                          // statically for class producers and does not see an array join.
-                          className={`subscription-bucket${exhausted ? " exhausted" : warning ? " warning" : ""}${measured ? "" : " unmeasured"}`}
-                          key={bucket.id}
-                        >
-                          <dt>{bucket.label}</dt>
-                          <dd>
-                            {measured ? (
-                              <><strong>{Math.round(remaining)}% Remaining</strong><span>{Math.round(bucket.usedPercent ?? 100 - remaining)}% Used</span></>
-                            ) : (
-                              <span className="subscription-unmeasured">
-                                <span aria-hidden="true">—</span>
-                                <span className="sr-only">Utilization Not Reported</span>
-                              </span>
-                            )}
-                            {exhausted && <StatusBadge meta={statusMeta("usage", "exhausted")} />}
-                            {!exhausted && warning && <StatusBadge meta={statusMeta("usage", "approaching_limit")} />}
-                            {bucket.resetsAt && (
-                              measured
-                                ? <span title={resetTitle}>{resetText}</span>
-                                : <strong title={resetTitle}>{resetText}</strong>
-                            )}
-                          </dd>
-                        </div>
-                      );
-                    })}
-                  </dl>
-                )}
-                {source.credits && (
-                  <p className="subscription-detail">
-                    Credits: {source.credits.unlimited ? "Unlimited" : source.credits.balance ?? (source.credits.hasCredits ? "Available" : "None")}
-                  </p>
-                )}
-                {source.spendControls?.map((control) => (
-                  <p className="subscription-detail" key={control.id}>
-                    {control.reached && <><StatusBadge meta={statusMeta("usage", "limit_reached")} />{" "}</>}{control.label}: {control.used ?? "Usage Reported"}{control.limit ? ` of ${control.limit}` : ""}
-                    {control.resetsAt ? ` · ${subscriptionResetLabel(control.resetsAt, subscriptionNow)}` : ""}
-                  </p>
-                ))}
-                <footer>
-                  Last provider update: {new Date(source.fetchedAt).toLocaleString()}
-                  {source.runnerStatus === "offline" ? " · Machine Offline" : ""}
-                </footer>
-              </article>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="usage-api-controls" aria-labelledby="api-usage-heading">
-        <div className="usage-api-controls-heading">
-          <h3 id="api-usage-heading">API Usage</h3>
-          <p>Filter the API-equivalent session usage below. Subscription allowances above are unaffected.</p>
-        </div>
-        {/* These filters deliberately live with the API-equivalent figures they scope. Subscription
-            allowance windows above come from providers and never change with these selections. */}
-        <div className="toolbar usage-desktop-controls">
-          <SegmentedControl<UsageMetric>
-            label="Usage Metric"
-            value={metric}
-            options={[
-              { value: "cost", label: "Cost", title: "Show API-equivalent cost" },
-              { value: "tokens", label: "Tokens", title: "Show processed tokens" },
-            ]}
-            onChange={setMetric}
-          />
-          <SegmentedControl
-            className="usage-range"
-            label="Usage Range"
-            value={String(days)}
-            options={rangeOptions}
-            onChange={selectRange}
-          />
-          <SegmentedControl
-            label="Usage Aggregation"
-            value={granularity}
-            options={desktopGranularityOptions}
-            onChange={selectGranularity}
-          />
-        </div>
-        <div className="usage-mobile-controls">
-          <div className="usage-compact-field">
-            <span>Metric</span>
-            <Select<UsageMetric>
-              label="Usage Metric"
-              value={metric}
-              options={[
-                { value: "cost", label: "Cost" },
-                { value: "tokens", label: "Tokens" },
-              ]}
-              onChange={setMetric}
-            />
-          </div>
-          <div className="usage-compact-field">
-            <span>Range</span>
-            <Select
-              label="Usage Range"
-              value={String(days)}
-              options={rangeOptions}
-              onChange={selectRange}
-            />
-          </div>
-          <div className="usage-compact-field">
-            <span>Aggregation</span>
-            <Select
-              label="Usage Aggregation"
-              value={granularity}
-              options={granularityOptions}
-              describedBy={weekCapabilityNote ? "usage-week-capability-note" : undefined}
-              menuWidth={280}
-              onChange={selectGranularity}
-            />
-          </div>
-        </div>
-        {(hourlyUnavailable || weekCapabilityNote) && (
-          <div className="usage-granularity-notes">
-            {hourlyUnavailable && <p className="usage-granularity-note" role="note">{hourlyUnavailableReason}</p>}
-            {weekCapabilityNote && (
-              <p id="usage-week-capability-note" className="usage-granularity-note" role="note">
-                {weekCapabilityNote}
-              </p>
-            )}
-          </div>
-        )}
-      </section>
-
-      {loading && !data && <div className="usage-state" role="status">Loading usage…</div>}
-      {error && <div className="usage-state error" role="alert">{error}</div>}
-      {data && (
-        /* Refetches keep the previous render in place instead of flashing a skeleton: the frame
-           holds and the numbers update where they stand. */
-        <div aria-busy={loading}>
-          <p className="usage-coverage" role="note">
-            Coverage begins {new Date(data.retention.coverageStartedAt).toLocaleString()}. Existing lifetime totals before that cutover are not backdated into buckets.
-          </p>
-          {includesCodexAppServer && (
-            <p className="usage-coverage" role="note">
-              Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response.
-            </p>
-          )}
-          {notices.length > 0 && (
-            <div className="usage-notice" role="note" aria-label="Coverage">
-              {notices.map((notice) => <p key={notice}>{notice}</p>)}
-            </div>
-          )}
-
-          <section className="usage-overview" aria-label="Overview">
-            <div className="usage-headline">
-              <span className="usage-headline-value">{formatMetric(metricValue(data.totals, metric), metric)}</span>
-              <span className="usage-headline-note">
-                {metric === "cost" ? "API-equivalent estimate · " : "Processed tokens · "}last {windowDays(data)} days
-              </span>
-              <ul className="usage-driver-list" aria-label="By Driver">
-                {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
-                {rows.map((row) => (
-                  <li className="usage-driver-row" key={row.driver}>
-                    <div>
-                      <span>
-                        <span className={`usage-series-swatch ${seriesClass(row.driver)}`} aria-hidden="true" />
-                        {DRIVER_PRESENTATION[row.driver].label}
-                      </span>
-                      <strong>{formatMetric(metricValue(row.amount, metric), metric)}</strong>
-                    </div>
-                    <small>
-                      {formatShare(row.share)} of {metric === "cost" ? "cost" : "tokens"} · {
-                        metric === "cost"
-                          ? `${formatCompactTokens(processedTokens(row.amount))} tokens`
-                          : formatMoney(row.amount.costUsd)
-                      }
-                    </small>
-                  </li>
-                ))}
-              </ul>
-            </div>
-            <div className="usage-chart-section">
-              <h3>{GRANULARITY_LABEL[data.granularity].adjective} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
-              <UsageChart
-                columns={columns}
-                drivers={drivers}
-                metric={metric}
-                granularity={data.granularity}
-                bounds={{ since: data.since, through: data.through }}
-                tableHint={breakdown === data.granularity
-                  ? `the ${periodNoun} table below lists every value.`
-                  : `select ${periodNoun} under Breakdown for a table of every value.`}
-              />
-            </div>
-          </section>
-
-          <section className="usage-totals-section" aria-labelledby="usage-totals-heading">
-            <h3 id="usage-totals-heading">Totals</h3>
-            <dl className="facts strip">
-              <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
-              <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
-              <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>
-              <div><dt>Output</dt><dd>{formatCompactTokens(data.totals.outputTokens)}</dd></div>
-              <div><dt>Cache Savings</dt><dd>{formatMoney(data.totals.cacheSavingsUsd)}</dd></div>
-            </dl>
-          </section>
-
-          <section className="usage-breakdown-section" aria-labelledby="usage-breakdown-heading">
-            <div className="usage-breakdown-heading">
-              <h3 id="usage-breakdown-heading">Breakdown</h3>
-              <SegmentedControl
-                label="Usage Breakdown"
-                value={breakdown}
-                options={[
-                  { value: "model", label: "Model" },
-                  ...granularityOptions,
-                ]}
-                onChange={(next) => {
-                  setBreakdown(next);
-                  if (next !== "model") setGranularity(next);
-                }}
-              />
-            </div>
-            {breakdown === "model" ? (
-              <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-model-caption">
-                <table className="table usage-table">
-                  <caption id="usage-model-caption">Usage by Model</caption>
-                  <thead><tr>
-                    <th scope="col" className="col-name">Model</th>
-                    <th scope="col" className="num">Cost</th>
-                    <th scope="col" className="num">Share</th>
-                    <th scope="col" className="num">Tokens</th>
-                  </tr></thead>
-                  <tbody>
-                    {models.length === 0 ? (
-                      <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
-                    ) : models.map((row) => (
-                      <tr key={row.key}>
-                        <th scope="row">{row.key}{row.costSource === "unpriced" ? " · unpriced" : ""}</th>
-                        <td className="num cell-status">{formatMoney(row.costUsd)}</td>
-                        <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Share: </span>{formatShare(row.share)}</td>
-                        <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Tokens: </span>{formatCompactTokens(processedTokens(row))}</td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            ) : (
-              <div
-                className="table-wrap usage-table-wrap"
-                // A scroll region needs to be REACHABLE. The max-height that makes the sticky header
-                // work also gives this its own scrollbar, and a plain overflow div is not in the
-                // sequential focus order in WebKit — so a keyboard user tabbed past it.
-                tabIndex={0}
-                role="region"
-                aria-labelledby="usage-table-caption"
-              >
-                <table className="table usage-table">
-                  <caption id="usage-table-caption">{GRANULARITY_LABEL[data.granularity].adjective} Usage in UTC</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col" className="col-name">{periodNoun}</th>
-                      {drivers.map((driver) => <th scope="col" className="num" key={driver}>{driverLabel(driver)}</th>)}
-                      <th scope="col" className="num">Total</th>
-                      <th scope="col" className="num">{metric === "cost" ? "Tokens" : "Cost"}</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.series.length === 0 ? (
-                      <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
-                    ) : data.series.map((bucket) => (
-                      <tr key={bucket.bucketTs}>
-                        <th scope="row">{bucketLabel(bucket.bucketTs, data.granularity, data)}</th>
-                        {drivers.map((driver) => {
-                          const split = perDriverByBucket.get(bucket.bucketTs);
-                          const cell = split?.get(driver);
-                          // No split for the bucket at all means the plane never sent one; a
-                          // missing driver inside a split means that driver had nothing.
-                          // In the narrow two-line layout the drivers join line 2, each named,
-                          // since there is no detail view to find them in.
+                  <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-users-caption">
+                    <table className="table usage-table">
+                      <caption id="usage-users-caption">Cost by User in UTC Days</caption>
+                      <thead>
+                        <tr>
+                          <th scope="col" className="col-name">User</th>
+                          <th scope="col" className="num">Today</th>
+                          <th scope="col" className="num">Last 7 Days</th>
+                          <th scope="col" className="num">Last 30 Days</th>
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {users.length === 0 ? (
+                          <tr><td colSpan={4} className="usage-empty">No user-owned usage in the last 30 days.</td></tr>
+                        ) : users.map((row) => {
+                          const over = row.dailyBudgetUsd != null && row.todayUsd >= row.dailyBudgetUsd;
                           return (
-                            <td className="num cell-meta cell-dim" data-driver={driver} key={driver}>
-                              <span className="cell-label" aria-hidden="true">{driverLabel(driver)}: </span>
-                              {!split ? "—" : formatMetric(cell ? metricValue(cell, metric) : 0, metric)}
-                            </td>
+                            <tr key={row.userId}>
+                              <th scope="row"><PersonalIdentifier value={row.userName} label="User Name" />{over ? " · paused by daily budget" : ""}</th>
+                              <td className="num cell-status">
+                                <span className="cell-label" aria-hidden="true">Today: </span>
+                                {formatMoney(row.todayUsd)}
+                                {row.dailyBudgetUsd != null && (
+                                  <span className="cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
+                                )}
+                              </td>
+                              <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 7 Days: </span>{formatMoney(row.last7DaysUsd)}</td>
+                              <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 30 Days: </span>{formatMoney(row.last30DaysUsd)}</td>
+                            </tr>
                           );
                         })}
-                        <td className="num cell-status">{formatMetric(metricValue(bucket, metric), metric)}</td>
-                        <td className="num cell-meta cell-dim">
-                          <span className="cell-label" aria-hidden="true">{metric === "cost" ? "Tokens" : "Cost"}: </span>
-                          {metric === "cost" ? formatCompactTokens(processedTokens(bucket)) : formatMoney(bucket.costUsd)}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </section>
-
-          <div className="usage-breakdowns">
-            {(["Agent", "Runner"] as const).map((label) => {
-              const list = label === "Agent" ? data.byAgent : data.byRunner;
-              return (
-                <section className="runner-card usage-breakdown" key={label}>
-                  <h3>By {label}</h3>
-                  {list.length === 0 ? <p>No usage.</p> : (
-                    <ul>{list.slice(0, 20).map((row) => (
-                      <li key={row.key}><span>{row.key}</span><strong>{formatMetric(metricValue(row, metric), metric)}</strong></li>
-                    ))}</ul>
-                  )}
+                      </tbody>
+                    </table>
+                  </div>
                 </section>
-              );
-            })}
-          </div>
-
-          {users && (
-            <section className="usage-users-section" aria-labelledby="usage-users-heading">
-              <div className="usage-breakdown-heading">
-                <div>
-                  <h3 id="usage-users-heading">By User</h3>
-                  <p className="usage-headline-note">
-                    {dailyBudget?.perUserUsd != null
-                      ? `Each user may spend ${formatMoney(dailyBudget.perUserUsd)} per UTC day across their sessions; new turns pause past it.`
-                      : "No per-user daily budget is set."}
-                  </p>
-                </div>
-                {data.canManageRetention && (
-                  <form
-                    className="usage-daily-budget"
-                    onSubmit={(event) => { event.preventDefault(); void saveDailyBudget(); }}
-                  >
-                    <label>
-                      Daily Budget per User ($)
-                      <input
-                        type="number"
-                        min="0"
-                        step="0.5"
-                        placeholder="none"
-                        value={dailyBudgetDraft}
-                        onChange={(event) => setDailyBudgetDraft(event.target.value)}
-                      />
-                    </label>
-                    <button type="submit" className="btn primary" disabled={dailyBudgetSaving}>
-                      {dailyBudgetSaving ? "Saving…" : "Save Daily Budget"}
-                    </button>
-                  </form>
-                )}
-              </div>
-              {dailyBudgetStatus && (
-                <div className="usage-save-status" role={dailyBudgetFailed ? "alert" : "status"}>{dailyBudgetStatus}</div>
               )}
-              <div className="table-wrap usage-table-wrap" tabIndex={0} role="region" aria-labelledby="usage-users-caption">
-                <table className="table usage-table">
-                  <caption id="usage-users-caption">Cost by User in UTC Days</caption>
-                  <thead>
-                    <tr>
-                      <th scope="col" className="col-name">User</th>
-                      <th scope="col" className="num">Today</th>
-                      <th scope="col" className="num">Last 7 Days</th>
-                      <th scope="col" className="num">Last 30 Days</th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {users.length === 0 ? (
-                      <tr><td colSpan={4} className="usage-empty">No user-owned usage in the last 30 days.</td></tr>
-                    ) : users.map((row) => {
-                      const over = row.dailyBudgetUsd != null && row.todayUsd >= row.dailyBudgetUsd;
-                      return (
-                        <tr key={row.userId}>
-                          <th scope="row"><PersonalIdentifier value={row.userName} label="User Name" />{over ? " · paused by daily budget" : ""}</th>
-                          <td className="num cell-status">
-                            <span className="cell-label" aria-hidden="true">Today: </span>
-                            {formatMoney(row.todayUsd)}
-                            {row.dailyBudgetUsd != null && (
-                              <span className="cell-dim"> of {formatMoney(row.dailyBudgetUsd)}</span>
-                            )}
-                          </td>
-                          <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 7 Days: </span>{formatMoney(row.last7DaysUsd)}</td>
-                          <td className="num cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Last 30 Days: </span>{formatMoney(row.last30DaysUsd)}</td>
-                        </tr>
-                      );
-                    })}
-                  </tbody>
-                </table>
-              </div>
-            </section>
-          )}
 
-          {data.canManageRetention && (
-            <section className="runner-card usage-retention" aria-labelledby="usage-retention-heading">
-              <div><h3 id="usage-retention-heading">Usage Aggregate Retention</h3><p>This affects usage buckets only—not transcripts, audit logs, provider state, or session budget totals.</p></div>
-              <label>Hourly Buckets (Days)<input type="number" min="1" max="90" value={hourlyDays} onChange={(event) => setHourlyDays(event.target.value)} /></label>
-              <label>Daily Buckets (Days)<input type="number" min="30" max="3650" value={dailyDays} onChange={(event) => setDailyDays(event.target.value)} /></label>
-              <button type="button" className="btn primary" disabled={saving} onClick={() => void saveRetention()}>{saving ? "Saving…" : "Save Retention"}</button>
-              {saveStatus && <div className="usage-save-status" role={saveFailed ? "alert" : "status"}>{saveStatus}</div>}
-            </section>
+              {data.canManageRetention && (
+                <section className="runner-card usage-retention" aria-labelledby="usage-retention-heading">
+                  <div><h3 id="usage-retention-heading">Usage Aggregate Retention</h3><p>This affects usage buckets only—not transcripts, audit logs, provider state, or session budget totals.</p></div>
+                  <label>Hourly Buckets (Days)<input type="number" min="1" max="90" value={hourlyDays} onChange={(event) => setHourlyDays(event.target.value)} /></label>
+                  <label>Daily Buckets (Days)<input type="number" min="30" max="3650" value={dailyDays} onChange={(event) => setDailyDays(event.target.value)} /></label>
+                  <button type="button" className="btn primary" disabled={saving} onClick={() => void saveRetention()}>{saving ? "Saving…" : "Save Retention"}</button>
+                  {saveStatus && <div className="usage-save-status" role={saveFailed ? "alert" : "status"}>{saveStatus}</div>}
+                </section>
+              )}
+            </div>
           )}
-          <p className="usage-privacy">{data.privacy}</p>
         </div>
       )}
     </section>

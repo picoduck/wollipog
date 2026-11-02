@@ -986,7 +986,13 @@ A row of tools above the content they act on: search, filters, view switches and
   Desktop filter menu triggers use `.filter-btn` too: they keep their field name visible and
   take `.is-set` while applied; the accessible name and removable chip include the chosen value.
 - Replaces `.agent-defaults-toolbar`, `.archive-toolbar`, `.board-toolbar`, `.connections-toolbar`
-  with `.view-toolbar`, `.inbox-toolbar` and `.usage-toolbar-controls`.
+  with `.view-toolbar`, `.inbox-toolbar`, `.usage-toolbar-controls`, and Usage and Cost's API Usage
+  card with its `.usage-desktop-controls` and `.usage-mobile-controls` (#3010).
+- Usage and Cost's API Usage tab (#3010) has one toolbar: Metric (Cost | Tokens), a Range menu
+  button reading "Last 30 Days", Group By (Hour | Day | Week, Hour omitted for a range longer than
+  hourly retention), then About These Numbers at the trailing end, the `InfoPopover` with a visible
+  label (the icon alone on phones). On phones Range and Group By are one button, "30 Days, Daily",
+  that opens a sheet with a Range and a Group By section.
 
 ### 4.8 Breadcrumbs
 
@@ -3515,9 +3521,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   height. It does this by redefining `--control-h-lg` on the rail. Touch keeps 48px items (§15.3).
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
-- Page content follows the tier too (#2106). Archived Sessions keeps its two-line rows (§14) at every tier. The Usage API card's description takes the line and its three segmented
-  controls follow as one group: beside the description while it keeps 220px (about 30 characters),
-  otherwise together on their own line below it.
+- Page content follows the tier too (#2106). Archived Sessions keeps its two-line rows (§14) at every tier. Usage and Cost's API Usage toolbar keeps its desktop row
+  (Metric, the Range menu button, Group By and About These Numbers) on one line (#3010).
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip, keeping the session bar's `+N`; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its

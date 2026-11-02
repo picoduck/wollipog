@@ -11,12 +11,15 @@ import type {
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UsageView } from "../components/UsageView.js";
+import type { UsageTab } from "../navigation.js";
 import "../styles.css";
 
 /**
  * The Usage & Cost view over a deterministic 30-day window, for screenshots and the spec. Query
  * flags: `?theme=light|dark`, `?empty=1` for a window with no usage, `?unpriced=1` for a partially
- * unpriced window with a cached rate table, `?subscriptions=1` for the Claude subscription cards.
+ * unpriced window with a cached rate table, `?subscriptions=1` for the Claude subscription cards,
+ * `?tab=subscriptions` to open the Subscriptions tab, `?hourlyDays=14` for shorter hourly
+ * retention, and `?noWeek=1` for a plane without weekly aggregation.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -93,11 +96,11 @@ const byModel = drivers.map((entry) => ({
 
 const response: UsageAggregationResponse = {
   granularity: "day",
-  supportedGranularities: ["hour", "day", "week"],
+  supportedGranularities: params.get("noWeek") === "1" ? ["hour", "day"] : ["hour", "day", "week"],
   hourlyDataAvailable: true,
   since: END - 29 * DAY,
   through: END + DAY,
-  retention: { hourlyDays: 30, dailyDays: 365, coverageStartedAt: Date.UTC(2026, 6, 1) },
+  retention: { hourlyDays: Number(params.get("hourlyDays") ?? 30), dailyDays: 365, coverageStartedAt: Date.UTC(2026, 6, 1) },
   canManageRetention: true,
   privacy: "content-free aggregates only; no session ids, prompts, paths, tool inputs, event bodies, environment values, or auth data",
   totals,
@@ -250,10 +253,36 @@ const client = {
   refreshSubscriptionUsage: async () => subscription,
 } as unknown as ApiClient;
 
+/** The tab is `?tab=subscriptions`, pushed like the shell's route so Back returns to the last tab. */
+function currentTab(): UsageTab | undefined {
+  return new URLSearchParams(window.location.search).get("tab") === "subscriptions" ? "subscriptions" : undefined;
+}
+
+function UsageRoute() {
+  const [tab, setTab] = React.useState(currentTab);
+  React.useEffect(() => {
+    const listener = () => setTab(currentTab());
+    window.addEventListener("popstate", listener);
+    return () => window.removeEventListener("popstate", listener);
+  }, []);
+  return (
+    <UsageView
+      tab={tab}
+      onSelectTab={(next) => {
+        const url = new URL(window.location.href);
+        if (next) url.searchParams.set("tab", next);
+        else url.searchParams.delete("tab");
+        window.history.pushState(null, "", url);
+        setTab(next);
+      }}
+    />
+  );
+}
+
 createRoot(document.getElementById("root")!).render(
   <React.StrictMode>
     <ApiProvider client={client}>
-      <main className="main-pane"><UsageView /></main>
+      <main className="main-pane"><UsageRoute /></main>
     </ApiProvider>
   </React.StrictMode>,
 );

@@ -27,7 +27,7 @@ const SURFACES: Array<{
   {
     name: "a Usage subscription row",
     open: async (page) => {
-      await page.goto("/usage-view-e2e.html?subscriptions=1");
+      await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
       return page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-account");
     },
     reveal: "Show Account Email",
