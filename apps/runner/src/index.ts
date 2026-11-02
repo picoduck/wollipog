@@ -208,6 +208,7 @@ import {
   waitForPendingKills,
 } from "./spawn.js";
 import { providerContainmentEmpty, providerContainmentIdentity } from "./linux-cgroup.js";
+import { watchSshLifetime } from "./ssh-supervision.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -385,6 +386,16 @@ try {
 
 async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
+// Before attestation succeeds no provider HOME or mutable store is owned. Arm transport
+// cancellation now, so an unavailable control plane cannot strand a supervised SSH launch.
+// Startup after attestation is synchronous through the assignment to graceful shutdown below.
+let onSshTransportClosed: () => void = () => process.exit(0);
+if (process.env.WOLLIPOG_SSH_SUPERVISED === "1") {
+  watchSshLifetime(process.stdin, () => {
+    log("ssh_transport_closed; draining runner-owned work");
+    onSshTransportClosed();
+  });
+}
 validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
@@ -443,8 +454,12 @@ if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
 config.dataDir = dataDirLease.dataDir;
 // Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
 // runner data directory when the temporary filesystem is noexec. This never moves the runner.
-providerContainmentIdentity(config.dataDir);
 process.once("exit", dataDirLease.release);
+const containment = providerContainmentIdentity(config.dataDir);
+if (process.env.WOLLIPOG_SSH_REQUIRE_CGROUP === "1" && !containment) {
+  console.error("[runner] ssh_launch_failed reason=containment-unavailable; verify delegated cgroup v2 support before reconnecting; preserve existing ownership evidence");
+  process.exit(1);
+}
 if (dataDirLease.migratedLegacyDataDir) {
   log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
 }
@@ -4435,6 +4450,7 @@ function shutdown(exitCode = 0): void {
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 process.on("SIGHUP", () => shutdown());
+onSshTransportClosed = () => { if (!shuttingDown) shutdown(); };
 // A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state, so run
 // the graceful shutdown() (waits for pending kills, releases provider-home leases) before exiting —
 // a hard crash would strand the lease and block every future agent. shutdown()'s own `shuttingDown`

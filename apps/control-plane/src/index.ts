@@ -180,6 +180,7 @@ import {
 import { RemoteAccess } from "./remote-access.js";
 import { registerRemoteAccessRoutes } from "./remote-access-route.js";
 import { probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness } from "./host-admin-route.js";
+import { finishControlPlaneShutdown } from "./control-plane-shutdown.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
@@ -1638,6 +1639,7 @@ app.register(async (instance) => {
       case "agents_updated":
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
+          orchestrator.onRunnerAgentsUpdated(msg.runnerId);
           // The review-session capability follows the agents it was derived from (#3369).
           if (msg.reviewSession !== undefined && runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "reviewSession")) {
             db.updateRunnerReviewSessionCapability(msg.runnerId, msg.reviewSession);
@@ -7125,7 +7127,7 @@ app.addHook("onClose", async () => {
   try {
     await outboundEvents.close();
   } finally {
-    orchestrator.shutdown();
+    await orchestrator.shutdown();
     // One last checkpoint pass, which flushes the log whenever it has frames to copy.
     db.stopWalCheckpoints();
   }
@@ -7144,11 +7146,7 @@ function gracefulShutdown(exitCode: number, reason: string): void {
   // app.close() fires the onClose hook, which runs orchestrator.shutdown() to kill the box SSH
   // children — the same path SIGINT/SIGTERM use. Force-exit on a bounded failsafe so a hung close
   // (possible after an uncaughtException left state corrupt) can never wedge the process forever.
-  const failsafe = setTimeout(() => process.exit(exitCode), 5_000);
-  void app.close().finally(() => {
-    clearTimeout(failsafe);
-    process.exit(exitCode);
-  });
+  finishControlPlaneShutdown(orchestrator.shutdown(), () => app.close(), () => process.exit(exitCode));
 }
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.once(sig, () => gracefulShutdown(0, sig));
