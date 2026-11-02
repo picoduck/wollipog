@@ -29,7 +29,9 @@ test("desktop: metric, chart interaction, and Group By as the one aggregation co
   await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly cost");
   await expect(breakdown.getByRole("tab").first()).toHaveText("By Hour");
   await expect(tableHead.first()).toHaveText("Hour (UTC)");
-  await expect(page.locator(".usage-chart-axis").first()).toContainText("· 03:00");
+  // The hourly axis spans the whole range from its first hour, not just the hours with usage.
+  await expect(page.locator(".usage-chart-axis").first()).toHaveText("Aug 5 · 00:00");
+  await expect(page.locator(".usage-chart-axis").last()).toHaveText("Sep 3 · 23:00");
 
   const cost = await headline.textContent();
   await page.getByRole("radio", { name: "Tokens" }).click();
@@ -40,11 +42,13 @@ test("desktop: metric, chart interaction, and Group By as the one aggregation co
   await page.screenshot({ path: `${SHOT}/desktop-dark-tokens.png`, fullPage: true });
   await page.getByRole("radio", { name: "Cost" }).click();
 
-  // Hover a column: the readout lists every driver plus a total.
+  // Hover a column: the readout lists every driver plus a total. Every hour of the 30 days is a
+  // column; the fixture's usage lands at 03:00 each day.
   const hits = page.locator(".usage-chart-hit");
-  await expect(hits).toHaveCount(30);
-  await hits.nth(14).hover();
+  await expect(hits).toHaveCount(30 * 24);
   const readout = page.locator(".usage-chart-readout");
+  await expect(readout).toContainText(/^Hourly average \$[\d.]+ · Peak \$[\d.]+ on Aug \d+ at 03:00$/);
+  await hits.nth(14 * 24 + 3).hover();
   await expect(readout).toContainText("Claude Code");
   await expect(readout).toContainText("Codex");
   await expect(readout).toContainText("Total");
@@ -171,7 +175,7 @@ test("at 834px the time table folds its trailing column under the date and keeps
     // DejaVu on CI is wider than this host's face: a header needs room to spare, not just to fit.
     spare: cell.clientWidth - cell.scrollWidth,
   })));
-  expect(headers.map((header) => header.text)).toEqual(["Claude Code", "Codex", "ACP"]);
+  expect(headers.map((header) => header.text)).toEqual(["Claude Code", "Codex", "Gemini CLI"]);
   for (const header of headers) expect(header.spare, header.text ?? "").toBeGreaterThanOrEqual(0);
   const widths = await table.locator("thead th.cell-extra").evaluateAll((cells) => cells.map((cell) => {
     const range = document.createRange();

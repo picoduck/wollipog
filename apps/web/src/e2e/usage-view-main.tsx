@@ -25,10 +25,13 @@ import "../styles.css";
  * unpriced window with a cached rate table, `?subscriptions=1` for the Claude subscription cards,
  * `?tab=subscriptions` to open the Subscriptions tab, `?hourlyDays=14` for shorter hourly
  * retention, `?noWeek=1` for a plane without weekly aggregation, and `?coverage=recent` for recording
- * that started yesterday, so the 30-day window is clamped to its first day.
+ * that started yesterday, so the 30-day window is clamped to its first day, `?coverageDays=10` for
+ * recording that started ten days ago, and `?sparse=1` for usage on only three of the 30 days.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
+// `?scheme=dracula` (or another alternative): the colour scheme, as the shell sets it.
+if (params.get("scheme")) document.documentElement.setAttribute("data-scheme", params.get("scheme")!);
 
 const DAY = 86_400_000;
 const END = Date.UTC(2026, 8, 3);
@@ -58,9 +61,14 @@ function add(a: UsageAmount, b: UsageAmount): UsageAmount {
 const unpriced = params.get("unpriced") === "1";
 const empty = params.get("empty") === "1";
 const recentCoverage = params.get("coverage") === "recent";
-const COVERAGE_STARTED_AT = recentCoverage ? END - DAY + 15 * 3_600_000 + 20 * 60_000 : Date.UTC(2026, 6, 1);
+// `?coverageDays=10`: recording started ten days ago, so the chart's first 20 days are Not Recorded.
+const coverageDays = Number(params.get("coverageDays") ?? 0);
+// `?sparse=1`: usage on only three days of the 30, so the rest of the axis is zero.
+const sparse = params.get("sparse") === "1";
+const COVERAGE_STARTED_AT = recentCoverage ? END - DAY + 15 * 3_600_000 + 20 * 60_000
+  : coverageDays > 0 ? END - (coverageDays - 1) * DAY : Date.UTC(2026, 6, 1);
 // The plane clamps the window to the day recording started, as `usage-aggregation.ts` does.
-const SINCE = recentCoverage ? END - DAY : END - 29 * DAY;
+const SINCE = recentCoverage ? END - DAY : coverageDays > 0 ? COVERAGE_STARTED_AT : END - 29 * DAY;
 // Each driver's agent, the model it ran and the machine it ran on, as the store names them.
 const drivers: Array<{
   driver: AgentDriverKind; agentId: string; agentName: string; model: string; modelName: string; runnerId: string; weight: number;
@@ -75,6 +83,7 @@ const seriesByDriver: UsageDriverTimeBucket[] = [];
 for (let dayIndex = 0; dayIndex < 30 && !empty; dayIndex += 1) {
   const bucketTs = END - (29 - dayIndex) * DAY;
   if (bucketTs < SINCE) continue;
+  if (sparse && ![4, 17, 26].includes(dayIndex)) continue;
   const weekday = new Date(bucketTs).getUTCDay();
   const quiet = weekday === 0 || weekday === 6;
   const push = dayIndex >= 12 && dayIndex <= 17 ? 1.9 : 1;
