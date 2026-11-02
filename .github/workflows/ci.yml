@@ -135,7 +135,7 @@ jobs:
     # five minutes beside the unit tests, which now run in the `unit` job below (#3770). Every run
     # step has its own timeout, so the step that overruns is the one named; the contract test keeps
     # this budget above all of those bounds plus a five-minute allowance for the setup actions.
-    timeout-minutes: 35
+    timeout-minutes: 38
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -275,9 +275,13 @@ jobs:
         timeout-minutes: 4
         run: pnpm --filter @wollipog/web build
 
-      - name: Validate Runner Bundle
-        timeout-minutes: 2
-        run: pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only
+      - name: Validate Packaged Runner Guard
+        timeout-minutes: 5
+        env:
+          TARGET_TRIPLE: x86_64-unknown-linux-gnu
+        run: |
+          pnpm --filter @wollipog/runner build:binary
+          node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-unknown-linux-gnu
 
       # esbuild-only pass (build-sidecar.mjs --bundle-only): proves the control plane and
       # its deps still bundle into one CJS file. Skips the SEA/postject/Tauri steps, so no

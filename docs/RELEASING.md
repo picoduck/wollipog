@@ -73,7 +73,19 @@ The runner SEA embeds fixed skill-adoption helpers compiled on the build host. m
 snapshot helper with `/usr/bin/clang`. Linux legs compile the no-replace rename helper
 (`apps/runner/native/linux-skill-rename.c`) with `/usr/bin/cc -static`, which needs a C compiler and
 the static C library; the `build-essential` packages the Linux legs install provide both. CI's
-`--bundle-only` runner check compiles the same static helper on every pull request.
+packaged runner check compiles the same static helper on every pull request.
+
+The **Validate Packaged Runner Guard** step in `ci.yml` builds the complete unsigned Linux x64
+runner SEA (including injection), then runs the provisioning self-test against that executable.
+It also invokes `--managed-worktree-guard` from a foreign working directory and requires a real
+deny document for destructive worktree removal, exit code 2 for malformed input, and an ordinary
+command to pass. Missing output, crashes and timeouts fail the step. This runs in **Typecheck &
+Bundles**, a dependency of the required **Typecheck, Test & Sidecar Bundle** aggregator, on PRs,
+merge groups and rolling main validation; it is not an advisory Platform Isolation check.
+To repeat locally after `pnpm --filter @wollipog/runner build:binary`, run
+`node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs <absolute-runner-binary>`.
+This guard smoke establishes Linux x64 packaged behavior; the six native release legs still build
+their own artifacts and run their existing entry-point checks.
 
 Each matrix job also publishes the **headless control plane**: the exact injected and signed
 sidecar bytes are copied to `apps/control-plane/dist-bin/wollipog-control-plane-<triple>[.exe]`,
