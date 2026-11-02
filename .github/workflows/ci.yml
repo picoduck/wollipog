@@ -532,14 +532,14 @@ jobs:
     # Maximum non-install remainder: 2016s (previous envelope: 1448s),
     # including other setup, suite, shard-1 production checks and cleanup; queue wait excluded.
     # Cache-hit OR cache-miss path: two six-minute attempts, not both exclusive paths.
-    # #3628 natural merge group 40018244256 measured 2078s non-install including production.
-    # Keep the 1710s forecast historical; round the measured floor to 2080s.
-    # 720s attempts + 2080s remainder + 480s cache/verify + 180s enforcement
-    # + 480s failure diagnostics + 180s reserve = 4120s, rounded up to 69m (4140s).
-    # Residual reserve is 200s. Same five jobs; only the finite worst-case cap grows 1m.
-    # scripts/workflow-browser-budget.test.mjs derives this from actual step deadlines and
-    # identified phases. docs/ci-browser-shards-2026-11-02.md records natural-run comparison.
-    timeout-minutes: 69
+    # #3628 natural sample through 2026-11-02: job 125302223524 measured 2453s
+    # non-install work. Latest complete group 41465192009 remeasures all five shards.
+    # 720s attempts + 2460s rounded remainder + 480s cache/verify + 180s enforcement
+    # + 480s failure diagnostics + 180s reserve = 4500s, rounded to 75m (4500s).
+    # Residual reserve is 180s. Same five jobs; this changes only the finite cap.
+    # scripts/workflow-browser-budget.test.mjs derives this from bounded phases and evidence.
+    # docs/ci-browser-shards-2026-11-02.md records natural-run comparison and uncertainty.
+    timeout-minutes: 75
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be

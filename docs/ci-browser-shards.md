@@ -94,7 +94,7 @@ still compares the full settings-rows spec when the existing diff detector requi
 
 The following 59-minute derivation is the historical #3644 pre-merge model.
 #3650 added cache phases (68 minutes); the [November 2 measurement](ci-browser-shards-2026-11-02.md)
-reconciles natural phases to a 2080s floor and 69-minute cap. It also supplies
+reconciles natural phases to a 2460s coherent floor and 75-minute cap. It also supplies
 the natural-run comparison requested below.
 
 The [finite budget](ci-browser-budget.md) remains **59 minutes**, without raising

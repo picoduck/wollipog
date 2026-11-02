@@ -2,7 +2,8 @@
   "units": "seconds",
   "queueDefinition": "job created_at to started_at; excluded from active duration and budget",
   "cleanupDefinition": "remaining active time after measured setup, suite and production; includes job gaps and finalization",
-  "sampledOn": "2026-10-18",
+  "sampledOn": "2026-11-02",
+  "historicalSizingSampledOn": "2026-10-18",
   "baselineHead": "b697f9c60a4d1d248f7662d667b69ec1d6fc63b6",
   "otherSetupDefinition": "job start to suite start minus elapsed first install and retry; includes all pre-suite gaps",
   "completeRunAttempts": [
@@ -84,7 +85,20 @@
       "attempt": 1,
       "event": "merge_group",
       "headSha": "98accc6be15171f931a90a2f9de602b0048cf330",
-      "workflowConclusion": "success"
+      "createdAt": "2026-10-23T20:18:52Z",
+      "workflowConclusion": "success",
+      "workloadTreeSha256": "58be66facfa95431b841c47ce1c2a0d04d7c8828e64fca23b67ffe57309f34a9"
+    },
+    {
+      "runId": 41465192009,
+      "attempt": 1,
+      "event": "merge_group",
+      "headSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b",
+      "testedSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b",
+      "createdAt": "2026-11-02T14:46:47Z",
+      "workflowConclusion": "success",
+      "workloadTreeSha256": "2ebcd9f9e24e8d8013987158dc0fb2e8e3fc8d242fa7d1d028f769d0126883b0",
+      "workloadTreeSourceSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b"
     }
   ],
   "historicalBaselineHead": "97dd322c312ff315a651cfa6af5e5229fdcc181d",
@@ -152,6 +166,27 @@
     "cutoff": "2026-10-18T17:15:00Z",
     "exclusionInventory": "Eligible main-push/merge-group runs created after the oldest selected run and by the cutoff, with both completed non-successes and incomplete attempts recorded; later observations are explicitly distinguished"
   },
+  "naturalSizingSample": {
+    "collectedOn": "2026-11-02",
+    "since": "2026-10-23T21:02:55Z",
+    "until": "2026-11-02T15:00:00Z",
+    "maximumPassingJob": {
+      "runId": 41452903152,
+      "attempt": 1,
+      "event": "merge_group",
+      "headSha": "3f3b7808b6bbe63497f82dca7ee6936c84a7381e",
+      "testedSha": "3f3b7808b6bbe63497f82dca7ee6936c84a7381e",
+      "createdAt": "2026-11-02T13:25:48Z",
+      "workflowConclusion": "success",
+      "workloadTreeSha256": "6b08acb528c99f34b1076ac093ee4e31127fa04778274882e9e4a973127fb162",
+      "workloadTreeSourceSha": "3f3b7808b6bbe63497f82dca7ee6936c84a7381e",
+      "jobId": 125302223524,
+      "workflowState": "passing"
+    },
+    "latestCompletePassingGroup": 41465192009,
+    "maximumNonInstallSeconds": 2453,
+    "basis": "Completed successful first-attempt shard maximum across natural PR/groups; partial failed/cancelled workflows retained for sizing only. Latest complete successful group remeasures all five shards."
+  },
   "samples": [
     {"runId": 37478932815, "attempt": 1, "event": "pull_request", "headSha": "695c1d4df46969789ec35afdb0a62929ca6f80eb", "jobId": 112321655414, "shard": 1, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1270, "installPath": "system-dependencies", "firstInstallSeconds": 17, "retryInstallSeconds": 0, "otherSetupSeconds": 40, "suiteSeconds": 1168, "productionSeconds": 42, "cleanupSeconds": 3, "nonInstallSeconds": 1253},
     {"runId": 37478932815, "attempt": 1, "event": "pull_request", "headSha": "695c1d4df46969789ec35afdb0a62929ca6f80eb", "jobId": 112321655537, "shard": 3, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 722, "installPath": "system-dependencies", "firstInstallSeconds": 17, "retryInstallSeconds": 0, "otherSetupSeconds": 38, "suiteSeconds": 663, "productionSeconds": 0, "cleanupSeconds": 4, "nonInstallSeconds": 705},
@@ -216,8 +251,14 @@
     {"runId": 39135469681, "attempt": 1, "event": "merge_group", "headSha": "06af3ae5887d9e3f42f5de2d3b5a77ecd7cf8977", "jobId": 117698982331, "shard": 5, "conclusion": "success", "queueSeconds": 1857, "activeSeconds": 1433, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 20, "suiteSeconds": 1398, "productionSeconds": 0, "cleanupSeconds": 3, "nonInstallSeconds": 1421},
     {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790178, "shard": 1, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 2091, "installPath": "system-dependencies", "firstInstallSeconds": 13, "retryInstallSeconds": 0, "otherSetupSeconds": 24, "suiteSeconds": 1944, "productionSeconds": 107, "cleanupSeconds": 3, "nonInstallSeconds": 2078},
     {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790191, "shard": 5, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1993, "installPath": "system-dependencies", "firstInstallSeconds": 18, "retryInstallSeconds": 0, "otherSetupSeconds": 25, "suiteSeconds": 1947, "productionSeconds": 0, "cleanupSeconds": 3, "nonInstallSeconds": 1975},
-    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790194, "shard": 4, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 2608, "installPath": "system-dependencies", "firstInstallSeconds": 372, "retryInstallSeconds": 256, "otherSetupSeconds": 26, "suiteSeconds": 1950, "productionSeconds": 0, "cleanupSeconds": 4, "nonInstallSeconds": 1980},
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790194, "shard": 4, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 2608, "installPath": "system-dependencies", "firstInstallSeconds": 372, "retryInstallSeconds": 256, "otherSetupSeconds": 26, "suiteSeconds": 1950, "productionSeconds": 0, "cleanupSeconds": 4, "nonInstallSeconds": 1980, "firstAttemptTimedOut": true, "timeoutEvidence": "Check-run 120635790194 annotation confirms Install Playwright System Dependencies timed out after six minutes; observed first phase 372s."},
     {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790224, "shard": 3, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1933, "installPath": "system-dependencies", "firstInstallSeconds": 17, "retryInstallSeconds": 0, "otherSetupSeconds": 27, "suiteSeconds": 1888, "productionSeconds": 0, "cleanupSeconds": 1, "nonInstallSeconds": 1916},
-    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790263, "shard": 2, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1907, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 21, "suiteSeconds": 1872, "productionSeconds": 0, "cleanupSeconds": 2, "nonInstallSeconds": 1895}
+    {"runId": 40018244256, "attempt": 1, "event": "merge_group", "headSha": "98accc6be15171f931a90a2f9de602b0048cf330", "jobId": 120635790263, "shard": 2, "conclusion": "success", "queueSeconds": 2, "activeSeconds": 1907, "installPath": "system-dependencies", "firstInstallSeconds": 12, "retryInstallSeconds": 0, "otherSetupSeconds": 21, "suiteSeconds": 1872, "productionSeconds": 0, "cleanupSeconds": 2, "nonInstallSeconds": 1895},
+    {"runId": 41465192009, "attempt": 1, "event": "merge_group", "headSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b", "jobId": 125344083022, "shard": 4, "conclusion": "success", "queueSeconds": 2, "installPath": "system-dependencies", "activeSeconds": 2311, "firstInstallSeconds": 6, "retryInstallSeconds": 0, "otherSetupSeconds": 31, "suiteSeconds": 2266, "productionSeconds": 0, "cleanupSeconds": 8, "nonInstallSeconds": 2305},
+    {"runId": 41465192009, "attempt": 1, "event": "merge_group", "headSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b", "jobId": 125344083137, "shard": 1, "conclusion": "success", "queueSeconds": 2, "installPath": "system-dependencies", "activeSeconds": 1520, "firstInstallSeconds": 5, "retryInstallSeconds": 0, "otherSetupSeconds": 25, "suiteSeconds": 1417, "productionSeconds": 70, "cleanupSeconds": 3, "nonInstallSeconds": 1515},
+    {"runId": 41465192009, "attempt": 1, "event": "merge_group", "headSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b", "jobId": 125344083295, "shard": 3, "conclusion": "success", "queueSeconds": 2, "installPath": "system-dependencies", "activeSeconds": 1588, "firstInstallSeconds": 5, "retryInstallSeconds": 0, "otherSetupSeconds": 27, "suiteSeconds": 1545, "productionSeconds": 0, "cleanupSeconds": 11, "nonInstallSeconds": 1583},
+    {"runId": 41465192009, "attempt": 1, "event": "merge_group", "headSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b", "jobId": 125344083567, "shard": 2, "conclusion": "success", "queueSeconds": 17, "installPath": "system-dependencies", "activeSeconds": 2179, "firstInstallSeconds": 5, "retryInstallSeconds": 0, "otherSetupSeconds": 31, "suiteSeconds": 2124, "productionSeconds": 0, "cleanupSeconds": 19, "nonInstallSeconds": 2174},
+    {"runId": 41465192009, "attempt": 1, "event": "merge_group", "headSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b", "jobId": 125344083604, "shard": 5, "conclusion": "success", "queueSeconds": 2, "installPath": "system-dependencies", "activeSeconds": 1737, "firstInstallSeconds": 6, "retryInstallSeconds": 0, "otherSetupSeconds": 29, "suiteSeconds": 1696, "productionSeconds": 0, "cleanupSeconds": 6, "nonInstallSeconds": 1731},
+    {"runId": 41452903152, "attempt": 1, "event": "merge_group", "headSha": "3f3b7808b6bbe63497f82dca7ee6936c84a7381e", "jobId": 125302223524, "shard": 4, "conclusion": "success", "queueSeconds": 2, "installPath": "system-dependencies", "activeSeconds": 2459, "firstInstallSeconds": 6, "retryInstallSeconds": 0, "otherSetupSeconds": 37, "suiteSeconds": 2410, "productionSeconds": 0, "cleanupSeconds": 6, "nonInstallSeconds": 2453}
   ]
 }
