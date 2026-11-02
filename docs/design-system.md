@@ -3463,7 +3463,11 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - The first column is the row's name and is the open target (the whole row is clickable).
 - Actions column: last, right-aligned, one inline `.btn.sm.ghost` plus `.icon-btn.sm` ⋯. No
   wrapping, no 2–4 text buttons.
-- Totals row: `--type-body-strong`, top hairline in `--border-strong`.
+- Totals row: `--type-body-strong`, top hairline in `--border-strong`, in the table's `<tfoot>`.
+- **Compact (`.table.compact`)**: a table inside a popover (§9.2), such as Session Cost's table by
+  model (#3017). 32px rows, 8px between cells and none at the table's edges, no row hover (its rows
+  open nothing), and at most three short columns, so it keeps its columns at every width and never
+  folds into the two-line rows below.
 - Sortable headers are buttons; on touch the header row is 44px tall.
 - Wide tables sit in a scroll wrapper with a right edge fade; the name column is sticky.
 - **Phone (and containers under 560px): tables become two-line rows**: name + status on line 1, the
@@ -3873,11 +3877,12 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Six other label and value lists still carry their own rules and
-move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
-`.auth-recovery-identity`, `.shortcut-list`, `.governance-decision-facts` and
-`.approval-selector-context`.
-(`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
+**Remaining `<dl>` recipes.** Four other label and value lists still carry their own rules and
+move onto `.facts` with their area: `.auth-recovery-identity`, `.shortcut-list`,
+`.governance-decision-facts` and `.approval-selector-context`.
+(`.context-popover-facts` and `.session-usage-facts` moved onto `.facts` with the Context Window
+and Session Cost popovers, #3017,
+`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
 `.campaign-held-child-hold` with Held Children, #2157, `.runner-meta` and
 `.connection-details-list` with the machine detail's Connection Details, #2988, and
 `.automation-facts` with the automation page's Rules and Limits, #2968, and `.instance-meta` went

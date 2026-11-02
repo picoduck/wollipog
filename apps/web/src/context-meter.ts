@@ -24,14 +24,31 @@ const DANGER_PCT = 90;
 
 const UNKNOWN: ContextFill = { fillPct: 0, formatPct: "—", isFull: false, tone: "neutral", known: false };
 
-/** What the popover says about compaction. Every native harness compacts on its own once the
- * window fills; none advertises the threshold, and Wollipog exposes no manual compact, so the
- * sentence names the fact rather than a number. ACP agents are opaque about it. */
+/** Every native harness compacts on its own once the window fills; ACP agents are opaque about it. */
+export function compactsAutomatically(driver: string | undefined): boolean {
+  return driver === "claude-code" || driver === "codex" || driver === "codex-app-server" || driver === "pi";
+}
+
+/** What the popover says about compaction below the warning level. No harness advertises the
+ * threshold, and Wollipog exposes no manual compact, so the sentence names the fact rather than a
+ * number. */
 export function compactionNote(driver: string | undefined): string {
-  if (driver === "claude-code" || driver === "codex" || driver === "codex-app-server" || driver === "pi") {
-    return "Context compacts automatically when the window fills.";
-  }
-  return "Compaction is up to the agent.";
+  return compactsAutomatically(driver)
+    ? "Context compacts automatically when the window fills."
+    : "Compaction is up to the agent.";
+}
+
+/** The compact notice the popover shows from the warning level, in the ring's tone (#3017), for an
+ * agent that compacts automatically; null below 75% and for an agent that does not. */
+export function compactionNotice(
+  driver: string | undefined,
+  tone: ContextFillTone,
+  agentLabel: string,
+): { tone: "warning" | "danger"; text: string } | null {
+  if (!compactsAutomatically(driver) || tone === "neutral") return null;
+  return tone === "danger"
+    ? { tone, text: "Almost full. The next long reply will trigger compaction." }
+    : { tone, text: `Over three quarters full. ${agentLabel} will compact the conversation soon.` };
 }
 
 /**

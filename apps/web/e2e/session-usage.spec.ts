@@ -76,24 +76,24 @@ test("desktop: per-turn usage, the ring popover with totals and the per-model sp
   const popover = page.locator(".context-popover").first();
   await expect(popover).toBeVisible();
   // Occupancy and capacity only: cumulative usage and billing moved to the cost control (#781).
-  await expect(popover).toContainText("Used");
-  await expect(popover).toContainText("72k");
-  // #806's capacity provenance survives the split — which window is being measured against is an
-  // occupancy fact, not billing.
-  await expect(popover).toContainText("Capacity");
-  await expect(popover).toContainText("200K · Provider Reported");
-  await expect(popover).toContainText("Remaining");
-  await expect(popover).toContainText("128k");
+  // One unit style (#3017): Used, Remaining and Window all read as "72K", "128K" and "200K".
+  const occupancy = popover.locator("dl.facts");
+  await expect(occupancy.locator("dt")).toHaveText(["Used", "Remaining", "Window"]);
+  await expect(occupancy.locator("dd")).toHaveText(["72K", "128K", "200K"]);
+  // #806's capacity provenance survives the split as a sentence — which window is being measured
+  // against is an occupancy fact, not billing.
+  await expect(popover).toContainText("Window size reported by the provider.");
+  await expect(popover).not.toContainText("Provider Reported");
   await expect(popover).toContainText("compacts automatically");
-  await expect(popover).not.toContainText("By Model");
-  await expect(popover).not.toContainText("Total Processed");
+  await expect(popover.locator(".notice")).toHaveCount(0);
+  await expect(popover).not.toContainText("Tokens");
   await expect(popover).not.toContainText("Session Cost");
   await page.screenshot({ path: `${SHOT}/desktop-popover.png` });
   await page.keyboard.press("Escape");
   await expect(popover).toHaveCount(0);
 });
 
-test("desktop: the cost control opens Session Usage with cumulative tokens and the model split", async ({ page }) => {
+test("desktop: the cost control opens Session Cost: a table by model, the breakdown behind a disclosure", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780");
 
@@ -104,39 +104,57 @@ test("desktop: the cost control opens Session Usage with cumulative tokens and t
   await expect(cost).not.toContainText("context");
 
   await cost.click();
-  const usage = page.locator(".session-usage-popover").first();
+  const usage = page.getByRole("group", { name: "Session Cost" });
   await expect(usage).toBeVisible();
-  await expect(usage).toContainText("Session Usage");
-  await expect(usage).toContainText("Input");
-  await expect(usage).toContainText("Output");
-  await expect(usage).toContainText("Cache Read");
-  await expect(usage).toContainText("Total Processed");
-  await expect(usage).toContainText("205k");
-  await expect(usage).toContainText("By Model");
-  await expect(usage).toContainText("gpt-5.5-codex-mini");
-  await expect(usage).toContainText("$0.16");
-  await expect(usage).not.toContainText("Not Priced");
-  const protocolInfo = usage.getByRole("button", { name: "About Codex App Server Usage" });
-  const protocolDetail = usage.locator(".session-usage-info-detail");
-  await expect(protocolInfo).toBeVisible();
-  await expect(protocolDetail).toBeHidden();
-  const pricingSource = usage.getByRole("link", { name: "Estimated API Costs" });
+  await expect(usage.locator(".usage-popover-head")).toHaveText("Session Cost$1.37");
+  // One table: two models and the Total row, in Title Case and the body font.
+  const table = usage.locator("table");
+  await expect(table).toHaveCount(1);
+  await expect(table.locator("thead th")).toHaveText(["Model", "Tokens", "Cost"]);
+  await expect(table.locator("tbody tr")).toHaveCount(2);
+  await expect(table.locator("tbody th")).toHaveText(["gpt-5.5-codex", "gpt-5.5-codex-mini"]);
+  await expect(table.locator("tbody tr").last()).toContainText("$0.16");
+  await expect(table.locator("tfoot tr")).toHaveText("Total205K$1.37");
+  // Nothing in the panel is set in capitals or a monospace face.
+  const styles = await usage.evaluate((panel) => [...panel.querySelectorAll("*")]
+    .map((element) => getComputedStyle(element))
+    .map((style) => ({ transform: style.textTransform, mono: /mono/i.test(style.fontFamily) })));
+  expect(styles.filter((style) => style.transform === "uppercase" || style.mono)).toEqual([]);
+  // Token Breakdown is closed by default and holds the buckets and the Codex App Server sentence.
+  const disclosure = usage.locator("details.disclosure");
+  await expect(disclosure).not.toHaveAttribute("open", "");
+  await expect(disclosure.locator(".facts")).toBeHidden();
+  await expect(usage.getByRole("button", { name: "About Codex App Server Usage" })).toHaveCount(0);
+  await expect(usage).not.toContainText("Unpriced");
+  const pricingSource = usage.getByRole("link", { name: "published rates" });
   await expect(pricingSource).toHaveAttribute(
     "href",
     "https://raw.githubusercontent.com/BerriAI/litellm/main/model_prices_and_context_window.json",
   );
+  await expect(usage.locator(".usage-popover-foot")).toContainText("Estimated API cost at published rates.");
   await expect(usage).not.toContainText("raw.githubusercontent.com");
+  await expect(usage.getByRole("button", { name: "Usage and Cost" })).toBeVisible();
   // The usage panel never repeats the context meter's occupancy or capacity.
-  await expect(usage).not.toContainText("Capacity");
+  await expect(usage).not.toContainText("Window");
   await expect(usage).not.toContainText("Remaining");
   await page.screenshot({ path: `${SHOT}/desktop-session-usage.png` });
-  await protocolInfo.hover();
-  await expect(protocolDetail).toBeVisible();
-  await expect(protocolDetail).toContainText("before the machine's Wollipog update includes only the final response");
+
+  await disclosure.locator("summary").click();
+  await expect(disclosure.locator(".facts dt")).toHaveText(["Input", "Output", "Cache Read", "Cache Write", "Cache Savings"]);
+  await expect(disclosure).toContainText("before the machine's Wollipog update counts only the final response of each turn");
 
   await page.keyboard.press("Escape");
   await expect(usage).toHaveCount(0);
   await expect(cost).toHaveAttribute("aria-expanded", "false");
+  await expect(page.locator(".composer-box")).toBeVisible();
+});
+
+test("desktop: Usage and Cost in the popover's footer opens the Usage page", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780");
+  await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
+  await page.getByRole("group", { name: "Session Cost" }).getByRole("button", { name: "Usage and Cost" }).click();
+  await expect(page.locator("body")).toHaveAttribute("data-navigated-to", "usage");
 });
 
 test("desktop: an active Codex turn replaces a misleading small settled total before completion", async ({ page }) => {
@@ -147,7 +165,7 @@ test("desktop: an active Codex turn replaces a misleading small settled total be
   await expect(settledCost).toBeVisible();
   await settledCost.click();
   const settledUsage = page.locator(".session-usage-popover").first();
-  await expect(settledUsage.locator('dl > div:has(> dt:text-is("Output")) > dd')).toHaveText("21");
+  await expect(settledUsage.locator('.usage-disclosure dl > div:has(> dt:text-is("Output")) > dd')).toHaveText("21");
   await page.screenshot({ path: `${SHOT}/active-turn-before.png` });
   await page.keyboard.press("Escape");
   await expect(settledUsage).toHaveCount(0);
@@ -157,10 +175,10 @@ test("desktop: an active Codex turn replaces a misleading small settled total be
   await expect(liveCost).toBeVisible();
   await liveCost.click();
   const usage = page.locator(".session-usage-popover").first();
-  await expect(usage).toContainText("10k");
-  await expect(usage).toContainText("40k");
-  await expect(usage).toContainText("4.5k");
-  await expect(usage).toContainText("55k");
+  await expect(usage).toContainText("10K");
+  await expect(usage).toContainText("40K");
+  await expect(usage).toContainText("4.5K");
+  await expect(usage).toContainText("55K");
   await expect(usage).not.toContainText("21");
   await page.screenshot({ path: `${SHOT}/active-turn-after.png` });
 });
@@ -188,17 +206,30 @@ test("desktop: an unpriced session says so instead of showing $0.00", async ({ p
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=none");
 
-  const cost = page.getByRole("button", { name: "Session Usage: Cost Unavailable" });
+  const cost = page.getByRole("button", { name: "Session Usage: 205K Tokens, Unpriced" });
   await expect(cost).toBeVisible();
-  await expect(cost).toHaveText("$—");
+  await expect(cost).toHaveText("205K Tokens");
   await expect(page.locator(".session-detail").first()).not.toContainText("$0.00");
+  await expect(page.locator(".session-detail").first()).not.toContainText("$—");
 
   await cost.click();
-  const usage = page.locator(".session-usage-popover").first();
-  await expect(usage).toContainText("Not Priced");
-  await expect(usage).toContainText("could not be priced");
+  const usage = page.getByRole("group", { name: "Session Cost" });
+  await expect(usage.locator(".usage-popover-head .status")).toHaveText("Unpriced");
+  await expect(usage).toContainText("No rate is known for these models, so the cost isn't estimated. Token counts are exact.");
+  await expect(usage.locator("tbody td:last-child, tfoot td:last-child")).toHaveText(["Unpriced", "Unpriced", "Unpriced"]);
   await expect(usage).not.toContainText("$0.00");
+  await expect(usage).not.toContainText("lower bound");
   await page.screenshot({ path: `${SHOT}/desktop-unpriced.png` });
+});
+
+test("desktop: a cost without token counts says so and shows no table", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&usage=cost-only");
+  await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
+  const usage = page.getByRole("group", { name: "Session Cost" });
+  await expect(usage).toContainText("The provider reported this cost but no token counts, so there is no breakdown by model.");
+  await expect(usage.locator("table, details, dl")).toHaveCount(0);
+  await expect(usage).not.toContainText("unknown");
 });
 
 test("desktop: a provider-reported free session stays $0.00 through its model detail", async ({ page }) => {
@@ -214,11 +245,9 @@ test("desktop: a provider-reported free session stays $0.00 through its model de
 
   await cost.click();
   const usage = page.locator(".session-usage-popover").first();
-  await expect(usage.locator(".session-usage-head > span")).toHaveText("$0.00");
+  await expect(usage.locator(".usage-popover-figure")).toHaveText("$0.00");
   await expect(usage).toContainText("Cost as reported by the provider.");
-  const modelCosts = usage.locator(
-    '.session-usage-model dl > div:has(> dt:text-is("Cost")) > dd',
-  );
+  const modelCosts = usage.locator("tbody td:last-child");
   await expect(modelCosts).toHaveCount(2);
   await expect(modelCosts).toHaveText(["$0.00", "$0.00"]);
   await expect(usage).not.toContainText("$1.21");
@@ -233,10 +262,19 @@ for (const detailState of ["pending", "failed"] as const) {
 
     await page.getByRole("button", { name: "Session Usage: $0.00" }).click();
     const usage = page.locator(".session-usage-popover").first();
-    await expect(usage.locator(".session-usage-head > span")).toHaveText("$0.00");
-    await expect(usage.locator(".session-usage-models")).toHaveCount(0);
+    await expect(usage.locator(".usage-popover-figure")).toHaveText("$0.00");
+    await expect(usage.locator("table")).toHaveCount(0);
+    // The processed total stays in view while there is no table.
+    await expect(usage.locator(":scope > dl.facts")).toHaveText("Tokens205K");
     if (detailState === "failed") {
-      await expect(usage.getByRole("alert")).toHaveText("Usage detail unavailable");
+      const notice = usage.getByRole("alert");
+      await expect(notice).toHaveClass(/\bcompact\b/);
+      await expect(notice).toHaveClass(/t-danger/);
+      await expect(notice.locator(".notice-body")).toHaveText("Couldn't load the breakdown by model.");
+      await expect(notice).not.toContainText("Usage detail unavailable");
+      await notice.getByRole("button", { name: "Show Details" }).click();
+      await expect(notice).toContainText("Usage detail unavailable");
+      await expect(notice.getByRole("button", { name: "Retry" })).toBeVisible();
     } else {
       await expect(usage.getByRole("alert")).toHaveCount(0);
     }
@@ -256,22 +294,37 @@ test("desktop: an unknown context window hides the ring and keeps the cost contr
   expect(geometry.meter).toBeNull();
   expect(geometry.cost!.right).toBeLessThanOrEqual(geometry.trailing!.left);
   await cost.click();
-  await expect(page.locator(".session-usage-popover").first()).toContainText("Total Processed");
+  await expect(page.locator(".session-usage-popover tfoot").first()).toContainText("Total205K");
   await page.screenshot({ path: `${SHOT}/desktop-unknown-context.png` });
 });
 
-test("the warning state above the threshold", async ({ page }) => {
+test("from 75% the popover's notice takes the ring's warning tone, and from 90% its danger tone", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
-  await page.goto("/session-usage-e2e.html?width=1180&height=780&used=186000&driver=claude-code");
-  const meter = page.locator(".composer-bar .context-control");
-  await expect(meter).toHaveClass(/t-danger/);
-  await expect(page.locator(".context-control > button").first()).toHaveAttribute("aria-label", /93% Used/);
-  await page.locator(".context-control > button").first().click();
-  await expect(page.locator(".context-popover").first()).toContainText("compacts automatically");
-  await page.screenshot({ path: `${SHOT}/desktop-warning.png` });
-  await page.keyboard.press("Escape");
+  for (const level of [
+    { used: 156_000, pct: "78%", tone: "t-warning", text: "Over three quarters full. Claude Code will compact the conversation soon." },
+    { used: 184_000, pct: "92%", tone: "t-danger", text: "Almost full. The next long reply will trigger compaction." },
+  ]) {
+    await page.goto(`/session-usage-e2e.html?width=1180&height=780&used=${level.used}&driver=claude-code`);
+    const meter = page.locator(".composer-bar .context-control");
+    await expect(meter).toHaveClass(new RegExp(level.tone));
+    await expect(page.locator(".context-control > button").first()).toHaveAttribute("aria-label", `Context Window ${level.pct} Used`);
+    await page.locator(".context-control > button").first().click();
+    const popover = page.locator(".context-popover").first();
+    const notice = popover.locator(".notice");
+    await expect(notice).toHaveCount(1);
+    await expect(notice).toHaveClass(new RegExp(`compact.*${level.tone}|${level.tone}.*compact`));
+    await expect(notice).toHaveText(level.text);
+    await expect(popover.locator(".meter")).toHaveClass(new RegExp(level.tone));
+    await expect(popover).not.toContainText("compacts automatically");
+    await page.screenshot({ path: `${SHOT}/desktop-${level.tone.slice(2)}.png` });
+    await page.keyboard.press("Escape");
+    await expect(popover).toHaveCount(0);
+  }
+  // The cost table names Claude models by their display names, the id as the tooltip.
   await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
-  await expect(page.locator(".session-usage-popover").first()).toContainText("claude-fable-5-1");
+  const names = page.locator(".session-usage-popover tbody th");
+  await expect(names).toHaveText(["Fable 5.1", "Haiku 4.5"]);
+  await expect(names.first()).toHaveAttribute("title", "claude-fable-5-1");
 });
 
 test("a cost checkpoint parks the session with its Budget card docked above the composer", async ({ page }) => {
@@ -576,7 +629,7 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
 
       await ring.click();
       const context = page.locator(".context-popover");
-      await expect(context).toContainText("Capacity");
+      await expect(context).toContainText("Window200K");
       await page.keyboard.press("Escape");
       await expect(context).toHaveCount(0);
       // Escape closed only the popover (#1796): the session and its composer are still here.
@@ -585,7 +638,7 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
 
       await cost.click();
       const usage = page.locator(".session-usage-popover");
-      await expect(usage).toContainText("Total Processed");
+      await expect(usage.locator("tfoot")).toContainText("Total205K");
       // Opening upward from the bar, it stays on screen.
       const usageBox = (await usage.boundingBox())!;
       expect(usageBox.y).toBeGreaterThanOrEqual(0);
@@ -608,7 +661,7 @@ test.describe("desktop: context and cost sit in the composer bar before the mic"
     { name: "a short priced", query: "", text: "$1.37" },
     { name: "a long priced", query: "&cost=12345.67", text: "$12,345.67" },
     { name: "a sub-cent priced", query: "&cost=0.0007", text: "$0.0007" },
-    { name: "an unavailable", query: "&cost=none", text: "$—" },
+    { name: "an unpriced", query: "&cost=none", text: "205K Tokens" },
   ];
   for (const label of LABELS) {
     test(`${label.name} cost fits the bar beside the ring`, async ({ page }) => {
@@ -687,7 +740,7 @@ test.describe("a composer column under 640px moves the figures into Model Settin
     // The popover opens the breakdown in its own place too, never as a second floating layer (#2447).
     await group.getByRole("button", { name: "Session Cost" }).click();
     await expect(menu.locator(".menu-head-title")).toHaveText("Session Cost");
-    await expect(menu.getByRole("group", { name: "Session Usage" }).locator(".session-usage-model")).toHaveCount(2);
+    await expect(menu.getByRole("group", { name: "Session Cost" }).locator("tbody tr")).toHaveCount(2);
     await expect(page.locator(".session-usage-popover")).toHaveCount(0);
     await page.keyboard.press("Escape");
     await expect(menu.getByRole("button", { name: "Session Cost" })).toBeFocused();
@@ -820,17 +873,20 @@ test.describe("mobile: the Session Usage group opens its breakdowns inside Model
 
       await expect(menu.locator(".menu-head-title")).toHaveText("Session Cost");
       await expect(menu.getByRole("radiogroup")).toHaveCount(0);
-      const usage = menu.getByRole("group", { name: "Session Usage" });
-      await expect(usage.locator(".session-usage-model-name")).toHaveText(["gpt-5.5-codex", "gpt-5.5-codex-mini"]);
-      await expect(usage).toContainText("Total Processed");
-      const link = usage.getByRole("link", { name: "Estimated API Costs" });
+      // The same contents as the bar's popover (#3017): the table by model, the closed Token
+      // Breakdown holding the Codex App Server sentence, and the footer.
+      const usage = menu.getByRole("group", { name: "Session Cost" });
+      await expect(usage.locator("tbody th")).toHaveText(["gpt-5.5-codex", "gpt-5.5-codex-mini"]);
+      await expect(usage.locator("tfoot tr")).toHaveText("Total205K$1.37");
+      const link = usage.getByRole("link", { name: "published rates" });
       await link.scrollIntoViewIfNeeded();
       await expect(link).toBeVisible();
-      const note = usage.locator(".session-usage-info-detail");
+      const disclosure = usage.locator("details.disclosure");
+      const note = disclosure.getByText("Codex App Server usage recorded before");
       await expect(note).toBeHidden();
-      await usage.getByRole("button", { name: "About Codex App Server Usage" }).tap();
+      await disclosure.locator("summary").tap();
       await expect(note).toBeVisible();
-      await expect(note).toContainText("Usage recorded since then counts every response.");
+      await expect(disclosure.locator(".facts dt")).toHaveText(["Input", "Output", "Cache Read", "Cache Write", "Cache Savings"]);
       // The breakdown stays inside the sheet: no sideways scroll, nothing past the screen edge.
       const sheet = await menu.evaluate((element) => ({
         overflow: element.scrollWidth - element.clientWidth,
@@ -846,8 +902,8 @@ test.describe("mobile: the Session Usage group opens its breakdowns inside Model
       await menu.getByRole("button", { name: "Context Window" }).tap();
       await expect(menu.locator(".menu-head-title")).toHaveText("Context Window");
       const occupancy = menu.getByRole("group", { name: "Context Window" });
-      await expect(occupancy).toContainText("Capacity");
-      await expect(occupancy).toContainText("Remaining");
+      await expect(occupancy.locator("dl.facts dd")).toHaveText(["72K", "128K", "200K"]);
+      await expect(occupancy).toContainText("Window size reported by the provider.");
     });
   });
 
@@ -868,17 +924,19 @@ test.describe("mobile: the Session Usage group opens its breakdowns inside Model
 
     const back = menu.getByRole("button", { name: "Back to Model Settings" });
     await expect(back).toBeFocused();
-    const usage = menu.getByRole("group", { name: "Session Usage" });
-    await expect(usage.locator(".session-usage-model")).toHaveCount(2);
+    const usage = menu.getByRole("group", { name: "Session Cost" });
+    await expect(usage.locator("tbody tr")).toHaveCount(2);
     await page.keyboard.press("Tab");
     await expect(menu.getByRole("button", { name: "Close Model Settings" })).toBeFocused();
     await page.keyboard.press("Tab");
-    const about = usage.getByRole("button", { name: "About Codex App Server Usage" });
-    await expect(about).toBeFocused();
+    const summary = usage.locator("details.disclosure > summary");
+    await expect(summary).toBeFocused();
     await page.keyboard.press("Enter");
-    await expect(usage.locator(".session-usage-info-detail")).toBeVisible();
+    await expect(usage.locator("details.disclosure")).toHaveAttribute("open", "");
     await page.keyboard.press("Tab");
-    await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeFocused();
+    await expect(usage.getByRole("link", { name: "published rates" })).toBeFocused();
+    await page.keyboard.press("Tab");
+    await expect(usage.getByRole("button", { name: "Usage and Cost" })).toBeFocused();
     await page.keyboard.press("Tab");
     await expect(back, "Tab stays inside the sheet").toBeFocused();
 
@@ -905,7 +963,7 @@ test.describe("mobile: the Session Usage group opens its breakdowns inside Model
     const cost = menu.getByRole("button", { name: "Session Cost" });
     await cost.click();
     await expect(menu.locator(".menu-head-title")).toHaveText("Session Cost");
-    await expect(menu.getByRole("group", { name: "Session Usage" })).toContainText("Total Processed");
+    await expect(menu.getByRole("group", { name: "Session Cost" })).toContainText("Token Breakdown");
 
     await page.keyboard.press("Escape");
     await expect(menu.locator(".menu-head-title")).toHaveText("Model Settings");
@@ -944,19 +1002,18 @@ test("mobile: without Model Settings the figures take their own row, and cost op
   await cost.click();
   const usage = page.locator(".session-usage-popover").first();
   await expect(usage).toBeVisible();
-  await expect(usage).toContainText("Input");
-  await expect(usage).toContainText("Output");
-  const protocolInfo = usage.getByRole("button", { name: "About Codex App Server Usage" });
-  const protocolDetail = usage.locator(".session-usage-info-detail");
-  await expect(protocolDetail).toBeHidden();
-  await protocolInfo.click();
-  await expect(protocolDetail).toBeVisible();
-  await expect(protocolDetail).toContainText("Usage recorded since then counts every response.");
+  await expect(usage.locator("tbody tr")).toHaveCount(2);
+  // The Codex App Server note is a sentence inside Token Breakdown, never an overlay on the figures.
+  const disclosure = usage.locator("details.disclosure");
+  const protocolNote = disclosure.getByText("Codex App Server usage recorded before");
+  await expect(protocolNote).toBeHidden();
+  await disclosure.locator("summary").click();
+  await expect(protocolNote).toBeVisible();
+  await expect(disclosure.locator(".facts dt").first()).toHaveText("Input");
   await page.screenshot({ path: `${SHOT}/mobile-session-usage-info.png` });
-  await protocolInfo.click();
-  await page.mouse.move(0, 0);
-  await expect(protocolDetail).toBeHidden();
-  await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();
+  await disclosure.locator("summary").click();
+  await expect(protocolNote).toBeHidden();
+  await expect(usage.getByRole("link", { name: "published rates" })).toBeVisible();
   await expect(usage).not.toContainText("raw.githubusercontent.com");
   const usageBox = (await usage.boundingBox())!;
   expect(usageBox.x).toBeGreaterThanOrEqual(0);
@@ -976,7 +1033,7 @@ test.describe("with a touch pointer", () => {
     await page.locator(".composer-idle-preview").click();
     await page.locator(".composer-usage-row").getByRole("button", { name: /^Session Usage: / }).click();
     const usage = page.locator(".session-usage-popover").first();
-    const link = usage.getByRole("link", { name: "Estimated API Costs" });
+    const link = usage.getByRole("link", { name: "published rates" });
     await expect(link).toBeVisible();
     const band = await link.evaluate((element) => {
       element.scrollIntoView({ block: "center" });
@@ -1031,7 +1088,7 @@ test("mobile light theme: the estimated cost source stays compact", async ({ pag
   await page.locator(".composer-idle-preview").click();
   await page.getByRole("button", { name: "Session Usage: $1.37" }).click();
   const usage = page.locator(".session-usage-popover").first();
-  await expect(usage.getByRole("link", { name: "Estimated API Costs" })).toBeVisible();
+  await expect(usage.getByRole("link", { name: "published rates" })).toBeVisible();
   expect(await usage.evaluate((element) => element.scrollWidth)).toBeLessThanOrEqual(await usage.evaluate((element) => element.clientWidth));
   await page.screenshot({ path: `${SHOT}/mobile-session-usage-light.png` });
 });

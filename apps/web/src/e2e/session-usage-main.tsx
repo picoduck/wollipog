@@ -94,6 +94,8 @@ const unpricedCost = costParam === "none";
 const unavailableCost = costParam === "unavailable";
 const freeCost = costParam === "free";
 const absentUsage = params.get("usage") === "absent";
+// `?usage=cost-only` is a provider-reported cost with no token counts at all (#3017).
+const costOnlyUsage = params.get("usage") === "cost-only";
 const activeUsage = params.get("active-usage") === "1";
 const usageDetail = params.get("usage-detail");
 const parsedCost = Number(costParam);
@@ -154,8 +156,8 @@ const session: SessionView = {
   model: "codex-large",
   effort: null,
   permissionMode: null,
-  tokensIn: absentUsage ? 0 : activeUsage ? 18_714 : 184_000,
-  tokensOut: absentUsage ? 0 : activeUsage ? 21 : 21_000,
+  tokensIn: absentUsage || costOnlyUsage ? 0 : activeUsage ? 18_714 : 184_000,
+  tokensOut: absentUsage || costOnlyUsage ? 0 : activeUsage ? 21 : 21_000,
   costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : activeUsage ? 0.075276 : sessionCostUsd,
   ...(freeCost ? { costSource: "providerReported" as const }
     : unpricedCost ? { costSource: "unpriced" as const } : {}),
@@ -689,7 +691,8 @@ const connection: UiConnectionRuntime = {
 
 const navigation: ViewNavigation = {
   current: () => ({ name: "session", id: SESSION_ID }),
-  push() {},
+  // Recorded so a spec can see where a control navigated (the Session Cost footer's Usage and Cost).
+  push(view) { document.body.dataset.navigatedTo = view.name; },
   listen: () => () => {},
 };
 
@@ -815,6 +818,9 @@ const client = {
   sessionUsage: async () => {
     if (usageDetail === "pending") return new Promise<never>(() => {});
     if (usageDetail === "failed") throw new Error("Usage detail unavailable");
+    if (costOnlyUsage) {
+      return { sessionId: SESSION_ID, totals: usageAmount(0, 0, sessionCostUsd, 0), byModel: [{ model: "unknown", ...usageAmount(0, 0, sessionCostUsd, 0) }] };
+    }
     if (activeUsage) {
       const live = session.tokensOut > 21;
       return {
