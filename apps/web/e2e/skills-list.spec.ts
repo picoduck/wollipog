@@ -82,9 +82,17 @@ test.describe("at 1440×900 with a fine pointer", () => {
         badges: [...pane.querySelectorAll(".skill-row-status")].map((badge) => badge.getBoundingClientRect().right),
         gaps: groups.slice(1).map((group, index) =>
           group.getBoundingClientRect().top - groups[index]!.getBoundingClientRect().bottom),
+        foot: (() => {
+          const box = pane.querySelector(".list-foot")!.getBoundingClientRect();
+          return { left: box.left, right: box.right };
+        })(),
+        rowRight: pane.querySelector(".skill-row")!.getBoundingClientRect().right,
+        orphans: textLeft(pane.querySelector(".skill-list-orphans .row-title")!),
       };
     });
-    for (const left of [...geometry.titles, ...geometry.labels]) expect(left).toBeCloseTo(geometry.filter, 0);
+    for (const left of [...geometry.titles, ...geometry.labels, geometry.orphans]) expect(left).toBeCloseTo(geometry.filter, 0);
+    expect(geometry.foot.left, "the foot's hairline starts at the filter's edge, not in the rows' bleed").toBeCloseTo(geometry.filter, 0);
+    expect(geometry.foot.right, "and ends where the rows do").toBeCloseTo(geometry.rowRight, 0);
     expect(geometry.badges.length).toBeGreaterThan(0);
     for (const right of geometry.counts) expect(right, "a count in line with the rows' badges").toBeCloseTo(geometry.badges[0]!, 0);
     expect(geometry.gaps).toEqual(geometry.gaps.map(() => 0));

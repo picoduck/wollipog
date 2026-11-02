@@ -15781,6 +15781,13 @@ button.review-finding-location {
     padding-left: calc(var(--page-gutter) - var(--space-3));
   }
 }
+/* The foot's hairline is not a row: it starts at the filter's edge, while its Orphaned Copies row
+   bleeds with the others. */
+.skill-list-body > .list-foot { margin-left: var(--space-3); }
+.skill-list-body > .list-foot > .skill-list-orphans {
+  width: calc(100% + var(--space-3));
+  margin-left: calc(-1 * var(--space-3));
+}
 /* Groups follow each other directly: the 32px header is the gap. */
 .skill-list-group { display: grid; }
 /* Group headers inside a list (§5.2): --type-label in --text-dim, 32px, Title Case as written, with
