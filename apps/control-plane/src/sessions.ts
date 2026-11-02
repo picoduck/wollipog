@@ -23,7 +23,7 @@ import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
 import type { OperatorVideoValidationPermits } from "./operator-video-validation.js";
 import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
-import type { HumanPrincipal } from "./identity.js";
+import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
@@ -5664,6 +5664,36 @@ export class SessionsService {
     return campaign ? this.campaignAssignment(controller, campaign, text) : text;
   }
 
+  /** #4022: the durable prompt-outbox command whose running turn `sender` may steer, or undefined.
+   *
+   * The runner refuses steering into any turn a durable command started, because an automation's
+   * turn must keep its ordering and receipt (#3173). This names the one exception: the child's
+   * controlling Orchestrator, steering a turn the control plane started from its own prompt outbox
+   * (assignments, Orchestrator prompts, decision resumes and continuations). Every input is a
+   * server-owned record, never request data, and authority is deliberately narrow:
+   *
+   * - the sender is an Orchestrator credential bound to the child's immediate parent, and that parent
+   *   is also the child's outermost controlling Orchestrator, so a nested Orchestrator, a grandparent,
+   *   a sibling, a descendant or an unrelated session gains nothing; malformed, cyclic or missing
+   *   ancestry resolves no controller at all;
+   * - the turn's command is the session's single started outbox `prompt_session`. An automation's
+   *   command lives in its own outbox and never matches, and a recovered answer is not a prompt.
+   *
+   * The runner then admits it only if this exact id started the active turn. */
+  private controllingOrchestratorSteerableCommand(session: SessionView, sender: AgentPrincipal | undefined): string | undefined {
+    const controllerId = sender?.kind === "agent" && sender.orchestrator === true ? sender.credentialSessionId : undefined;
+    if (!controllerId || session.parentSessionId !== controllerId) return undefined;
+    if (this.db.sessionResultOrchestrator(session.id) !== controllerId) return undefined;
+    const controller = this.orchestratorCampaignController(session);
+    if (!controller || controller === "refused" || controller.id !== controllerId) return undefined;
+    const command = this.db.startedSessionPromptCommand(session.id, session.runnerId);
+    if (!command) return undefined;
+    let payload: unknown;
+    try { payload = JSON.parse(command.payloadJson); } catch { return undefined; }
+    const prompt = payload as Partial<DurableSessionCommand> | null;
+    return prompt?.type === "prompt_session" && prompt.sessionId === session.id ? command.commandId : undefined;
+  }
+
   /** Admit a message for a session that may already be mid-turn.
    *
    * Ordinary admission puts the message on the session's FIFO, where it waits for the running
@@ -5685,10 +5715,12 @@ export class SessionsService {
     slashCommand?: string,
     config?: SessionConfig,
     holdReader?: HoldAdviceReader,
+    /** The authenticated agent sending it; only its server-derived identity is read (#4022). */
+    sender?: AgentPrincipal,
   ): Promise<ServiceResult<PromptAdmissionView>> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
-    const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config);
+    const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config, sender);
     return steered ??
       this.prompt(sessionId, text, images, slashCommand, config, undefined, "session", false, undefined, holdReader);
   }
@@ -5703,6 +5735,7 @@ export class SessionsService {
     images: PromptImageInput[],
     slashCommand: string | undefined,
     config: SessionConfig | undefined,
+    sender: AgentPrincipal | undefined,
   ): Promise<ServiceResult<PromptAdmissionView> | null> {
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     // The steering lane carries plain conversational text only. A slash command, an attachment, or
@@ -5719,11 +5752,12 @@ export class SessionsService {
     const turnId = this.hub.activeTurnIdForSession(sessionId);
     if (!turnId) return null;
     const submissionId = `prompt_steer_${randomUUID().slice(0, 12)}`;
+    const controllingOrchestratorCommandId = this.controllingOrchestratorSteerableCommand(session, sender);
     const steered = await this.steer(sessionId, {
       submissionId,
       turnId,
       text: this.campaignWrappedText(session, text),
-    });
+    }, controllingOrchestratorCommandId);
     if (!steered.ok) {
       // Falling back to the queue after a failure that already crossed the runner boundary would
       // deliver the same instruction twice. steer() refuses with 400/404/409/500 only before it
@@ -7071,7 +7105,13 @@ export class SessionsService {
     })).digest("hex");
   }
 
-  async steer(sessionId: string, request: SteerRequest): Promise<ServiceResult<SteeringAttemptView>> {
+  /** `controllingOrchestratorCommandId` is never read from `request`: only promptOrSteer supplies
+   * it, after proving the sender's controlling ancestry (#4022). */
+  async steer(
+    sessionId: string,
+    request: SteerRequest,
+    controllingOrchestratorCommandId?: string,
+  ): Promise<ServiceResult<SteeringAttemptView>> {
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
@@ -7231,6 +7271,7 @@ export class SessionsService {
       ...(promotion ? { promotePromptId: request.promotePromptId } : {
         ...(text ? { text } : {}),
         ...(commandImages.length ? { images: commandImages } : {}),
+        ...(controllingOrchestratorCommandId ? { controllingOrchestratorCommandId } : {}),
       }),
     };
     try {

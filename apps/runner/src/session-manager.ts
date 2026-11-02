@@ -826,6 +826,10 @@ interface ActiveSession {
   historyIntegrityFailure?: string;
   /** Durable owner of the currently dequeued turn, used when a driver callback trips the latch. */
   currentDurable?: DurableCommandLifecycle;
+  /** #4022: the dequeued durable turn is an ordinary prompt, not a recovered answer, a recovery or
+   * background continuation, or a provider command. Only such a turn may take its controlling
+   * Orchestrator's steering, and only when the control plane names `currentDurable`'s exact id. */
+  currentDurablePromptSteerable?: boolean;
   /** Manual provider commands are also non-steerable, but never alias automation ownership. */
   currentSessionCommand?: SessionCommandInvocationLifecycle;
   /** The current manual command crossed its durable started boundary and may have reached the
@@ -10975,7 +10979,7 @@ export class SessionManager {
     const promoted = request.promotePromptId
       ? entry.queue.find((prompt) => prompt.id === request.promotePromptId)
       : undefined;
-    const activeEligibility = this.steeringEligibility(entry, promoted);
+    const activeEligibility = this.steeringEligibility(entry, promoted, request);
     if (!activeEligibility.eligible) {
       return hasDirect && activeEligibility.reason === "no_active_provider_turn"
         ? this.handleDefiniteSteeringFailure(operation, activeEligibility.reason, activeEligibility.message)
@@ -11023,16 +11027,37 @@ export class SessionManager {
       prompt.durable?.beginSteering && prompt.durable.steeringRejected);
   }
 
+  /** #4022: direct text from the child's controlling Orchestrator into a turn its control plane
+   * started from the durable prompt outbox. The control plane proves the ancestry and names the
+   * exact command; an automation's command id never matches, and the steering attempt keeps its
+   * own receipt without touching the command's lifecycle. */
+  private isControllingOrchestratorSteer(entry: ActiveSession, request: SteeringRequest | undefined): boolean {
+    const commandId = request?.controllingOrchestratorCommandId;
+    return typeof commandId === "string" && commandId.length > 0 && !request?.promotePromptId &&
+      entry.currentDurablePromptSteerable === true && entry.currentDurable?.commandId === commandId;
+  }
+
+  /** Durable turns refuse ordinary steering. An async answer continues the work without taking
+   * ownership of the command's receipt, and the controlling Orchestrator may steer its own prompts. */
+  private durableTurnRefusesSteering(
+    entry: ActiveSession,
+    source: QueuedPrompt | undefined,
+    request: SteeringRequest | undefined,
+  ): boolean {
+    return Boolean(entry.currentDurable) && !this.isSteerableAsyncAnswer(source) &&
+      !this.isControllingOrchestratorSteer(entry, request);
+  }
+
   /** Authoritative runner-known steering admission gates. Protocol negotiation is owned by the
    * control plane, so callers must additionally require the steering protocol before presenting
    * this projection as actionable. */
-  private steeringEligibility(entry: ActiveSession, prompt?: QueuedPrompt): SteeringEligibility {
+  private steeringEligibility(entry: ActiveSession, prompt?: QueuedPrompt, request?: SteeringRequest): SteeringEligibility {
     if (entry.historyIntegrityFailure) {
       return { eligible: false, reason: "history_integrity_failure", message: entry.historyIntegrityFailure };
     }
     // An answer continues work requested by the automation without taking ownership of its
     // command receipt. Ordinary steering still cannot alter an automation-owned turn.
-    if ((entry.currentDurable && !this.isSteerableAsyncAnswer(prompt)) || entry.currentSessionCommand) {
+    if (this.durableTurnRefusesSteering(entry, prompt, request) || entry.currentSessionCommand) {
       return {
         eligible: false,
         reason: "policy_blocked",
@@ -11154,7 +11179,7 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+    if (this.durableTurnRefusesSteering(entry, operation.source, request)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
     }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
@@ -11201,7 +11226,7 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+    if (this.durableTurnRefusesSteering(entry, operation.source, request)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
     }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
@@ -13015,6 +13040,8 @@ export class SessionManager {
         }
         entry.activeTurnConfig = normalizedConfig(next.config ?? this.store.readMeta(sessionId)?.config);
         entry.currentDurable = next.durable;
+        entry.currentDurablePromptSteerable = Boolean(next.durable && !next.sessionCommand &&
+          !next.recoveredQuestion && !next.syntheticRecovery && !next.providerRecovery && !next.backgroundJobIds?.length);
         entry.currentSessionCommand = next.sessionCommand?.lifecycle;
         entry.sessionCommandProviderStarted = false;
         try {
@@ -13031,6 +13058,7 @@ export class SessionManager {
           // fence attached to a drain generation that no longer owns a turn.
           if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
           entry.currentDurable = undefined;
+          entry.currentDurablePromptSteerable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
           entry.providerPromptSubmitted = false;

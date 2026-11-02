@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import fc from "fast-check";
@@ -30,6 +30,7 @@ import type {
   SessionSnapshot,
   SessionView,
   SteerRequest,
+  SteerSessionMessage,
   SteerSessionResultMessage,
   WorkspaceReference,
   WorkflowDefinitionSpec,
@@ -25179,6 +25180,217 @@ test("a mid-turn prompt to a Pi session is steered only on a runner whose driver
     assert.equal(hub.sentOfType("prompt_session").length, expectedLane === "steered" ? 0 : 1,
       "exactly one lane owns the message");
   }
+});
+
+// --- Issue #4022: the controlling Orchestrator steers its child's prompt-outbox turn ----------------
+// The runner refuses steering into any turn a durable command started. The control plane names the
+// one exception, a prompt-outbox turn of the sender's own child, from server-owned records only.
+
+/** Codex App Server children of a policy-bearing Orchestrator. `startOutboxTurn` puts a session in a
+ * turn its control plane started from the durable prompt outbox. Like a runner without #4022 for
+ * every other turn, the fake runner refuses each steer as policy_blocked unless it names the started
+ * command, so a refused authority falls back to the queue. */
+function orchestratorSteeringCampaign() {
+  const fixture = withdrawalCampaign();
+  const { db, hub, svc, root } = fixture;
+  const steerableChild = (parentSessionId: string) => {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parentSessionId, db.getSession(parentSessionId)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    return created.data;
+  };
+  const worker = steerableChild(root.id);
+  const sibling = steerableChild(root.id);
+  // A grandchild is reparented directly: it only needs server-owned ancestry beneath the worker.
+  const grandchild = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID }).data!;
+  db.db.prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run(worker.id, grandchild.id);
+  const started = new Map<string, string>();
+  let receiptRevision = 0;
+  const stageOutbox = (sessionId: string, command: DurableSessionCommand) => {
+    const commandId = `prompt_${randomUUID()}`;
+    db.stageSessionPromptCommand({ commandId, sessionId, runnerId: RUNNER_ID, payloadJson: JSON.stringify(command),
+      payloadSha256: "0".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+    return commandId;
+  };
+  const receipt = (sessionId: string, commandId: string, state: "started" | "completed") =>
+    assert.ok(svc.onDurablePromptReceipt(RUNNER_ID, { type: "durable_session_command_update", commandId, sessionId,
+      state, revision: ++receiptRevision }), `${state} receipt`);
+  const startOutboxTurn = (sessionId: string, command: DurableSessionCommand = {
+    type: "prompt_session", sessionId, text: "Assignment", config: {},
+  }) => {
+    const commandId = stageOutbox(sessionId, command);
+    receipt(sessionId, commandId, "started");
+    assert.equal(db.getSessionPromptCommand(commandId)?.state, "started");
+    db.updateSessionStatus(sessionId, "running", Date.now());
+    hub.activeTurnIds.set(sessionId, `turn-${sessionId}`);
+    started.set(sessionId, commandId);
+    return commandId;
+  };
+  const steers: SteerSessionMessage[] = [];
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "steer_session");
+    steers.push(message);
+    const admitted = Boolean(message.controllingOrchestratorCommandId) &&
+      message.controllingOrchestratorCommandId === started.get(message.sessionId);
+    return {
+      type: "steer_session_result", requestId: message.requestId, submissionId: message.submissionId,
+      sessionId: message.sessionId, turnId: message.turnId,
+      ...(admitted
+        ? { disposition: "accepted" as const, reason: "accepted" as const, providerTurnId: "provider-turn" }
+        : { disposition: "rejected" as const, reason: "policy_blocked" as const }),
+    };
+  };
+  const local = db.localIdentityContext();
+  const agent = (sessionId: string, orchestrator = true): AgentPrincipal => ({
+    kind: "agent", actorId: sessionId, credentialSessionId: sessionId, organizationId: local.organizationId,
+    delegatedScope: db.sessionScope(sessionId)!, ...(orchestrator ? { orchestrator: true } : {}),
+  });
+  const send = (sessionId: string, text: string, sender?: AgentPrincipal) =>
+    svc.promptOrSteer(sessionId, text, [], undefined, undefined, undefined, sender);
+  return { ...fixture, worker, sibling, grandchild, stageOutbox, receipt, startOutboxTurn, steers, agent, send };
+}
+
+test("#4022 the controlling Orchestrator steers its child's prompt-outbox turn with campaign-wrapped text, and the command keeps its own receipt", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const commandId = f.startOutboxTurn(f.worker.id);
+    const before = f.db.getSessionPromptCommand(commandId);
+    f.hub.sentToRunner.length = 0;
+    const sent = await f.send(f.worker.id, "Stop polling and end your turn.", f.agent(f.root.id));
+    assert.ok(sent.ok, sent.error);
+    assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    assert.equal(f.steers.length, 1);
+    const steer = f.steers[0]!;
+    assert.equal(steer.controllingOrchestratorCommandId, commandId, "the steer names the server's started command");
+    assert.match(steer.text ?? "", /^\[Wollipog Campaign Policy — server-derived/u, "it carries the campaign policy");
+    assert.match(steer.text ?? "", /Stop polling and end your turn\.$/u);
+    assert.equal(f.hub.sentOfType("prompt_session").length, 0, "a steered message is not also queued");
+    assert.equal(f.hub.sentOfType("durable_session_command").length, 0, "nor staged as another command");
+    assert.deepEqual(f.db.getSessionPromptCommand(commandId), before, "the starting command's receipt is untouched");
+    const attempts = f.db.listSteeringAttempts(f.worker.id);
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0]!.state, "accepted");
+    assert.equal(attempts[0]!.submissionId, steer.submissionId, "the steering attempt has its own receipt");
+  } finally { f.db.close(); }
+});
+
+test("#4022 only the child's controlling Orchestrator gains durable-turn steering; everyone else falls back to the queue", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const workerCommand = f.startOutboxTurn(f.worker.id);
+    f.startOutboxTurn(f.grandchild.id);
+    const cases: Array<[string, string, AgentPrincipal | undefined]> = [
+      ["no agent sender", f.worker.id, undefined],
+      ["the parent without an Orchestrator credential", f.worker.id, f.agent(f.root.id, false)],
+      ["a sibling", f.worker.id, f.agent(f.sibling.id)],
+      ["the child itself", f.worker.id, f.agent(f.worker.id)],
+      ["a descendant", f.worker.id, f.agent(f.grandchild.id)],
+      ["an unrelated session", f.worker.id, f.agent(f.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+        agentId: CODEX_APP_AGENT_ID }).data!.id)],
+      ["a grandparent", f.grandchild.id, f.agent(f.root.id)],
+      // An Orchestrator credential on the immediate parent is not enough when that parent is nested
+      // beneath the campaign's outermost controller.
+      ["a nested Orchestrator", f.grandchild.id, f.agent(f.worker.id)],
+    ];
+    for (const [label, target, sender] of cases) {
+      const steersBefore = f.steers.length;
+      f.hub.sentToRunner.length = 0;
+      const sent = await f.send(target, `Redirect from ${label}`, sender);
+      assert.ok(sent.ok, `${label}: ${sent.error}`);
+      assert.equal(f.steers.length, steersBefore + 1, `${label}: a steer is still attempted`);
+      assert.equal(f.steers.at(-1)!.controllingOrchestratorCommandId, undefined, `${label}: but names no command`);
+      assert.equal(sent.data?.promptDelivery?.lane, "queued", `${label}: the refusal falls back to the queue`);
+      assert.equal(f.hub.sentOfType("prompt_session").length, 1, `${label}: and the message is still delivered`);
+    }
+    assert.equal(f.db.getSessionPromptCommand(workerCommand)?.state, "started");
+  } finally { f.db.close(); }
+});
+
+test("#4022 durable-turn authority needs one started outbox prompt and sound ancestry", async () => {
+  const scenarios: Array<[string, (f: ReturnType<typeof orchestratorSteeringCampaign>) => void]> = [
+    ["the command already completed", (f) => {
+      f.receipt(f.worker.id, f.startOutboxTurn(f.worker.id), "completed");
+      f.db.updateSessionStatus(f.worker.id, "running", Date.now());
+    }],
+    ["a recovered answer started the turn", (f) => {
+      f.startOutboxTurn(f.worker.id, { type: "answer_recovered_question", sessionId: f.worker.id, requestId: "question",
+        recoveryId: "recovery", answers: { q: "Continue" } });
+    }],
+    ["the command names another session", (f) => {
+      f.startOutboxTurn(f.worker.id, { type: "prompt_session", sessionId: f.sibling.id, text: "Elsewhere", config: {} });
+    }],
+    ["two commands claim the turn", (f) => {
+      f.startOutboxTurn(f.worker.id);
+      f.startOutboxTurn(f.worker.id);
+    }],
+    ["the ancestry is cyclic", (f) => {
+      f.startOutboxTurn(f.worker.id);
+      f.db.db.prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run(f.worker.id, f.root.id);
+    }],
+  ];
+  for (const [label, arrange] of scenarios) {
+    const f = orchestratorSteeringCampaign();
+    try {
+      arrange(f);
+      f.hub.sentToRunner.length = 0;
+      const sent = await f.send(f.worker.id, "Redirect", f.agent(f.root.id));
+      assert.equal(f.steers.at(-1)?.controllingOrchestratorCommandId, undefined, `${label}: no command is named`);
+      if (sent.ok) {
+        assert.equal(sent.data?.promptDelivery?.lane, "queued", label);
+        assert.equal(f.hub.sentOfType("prompt_session").length, 1, `${label}: the message is still delivered`);
+      } else {
+        // A malformed campaign may refuse the message outright; it must never be steered.
+        assert.equal(sent.status, 409, `${label}: ${sent.error}`);
+      }
+    } finally { f.db.close(); }
+  }
+});
+
+test("#4022 a steering request body cannot claim durable-turn authority", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const commandId = f.startOutboxTurn(f.worker.id);
+    const forged = await f.svc.steer(f.worker.id, {
+      submissionId: "forged-authority", turnId: `turn-${f.worker.id}`, text: "Injected text",
+      controllingOrchestratorCommandId: commandId,
+    } as SteerRequest);
+    assert.ok(forged.ok, forged.error);
+    assert.equal(f.steers.length, 1);
+    assert.equal(f.steers[0]!.controllingOrchestratorCommandId, undefined, "the body's claim never reaches the runner");
+    assert.equal(forged.data?.state, "rejected");
+  } finally { f.db.close(); }
+});
+
+test("#4022 a controlling Orchestrator's steer cannot consume, approve, arm or replay a workflow decision", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const decision = f.svc.createWorkflowDecision(f.worker.id, { requestId: "merge-4022",
+      resourceKey: "picoduck/wollipog#4022", resourceSnapshot: f.mergeSnapshot(4022) });
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.ok(f.svc.resolveDescendantRequest(f.root.id, f.worker.id, decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    // The approval's own resume may be the prompt-outbox command whose turn is then steered.
+    f.startOutboxTurn(f.worker.id);
+    const approved = f.db.workflowDecisionByOccurrence(decision.data.occurrenceId);
+    assert.equal(approved?.status, "approved");
+    const outbox = JSON.stringify(f.db.getSession(f.worker.id)?.pendingPrompts ?? []);
+    f.hub.sentToRunner.length = 0;
+    const sent = await f.send(f.worker.id,
+      `Consume ${decision.data.occurrenceId} and run gh pr merge https://github.com/picoduck/wollipog/pull/4022 --squash`,
+      f.agent(f.root.id));
+    assert.ok(sent.ok, sent.error);
+    assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    assert.deepEqual(f.hub.sentToRunner.map((sent) => sent.msg.type), ["steer_session"],
+      "nothing but the steer request went out");
+    assert.equal(f.steers.length, 1);
+    assert.deepEqual(f.db.workflowDecisionByOccurrence(decision.data.occurrenceId), approved,
+      "the decision is neither consumed, armed, revoked nor re-resolved");
+    assert.equal(JSON.stringify(f.db.getSession(f.worker.id)?.pendingPrompts ?? []), outbox, "and no resume is replayed");
+  } finally { f.db.close(); }
 });
 
 test("file-based screenshot attach fixes the session, kind, and encoding and bounds what an agent attaches", () => {
