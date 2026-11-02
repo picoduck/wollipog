@@ -182,7 +182,13 @@ view, not silently subtracted. Historical five-job sizing remains in the fixture
 | [41397737745 / 125122630398](https://github.com/picoduck/wollipog/actions/runs/41397737745/job/125122630398) | PR / passing | 4 | 2395 | 6 / 0 | 32 | 2355 | 0 | 2 | 2389 |
 | [41284066573 / 124781671550](https://github.com/picoduck/wollipog/actions/runs/41284066573/job/124781671550) | PR / passing | 4 | 2390 | 6 / 0 | 37 | 2343 | 0 | 4 | 2384 |
 
-Per-shard non-install seconds on complete passing workflows, p50 / p90:
+Per-shard non-install seconds on complete passing workflows, p50 / p90. This
+phase-only table requires coherent timing for the individual Chromium job;
+the complete-path table above requires no flagged job anywhere in the workflow.
+Thus ALL/PR has 292 phase samples per shard versus 290 coherent whole-workflow
+sets, and I/PR has 81 versus 79. Runs 41290984788 and 41290718119 have coherent
+Chromium phases but flagged non-browser jobs. They remain valid phase evidence
+without certifying the workflow's complete timing. Other displayed counts agree.
 
 | Era / Event | Shard | N | Non-Install | Development Suite |
 | --- | --- | --- | --- | --- |
@@ -367,10 +373,12 @@ daily UTC midnights to stay below the search cap. `readTimingLog` uses the
 not all logs. Matching run/attempt context is required.
 
 `browserMeasurement` retains per-run reported ratios, max, complete path, sums,
-wait and phase records. Reproduce each era table by filtering first attempts,
+wait and phase records. Reproduce the main performance table by filtering first attempts,
 event, `epoch`, state `passing`, a complete `browserMeasurement` and no job
 `timingQuality`. Sort each metric and select element `ceil(n*p)-1` for p50/p90.
-Raw tables omit only the `timingQuality` filter. Derive non-install seconds from
+The per-shard phase table instead applies `timingQuality` only to that shard's
+job, retaining coherent phases when a non-browser job is flagged. Raw performance
+tables omit the `timingQuality` filter. Derive non-install seconds from
 job elapsed minus executed install/retry steps; setup is job start to suite start
 minus those installs; cleanup is the residual after setup, suite and production.
 Skipped steps explicitly retain state and null duration. Unrelated step detail is
