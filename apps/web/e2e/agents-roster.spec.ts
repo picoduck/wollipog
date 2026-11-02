@@ -29,6 +29,24 @@ test.describe("fine pointer", () => {
     await expect(reviewer.locator(".row-sub")).toHaveText("Waiting to run npm run lint -- --fix");
     await expect(reviewer).toHaveAttribute("title", "Opens Parser Reviewer");
     await expect(page.locator(".worker-row", { hasText: "Test Writer" }).locator(".status")).toHaveText("Awaiting Prompt");
+    // Past a day the elapsed time reads in days; under it, unchanged (#3037).
+    await expect(page.locator(".worker-row", { hasText: "Test Writer" }).locator(".row-trail")).toHaveText("16d");
+    await expect(page.locator(".worker-row", { hasText: "Grammar Worker" }).locator(".row-trail")).toHaveText("3h 20m");
+    // A background job's suffix is set apart in mono `--text-faint`, as on its Background Work row
+    // (§4.10), and a readable id (`job-monitor`) is hashed rather than cut to "onitor".
+    const job = page.locator(".worker-row", { hasText: "Monitor Job" });
+    await expect(job.locator(".row-title")).toHaveText(/^Monitor Job [0-9a-f]{6}$/);
+    await expect(job.locator(".row-title")).not.toHaveText(/\bonitor\b/);
+    const suffix = await job.locator(".background-job-id").evaluate((id) => {
+      const probe = id.ownerDocument.createElement("span");
+      probe.style.cssText = "color: var(--text-faint); font-family: var(--font-mono)";
+      id.parentElement!.append(probe);
+      const [shown, expected] = [getComputedStyle(id), getComputedStyle(probe)];
+      const result = { color: shown.color === expected.color, mono: shown.fontFamily === expected.fontFamily };
+      probe.remove();
+      return result;
+    });
+    expect(suffix).toEqual({ color: true, mono: true });
     await expect(page.locator(".agents-list")).not.toContainText(/Tokens|claude-opus|high|Pod Member|Subagent ·/);
     // The filter fills the panel with three equal options and no "Loaded".
     const options = await page.locator(".seg.block .seg-option").evaluateAll((items) => items.map((item) => Math.round(item.getBoundingClientRect().width)));

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BackgroundDeliveryView, ManagedBackgroundJobView } from "@wollipog/protocol";
-import { backgroundJobLabel, blockedDeliveryStopTarget } from "./background-job-stop.js";
+import { backgroundJobLabel, backgroundJobShortId, blockedDeliveryStopTarget } from "./background-job-stop.js";
 import {
   backgroundJobGroupBadge,
   backgroundJobGroupCounts,
@@ -29,16 +29,39 @@ const finished = (overrides: Partial<ManagedBackgroundJobView> = {}) => job({
   terminalStatus: "completed", terminalObservedAt: NOW - 5 * MINUTE, continuationRequired: true, ...overrides,
 });
 
-test("a job's name is its kind and the last six characters of its id, wherever it is shown (#2858)", () => {
+test("a job's name is its kind and a six-character suffix of its id, wherever it is shown (#2858)", () => {
   assert.equal(backgroundJobLabel(job()), "Shell Job a1f3c9");
   assert.equal(backgroundJobLabel(job({ id: "x-7be210", launchType: "monitor" })), "Monitor Job 7be210");
-  assert.equal(backgroundJobLabel(job({ id: "abc", launchType: "unknown" })), "Background Job abc");
+  // A short id is hashed rather than shown cut or padded.
+  assert.equal(backgroundJobLabel(job({ id: "abc", launchType: "unknown" })), "Background Job 47e90b");
   // The Session Status popover's Stop Job names the job the same way (#2275).
   const target = blockedDeliveryStopTarget({
     driver: "claude-code", backgroundWorkTracking: "managed", backgroundWorkState: "running",
     backgroundJobs: [finished({ id: "agent-04d2e1", launchType: "agent" }), job({ id: "monitor-7be210", launchType: "monitor" })],
   }, { parentTurnId: "turn-1", watchdogState: "continuation_blocked", unfinishedSiblingJobs: 1 }, 999, true);
   assert.deepEqual(target, { jobId: "monitor-7be210", jobLabel: "Monitor Job 7be210" });
+});
+
+test("a job's suffix never cuts a word: a readable id is hashed, a random-looking one is kept (#2858)", () => {
+  const monitor = job({ id: "job-monitor", launchType: "monitor" });
+  const shell = job({ id: "session-tools-job-2" });
+  const random = job({ id: "job-shell-a1f3c9" });
+  assert.match(backgroundJobShortId(monitor), /^[0-9a-f]{6}$/);
+  assert.match(backgroundJobShortId(shell), /^[0-9a-f]{6}$/);
+  assert.notEqual(backgroundJobLabel(monitor), "Monitor Job onitor");
+  assert.notEqual(backgroundJobLabel(shell), "Shell Job -job-2");
+  assert.equal(backgroundJobLabel(random), "Shell Job a1f3c9");
+  // The same id always gets the same name.
+  assert.equal(backgroundJobLabel(job({ id: "job-monitor", launchType: "monitor" })), backgroundJobLabel(monitor));
+  // Six letters with no digit read as a word, so they are hashed too; digits alone stay.
+  assert.match(backgroundJobShortId(job({ id: "x-monitor" })), /^[0-9a-f]{6}$/);
+  assert.notEqual(backgroundJobShortId(job({ id: "x-monitor" })), "onitor");
+  assert.equal(backgroundJobShortId(job({ id: "job-123456" })), "123456");
+  // Different ids never share a name, including near neighbours a hash must still separate.
+  const ids = ["job-monitor", "session-tools-job-2", "job-shell-a1f3c9", "session-tools-job-1",
+    "session-tools-job-3", "job-1", "job-2", "monitor", "abc", "x-7be210"];
+  const suffixes = ids.map((id) => backgroundJobShortId(job({ id })));
+  assert.equal(new Set(suffixes).size, ids.length);
 });
 
 test("a turn is named by the transcript's number, never its place in the list (#2858)", () => {

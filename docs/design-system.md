@@ -996,6 +996,10 @@ A path trail, such as the Files panel's folder path.
 - Each ancestor is a `button.crumb` in `--accent` (it navigates, like a link, and underlines on
   hover). The current segment is `.crumb.is-current` in `--text`. A disabled crumb is `--text-dim`.
 - Separators are `.crumb-sep` (`/`, `--text-faint`, `aria-hidden`).
+- Files' first crumb is the session's root (`sessionRootName()`, #2852): the workspace's name for a
+  session in a managed worktree, whose folder is named after the session id, otherwise the folder's
+  own name. Its tooltip is the folder's full path. Session Tools' Files row ("Browse acme-storefront")
+  and Go to File's "N matches in …" and "Nothing in … matches that name." use the same name.
 - Replaces `.files-crumbs` and `.files-crumb`.
 
 ### 4.9 Side Panel Frame
@@ -1149,8 +1153,11 @@ and whether their result came back. It is one list of turn groups, never a card 
   transcript to the turn, loading earlier activity a page at a time until it is there. An unknown
   turn, or one the fully loaded transcript does not hold, has no View Turn. The heading never wraps
   View Turn under its label; the label gives way first.
-- **Job rows.** `.row.row-2`: line 1 is the job's name, its kind and the last six characters of its
-  id in mono `--text-faint` ("Shell Job a1f3c9", `backgroundJobLabel()`, the same name everywhere),
+- **Job rows.** `.row.row-2`: line 1 is the job's name, its kind and a six-character suffix of its
+  id in mono `--text-faint` ("Shell Job a1f3c9", `backgroundJobLabel()`, the same name everywhere,
+  the Agents roster's job rows included). The suffix is the id's last six characters when they read
+  as random (letters and digits only, with at least one digit), otherwise six hex characters of a
+  hash of the whole id, so a readable id never shows a cut word ("onitor"),
   and its `job` badge; line 2 is one sentence about its result ("Started 10m ago", "Result waits for
   the other job", "Result returned 50m ago", "Last seen 12m ago") with the duration trailing, then a
   chevron. A row pushes the job's **Job Detail** page (§4.9 Pages). A turn with only a retained

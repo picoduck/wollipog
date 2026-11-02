@@ -1,5 +1,4 @@
-import { formatDuration } from "../format.js";
-import { isLiveWorker, workerStatusMeta, type WorkerRow } from "../worker-roster.js";
+import { isLiveWorker, workerElapsed, workerStatusMeta, type WorkerRow } from "../worker-roster.js";
 import { ArrowUpRightIcon, ChevronRightIcon } from "./Icons.js";
 import { StatusBadge } from "./StatusBadge.js";
 
@@ -32,7 +31,7 @@ export function WorkerRowItem({
   onOpen: (row: WorkerRow) => void;
 }) {
   const end = row.completedAt ?? (isLiveWorker(row) ? now : row.lastActivityAt);
-  const elapsed = row.startedAt != null && end != null ? formatDuration(Math.max(0, end - row.startedAt)) : "";
+  const elapsed = row.startedAt != null && end != null ? workerElapsed(Math.max(0, end - row.startedAt)) : "";
   const opensSession = row.target.kind === "session";
   return (
     <div role="listitem" className={`worker-row-item${nested ? " nested" : ""}${lastNested ? " nested-last" : ""}`}>
@@ -43,7 +42,11 @@ export function WorkerRowItem({
         onClick={() => onOpen(row)}>
         <span className="row-body">
           <span className="row-line">
-            <span className="row-title">{row.name}</span>
+            <span className="row-title">
+              {row.nameParts
+                ? <>{row.nameParts.kind} <span className="mono background-job-id">{row.nameParts.id}</span></>
+                : row.name}
+            </span>
             <StatusBadge meta={workerStatusMeta(row)} />
           </span>
           <span className="row-line">

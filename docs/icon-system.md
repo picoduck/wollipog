@@ -189,6 +189,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |
 | `HistoryIcon` | Lucide | `History` | Decision History, in the Session Tools list and the tool switcher (#2844). |
 | `MessageSquareIcon` | Lucide | `MessageSquare` | Side Chat, in the Session Tools list and the tool switcher (#2844). |
+| `FindingIcon` | Lucide | `MessageSquareCode` | A review finding: the inline finding editor's caption naming its line (#2851). |
 | `FilesIcon` | Lucide | `Files` | A count of files, in a meta row. |
 | `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
 | `ReadIcon` | Lucide | `BookOpen` | A read step in the transcript. |

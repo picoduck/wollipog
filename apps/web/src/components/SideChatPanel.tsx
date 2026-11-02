@@ -94,11 +94,20 @@ const ENDED_PHRASE: Partial<Record<SessionStatus, string>> = {
   stopped: "was stopped",
 };
 
+/** The same, before anything was said: "This side chat was stopped before any reply." */
+const ENDED_EMPTY_PHRASE: Partial<Record<SessionStatus, string>> = {
+  completed: "finished",
+  failed: "failed",
+  stopped: "was stopped",
+};
+
 /**
  * The ended state's one sentence (#1206, #2863): what happened and where the transcript is. Its
- * remedy is the one button beside it, so the sentence does not repeat it.
+ * remedy is the one button beside it, so the sentence does not repeat it. A side chat that ended
+ * with no messages has no transcript to point to, so it says only what happened (#3037).
  */
-export function sideChatEndedSentence(status: SessionStatus): string {
+export function sideChatEndedSentence(status: SessionStatus, hasMessages = true): string {
+  if (!hasMessages) return `This side chat ${ENDED_EMPTY_PHRASE[status] ?? "ended"} before any reply.`;
   return `This side chat ${ENDED_PHRASE[status] ?? "ended"}. Its transcript stays here and in Sessions.`;
 }
 
@@ -694,6 +703,8 @@ export function SideChatPanel({
   }
 
   const transcriptLoaded = child !== undefined && loadedTranscript === `${child.id}:${child.eventEpoch ?? 0}`;
+  // Until its transcript has loaded, an ended side chat is taken to have one.
+  const endedEmpty = childEnded && transcriptLoaded && items.length === 0;
   const transcript = creating || !child ? null
     : !transcriptLoaded ? <TranscriptSkeleton label="Loading Side Chat Transcript" />
       : items.length ? (
@@ -705,7 +716,8 @@ export function SideChatPanel({
           historyKey={`${child.id}:${child.eventEpoch ?? 0}`}
           onInsertReply={insertReply}
         />
-      ) : childEnded || childStarting ? null : <p className="sc-empty">No messages yet.</p>;
+      ) : endedEmpty ? <p className="sc-empty">No messages were sent in this side chat.</p>
+        : childEnded || childStarting ? null : <p className="sc-empty">No messages yet.</p>;
 
   return (
     <div className="sc-panel" onKeyDown={onPanelKeyDown}>
@@ -722,7 +734,7 @@ export function SideChatPanel({
       <div className="sc-foot">
         {showEnded ? (
           <div className="sc-ended">
-            <p className="sc-ended-text">{sideChatEndedSentence(child!.status)}</p>
+            <p className="sc-ended-text">{sideChatEndedSentence(child!.status, !endedEmpty)}</p>
             <div className="sc-ended-action">
               <button type="button" className="btn primary" ref={restartRef} disabled={!runnerOnline}
                 aria-describedby={!runnerOnline ? reasonId : undefined} onClick={() => start(true)}>

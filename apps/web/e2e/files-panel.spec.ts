@@ -108,6 +108,18 @@ test.describe("at 400px", () => {
     await expect(goToFile(page)).toBeFocused();
   });
 
+  test("a managed worktree is named by its workspace, with the folder's full path as the first crumb's tooltip (#3037)", async ({ page }) => {
+    await open(page, "?worktree=managed");
+    const root = page.locator(".crumbs .crumb").first();
+    await expect(root).toHaveText("acme-storefront");
+    await expect(root).toHaveAttribute("title", "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_8c41d2");
+    await expect(page.locator("#right-panel")).not.toContainText("s_8c41d2");
+    await goToFile(page).fill("check");
+    await expect(page.locator(".files-goto-count")).toHaveText("5 matches in acme-storefront");
+    await goToFile(page).fill("zzz");
+    await expect(page.getByText("Nothing in acme-storefront matches that name.")).toBeVisible();
+  });
+
   test("a truncated search says so", async ({ page }) => {
     await open(page, "?truncated=1");
     await goToFile(page).fill("check");

@@ -34,7 +34,7 @@ import {
   rankGoToFileResults,
   resolveSourceTarget,
   sourceLines,
-  workspaceFolderName,
+  sessionRootName,
   type GitMarker,
   type GoToFileMatch,
   type ResolvedSourceTarget,
@@ -370,7 +370,7 @@ export function FilesBrowser({
     session.runnerId,
   ).name);
   const machineName = runnerName || "The machine";
-  const rootName = workspaceFolderName(session.worktreePath, session.workspaceName);
+  const rootName = sessionRootName(session);
 
   // Go to File (#2852): the query, the runner's last answer for it, and the active result.
   const [query, setQuery] = useState("");
@@ -694,6 +694,8 @@ export function FilesBrowser({
   const shownPath = opening ?? shownFile?.path ?? null;
   const folder = shownPath !== null ? parentPath(shownPath) : path;
   const crumbs = crumbsFor(folder, rootName);
+  // The root crumb's tooltip is the folder's full path, which its name may not tell (#2852).
+  const rootTitle = session.worktreePath ?? undefined;
   const disabled = !runnerOnline || busy;
   const atRoot = shownPath === null && path === "";
 
@@ -853,9 +855,10 @@ export function FilesBrowser({
           <span key={c.path}>
             {i > 0 && <span className="crumb-sep" aria-hidden="true">/</span>}
             {shownPath === null && i === crumbs.length - 1 ? (
-              <span className="crumb is-current" aria-current="location">{c.name}</span>
+              <span className="crumb is-current" aria-current="location" title={i === 0 ? rootTitle : undefined}>{c.name}</span>
             ) : (
-              <button className="crumb" type="button" disabled={disabled && shownPath === null} onClick={() => showFolder(c.path)}>
+              <button className="crumb" type="button" title={i === 0 ? rootTitle : undefined}
+                disabled={disabled && shownPath === null} onClick={() => showFolder(c.path)}>
                 {c.name}
               </button>
             )}

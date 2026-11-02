@@ -8,7 +8,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { backgroundJobCurrentState } from "../background-job-stop.js";
-import { workspaceFolderName } from "../files-panel.js";
+import { sessionRootName } from "../files-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -286,7 +286,7 @@ function SessionToolsListView({
   const fact = (id: SessionToolId): RowFact => {
     switch (id) {
       case "review": return { text: reviewFact(changes, requiredFindings) };
-      case "files": return { text: filesFact(workspaceFolderName(session.worktreePath, session.workspaceName)) };
+      case "files": return { text: filesFact(sessionRootName(session)) };
       case "browser": return { text: browserFact(artifacts) };
       case "terminal": return { text: terminal };
       case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge };

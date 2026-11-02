@@ -10,7 +10,7 @@ import { assertNoDomNode } from "../dom-test-assertions.js";
 import { ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
 import { findingSummary } from "./DiffInlineFinding.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
-import { GitDiffViewer, type DiffReviewControls } from "./GitDiffViewer.js";
+import { findingEditorCaption, GitDiffViewer, type DiffReviewControls } from "./GitDiffViewer.js";
 
 /**
  * A finding in the diff (#2851): the editor is one neutral card with a Severity radio group, a
@@ -134,7 +134,13 @@ test("the editor is one card: Severity radios and Required on a row, its helper,
   assert.equal(editor.getAttribute("role"), "group");
   assert.equal(editor.getAttribute("aria-label"), "New Finding");
   const body = editor.querySelector<HTMLTextAreaElement>("textarea")!;
-  assert.equal(body.getAttribute("aria-label"), "Finding");
+  // The caption above the textarea names its line and is its accessible name (#2851).
+  const caption = editor.querySelector<HTMLElement>(".dedit-caption")!;
+  assert.equal(caption.textContent, "Finding on line 2");
+  assert.ok(caption.querySelector("svg"), "after the finding icon");
+  assert.ok(caption.nextElementSibling === body, "directly above the textarea");
+  assert.equal(body.getAttribute("aria-labelledby"), caption.id);
+  assert.equal(body.getAttribute("aria-label"), null);
   assert.equal(body.placeholder, "Describe the issue and the fix you expect");
   assert.equal(body.getAttribute("rows"), "3");
 
@@ -346,4 +352,20 @@ test("a settled finding's line keeps the first words of its first line", () => {
   assert.ok(summary.endsWith("…") && summary.length <= 81);
   assert.ok(long.startsWith(summary.slice(0, -1)), "cut at a word boundary");
   assert.equal(findingSummary("x".repeat(120)), `${"x".repeat(80)}…`);
+});
+
+test("the finding editor's caption names its line, opening on line 26 as on any other (#2851)", async () => {
+  const { container, render } = await mount();
+  const { review } = controls();
+  const shifted: GitHunk = { ...hunkWith("c"), header: "@@ -25,3 +25,3 @@", oldStart: 25, newStart: 25 };
+  await render(<GitDiffViewer diff={{ ...diffOf(), files: [{ ...diffOf().files[0]!, hunks: [shifted] }] }} review={review} />);
+  const add = container.querySelector<HTMLButtonElement>('button[aria-label="Add Finding on Line 26"]');
+  assert.ok(add, "the added line is line 26");
+  await act(async () => { add.click(); });
+  const body = container.querySelector<HTMLTextAreaElement>(".dedit textarea")!;
+  const label = container.querySelector(`[id="${body.getAttribute("aria-labelledby")}"]`);
+  assert.equal(label?.textContent, "Finding on line 26");
+  assert.equal(findingEditorCaption(26), "Finding on line 26");
+  assert.equal(findingEditorCaption(26, 31), "Finding on lines 26–31");
+  assert.equal(findingEditorCaption(26, 26), "Finding on line 26");
 });

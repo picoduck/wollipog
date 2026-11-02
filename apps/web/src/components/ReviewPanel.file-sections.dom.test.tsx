@@ -123,7 +123,9 @@ const noFindings: ReviewFindingsResponse = {
   summary: { total: 0, unresolved: 0, requiredUnresolved: 0, sent: 0, resolved: 0, dismissed: 0, completion: "complete" },
 };
 
-async function mountPanel({ race = false, panelWidth, failReads = false }: { race?: boolean; panelWidth?: number; failReads?: boolean } = {}) {
+async function mountPanel({ race = false, panelWidth, failReads = false, canExpandPanel }: {
+  race?: boolean; panelWidth?: number; failReads?: boolean; canExpandPanel?: boolean;
+} = {}) {
   const host = domWindow.document.createElement("div");
   domWindow.document.body.appendChild(host);
   // The panel's frame as RightPanel draws it: the `rp` container, its header slot and the body.
@@ -165,7 +167,8 @@ async function mountPanel({ race = false, panelWidth, failReads = false }: { rac
       <FeedbackProvider>
         <ApiProvider client={client}>
           <PanelActionSlotContext.Provider value={slot as unknown as HTMLElement}>
-            <ReviewPanel session={session} runnerOnline runnerProtocolVersion={157} git={git} onOpenSourceLocation={() => {}} />
+            <ReviewPanel session={session} runnerOnline runnerProtocolVersion={157} git={git} onOpenSourceLocation={() => {}}
+              {...(canExpandPanel === undefined ? {} : { canExpandPanel })} />
           </PanelActionSlotContext.Provider>
         </ApiProvider>
       </FeedbackProvider>,
@@ -358,6 +361,31 @@ test("View Options wraps long lines and collapses every file into the index, whi
     assert.deepEqual(shape(), [`${tracked.path}:open`, `${added.path}:open`]);
   } finally {
     await harness.unmount();
+  }
+});
+
+test("where Expand Panel isn't offered, as on a phone, Side by Side's reason asks for a wider screen (#2848)", async () => {
+  Object.defineProperty(globalThis, "ResizeObserver", { configurable: true, writable: true, value: FakeResizeObserver });
+  const harness = await mountPanel({ panelWidth: 390, canExpandPanel: false });
+  try {
+    const options = await viewOptions(harness.container);
+    assert.deepEqual(options.rows.find(([label]) => label === "Side by Side"),
+      ["Side by Side", "menuitemradio", "false", "Side by Side needs a wider screen."]);
+    assert.ok(!options.rows.some(([, , , reason]) => reason?.includes("Expand the panel")),
+      "no reason points at a control the panel doesn't have");
+    await options.close();
+  } finally {
+    await harness.unmount();
+  }
+  // A docked 400px panel on desktop, where Expand Panel is offered, keeps pointing at it.
+  const docked = await mountPanel({ panelWidth: 400, canExpandPanel: true });
+  try {
+    const options = await viewOptions(docked.container);
+    assert.deepEqual(options.rows.find(([label]) => label === "Side by Side"),
+      ["Side by Side", "menuitemradio", "false", "Expand the panel to compare side by side."]);
+    await options.close();
+  } finally {
+    await docked.unmount();
   }
 });
 

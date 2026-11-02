@@ -16,6 +16,8 @@ import {
   resolveSourceTarget,
   sourceLines,
   unquotePorcelainPath,
+  inManagedWorktree,
+  sessionRootName,
   workspaceFolderName,
 } from "./files-panel.js";
 
@@ -134,6 +136,28 @@ test("the root is named by its working folder, POSIX or Windows, else the worksp
   assert.equal(parentPath("c.ts"), "");
   assert.equal(parentPath(""), "");
   assert.equal(baseName("a/b/c.ts"), "c.ts");
+});
+
+test("a managed worktree is named by its workspace, a folder of its own by the folder (#2852)", () => {
+  const managedPath = "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_4de7e8705433";
+  // Launched in a worktree, with no worktree records from an older control plane.
+  const launched = { useWorktree: true, worktreePath: managedPath, workspaceName: "acme-storefront" };
+  assert.equal(inManagedWorktree(launched), true);
+  assert.equal(sessionRootName(launched), "acme-storefront");
+  // The selected worktree's record decides: one Wollipog created is managed, an attached one is not.
+  const created = { ...launched, useWorktree: false,
+    worktrees: [{ id: "s_4de7e8705433", path: managedPath, branch: "agent/s_4de7e8705433", source: "created" as const }] };
+  assert.equal(sessionRootName(created), "acme-storefront");
+  const attached = { ...launched, worktreePath: "/home/me/src/storefront-checkout",
+    worktrees: [{ id: "checkout", path: "/home/me/src/storefront-checkout", branch: "checkout", source: "attached" as const }] };
+  assert.equal(inManagedWorktree(attached), false);
+  assert.equal(sessionRootName(attached), "storefront-checkout");
+  // A session working directly in its folder keeps the folder's name.
+  const direct = { useWorktree: false, worktreePath: "/home/me/src/storefront", workspaceName: "acme-storefront" };
+  assert.equal(sessionRootName(direct), "storefront");
+  // With no workspace name to use, the folder's name stays.
+  assert.equal(sessionRootName({ ...launched, workspaceName: "  " }), "s_4de7e8705433");
+  assert.equal(sessionRootName({ useWorktree: true, worktreePath: null, workspaceName: "acme-storefront" }), "acme-storefront");
 });
 
 test("rows name their icon by kind, never by emoji", () => {
