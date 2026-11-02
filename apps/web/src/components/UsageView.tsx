@@ -41,7 +41,7 @@ import {
   processedTokens,
   subscriptionPlanLabel,
   todaySpendUsd,
-  windowDays,
+  usageWindowCaption,
   type BreakdownRow,
   type UsageBreakdownTab,
   type UsageMetric,
@@ -963,36 +963,23 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
               <section className="usage-overview" aria-label="Overview">
                 <div className="usage-headline">
                   <span className="usage-headline-value">{formatMetric(metricValue(data.totals, metric), metric)}</span>
-                  <span className="usage-headline-note">
-                    {metric === "cost" ? "API-equivalent estimate · " : "Processed tokens · "}last {windowDays(data)} days
-                  </span>
+                  <span className="usage-headline-note">{usageWindowCaption(metric, data)}</span>
+                  {/* The chart's only legend: each driver's swatch, name, share and amount. */}
                   <ul className="usage-driver-list" aria-label="By Driver">
                     {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
                     {rows.map((row) => (
                       <li className="usage-driver-row" key={row.driver}>
-                        <div>
-                          <span>
-                            <span className={`usage-series-swatch ${seriesClass(row.driver)}`} aria-hidden="true" />
-                            {DRIVER_PRESENTATION[row.driver].label}
-                          </span>
-                          <strong>{formatMetric(metricValue(row.amount, metric), metric)}</strong>
-                        </div>
-                        <small>
-                          {formatShare(row.share)} of {metric === "cost" ? "cost" : "tokens"} · {
-                            metric === "cost"
-                              ? `${formatCompactTokens(processedTokens(row.amount))} tokens`
-                              : formatMoney(row.amount.costUsd)
-                          }
-                        </small>
+                        <span className={`usage-series-swatch ${seriesClass(row.driver)}`} aria-hidden="true" />
+                        <span className="usage-driver-name">{DRIVER_PRESENTATION[row.driver].label}</span>
+                        <span className="usage-driver-share">{formatShare(row.share)}</span>
+                        <strong>{formatMetric(metricValue(row.amount, metric), metric)}</strong>
                       </li>
                     ))}
                   </ul>
                 </div>
                 <div className="usage-chart-section">
-                  <h3>{GRANULARITY_LABEL[data.granularity].adjective} {metric === "cost" ? "Cost" : "Processed Tokens"}</h3>
                   <UsageChart
                     columns={columns}
-                    drivers={drivers}
                     metric={metric}
                     granularity={data.granularity}
                     bounds={{ since: data.since, through: data.through }}
@@ -1003,16 +990,18 @@ export function UsageView({ tab: routeTab, onSelectTab }: {
                 </div>
               </section>
 
-              <section className="usage-totals-section" aria-labelledby="usage-totals-heading">
-                <h3 id="usage-totals-heading">Totals</h3>
-                <dl className="facts strip">
-                  <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
-                  <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
-                  <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>
-                  <div><dt>Output</dt><dd>{formatCompactTokens(data.totals.outputTokens)}</dd></div>
-                  <div><dt>Cache Savings</dt><dd>{formatMoney(data.totals.cacheSavingsUsd)}</dd></div>
-                </dl>
-              </section>
+              {/* Tokens mode carries a sixth fact, which a compact column wraps to three by two. */}
+              <dl className={`facts strip usage-facts${metric === "tokens" ? " usage-facts-six" : ""}`}>
+                <div><dt>Processed Tokens</dt><dd>{formatCompactTokens(processedTokens(data.totals))}</dd></div>
+                <div><dt>Cached Input</dt><dd>{formatCompactTokens(data.totals.cachedInputTokens)}</dd></div>
+                <div><dt>Uncached Input</dt><dd>{formatCompactTokens(data.totals.uncachedInputTokens)}</dd></div>
+                <div><dt>Output</dt><dd>{formatCompactTokens(data.totals.outputTokens)}</dd></div>
+                <div><dt>Cache Savings</dt><dd>{formatMoney(data.totals.cacheSavingsUsd)}</dd></div>
+                {/* The Tokens headline drops the dollar figure, so the strip keeps it. */}
+                {metric === "tokens" && (
+                  <div><dt>Estimated Cost</dt><dd>{formatMetric(metricValue(data.totals, "cost"), "cost")}</dd></div>
+                )}
+              </dl>
 
               <section className="usage-tables-section" aria-labelledby="usage-breakdown-heading">
                 <h3 id="usage-breakdown-heading">Breakdown</h3>

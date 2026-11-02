@@ -1,4 +1,4 @@
-import { expect, test } from "@playwright/test";
+import { expect, test, type Page } from "@playwright/test";
 
 // These cases exercise the explicitly enabled privacy mode. Default-off behavior has separate coverage.
 test.beforeEach(async ({ page }) => {
@@ -26,7 +26,7 @@ test("desktop: metric, chart interaction, and Group By as the one aggregation co
   const tableHead = page.locator(".usage-tables-section .usage-table thead th");
   await expect(page.getByRole("radiogroup", { name: "Usage Breakdown" })).toHaveCount(0);
   await aggregation.getByRole("radio", { name: "Hour" }).click();
-  await expect(page.locator(".usage-chart-section h3")).toContainText("Hourly Cost");
+  await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly cost");
   await expect(breakdown.getByRole("tab").first()).toHaveText("By Hour");
   await expect(tableHead.first()).toHaveText("Hour (UTC)");
   await expect(page.locator(".usage-chart-axis").first()).toContainText("· 03:00");
@@ -35,7 +35,7 @@ test("desktop: metric, chart interaction, and Group By as the one aggregation co
   await page.getByRole("radio", { name: "Tokens" }).click();
   await expect(headline).not.toHaveText(cost ?? "");
   await expect(headline).toContainText("M");
-  await expect(page.locator(".usage-chart-section h3")).toContainText("Processed Tokens");
+  await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly processed tokens");
   await expect(tableHead.last()).toHaveText("Cost");
   await page.screenshot({ path: `${SHOT}/desktop-dark-tokens.png`, fullPage: true });
   await page.getByRole("radio", { name: "Cost" }).click();
@@ -54,18 +54,19 @@ test("desktop: metric, chart interaction, and Group By as the one aggregation co
   // Keyboard reaches the same readout.
   await hits.nth(3).focus();
   await expect(readout).toContainText("Total");
-  const legend = page.locator(".usage-legend li");
-  await expect(legend).toHaveCount(3);
+  // The driver list is the chart's only legend.
+  await expect(page.getByRole("list", { name: "By Driver" }).getByRole("listitem")).toHaveCount(3);
+  await expect(page.locator(".usage-legend, .usage-series-key")).toHaveCount(0);
 
   // A Breakdown tab changes only the dimension; the chart keeps its aggregation.
   await breakdown.getByRole("tab", { name: "By Model" }).click();
   await expect(tableHead.first()).toHaveText("Model");
   await expect(page.locator(".usage-table tbody th").first()).toHaveText("Fable 5.1");
-  await expect(page.locator(".usage-chart-section h3")).toContainText("Hourly Cost");
+  await expect(page.locator(".usage-chart-svg title")).toContainText("Hourly cost");
   await expect(aggregation.getByRole("radio", { name: "Hour" })).toHaveAttribute("aria-checked", "true");
   await page.screenshot({ path: `${SHOT}/desktop-dark-model.png`, fullPage: true });
   await aggregation.getByRole("radio", { name: "Week" }).click();
-  await expect(page.locator(".usage-chart-section h3")).toContainText("Weekly Cost");
+  await expect(page.locator(".usage-chart-svg title")).toContainText("Weekly cost");
   await expect(breakdown.getByRole("tab").first()).toHaveText("By Week");
   await expect(breakdown.getByRole("tab", { name: "By Model" })).toHaveAttribute("aria-selected", "true");
   await breakdown.getByRole("tab", { name: "By Week" }).click();
@@ -231,7 +232,7 @@ test.describe("with a touch pointer", () => {
     await expect(sheet.locator(".menu-label")).toHaveText(["Range", "Group By"]);
     await page.screenshot({ path: `${SHOT}/mobile-dark-range-sheet.png` });
     await sheet.getByRole("menuitemradio", { name: "Week" }).click();
-    await expect(page.locator(".usage-chart-section h3")).toContainText("Weekly Processed Tokens");
+    await expect(page.locator(".usage-chart-svg title")).toContainText("Weekly processed tokens");
     await expect(page.getByRole("button", { name: "Range and Group By: 30 Days, Weekly" })).toBeVisible();
     await page.keyboard.press("Escape");
     await expect(sheet).toBeHidden();
@@ -309,6 +310,126 @@ test("at 1440px the header, the tabs and the toolbar are all that sit above the 
   await expect(page.getByRole("button", { name: "Range: Last 90 Days" })).toBeVisible();
   // Past hourly retention Hour is omitted, never shown disabled.
   await expect(page.getByRole("radiogroup", { name: "Group By" }).getByRole("radio")).toHaveText(["Day", "Week"]);
+});
+
+/** Each fact's label and value boxes, and whether the label is cut off. */
+const factBoxes = (page: Page) => page.locator(".usage-facts > div").evaluateAll((pairs) => pairs.map((pair) => {
+  const box = (node: Element) => {
+    const rect = node.getBoundingClientRect();
+    return { left: rect.left, right: rect.right, top: rect.top, bottom: rect.bottom };
+  };
+  const label = pair.querySelector("dt")!;
+  return {
+    label: label.textContent,
+    pair: box(pair),
+    dt: box(label),
+    dd: box(pair.querySelector("dd")!),
+    truncated: label.scrollWidth > label.clientWidth + 1,
+  };
+}));
+
+test("at 1440px the overview puts the headline column beside the chart over one facts strip", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html");
+  const caption = page.locator(".usage-headline-note").first();
+  await expect(caption).toHaveText("Estimated API cost, Aug 5 – Sep 3");
+  const headline = (await page.locator(".usage-headline").boundingBox())!;
+  const chart = (await page.locator(".usage-chart-section").boundingBox())!;
+  expect(headline.width).toBeGreaterThanOrEqual(240);
+  expect(headline.width).toBeLessThanOrEqual(280);
+  expect(chart.x).toBeGreaterThan(headline.x + headline.width);
+  expect(Math.abs(chart.y - headline.y)).toBeLessThanOrEqual(1);
+  await expect(page.locator(".usage-chart-section h3")).toHaveCount(0);
+  await expect(page.locator(".usage-facts dt")).toHaveText(["Processed Tokens", "Cached Input", "Uncached Input", "Output", "Cache Savings"]);
+  const cost = await page.locator(".usage-headline-value").textContent();
+
+  await page.getByRole("radio", { name: "Tokens" }).click();
+  await expect(caption).toHaveText("Processed tokens, Aug 5 – Sep 3");
+  await expect(page.locator(".usage-facts dt")).toHaveText([
+    "Processed Tokens", "Cached Input", "Uncached Input", "Output", "Cache Savings", "Estimated Cost",
+  ]);
+  await expect(page.locator(".usage-facts dd").last()).toHaveText(cost!);
+  // Six facts sit on one row.
+  const facts = await factBoxes(page);
+  expect(new Set(facts.map((fact) => Math.round(fact.pair.top))).size).toBe(1);
+  expect(facts.filter((fact) => fact.truncated)).toEqual([]);
+});
+
+test("recent coverage: the caption says when recording started instead of counting days", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?coverage=recent");
+  const caption = page.locator(".usage-headline-note").first();
+  await expect(caption).toHaveText("Estimated API cost since Sep 2, when recording started");
+  await page.getByRole("radio", { name: "Tokens" }).click();
+  await expect(caption).toHaveText("Processed tokens since Sep 2, when recording started");
+  await expect(page.locator("main")).not.toContainText(/\b1 days?\b/);
+});
+
+test("at 834px the overview stacks, five facts keep one row and six wrap to three columns by two rows", async ({ page }) => {
+  await page.setViewportSize({ width: 834, height: 1000 });
+  await page.goto("/usage-view-e2e.html");
+  // Cost mode's five facts never wrap into a row with an empty cell.
+  await expect(page.locator(".usage-facts dt")).toHaveCount(5);
+  const five = await factBoxes(page);
+  expect(new Set(five.map((fact) => Math.round(fact.pair.top))).size).toBe(1);
+  expect(five.filter((fact) => fact.truncated)).toEqual([]);
+  await page.screenshot({ path: `${SHOT}/compact-834-dark-cost.png`, fullPage: true });
+
+  await page.getByRole("radio", { name: "Tokens" }).click();
+  await expect(page.locator(".usage-facts dt")).toHaveCount(6);
+  const headline = (await page.locator(".usage-headline").boundingBox())!;
+  const chart = (await page.locator(".usage-chart-section").boundingBox())!;
+  expect(chart.y).toBeGreaterThanOrEqual(headline.y + headline.height);
+
+  const facts = await factBoxes(page);
+  const rows = [...new Set(facts.map((fact) => Math.round(fact.pair.top)))];
+  const columns = [...new Set(facts.map((fact) => Math.round(fact.pair.left)))];
+  expect(rows).toHaveLength(2);
+  expect(columns).toHaveLength(3);
+  // Fonts on CI are wider than on a workstation, so only clipping is checked, not exact widths.
+  expect(facts.filter((fact) => fact.truncated)).toEqual([]);
+  await page.screenshot({ path: `${SHOT}/compact-834-dark-tokens.png`, fullPage: true });
+});
+
+test("a desktop main column narrowed by a docked panel turns the facts strip into rows", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage-view-e2e.html");
+  // The main column is the `app` container; a docked panel can leave it this narrow on a desktop.
+  await page.addStyleTag({ content: ".main { width: 480px; }" });
+  for (const metric of ["Cost", "Tokens"] as const) {
+    await page.getByRole("radio", { name: metric }).click();
+    await expect(page.locator(".usage-facts dt")).toHaveCount(metric === "Cost" ? 5 : 6);
+    const strip = (await page.locator(".usage-facts").boundingBox())!;
+    const facts = await factBoxes(page);
+    expect(new Set(facts.map((fact) => Math.round(fact.pair.top))).size).toBe(facts.length);
+    for (const fact of facts) {
+      expect(Math.abs(fact.dd.right - (strip.x + strip.width))).toBeLessThanOrEqual(1);
+      expect(fact.dt.right).toBeLessThanOrEqual(fact.dd.left);
+    }
+    expect(facts.filter((fact) => fact.truncated)).toEqual([]);
+  }
+  // Just wide enough for five side by side: one row, no label spills out of its cell.
+  await page.addStyleTag({ content: ".main { width: 640px; }" });
+  await page.getByRole("radio", { name: "Cost" }).click();
+  const five = await factBoxes(page);
+  expect(new Set(five.map((fact) => Math.round(fact.pair.top))).size).toBe(1);
+  expect(five.filter((fact) => fact.truncated)).toEqual([]);
+});
+
+test("at 390px the facts strip is rows, label left and value right", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/usage-view-e2e.html");
+  await page.getByRole("radio", { name: "Tokens" }).click();
+  await expect(page.locator(".usage-facts dt")).toHaveCount(6);
+  const strip = (await page.locator(".usage-facts").boundingBox())!;
+  const facts = await factBoxes(page);
+  expect(new Set(facts.map((fact) => Math.round(fact.pair.top))).size).toBe(6);
+  for (const fact of facts) {
+    expect(Math.abs(fact.dt.left - strip.x)).toBeLessThanOrEqual(1);
+    expect(Math.abs(fact.dd.right - (strip.x + strip.width))).toBeLessThanOrEqual(1);
+    expect(fact.dt.right).toBeLessThanOrEqual(fact.dd.left);
+  }
+  expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
 test("with 14 days of hourly retention Hour appears only on Last 7 Days", async ({ page }) => {

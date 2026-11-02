@@ -1420,7 +1420,10 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
 - `.facts.strip` is the summary strip above a table or chart (Usage totals, later Archive): the
   pairs side by side between two hairlines, separated by vertical hairlines, the value in
   `--type-title` with tabular figures. Under 760px the strip becomes rows, label left and value
-  right. It is a modifier, not a second class.
+  right. It is a modifier, not a second class. In a compact main column Usage and Cost's strip
+  (`.usage-facts`) keeps five facts on one row and wraps six to three columns by two rows, so it
+  never squeezes its labels or leaves an empty cell; a main column under 640px (a docked panel
+  beside it) gets the phone's rows.
 - A region may set the list's spacing or size but not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
   `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Ten more `<dl>` recipes

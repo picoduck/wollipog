@@ -20,7 +20,7 @@ import {
   processedTokens,
   subscriptionPlanLabel,
   todaySpendUsd,
-  windowDays,
+  usageWindowCaption,
 } from "./usage-view-model.js";
 
 test("subscription plans normalize known branding and preserve unknown provider labels", () => {
@@ -101,10 +101,55 @@ test("columns stack drivers in slot order, ascend in time, and fall back to buck
   assert.equal(buildColumns(series, [], ["claude-code"], "cost").every((column) => column.bands.length === 0), true);
 });
 
-test("the headline window comes from the response, not the last clicked range", () => {
-  assert.equal(windowDays({ since: 0, through: 30 * 86_400_000 }), 30);
-  assert.equal(windowDays({ since: 0, through: 7 * 86_400_000 + 3_600_000 }), 7);
-  assert.equal(windowDays({ since: 5, through: 5 }), 1);
+test("the headline caption names the response's real dates, not the last clicked range", () => {
+  const retention = { hourlyDays: 30, dailyDays: 365, coverageStartedAt: Date.UTC(2026, 0, 1) };
+  // A full 30-day daily window ends at an exclusive midnight, so its last day is the day before.
+  const full = { since: Date.UTC(2026, 7, 5), through: Date.UTC(2026, 8, 4), retention };
+  assert.equal(usageWindowCaption("cost", full), "Estimated API cost, Aug 5 – Sep 3");
+  assert.equal(usageWindowCaption("tokens", full), "Processed tokens, Aug 5 – Sep 3");
+  // A live window ends now, part way through today.
+  assert.equal(
+    usageWindowCaption("cost", { since: Date.UTC(2026, 7, 5), through: Date.UTC(2026, 8, 3, 14, 30), retention }),
+    "Estimated API cost, Aug 5 – Sep 3",
+  );
+  // An hourly window starts on the hour, not at midnight; the dates are still UTC days.
+  assert.equal(
+    usageWindowCaption("cost", { since: Date.UTC(2026, 7, 27, 14), through: Date.UTC(2026, 8, 3, 14, 30), retention }),
+    "Estimated API cost, Aug 27 – Sep 3",
+  );
+  // A window that crosses a year names the year on both dates.
+  assert.equal(
+    usageWindowCaption("tokens", { since: Date.UTC(2025, 11, 20), through: Date.UTC(2026, 0, 19), retention: { ...retention, coverageStartedAt: 0 } }),
+    "Processed tokens, Dec 20, 2025 – Jan 18, 2026",
+  );
+});
+
+test("a window clamped to the start of recording says when recording started, never a day count", () => {
+  const DAY = 86_400_000;
+  const now = Date.UTC(2026, 8, 26, 9);
+  // Recording started yesterday at 15:20 UTC; a 30-day range is clamped to that day's bucket.
+  const coverageStartedAt = Date.UTC(2026, 8, 25, 15, 20);
+  const retention = { hourlyDays: 30, dailyDays: 365, coverageStartedAt };
+  const daily = { since: Math.floor(coverageStartedAt / DAY) * DAY, through: now, retention };
+  assert.equal(usageWindowCaption("cost", daily), "Estimated API cost since Sep 25, when recording started");
+  assert.equal(usageWindowCaption("tokens", daily), "Processed tokens since Sep 25, when recording started");
+  const hourly = { since: Date.UTC(2026, 8, 25, 15), through: now, retention };
+  assert.equal(usageWindowCaption("cost", hourly), "Estimated API cost since Sep 25, when recording started");
+  // Recording that started on the very first day of an unclamped window still reads as the start.
+  assert.equal(
+    usageWindowCaption("cost", { since: Date.UTC(2026, 7, 27), through: now, retention: { ...retention, coverageStartedAt: Date.UTC(2026, 7, 27) } }),
+    "Estimated API cost since Aug 27, when recording started",
+  );
+  // A start of recording in the previous year names both years.
+  assert.equal(
+    usageWindowCaption("cost", { since: Date.UTC(2025, 11, 31), through: Date.UTC(2026, 0, 2, 3), retention: { ...retention, coverageStartedAt: Date.UTC(2025, 11, 31, 8) } }),
+    "Estimated API cost since Dec 31, 2025, when recording started",
+  );
+  // A window shorter than a day that has not reached coverage names its one date.
+  assert.equal(
+    usageWindowCaption("cost", { since: Date.UTC(2026, 8, 26), through: now, retention: { ...retention, coverageStartedAt: Date.UTC(2026, 0, 1) } }),
+    "Estimated API cost, Sep 26",
+  );
 });
 
 test("axis helpers produce clean ticks and bounded, end-anchored labels", () => {
