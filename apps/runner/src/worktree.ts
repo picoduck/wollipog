@@ -1488,6 +1488,9 @@ export interface MergedWorktreePullRequestDiscoveryOptions extends WorktreeOptio
   /** Also probe a branch whose upstream tracking ref still exists. Archive retirement needs
    * delivery proof even when publication is already proven by a live upstream. */
   includeLiveUpstream?: boolean;
+  /** Accept only a same-repository change request whose source branch is this local branch or its
+   * configured upstream branch (#3981). Discovery otherwise ignores the source branch name. */
+  requireHeadBranch?: boolean;
 }
 type LinkedChangeRequest = {
   provider: ForgeProvider;
@@ -1566,6 +1569,8 @@ export function parseWorktreePullRequestState(
 export function parseMergedWorktreePullRequestForHead(
   raw: string,
   expectedHead: string,
+  /** When given, also require a same-repository pull request from one of these branches. */
+  headBranches?: readonly string[],
 ): DiscoveredMergedPullRequest | null {
   if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
   try {
@@ -1577,6 +1582,8 @@ export function parseMergedWorktreePullRequestForHead(
       if (item.state !== "MERGED" ||
           typeof item.headRefOid !== "string" || item.headRefOid.toLowerCase() !== expectedHead.toLowerCase() ||
           typeof item.url !== "string") continue;
+      if (headBranches && (item.isCrossRepository !== false || typeof item.headRefName !== "string" ||
+          !headBranches.includes(item.headRefName))) continue;
       const request = linkedChangeRequest(item.url);
       if (request?.provider !== "github") continue;
       return {
@@ -1601,6 +1608,8 @@ export function parseMergedGitLabMergeRequestForHead(
   raw: string,
   expectedHead: string,
   host: string,
+  /** When given, also require a same-project merge request from one of these branches. */
+  headBranches?: readonly string[],
 ): DiscoveredMergedPullRequest | null {
   if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
   try {
@@ -1612,6 +1621,9 @@ export function parseMergedGitLabMergeRequestForHead(
       if (item.state !== "merged" ||
           typeof item.sha !== "string" || item.sha.toLowerCase() !== expectedHead.toLowerCase() ||
           typeof item.web_url !== "string") continue;
+      if (headBranches && (typeof item.source_project_id !== "number" ||
+          item.source_project_id !== item.target_project_id || typeof item.source_branch !== "string" ||
+          !headBranches.includes(item.source_branch))) continue;
       const request = linkedChangeRequest(item.web_url);
       if (request?.provider !== "gitlab" || request.host !== host.toLowerCase()) continue;
       return {
@@ -1754,6 +1766,9 @@ export async function mergedWorktreePullRequestForBranch(
       return null;
     }
     if (options.onForgeAttempt && !options.onForgeAttempt(identity)) return null;
+    const headBranches = options.requireHeadBranch
+      ? [...new Set([branch, ...(merge ? [merge.replace(/^refs\/heads\//u, "")] : [])])]
+      : undefined;
     try {
       if (forge.provider === "gitlab") {
         const result = await run(
@@ -1765,18 +1780,18 @@ export async function mergedWorktreePullRequestForBranch(
           ],
           { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
         );
-        return parseMergedGitLabMergeRequestForHead(result.stdout, head, forge.host);
+        return parseMergedGitLabMergeRequestForHead(result.stdout, head, forge.host, headBranches);
       }
       const result = await run(
         context,
         "gh",
         [
           "pr", "list", "--search", head, "--state", "merged", "--limit", "100",
-          "--json", "url,state,headRefOid",
+          "--json", headBranches ? "url,state,headRefOid,headRefName,isCrossRepository" : "url,state,headRefOid",
         ],
         { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
       );
-      return parseMergedWorktreePullRequestForHead(result.stdout, head);
+      return parseMergedWorktreePullRequestForHead(result.stdout, head, headBranches);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") options.onIneligible?.();
       else options.onForgeUnavailable?.();

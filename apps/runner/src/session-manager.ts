@@ -3897,18 +3897,20 @@ export class SessionManager {
   /** One branch can deliver several pull requests in sequence (#3981): after the linked one is
    * squash-merged and its remote branch deleted, the same branch is pushed again for the next. The
    * link still names the earlier merged head, which no longer equals the tip, so it cannot stand in
-   * for the vanished upstream. Ask the forge whether a merged pull request in the linked pull
-   * request's repository delivered exactly the current tip of the registered branch.
+   * for the vanished upstream. Ask the forge whether a merged pull request delivered exactly the
+   * current tip of the registered branch: it must be in the linked pull request's repository,
+   * not from a fork, and its source branch must be this branch or its configured upstream branch.
    *
    * Like a live-upstream delivery proof, the result serves only the retirement that asked for it
    * and is never persisted as the worktree's link. Nothing else is relaxed: a tip no merged pull
    * request delivered is still kept, and safe removal compares this head with the tree once more.
    * Explicit discard, archive retirement and their deferred replays call this; pull-request
-   * reconciliation does not. */
+   * reconciliation does not. A tip equal to the linked head, or to `provenHead`, is returned as
+   * delivered without asking the forge again. */
   private async discoverDeliveredSuccessorHead(
     meta: SessionMeta,
     worktree: SessionWorktreeView,
-    options: { requireDelivered?: boolean; provenHead?: string } = {},
+    options: { requireDelivered?: boolean; provenHead?: string; skipForge?: boolean } = {},
   ): Promise<{ probed: boolean; forgeUnavailable: boolean; deliveredHead?: string }> {
     const skipped = { probed: false, forgeUnavailable: false };
     const linked = worktree.pullRequest;
@@ -3922,11 +3924,13 @@ export class SessionManager {
     } catch {
       return skipped;
     }
-    // The tip the existing proof already covers needs no further forge round trip.
-    if (!/^[a-f0-9]{40,64}$/u.test(head) || head === linkedHead || head === options.provenHead) return skipped;
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return skipped;
+    if (head === linkedHead || head === options.provenHead) return { ...skipped, deliveredHead: head };
+    if (options.skipForge) return skipped;
     let forgeUnavailable = false;
     const discovered = await this.discoverMergedWorktreePullRequest(worktree.path, checkedOutBranch, {
       context: meta.context,
+      requireHeadBranch: true,
       onForgeUnavailable: () => { forgeUnavailable = true; },
       ...(options.requireDelivered ? { includeLiveUpstream: true } : {}),
     });
@@ -17246,7 +17250,8 @@ export class SessionManager {
    * deliver a later pull request (#3981), that head is stale and replay would refuse the tree as
    * unpushed forever. Re-derive the proof for the current tip through the same helper an explicit
    * discard uses, and back off after a negative or unavailable answer exactly like the initial
-   * merged-head refresh. Pull-request reconciliation records are left as they were.
+   * merged-head refresh. A tip that went back to the linked head gets that head back as its proof
+   * without a forge call. Pull-request reconciliation records are left as they were.
    * Callers hold the session's worktree lane. */
   private async refreshDeferredSuccessorHead(
     record: WorktreeCleanupRecord,
@@ -17254,7 +17259,7 @@ export class SessionManager {
     if (!record.verifiedMergedHead || record.trigger === "pull_request_reconciliation") return "not_needed";
     const backoffKey = this.deferredMergedHeadKey(record);
     const retryAt = this.deferredMergedHeadRetryAt.get(backoffKey);
-    if (retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow()) return "unavailable";
+    const backedOff = retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow();
     const meta = this.store.readMeta(record.sessionId);
     const worktree = meta && this.attributedWorktrees(meta).find((item) =>
       item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
@@ -17265,8 +17270,11 @@ export class SessionManager {
     const discovery = await this.discoverDeliveredSuccessorHead(meta, worktree, {
       requireDelivered: record.trigger === "archive_retirement",
       provenHead: record.verifiedMergedHead,
+      skipForge: backedOff,
     });
+    if (discovery.deliveredHead === record.verifiedMergedHead) return "not_needed";
     if (!discovery.deliveredHead) {
+      if (backedOff) return "unavailable";
       if (!discovery.probed) return "not_needed";
       this.deferredMergedHeadRetryAt.set(
         backoffKey,
