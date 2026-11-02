@@ -81,6 +81,21 @@ test("coverage classifies every in-scope file exactly once, compared exactly", (
     /context_files_examined has non-repository paths: \["\/etc\/passwd","docs\/x\.md"\]/u);
 });
 
+test("deleted context paths must belong to the scope or runner-provided PR context", () => {
+  const deleted = "gone.ts";
+  const value = report({ context_files_examined: [deleted] });
+  assert.deepEqual(validateReviewReport(value, { ...context, contextFiles: [deleted] }), []);
+  assert.deepEqual(validateReviewReport(report({
+    context_files_examined: [deleted], examined_changed_files: ["src/a.ts", deleted],
+  }), { ...context, scopeFiles: [...context.scopeFiles, deleted] }), []);
+  assert.match(validateReviewReport(value, context).join(), /non-repository paths/u);
+  for (const path of ["/etc/passwd", "../gone.ts", "./gone.ts"]) {
+    assert.match(validateReviewReport(report({ context_files_examined: [path] }), {
+      ...context, contextFiles: [path],
+    }).join(), /non-repository paths/u, "allowlisting cannot bypass canonical paths");
+  }
+});
+
 test("evaluation precedence: timeout, fatal, missing report, model, contract; snapshot overrides all", () => {
   const timeout = evaluateReviewAttempt(evidence({ timedOut: true, output: null }), context);
   assert.deepEqual([timeout.failureClass, timeout.consumed, timeout.effectiveVote], ["timeout", false, null]);
