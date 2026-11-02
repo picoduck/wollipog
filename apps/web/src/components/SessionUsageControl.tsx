@@ -82,9 +82,13 @@ function SessionCostFigures({ session, models, detail }: {
   const { totals, loaded, breakdownError, loading, retry, label } = detail;
   const navigate = useOptionalNavigate();
   const priced = label.priced;
-  const provenanceUrl = priced ? estimatedCostSourceUrl(loaded) : null;
-  const provenance = priced && !provenanceUrl ? costProvenanceNote(loaded) : null;
   const byModel = loaded?.byModel ?? [];
+  // Some models priced and some not: the known amounts stay on their rows, and one sentence names
+  // the gap instead of the lower-bound note or the fully unpriced sentence.
+  const partlyPriced = byModel.some((row) => row.costSource === "unpriced")
+    && byModel.some((row) => row.costSource !== "unpriced");
+  const provenanceUrl = priced ? estimatedCostSourceUrl(loaded) : null;
+  const provenance = priced && !provenanceUrl && !partlyPriced ? costProvenanceNote(loaded) : null;
   // A priced zero is an amount, not a gap. The shared label has already chosen between the
   // current session snapshot and a caught-up ledger, so use that same provenance decision while
   // detail is pending, failed, or stale instead of making the heading disagree with the control.
@@ -93,7 +97,9 @@ function SessionCostFigures({ session, models, detail }: {
   // zeroes under a model named "unknown".
   const tokensReported = totals.processedTokens > 0;
   const basis = !totals.detailed ? inputTokenBasis(session.driver) : undefined;
-  const live = session.liveUsage && session.liveUsage.tokensIn + session.liveUsage.tokensOut > 0 ? session.liveUsage : null;
+  // A provisional request priced from its cache buckets alone can carry a cost with no counted tokens.
+  const liveUsage = session.liveUsage;
+  const live = liveUsage && (liveUsage.tokensIn + liveUsage.tokensOut > 0 || liveUsage.costUsd > 0) ? liveUsage : null;
 
   return (
     <>
@@ -103,7 +109,9 @@ function SessionCostFigures({ session, models, detail }: {
           ? <span className="usage-popover-figure">{headCost}</span>
           : <StatusBadge tone="neutral" noDot label={UNPRICED} />}
       </div>
-      {!priced && (
+      {partlyPriced ? (
+        <p className="usage-popover-note">Some models have no known rate, so this cost is incomplete. Token counts are exact.</p>
+      ) : !priced && (
         <p className="usage-popover-note">No rate is known for these models, so the cost isn't estimated. Token counts are exact.</p>
       )}
       {!tokensReported ? (
@@ -129,8 +137,9 @@ function SessionCostFigures({ session, models, detail }: {
                 <td className="num">{formatTokens(row.processedTokens)}</td>
                 {/* Named as unpriced when the rate table could not price the model, rather than
                     a misleading $0.00. A row that WAS priced states its amount even when that
-                    amount is zero, because a free model costing nothing is a fact. */}
-                <td className="num">{!priced || row.costSource === "unpriced" ? UNPRICED : formatCost(row.costUsd) || "$0.00"}</td>
+                    amount is zero, because a free model costing nothing is a fact, and even when
+                    the session as a whole is unpriced. */}
+                <td className="num">{row.costSource === "unpriced" ? UNPRICED : formatCost(row.costUsd) || "$0.00"}</td>
               </tr>
             ))}
             {/* A running Claude turn's completed requests are in the totals but in no ledger row

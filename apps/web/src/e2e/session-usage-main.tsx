@@ -91,6 +91,8 @@ const servedWindow = Number(params.get("served") ?? "0");
 const unknownContextWindow = params.get("window") === "none";
 const costParam = params.get("cost");
 const unpricedCost = costParam === "none";
+// `?cost=partial`: one model priced, the other with no known rate (#3017).
+const partialCost = costParam === "partial";
 const unavailableCost = costParam === "unavailable";
 const freeCost = costParam === "free";
 const absentUsage = params.get("usage") === "absent";
@@ -158,9 +160,9 @@ const session: SessionView = {
   permissionMode: null,
   tokensIn: absentUsage || costOnlyUsage ? 0 : activeUsage ? 18_714 : 184_000,
   tokensOut: absentUsage || costOnlyUsage ? 0 : activeUsage ? 21 : 21_000,
-  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : activeUsage ? 0.075276 : sessionCostUsd,
+  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : activeUsage ? 0.075276 : partialCost ? mainModelCostUsd : sessionCostUsd,
   ...(freeCost ? { costSource: "providerReported" as const }
-    : unpricedCost ? { costSource: "unpriced" as const } : {}),
+    : unpricedCost || partialCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
   adopted: false,
   // A known context window makes the ContextWindowMeter render in the strip's leading cell,
@@ -845,21 +847,24 @@ const client = {
       sessionId: SESSION_ID,
       totals: unpricedCost
         ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
+        : partialCost ? usageAmount(184_000, 21_000, mainModelCostUsd, 205_000, "unpriced")
         : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
         : usageAmount(184_000, 21_000, sessionCostUsd, 205_000, "modelPriced"),
       byModel: [
         {
           model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
-          ...usageAmount(160_000, 18_000, freeCost ? 0 : mainModelCostUsd, 178_000),
+          ...(unpricedCost
+            ? usageAmount(160_000, 18_000, 0, 178_000, "unpriced")
+            : usageAmount(160_000, 18_000, freeCost ? 0 : mainModelCostUsd, 178_000, partialCost ? "modelPriced" : "providerReported")),
         },
         {
           model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
           ...usageAmount(
             24_000,
             3_000,
-            unpricedCost || freeCost ? 0 : miniModelCostUsd,
+            unpricedCost || partialCost || freeCost ? 0 : miniModelCostUsd,
             27_000,
-            unpricedCost ? "unpriced" : freeCost ? "providerReported" : "modelPriced",
+            unpricedCost || partialCost ? "unpriced" : freeCost ? "providerReported" : "modelPriced",
           ),
         },
       ],

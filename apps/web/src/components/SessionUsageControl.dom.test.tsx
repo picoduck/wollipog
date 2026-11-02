@@ -579,7 +579,32 @@ test("a mixed-model session names the unpriced model and states its cost as a lo
     ["gpt-5.5-codex-mini", "27K", "Unpriced"],
     ["Total", "205K", "$1.21"],
   ]);
-  assert.ok(notes(popover).includes("3 records could not be priced, so this cost is a lower bound."));
+  // One sentence names the gap; neither the lower-bound note nor the fully unpriced sentence repeats it.
+  assert.deepEqual(notes(popover).filter((note) => /rate|priced|lower bound/.test(note ?? "")),
+    ["Some models have no known rate, so this cost is incomplete. Token counts are exact."]);
+  await view.cleanup();
+});
+
+test("an unpriced session keeps the known amount of a model that was priced", async () => {
+  const view = await mount(session({ costUsd: 0, tokensIn: 184_000, tokensOut: 21_000 }), {
+    sessionId: "s1",
+    totals: amount({ processedTokens: 205_000, costSource: "unpriced", unpricedRecords: 3 }),
+    byModel: [
+      { model: "claude-fable-5-1", ...amount({ processedTokens: 178_000, costUsd: 1.21, costSource: "modelPriced" }) },
+      { model: "claude-haiku-4-5", ...amount({ processedTokens: 27_000, costSource: "unpriced", unpricedRecords: 3 }) },
+    ],
+  });
+  assert.equal(view.button()!.textContent, "205K Tokens");
+  await view.open();
+  const popover = view.popover()!;
+  assert.equal(popover.querySelector(".usage-popover-head .status")!.textContent, "Unpriced");
+  assert.deepEqual(table(popover).slice(1), [
+    ["Fable 5.1", "178K", "$1.21"],
+    ["Haiku 4.5", "27K", "Unpriced"],
+    ["Total", "205K", "Unpriced"],
+  ]);
+  assert.ok(notes(popover).includes("Some models have no known rate, so this cost is incomplete. Token counts are exact."));
+  assert.doesNotMatch(popover.textContent ?? "", /No rate is known for these models/);
   await view.cleanup();
 });
 
@@ -605,6 +630,17 @@ test("a running Claude turn's live usage is its own row, so the rows add up to t
   await unrated.open();
   assert.deepEqual(table(unrated.popover()!)[2], ["Running Turn", "15", "Unpriced"]);
   await unrated.cleanup();
+
+  // A provisional request priced from its cache buckets alone has a cost but no counted tokens.
+  const cacheOnly = await mount(session({ driver: "claude-code", tokensIn: 10, tokensOut: 5, costUsd: 0.01,
+    liveUsage: { tokensIn: 0, tokensOut: 0, costUsd: 0.02 } }), ledger);
+  await cacheOnly.open();
+  assert.deepEqual(table(cacheOnly.popover()!).slice(1), [
+    ["Fable 5.1", "1K", "$0.01"],
+    ["Running Turn", "0", "$0.02"],
+    ["Total", "1K", "$0.03"],
+  ]);
+  await cacheOnly.cleanup();
 });
 
 test("a session that has processed nothing renders no control", async () => {

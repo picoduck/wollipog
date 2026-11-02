@@ -222,6 +222,17 @@ test("desktop: an unpriced session says so instead of showing $0.00", async ({ p
   await page.screenshot({ path: `${SHOT}/desktop-unpriced.png` });
 });
 
+test("desktop: a partly priced session keeps the known amount and names the gap", async ({ page }) => {
+  await page.setViewportSize({ width: 1200, height: 820 });
+  await page.goto("/session-usage-e2e.html?width=1180&height=780&cost=partial");
+  await page.getByRole("button", { name: "Session Usage: $1.21" }).click();
+  const usage = page.getByRole("group", { name: "Session Cost" });
+  await expect(usage.locator("tbody td:last-child, tfoot td:last-child")).toHaveText(["$1.21", "Unpriced", "$1.21"]);
+  await expect(usage).toContainText("Some models have no known rate, so this cost is incomplete. Token counts are exact.");
+  await expect(usage).not.toContainText("No rate is known for these models");
+  await expect(usage).not.toContainText("lower bound");
+});
+
 test("desktop: a cost without token counts says so and shows no table", async ({ page }) => {
   await page.setViewportSize({ width: 1200, height: 820 });
   await page.goto("/session-usage-e2e.html?width=1180&height=780&usage=cost-only");
