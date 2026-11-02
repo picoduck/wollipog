@@ -17438,6 +17438,23 @@ button.review-finding-location {
   .usage-facts-six.strip > div:nth-child(3n + 1) { padding-left: 0; border-left: 0; }
   .usage-facts-six.strip > div:nth-child(n + 4) { border-top: 1px solid var(--border); }
 }
+/* A column too narrow for five labels side by side (a docked panel beside it) gets the phone's
+   rows, label left and value right; a label that still cannot fit breaks rather than spill. */
+.usage-facts dt { overflow-wrap: anywhere; }
+@container app (max-width: 639px) {
+  .usage-facts.strip { grid-template-columns: minmax(0, 1fr); }
+  .usage-facts.strip > div {
+    flex-direction: row;
+    align-items: center;
+    justify-content: space-between;
+    padding: var(--space-2) 0;
+  }
+  .usage-facts.strip > div + div {
+    border-top: 1px solid var(--border);
+    border-left: 0;
+  }
+  .usage-facts.strip dd { font: var(--type-body-strong); }
+}
 
 .usage-chart { position: relative; display: grid; gap: 8px; min-width: 0; }
 .usage-chart-empty { padding: 40px 0; color: var(--text-dim); text-align: center; }

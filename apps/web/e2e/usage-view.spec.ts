@@ -292,6 +292,31 @@ test("at 834px the overview stacks, five facts keep one row and six wrap to thre
   await page.screenshot({ path: `${SHOT}/compact-834-dark-tokens.png`, fullPage: true });
 });
 
+test("a desktop main column narrowed by a docked panel turns the facts strip into rows", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage-view-e2e.html");
+  // The main column is the `app` container; a docked panel can leave it this narrow on a desktop.
+  await page.addStyleTag({ content: ".main { width: 480px; }" });
+  for (const metric of ["Cost", "Tokens"] as const) {
+    await page.getByRole("radio", { name: metric }).click();
+    await expect(page.locator(".usage-facts dt")).toHaveCount(metric === "Cost" ? 5 : 6);
+    const strip = (await page.locator(".usage-facts").boundingBox())!;
+    const facts = await factBoxes(page);
+    expect(new Set(facts.map((fact) => Math.round(fact.pair.top))).size).toBe(facts.length);
+    for (const fact of facts) {
+      expect(Math.abs(fact.dd.right - (strip.x + strip.width))).toBeLessThanOrEqual(1);
+      expect(fact.dt.right).toBeLessThanOrEqual(fact.dd.left);
+    }
+    expect(facts.filter((fact) => fact.truncated)).toEqual([]);
+  }
+  // Just wide enough for five side by side: one row, no label spills out of its cell.
+  await page.addStyleTag({ content: ".main { width: 640px; }" });
+  await page.getByRole("radio", { name: "Cost" }).click();
+  const five = await factBoxes(page);
+  expect(new Set(five.map((fact) => Math.round(fact.pair.top))).size).toBe(1);
+  expect(five.filter((fact) => fact.truncated)).toEqual([]);
+});
+
 test("at 390px the facts strip is rows, label left and value right", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto("/usage-view-e2e.html");
