@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 import { test } from "node:test";
 import { commandTargetsGuardState } from "./managed-worktree-protection.js";
 
@@ -111,15 +111,21 @@ test("Bash witness version gates retain supported older-shell witnesses", () => 
   assert.equal(supportsWitness("@k", 5, 2), true);
 });
 
-test("empty tokenizer names retain base behavior for non-operator dollar syntax", () => {
+test("empty tokenizer names retain base behavior for non-operator dollar syntax", t => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-dollar-controls-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const project = join(root, "project");
+  const hooks = join(root, "state", "hooks");
+  mkdirSync(project);
+  mkdirSync(hooks, { recursive: true });
   for (const command of [
     'echo "$(pwd)"', 'cd "$(git rev-parse --show-toplevel)"', 'grep -E "^foo$" f',
     "printf $'a\\tb'", 'echo $#', 'T=$(mktemp -d)',
     'git commit -m "$(cat <<\'EOF\'\nmsg\nEOF\n)"',
-  ]) assert.equal(commandTargetsGuardState(command, "/project", "/state/hooks"), null, command);
+  ]) assert.equal(commandTargetsGuardState(command, project, hooks), null, command);
   // Preserving the sentinel must not suppress direct or relative state access in substitutions.
-  for (const command of ['cat $(echo ../state/hooks/file)', 'cat "$(cat /state/hooks/file)"'])
-    assert.notEqual(commandTargetsGuardState(command, "/project", "/state/hooks"), null, command);
+  for (const command of ['cat $(echo ../state/hooks/file)', `cat "$(cat ${hooks.split(sep).join("/")}/file)"`])
+    assert.notEqual(commandTargetsGuardState(command, project, hooks), null, command);
 });
 
 test("operators refuse before platform path resolution, including drive/backslash and WSL paths", () => {
