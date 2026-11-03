@@ -616,6 +616,56 @@ async function workflowDecisionWithdrawalCompatibilityError(deps: McpDeps): Prom
       "Update Wollipog; nothing was withdrawn."), required, actual);
 }
 
+/** A Wollipog-performed forge action reads GitHub, may push, and re-reads closures first (#4067). */
+const FORGE_DECISION_ACTION_TIMEOUT_MS = 180_000;
+
+async function forgeDecisionActionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("Wollipog-performed forge actions", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Wollipog-performed forge actions need",
+      "Update Wollipog; nothing was performed."), required, actual);
+}
+
+/** The one actionable next step when a provider refuses an approved forge command (#4067). */
+function forgeActionFallback(occurrenceId: string, resourceDigest: unknown, kind: "enqueue" | "deletion"): string {
+  const digest = typeof resourceDigest === "string" ? resourceDigest : "<resourceDigest from get_workflow_decision>";
+  return `If your provider refuses the approved ${kind === "enqueue" ? "enqueue" : "branch deletion"} command, do not retry it ` +
+    "through another shell, wrapper or permission change. Call execute_workflow_decision with occurrenceId " +
+    `${occurrenceId} and resourceDigest ${digest}: Wollipog performs exactly this approved action itself` +
+    (kind === "deletion" ? " (the deletion decision must name pullRequest and headSha)." : ".");
+}
+
+/** One sentence naming the decision, what Wollipog did, and what to do next. */
+function forgeActionSummary(decision: unknown): string {
+  const view = decision as { occurrenceId?: string; status?: string; forgeAction?: {
+    kind?: string; outcome?: string; refusal?: { reason?: string; summary?: string } } } | null;
+  const action = view?.forgeAction;
+  const name = `Decision ${view?.occurrenceId ?? "(unknown)"}`;
+  if (!action) return `${name}: no forge action was recorded; read get_workflow_decision.`;
+  switch (action.outcome) {
+    case "deleted": return `${name}: Wollipog deleted the approved branch.`;
+    case "already_deleted": return `${name}: the approved branch was already deleted.`;
+    case "enqueued": return `${name}: Wollipog enqueued the approved head. Park on the pull request until it merges.`;
+    case "already_queued": return `${name}: the approved head was already in the merge queue. Park on the pull request until it merges.`;
+    case "already_merged": return `${name}: the approved head was already merged.`;
+    case "uncertain": return action.kind === "pr_merge_enqueue"
+      ? `${name}: the enqueue may have run. Do not replay it; reconcile_workflow_decision once the pull request reads MERGED, or report it to your Orchestrator.`
+      : `${name}: the deletion may have run. Call execute_workflow_decision again; a compare-and-delete is safe to repeat.`;
+    default: return view?.status === "revoked"
+      ? `${name}: refused (${action.refusal?.reason ?? "unspecified"}): ${action.refusal?.summary ?? ""} The approval was revoked; request a new decision with fresh evidence, or report the branch to your Orchestrator.`
+      : `${name}: refused (${action.refusal?.reason ?? "unspecified"}): ${action.refusal?.summary ?? ""} Nothing changed and the approval still stands; fix the cause and call execute_workflow_decision again, or report it to your Orchestrator.`;
+  }
+}
+
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
 const SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS = 5_000;
 
@@ -1100,6 +1150,8 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       properties: {
         category: { const: "merged_branch_deletion" }, repository: { type: "string" }, branch: { type: "string" },
         merged: { const: true }, mergeCommitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
+        pullRequest: { type: "integer", minimum: 1, description: "The merged pull request (v278); with headSha, lets execute_workflow_decision delete it" },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The merged pull request's head, the tip the deletion is pinned to (v278)" },
         dependentPullRequests: { type: "object", properties: {
           checkedAt: { type: "integer", minimum: 1 }, open: { type: "array", maxItems: 0 },
         }, required: ["checkedAt", "open"], additionalProperties: false },
@@ -1151,7 +1203,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
-  "reconcile_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
+  "reconcile_workflow_decision", "execute_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
@@ -2260,7 +2312,45 @@ export const TOOLS: McpTool[] = [
         { resourceSnapshot: args?.resourceSnapshot, ...(args?.action ? { action: args.action } : {}) },
         merge ? Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, MERGE_DECISION_TIMEOUT_MS) : undefined,
       );
-      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+      if (!r.ok) return errorResult(r.message);
+      // #4067: name the decision and the fallback up front, so a provider refusal is never a dead end.
+      const fallback = (merge || args?.resourceSnapshot?.category === "merged_branch_deletion") &&
+        !await forgeDecisionActionCompatibilityError(deps)
+        ? forgeActionFallback(args.occurrenceId, r.data?.resourceDigest, merge ? "enqueue" : "deletion") : undefined;
+      return textResult({ decision: r.data, ...(fallback ? { forgeActionFallback: fallback } : {}) });
+    },
+  },
+  {
+    name: "execute_workflow_decision",
+    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED). Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v278.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        occurrenceId: { type: "string", minLength: 1, maxLength: 256 },
+        resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" },
+      },
+      required: ["occurrenceId", "resourceDigest"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+        return errorResult("occurrenceId and a session identity are required");
+      }
+      if (typeof args?.resourceDigest !== "string" || !/^[0-9a-f]{64}$/u.test(args.resourceDigest)) {
+        return errorResult("resourceDigest must be the decision's 64-character hex digest");
+      }
+      const compatibilityError = await forgeDecisionActionCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/execute`,
+        { resourceDigest: args.resourceDigest },
+        Math.max(deps.requestTimeoutMs ?? CP_TIMEOUT_MS, FORGE_DECISION_ACTION_TIMEOUT_MS),
+      );
+      return r.ok ? textResult({ decision: r.data, summary: forgeActionSummary(r.data) }) : errorResult(r.status === undefined || r.status >= 500
+        ? `${r.message}. The action may already have been performed; read get_workflow_decision and the forge before trying again.`
+        : r.message);
     },
   },
   {

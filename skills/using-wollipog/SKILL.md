@@ -179,6 +179,20 @@ child's enqueue produces no permission receipt in auto or Full Access mode, so c
 forge reports the PR merged; its proof is that merged approved head. Treat any unavailable or
 mismatched proof as a blocker rather than requesting a replacement approval or replaying the action.
 
+Your provider's own permission check can refuse an approved command (Claude Code's auto-mode
+classifier decides inline, for example). Never retry such a command through another shell, a
+wrapper, or a permission-mode change. Call `execute_workflow_decision` (or `wollipog decision
+execute <occurrence-id> --resource-digest <sha256>`) with the occurrence's `resourceDigest` instead,
+and Wollipog performs the one approved forge action itself through your session's forge login
+(control plane protocol v278). For a `merged_branch_deletion`, include the merged `pullRequest` and
+its `headSha` in the snapshot you request. Wollipog then deletes that exact branch only while its
+remote tip is still that head and no open pull request targets it. You can execute the deletion
+instead of consuming it, or after a consumed command was refused. For an armed GitHub `pr_merge`,
+it runs the canonical pinned enqueue. Read `forgeAction` in the result. A success consumes the
+approval once. A refusal that changed nothing leaves it approved for a retry. A stale snapshot
+(the tip moved, a dependent pull request opened, or the head or closures changed) revokes it. An
+uncertain enqueue is never replayed: reconcile it once the PR reads MERGED.
+
 Keep the campaign work ledger current (control plane protocol v196+; `wollipog campaign …` from the
 CLI). Every record lands in the root campaign, including from a nested Orchestrator:
 

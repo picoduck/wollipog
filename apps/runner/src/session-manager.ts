@@ -10,8 +10,9 @@ import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPu
 import { boundedIssueNumbers, campaignRepositoryLocation, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
+import { contextGitRunner, executeBranchDeletion, executePullRequestEnqueue, type ForgeGitRunner } from "./forge-decision-action.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -19066,6 +19067,41 @@ export class SessionManager {
       return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitHub could not be checked." };
+    }
+  }
+
+  /** v278 (#4067): perform one approved forge action the control plane checked, through the
+   * requesting session's own `gh` and `git` logins and context. A fixed outcome, never tool output. */
+  async forgeDecisionAction(
+    message: ForgeDecisionActionMessage,
+    options: { gh?: GhRunner; git?: ForgeGitRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<ForgeDecisionActionResultMessage> {
+    const base = { type: "forge_decision_action_result" as const, requestId: message.requestId,
+      sessionId: message.sessionId, occurrenceId: message.occurrenceId };
+    const meta = this.store.readMeta(message.sessionId);
+    const roots = meta ? [...new Set([meta.worktreePath, meta.repoPath].filter(
+      (root): root is string => typeof root === "string" && root.length > 0))] : [];
+    // A merged branch's worktree may already be retired; its repository still has the remote. A WSL
+    // path is not checked from this side and is used as recorded.
+    const cwd = meta?.context?.kind === "wsl" ? roots[0] : roots.find((root) => existsSync(root));
+    if (!meta || !cwd) {
+      return { ...base, outcome: "refused", refusal: { reason: "runner_unavailable",
+        summary: "The session has no repository on this runner to act from." } };
+    }
+    try {
+      const agentEnv = options.agentEnv?.(meta) ?? {};
+      const gh = options.gh ?? contextGhRunner(meta.context, cwd, agentEnv);
+      const result = message.action?.kind === "branch_deletion"
+        ? await executeBranchDeletion(message.action, gh, options.git ?? contextGitRunner(meta.context, cwd, agentEnv))
+        : message.action?.kind === "pr_merge_enqueue"
+          ? await executePullRequestEnqueue(message.action, gh)
+          : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };
+      this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, kind: message.action?.kind, outcome: result.outcome,
+        ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+      return { ...base, ...result };
+    } catch {
+      return { ...base, outcome: "uncertain" };
     }
   }
 
