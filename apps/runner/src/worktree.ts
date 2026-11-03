@@ -1881,9 +1881,7 @@ export async function mergedPullRequestContainingHead(
     project = parsed.project;
     // Rebuild the endpoint from the validated identity: neither the configured remote name nor its
     // raw URL ever reaches Git's argument list, so session-written configuration cannot add options.
-    fetchUrl = options.forgeFetchRepository ?? (/^(?:ssh:\/\/|[^/:\s]+@[^/:\s]+:)/iu.test(remoteUrl)
-      ? `ssh://git@github.com/${project}.git`
-      : `https://github.com/${project}.git`);
+    fetchUrl = options.forgeFetchRepository ?? `https://github.com/${project}.git`;
   } catch {
     return { state: "unavailable" };
   }
@@ -1926,14 +1924,19 @@ export async function mergedPullRequestContainingHead(
   for (const candidate of candidates.values()) {
     try {
       // No destination ref: the objects land in the shared store and only this worktree's private
-      // FETCH_HEAD is written, so nothing a session could later move records the result. Hooks and
-      // fsmonitor stay off, and only the forge's own transports are allowed, even after a rewrite.
+      // FETCH_HEAD is written, so nothing a session could later move records the result. Repository
+      // configuration may be session-written, so nothing it names runs here: hooks and fsmonitor are
+      // off, HTTPS is the only transport (no configured SSH command), TLS is verified, and the
+      // credential helpers it lists are replaced by the forge CLI this probe already relies on,
+      // which answers only for hosts it is signed in to.
       await runContextCommand(
         context,
         "git",
         [
           "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-          "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always",
+          "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+          "-c", "http.sslVerify=true",
+          "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
           ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
           "fetch", "--no-tags", "--no-recurse-submodules", "--quiet", "--",
           fetchUrl, `refs/pull/${candidate.number}/head`,
