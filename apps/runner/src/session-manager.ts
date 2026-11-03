@@ -174,7 +174,7 @@ import {
 } from "./discovery/claude-slash-catalog.js";
 import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
 import {
-  REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, type ReviewSessionUpdate,
+  REVIEW_EQUIVALENCE_OUTPUT, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, type ReviewSessionUpdate,
 } from "@wollipog/protocol";
 import { ReviewScopeRefusal } from "./review-snapshot.js";
 import type { ReviewObservation, ReviewSessionHooks } from "./review-sessions.js";
@@ -2216,11 +2216,11 @@ export class SessionManager {
     spec: SessionLaunchSpec,
     brief: string,
     authorizationError: string | undefined,
-  ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string }> {
+  ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string } | { settled: true }> {
     // Accounted reviews have a durable zero-usage preparation record. A refusal/cancellation
     // returns that reservation through the ordinary final checkpoint; no provider has run yet.
     // Other reviews retain their existing outcome-only record. Outcome always precedes status.
-    const endBeforeLaunch = (update: ReviewSessionUpdate, status: "failed" | "stopped") => {
+    const endBeforeLaunch = (update: ReviewSessionUpdate, status: "failed" | "stopped" | "completed") => {
       const meta = this.store.readMeta(spec.sessionId);
       const checkpoint = spec.campaignBudgetDispatch && meta?.campaignBudgetCheckpoint;
       if (checkpoint && meta?.review) {
@@ -2282,6 +2282,13 @@ export class SessionManager {
       const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason };
       endBeforeLaunch(update, "stopped");
       return { error: reason };
+    }
+    if (prepared.equivalent) {
+      // #4075: a recorded equivalence needs no reviewer. It ends here, before any provider runs, and
+      // the control plane checks it against the review run before it carries the upvote.
+      endBeforeLaunch({ type: "review_session_update", sessionId: spec.sessionId, state: "completed",
+        round: prepared.round, output: REVIEW_EQUIVALENCE_OUTPUT }, "completed");
+      return { settled: true };
     }
     this.preparedReviewRounds.set(spec.sessionId, prepared.round);
     // The planned round goes up now, so the requester can see which round is under review.
@@ -6892,6 +6899,12 @@ export class SessionManager {
       const review = await this.prepareReviewLaunch(spec, initialPrompt ?? "", authorization.error);
       if ("error" in review) {
         durable?.failed(review.error, "INVALID_COMMAND");
+        reportMaterialized(false);
+        return false;
+      }
+      if ("settled" in review) {
+        // A recorded equivalence (#4075) completes without a provider.
+        durable?.completed();
         reportMaterialized(false);
         return false;
       }

@@ -450,6 +450,21 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
+- Integrating the moved base branch is treated like a rebase (#4075, protocol 277 runner and
+  control plane). The runner proves strictly that a head's only change since the last valid round
+  is one merge of the moved base: a two-parent merge whose first parent is the last valid head,
+  whose second is a commit of the pull request's current base that head did not contain, and whose
+  tree differs from Git's own merge only inside its conflicted hunks. Such a head gets a
+  base-merge round (`round.baseMerge`): a delta round scoped to the merge's effect on the pull
+  request's own diff, which does not count against the epoch's budget and needs no extension. When
+  the last valid round was an upvote and the merge leaves the pull request's own diff byte-identical
+  (each changed path's mode and blobs against its merge base), no reviewer runs: the run records a
+  reviewed-head equivalence (`round.mode` `equivalent`, `round.equivalentTo`) that carries the
+  upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
+  claim against the run's current epoch and last valid head before recording it. An octopus
+  merge, a merged parent outside the base branch, a path-level conflict, a change outside a
+  conflict block, any commit after the merge, or a requested full review is an ordinary commit and
+  counts as before. Older peers keep counting every round.
 - An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
@@ -464,8 +479,19 @@ attempt, mode, base and the files in scope):
     Unused grants are rechecked against the run at consumption and admission; stale and superseded
     grants do not add rounds. Extensions keep the normal campaign admission and cost accounting.
   - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
-    itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
-    an explicit Parent Control grant; Full Control never takes it as part of its own boundary.
+    itself, and a person resolves it from its card. Under an Orchestrator an explicit Parent Control
+    grant delegates it without a cap. Under Full Control it is also the controlling Orchestrator's
+    within a server-enforced cap per pull request (#4075, which the owner approved in place of the
+    #3369 rule that Full Control never takes it): every approved or consumed Orchestrator-owned
+    extension of that pull request, from any epoch or requester, counts toward at most the run's
+    configured round budget of extra rounds in total. The count is durable, so a re-request
+    cannot reset it. Past the cap, under a stale boundary, from a root Orchestrator's own run, in
+    every Custom campaign, and whenever the requester's or the controller's runner is older than
+    protocol 277, it stays the person's (reason `review_extension_cap_reached` past the cap).
+    `get_campaign` reports it as Orchestrator-owned with `reviewRoundExtensionCap`, and each
+    occurrence's `authorityEvaluation` records whose decision it is. A grant adds only review
+    rounds, spent from the campaign's review allowance like every review; it grants no merge,
+    filesystem, shell or network authority.
   - **Effect:** approved and consumed extensions add their rounds to that epoch's budget. The next
     review request consumes an approved one, so a session restart, which revokes unconsumed
     decisions, cannot take back rounds already granted. A policy stored before this category

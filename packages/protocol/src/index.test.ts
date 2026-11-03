@@ -119,7 +119,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 276);
+  assert.equal(PROTOCOL_VERSION, 277);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -357,8 +357,12 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 276", () => {
-  assert.equal(PROTOCOL_VERSION, 276);
+test("PROTOCOL_VERSION is 277", () => {
+  assert.equal(PROTOCOL_VERSION, 277);
+  for (const capability of ["reviewBaseMergeRounds", "fullControlReviewExtensions"] as const) {
+    assert.equal(runnerSupportsProtocol(276, capability), false);
+    assert.equal(runnerSupportsProtocol(277, capability), true);
+  }
   assert.equal(runnerSupportsProtocol(275, "delegatedImageEvidenceReview"), false);
   assert.equal(runnerSupportsProtocol(276, "delegatedImageEvidenceReview"), true);
   assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
