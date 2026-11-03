@@ -404,8 +404,8 @@ export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
 export const SESSION_STOP_TIMEOUT_MS = 45_000;
 export const SESSION_STOP_MAX_ATTEMPTS = 3;
 /** How soon an event that must wake the Orchestrator promptly is delivered: a human resolving a
- * gate, a held child, or a child report awaiting verification. Only near-simultaneous events join
- * it. */
+ * gate, a held child, or a child that completed, failed or stopped. Only near-simultaneous events
+ * join it. An idle child's report waits out the coalescing window (#4073). */
 export const CAMPAIGN_CONTINUATION_FAN_IN_MS = 1_000;
 /** How long any other event waits, from the oldest undelivered one, so that a burst arrives as one
  * continuation (#3083). Each continuation is a full-context model turn, while a child waiting on
@@ -1965,6 +1965,9 @@ export class SessionsService {
   private readonly registrationNotifiedHumanTokens = new Map<string, Set<string>>();
   private readonly promptOutbox: SessionPromptOutbox;
   private readonly campaignRecovery: CampaignRecoveryService;
+  /** When each campaign's children's waits were last checked against the stall bound (#4073).
+   * Process-local: after a restart the first check covers every wait that has already expired. */
+  private readonly campaignChildWaitsCheckedAt = new Map<string, number>();
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
   private readonly titleGenerationEpochs = new Map<string, number>();
@@ -6212,6 +6215,15 @@ export class SessionsService {
 
   private maintainCampaignContinuations(now: number, runnerId?: string): void {
     for (const campaignSessionId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
+      // A waiting child's turn end records nothing (#4073). A job that reaches the stall bound ends
+      // that wait without any runner update, so record what is now ready here.
+      const waitsCheckedAt = this.campaignChildWaitsCheckedAt.get(campaignSessionId) ?? 0;
+      if (now > waitsCheckedAt) {
+        if (this.db.campaignChildWaitsExpired(campaignSessionId, waitsCheckedAt, now)) {
+          this.db.recordCampaignContinuationEvents(this.campaignChildReadyEvents(campaignSessionId, now));
+        }
+        this.campaignChildWaitsCheckedAt.set(campaignSessionId, now);
+      }
       const latest = this.db.latestCampaignContinuation(campaignSessionId);
       if (latest) this.reconcileCampaignContinuationCommand(latest.commandId, now);
       const active = this.db.activeCampaignContinuation(campaignSessionId);
@@ -6256,16 +6268,27 @@ export class SessionsService {
         : events[0]!.createdAt + CAMPAIGN_CONTINUATION_COALESCE_MS;
       if (now < dueAt) continue;
       const sessions = new Map<string, SessionView | null>();
-      const details = events.map((event) => {
+      // Several turn ends of one child in this range are one entry, carrying its latest status and
+      // how many it stands for (#4073). The range itself still covers every event.
+      const turnEnds = new Map<string, { latestSeq: number; count: number }>();
+      for (const event of events) {
+        if (event.kind !== "child_ready" || !event.subjectSessionId) continue;
+        turnEnds.set(event.subjectSessionId, { latestSeq: event.seq,
+          count: (turnEnds.get(event.subjectSessionId)?.count ?? 0) + 1 });
+      }
+      const details = events.flatMap((event) => {
+        const child = event.kind === "child_ready" && event.subjectSessionId ? turnEnds.get(event.subjectSessionId) : undefined;
+        if (child && child.latestSeq !== event.seq) return [];
         try {
-          return this.campaignContinuationEventDetail(campaignSessionId, event, sessions);
+          const detail = this.campaignContinuationEventDetail(campaignSessionId, event, sessions);
+          return [child && child.count > 1 ? { ...detail, summary: { ...detail.summary, turnEnds: child.count } } : detail];
         } catch (error) {
           // Detail is a convenience. Never let it hold up delivery (or every other prompt this pass
           // flushes): fall back to the bare metadata, and to the full sweep it then requires.
           this.log.warn(`campaign continuation detail for event ${event.seq} deferred: ${(error as Error).message}`);
-          return { actionable: true, summary: { seq: event.seq, kind: event.kind,
+          return [{ actionable: true, summary: { seq: event.seq, kind: event.kind,
             ...(event.subjectSessionId ? { sessionId: event.subjectSessionId } : {}),
-            ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}), createdAt: event.createdAt } };
+            ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}), createdAt: event.createdAt } }];
         }
       });
       const continuationId = `campaign_cont_${randomUUID().replaceAll("-", "")}`;
@@ -6275,7 +6298,7 @@ export class SessionsService {
       // and a child report whose own child_ready event was consumed without verification (an
       // interrupted turn whose result was dismissed). Neither can be judged to need nothing.
       const outstanding = this.db.hasCampaignContinuationEventAfter(campaignSessionId, eventThroughSeq) ||
-        this.db.campaignContinuationChildCandidates(campaignSessionId).length > 0;
+        this.db.campaignContinuationChildCandidates(campaignSessionId, now).length > 0;
       const prompt = campaignContinuationPrompt(continuationId, campaignSessionId, eventFromSeq, eventThroughSeq,
         details, projection, outstanding);
       this.promptOutbox.stageCampaignContinuation({
@@ -6401,10 +6424,14 @@ export class SessionsService {
           ...settled(resolution, visible),
         } };
       }
-      case "child_ready":
-        return { actionable: true, summary: {
-          ...base, ...subject(event.subjectSessionId), ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
+      case "child_ready": {
+        // A child running again at delivery has moved past this turn end (#4073). Whatever it
+        // reports next ends another turn, and that turn end is recorded on its own.
+        const current = subject(event.subjectSessionId);
+        return { actionable: !("childStatus" in current) || current.childStatus !== "running", summary: {
+          ...base, ...current, ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
         } };
+      }
       case "child_blocked":
         return { actionable: true, summary: {
           ...base, ...subject(event.subjectSessionId),
@@ -9091,17 +9118,7 @@ export class SessionsService {
         now,
       });
     }
-    for (const child of this.db.campaignContinuationChildCandidates(before.id)) {
-      continuationEvents.push({
-        eventId: `child-ready:${before.id}:${child.sessionId}:${child.status}:${child.eventSeq}`,
-        campaignSessionId: before.id,
-        kind: "child_ready",
-        subjectSessionId: child.sessionId,
-        subjectStatus: child.status,
-        occurrenceId: `event-seq:${child.eventSeq}`,
-        now,
-      });
-    }
+    continuationEvents.push(...this.campaignChildReadyEvents(before.id, now));
     this.db.recordCampaignContinuationEvents(continuationEvents);
     if (humanBlockersCleared) {
       // An immediate HTTP/direct publication can clear the last blocker while a runtime or
@@ -9120,6 +9137,22 @@ export class SessionsService {
     // tokens must still come from the deferred before-view, or their urgent push can be lost.
     this.notifyTransition({ ...(notificationBefore ?? before), ...this.registrationNotificationViews.get(before.id) }, before.id);
     this.hub.sessionChangedById(before.id);
+  }
+
+  /** One child_ready event per unverified child whose latest turn end the Orchestrator still has
+   * to see. A child that is only waiting has none (#4073); its event is recorded once the wait
+   * ends, on the runner update that ends it or, for a stalled job, on the continuation tick. The
+   * identity names the child's status and report, so recording again is idempotent. */
+  private campaignChildReadyEvents(campaignSessionId: string, now: number): Parameters<ControlPlaneDb["recordCampaignContinuationEvent"]>[0][] {
+    return this.db.campaignContinuationChildCandidates(campaignSessionId, now).map((child) => ({
+      eventId: `child-ready:${campaignSessionId}:${child.sessionId}:${child.status}:${child.eventSeq}`,
+      campaignSessionId,
+      kind: "child_ready",
+      subjectSessionId: child.sessionId,
+      subjectStatus: child.status,
+      occurrenceId: `event-seq:${child.eventSeq}`,
+      now,
+    }));
   }
 
   private orchestratorOwnsGenericRequest(session: SessionView, request: PendingApproval): boolean {

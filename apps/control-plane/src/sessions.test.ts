@@ -10,6 +10,7 @@ import type {
   CreateSessionRequest,
   DurableSessionCommand,
   GitSummaryInfo,
+  ManagedBackgroundJobSnapshot,
   PodContextEntry,
   PodView,
   ProjectView,
@@ -36,6 +37,7 @@ import type {
   WorkflowDefinitionSpec,
 } from "@wollipog/protocol";
 import {
+  BACKGROUND_JOB_STALL_MS,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
@@ -2268,7 +2270,7 @@ test("a prompt event behind a full delivery slice still wakes the Orchestrator p
         kind: "request_actionable", subjectSessionId: child.id, occurrenceId: `request_backlog_${index}`, now: start });
     }
     db.recordCampaignContinuationEvent({ eventId: "ready", campaignSessionId: root.id, kind: "child_ready",
-      subjectSessionId: child.id, subjectStatus: "idle", now: start });
+      subjectSessionId: child.id, subjectStatus: "stopped", now: start });
     const first = deliver(start + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
     assert.ok(first, "the queue, not the 64-event slice, decides the deadline");
     assert.match(first, /durable event range 1-64\./u);
@@ -2286,7 +2288,7 @@ test("an unverified child report keeps asking for the sweep after its own event 
     db.appendEvent(child.id, { kind: "agent_message", text: "Final child report", final: true }, Date.now());
     svc.onSessionStatus(child.id, "idle");
     db.updateSessionStatus(root.id, "idle", Date.now());
-    assert.match(deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000) ?? "", /"kind":"child_ready"/u,
+    assert.match(deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000) ?? "", /"kind":"child_ready"/u,
       "the report wakes the Orchestrator, whose turn then ends without verifying it");
     assert.equal(db.campaignContinuationEvents(root.id).length, 0);
     db.recordCampaignContinuationEvent({ eventId: "settled-later", campaignSessionId: root.id,
@@ -2721,9 +2723,14 @@ test("a human settling a human-owned gate wakes the Orchestrator promptly withou
 
 test("each campaign event kind wakes on its own schedule and names what the Orchestrator needs (#3083)", () => {
   const cases = [
-    { name: "child_ready", prompt: true, record: (root: string, child: string) => ({
-      kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "idle", occurrenceId: "event-seq:9" }),
-    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","status":"idle"/u, action: "yes" },
+    { name: "child_ready for a completed child", prompt: true, childStatus: "completed" as const,
+      record: (_root: string, child: string) => ({
+        kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "completed", occurrenceId: "event-seq:9" }),
+    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"completed","status":"completed"/u, action: "yes" },
+    { name: "child_ready for an idle child running again at delivery (#4073)", prompt: false,
+      record: (_root: string, child: string) => ({
+        kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "idle", occurrenceId: "event-seq:9" }),
+    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","status":"idle"/u, action: "no" },
     { name: "child_blocked", prompt: true, record: (_root: string, child: string) => ({
       kind: "child_blocked" as const, subjectSessionId: child, subjectStatus: "worktree_recovery", occurrenceId: "hold_1" }),
     expected: /"kind":"child_blocked","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","hold":"worktree_recovery","holdId":"hold_1"/u, action: "yes" },
@@ -2746,6 +2753,7 @@ test("each campaign event kind wakes on its own schedule and names what the Orch
     const { db, root, child, deliver } = continuationCampaign("questions");
     try {
       const at = Date.now();
+      if ("childStatus" in scenario) db.updateSessionStatus(child.id, scenario.childStatus, at);
       if (scenario.resolver) {
         db.recordCampaignRequestResolution({
           campaignSessionId: root.id, requestToken: campaignRequestToken("generic", child.id, "request_kind"),
@@ -2779,7 +2787,7 @@ test("campaign events within the coalescing window arrive as one continuation, a
     const record = (eventId: string, now: number, kind: "request_actionable" | "child_ready" = "request_actionable") =>
       db.recordCampaignContinuationEvent({
         eventId, campaignSessionId: root.id, kind, subjectSessionId: child.id, now,
-        ...(kind === "child_ready" ? { subjectStatus: "idle" } : { occurrenceId: eventId }),
+        ...(kind === "child_ready" ? { subjectStatus: "stopped" } : { occurrenceId: eventId }),
       });
     const start = Date.now();
     db.updateSessionStatus(root.id, "idle", start);
@@ -2797,6 +2805,183 @@ test("campaign events within the coalescing window arrive as one continuation, a
     assert.ok(joined, "a prompt event does not wait for the earlier event's window");
     assert.match(joined, /durable event range 3-4\./u);
     assert.match(joined, /"occurrenceId":"request_c".*"kind":"child_ready"/u);
+  } finally {
+    db.close();
+  }
+});
+
+/** Runner snapshots for a continuationCampaign child (#4073). `turnEnd` runs one turn that ends
+ * with a final message and the given managed background jobs; `job` builds a live job, or an ended
+ * one when given its end time. */
+function campaignChildTurns(harness: ReturnType<typeof continuationCampaign>) {
+  const { db, svc, child } = harness;
+  const job = (id: string, registeredAt: number, endedAt?: number): ManagedBackgroundJobSnapshot => ({
+    id, parentTurnId: `turn-${id}`, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, launchType: "shell", registeredAt,
+    ...(endedAt === undefined ? {} : { terminalStatus: "completed" as const, terminalObservedAt: endedAt }),
+  });
+  const update = (status: SessionStatus, backgroundJobs: ManagedBackgroundJobSnapshot[]) => {
+    const current = db.getSession(child.id)!;
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, workspaceId: current.workspaceId, agentId: current.agentId, status,
+      useWorktree: current.useWorktree, worktreePath: current.worktreePath ?? null,
+      seq: db.listEvents(child.id).at(-1)?.seq ?? 0, backgroundJobs,
+    }));
+  };
+  const turnEnd = (text: string, backgroundJobs: ManagedBackgroundJobSnapshot[] = []) => {
+    update("running", backgroundJobs);
+    const report = db.appendEvent(child.id, { kind: "agent_message", text, final: true }, Date.now());
+    update("idle", backgroundJobs);
+    return report.seq;
+  };
+  return { job, update, turnEnd };
+}
+
+test("a child that ends its turn behind a live background job wakes nobody until the wait ends (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, deliver } = harness;
+  const { job, update, turnEnd } = campaignChildTurns(harness);
+  try {
+    const start = Date.now();
+    db.updateSessionStatus(root.id, "idle", start);
+    turnEnd("PR opened; required CI runs in a background wait.", [job("ci", start)]);
+    assert.equal(db.getSession(child.id)?.status, "idle");
+    assert.equal(db.campaignChildWait(child.id, Date.now()), "background_job");
+    assert.deepEqual(db.campaignContinuationEvents(root.id), [], "a waiting turn end records no event");
+    assert.equal(deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000), null);
+
+    update("idle", [job("ci", start, Date.now())]);
+    assert.equal(db.campaignChildWait(child.id, Date.now()), null);
+    assert.equal(deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500), null,
+      "an idle child's turn end joins the coalescing window");
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text, "the ended wait wakes the Orchestrator for the child's report");
+    assert.match(text, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a waiting child that asks or stops still wakes the Orchestrator (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, svc, root, child, deliver, ask } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Waiting on required CI.", [job("ci", Date.now())]);
+    ask("which", "Which base branch?");
+    const asked = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(asked, "a question is delivered on its usual schedule");
+    assert.match(asked, /"kind":"request_actionable",.*"occurrenceId":"request_which","category":"question".*"pending":true/u);
+    assert.match(asked, /Action needed: yes/u);
+
+    svc.onSessionStatus(child.id, "stopped");
+    const stopped = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
+    assert.ok(stopped, "a stopped child wakes the Orchestrator within the prompt fan-in, live job or not");
+    assert.match(stopped, /"kind":"child_ready",.*"childStatus":"stopped","status":"stopped"/u);
+    assert.match(stopped, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a background job past the stall bound stops hiding a child's report (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, deliver } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    const start = Date.now();
+    db.updateSessionStatus(root.id, "idle", start);
+    turnEnd("Done; a monitor is still running.", [job("monitor", start - BACKGROUND_JOB_STALL_MS + 60_000)]);
+    assert.equal(deliver(start + 30_000), null);
+    assert.deepEqual(db.campaignContinuationEvents(root.id), []);
+    assert.equal(deliver(start + 61_000), null, "the expired wait records the report, which then coalesces");
+    assert.equal(db.campaignContinuationEvents(root.id).filter((event) => event.kind === "child_ready").length, 1);
+    const text = deliver(start + 61_000 + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"kind":"child_ready",.*"childStatus":"idle"/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("several turn ends of one child within the window arrive as one entry with the latest status (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, deliver } = harness;
+  const { turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Pushed the first review fix.");
+    turnEnd("Pushed the second review fix.");
+    assert.equal(db.campaignContinuationEvents(root.id).length, 2);
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /durable event range 1-2\./u, "the range still covers every turn end");
+    assert.equal(text.match(/"kind":"child_ready"/gu)?.length, 1);
+    assert.match(text, /"seq":2,"kind":"child_ready",.*"childStatus":"idle","status":"idle","turnEnds":2\}/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a child idle behind a background CI wait leaves an unrelated settled request at Action needed: no (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, deliver } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Waiting on required CI.", [job("ci", Date.now())]);
+    db.recordCampaignContinuationEvent({ eventId: "settled", campaignSessionId: root.id,
+      kind: "request_actionable", subjectSessionId: child.id, occurrenceId: "request_gone", now: Date.now() });
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"occurrenceId":"request_gone","pending":false/u);
+    assert.match(text, /Action needed: no\./u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a replayed campaign sequence wakes the Orchestrator once, for the report it must verify (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, continuations, deliver } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const texts: string[] = [];
+    const settle = () => {
+      const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+      if (text) texts.push(text);
+    };
+    // The issue's reproduction: a pull request with a background wait on required CI, an
+    // acknowledgement of the Orchestrator's note, a review fix that restarts CI, and the report the
+    // runner's continuation produces once CI ends. Each was a separate actionable wake before.
+    const ciStart = Date.now();
+    const turnEnds = [
+      turnEnd("PR opened; required CI runs in a background wait.", [job("ci", ciStart)]),
+    ];
+    settle();
+    db.appendEvent(child.id, { kind: "user_message", text: "Note from the Orchestrator.", final: true }, Date.now());
+    turnEnds.push(turnEnd("Understood.", [job("ci", ciStart)]));
+    settle();
+    const ciEnd = Date.now(), rerunStart = Date.now();
+    turnEnds.push(turnEnd("Pushed the review fix; CI restarted.", [job("ci", ciStart, ciEnd), job("ci-2", rerunStart)]));
+    settle();
+    const report = turnEnd("Final report: required CI passed.", [job("ci", ciStart, ciEnd), job("ci-2", rerunStart, Date.now())]);
+    turnEnds.push(report);
+    settle();
+    settle();
+
+    assert.equal(new Set(turnEnds).size, 4, "four turn ends, each a new report, each of which used to wake the root");
+    assert.equal(continuations().length, 1, "only the final report wakes it");
+    assert.equal(texts.length, 1);
+    assert.match(texts[0]!, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.match(texts[0]!, /Action needed: yes/u);
+    assert.deepEqual(db.campaignContinuationChildCandidates(root.id).map((candidate) => candidate.eventSeq), [report],
+      "the report that woke it is the one awaiting verification");
+    assert.ok(db.campaignContinuationEvents(root.id).length === 0);
   } finally {
     db.close();
   }
