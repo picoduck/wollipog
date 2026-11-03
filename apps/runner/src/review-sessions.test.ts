@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -355,6 +357,25 @@ test("a spawned reviewer command must be trusted as the first PATH match, with i
     assert.throws(() => verifySpawnedCommand("claude", path, [writable], uid, rootUid), /relative entry/u, path);
   }
   assert.throws(() => verifySpawnedCommand("../claude", trusted, [], uid, rootUid), /is not installed/u);
+});
+
+test("the runner's reviewer check names the configured grant that makes the reviewer session-writable (#4122)", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-grant-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const claude = join(realpathSync(root), "claude");
+  // The fixture can only live under the system temporary directory, so it stands in for the
+  // workspace root here; review-trust.test.ts covers the conventional HOME install itself.
+  const deps = defaultReviewSessionDependencies("/state", () => {}, () => [
+    { path: tmpdir(), grant: `workspace "scratch"`, recovery: `remove workspace "scratch" from this machine` },
+  ]);
+  assert.throws(() => deps.verifyCommand(claude), {
+    message: `${claude} is inside a directory a session can write (${realpathSync(tmpdir())}), granted by workspace "scratch". ` +
+      `To use it, remove workspace "scratch" from this machine, or install the reviewer where no session can write ` +
+      `and set its agent's command to that absolute path`,
+  });
 });
 
 test("prepare checks out the exact pushed head privately and pins the patch in the prompt", async (t) => {

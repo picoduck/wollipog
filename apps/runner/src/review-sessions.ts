@@ -37,7 +37,8 @@ import {
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
 } from "./review-snapshot.js";
 import {
-  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools, type CodexReviewerProtection,
+  discoverReviewTools, explainSessionWritableRefusal, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools,
+  type CodexReviewerProtection, type SessionWritableGrant,
 } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
 
@@ -85,15 +86,15 @@ export interface ReviewSessionDependencies {
 export function defaultReviewSessionDependencies(
   dataDir: string,
   log: (message: string) => void,
-  /** Directories sessions can write (see `configuredSessionWritablePaths`), read at each use. */
-  sessionWritablePaths: () => readonly string[] = () => [],
+  /** Directories sessions can write and what grants each (see `configuredSessionWritableGrants`), read at each use. */
+  sessionWritableGrants: () => readonly SessionWritableGrant[] = () => [],
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
   codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
-  const extraRoots = () => [
-    ...sessionWritablePaths(),
+  const extraRoots = (grants = sessionWritableGrants()) => [
+    ...new Set(grants.map((grant) => grant.path)),
     ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),
   ];
   return {
@@ -130,8 +131,16 @@ export function defaultReviewSessionDependencies(
     },
     gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
-    verifyCommand: (command, pathEnv = process.env.PATH) =>
-      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid, undefined, codexProtection()),
+    verifyCommand: (command, pathEnv = process.env.PATH) => {
+      const grants = sessionWritableGrants();
+      try {
+        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection());
+      } catch (error) {
+        // Name the grant that makes the reviewer session-writable and how to withdraw it (#4122).
+        throw explainSessionWritableRefusal(error, grants,
+          "install the reviewer where no session can write and set its agent's command to that absolute path");
+      }
+    },
     agents,
     agentPath,
     log,

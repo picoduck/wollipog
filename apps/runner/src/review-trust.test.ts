@@ -3,7 +3,9 @@ import { test } from "node:test";
 import { chmodSync, chownSync, lchownSync, mkdirSync, mkdtempSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { trustedPath, configuredSessionWritablePaths } from "./review-trust.js";
+import {
+  configuredSessionWritableGrants, configuredSessionWritablePaths, explainSessionWritableRefusal, homeWritableRoots, trustedPath,
+} from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
 const uid = process.getuid?.() ?? -1;
 const rootUid = statSync("/").uid;
@@ -95,15 +97,15 @@ test("provider account, agent, session and host provider homes are session-writa
   mkdirSync(f.dataDir);
   const at = (name: string) => join(f.root, name);
   const paths = configuredSessionWritablePaths({
-    workspaces: [{ path: at("project"), additionalDirectoryGrants: [at("grant")] }],
-    providerAccounts: [{ directory: at("account-claude") }],
+    workspaces: [{ name: "Project", path: at("project"), additionalDirectoryGrants: [at("grant")] }],
+    providerAccounts: [{ label: "Claude", directory: at("account-claude") }],
     agents: [
       { id: "codex-custom", env: { CODEX_HOME: at("agent-codex"), HOME: at("agent-home") } },
       { id: "from-env", env: { CLAUDE_CONFIG_DIR: { fromEnv: "WOLLIPOG_TEST_CLAUDE_HOME" }, CODEX_HOME: { fromEnv: "WOLLIPOG_TEST_UNSET" } } },
       { id: "relative", env: { CODEX_HOME: "relative/codex" } },
     ],
     sessions: [{
-      repoPath: at("project"), worktreePath: at("worktree"),
+      sessionId: "s_roots", repoPath: at("project"), worktreePath: at("worktree"),
       worktrees: [{ id: "wt", path: at("attached"), branch: "b", source: "attached" }] as SessionMeta["worktrees"],
       env: { CLAUDE_CONFIG_DIR: at("session-env-claude"), HOME: at("session-home") },
       providerCredentialHome: at("session-credentials"), providerConversationHome: at("session-conversation"),
@@ -117,4 +119,98 @@ test("provider account, agent, session and host provider homes are session-writa
     "session-conversation", "session-pending", "host-codex",
   ]) assert.ok(paths.includes(at(expected)), `${expected} is a session-writable root`);
   assert.ok(paths.every((path) => path.startsWith("/")), "relative values are dropped");
+});
+
+const RELOCATION = "install the reviewer where no session can write and set its agent's command to that absolute path";
+
+/** The conventional native Claude Code install: `~/.local/bin/claude` links into a versions tree. */
+function conventionalClaude(home: string): { link: string; binary: string } {
+  mkdirSync(join(home, ".local", "bin"), { recursive: true });
+  mkdirSync(join(home, ".local", "share", "claude", "versions"), { recursive: true });
+  const binary = executable(join(home, ".local", "share", "claude", "versions", "2.1.0"));
+  const link = join(home, ".local", "bin", "claude");
+  symlinkSync(binary, link);
+  return { link, binary };
+}
+
+function refusal(path: string, roots: readonly string[], grants: Parameters<typeof explainSessionWritableRefusal>[1]): string {
+  try { trustedPath(path, roots, uid, rootUid); } catch (error) {
+    return (explainSessionWritableRefusal(error, grants, RELOCATION) as Error).message;
+  }
+  assert.fail(`${path} was trusted`);
+}
+
+test("a home-directory workspace refuses the conventional Claude install by naming its grant and recovery (#4122)", posixOnly, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-home-workspace-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  chmodSync(root, 0o700);
+  const home = join(root, "home"); mkdirSync(home);
+  const project = join(root, "dev", "project"); mkdirSync(project, { recursive: true });
+  const { link, binary } = conventionalClaude(home);
+  const projectSession = { sessionId: "s_project", repoPath: project, worktreePath: join(root, "worktrees", "s_project"), env: {} };
+  const sources = {
+    workspaces: [{ name: "home", path: home }, { name: "Project", path: project }],
+    sessions: [projectSession, { sessionId: "s_home", repoPath: home, worktreePath: null, env: {} }],
+  };
+  const grants = configuredSessionWritableGrants(sources);
+  const roots = [...homeWritableRoots(home), ...configuredSessionWritablePaths(sources)];
+  // The review comes from a session in the separate project, yet the reviewer is shared: a session
+  // in the home workspace could repoint `~/.local/bin/claude`, so the refusal stands.
+  assert.equal(refusal(link, roots, grants),
+    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}), granted by workspace "home" and ` +
+    `session s_home. To use it, remove workspace "home" from this machine and delete session s_home, or ${RELOCATION}`);
+
+  // Removing only the workspace keeps the independent grant of a session that can resume there.
+  const withoutWorkspace = { ...sources, workspaces: [{ name: "Project", path: project }] };
+  assert.match(refusal(link, [...homeWritableRoots(home), ...configuredSessionWritablePaths(withoutWorkspace)],
+    configuredSessionWritableGrants(withoutWorkspace)), /granted by session s_home\. To use it, delete session s_home, or /u);
+
+  // Once neither grants HOME, the same installation is trusted for the separate project's review.
+  const supported = { workspaces: [{ name: "Project", path: project }], sessions: [projectSession] };
+  assert.equal(trustedPath(link, [...homeWritableRoots(home), ...configuredSessionWritablePaths(supported)], uid, rootUid), binary);
+});
+
+test("refusals list many sessions briefly and offer only relocation for grants without a withdrawal", posixOnly, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "review-grant-recovery-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  chmodSync(root, 0o700);
+  const home = join(root, "home"); mkdirSync(home);
+  const { link } = conventionalClaude(home);
+  const sessions = ["s_1", "s_2", "s_3", "s_4"].map((sessionId) => ({ sessionId, repoPath: home, worktreePath: null, env: {} }));
+  assert.match(refusal(link, [home], configuredSessionWritableGrants({ sessions })),
+    /granted by 4 sessions \(s_1, s_2, s_3 \(\+1 more\)\)\. To use it, delete sessions s_1, s_2, s_3 \(\+1 more\), or install/u);
+  // Every grant that would refuse the path is named, not only the first root found.
+  const nested = configuredSessionWritableGrants({
+    workspaces: [{ name: "home", path: home }, { name: "Project", path: join(root, "project"), additionalDirectoryGrants: [join(home, ".local")] }],
+  });
+  assert.match(refusal(link, [home, join(home, ".local")], nested), new RegExp(
+    `granted by workspace "home" and a directory grant of workspace "Project"\\. To use it, remove workspace "home" from this ` +
+    `machine and remove that directory grant from workspace "Project", or install`, "u"));
+  // When a built-in root refuses the path first, withdrawing configured grants cannot help.
+  assert.equal(refusal(link, [join(home, ".local"), home], configuredSessionWritableGrants({ workspaces: [{ name: "home", path: home }] })),
+    `${join(home, ".local", "bin")} is inside a directory a session can write (${join(home, ".local")}), granted by workspace "home". ` +
+    `To use it, ${RELOCATION}`);
+  // A provider account directory has no withdrawal short of moving the program.
+  assert.equal(refusal(link, [home], configuredSessionWritableGrants({ providerAccounts: [{ label: "Work", directory: home }] })),
+    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}), granted by provider account "Work". ` +
+    `To use it, ${RELOCATION}`);
+  // Built-in roots (provider homes, caches, temporary directories) have no configured grant.
+  assert.equal(refusal(link, [home], []),
+    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}). To use it, ${RELOCATION}`);
+  const unrelated = new Error("claude is not installed");
+  assert.equal(explainSessionWritableRefusal(unrelated, [], RELOCATION), unrelated);
+});
+
+test("agent and session environments name the variable that grants a root", () => {
+  const grants = configuredSessionWritableGrants({
+    agents: [{ id: "claude", env: { HOME: "/srv/agent-home" } }],
+    sessions: [{ sessionId: "s_env", repoPath: "/srv/project", worktreePath: null, env: { CODEX_HOME: "/srv/codex" } }],
+    hostEnv: { CLAUDE_CONFIG_DIR: "/srv/claude" },
+  });
+  assert.deepEqual(grants.find((grant) => grant.path === "/srv/agent-home/.cache"),
+    { path: "/srv/agent-home/.cache", grant: `HOME in agent "claude"'s environment`, recovery: `change HOME in agent "claude"'s environment` });
+  assert.deepEqual(grants.find((grant) => grant.path === "/srv/codex"),
+    { path: "/srv/codex", grant: "CODEX_HOME in session s_env", recovery: "delete session s_env", sessionId: "s_env" });
+  assert.deepEqual(grants.find((grant) => grant.path === "/srv/claude"),
+    { path: "/srv/claude", grant: "CLAUDE_CONFIG_DIR in the runner's environment" });
 });
