@@ -931,10 +931,12 @@ export class ClaudeCodeDriver implements Driver {
     // An inconclusive result keeps the old baseline; journaling it again would move the recovery
     // cursor past live requests that are still open (#3086).
     const checkpoint = this.usageAccounting.checkpoint !== before ? this.usageAccounting.checkpoint : null;
+    // An uncertain total journals its baseline on its first record (see ClaudeUsageAccounting).
+    const journaled = events.some((event) => event.claudeUsageCheckpoint);
     events.forEach((event, index) => this.cb.onEvent({ ...event,
       ...(index === events.length - 1 && typeof result.duration_ms === "number" ? { durationMs: result.duration_ms } : {}),
-      // An incomplete record moves the baseline only when it closes an unproven total.
-      ...(index === events.length - 1 && checkpoint ? { claudeUsageCheckpoint: checkpoint } : {}),
+      ...(index === events.length - 1 && checkpoint && !journaled && !event.accountingIncomplete
+        ? { claudeUsageCheckpoint: checkpoint } : {}),
     }));
     if (checkpoint) this.cb.onClaudeUsageCheckpoint?.(checkpoint);
   }

@@ -138,9 +138,39 @@ test("a persisted baseline that no probe confirmed settles only totals that cove
   // The restored prefix lost the interrupted request: the total grew by 5 input tokens, not 50.
   const events = accounting.result("s", grown(15, 0.03));
   const { liveUsage: _live, ...ordinary } = live;
-  assert.deepEqual(events, [{ ...ordinary, liveUsage: "republished" }, { kind: "token_usage", accountingIncomplete: true, liveUsage: "settled" }]);
+  assert.deepEqual(events, [{ kind: "token_usage", accountingIncomplete: true, claudeUsageCheckpoint: accounting.checkpoint },
+    { ...ordinary, liveUsage: "settled" }], "the marker journals the new baseline before any request is republished");
   assert.equal(accounting.checkpoint!.totalCostUsd, 0.04, "later turns are differences from this total");
   assert.ok(Math.abs(accounting.result("s", grown(16, 0.04))[0]!.costUsd! - 0.01) < 1e-10);
+});
+
+test("a restart part-way through an uncertain result never counts a republished request again", () => {
+  const total = (n: number) => ({ total_cost_usd: n / 100, modelUsage: { m: { inputTokens: n, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: n / 100 } } });
+  const req = (n: number) => ({ model: "m", inputTokens: n, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+  const persisted = claudeUsageCheckpoint("s", total(100))!;
+  const accounting = new ClaudeUsageAccounting(undefined, persisted);
+  start(accounting, "2.1.296");
+  // Claude lost the interrupted 50-token request from its totals; the next 10-token request counts.
+  const live = [accounting.request(req(50))!, accounting.request(req(10))!];
+  const batch = accounting.result("s", total(110));
+  assert.equal(batch.length, 3);
+  for (let durable = 0; durable <= batch.length; durable++) {
+    // Rebuild the relaunch as the session manager does from the durable prefix of the batch.
+    let checkpoint = persisted;
+    let open = [...live];
+    for (const event of batch.slice(0, durable)) {
+      if (event.claudeUsageCheckpoint) checkpoint = event.claudeUsageCheckpoint;
+      if (event.liveUsage === "settled") open = [];
+      else if (event.liveUsage === "republished") open.shift();
+    }
+    const relaunched = new ClaudeUsageAccounting(undefined, checkpoint, open);
+    start(relaunched, "2.1.296");
+    relaunched.request(req(10));
+    const after = relaunched.result("s", total(120));
+    const accrued = [...batch.slice(0, durable), ...after].filter((event) => event.liveUsage !== "provisional");
+    assert.equal(accrued.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0), 70,
+      `a restart after ${durable} durable records accounts every observed request exactly once`);
+  }
 });
 
 test("an unknown scope never bills a resumed process's first total as a delta", () => {
@@ -152,11 +182,11 @@ test("an unknown scope never bills a resumed process's first total as a delta", 
 
   const resumed = new ClaudeUsageAccounting(undefined, claudeUsageCheckpoint("s", result(0.02, 0.01))!);
   start(resumed);
-  assert.deepEqual(resumed.result("s", grown(15, 0.03)), [{ kind: "token_usage", accountingIncomplete: true }]);
+  assert.deepEqual(resumed.result("s", grown(15, 0.03)), [{ kind: "token_usage", accountingIncomplete: true, claudeUsageCheckpoint: resumed.checkpoint }]);
   assert.equal(resumed.checkpoint!.accountingScope, "process");
   assert.ok(Math.abs(resumed.result("s", grown(16, 0.04))[0]!.costUsd! - 0.01) < 1e-10, "later totals of the same process are differences");
   start(resumed);
-  assert.deepEqual(resumed.result("s", grown(17, 0.05)), [{ kind: "token_usage", accountingIncomplete: true }], "a new process is unproven again");
+  assert.deepEqual(resumed.result("s", grown(17, 0.05)).map((event) => event.accountingIncomplete), [true], "a new process is unproven again");
 
   const learned = new ClaudeUsageAccounting(false);
   learned.beginProcess(true);
@@ -164,6 +194,6 @@ test("an unknown scope never bills a resumed process's first total as a delta", 
     "a conversation learned at its first report records its zero baseline");
   const unbased = new ClaudeUsageAccounting(false);
   start(unbased, "2.1.296");
-  assert.deepEqual(unbased.result("s", result(0.02, 0.01)), [{ kind: "token_usage", accountingIncomplete: true }],
+  assert.deepEqual(unbased.result("s", result(0.02, 0.01)).map((event) => event.accountingIncomplete), [true],
     "restored totals without any baseline are uncertain");
 });

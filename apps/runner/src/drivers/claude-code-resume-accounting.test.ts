@@ -216,9 +216,10 @@ test("a resumed CLI that reports no version is never billed a running total: its
   turns.slice(1).forEach((records, index) => assert.deepEqual(sumTokens(records), tokens(turnRequests(index + 3)),
     `turn ${index + 3} accounts only its own observed requests`));
   for (const records of turns) {
-    assert.equal(records.at(-1)!.accountingIncomplete, true, "the record is uncertain, not exact");
+    assert.equal(records[0]!.accountingIncomplete, true, "the record is uncertain, not exact");
+    assert.ok(records[0]!.claudeUsageCheckpoint, "and journals the new baseline before any request is republished");
     assert.equal(sumCost(records), 0, "no running total is billed; the control plane prices the observed requests");
-    assert.ok(records.slice(0, -1).every((record) => record.liveUsage === "republished"));
+    assert.deepEqual(records.slice(1).map((record) => record.liveUsage), [...records.slice(2).map(() => "republished"), "settled"]);
   }
   const all = [...accrued(before.events), ...accrued(events)];
   assert.deepEqual(sumTokens(all), tokens(cli.requests), "every observed request is accounted exactly once");

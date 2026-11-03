@@ -218,10 +218,13 @@ export class ClaudeUsageAccounting {
     return this.settle(events);
   }
 
-  /** Account the requests observed live, and mark the record incomplete rather than exact. */
+  /** Account the requests observed live, and mark the record incomplete rather than exact. The
+   * marker comes first and carries the new baseline: a restart part-way through the batch then
+   * recovers that baseline with only the requests not yet republished still open, so neither a
+   * republished request nor the uncertainty is lost or counted again. */
   private uncertain(): UsageEvent[] {
     const observed = this.live.map((event): UsageEvent => ({ ...event, liveUsage: "republished" }));
-    return this.settle([...observed, { kind: "token_usage", accountingIncomplete: true }]);
+    return this.settle([{ kind: "token_usage", accountingIncomplete: true, claudeUsageCheckpoint: this.checkpoint! }, ...observed]);
   }
 
   /** Close the live window with `events`, the last of which (or a content-free marker) is
