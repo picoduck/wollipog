@@ -309,6 +309,15 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/reconcile`);
 
+  // #4067: Wollipog performs the approved action; the tool sends only the occurrence and its digest.
+  const before = calls.length;
+  assert.equal((await callTool(deps, "execute_workflow_decision", { occurrenceId: "workflow_1", resourceDigest: "short" })).isError, true);
+  assert.equal(calls.length, before, "a malformed digest sends nothing");
+  await callTool(deps, "execute_workflow_decision", { occurrenceId: "workflow_1", resourceDigest: "d".repeat(64) });
+  assert.deepEqual(calls.at(-1)?.body, { resourceDigest: "d".repeat(64) });
+  assert.equal(calls.at(-1)?.method, "POST");
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/execute`);
+
   deps.orchestrator = true;
   const resolution = await callTool(deps, "resolve_descendant_workflow_decision", {
     sessionId: "child", occurrenceId: "workflow_1", outcome: "approve",
@@ -729,6 +738,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_workflow_decision",
       "list_workflow_decisions",
       "consume_workflow_decision",
+      "execute_workflow_decision",
       "reconcile_workflow_decision",
       "withdraw_workflow_decision",
       "get_session_events",

@@ -15,7 +15,7 @@ import type {
   CampaignForgePullRequestObservation,
   CampaignPullRequestRef,
 } from "@wollipog/protocol";
-import { CAMPAIGN_FORGE_OBSERVATION, campaignRepositoryLocation } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, campaignRepositoryLocation, forgeActionBranchName } from "@wollipog/protocol";
 import { observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
 import { runContextCommand } from "./context-command.js";
 import { summarizeCheckRollup } from "./git-ops.js";
@@ -84,6 +84,7 @@ export function forgeStatusQuery(refs: ReadonlyArray<{ owner: string; name: stri
     defaultBranchRef{name}
     pullRequest(number:${ref.number}){
       state isDraft headRefOid baseRefName reviewDecision mergeStateStatus
+      headRefName isCrossRepository headRef{target{oid}}
       mergeCommit{oid}
       mergeQueueEntry{position state}
       commits(last:1){nodes{commit{statusCheckRollup{state
@@ -203,6 +204,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
   if (commits.length === 1 && !commit) return null;
   const rollups = checkRollups(commit ? commit.statusCheckRollup ?? null : null, REQUIREMENTS_MET.has(pr.mergeStateStatus as string));
   if (!rollups) return null;
+  const headBranch = observedHeadBranch(pr);
   return {
     state,
     draft: pr.isDraft,
@@ -213,7 +215,17 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
     mergeQueue,
     mergeCommitSha: mergeCommit ? mergeCommit.oid as string : null,
     ...(typeof defaultBranch === "string" && defaultBranch.length > 0 && defaultBranch.length <= 256 ? { defaultBranch } : {}),
+    ...(headBranch ? { headBranch } : {}),
   };
+}
+
+/** v280 (#4067): the head branch in the pull request's own repository and its tip, `null` once it
+ * is deleted. A fork's branch, or anything malformed, is left out rather than guessed. */
+function observedHeadBranch(pr: Record<string, unknown>): CampaignForgePullRequestObservation["headBranch"] {
+  if (pr.isCrossRepository !== false || !forgeActionBranchName(pr.headRefName)) return undefined;
+  if (pr.headRef === null) return { name: pr.headRefName, tipSha: null };
+  const tip = record(record(pr.headRef)?.target)?.oid;
+  return typeof tip === "string" && /^[0-9a-f]{40}$/u.test(tip) ? { name: pr.headRefName, tipSha: tip } : undefined;
 }
 
 type Result = NonNullable<CampaignForgeObserveResultMessage["results"]>[number];

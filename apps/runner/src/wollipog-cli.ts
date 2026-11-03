@@ -505,6 +505,16 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         input: { occurrenceId, resourceSnapshot: snapshot.value },
       };
     }
+    if (verb === "execute") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision execute requires an occurrence id" };
+      }
+      const resourceDigest = option(args, "--resource-digest");
+      if (!resourceDigest || !/^[0-9a-f]{64}$/u.test(resourceDigest)) {
+        return { error: "decision execute requires --resource-digest <64 hex characters>" };
+      }
+      return { tool: "execute_workflow_decision", input: { occurrenceId, resourceDigest } };
+    }
     if (verb === "withdraw") {
       if (!occurrenceId || occurrenceId.startsWith("--")) {
         return { error: "decision withdraw requires an occurrence id" };
@@ -962,6 +972,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
     : parsed.tool === "withdraw_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
+    : parsed.tool === "execute_workflow_decision"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
