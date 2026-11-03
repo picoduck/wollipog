@@ -482,7 +482,12 @@ test("keycaps show for a mouse and are absent on a coarse pointer (#2844)", asyn
   try {
     const keyed = [...fine.container.querySelectorAll<HTMLElement>(".session-tools .session-tool")]
       .filter((button) => button.querySelector("kbd")).map((button) => button.dataset.tool);
-    assert.deepEqual(keyed, ["review", "files", "terminal", "sidechat"]);
+    // Every tool that can open shows its chord (#1260); an unavailable one says why instead.
+    const unavailable = [...fine.container.querySelectorAll<HTMLElement>('.session-tools .session-tool[aria-disabled="true"]')]
+      .map((button) => button.dataset.tool);
+    assert.deepEqual(keyed, ["review", "files", "browser", "terminal", "subagents", "sidechat", "background", "requests", "decisions"]
+      .filter((tool) => !unavailable.includes(tool)));
+    assert.ok(keyed.includes("browser") && keyed.includes("decisions"));
   } finally {
     await fine.dispose();
   }

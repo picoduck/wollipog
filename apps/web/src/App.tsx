@@ -32,6 +32,7 @@ import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import {
+  handleSidePanelChord,
   openGoToFile,
   openSideChat,
   terminalToolShowing,
@@ -717,10 +718,6 @@ export function Shell() {
         if (filesSupported) openGoToFile(rightPanel);
         else rightPanel.show("launcher");
       }
-      if (matchesShortcut(e, "open-review")) {
-        e.preventDefault();
-        rightPanel.openMode("review");
-      }
       // Side Chat: opens the panel on it with focus in its message field, never closes it (#2862).
       if (matchesShortcut(e, "open-side-chat")) {
         e.preventDefault();
@@ -730,18 +727,9 @@ export function Shell() {
         e.preventDefault();
         toggleTerminal();
       }
-      // The Side Panel toggle's chord: closing keeps the tool, so it reopens on the last one (#1260).
-      // Opening lands on the tool switcher, so the arrow keys reach every other tool (#2843).
-      if (matchesShortcut(e, "toggle-side-panel") && activeSession) {
-        e.preventDefault();
-        const opening = !rightPanel.open;
-        rightPanel.toggle();
-        if (opening) {
-          window.requestAnimationFrame(() => {
-            document.querySelector<HTMLElement>("#right-panel .rpanel-switcher")?.focus();
-          });
-        }
-      }
+      // The Side Panel toggle, Review and the other tools' chords (#1260). Only a loaded session has
+      // a panel: a missing one's page is a placeholder (#2202).
+      if (activeSession) handleSidePanelChord(e, rightPanel);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);

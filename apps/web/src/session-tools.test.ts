@@ -68,9 +68,12 @@ test("an unavailable tool is listed with its reason; Campaign Status is listed o
   }), { listed: true, unavailableReason: "The campaign could not be loaded." });
 });
 
-test("each tool with a chord names it, for the keycap the switcher and Session Tools show (#2862)", () => {
-  assert.deepEqual(SESSION_TOOLS.filter((tool) => tool.shortcut).map((tool) => [tool.name, tool.shortcut]), [
-    ["Review", "open-review"], ["Files", "open-files"], ["Terminal", "toggle-terminal"], ["Side Chat", "open-side-chat"],
+test("every tool names its chord, for the keycap the switcher and Session Tools show (#2862, #1260)", () => {
+  assert.deepEqual(SESSION_TOOLS.map((tool) => [tool.name, tool.shortcut ?? null]), [
+    ["Session Tools", null],
+    ["Review", "open-review"], ["Files", "open-files"], ["Browser", "open-browser"], ["Terminal", "toggle-terminal"],
+    ["Agents", "open-agents"], ["Side Chat", "open-side-chat"], ["Background Work", "open-background-work"],
+    ["Campaign Status", "open-campaign-status"], ["Requests", "open-requests"], ["Decision History", "open-decision-history"],
   ]);
 });
 

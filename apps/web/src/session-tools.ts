@@ -30,14 +30,14 @@ export const SESSION_TOOLS: readonly SessionTool[] = [
   { id: "launcher", name: "Session Tools", group: null },
   { id: "review", name: "Review", group: "Code", shortcut: "open-review" },
   { id: "files", name: "Files", group: "Code", shortcut: "open-files" },
-  { id: "browser", name: "Browser", group: "Code" },
+  { id: "browser", name: "Browser", group: "Code", shortcut: "open-browser" },
   { id: "terminal", name: "Terminal", group: "Code", shortcut: "toggle-terminal" },
-  { id: "subagents", name: "Agents", group: "Work" },
+  { id: "subagents", name: "Agents", group: "Work", shortcut: "open-agents" },
   { id: "sidechat", name: "Side Chat", group: "Work", shortcut: "open-side-chat" },
-  { id: "background", name: "Background Work", group: "Work" },
-  { id: "campaign", name: "Campaign Status", group: "Work" },
-  { id: "requests", name: "Requests", group: "Decisions" },
-  { id: "decisions", name: "Decision History", group: "Decisions" },
+  { id: "background", name: "Background Work", group: "Work", shortcut: "open-background-work" },
+  { id: "campaign", name: "Campaign Status", group: "Work", shortcut: "open-campaign-status" },
+  { id: "requests", name: "Requests", group: "Decisions", shortcut: "open-requests" },
+  { id: "decisions", name: "Decision History", group: "Decisions", shortcut: "open-decision-history" },
 ];
 
 export function sessionTool(id: SessionToolId): SessionTool {
