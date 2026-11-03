@@ -29311,6 +29311,10 @@ test("campaign cost names Claude turns that billed a running total as uncertain 
     db.appendEvent(child, turn(3, checkpoint(3, 200)), Date.now(), { accrueUsage: true }); // the whole total again
     assert.equal(summary().runningTotalClaudeRecords, 1);
     assert.equal(knownUsd(summary().total), 4, "the amount is shown as recorded");
+    // A deleted contributor's cost stays in the campaign, and so does its uncertainty.
+    db.deleteSession(child);
+    assert.equal(knownUsd(summary().total), 4);
+    assert.equal(summary().runningTotalClaudeRecords, 1);
   } finally {
     db.close();
   }

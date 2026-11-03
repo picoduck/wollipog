@@ -10283,6 +10283,14 @@ test("Claude turns that billed a running total are shown as uncertain in every c
     db.close();
     db = ControlPlaneDb.open(file);
     assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the backfill runs once");
+
+    // A reconnect's snapshot accrues the cost first; history hydrated afterwards is still flagged.
+    db.createSession(newSession({ id: "snapshot-first", driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.updateSessionFromSnapshot("snapshot-first", snapshot({ id: "snapshot-first", driver: "claude-code", tokensIn: 2,
+      costUsd: 35, costIsEstimate: true, seq: 2 }), 3_600_500);
+    db.appendEvent("snapshot-first", turn(15, checkpoint(15, 7_000)), 3_600_600, { accrueUsage: true, runnerSeq: 1 });
+    db.appendEvent("snapshot-first", turn(20, checkpoint(20, 7_400)), 3_600_700, { accrueUsage: true, runnerSeq: 2 });
+    assert.deepEqual(db.sessionUsageByModel("snapshot-first").runningTotalRecords, { records: 1, costUsd: 20 });
   } finally {
     db.close();
     rmSync(root, { recursive: true, force: true });

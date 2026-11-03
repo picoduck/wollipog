@@ -2780,9 +2780,12 @@ CREATE TABLE IF NOT EXISTS usage_claude_running_totals (
   workspace_id    TEXT NOT NULL,
   agent_id        TEXT NOT NULL,
   driver          TEXT NOT NULL,
+  campaign_session_id TEXT,
   cost_microusd   INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_session ON usage_claude_running_totals(session_id);
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_campaign
+  ON usage_claude_running_totals(campaign_session_id, bucket_ts) WHERE campaign_session_id IS NOT NULL;
 CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_bucket
   ON usage_claude_running_totals(organization_id, bucket_ts);
 
@@ -15015,11 +15018,14 @@ export class ControlPlaneDb {
     const owner = dimensions.scope.owner;
     this.stmt(
       `INSERT OR IGNORE INTO usage_claude_running_totals
-         (event_id, session_id, bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver, cost_microusd)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (event_id, session_id, bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver,
+          campaign_session_id, cost_microusd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     ).run(eventId, sessionId, Math.floor(Math.max(0, occurredAt) / 3_600_000) * 3_600_000, dimensions.scope.organizationId,
       owner.kind, owner.kind === "organization" ? owner.organizationId : owner.kind === "user" ? owner.userId : owner.teamId,
-      dimensions.runnerId, dimensions.workspaceId, dimensions.agentId, dimensions.driver, ControlPlaneDb.usageMicroUsd(billed));
+      dimensions.runnerId, dimensions.workspaceId, dimensions.agentId, dimensions.driver,
+      // The campaign its usage is attributed to: attribution keeps a deleted contributor's cost.
+      this.campaignUsageMembership(sessionId)?.campaignSessionId ?? null, ControlPlaneDb.usageMicroUsd(billed));
   }
 
   /** One-time scan of history recorded before the flag existed (#4069). Records it cannot read, or
@@ -15058,6 +15064,12 @@ export class ControlPlaneDb {
     source?: { historyEpoch: number | null; runnerSeq: number },
     eventId?: number,
   ): void {
+    // Before any coverage check: a snapshot may already have accrued this record's cost, and a
+    // hydrated history that arrives afterwards must still be flagged (#4069).
+    if (eventId !== undefined && payload.kind === "token_usage" && payload.claudeUsageCheckpoint?.accountingScope === "process") {
+      const dimensions = this.usageDimensions(sessionId);
+      if (dimensions?.driver === "claude-code") this.flagClaudeRunningTotalInTransaction(sessionId, eventId, payload, occurredAt, dimensions);
+    }
     if (source) {
       let state = this.stmt(
         `SELECT runner_history_epoch, covered_through_seq FROM usage_session_state WHERE session_id=?`,
@@ -15179,9 +15191,6 @@ export class ControlPlaneDb {
             driver: dimensions.driver, model: dimensions.model, bucketTs: Math.floor(occurredAt / 3_600_000) * 3_600_000, granularity: "hour" }),
           cost.microusd + carryMicrousd, counted && priced.costSource === "providerReported" ? 1 : 0,
         );
-      }
-      if (eventId !== undefined && dimensions?.driver === "claude-code") {
-        this.flagClaudeRunningTotalInTransaction(sessionId, eventId, payload, occurredAt, dimensions);
       }
       this.stmt(
         `INSERT INTO usage_session_state

@@ -415,9 +415,9 @@ export class CampaignWorkAccounting {
     // Turns in the contributing sessions, since attribution began, that billed a running total (#4069).
     const runningTotalClaudeRecords = attributedSince === null || hidden.attempt || hidden.coordination || hidden.unattributed ? 0
       : Number((this.stmt(
-        `SELECT COUNT(*) AS n FROM usage_claude_running_totals
-          WHERE bucket_ts>=? AND session_id IN (SELECT session_id FROM campaign_usage_attribution WHERE campaign_session_id=?)`,
-      ).get(Math.floor(attributedSince / 3_600_000) * 3_600_000, campaignSessionId) as { n: number }).n);
+        // Keyed by the campaign the flagged usage was attributed to, so a deleted contributor keeps it.
+        "SELECT COUNT(*) AS n FROM usage_claude_running_totals WHERE campaign_session_id=? AND bucket_ts>=?",
+      ).get(campaignSessionId, Math.floor(attributedSince / 3_600_000) * 3_600_000) as { n: number }).n);
     return {
       total: hidden.attempt || hidden.coordination || hidden.unattributed ? NOT_AUTHORIZED : campaignCostMetric(total, historyGap),
       workItems: metric("attempt"),
