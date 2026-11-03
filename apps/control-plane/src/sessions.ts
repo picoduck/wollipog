@@ -12,6 +12,7 @@ import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
@@ -34,7 +35,7 @@ import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
@@ -11134,6 +11135,34 @@ export class SessionsService {
     return read;
   }
 
+  /** The epic source's snapshot (#4060): the runner's inspection with the issue's members, and, when
+   * they would prove the closure, its delivery verified at the same digest and member read. `false`
+   * for an issue without members, or a runner whose forge has no member read (GitLab), whose
+   * ordinary snapshot stands; null when the members could not be read. */
+  private async inspectEpicClosure(sessionId: string, runnerId: string, base: GithubIssueClosureSnapshot): Promise<GithubIssueClosureSnapshot | false | null> {
+    const inspect = async (deliveryPullRequests?: Array<{ number: number; headSha: string }>) => {
+      const requestId = `issue_closure_epic_${randomUUID()}`;
+      const result = await this.hub.requestFromRunner(runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
+        issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true, ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
+      return result?.type === "github_issue_closure_result" && result.ok && result.sessionId === sessionId && result.inspection?.state === "OPEN" &&
+        result.inspection.repository === base.repository && result.inspection.issue === base.issue ? result.inspection : null;
+    };
+    const read = await inspect();
+    if (read && read.epicMembers === undefined) return false;
+    const members = read && normalizeIssueClosureEpicMembers(read.epicMembers);
+    if (!read || !members?.readable) return null;
+    if (!members.members.length) return false;
+    const { state: _state, delivery: _delivery, ...inspection } = read;
+    const { delivery: _ordinary, ...rest } = base;
+    let snapshot: GithubIssueClosureSnapshot = { ...rest, ...inspection, epicMembers: members };
+    const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, base.issue);
+    if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
+      const verified = await inspect(delivery.map(({ number, headSha }) => ({ number, headSha })));
+      if (verified?.forgeDigest === snapshot.forgeDigest && verified.delivery) snapshot = { ...snapshot, delivery: verified.delivery };
+    }
+    return snapshot;
+  }
+
   async requestGithubIssueClosure(
     sessionId: string,
     request: GithubIssueClosureRequest,
@@ -11182,7 +11211,7 @@ export class SessionsService {
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
       const { state: _state, ...inspection } = inspected.inspection;
-      const snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
+      let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
@@ -11209,12 +11238,21 @@ export class SessionsService {
                 verified.inspection.state === "OPEN" && verified.inspection.forgeDigest === snapshot.forgeDigest) snapshot.delivery = verified.inspection.delivery;
           }
         }
-        const proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
+        let proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
+        // Without the ordinary proof, an epic may be proven from its members (#4060). The runner reads
+        // them on the forge; an issue without members keeps the ordinary snapshot, unchanged.
+        let membersUnreadable = false;
+        if (!proof && epicSourceApplies(this.db, this.db.getSession(sessionId)!, snapshot) &&
+            runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "epicClosureMembers")) {
+          const epic = await this.inspectEpicClosure(sessionId, session.runnerId, snapshot);
+          if (epic === null) membersUnreadable = true;
+          else if (epic) { snapshot = epic; proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot); }
+        }
         const commentSafe = !request.comment || campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, []);
         if (proof && commentSafe) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
         else {
           // The person-owned route stays, but names every gap and what would fix it (#4058).
-          const gaps = closureDeliveryGaps(this.db, this.db.getSession(sessionId)!, snapshot, { proven: Boolean(proof), commentSafe });
+          const gaps = closureDeliveryGaps(this.db, this.db.getSession(sessionId)!, snapshot, { proven: Boolean(proof), commentSafe, membersUnreadable });
           if (gaps) snapshot.deliveryGaps = gaps;
           snapshot.deliveryFailure = gaps ? issueClosureDeliveryFailure(gaps) : "outside_boundary";
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,

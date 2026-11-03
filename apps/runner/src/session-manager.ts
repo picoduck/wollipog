@@ -19216,7 +19216,7 @@ export class SessionManager {
     const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests);
+        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true);
         if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
         return { ...base, ok: true, inspection };
       }

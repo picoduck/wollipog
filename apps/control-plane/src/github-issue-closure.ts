@@ -3,7 +3,7 @@ import type { GithubIssueClosureRefusal, GithubIssueClosureSnapshot, SessionView
 import {
   campaignIssueForgeUrl, campaignRepositoryLocation, GITHUB_ISSUE_CLOSURE_FAILURE_REASONS, GITHUB_ISSUE_CLOSURE_RESULT_REFUSAL_REASONS,
   GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX, githubIssueClosureRefusal, isGithubIssueClosureRefusalReason, isTerminal,
-  normalizeGithubIssueClosureRefusal, normalizeIssueClosureDeliveryGaps, validIssueAdmission,
+  normalizeGithubIssueClosureRefusal, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers, validIssueAdmission,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
@@ -68,6 +68,8 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
   if (deliveryGaps === null) return null;
   const previous = value.previousRefusal === undefined ? undefined : previousRefusal(value.previousRefusal);
   if (previous === null) return null;
+  const epicMembers = value.epicMembers === undefined ? undefined : normalizeIssueClosureEpicMembers(value.epicMembers);
+  if (epicMembers === null) return null;
   if (!validIssueAdmission(value.issueAdmission) || value.dispositionRecommendationId !== undefined && !bounded(value.dispositionRecommendationId, 256)) return null;
   if (value.delivery !== undefined && (!Array.isArray(value.delivery) || value.delivery.length > 100 || value.delivery.some((p) =>
       !record(p) || !Number.isSafeInteger(p.number) || (p.number as number) < 1 || typeof p.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(p.headSha) ||
@@ -106,6 +108,7 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     ...(value.deliveryFailure === undefined ? {} : { deliveryFailure: value.deliveryFailure as string }),
     ...(deliveryGaps === undefined ? {} : { deliveryGaps }),
     ...(value.delivery === undefined ? {} : { delivery: structuredClone(value.delivery) as GithubIssueClosureSnapshot["delivery"] }),
+    ...(epicMembers === undefined ? {} : { epicMembers }),
     ...(value.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: value.dispositionRecommendationId as string }),
     ...(value.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(value.issueAdmission) as GithubIssueClosureSnapshot["issueAdmission"] }),
     ...(previous === undefined ? {} : { previousRefusal: previous }) };

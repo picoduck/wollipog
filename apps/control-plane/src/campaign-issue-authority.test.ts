@@ -3,8 +3,8 @@ import { createHash } from "node:crypto";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignControl, type CampaignPublicationAdmissionFailure, type RunnerMetadata, type WorkflowDecisionView,
-  type CampaignWorkItemDetail, type IssueClosureDeliveryGap, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure, issueClosureDeliveryGap,
-  normalizeIssueClosureDeliveryGaps } from "@wollipog/protocol";
+  type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure,
+  issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
@@ -37,7 +37,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
   }
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
-  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false as boolean | number, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
+  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false as boolean | number, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string>,
+    epicMembers: undefined as IssueClosureEpicMembers | undefined, closureMessages: [] as unknown[] };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
@@ -48,12 +49,15 @@ function harness(full = true, maximum = 5, issues = [100]) {
           ({ issue: { repository: "team/repo", number }, title: message.publication?.sanitizedTitle ?? state.publicationTitles[number] ?? `Issue ${number}`, source: "sub_issue" as const })) }) };
     }
     if (message.type === "github_issue_closure") {
+      state.closureMessages.push(message);
       if (message.operation === "execute") { state.executes++; return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true,
         result: { outcome: "uncertain", completedAt: Date.now() } }; }
       return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, inspection: { repository: "team/repo", issue: message.issue,
         title: "Issue", url: `https://github.com/team/repo/issues/${message.issue}`, state: "OPEN", forgeDigest: "a".repeat(64),
         openPullRequests: state.openPR === false ? [] : [openPullRequest(state.openPR === true ? 10 : state.openPR)],
-        ...(message.deliveryPullRequests === undefined ? {} : { delivery: state.delivery }) } };
+        ...(message.deliveryPullRequests === undefined ? {} : { delivery: state.delivery }),
+        // A member read is bound into the digest, as the runner binds it.
+        ...(message.epicMembers && state.epicMembers ? { epicMembers: state.epicMembers, forgeDigest: "b".repeat(64) } : {}) } };
     }
     throw new Error("Unexpected runner command");
   };
@@ -181,6 +185,110 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
     assert.ok(final.ok); assert.equal(final.data!.decision!.authority, "orchestrator");
     assert.ok(h.approve(final.data!.decision!).ok);
     assert.ok((await h.svc.executeGithubIssueClosure("root", final.data!.decision!.occurrenceId, final.data!.decision!.resourceDigest)).ok);
+  } finally { h.db.close(); }
+});
+
+test("#4060 an in-scope epic's completed closure is Orchestrator-owned from its closed members, and names any member that is not", async () => {
+  const h = harness(true, 5, [100, 101, 102]);
+  try {
+    const request = { issue: 100, reason: "completed" as const, explanation: "Every member delivered", evidence: ["Members closed"] };
+    const ask = (requestId: string, reason: "completed" | "not_planned" = "completed") =>
+      h.svc.requestGithubIssueClosure("root", { ...request, reason, requestId });
+    const closureSnapshot = (decision: WorkflowDecisionView) => {
+      assert.equal(decision.resourceSnapshot.category, "issue_closure");
+      return decision.resourceSnapshot as Extract<WorkflowDecisionView["resourceSnapshot"], { category: "issue_closure" }>;
+    };
+    const member = (number: number, state: IssueClosureEpicMembers["members"][number]["state"]) => ({ number, state });
+    // The epic's own work item is a placeholder: it was never dispatched, so it is never a gap here.
+    for (const [name, members, code, named] of [
+      ["open", [member(101, "completed"), member(102, "open")], "epic_member_open", [102]],
+      ["closed otherwise", [member(101, "completed"), member(102, "closed_not_completed")], "epic_member_not_completed", [102]],
+      // A member added to the epic after launch counts, and is outside scope until admitted.
+      ["added after launch", [member(101, "completed"), member(102, "completed"), member(103, "completed")], "epic_member_outside_scope", [103]],
+      ["unreadable member", [member(101, "completed"), member(102, "unreadable")], "epic_member_unreadable", [102]],
+    ] as const) {
+      h.state.epicMembers = { readable: true, members: [...members] };
+      const result = await ask(`epic-${name}`);
+      assert.ok(result.ok, result.error ?? name);
+      const decision = result.data!.decision!;
+      assert.equal(decision.authority, "human", name);
+      assert.equal(decision.authorityEvaluation?.reason, "closure_proof_incomplete", name);
+      const snapshot = closureSnapshot(decision);
+      assert.deepEqual(snapshot.epicMembers, h.state.epicMembers, name);
+      assert.deepEqual(snapshot.deliveryGaps?.map((gap) => [gap.code, gap.members, gap.workItemId]), [[code, named, undefined]], name);
+      assert.equal(snapshot.deliveryFailure, `${code}:#${named[0]}`, name);
+      assert.match(snapshot.deliveryGaps![0]!.summary, new RegExp(`#${named[0]}\\b`), name);
+      assert.deepEqual(result.data!.proofGaps?.gaps, snapshot.deliveryGaps, name);
+    }
+    // A member list the runner could not read is named, and the ordinary snapshot and gaps stand.
+    h.state.epicMembers = { readable: false, members: [] };
+    const unreadable = await ask("epic-unreadable-list");
+    assert.ok(unreadable.ok); assert.equal(unreadable.data!.decision!.authority, "human");
+    const ordinary = closureSnapshot(unreadable.data!.decision!);
+    assert.equal(ordinary.epicMembers, undefined);
+    assert.deepEqual(gapNames(ordinary.deliveryGaps), [{ code: "no_delivered_verification", workItemId: h.item.id },
+      { code: "epic_members_unreadable", workItemId: undefined }]);
+    // An issue without members behaves as before.
+    h.state.epicMembers = { readable: true, members: [] };
+    const plain = await ask("no-members");
+    assert.ok(plain.ok); assert.equal(plain.data!.decision!.authority, "human");
+    assert.equal(closureSnapshot(plain.data!.decision!).epicMembers, undefined);
+    assert.deepEqual(gapNames(closureSnapshot(plain.data!.decision!).deliveryGaps), [{ code: "no_delivered_verification", workItemId: h.item.id }]);
+
+    h.state.epicMembers = { readable: true, members: [member(101, "completed"), member(102, "completed")] };
+    // An epic item that was dispatched is no placeholder: it still needs its own delivery.
+    const original = h.db.campaignWorkLedger.detail.bind(h.db.campaignWorkLedger);
+    h.db.campaignWorkLedger.detail = (campaign, id, now) => {
+      const item = original(campaign, id, now);
+      return item && id === h.item.id ? { ...item, attemptCount: 1 } : item;
+    };
+    const dispatched = await ask("epic-dispatched-item");
+    assert.ok(dispatched.ok); assert.equal(dispatched.data!.decision!.authority, "human");
+    assert.deepEqual(gapNames(closureSnapshot(dispatched.data!.decision!).deliveryGaps), [{ code: "no_delivered_verification", workItemId: h.item.id }]);
+    h.db.campaignWorkLedger.detail = original;
+
+    // Every member closed as completed and in scope: Orchestrator-owned, with no fixed-by plan.
+    const proven = await ask("epic-proven");
+    assert.ok(proven.ok, proven.error ?? "epic closure requested");
+    const decision = proven.data!.decision!;
+    assert.equal(decision.authority, "orchestrator");
+    const snapshot = closureSnapshot(decision);
+    assert.deepEqual(snapshot.epicMembers, h.state.epicMembers);
+    assert.equal(snapshot.forgeDigest, "b".repeat(64), "the snapshot is the member read's inspection");
+    assert.ok(snapshot.issueAdmission);
+    assert.equal(snapshot.deliveryGaps, undefined);
+    const proof = closureEvidence(h.db, h.db.getSession("root")!, snapshot);
+    assert.deepEqual(proof && "placeholders" in proof ? proof.placeholders : null, [h.item.id]);
+    // A member's state recorded in the snapshot is the proof: an open one never proves it.
+    assert.equal(closureEvidence(h.db, h.db.getSession("root")!, { ...snapshot, epicMembers: { readable: true,
+      members: [member(101, "completed"), member(102, "open")] } }), null);
+    // Not-planned closures never read members.
+    const asked = h.state.closureMessages.length;
+    const notPlanned = await ask("epic-not-planned", "not_planned");
+    assert.ok(notPlanned.ok);
+    assert.equal(closureSnapshot(notPlanned.data!.decision!).epicMembers, undefined);
+    assert.ok(h.state.closureMessages.slice(asked).every((message) => !(message as { epicMembers?: true }).epicMembers));
+    // The proven request superseded every earlier one; approve and execute it, and the runner gets the member read.
+    const current = (await ask("epic-proven-again")).data!.decision!;
+    assert.equal(current.authority, "orchestrator");
+    assert.ok(h.approve(current).ok);
+    assert.ok((await h.svc.executeGithubIssueClosure("root", current.occurrenceId, current.resourceDigest)).ok);
+    const executed = h.state.closureMessages.at(-1) as { operation: string; snapshot: { epicMembers?: IssueClosureEpicMembers } };
+    assert.equal(executed.operation, "execute");
+    assert.deepEqual(executed.snapshot.epicMembers, h.state.epicMembers);
+  } finally { h.db.close(); }
+});
+
+test("#4060 an epic's closure keeps the ordinary proof on a runner without the member read", async () => {
+  const h = harness(true, 5, [100, 101, 102]);
+  try {
+    h.db.registerRunner(h.metadata, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.epicClosureMembers - 1);
+    h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }, { number: 102, state: "completed" }] };
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "old-runner", issue: 100, reason: "completed",
+      explanation: "Every member delivered", evidence: ["Members closed"] });
+    assert.ok(result.ok, result.error ?? "closure requested");
+    assert.equal(result.data!.decision!.authority, "human");
+    assert.ok(h.state.closureMessages.every((message) => !(message as { epicMembers?: true }).epicMembers));
   } finally { h.db.close(); }
 });
 
@@ -2923,6 +3031,27 @@ test("#4058 gaps are canonical: action and summary derive from the code, and the
   const short = issueClosureDeliveryFailure([issueClosureDeliveryGap("attempt_open", { workItemId: "a" }), issueClosureDeliveryGap("stale_pull_request", { workItemId: "b", pullRequests: [4] })]);
   assert.equal(short, "attempt_open:a; stale_pull_request:b:#4");
   assert.equal(issueClosureDeliveryFailure([issueClosureDeliveryGap("no_work_item")]), "no_work_item");
+});
+
+test("#4060 epic member gaps name their members, and stored member reads normalize canonically", () => {
+  const open = issueClosureDeliveryGap("epic_member_open", { members: [7, 3, 7] });
+  assert.deepEqual([open.members, open.action], [[3, 7], "close_members"]);
+  assert.match(open.summary, /^Members of this epic are open: #3, #7\. Close each named member as completed through its own closure request/u);
+  assert.equal(issueClosureDeliveryGap("epic_member_outside_scope", { members: [9] }).action, "person_decides");
+  assert.equal(issueClosureDeliveryGap("epic_member_not_completed", { members: [9] }).action, "person_decides");
+  assert.equal(issueClosureDeliveryGap("epic_members_unreadable").action, "request_again");
+  assert.deepEqual(normalizeIssueClosureDeliveryGaps([{ ...open, summary: "forged" }]), [open]);
+  assert.equal(normalizeIssueClosureDeliveryGaps([{ code: "epic_member_open", members: "3" }]), null);
+  assert.equal(issueClosureDeliveryFailure([open, issueClosureDeliveryGap("epic_members_unreadable")]), "epic_member_open:#3,#7; epic_members_unreadable");
+  const read = { readable: true, members: [{ number: 3, state: "completed" }, { number: 7, state: "open" }] };
+  assert.deepEqual(normalizeIssueClosureEpicMembers(read), read);
+  for (const invalid of [null, [], { readable: true }, { readable: false, members: [{ number: 3, state: "open" }] },
+    { readable: true, members: [{ number: 7, state: "open" }, { number: 3, state: "open" }] },
+    { readable: true, members: [{ number: 3, state: "open" }, { number: 3, state: "open" }] },
+    { readable: true, members: [{ number: 3, state: "merged" }] }, { readable: true, members: [{ number: 0, state: "open" }] },
+    { readable: true, members: Array.from({ length: 101 }, (_, n) => ({ number: n + 1, state: "open" })) }]) {
+    assert.equal(normalizeIssueClosureEpicMembers(invalid), null, JSON.stringify(invalid).slice(0, 80));
+  }
 });
 
 test("#4058 every named gap appears with and without a fixed-by plan, and naming it never admits the proof", () => {

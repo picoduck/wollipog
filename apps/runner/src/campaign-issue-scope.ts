@@ -1,4 +1,5 @@
-import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationSubject, campaignPublicationTitle, campaignRepositoryLocation, type CampaignIssueScopeView } from "@wollipog/protocol";
+import { epicChecklistMembers, campaignPublicationSafe, campaignPublicationSubject, campaignPublicationTitle, campaignRepositoryLocation, ISSUE_CLOSURE_EPIC_MEMBERS_MAX,
+  type CampaignIssueScopeView, type IssueClosureEpicMembers, type IssueClosureEpicMemberState } from "@wollipog/protocol";
 import { createHash } from "node:crypto";
 import { githubSlug } from "./git-ops.js";
 import { gitlabIssueOrigin, readGitlabIssue, readGitlabProject } from "./gitlab-issue-closure.js";
@@ -63,6 +64,48 @@ export async function inspectCampaignIssueScope(run: Run, epic?: number, issues:
     candidates.push({ issue: { repository, number: issue.number }, title: issue.title, source: "member_checklist" });
   }
   return { repository, candidates };
+}
+
+/** A GitHub issue state as an epic member's state: only the forge's completed reason is `completed`. */
+function epicMemberState(raw: { state?: unknown; state_reason?: unknown }): IssueClosureEpicMemberState | null {
+  if (raw.state === "open") return "open";
+  if (raw.state !== "closed") return null;
+  return raw.state_reason === "completed" ? "completed" : "closed_not_completed";
+}
+
+/** An epic's members and their states at closure time (#4060), from exactly the sources scope
+ * admission reads: GitHub sub-issues, then the epic body's member checklist. The member list is
+ * all or nothing: an overflowing, malformed or cross-repository sub-issue list makes the whole read
+ * unreadable, as it refuses scope admission. A checklist member that cannot be read is named
+ * `unreadable` instead, so the closure can say which one. Agent-written text never adds a member:
+ * the checklist is the forge's own copy of the epic body. */
+export async function readEpicMemberStates(run: Run, repository: string, epic: number, body: string): Promise<IssueClosureEpicMembers> {
+  const unreadable: IssueClosureEpicMembers = { readable: false, members: [] };
+  const members = new Map<number, IssueClosureEpicMemberState>();
+  let checklist: number[];
+  try {
+    const children = JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/issues/${epic}/sub_issues?per_page=100`]));
+    if (!Array.isArray(children) || children.length > 99) return unreadable;
+    for (const child of children) {
+      const state = child && typeof child === "object" ? epicMemberState(child) : null;
+      if (!state || !Number.isSafeInteger(child.number) || child.number < 1 || child.number === epic || child.pull_request ||
+          typeof child.html_url !== "string" || child.html_url.toLowerCase() !== `https://github.com/${repository}/issues/${child.number}`.toLowerCase()) return unreadable;
+      members.set(child.number, state);
+    }
+    checklist = epicChecklistMembers(body, repository).filter((number) => number !== epic && !members.has(number));
+  } catch { return unreadable; }
+  if (members.size + checklist.length > ISSUE_CLOSURE_EPIC_MEMBERS_MAX) return unreadable;
+  for (let offset = 0; offset < checklist.length; offset += 4) {
+    await Promise.all(checklist.slice(offset, offset + 4).map(async (number) => {
+      try {
+        const raw = JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/issues/${number}`]));
+        const state = raw && typeof raw === "object" && raw.number === number && !raw.pull_request && typeof raw.html_url === "string" &&
+          raw.html_url.toLowerCase() === `https://github.com/${repository}/issues/${number}`.toLowerCase() ? epicMemberState(raw) : null;
+        members.set(number, state ?? "unreadable");
+      } catch { members.set(number, "unreadable"); }
+    }));
+  }
+  return { readable: true, members: [...members].sort(([a], [b]) => a - b).map(([number, state]) => ({ number, state })) };
 }
 
 /** GitLab scope (#3539, v249): issues are read with `glab`, and an epic is an ordinary issue of the

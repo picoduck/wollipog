@@ -196,7 +196,7 @@ bounded privacy-safe inventory through the authorized single-session projection.
 | Inspect the bounded managed background-job inventory | 82 |
 | Classify provider background-work tracking explicitly | 83 |
 | Discover and safely adopt external Pi sessions | 156 |
-| Remove a workspace set in the runner's configuration | 278 |
+| Remove a workspace set in the runner's configuration | 279 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner

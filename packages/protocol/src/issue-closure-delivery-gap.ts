@@ -8,10 +8,46 @@
  * person's, or `person_decides` when no campaign action can. Gaps are derived by the server from
  * the ledger and the runner's forge read, never from the request's explanation or evidence.
  *
- * New proof conditions (an epic closed from its verified members, for example) add a code here and
- * map it to an existing action, or add an action. Consumers that meet an unknown code from a newer
- * peer read it as `delivery_unverified`.
+ * New proof conditions add a code here and map it to an existing action, or add an action, as the
+ * epic source (#4060) does. Consumers that meet an unknown code from a newer peer read it as
+ * `delivery_unverified`.
  */
+
+/** One member of an epic as the runner read it at closure time (#4060), from the same forge sources
+ * scope admission accepts: GitHub sub-issues and the epic's member checklist. `completed` is closed
+ * with the forge's completed reason; `closed_not_completed` is any other closure, including one the
+ * forge records no reason for; `unreadable` is a checklist member the runner could not read. */
+export type IssueClosureEpicMemberState = "open" | "completed" | "closed_not_completed" | "unreadable";
+
+/** The most members an epic closure reads; a larger epic is unreadable rather than partly read. */
+export const ISSUE_CLOSURE_EPIC_MEMBERS_MAX = 100;
+
+export interface IssueClosureEpicMembers {
+  /** False when the sub-issues or member checklist could not be read in full; `members` is then empty. */
+  readable: boolean;
+  /** Ascending by number, without the epic itself. Empty for an issue with no members. */
+  members: Array<{ number: number; state: IssueClosureEpicMemberState }>;
+}
+
+const EPIC_MEMBER_STATES: ReadonlySet<string> = new Set<IssueClosureEpicMemberState>(["open", "completed", "closed_not_completed", "unreadable"]);
+
+/** A received or stored member read, rebuilt canonically; null when it is not a bounded, sorted,
+ * duplicate-free read. */
+export function normalizeIssueClosureEpicMembers(value: unknown): IssueClosureEpicMembers | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  const record = value as Record<string, unknown>;
+  if (typeof record.readable !== "boolean" || !Array.isArray(record.members) || record.members.length > ISSUE_CLOSURE_EPIC_MEMBERS_MAX ||
+      !record.readable && record.members.length) return null;
+  const members: IssueClosureEpicMembers["members"] = [];
+  for (const raw of record.members) {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return null;
+    const member = raw as Record<string, unknown>;
+    if (!Number.isSafeInteger(member.number) || (member.number as number) < 1 || typeof member.state !== "string" ||
+        !EPIC_MEMBER_STATES.has(member.state) || members.length && members.at(-1)!.number >= (member.number as number)) return null;
+    members.push({ number: member.number as number, state: member.state as IssueClosureEpicMemberState });
+  }
+  return { readable: record.readable, members };
+}
 
 export const ISSUE_CLOSURE_DELIVERY_GAP_CODES = [
   /** Open pull requests GitHub relates to the issue; `pullRequests` names each. */
@@ -50,13 +86,23 @@ export const ISSUE_CLOSURE_DELIVERY_GAP_CODES = [
   "comment_unsafe",
   /** Delivery could not be proven for a reason no other code names. */
   "delivery_unverified",
+  /** Epic source (#4060): these members are open on the forge; `members` names each. */
+  "epic_member_open",
+  /** Epic source: these members were closed, but not as completed; `members` names each. */
+  "epic_member_not_completed",
+  /** Epic source: these members are outside the campaign's scope; `members` names each. */
+  "epic_member_outside_scope",
+  /** Epic source: the runner could not read these members; `members` names each. */
+  "epic_member_unreadable",
+  /** Epic source: the runner could not read the issue's sub-issues or member checklist in full. */
+  "epic_members_unreadable",
 ] as const;
 
 export type IssueClosureDeliveryGapCode = typeof ISSUE_CLOSURE_DELIVERY_GAP_CODES[number];
 
 export const ISSUE_CLOSURE_GAP_ACTIONS = [
   "wait_for_pull_requests", "verify_child", "finish_attempt", "deliver_work_item", "record_delivery_pull_requests",
-  "request_again", "record_disposition", "revise_comment", "person_decides",
+  "request_again", "record_disposition", "revise_comment", "close_members", "person_decides",
 ] as const;
 
 export type IssueClosureGapAction = typeof ISSUE_CLOSURE_GAP_ACTIONS[number];
@@ -70,6 +116,8 @@ export interface IssueClosureDeliveryGap {
   workItemId?: string;
   /** The pull or merge requests the gap names, ascending; omitted when it names none. */
   pullRequests?: number[];
+  /** The epic's member issues the gap names, ascending (#4060); omitted when it names none. */
+  members?: number[];
   /** Derived from `code`: what would let a new request become Orchestrator-owned. */
   action: IssueClosureGapAction;
   /** One or two sentences derived from the fields above, for agents and the Inbox. */
@@ -95,6 +143,11 @@ const GAP_ACTION: Record<IssueClosureDeliveryGapCode, IssueClosureGapAction> = {
   disposition_unverified: "record_disposition",
   comment_unsafe: "revise_comment",
   delivery_unverified: "person_decides",
+  epic_member_open: "close_members",
+  epic_member_not_completed: "person_decides",
+  epic_member_outside_scope: "person_decides",
+  epic_member_unreadable: "request_again",
+  epic_members_unreadable: "request_again",
 };
 
 const ACTION_TEXT: Record<IssueClosureGapAction, string> = {
@@ -109,6 +162,8 @@ const ACTION_TEXT: Record<IssueClosureGapAction, string> = {
   record_disposition: "Record each work item's cancellation or scope removal with a reason and end any open attempt; a named recommendation " +
     "must be rejected or a duplicate, with a reason, and cite the item. Then request the closure again.",
   revise_comment: "Remove the unsafe text from the comment, or omit it, and request the closure again.",
+  close_members: "Close each named member as completed through its own closure request, which is Orchestrator-owned when its " +
+    "delivery is proven, then request this closure again.",
   person_decides: "No campaign action makes a new request Orchestrator-owned; the person decides this one.",
 };
 
@@ -121,7 +176,7 @@ export function isIssueClosureDeliveryGapCode(value: unknown): value is IssueClo
 const named = (pullRequests: readonly number[] | undefined) => pullRequests?.length
   ? pullRequests.map((number) => `#${number}`).join(", ") : "";
 
-function gapText(code: IssueClosureDeliveryGapCode, item: string, prs: string): string {
+function gapText(code: IssueClosureDeliveryGapCode, item: string, prs: string, members: string): string {
   const of = item ? ` for work item ${item}` : "";
   switch (code) {
     case "open_related_pull_requests": return `Related pull requests are open: ${prs || "unnamed"}. One whose title and body no longer mention ` +
@@ -144,6 +199,11 @@ function gapText(code: IssueClosureDeliveryGapCode, item: string, prs: string): 
     case "disposition_unverified": return `The not-planned disposition${of} is not recorded`;
     case "comment_unsafe": return "The closing comment did not pass publication sanitization";
     case "delivery_unverified": return "Delivery could not be proven";
+    case "epic_member_open": return `Members of this epic are open: ${members || "unnamed"}`;
+    case "epic_member_not_completed": return `Members of this epic were closed, but not as completed: ${members || "unnamed"}`;
+    case "epic_member_outside_scope": return `Members of this epic are outside the campaign's scope: ${members || "unnamed"}`;
+    case "epic_member_unreadable": return `The runner could not read these members of this epic: ${members || "unnamed"}`;
+    case "epic_members_unreadable": return "The runner could not read this issue's sub-issues and member checklist in full";
   }
 }
 
@@ -157,13 +217,14 @@ function pullRequestNumbers(value: unknown): number[] | undefined {
 /** The one canonical gap for a code; its action and summary are always derived, never accepted. */
 export function issueClosureDeliveryGap(
   code: IssueClosureDeliveryGapCode,
-  details: { workItemId?: string; pullRequests?: readonly number[] } = {},
+  details: { workItemId?: string; pullRequests?: readonly number[]; members?: readonly number[] } = {},
 ): IssueClosureDeliveryGap {
   const pullRequests = pullRequestNumbers(details.pullRequests);
+  const members = pullRequestNumbers(details.members);
   const workItemId = typeof details.workItemId === "string" && details.workItemId ? details.workItemId.slice(0, 256) : undefined;
   const action = GAP_ACTION[code];
-  return { code, ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}), action,
-    summary: `${gapText(code, workItemId ?? "", named(pullRequests))}. ${ACTION_TEXT[action]}` };
+  return { code, ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}), ...(members ? { members } : {}), action,
+    summary: `${gapText(code, workItemId ?? "", named(pullRequests), named(members))}. ${ACTION_TEXT[action]}` };
 }
 
 /** Stored gaps, rebuilt canonically; null when the value is not a bounded gap list. An unknown
@@ -176,9 +237,11 @@ export function normalizeIssueClosureDeliveryGaps(value: unknown): IssueClosureD
     const record = raw as Record<string, unknown>;
     if (record.workItemId !== undefined && (typeof record.workItemId !== "string" || !record.workItemId || record.workItemId.length > 256)) return null;
     if (record.pullRequests !== undefined && (!Array.isArray(record.pullRequests) || record.pullRequests.length > 100)) return null;
+    if (record.members !== undefined && (!Array.isArray(record.members) || record.members.length > 100)) return null;
     gaps.push(issueClosureDeliveryGap(isIssueClosureDeliveryGapCode(record.code) ? record.code : "delivery_unverified", {
       ...(record.workItemId === undefined ? {} : { workItemId: record.workItemId as string }),
       ...(record.pullRequests === undefined ? {} : { pullRequests: record.pullRequests as number[] }),
+      ...(record.members === undefined ? {} : { members: record.members as number[] }),
     }));
   }
   return gaps;
@@ -188,11 +251,12 @@ export function normalizeIssueClosureDeliveryGaps(value: unknown): IssueClosureD
 export const ISSUE_CLOSURE_DELIVERY_FAILURE_MAX = 512;
 
 /** The compact `deliveryFailure` line: `code[:workItemId][:#n,#m]` per gap, joined by "; ", naming
- * at most ten pull requests per gap. Gaps that would pass the bound are left out and counted, so
- * the line never cuts a name in half; `deliveryGaps` keeps them all. */
+ * at most ten pull requests, or epic members, per gap (no code names both). Gaps that would pass
+ * the bound are left out and counted, so the line never cuts a name in half; `deliveryGaps` keeps
+ * them all. */
 export function issueClosureDeliveryFailure(gaps: readonly IssueClosureDeliveryGap[]): string {
   const parts = gaps.map((gap) => {
-    const prs = gap.pullRequests ?? [];
+    const prs = gap.pullRequests ?? gap.members ?? [];
     const listed = prs.slice(0, 10).map((number) => `#${number}`).join(",") + (prs.length > 10 ? `,+${prs.length - 10}` : "");
     return [gap.code, ...(gap.workItemId ? [gap.workItemId] : []), ...(listed ? [listed] : [])].join(":");
   });

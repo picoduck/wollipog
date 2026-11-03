@@ -86,7 +86,7 @@ function runnerMeta(runnerId: string, temp: string): RunnerMetadata {
       capabilities: { models: [{ id: MODEL, default: true }], effortLevels: ["high"], slashCommands: [],
         permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true } }],
     runtime: { dataDir: "/fixture/data", worktreeRoot: "/fixture/data/worktrees", maxConcurrentSessions: 8,
-      campaignLaunchInspection: { version: 2 }, executionIsolation: { mode: "provider", network: "inherit" } },
+      campaignLaunchInspection: { version: 3 }, executionIsolation: { mode: "provider", network: "inherit" } },
   };
 }
 

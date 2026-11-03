@@ -834,19 +834,21 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      the merge gate accepts. Under Full Control, the controlling Orchestrator owns
 //      review_round_extension up to a per-pull-request cap when both the requester's and the
 //      controller's runners are v277; older peers keep it with the person.
-// 278: workspace removal (#4123). DELETE /api/runners/:id/workspaces/:workspaceId unregisters a
+// 278: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
+//      a Full Control completed closure of an in-scope epic can be proven from its closed members.
+// 279: workspace removal (#4123). DELETE /api/runners/:id/workspaces/:workspaceId unregisters a
 //      Workspace. A managed one is removed in the control plane; a configured one is sent as
 //      remove_workspace, and the runner records the removal in its data directory, stops
 //      advertising it and answers remove_workspace_result. Runner views tag each Workspace's
 //      `source`. Older runners keep their configured Workspaces and the control plane refuses.
-export const PROTOCOL_VERSION = 278;
+export const PROTOCOL_VERSION = 279;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
-import type { IssueClosureDeliveryGap } from "./issue-closure-delivery-gap.js";
+import type { IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
 export * from "./delegated-image-review.js";
@@ -863,6 +865,8 @@ export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
+export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
+export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.js";
 export type {
   CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
@@ -1054,9 +1058,9 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
-  /** v278 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
+  /** v279 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
    * Workspaces added in Wollipog are removed by the control plane on any runner. */
-  workspaceRemoval: 278,
+  workspaceRemoval: 279,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -1231,6 +1235,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorIssueScope: 158,
   campaignIssueScopeChanges: 208,
   orchestratorIssueClosure: 194,
+  /** v278 issue-closure inspection reads an epic's sub-issues and member checklist with each member's
+   * state (#4060). Without it an epic's completed closure has only the work-item proof. */
+  epicClosureMembers: 278,
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
@@ -3943,8 +3950,9 @@ export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
-   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection. */
-  campaignLaunchInspection?: { version: 1 | 2 };
+   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection.
+   * Version 3 accepts authorized project location paths and returns closed failure codes. */
+  campaignLaunchInspection?: { version: 1 | 2 | 3 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */
@@ -5196,6 +5204,10 @@ export interface GithubIssueClosureInspection {
    * omit it; a refusal of their snapshot cannot then name the PR that changed. */
   openPullRequests: Array<{ number: number; title: string; url: string; headSha: string; closesIssue?: boolean }>;
   delivery?: Array<{ number: number; headSha: string; mergeCommitSha: string }>;
+  /** v278 (#4060): present only when the inspection asked for them, and then part of `forgeDigest`:
+   * the epic's members from its sub-issues and member checklist, with each member's state. A GitLab
+   * runner omits it, so a GitLab epic keeps only the work-item proof. */
+  epicMembers?: IssueClosureEpicMembers;
 }
 
 export interface GithubIssueClosureRequest {
@@ -9745,7 +9757,9 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
 } & (
-  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }> }
+  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
+      /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
+      epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
 );
 

@@ -70,6 +70,23 @@ their own-work-item behavior. Epic prose and other agent-written text cannot cre
 this implementation supports the recorded-plan source. Clients need protocol 268 to send `fixedBy`;
 older servers keep such closures human-owned. Do not update the hosting stack to gain support.
 
+An in-scope epic has a second source, its members, and needs no plan. When a completed closure of
+an issue without a fixed-by plan fails its own-work proof, the runner reads the issue's members on
+the forge at request time from the sources scope admission accepts (GitHub sub-issues and the
+epic body's member checklist), never from agent text, and binds that read into the closure. The
+closure is Orchestrator-owned when every member is in the campaign's scope and closed as
+completed, and every work item of the epic itself is either delivered under the existing proof or
+a placeholder that was never dispatched. Anything else keeps the closure human-owned and names the
+member: open (`epic_member_open`; close it through its own closure request first, then ask again),
+closed another way, outside scope (including a member added after launch that scope never
+admitted), or unreadable. An epic never closes while a member is open on the forge, even one whose
+own closure would pass. If a member joins, leaves or changes state before execution, the runner
+refuses the approval with `epic_members_changed`. A placeholder item of an epic closed this way no
+longer holds the campaign's completion, so the root need not mark it `scope_removed`; any epic
+item with an attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
+plan and issues without members are unchanged. The member read needs runner protocol 278 and a
+GitHub repository; elsewhere the epic keeps the own-work proof and its closure stays human-owned.
+
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision
 only when the server-established human boundary, current occurrence owner and repository rules
 permit it. Use request/get/consume with unchanged resources immediately before acting. Human
