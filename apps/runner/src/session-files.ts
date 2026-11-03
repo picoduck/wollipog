@@ -27,6 +27,8 @@ import { run } from "./discovery/resolve.js";
 export const READ_FILE_CAP = 512 * 1024;
 const WORKSPACE_SEARCH_VISIT_CAP = 20_000;
 const WORKSPACE_DIRECTORY_ENTRY_CAP = 2_000;
+/** Full fuzzy alignment work one search may spend, in cells; past it, paths are placed greedily. */
+export const WORKSPACE_FUZZY_ALIGNMENT_BUDGET = 4_000_000;
 
 export interface SessionFileListing {
   path: string;
@@ -482,11 +484,16 @@ function containingQuery(visit: WorkspaceVisit, query: string): WorkspaceReferen
 }
 
 /** Files only, best score first, then the shorter path; remaining ties keep the visit order. */
-export function bestFuzzyFiles(visit: WorkspaceVisit, needle: string): WorkspaceReferenceSearch {
+export function bestFuzzyFiles(
+  visit: WorkspaceVisit,
+  needle: string,
+  alignmentBudget = WORKSPACE_FUZZY_ALIGNMENT_BUDGET,
+): WorkspaceReferenceSearch {
   const scored: { candidate: WorkspaceReferenceCandidate; score: number; order: number }[] = [];
+  const budget = { cells: alignmentBudget };
   visit.entries.forEach((candidate, order) => {
     if (candidate.isDirectory) return;
-    const score = fuzzyPathScore(candidate.path, needle);
+    const score = fuzzyPathScore(candidate.path, needle, budget);
     if (score !== null) scored.push({ candidate, score, order });
   });
   scored.sort((a, b) => b.score - a.score || a.candidate.path.length - b.candidate.path.length || a.order - b.order);

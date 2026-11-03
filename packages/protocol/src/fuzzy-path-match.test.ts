@@ -56,3 +56,18 @@ test("a very long path is matched without the full alignment and still ends in t
   assert.ok(found.positions[0]! > path.lastIndexOf("/"), "the characters land in the file name");
   assert.equal(fuzzyPathScore(path, "zz"), null);
 });
+
+test("a shared alignment budget is spent per path and, once gone, still matches the same paths cheaply", () => {
+  const needle = fuzzyPathNeedle("sdtsx");
+  const path = "apps/web/src/components/SessionDetail.tsx";
+  const budget = { cells: 1_000 };
+  const full = fuzzyPathScore(path, needle, budget);
+  assert.equal(full, fuzzyPathScore(path, needle), "within the budget the score is the full alignment's");
+  assert.ok(budget.cells < 1_000, "the alignment's cells were charged");
+  const spent = { cells: 0 };
+  const cheap = fuzzyPathScore(path, needle, spent);
+  assert.notEqual(cheap, null, "a spent budget still matches");
+  assert.ok(cheap! <= full!, "the cheap placement never outscores the best one");
+  assert.equal(spent.cells, 0);
+  assert.equal(fuzzyPathScore("src/a.ts", needle, spent), null, "and still rejects a non-match");
+});

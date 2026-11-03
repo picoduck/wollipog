@@ -244,6 +244,19 @@ test("a fuzzy search keeps the best 50 matches, not the first 50 found, and name
   }
 });
 
+test("bestFuzzyFiles bounds its total alignment work and still ranks every match", () => {
+  const entries = [
+    { path: "src/sidebar-details.tsx", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+    { path: "src/unrelated.ts", isDirectory: false },
+  ];
+  const unbounded = bestFuzzyFiles({ entries, truncated: false }, "sdtsx");
+  const spent = bestFuzzyFiles({ entries, truncated: false }, "sdtsx", 0);
+  assert.deepEqual(spent.results.map((candidate) => candidate.path).sort(), unbounded.results.map((candidate) => candidate.path).sort(),
+    "a spent budget changes how finely matches are scored, never which paths match");
+  assert.equal(spent.results.length, 2);
+});
+
 test("bestFuzzyFiles reports the visit cap ahead of the result cap", () => {
   const entries = Array.from({ length: 60 }, (_, index) => ({ path: `src/item-${index}.ts`, isDirectory: false }));
   const visitBound = bestFuzzyFiles({ entries, truncated: true }, "item");

@@ -37,9 +37,18 @@ export function fuzzyPathNeedle(query: string): string {
   return foldCase(query.replace(/\s+/g, ""));
 }
 
+/**
+ * Alignment work a caller allows across many paths, in cells (query length × path length). Once it
+ * runs out, each further path takes the cheap placement that pushes its characters toward the end,
+ * so scoring a whole traversal stays linear in its size whatever the query.
+ */
+export interface FuzzyAlignmentBudget {
+  cells: number;
+}
+
 /** The match's score, or null when `needle` (from `fuzzyPathNeedle`) is not in `path` in order. */
-export function fuzzyPathScore(path: string, needle: string): number | null {
-  return align(path, needle, false)?.score ?? null;
+export function fuzzyPathScore(path: string, needle: string, budget?: FuzzyAlignmentBudget): number | null {
+  return align(path, needle, false, budget)?.score ?? null;
 }
 
 /** The match's score and the matched offsets, for underlining. */
@@ -85,13 +94,13 @@ function bonusAt(path: string, index: number, nameStart: number): number {
 }
 
 /** The better of the match within the whole path and, with a bonus, within the file name alone. */
-function align(path: string, needle: string, withPositions: boolean): FuzzyPathMatch | null {
+function align(path: string, needle: string, withPositions: boolean, budget?: FuzzyAlignmentBudget): FuzzyPathMatch | null {
   if (needle.length === 0 || needle.length > path.length) return null;
   const haystack = foldCase(path);
   const nameStart = path.lastIndexOf("/") + 1;
-  const inPath = alignFrom(path, haystack, needle, 0, nameStart, withPositions);
+  const inPath = alignFrom(path, haystack, needle, 0, nameStart, withPositions, budget);
   if (!inPath) return null;
-  const inName = nameStart === 0 ? inPath : alignFrom(path, haystack, needle, nameStart, nameStart, withPositions);
+  const inName = nameStart === 0 ? inPath : alignFrom(path, haystack, needle, nameStart, nameStart, withPositions, budget);
   const best = inName && inName.score + NAME_ONLY >= inPath.score
     ? { score: inName.score + NAME_ONLY, positions: inName.positions }
     : inPath;
@@ -126,6 +135,7 @@ function alignFrom(
   start: number,
   nameStart: number,
   withPositions: boolean,
+  budget?: FuzzyAlignmentBudget,
 ): FuzzyPathMatch | null {
   const n = haystack.length;
   const m = needle.length;
@@ -140,10 +150,12 @@ function alignFrom(
     j = haystack.lastIndexOf(needle[i]!, j);
     latest[i] = j;
   }
-  if (m * (n - start) > MAX_ALIGNMENT_CELLS) {
+  const cells = m * (n - start);
+  if (cells > MAX_ALIGNMENT_CELLS || (budget !== undefined && budget.cells < cells)) {
     const positions = Array.from(latest.subarray(0, m));
     return { score: scorePositions(path, positions, nameStart), positions: withPositions ? positions : [] };
   }
+  if (budget) budget.cells -= cells;
   // previous[j]: the best score with the previous query character at offset j; previousRun[j]: the
   // bonus of the character that started its run. A run keeps its start's bonus, so "index" scores
   // higher as a whole word in "src/indexer/" than as letters spread across "binder-example".
