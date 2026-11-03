@@ -176,6 +176,12 @@ async function checkPageContent(page: Page, where: string) {
       overlapping: controls.flatMap((a, i) => controls.slice(i + 1)
         .filter((b) => overlaps(box(a), box(b))).map((b) => `${a.textContent} / ${b.textContent}`)),
       escape: Math.max(...controls.map((control) => box(control).right)) - box(toolbar).right,
+      // A button squeezed below its label: Range's label ends in an ellipsis inside its span, and
+      // About's spills out of the button. Boxes that merely touch would not show either (#4029).
+      clipped: controls.filter((control) => control.tagName === "BUTTON")
+        .filter((button) => [button, ...button.querySelectorAll(":scope > span")]
+          .some((element) => element.scrollWidth > element.clientWidth))
+        .map((button) => button.getAttribute("aria-label") ?? button.textContent),
     };
   });
   expect(usage.names, `${where}: a ${usage.column}px main column`).toEqual(usage.column <= 760
@@ -183,6 +189,7 @@ async function checkPageContent(page: Page, where: string) {
     : ["Metric", "Range: Last 30 Days", "Group By", "About These Numbers"]);
   expect(usage.rows, `${where}: the Usage toolbar stays on one row`).toBe(1);
   expect(usage.overlapping, `${where}: the Usage controls overlap`).toEqual([]);
+  expect(usage.clipped, `${where}: a Usage button clips its label`).toEqual([]);
   expectGeometry(usage.escape, `${where}: the Usage controls stay inside the page`).toBeLessThanOrEqual(0.51);
 }
 
