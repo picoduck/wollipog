@@ -199,6 +199,46 @@ test("a parked child's turn end owes its Orchestrator nothing; the woken child's
   } finally { h.db.close(); }
 });
 
+test("a wake that fails before starting records the parked child's report for its Orchestrator", () => {
+  const h = harness();
+  try {
+    h.db.appendEvent("s1", { kind: "agent_message", text: "Enqueued; parking.", final: true }, 5);
+    h.db.updateSessionStatus("s1", "idle", 6);
+    const watch = park(h);
+    const readyEvents = () => h.db.campaignContinuationEvents("root")
+      .filter((event) => event.kind === "child_ready" && event.subjectSessionId === "s1");
+    h.svc.onPullRequestWatchUpdate("r", { type: "pull_request_watch_update", watchId: watch.watchId, state: "fired", outcome: "merged" });
+    const [commandId] = [...h.wakes().keys()];
+    assert.ok(commandId);
+    assert.deepEqual(readyEvents(), [], "still parked while the wake is in flight");
+    h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId, sessionId: "s1",
+      state: "failed", revision: 5, code: "INVALID_COMMAND", error: "the runner refused the command" } as never);
+    assert.equal(h.db.pullRequestWatches.view(watch.watchId)!.continuation, "failed");
+    assert.equal(h.db.campaignChildWait("s1", Date.now()), null, "a failed wake no longer hides the child");
+    assert.equal(readyEvents().length, 1, "the parking report reaches the Orchestrator without another runner update");
+    assert.equal(h.db.getSession("s1")!.pullRequestWatch?.continuation, "failed", "the failed wake stays visible");
+  } finally { h.db.close(); }
+});
+
+test("only the parking turn is suppressed: a later turn's report reaches the Orchestrator while the watch runs", () => {
+  const h = harness();
+  try {
+    h.db.appendEvent("s1", { kind: "user_message", text: "Deliver the issue." }, 4);
+    h.db.appendEvent("s1", { kind: "agent_message", text: "Enqueued; parking.", final: true }, 5);
+    h.db.updateSessionStatus("s1", "idle", 6);
+    const ready = () => h.db.campaignContinuationChildCandidates("root").map((candidate) => [candidate.sessionId, candidate.eventSeq]);
+    park(h);
+    assert.deepEqual(ready(), [], "the parking turn's report is waiting");
+    // The parent asks something while the pull request is still queued; the watch keeps running.
+    h.db.appendEvent("s1", { kind: "user_message", text: "Which head did you enqueue?" }, 7);
+    const answer = h.db.appendEvent("s1", { kind: "agent_message", text: "aaaaaaaaaaaa, still queued.", final: true }, 8);
+    h.db.updateSessionStatus("s1", "idle", 9);
+    assert.equal(h.db.campaignChildWait("s1", Date.now()), null);
+    assert.deepEqual(ready(), [["s1", answer.seq]], "the later report is not hidden");
+    assert.equal(h.db.getSession("s1")!.pullRequestWatch?.state, "watching", "the watch itself keeps running");
+  } finally { h.db.close(); }
+});
+
 test("only the owning connection caches watch visibility; an attached reader sees the owner's new watch", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-watch-attach-"));
   const path = join(root, "control-plane.db");

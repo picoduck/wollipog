@@ -10141,6 +10141,16 @@ export class SessionsService {
     if (state === "failed") this.log.warn(`pull request watch wake failed for ${sessionId}: ${command.error ?? "unknown error"}`);
     this.hub.sessionChangedById(sessionId);
     this.settleQueuedAdmission(command, now);
+    // A wake that never started leaves the child idle and no longer parked, and its parking report
+    // was never recorded (campaignChildWait): record what is now ready, so its Orchestrator hears of it.
+    if (state !== "delivered") this.recordCampaignReadinessAfterWatch(sessionId, now);
+  }
+
+  /** A merge-queue watch stopped counting as a wait without the child's status changing (#4071). */
+  private recordCampaignReadinessAfterWatch(sessionId: string, now: number): void {
+    const campaignSessionId = this.db.campaignRootForMember(sessionId);
+    if (!campaignSessionId || campaignSessionId === sessionId) return;
+    this.db.recordCampaignContinuationEvents(this.campaignChildReadyEvents(campaignSessionId, now));
   }
 
   /** On registration: a runner without review sessions can no longer report its reviews. */

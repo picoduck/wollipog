@@ -91,7 +91,8 @@ export class PullRequestWatches {
       outcome TEXT, summary TEXT, reason TEXT, created_at INTEGER NOT NULL, ended_at INTEGER,
       continuation_state TEXT CHECK (continuation_state IS NULL OR
         continuation_state IN ('held','delivering','delivered','uncertain','failed','abandoned')),
-      continuation_command_id TEXT, continuation_updated_at INTEGER
+      continuation_command_id TEXT, continuation_updated_at INTEGER,
+      parked_turn_seq INTEGER NOT NULL DEFAULT 0
     );
     CREATE INDEX IF NOT EXISTS pull_request_watches_session ON pull_request_watches(session_id);
     CREATE INDEX IF NOT EXISTS pull_request_watches_runner ON pull_request_watches(runner_id) WHERE state='watching';
@@ -150,12 +151,16 @@ export class PullRequestWatches {
     return row ? PullRequestWatches.view(row) : undefined;
   }
 
-  /** True while the session is parked: watching, or its wake not yet handed to the runner. Its turn
-   * end then owes a supervising Orchestrator no continuation. */
+  /** True while the session is parked in the turn that parked it: watching, or its wake not yet
+   * handed to the runner, and no later turn started (a newer user message). That turn's end then owes
+   * a supervising Orchestrator no continuation; a later turn's report, such as one answering a
+   * parent's prompt while the watch keeps running, still does. */
   isParked(sessionId: string): boolean {
     // Every parked watch is also visible.
     if (this.noneVisible()) return false;
-    return this.stmt(`SELECT 1 FROM pull_request_watches WHERE session_id=? AND ${PARKED} LIMIT 1`).get(sessionId) !== undefined;
+    return this.stmt(`SELECT 1 FROM pull_request_watches w WHERE w.session_id=? AND ${PARKED}
+      AND NOT EXISTS (SELECT 1 FROM session_events e WHERE e.session_id=w.session_id AND e.kind='user_message'
+        AND e.seq>w.parked_turn_seq) LIMIT 1`).get(sessionId) !== undefined;
   }
 
   /** The visible watches of these sessions, newest first, at most `limit`. */
@@ -183,9 +188,12 @@ export class PullRequestWatches {
       // A newer park supersedes a wake the session has not received yet: it is acting again.
       this.write(`UPDATE pull_request_watches SET continuation_state='abandoned', continuation_updated_at=?
         WHERE session_id=? AND continuation_state='held'`).run(input.now, input.sessionId);
+      // The parking turn is the one whose user message is newest now; a newer one starts a later turn.
       this.write(`INSERT INTO pull_request_watches (watch_id, session_id, runner_id, repository, pr_number, head_sha,
-        state, created_at) VALUES (?,?,?,?,?,?,'watching',?)`).run(
-        input.watchId, input.sessionId, input.runnerId, input.repository, input.number, input.headSha, input.now);
+        state, created_at, parked_turn_seq) VALUES (?,?,?,?,?,?,'watching',?,
+        (SELECT COALESCE(MAX(seq),0) FROM session_events WHERE session_id=? AND kind='user_message'))`).run(
+        input.watchId, input.sessionId, input.runnerId, input.repository, input.number, input.headSha, input.now,
+        input.sessionId);
     });
     return replaced;
   }
