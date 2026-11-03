@@ -95,6 +95,20 @@ start; see [Managed Profiles](#managed-profiles).
 
 ## Managed Profiles
 
+Native Claude Code, Codex and Pi installation discovery uses a private probe HOME beneath each
+runner's owner-namespaced data directory. Executable resolution still searches the OS account's
+installed binaries, while version, capability, authentication, update-help and model probes use
+the leased probe environment. Model-cache fallback reads that same HOME. Discovery never copies
+credentials into it or uses it to replace an account or a saved session binding.
+
+An installed harness can report **Sign-In Required** while the Machine's SSH connection remains
+online. Use **Add Account** to complete supported sign-in into a persistent managed profile, then
+select that account for new sessions. Existing accounts and saved sessions keep their recorded
+HOMEs across reconnects and upgrades; explicitly selecting a shared HOME still enforces its lease
+and grants. Configured launch environments retain their explicit HOME selection and ownership
+checks. The content-free `provider_discovery_completed` log reports installation availability and
+sign-in counts without credential paths or account labels.
+
 An account created through Add Account on a v225 runner connected to a v225 control plane is a
 managed profile. Its HOME is `~/.agent-manager/profiles/<profileId>`: one root per SSH account,
 outside every runner's owner-namespaced data directory, named by a fresh random profile id. Existing

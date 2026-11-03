@@ -33,6 +33,20 @@ const probeConfiguredAcpAgent: typeof realProbeConfiguredAcpAgent = (agent, env,
 const probeConfiguredPiAgents: typeof realProbeConfiguredPiAgents = (agents, env, options) =>
   realProbeConfiguredPiAgents(agents, env, { ...testAdmission, ...options });
 
+test("configured Pi executes in the environment admitted by discovery ownership", async () => {
+  const agent = cfg({ id: "pi-isolated", driver: "pi", command: "fixture-pi", source: "config" });
+  let observed = false;
+  await probeConfiguredPiAgents([agent], () => ({}), {
+    authorize: async () => ({ env: { HOME: "/isolated-probe" }, settle: async () => {} }),
+    probe: async (_launch, _context, options) => {
+      observed = true;
+      assert.deepEqual(options?.env, { HOME: "/isolated-probe" });
+      return { available: true, authStatus: "unknown", capabilities: capabilitiesFor("pi")! };
+    },
+  });
+  assert.equal(observed, true);
+});
+
 const ACP_INITIALIZE_FIXTURE = [
   'let input="";',
   'process.stdin.setEncoding("utf8");',
@@ -442,13 +456,13 @@ test("a Codex replacement during discovery keeps the primary driver and rediscov
   }
 });
 
-test("a signed-out Codex is discovered but not ready, and signing in restores it", () => {
+test("a signed-out Codex retains installation availability and reports sign-in required separately", () => {
   const base = cfg({ id: "codex", name: "Codex", driver: "codex", source: "discovered" });
   const signedOut = codexAgentDefinitions({ ...base, authStatus: "unauthenticated" }, SUPPORTED_APP_SERVER, []);
   assert.deepEqual(signedOut.map((agent) => [agent.id, agent.available, agent.authStatus]), [
-    ["codex", false, "unauthenticated"],
+    ["codex", true, "unauthenticated"],
   ]);
-  // Only a confirmed missing login gates; unknown auth must not disable a working install.
+  // Neither missing nor unknown auth disables an installed harness for account setup.
   const unknown = codexAgentDefinitions({ ...base, authStatus: "unknown" }, SUPPORTED_APP_SERVER, []);
   assert.deepEqual(unknown.map((agent) => agent.available), [true]);
   const signedIn = codexAgentDefinitions({ ...base, authStatus: "authenticated" }, SUPPORTED_APP_SERVER, []);
@@ -477,9 +491,10 @@ test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing a
     discovered,
   )[0]!;
   assert.equal(disabled.available, false, "explicit config availability wins over the assertion");
-  // A key-less config row must not resurrect a gated discovery result.
+  // A key-less config row retains installation availability without claiming authentication.
   const plain = mergeAgents([cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server" })], discovered)[0]!;
-  assert.equal(plain.available, false);
+  assert.equal(plain.available, true);
+  assert.equal(plain.authStatus, "unauthenticated");
 });
 
 test("a failed or timed-out auth-file probe reports unknown, not signed-out", () => {

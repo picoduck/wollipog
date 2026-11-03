@@ -2209,6 +2209,10 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
         authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+        resolveEnv: (agent) => {
+          const configured = config.agents.find((candidate) => candidate.id === agent.id);
+          return configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : agent.env;
+        },
       }),
       claudeHookFeatureEnabled,
       log,
@@ -2227,6 +2231,10 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       else acpAuthStatus.delete(agent.id);
     }
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
+    log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
+      nativeProbeHome: "isolated", agents: metadata.agents.length,
+      available: metadata.agents.filter((agent) => agent.available === true).length,
+      signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
     metadata.editors = editors;
     if (refreshModels && metadata.executionTargets) {
       await Promise.all([containerTargets.refreshInstallations(), cloudTargets.refreshInstallations()]);
