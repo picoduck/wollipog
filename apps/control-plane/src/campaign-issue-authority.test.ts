@@ -2692,7 +2692,12 @@ test("#4062 a refused epic-member addition cannot be delivered through a dispatc
       { key: "issue:101", issue: { repository: "team/repo", number: 101 } }], planComplete: true });
     assert.equal(retarget.ok, false); assert.equal(retarget.status, 409);
     assert.match(retarget.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(retarget.error!, SCOPE_ROUTE);
+    const launchedChild = scoped.data!.id;
+    const updated = h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, issue: { repository: "team/repo", number: 101 } });
+    assert.equal(updated.ok, false); assert.equal(updated.status, 409);
+    assert.match(updated.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(updated.error!, SCOPE_ROUTE);
     assert.deepEqual(h.db.campaignWorkLedger.detail("root", h.item.id, Date.now())!.issue, { repository: "team/repo", number: 100 });
+    assert.equal(h.db.campaignWorkLedger.currentAssignment(launchedChild)?.workItemId, h.item.id);
     const delivered = await h.merge("child", 12, ["team/repo#100"]).request();
     assert.ok(delivered.ok, delivered.error ?? "refused");
     assert.equal(delivered.data!.authority, "orchestrator");

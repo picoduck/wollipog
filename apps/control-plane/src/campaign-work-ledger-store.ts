@@ -679,6 +679,15 @@ export class CampaignWorkLedgerStore {
     return refused ? fail<never>(refused.error, 409, refused.details) : null;
   }
 
+  /** Retargeting dispatched work is a dispatch for its new issue, checked the same way (#4062). Linking
+   * an accepted follow-up's published issue is not routed here: it must precede that issue's scope. */
+  private retargetRefusal(campaignId: string, item: ItemRow, issueRepository: string | null,
+    issueNumber: number | null): LedgerResult<never> | null {
+    if (issueRepository === item.issue_repository && issueNumber === item.issue_number || !this.openAttemptForItem(item.id)) return null;
+    const outside = this.hooks.admitDispatch?.(campaignId, itemIssue(issueRepository, issueNumber));
+    return outside ? fail<never>(`work item ${item.item_key} has an open attempt, so it cannot be retargeted: ${outside}`, 409) : null;
+  }
+
   private itemByKey(campaignId: string, key: string): ItemRow | undefined {
     return this.stmt("SELECT * FROM campaign_work_items WHERE campaign_session_id=? AND item_key=?")
       .get(campaignId, key) as ItemRow | undefined;
@@ -933,14 +942,9 @@ export class CampaignWorkLedgerStore {
           dispatchState: input.dispatchState ?? existing.dispatch_state,
           queuePosition: input.queuePosition !== undefined ? input.queuePosition : existing.queue_position,
         };
-        const revised = this.followUpRevision(campaignId, existing, next.title, next.issueRepository, next.issueNumber);
+        const revised = this.followUpRevision(campaignId, existing, next.title, next.issueRepository, next.issueNumber) ??
+          this.retargetRefusal(campaignId, existing, next.issueRepository, next.issueNumber);
         if (revised) return revised;
-        // Retargeting dispatched work is a dispatch for its new issue, checked the same way (#4062).
-        if ((next.issueRepository !== existing.issue_repository || next.issueNumber !== existing.issue_number) &&
-            this.openAttemptForItem(existing.id)) {
-          const outside = this.hooks.admitDispatch?.(campaignId, itemIssue(next.issueRepository, next.issueNumber));
-          if (outside) return fail(`work item ${input.key} has an open attempt, so it cannot be retargeted: ${outside}`, 409);
-        }
         if (next.title !== existing.title || next.issueRepository !== existing.issue_repository ||
             next.issueNumber !== existing.issue_number || next.dispatchState !== existing.dispatch_state ||
             next.queuePosition !== existing.queue_position) {
@@ -1087,9 +1091,10 @@ export class CampaignWorkLedgerStore {
         sets.push(`${column}=?`);
         values.push(value);
       };
+      const issueRepository = request.issue !== undefined ? request.issue?.repository ?? null : item.issue_repository;
+      const issueNumber = request.issue !== undefined ? request.issue?.number ?? null : item.issue_number;
       const revised = this.followUpRevision(campaignId, item, request.title !== undefined ? request.title?.trim() ?? null : item.title,
-        request.issue !== undefined ? request.issue?.repository ?? null : item.issue_repository,
-        request.issue !== undefined ? request.issue?.number ?? null : item.issue_number);
+        issueRepository, issueNumber) ?? this.retargetRefusal(campaignId, item, issueRepository, issueNumber);
       if (revised) return revised;
       if (request.title !== undefined) set("title", request.title?.trim() ?? null, item.title);
       if (request.issue !== undefined) {

@@ -85,8 +85,8 @@ Campaign Status lists it as recorded work outside authority, but:
   all), are human-owned (`unverified_closures`) whatever they declare: an unread pull request that
   declares an in-scope closure could still close an unscoped issue. A declared unscoped closure is
   still refused, as above.
-- Retargeting a work item that has an open attempt at an issue outside the scope is refused like a
-  dispatch. Linking an accepted follow-up's published issue to its item stays allowed, because that
+- Retargeting a work item that has an open attempt at an issue outside the scope, through
+  `record_campaign_plan` or `update_campaign_work_item`, is refused like a dispatch. Linking an accepted follow-up's published issue to its item stays allowed, because that
   record must precede the issue's scope addition; its merge still cannot close the issue unscoped.
 - Ownership follows the current scope. A merge is evaluated again when it is approved, when it is
   consumed, and once more after the arming read of GitHub against the controller as it is then. A
