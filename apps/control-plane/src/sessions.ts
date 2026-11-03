@@ -10689,7 +10689,8 @@ export class SessionsService {
     return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
       resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
         evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
-        publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess, { trustedPublication: true });
+        publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess,
+      { trustedPublication: true, requestedResourceKey: request.resourceKey });
   }
 
   /** `humanApproved`: the caller verified a person's qualifying approval of a publication that has
@@ -11190,6 +11191,8 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
+      /** The resourceKey an admitted publication was requested under, before it was stored under its recommendation (#4066). */
+      requestedResourceKey?: string;
       /** The server's own request when a follow-up passes the campaign's approval limit (#2940). */
       trustedFollowUpAdmission?: boolean;
       /** #3713: the child runner's GitHub read, taken just before this request. */
@@ -11318,6 +11321,14 @@ export class SessionsService {
       );
       if (parentUnsupported) return parentUnsupported;
     }
+    let retired: string[] = [];
+    if (category === "follow_up_issue_publication" && normalized.data.category === category &&
+        !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
+      const guarded = this.personOwnedPublicationGuard(sessionId, request.resourceKey, normalized.data,
+        internal?.trustedPublication && normalized.data.issueAdmission ? internal.requestedResourceKey ?? request.resourceKey : null);
+      if ("refusal" in guarded) return guarded.refusal;
+      retired = guarded.retire;
+    }
     const now = Date.now();
     const resourceDigest = auditDigest(normalized.data)!;
     const created = this.db.createWorkflowDecision({
@@ -11334,6 +11345,7 @@ export class SessionsService {
       authorityEvaluation,
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
+      ...(retired.length ? { alsoSupersede: retired } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
@@ -11373,6 +11385,47 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controller.session);
     this.hub.sessionChangedById(sessionId);
     return ok(this.withMergeReviewEvidence(decision), 201);
+  }
+
+  /** A requester's new publication never silently replaces one a person owns (#4066). A request
+   * that would supersede the requester's own pending or approved person-owned publication is
+   * refused, naming it and the withdrawal route, and creates nothing. The one exception is a
+   * publication the server admitted for recommendation R (`admittedFromKey` is the key it was
+   * requested under): that retires the requester's person-owned publications for R, or under the
+   * same key when they name no recommendation, so its stale twin cannot be approved and published
+   * again. One naming another recommendation is never retired. Other categories are unchanged. */
+  private personOwnedPublicationGuard(sessionId: string, resourceKey: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, admittedFromKey: string | null,
+  ): { retire: string[] } | { refusal: ServiceResult<WorkflowDecisionView> } {
+    const retire: string[] = [];
+    for (const held of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
+      if (held.category !== "follow_up_issue_publication" || held.authority !== "human" ||
+          held.resourceSnapshot.category !== "follow_up_issue_publication") continue;
+      const heldRecommendation = held.resourceSnapshot.recommendationId;
+      if (admittedFromKey !== null && snapshot.recommendationId && (heldRecommendation === snapshot.recommendationId ||
+          heldRecommendation === undefined && (held.resourceKey === admittedFromKey || held.resourceKey === resourceKey))) {
+        retire.push(held.occurrenceId);
+        continue;
+      }
+      if (held.resourceKey !== resourceKey) continue;
+      const next = held.status === "approved"
+        ? "It is approved: consume it to publish,"
+        : "Wait for the person's decision,";
+      return { refusal: { ok: false, status: 409, errorDetails: { code: "person_owned_publication_open", occurrenceId: held.occurrenceId },
+        error: `A person owns follow-up publication decision ${held.occurrenceId} (${held.status}) under resourceKey ${JSON.stringify(resourceKey)}, ` +
+          `and a new request would replace it without telling them. Nothing was created. ${next} or withdraw it first with ` +
+          `withdraw_workflow_decision (wollipog decision withdraw ${held.occurrenceId} --reason <text>) and request again.` } };
+    }
+    return { retire };
+  }
+
+  /** Why a superseded occurrence can no longer be resolved, naming what replaced it (#4066). */
+  private supersededWorkflowDecisionRefusal(decision: WorkflowDecisionView): ServiceResult<never> | null {
+    if (decision.status !== "superseded") return null;
+    return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded",
+      ...(decision.supersededBy ? { supersededBy: decision.supersededBy } : {}) },
+      error: `workflow decision ${decision.occurrenceId} was superseded by ${decision.supersededBy
+        ? `workflow decision ${decision.supersededBy}` : "a newer request for the same resource"} and can no longer be approved or denied` };
   }
 
   workflowDecision(sessionId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
@@ -11444,7 +11497,9 @@ export class SessionsService {
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
     }
-    if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    if (decision.status !== "pending") {
+      return this.supersededWorkflowDecisionRefusal(decision) ?? fail("workflow decision is stale or already resolved", 409);
+    }
     if (resolution?.outcome === "approve" && decision.resourceSnapshot.category === "pr_merge") {
       const requester = this.db.getSession(childSessionId);
       const refused = requester && this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot);
@@ -14117,6 +14172,12 @@ export class SessionsService {
     // duplicate POST, or wrong id must not clear pendingApproval / unblock the column
     // while the runner ignores the unknown id and the agent stays parked.
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
+    // A card a newer request replaced names its replacement (#4066); a workflow card's requestId is its occurrenceId.
+    if (pending?.requestId !== requestId) {
+      const replaced = this.db.workflowDecisionByOccurrence(requestId);
+      const refused = replaced?.sessionId === sessionId ? this.supersededWorkflowDecisionRefusal(replaced) : null;
+      if (refused) return refused;
+    }
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
@@ -14125,7 +14186,7 @@ export class SessionsService {
       if (actor.kind !== "human") return fail("this workflow decision requires an authenticated human", 403);
       const decision = this.db.workflowDecisionByOccurrence(pending.occurrenceId ?? requestId);
       if (!decision || decision.status !== "pending") {
-        return fail("workflow decision is stale or no longer pending", 409);
+        return (decision && this.supersededWorkflowDecisionRefusal(decision)) ?? fail("workflow decision is stale or no longer pending", 409);
       }
       const snapshot = decision.resourceSnapshot;
       const implementation = snapshot.category === "implementation_question";

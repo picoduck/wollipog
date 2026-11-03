@@ -3211,3 +3211,132 @@ test("#4062 a scope that drops a merge's closing issue while GitHub is read for 
     assert.equal(decision.status, "revoked"); assert.equal(decision.actionAdmission, undefined);
   } finally { h.db.close(); }
 });
+
+// #4066, observed live: children re-requested publications that had gone to the person, and each
+// re-request superseded the person's occurrence, so the person's approval landed on a dead one.
+const publicationRequest = (h: ReturnType<typeof harness>, sessionId: string, requestId: string, resourceKey: string,
+  recommendationId: string, sanitizedBody = body) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey,
+  resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody, labels: [], recommendationId } });
+const personResolves = (h: ReturnType<typeof harness>, sessionId: string, occurrenceId: string, outcome: "approve" | "deny" = "approve") =>
+  h.svc.resolveWorkflowDecision("root", sessionId, occurrenceId, { outcome }, "human", { kind: "human", id: h.principal.userId }, () => true);
+const cardIds = (h: ReturnType<typeof harness>, sessionId: string) =>
+  JSON.stringify(h.db.getSession(sessionId)!.pendingApproval ?? null);
+
+test("#4066 case A: a re-request never supersedes the person's pending or approved publication, and names it with the withdrawal route", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const unsafe = `${body}\napi_key=secret-value`;
+    const first = await publicationRequest(h, "child", "publish-1", "publish", recommendationId, unsafe);
+    assert.ok(first.ok, first.error ?? "first");
+    assert.deepEqual([first.data!.authority, first.data!.authorityEvaluation?.admissionFailure], ["human", "unsafe_payload"]);
+    const personal = first.data!.occurrenceId;
+
+    // While the person is deciding, the same key is refused, and nothing is created or retired.
+    const again = await publicationRequest(h, "child", "publish-2", "publish", recommendationId, unsafe);
+    assert.deepEqual([again.ok, again.status, again.errorDetails?.code, again.errorDetails?.occurrenceId],
+      [false, 409, "person_owned_publication_open", personal]);
+    assert.match(again.error!, new RegExp(`decision ${personal} \\(pending\\).*Nothing was created\\. Wait for the person's decision, or withdraw it first with withdraw_workflow_decision \\(wollipog decision withdraw ${personal} `, "u"));
+    assert.equal(h.db.workflowDecisionByRequestId("child", "publish-2"), null);
+    assert.equal(h.db.workflowDecisionByOccurrence(personal)!.status, "pending");
+    assert.ok(cardIds(h, "child").includes(personal), "the person's card stays");
+
+    // The person's approval lands on the live occurrence.
+    const approved = personResolves(h, "child", personal);
+    assert.ok(approved.ok, approved.error ?? "approve");
+    assert.equal(h.db.workflowDecisionByOccurrence(personal)!.status, "approved");
+
+    // A re-request after the person approved is refused too, and tells the requester to consume it.
+    const afterApproval = await publicationRequest(h, "child", "publish-3", "publish", recommendationId, unsafe);
+    assert.deepEqual([afterApproval.status, afterApproval.errorDetails?.occurrenceId], [409, personal]);
+    assert.match(afterApproval.error!, /\(approved\).*It is approved: consume it to publish, or withdraw it first/u);
+    assert.equal(h.db.workflowDecisionByRequestId("child", "publish-3"), null);
+    assert.equal(h.db.workflowDecisionByOccurrence(personal)!.status, "approved", "the person's approval still stands");
+
+    // A replayed requestId still answers with its own occurrence.
+    const replay = await publicationRequest(h, "child", "publish-1", "publish", recommendationId, unsafe);
+    assert.equal(replay.data?.occurrenceId, personal);
+  } finally { h.db.close(); }
+});
+
+test("#4066 case A: after the requester withdraws the person's pending publication, it can request again", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const unsafe = `${body}\napi_key=secret-value`;
+    const first = await publicationRequest(h, "child", "publish-1", "publish", recommendationId, unsafe);
+    assert.ok(first.ok);
+    assert.equal((await publicationRequest(h, "child", "publish-2", "publish", recommendationId, unsafe)).status, 409);
+    assert.ok(h.svc.withdrawWorkflowDecision("child", first.data!.occurrenceId, { reason: "Payload needs another redaction" }).ok);
+    const next = await publicationRequest(h, "child", "publish-3", "publish", recommendationId, unsafe);
+    assert.ok(next.ok, next.error ?? "after withdrawal");
+    assert.equal(next.data!.authority, "human");
+    assert.equal(h.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!.status, "revoked", "the withdrawal, not a supersession");
+  } finally { h.db.close(); }
+});
+
+test("#4066 case B: an admitted re-request retires the requester's person-owned publication for its recommendation, naming itself as the cause", async () => {
+  for (const personApprovedFirst of [false, true]) {
+    const label = personApprovedFirst ? "approved" : "pending";
+    const h = harness();
+    try {
+      const recommendationId = acceptedRecommendation(h);
+      const otherRecommendation = acceptedRecommendation(h, "Second repair");
+      h.state.publicationOk = false;
+      const personal = await publicationRequest(h, "child", "publish-1", "publish", recommendationId);
+      assert.ok(personal.ok, personal.error ?? label);
+      assert.deepEqual([personal.data!.authority, personal.data!.authorityEvaluation?.admissionFailure], ["human", "inspection_failed"], label);
+      // Neither another recommendation's person-owned publication nor another requester's is retired.
+      const other = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "other-1", resourceKey: "other", resourceSnapshot: {
+        category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Second repair", sanitizedBody: body, labels: [], recommendationId: otherRecommendation } });
+      assert.equal(other.data?.authority, "human", label);
+      const rootOwn = await publicationRequest(h, "root", "root-1", "publish", recommendationId);
+      assert.equal(rootOwn.data?.authority, "human", label);
+      if (personApprovedFirst) assert.ok(personResolves(h, "child", personal.data!.occurrenceId).ok, label);
+
+      h.state.publicationOk = true;
+      const admitted = await publicationRequest(h, "child", "publish-2", "publish", recommendationId);
+      assert.ok(admitted.ok, `${label}: ${admitted.error}`);
+      assert.equal(admitted.data!.authority, "orchestrator", label);
+      assert.equal(admitted.data!.resourceKey, `publication:${recommendationId}`, label);
+
+      const retired = h.db.workflowDecisionByOccurrence(personal.data!.occurrenceId)!;
+      assert.deepEqual([retired.status, retired.supersededBy], ["superseded", admitted.data!.occurrenceId], label);
+      assert.ok(!cardIds(h, "child").includes(personal.data!.occurrenceId), `${label}: the person's card is withdrawn`);
+      assert.ok(cardIds(h, "child").includes(admitted.data!.occurrenceId), label);
+      assert.ok(!h.db.unconsumedWorkflowDecisionsForSession("child").some((d) => d.occurrenceId === personal.data!.occurrenceId),
+        `${label}: verification no longer finds it unresolved`);
+      assert.equal(h.db.workflowDecisionByOccurrence(other.data!.occurrenceId)!.status, "pending", `${label}: another recommendation's stays`);
+      assert.equal(h.db.workflowDecisionByOccurrence(rootOwn.data!.occurrenceId)!.status, "pending", `${label}: another requester's stays`);
+
+      // The person cannot approve it, and is told what replaced it, on either route.
+      for (const refused of [personResolves(h, "child", personal.data!.occurrenceId),
+        h.svc.approve("child", personal.data!.occurrenceId, "approve", { kind: "human", id: h.principal.userId })]) {
+        assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code, refused.errorDetails?.supersededBy],
+          [false, 409, "workflow_decision_superseded", admitted.data!.occurrenceId], label);
+        assert.equal(refused.error, `workflow decision ${personal.data!.occurrenceId} was superseded by workflow decision ${admitted.data!.occurrenceId} and can no longer be approved or denied`, label);
+      }
+      assert.equal(h.db.workflowDecisionByOccurrence(personal.data!.occurrenceId)!.status, "superseded", label);
+
+      // The admitted one is the Orchestrator's to approve and the requester's to consume.
+      assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok, label);
+      const consumed = await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot });
+      assert.ok(consumed.ok, `${label}: ${consumed.error}`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4066 supersession between Orchestrator-owned occurrences is unchanged, and now names its cause", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const first = await publicationRequest(h, "child", "admitted-1", "publish", recommendationId);
+    const second = await publicationRequest(h, "child", "admitted-2", "publish", recommendationId);
+    assert.deepEqual([first.data?.authority, second.data?.authority], ["orchestrator", "orchestrator"]);
+    const replaced = h.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!;
+    assert.deepEqual([replaced.status, replaced.supersededBy], ["superseded", second.data!.occurrenceId]);
+    const refused = h.svc.resolveWorkflowDecision("root", "child", first.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error!, new RegExp(`superseded by workflow decision ${second.data!.occurrenceId}`, "u"));
+  } finally { h.db.close(); }
+});
