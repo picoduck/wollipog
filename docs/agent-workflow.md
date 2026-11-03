@@ -95,8 +95,12 @@ Use `wollipog review session run` (MCP `request_review_session`) for your own pu
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
 and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
-review epoch. Exhausted rounds require the exact `review_round_extension` decision; its default
-owner is human and Full Control does not delegate it. With protocol 232 or later, campaign review
+review epoch. A head that only merges the moved base branch gets a round that does not use the
+epoch's budget, or none at all when the pull request's own diff is unchanged since an upvote
+(protocol 277, #4075). Exhausted rounds require the exact `review_round_extension` decision; its
+default owner is human. Full Control owns it only within a server-enforced cap per pull request of
+the run's configured round budget once more (the owner approved this change to the #3369 decision);
+past the cap it is the person's. With protocol 232 or later, campaign review
 sessions reserve allowance before launch and record actual Session usage against it. Exhausted,
 stopped or unavailable allowances refuse admission with a reason; original human cost ceilings
 still apply across attempts. The older bridge and controlled campaign review jobs are retired.

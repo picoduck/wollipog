@@ -178,6 +178,9 @@ provider command, and merged forge head; resume the same App Server session firs
 child's enqueue produces no permission receipt in auto or Full Access mode, so call it once the
 forge reports the PR merged; its proof is that merged approved head. Treat any unavailable or
 mismatched proof as a blocker rather than requesting a replacement approval or replaying the action.
+After a same-head re-enqueue, reconcile the latest occurrence, whose admission preceded the enqueue
+that landed. Each other armed occurrence of the same command in the session then reads
+`superseded` and no longer blocks `verify_campaign_child`; do not withdraw or reconcile it.
 
 Keep the campaign work ledger current (control plane protocol v196+; `wollipog campaign …` from the
 CLI). Every record lands in the root campaign, including from a nested Orchestrator:
@@ -429,6 +432,12 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   findings (in full if the earlier commits are unavailable). Each epoch starts with 4 valid rounds,
   each round with 2 counted attempts. Stop after an upvote on the current head; an upvoted or
   unchanged reviewed head is refused. A changed head needs review under the applicable workflow.
+- Integrate the base branch with one plain merge commit directly on the reviewed head, with
+  nothing else in it (protocol 277). Its round reviews only the merge's effect and does not use
+  the epoch's rounds; if the reviewed head was upvoted and the merge leaves the pull request's own
+  diff unchanged, the review records an equivalence instead of running a reviewer, and you cite
+  that review session for the merge decision. Commit any fix separately, after that review: a fix
+  inside the merge, or any commit before its review, makes it an ordinary counted round.
 - If an epoch exhausts its rounds, including after an upvote followed by a verified fix at a changed
   head, stop and request a typed
   `review_round_extension` decision, once, using `request_workflow_decision` or `decision request`.
@@ -441,7 +450,8 @@ reuse it for later requests. Preserve your workflow's reviewer, isolation and ad
   the current head. Stale or superseded grants cannot admit a round; attempts and costs retain
   their normal limits and accounting.
   Read the exact decision's owner and outcome; it is human-owned by default and requires an
-  explicit grant to delegate. Consume an approval with the unchanged snapshot immediately before
+  explicit grant to delegate, except that a Full Control Orchestrator owns it within a
+  server-enforced cap of extra rounds per pull request. Consume an approval with the unchanged snapshot immediately before
   the matching review request; the next review request also consumes an approved extension.
   An extension adds rounds to that epoch; it does not raise the per-round attempt or cost limits.
   Missing typed support or an exhausted attempt limit is a blocker, not a reason to switch routes.

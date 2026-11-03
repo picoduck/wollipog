@@ -400,7 +400,7 @@ test("Remove… is for owners and admins, and an offline machine or an older run
   } finally {
     await away.unmount();
   }
-  const old = await mount(removable({ protocolVersion: 276 }));
+  const old = await mount(removable({ protocolVersion: 277 }));
   try {
     const section = sectionNamed(old.detail(), "Workspaces")!;
     const note = [...section.querySelectorAll<HTMLElement>(".section-note")]

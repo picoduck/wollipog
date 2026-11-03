@@ -136,7 +136,7 @@ test("Remove Workspace unregisters managed and configured workspaces with regist
     id: "device_workspace_removal_operator", name: "Operator Device", tokenHash: hashToken(OPERATOR_TOKEN),
     userId: "usr_workspace_operator", organizationId: identity.organizationId, now,
   });
-  seed.registerRunner(runner, now, 276);
+  seed.registerRunner(runner, now, 277);
   seed.issueRunnerCredential({
     credentialId: `rcred_${"workspaceremoval".padEnd(32, "0")}`,
     runnerId: runner.runnerId,
@@ -185,7 +185,7 @@ test("Remove Workspace unregisters managed and configured workspaces with regist
       .map(({ id, source }) => ({ id, source }));
   };
 
-  const oldRunner = await openRunner(port, sockets, 276, runner);
+  const oldRunner = await openRunner(port, sockets, 277, runner);
   assert.deepEqual(await workspaces(), [
     { id: "home", source: "configured" },
     { id: "site", source: "configured" },
@@ -200,8 +200,8 @@ test("Remove Workspace unregisters managed and configured workspaces with regist
   assert.equal(unsupported.status, 409);
   assert.deepEqual(await unsupported.json(), {
     error: "This machine needs a newer runner for removing configured workspaces. Update and restart the runner.",
-    requiredRunnerProtocolVersion: 277,
-    runnerProtocolVersion: 276,
+    requiredRunnerProtocolVersion: 278,
+    runnerProtocolVersion: 277,
   });
 
   // A workspace added in Wollipog lives in the control plane, so any runner version can drop it.

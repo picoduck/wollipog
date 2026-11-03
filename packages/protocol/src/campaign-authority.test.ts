@@ -741,3 +741,35 @@ test("extra review rounds follow only an explicit Parent Control grant, never Fu
   assert.equal(resolve(granted), "orchestrator", "an explicit grant delegates it");
   assert.equal(resolve(granted, true), "human", "a root's own request stays with a person");
 });
+
+test("Full Control owns extra review rounds within the server-enforced cap of a pull request, and only there (#4075)", () => {
+  const snapshot: WorkflowDecisionResourceSnapshot = {
+    category: "review_round_extension", repository: "picoduck/wollipog", pullRequest: 7, epoch: 1, headSha: "a".repeat(40),
+    roundsUsed: 4, blockingFindings: 1, extraRounds: 1, reason: "One verified blocker, fixed.",
+  };
+  const resolve = (input: Partial<Parameters<typeof resolveCampaignAuthority>[0]>) => resolveCampaignAuthority({
+    control, parentControl: "off", decisions: HUMAN_ONLY_PARENT_CONTROL_POLICY, root: false, supported: true, snapshot,
+    trustedSource: "workflow_route", ...input,
+  });
+  const within = resolve({ reviewExtensionCap: "within" });
+  assert.deepEqual([within.owner, within.basis, within.reason], ["orchestrator", "campaign_delegation", "authorized_operation"],
+    "audited as the Orchestrator's own decision");
+  assert.equal(within.boundaryRevision, control.boundary.revision);
+  const past = resolve({ reviewExtensionCap: "exceeded" });
+  assert.deepEqual([past.owner, past.reason], ["human", "review_extension_cap_reached"], "past the cap it is the person's");
+  assert.equal(resolve({}).owner, "human", "without the server's cap fact (an older peer) it stays the person's");
+  assert.equal(resolve({ reviewExtensionCap: "within", root: true }).owner, "human", "a root's own run stays the person's");
+  assert.equal(resolve({ reviewExtensionCap: "within", control: { mode: "custom" } }).owner, "human", "Custom never takes it");
+  assert.equal(resolve({ reviewExtensionCap: "within", supported: false }).owner, "human");
+  assert.equal(resolve({ reviewExtensionCap: "within", trustedSource: undefined }).owner, "human");
+  assert.equal(resolve({ reviewExtensionCap: "within", snapshot: { ...snapshot, repository: "other/repo" } }).owner, "human",
+    "only the boundary's repository");
+  // An explicit Parent Control grant keeps working, without the cap.
+  assert.equal(resolve({ reviewExtensionCap: "exceeded", decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, review_round_extension: "orchestrator" } }).owner,
+    "orchestrator");
+  // The category projection follows the same rule: Orchestrator only when every peer supports the cap.
+  assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, true), "orchestrator");
+  assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, false), "human");
+  assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", false, true), "human");
+  assert.equal(campaignWorkflowOwner({ mode: "custom" }, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, true), "human");
+});

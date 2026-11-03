@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
-  planReviewRound, REVIEW_ROUND_REFUSALS,
+  planReviewRound, REVIEW_EQUIVALENCE_OUTPUT, REVIEW_ROUND_REFUSALS,
   type CampaignBudgetAuthority,
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewReportFinding, type ReviewRunHistory,
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
@@ -392,7 +392,7 @@ test("a session requests a review session: a typed reviewer of the other family,
     assert.equal(start.spec.config?.effort, "high");
     assert.deepEqual(start.spec.review, {
       requesterSessionId: "s1", pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: HEAD, harness: "codex",
-      history: EMPTY_HISTORY,
+      history: { ...EMPTY_HISTORY, baseMergeRounds: true },
     });
     const reviewSession = h.db.getSession(view.reviewSessionId)!;
     assert.equal(reviewSession.kind, "review");
@@ -572,7 +572,7 @@ test("a GitLab merge request is reviewed by host-qualified project and IID, only
     const [start] = h.starts();
     assert.deepEqual(start?.spec.review, {
       requesterSessionId: "s1", pullRequest: { repository: GITLAB, number: 12 }, headSha: HEAD, harness: "codex",
-      history: EMPTY_HISTORY,
+      history: { ...EMPTY_HISTORY, baseMergeRounds: true },
     });
     assert.equal(h.db.getSession(result.data.reviewSessionId)!.title, `Codex Review of ${GITLAB}!12`);
   } finally { h.db.close(); }
@@ -799,7 +799,7 @@ test("a review run records each attempt's round and verdict and sends its histor
     assert.deepEqual(start.spec.review?.history, {
       ...EMPTY_HISTORY, epoch: 1, validRounds: 1, consumedInLastRound: 1,
       lastValid: { headSha: HEAD, baseSha: BASE, round: 1, vote: "DOWNVOTE", findings: [BLOCKER] },
-      lastAttempt: { headSha: HEAD, round: 1, attempt: 1, valid: true },
+      lastAttempt: { headSha: HEAD, round: 1, attempt: 1, valid: true }, baseMergeRounds: true,
     });
     assert.equal(start.spec.review?.fullReason, "The base moved.");
     assert.equal(h.db.reviewSessions.view(first.reviewSessionId)!.stale, true, "a newer review covers another head");
@@ -1297,6 +1297,152 @@ test("a run with rounds left, or an upvote, is not extended", () => {
   } finally { h.db.close(); }
 });
 
+/** Record one finished attempt of s1's run directly, as its runner would report it. */
+function attempt(h: ReturnType<typeof harness>, id: string, head: string, round: ReviewAttemptRound, vote: "UPVOTE" | "DOWNVOTE" = "DOWNVOTE") {
+  h.db.reviewSessions.record({ reviewSessionId: id, requesterSessionId: "s1", runnerId: "r", pullRequest: request().pullRequest,
+    headSha: head, reviewer: "codex" }, 10);
+  assert.ok(h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", round,
+    output: report(head, { vote, findings: vote === "DOWNVOTE" ? [BLOCKER] : [] }), verdict: VALID }, 11));
+}
+
+const C = "c".repeat(40), D = "d".repeat(40), E = "e".repeat(40);
+
+test("base-merge rounds use none of the epoch's budget, and only a v277 runner is asked to plan them (#4075)", () => {
+  const h = harness();
+  try {
+    const pr = request().pullRequest;
+    for (let round = 1; round <= 4; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+    assert.equal(h.db.reviewSessions.history("s1", pr).validRounds, 4);
+    // A base merge with a conflict resolution: reviewed in a fifth round, without an extension.
+    attempt(h, "merge", C, { ...ROUND, round: 5, mode: "delta", since: HEAD, baseMerge: true });
+    let run = h.db.reviewSessions.history("s1", pr);
+    assert.deepEqual([run.validRounds, run.roundBudget, run.lastValid?.headSha, run.lastAttempt?.round], [4, 4, C, 5],
+      "the merge's round is the new reference but leaves the budget untouched");
+    assert.equal(h.db.reviewSessions.view("merge")!.round?.baseMerge, true, "the round accounting names it");
+    // A base-merge claim that is not on the last valid head counts, whatever the runner said.
+    attempt(h, "stray", D, { ...ROUND, round: 6, mode: "delta", since: HEAD, baseMerge: true });
+    run = h.db.reviewSessions.history("s1", pr);
+    assert.deepEqual([run.validRounds, h.db.reviewSessions.view("stray")!.round?.baseMerge], [5, undefined]);
+    // The next request tells a v277 runner it may plan base-merge rounds.
+    assert.ok(h.svc.requestReviewSession("s1", request({ headSha: E })).ok);
+    assert.equal(h.starts().at(-1)!.spec.review?.history?.baseMergeRounds, true);
+  } finally { h.db.close(); }
+  const older = harness({ protocol: 276 });
+  try {
+    attempt(older, "r1", HEAD, ROUND);
+    assert.ok(older.svc.requestReviewSession("s1", request({ headSha: C })).ok);
+    assert.equal(older.starts().at(-1)!.spec.review?.history?.baseMergeRounds, undefined, "an older runner keeps counting every round");
+  } finally { older.db.close(); }
+});
+
+test("a pure base merge's equivalence is recorded on the run and satisfies the merge gate without a new round (#4075)", () => {
+  const h = harness();
+  try {
+    const pr = request().pullRequest;
+    for (let round = 1; round <= 3; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+    attempt(h, "upvote", HEAD, { ...ROUND, round: 4 }, "UPVOTE");
+    const equivalence = (id: string, head: string, equivalentTo: string, round: number) => {
+      h.db.reviewSessions.record({ reviewSessionId: id, requesterSessionId: "s1", runnerId: "r", pullRequest: pr, headSha: head, reviewer: "codex" }, 12);
+      h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", output: "runner text is ignored",
+        round: { ...ROUND, round, mode: "equivalent", scopeFiles: [], baseMerge: true, equivalentTo },
+        verdict: { ...VALID, effectiveVote: "DOWNVOTE" } }, 13);
+      return h.db.reviewSessions.view(id)!;
+    };
+    const recorded = equivalence("same", C, HEAD, 5);
+    assert.deepEqual([recorded.state, recorded.verdict, recorded.output, recorded.round?.equivalentTo],
+      ["completed", { valid: true, consumed: false, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] }, REVIEW_EQUIVALENCE_OUTPUT, HEAD],
+      "the control plane writes the verdict itself and carries the upvote");
+    const run = h.db.reviewSessions.history("s1", pr);
+    assert.deepEqual([run.validRounds, run.lastValid?.headSha, run.lastValid?.vote], [4, C, "UPVOTE"], "no round was used");
+    assert.deepEqual(h.db.reviewSessions.mergeEvidence("s1", { ...mergeSnapshot("same"), headSha: C }),
+      { status: "verified", reviewSessionId: "same", requesterSessionId: "s1", repository: pr.repository, pullRequest: pr.number,
+        headSha: C, vote: "UPVOTE", reviewer: "codex", epoch: 1, round: 5, attempt: 1, completedAt: 13 },
+      "the merge gate accepts the merged head without restoring the old one");
+    // An equivalence to a head that is no longer the last valid one is not recorded.
+    const stale = equivalence("stale", D, HEAD, 6);
+    assert.deepEqual([stale.state, stale.reason, stale.round, stale.verdict], ["failed", "the recorded equivalence no longer matches the review run", null, null]);
+    assert.equal(h.db.reviewSessions.mergeEvidence("s1", { ...mergeSnapshot("stale"), headSha: D })?.status, "refused");
+    // Nor one after a downvote.
+    attempt(h, "down", D, { ...ROUND, round: 6, mode: "delta", since: C }, "DOWNVOTE");
+    assert.equal(equivalence("down-eq", E, D, 7).state, "failed");
+  } finally { h.db.close(); }
+});
+
+test("a Full Control child's extra rounds are the Orchestrator's within its pull request's cap, counted durably (#4075)", async () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ costUsd: 1000, toolCalls: 1000 });
+    const pr = request().pullRequest;
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.decisionOwners.review_round_extension, "orchestrator");
+    assert.deepEqual(projection.reviewRoundExtensionCap, { scope: "pull_request", extraRounds: "configured_round_budget" });
+    for (let round = 1; round <= 4; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+    const ask = (requestId: string, roundsUsed: number, extraRounds: number, headSha: string) => {
+      const created = h.svc.createWorkflowDecision("s1", { requestId,
+        resourceKey: `review_round_extension:${pr.repository}#${pr.number}:epoch-1:rounds-${roundsUsed}`,
+        resourceSnapshot: { category: "review_round_extension", repository: pr.repository, pullRequest: pr.number, epoch: 1, headSha,
+          roundsUsed, blockingFindings: 1, extraRounds, reason: "A verified blocker, fixed." } });
+      assert.ok(created.data, created.error ?? "refused");
+      return created.data;
+    };
+    const grant = async (decision: { occurrenceId: string; resourceSnapshot: unknown }) => {
+      const approved = h.svc.resolveDescendantRequest("root", "s1", decision.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.ok(approved.ok, approved.error ?? "approval refused");
+      const consumed = await h.svc.consumeWorkflowDecision("s1", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot as never });
+      assert.equal(consumed.data?.status, "consumed", consumed.error ?? "consumed");
+    };
+    // Within the cap (the run's four configured rounds once more), the Orchestrator owns and grants it.
+    const first = ask("ext-1", 4, 3, C);
+    assert.deepEqual([first.authority, first.controllingSessionId, first.authorityEvaluation?.basis, first.authorityEvaluation?.reason],
+      ["orchestrator", "root", "campaign_delegation", "authorized_operation"]);
+    assert.equal(h.db.campaignProjection("root")!.children.waitingHuman, 0, "no human request was created");
+    assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+    await grant(first);
+    assert.equal(h.db.reviewSessions.history("s1", pr).roundBudget, 7, "the granted rounds are in the run's round accounting");
+    // A review under the grant is charged to the campaign's review allowance like any other.
+    const before = h.db.campaignBudgets.view("root")!.outstanding.costUsd;
+    const granted = h.svc.requestReviewSession("s1", request({ headSha: C }));
+    assert.ok(granted.data, granted.error ?? "refused");
+    assert.ok(h.starts().at(-1)!.spec.campaignBudgetDispatch);
+    assert.ok(h.db.campaignBudgets.view("root")!.outstanding.costUsd > before);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: granted.data.reviewSessionId, state: "completed",
+      output: report(C), round: { ...ROUND, round: 5, mode: "delta", since: HEAD }, verdict: VALID } as never);
+    for (let round = 6; round <= 7; round += 1) attempt(h, `r${round}`, C, { ...ROUND, round, mode: "delta", since: HEAD });
+    // Two more would pass the cap: the person's. One more fits exactly: the Orchestrator's again.
+    const past = ask("ext-2", 7, 2, D);
+    assert.deepEqual([past.authority, past.authorityEvaluation?.reason], ["human", "review_extension_cap_reached"]);
+    const fits = ask("ext-3", 7, 1, D);
+    assert.equal(fits.authority, "orchestrator", "a re-request of the same resource replaces the earlier one");
+    await grant(fits);
+    attempt(h, "r8", D, { ...ROUND, round: 8, mode: "delta", since: C });
+    // The cap is spent for this pull request: every later extension is the person's, whatever its epoch.
+    const after = ask("ext-4", 8, 1, E);
+    assert.deepEqual([after.authority, after.authorityEvaluation?.reason], ["human", "review_extension_cap_reached"]);
+    assert.equal(h.db.reviewExtensionCap("s1", { category: "review_round_extension", repository: pr.repository.toUpperCase(),
+      pullRequest: pr.number, epoch: 2, headSha: E, roundsUsed: 1, blockingFindings: 0, extraRounds: 1, reason: "x" }), "exceeded",
+    "counted per pull request across epochs, whatever the repository's case");
+  } finally { h.db.close(); }
+});
+
+test("a Custom campaign, or an older peer, keeps a child's extra rounds with the person (#4075)", () => {
+  for (const variant of ["custom", "older"] as const) {
+    const h = harness({ campaign: true, ...(variant === "older" ? { protocol: 276 } : {}) });
+    try {
+      if (variant === "older") h.enableCampaign({ costUsd: 1000, toolCalls: 1000 });
+      const pr = request().pullRequest;
+      for (let round = 1; round <= 4; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+      const created = h.svc.createWorkflowDecision("s1", { requestId: "ext",
+        resourceKey: `review_round_extension:${pr.repository}#${pr.number}:epoch-1:rounds-4`,
+        resourceSnapshot: { category: "review_round_extension", repository: pr.repository, pullRequest: pr.number, epoch: 1, headSha: C,
+          roundsUsed: 4, blockingFindings: 1, extraRounds: 1, reason: "One blocker." } });
+      assert.equal(created.data?.authority, "human", `${variant}: ${created.error}`);
+      assert.equal(h.db.campaignProjection("root")!.decisionOwners.review_round_extension, "human");
+      assert.equal(h.db.campaignProjection("root")!.reviewRoundExtensionCap, undefined);
+    } finally { h.db.close(); }
+  }
+});
+
 test("a campaign member's review reserves allowance and settles actual usage without child authority", () => {
   for (const driver of ["claude-code", "codex-app-server"] as const) {
     const h = harness({ campaign: true, driver });
@@ -1713,8 +1859,10 @@ test("a post-upvote round uses ordinary campaign admission, reservation and actu
     h.enableCampaign();
     const decision = askPostUpvote(h);
     assert.ok(decision.data, decision.error ?? "refused");
-    assert.equal(decision.data.authority, "human");
-    assert.ok(h.svc.approve("s1", decision.data.occurrenceId, "approve").ok);
+    // Within its pull request's cap, Full Control's Orchestrator owns it (#4075).
+    assert.equal(decision.data.authority, "orchestrator");
+    assert.ok(h.svc.resolveDescendantRequest("root", "s1", decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     const before = h.db.campaignBudgets.view("root")!;
     const next = h.svc.requestReviewSession("s1", request({ headSha: postUpvoteSnapshot().headSha }));
     assert.ok(next.data, next.error ?? "refused");
