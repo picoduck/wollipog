@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import type { ControlPlaneDb } from "./db.js";
+import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
 import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 
 /** Hash untrusted provider coordinates rather than allowing an identifier to become a credential,
@@ -20,6 +20,13 @@ export function requestReason(evaluation: CampaignAuthorityEvaluation): Campaign
     case "protected_request": case "human_required_rule": case "custom_owner": return "human_required_rule";
     default: return "missing_human_information";
   }
+}
+
+/** Why a stopped worker is blocked (#3362), from the server-written stop provenance only, never
+ * from agent text. A recorded Stop or archive request is an intentional stop; a declined guardrail
+ * is a genuine denial; any other or missing provenance is unverified. All three stay blocked. */
+export function stoppedWorkerReason(stop: SessionStopProvenance | null): CampaignRecoveryReason {
+  return stop?.cause === "requested" ? "intentional_stop" : stop?.cause === "guardrail" ? "hard_denial" : "unverified_stop";
 }
 
 /** Server adapters translate authoritative requests, holds, receipt state and forge facts into
@@ -110,7 +117,8 @@ export class CampaignRecoveryService {
         if (assignment || !ledgerWorkers.has(session.id)) observations.push({ action: "replace_worker",
           resource: { kind: "worker", sessionId: session.id, occurrenceId: `epoch:${session.eventEpoch ?? 0}`,
             ...(assignment ? { workItemId: assignment.workItemId } : {}) },
-          reason: session.status === "stopped" ? "hard_denial" : hostBlocked ? "unsupported_capability" : "transient_failure",
+          reason: session.status === "stopped" ? stoppedWorkerReason(this.db.sessionStopProvenance(session.id))
+            : hostBlocked ? "unsupported_capability" : "transient_failure",
           owner: hostBlocked ? "human" : "orchestrator",
           signal: `${session.id}:${session.eventEpoch ?? 0}:${session.status}${hostBlocked ? ":codex_sandbox_unavailable" : ""}` });
       }
