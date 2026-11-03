@@ -5420,12 +5420,16 @@ export interface WorkflowDecisionView {
   /** Explicit withdrawal by the controlling Orchestrator (#3941) or, from v269, by the requester
    * itself (#3917). The status reads `revoked`, which is terminal and never grants authority. */
   withdrawal?: { bySessionId: string; reason: string };
+  /** The occurrence that replaced this one, when the status reads `superseded` (#4066). Absent for
+   * an occurrence superseded before this was recorded. */
+  supersededBy?: string;
 }
 
 export interface CreateWorkflowDecisionRequest {
   /** Caller-owned idempotency key. Reuse with different content fails. */
   requestId: string;
-  /** Stable target identity; a newer occurrence supersedes older unconsumed occurrences. */
+  /** Stable target identity; a newer occurrence supersedes older unconsumed occurrences. A request
+   * that would supersede a person-owned follow-up publication is refused instead (#4066). */
   resourceKey: string;
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
 }

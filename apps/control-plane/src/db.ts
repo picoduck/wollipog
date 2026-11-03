@@ -7149,6 +7149,8 @@ export class ControlPlaneDb {
       "resume_updated_at INTEGER",
       // #3982: the requester's consumption recalled the queued resume.
       "resume_recalled_at INTEGER",
+      // #4066: the occurrence that superseded this one.
+      "superseded_by TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -21332,8 +21334,12 @@ export class ControlPlaneDb {
     return row && decisions ? { revision: row.revision, decisions } : null;
   }
 
+  /** `alsoSupersede` names further unconsumed occurrences of the same session and category that the
+   * new one replaces although their resourceKey differs (#4066); any other id is ignored. Every
+   * superseded occurrence records the new one as its cause. */
   createWorkflowDecision(input: Omit<WorkflowDecisionView, "status"> & {
     status?: Extract<WorkflowDecisionStatus, "pending">;
+    alsoSupersede?: string[];
   }): { decision: WorkflowDecisionView; replay: boolean; supersededOccurrenceIds: string[] } | null {
     const existing = this.workflowDecisionByRequestId(input.sessionId, input.requestId);
     if (existing) {
@@ -21344,15 +21350,17 @@ export class ControlPlaneDb {
     }
     const superseded = this.stmt(
       `SELECT occurrence_id FROM workflow_decisions
-       WHERE session_id=? AND category=? AND resource_key=? AND status IN ('pending','approved')`,
-    ).all(input.sessionId, input.category, input.resourceKey) as unknown as Array<{ occurrence_id: string }>;
+       WHERE session_id=? AND category=? AND status IN ('pending','approved')
+         AND (resource_key=? OR occurrence_id IN (SELECT value FROM json_each(?)))`,
+    ).all(input.sessionId, input.category, input.resourceKey, JSON.stringify(input.alsoSupersede ?? [])) as unknown as Array<{ occurrence_id: string }>;
     this.db.exec("BEGIN");
     try {
-      this.stmt(
-        `UPDATE workflow_decisions SET status='superseded', resolved_at=?
-         WHERE session_id=? AND category=? AND resource_key=? AND status IN ('pending','approved')`,
-      ).run(input.createdAt, input.sessionId, input.category, input.resourceKey);
+      const supersede = this.stmt(
+        `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
+         WHERE occurrence_id=? AND status IN ('pending','approved')`,
+      );
       for (const { occurrence_id: occurrenceId } of superseded) {
+        supersede.run(input.createdAt, input.occurrenceId, occurrenceId);
         this.retireWorkflowDecisionResume(occurrenceId, input.createdAt);
       }
       this.stmt(
@@ -32704,6 +32712,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     action_runner_history_epoch?: number | null;
     child_message?: string | null;
     withdrawal?: string | null;
+    superseded_by?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     closing_reference_check?: string | null;
@@ -32761,6 +32770,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
       : {}),
     ...(row.child_message ? { childMessage: row.child_message } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
+    ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
   };
 }
 
