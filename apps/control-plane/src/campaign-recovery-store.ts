@@ -117,10 +117,10 @@ const terminal = new Set(["resolved", "cancelled"]);
 // A Full Control decline is final for its occurrence: blocked, never dispatched, never asked.
 const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted", "request_declined",
   "intentional_stop", "unverified_stop"]);
-// How a stopped worker is classified (#3362). Each is a hard block; only the explanation differs,
-// so the same stopped episode may move between them (a record written before provenance was read
-// says hard_denial) without ever leaving blocked.
-const stopReasons = new Set<CampaignRecoveryReason>(["hard_denial", "intentional_stop", "unverified_stop"]);
+// How a stopped worker is classified (#3362), least to most severe. Each is a hard block. A worker
+// record keeps its work item across replacement workers, so its label may only escalate: a later
+// worker's denial is never hidden behind an inherited intentional stop, and nothing relabels a denial.
+const stopSeverity: Partial<Record<CampaignRecoveryReason, number>> = { intentional_stop: 1, unverified_stop: 2, hard_denial: 3 };
 const human = new Set<CampaignRecoveryReason>(["missing_human_information", "missing_access",
   "boundary_enlargement", "human_required_rule", "unsupported_capability", "publication_not_admitted"]);
 
@@ -310,10 +310,10 @@ export class CampaignRecoveryStore {
         // flight. The same record (same occurrence) is woken again, or exhausted past its ceiling.
         const settledAt = currentDispatch && authorized && !observation.resolved ? settledWakeAt?.(old!) : undefined;
         const stalled = settledAt !== undefined && now >= settledAt + stalledRecoveryWakeDelayMs(attempts);
-        const restatedStop = old?.action === "replace_worker" && !freshOccurrence &&
-          stopReasons.has(old.reason) && stopReasons.has(observation.reason);
+        const escalatedStop = old?.action === "replace_worker" &&
+          (stopSeverity[observation.reason] ?? 0) > (stopSeverity[old.reason] ?? Infinity);
         let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && (!currentDispatch || stalled)
-          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved && !restatedStop
+          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved && !escalatedStop
             ? old.reason : observation.reason;
         const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
           ? reason === "uncertain_outcome" ? "blocked" : "cancelled" : hard.has(reason) ? "blocked"

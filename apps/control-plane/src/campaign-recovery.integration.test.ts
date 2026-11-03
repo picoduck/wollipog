@@ -1575,26 +1575,33 @@ test("an ended assignment's stop is history, not recovery work (#3362)", () => {
   } finally { h.db.close(); }
 });
 
-test("a stop recorded as a hard denial before provenance was read is restated, still blocked (#3362)", () => {
+test("a stored hard denial is never relabeled, and a stop label only escalates across workers (#3362)", () => {
   const h = fixture();
   try {
     const workItemId = assignChild(h);
+    const revision = h.db.getSession("root")!.parentControlPolicy?.revision ?? 0;
     h.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
     const epoch = h.db.getSession("child")!.eventEpoch ?? 0;
-    const legacy = { action: "replace_worker" as const, owner: "orchestrator" as const, reason: "hard_denial" as const,
-      resource: { kind: "worker" as const, sessionId: "child", occurrenceId: `epoch:${epoch}`, workItemId },
-      signal: `child:${epoch}:stopped` };
-    h.db.campaignRecovery.synchronize("root", h.db.getSession("root")!.parentControlPolicy?.revision ?? 0, true, [legacy], 50);
-    assert.equal(workerRecord(h)!.reason, "hard_denial");
-    h.recovery.maintain(100);
-    assert.deepEqual([workerRecord(h)!.reason, workerRecord(h)!.state, workerRecord(h)!.attempts], ["intentional_stop", "blocked", 0]);
-    // Another worker's later failure on the same item is a fresh occurrence: it cannot soften the block.
-    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "unaffected" }).ok);
-    h.db.updateSessionStatus("unaffected", "failed", 6);
-    h.recovery.maintain(200);
-    assert.deepEqual([workerRecord(h)!.resource.sessionId, workerRecord(h)!.reason, workerRecord(h)!.state],
-      ["unaffected", "intentional_stop", "blocked"]);
+    // A record an earlier version wrote for this very stop keeps its denial: nothing softens it.
+    h.db.campaignRecovery.synchronize("root", revision, true, [{ action: "replace_worker", owner: "orchestrator",
+      reason: "hard_denial", resource: { kind: "worker", sessionId: "child", occurrenceId: `epoch:${epoch}`, workItemId },
+      signal: `child:${epoch}:stopped` }], 50);
+    for (const now of [100, 200]) h.recovery.maintain(now);
+    assert.deepEqual([workerRecord(h)!.reason, workerRecord(h)!.state], ["hard_denial", "blocked"]);
   } finally { h.db.close(); }
+  // An intentional stop, then a replacement worker's guardrail denial before the next scan: the denial shows.
+  const escalated = fixture();
+  try {
+    const workItemId = assignChild(escalated);
+    escalated.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    escalated.recovery.maintain(100);
+    assert.equal(workerRecord(escalated)!.reason, "intentional_stop");
+    assert.ok(escalated.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "unaffected" }).ok);
+    escalated.db.updateSessionStatus("unaffected", "stopped", 6, { cause: "guardrail" });
+    for (const now of [200, 300]) escalated.recovery.maintain(now);
+    assert.deepEqual([workerRecord(escalated)!.resource.sessionId, workerRecord(escalated)!.reason, workerRecord(escalated)!.state],
+      ["unaffected", "hard_denial", "blocked"]);
+  } finally { escalated.db.close(); }
 });
 
 test("pause, archive, revocation and denial still prevent replacing a stopped worker (#3362)", () => {
