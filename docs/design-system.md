@@ -999,8 +999,10 @@ A row of tools above the content they act on: search, filters, view switches and
 - Usage and Cost's API Usage tab (#3010) has one toolbar: Metric (Cost | Tokens), a Range menu
   button reading "Last 30 Days", Group By (Hour | Day | Week, Hour omitted for a range longer than
   hourly retention), then About These Numbers at the trailing end, the `InfoPopover` with a visible
-  label (the icon alone on phones). On phones Range and Group By are one button, "30 Days, Daily",
-  that opens a sheet with a Range and a Group By section.
+  label. The toolbar follows the main column (§2.10), not the viewport (#4029): in a column no wider
+  than a phone (760px), on a phone or beside a docked panel, About is the icon alone and Range and
+  Group By are one button, "30 Days, Daily", that opens a Range and a Group By section (a sheet on
+  phones).
 
 ### 4.8 Breadcrumbs
 

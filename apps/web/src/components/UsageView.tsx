@@ -58,7 +58,8 @@ import { ListFoot } from "./ListFoot.js";
 import { handleRovingChoiceKeyDown, useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import { TabList } from "./Tabs.js";
-import { useIsMobile } from "./useIsMobile.js";
+import { MOBILE_BREAKPOINT_PX, useIsMobile } from "./useIsMobile.js";
+import { useColumnAtLeast } from "./usePanelWidth.js";
 import { BudgetHistoryDialog } from "./BudgetHistoryDialog.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -85,7 +86,14 @@ function coverageDate(timestamp: number): string {
   return new Date(timestamp).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric", timeZone: "UTC" });
 }
 
-/** A range in the Range menu and the phone's Range and Group By sheet: "Last 30 Days". */
+/**
+ * The desktop toolbar wants about 710px of main column (about 745px in CI's DejaVu Sans at "Last 365
+ * Days"). A column no wider than a phone gets the phone's toolbar, so a desktop column a docked panel
+ * narrows keeps every control on one row (#4029).
+ */
+const USAGE_TOOLBAR_MIN_COLUMN_PX = MOBILE_BREAKPOINT_PX + 1;
+
+/** A range in the Range menu and the compact toolbar's Range and Group By menu: "Last 30 Days". */
 interface RangeChoice {
   range: number;
   /** Set on a range that allows Hour: "Hour grouping is available for ranges up to 14 days." */
@@ -93,8 +101,9 @@ interface RangeChoice {
 }
 
 /**
- * The toolbar's menu buttons (§4.7, §9.1): Range on desktop, and on phones the one button that
- * opens Range and Group By as a sheet. Its items are radio rows; a choice applies at once.
+ * The toolbar's menu buttons (§4.7, §9.1): Range on desktop, and in a main column no wider than a
+ * phone the one button that opens Range and Group By, as a sheet on phones. Its items are radio
+ * rows; a choice applies at once.
  */
 function UsageMenuButton({ label, ariaLabel, menuLabel, disabled, title, keepOpen = false, children }: {
   label: string;
@@ -102,8 +111,8 @@ function UsageMenuButton({ label, ariaLabel, menuLabel, disabled, title, keepOpe
   menuLabel: string;
   disabled?: boolean;
   title?: string;
-  /** The phone sheet stays open after a choice, so its other section can be set too and the
-   * button behind it answers both (§15.1, as the Board's Filters sheet does). */
+  /** The Range and Group By menu stays open after a choice, so its other section can be set too
+   * and the button behind it answers both (§15.1, as the Board's Filters sheet does). */
   keepOpen?: boolean;
   children: (choose: (apply: () => void) => void) => ReactNode;
 }) {
@@ -385,6 +394,8 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
     else setLocalTab(next);
   };
   const phone = useIsMobile();
+  const [toolbarElement, setToolbarElement] = useState<HTMLDivElement | null>(null);
+  const compactToolbar = !useColumnAtLeast(toolbarElement, USAGE_TOOLBAR_MIN_COLUMN_PX) || phone;
   const api = useApi();
   const hasStore = useHasStore();
   const [days, setDays] = useState(30);
@@ -680,7 +691,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   ] as const;
 
   const toolbar = (
-    <div className="toolbar usage-toolbar">
+    <div ref={setToolbarElement} className="toolbar usage-toolbar">
       <SegmentedControl<UsageMetric>
         label="Metric"
         value={metric}
@@ -690,7 +701,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
         ]}
         onChange={setMetric}
       />
-      {phone ? (
+      {compactToolbar ? (
         <UsageMenuButton
           label={`${days} Days, ${GRANULARITY_LABEL[granularity].adjective}`}
           ariaLabel={`Range and Group By: ${days} Days, ${GRANULARITY_LABEL[granularity].adjective}`}
@@ -741,7 +752,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
       )}
       <InfoPopover
         tool="These Numbers"
-        labelled
+        labelled={!compactToolbar}
         facts={rateSource ? [{
           term: "Rate Source",
           value: <a href={rateSource} target="_blank" rel="noreferrer">{new URL(rateSource).host}</a>,
