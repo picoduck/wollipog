@@ -6,8 +6,10 @@ import { campaignRepositoryLocation } from "@wollipog/protocol";
 export interface MessageIssueReference { number: number; start: number; end: number; range?: true; context?: true }
 
 // A range between two short references (#4061): "#A–#B", "#A-#B", "#A—#B", "#A..#B", "#A to #B" or
-// "#A through #B", with or without spaces, on one line. A chain such as "#1–#2–#3" is no range.
-const RANGE = /(?<![\w./#\-–—])#([1-9][0-9]{0,15})(?:[^\S\r\n]*(?:[-–—]|\.\.)[^\S\r\n]*|[^\S\r\n]+(?:to|through)[^\S\r\n]+)#([1-9][0-9]{0,15})(?![\w\-–—]|\.\.)/giu;
+// "#A through #B", with or without spaces, on one line. A chain such as "#1–#2–#3" or "#1 – #3 to
+// #5" is no range: neither end may join another reference through a separator, spaced or not.
+const SEPARATOR = String.raw`(?:[^\S\r\n]*(?:[-–—]|\.\.)[^\S\r\n]*|[^\S\r\n]+(?:to|through)[^\S\r\n]+)`;
+const RANGE = new RegExp(String.raw`(?<![\w./#\-–—]|#[0-9]+${SEPARATOR})#([1-9][0-9]{0,15})${SEPARATOR}#([1-9][0-9]{0,15})(?![\w\-–—]|\.\.|${SEPARATOR}#)`, "giu");
 
 /** Every reference a message makes to the campaign's own repository's issues, in text order:
  * `#123`, `owner/repo#123` and `https://github.com/owner/repo/issues/123`, or for a GitLab project

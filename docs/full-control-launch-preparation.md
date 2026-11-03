@@ -88,7 +88,8 @@ only) establishes the boundary before the Orchestrator's first turn:
   its last (`#9–#5`, `#5–#5`), names nothing: only its two endpoints are recorded, as context. If
   the expanded ranges would take the message past 100 distinct issues (or past 1000 expanded
   occurrences), no range in it expands, and each one's endpoints are context. A chain such as
-  `#1–#2–#3` is no range; each reference stands alone. Expansion depends only on the text, and the
+  `#1–#3–#5` or `#1 – #3 to #5`, spaced or not and whatever its separators, is no range: each
+  reference stands alone, so no issue between them is ever scoped. Expansion depends only on the text, and the
   runner still verifies every issue a range names, so a pull request or missing issue inside one
   drops out like any other unverified reference.
 - The runner then reads every reference, requested or context, and only verified issues are kept:

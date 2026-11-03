@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import { issueReferencesInMessage } from "./campaign-launch-admission.js";
-import { firstMessageIssueIntent, firstMessageTargetEpics, MAX_CLASSIFIED_MESSAGE_LENGTH, MAX_CLASSIFIED_REFERENCES, MAX_TARGET_EPICS } from "./first-message-issue-intent.js";
+import { firstMessageIssueIntent, firstMessageTargetEpics, issueReferenceSpans, MAX_CLASSIFIED_MESSAGE_LENGTH, MAX_CLASSIFIED_REFERENCES, MAX_TARGET_EPICS } from "./first-message-issue-intent.js";
 
 const repo = "owner/repo";
 const intent = (text: string, repository = repo) => firstMessageIssueIntent(text, repository);
@@ -115,8 +115,19 @@ test("a range scopes every issue it names, under the cue that governs it, in eve
   // A spaced dash ends a clause, but not inside a range, and never across a line.
   assert.deepEqual(intent("Never close #1 - fix #2 instead."), { scope: [], context: [1, 2] });
   assert.deepEqual(intent("Deliver:\n- #1\n- #4"), { scope: [1, 4], context: [] });
-  // A chain names no range: each reference stands alone.
-  assert.deepEqual(intent("Fix #1–#2–#3."), { scope: [1, 2, 3], context: [] });
+  // A chain names no range, spaced or not and whatever its separators: each reference stands alone,
+  // so no issue between them is ever scoped.
+  for (const chain of ["#1–#3–#5", "#1 – #3 – #5", "#1 - #3 - #5", "#1 to #3 to #5", "#1 – #3 to #5", "#1..#3 through #5",
+    "#1 through #3–#5", "#1—#3 .. #5", "#1 – #3 – #5 – #7"]) {
+    assert.equal(issueReferenceSpans(`Fix ${chain}.`, repo).some((r) => r.range), false, chain);
+    // A spaced dash still ends a clause (#3920), and a reference right after ".." is not read at all,
+    // so a later reference may be context or absent; an unwritten one is never there.
+    const { scope, context } = intent(`Fix ${chain}.`);
+    assert.ok([...scope, ...context].every((n) => [1, 3, 5, 7].includes(n)), chain);
+    assert.ok(scope.includes(1), chain);
+  }
+  // A range beside a chain-like word is still a range.
+  assert.deepEqual(intent("Fix #1–#3 - then close #9.").scope, [1, 2, 3, 9]);
 });
 
 test("a negated, background or cited range withholds every issue in it (#4061)", () => {
@@ -145,6 +156,14 @@ test("an oversized, inverted or empty range scopes nothing and records its endpo
   const started = performance.now();
   assert.deepEqual(intent(`Fix ${"#1–#100 ".repeat(5000)}`), { scope: [], context: [1, 100] });
   assert.ok(performance.now() - started < 1000);
+  // Separator and whitespace runs the range's guards read around each reference stay fast.
+  const near = MAX_CLASSIFIED_MESSAGE_LENGTH - 64;
+  for (const filler of [`#1${" ".repeat(near)}–#2`, "#1 – ".repeat(near / 5), "#1 to ".repeat(near / 6), `#1 ${"– ".repeat(near / 2)}#2`,
+    "#1..".repeat(near / 4), `${" ".repeat(near)}#1 through #2`]) {
+    const begun = performance.now();
+    intent(`Fix ${filler}`.slice(0, MAX_CLASSIFIED_MESSAGE_LENGTH));
+    assert.ok(performance.now() - begun < 1000, `${filler.slice(0, 12)}… took ${Math.round(performance.now() - begun)}ms`);
+  }
 });
 
 test("only a scoped reference written after the word epic names a target epic (#4061)", () => {
