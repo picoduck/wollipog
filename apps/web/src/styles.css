@@ -3602,14 +3602,17 @@ textarea {
   text-align: left;
   cursor: pointer;
 }
-/* The stretched primary click (§5.3). Controls written after it are positioned, so they stack above. */
-.card-open::after {
+/* The stretched primary click (§5.3). Controls written after it are positioned, so they stack above.
+   It is the button's ::before, so the type mark at the start of the title (#4076), positioned,
+   follows it in tree order and stacks above it too: hovering the mark shows its tooltip. */
+.card-open::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: inherit;
 }
 /* The ring is the card's; the button's own stays transparent, so forced colors still draws one. */
+.card-open > .session-type-icon { position: relative; }
 .card-open:focus-visible { outline: 2px solid transparent; }
 .card:has(> .card-open:focus-visible) {
   outline: var(--focus-width) solid var(--focus);
