@@ -5,6 +5,7 @@ import type {
   UsageAmount,
   UsageBreakdown,
   UsageDriverTimeBucket,
+  UsagePricingStatus,
   UsageTimeBucket,
   UserCostWindows,
 } from "@wollipog/protocol";
@@ -589,6 +590,51 @@ export function coverageSentence(item: CoverageItem): string {
 /** Whether loading newer rates could help: something is unpriced, or the rates are missing or old. */
 export function coverageNeedsRates(items: readonly CoverageItem[]): boolean {
   return items.some((item) => item.kind === "unpriced" || item.kind === "rates-unavailable" || item.kind === "rates-cached");
+}
+
+/** What a Refresh Rates that didn't produce a fresh table says: a sentence in the notice and its
+ * reason behind Show Details, one paragraph each. */
+export interface RatesRefreshProblem {
+  summary: string;
+  details: string[];
+}
+
+const COULD_NOT_REFRESH = "Rates couldn't be refreshed.";
+
+/** Ends the plane's failure text as a sentence; it arrives as a bare clause. */
+function asSentence(text: string): string {
+  return /[.!?…]$/.test(text) ? text : `${text}.`;
+}
+
+/** Why a Refresh Rates answer isn't a fresh table (#3016, #4056), or `null` when it is. A plane
+ * that predates #4056 sends neither the failure nor the skip, so it keeps the general wording. */
+export function ratesRefreshProblem(pricing: UsagePricingStatus): RatesRefreshProblem | null {
+  if (pricing.status === "fresh") return null;
+  if (pricing.source === "disabled") return { summary: COULD_NOT_REFRESH, details: ["Rate fetching is turned off on this control plane."] };
+  const failure = pricing.lastRefreshError?.message;
+  if (pricing.refreshSkipped) {
+    const seconds = Math.max(1, Math.ceil(pricing.refreshSkipped.retryAfterMs / 1000));
+    return {
+      summary: "This refresh was skipped because one ran less than a minute ago.",
+      details: [
+        `Wollipog tries the rate source at most once a minute. Try again in ${seconds === 1 ? "1 second" : `${seconds} seconds`}.`,
+        ...(failure ? [`The last attempt failed: ${asSentence(failure)}`] : []),
+      ],
+    };
+  }
+  if (failure) {
+    return {
+      summary: COULD_NOT_REFRESH,
+      details: [`${pricing.source} couldn't be fetched: ${asSentence(failure)}`, `The rates are still ${pricing.status}.`],
+    };
+  }
+  return {
+    summary: COULD_NOT_REFRESH,
+    details: [
+      `${pricing.source} didn't return a usable rate table, so the rates are still ${pricing.status}. ` +
+        "Wollipog fetches them at most once a minute; the control plane's log has the cause.",
+    ],
+  };
 }
 
 /** A window with nothing in it (#3016): no processed tokens and no cost. */

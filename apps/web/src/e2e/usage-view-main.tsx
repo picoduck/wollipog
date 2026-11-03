@@ -156,6 +156,7 @@ const response: UsageAggregationResponse = {
 
 // Refresh Rates loads a fresh table, which the next answer reports.
 let ratesRefreshed = false;
+let ratesRefreshAttempts = 0;
 
 function aggregateResponse(granularity: UsageAggregationGranularity): UsageAggregationResponse {
   const bucketStart = (timestamp: number) => {
@@ -324,6 +325,22 @@ const client = {
     return aggregateResponse(input.granularity ?? "day");
   },
   refreshUsagePricing: async () => {
+    // `?ratesRefresh=timeout|invalid`: the fetch fails with that reason, and every later click
+    // lands inside the plane's one-minute refresh floor (#4056).
+    const failure = params.get("ratesRefresh");
+    if (failure === "timeout" || failure === "invalid") {
+      const lastRefreshError = {
+        message: failure === "timeout" ? "the rate source didn't answer within 30 seconds" : "rate table document isn't valid JSON",
+        at: END,
+      };
+      ratesRefreshAttempts += 1;
+      return { pricing: {
+        ...response.pricing!,
+        status: "cached" as const,
+        lastRefreshError,
+        ...(ratesRefreshAttempts > 1 ? { refreshSkipped: { nextAttemptAt: END + 60_000, retryAfterMs: 42_000 } } : {}),
+      } };
+    }
     ratesRefreshed = true;
     return { pricing: { ...response.pricing!, status: "fresh" as const } };
   },

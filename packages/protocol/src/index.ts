@@ -6593,6 +6593,14 @@ export interface UsagePricingStatus {
   source: string;
   fetchedAt: number | null;
   knownModels: number;
+  /** Why the last refresh failed (#4056): one line of at most 200 characters, with no request
+   * headers or credentials, and when it failed. A successful refresh clears it. Older control
+   * planes never send it. */
+  lastRefreshError?: { message: string; at: number };
+  /** Only on a refresh answer that made no new attempt because one ran within the refresh floor
+   * (#4056): when the next attempt may run, by the plane's clock and as a delay from the answer.
+   * Older control planes never send it. */
+  refreshSkipped?: { nextAttemptAt: number; retryAfterMs: number };
 }
 
 export interface UsageRetentionPolicy {

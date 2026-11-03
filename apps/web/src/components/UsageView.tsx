@@ -34,11 +34,13 @@ import {
   metricValue,
   periodLabel,
   processedTokens,
+  ratesRefreshProblem,
   todaySpendUsd,
   usageDriverLabels,
   usageIsEmpty,
   usageWindowCaption,
   type BreakdownRow,
+  type RatesRefreshProblem,
   type UsageAgentCandidate,
   type UsageBreakdownTab,
   type UsageMetric,
@@ -423,7 +425,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   const navigate = useOptionalNavigate();
   const [showSkeleton, setShowSkeleton] = useState(false);
   const [ratesRefreshing, setRatesRefreshing] = useState(false);
-  const [ratesError, setRatesError] = useState<string | null>(null);
+  const [ratesProblem, setRatesProblem] = useState<RatesRefreshProblem | null>(null);
 
   const load = useCallback(async (range: number, requestedGranularity: UsageAggregationGranularity) => {
     const generation = ++requestGeneration.current;
@@ -497,19 +499,17 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   // now on, then reloads the window. Nothing already recorded is re-priced.
   const refreshRates = async () => {
     setRatesRefreshing(true);
-    setRatesError(null);
+    setRatesProblem(null);
     try {
       // The plane answers a failed fetch with the rates it still has, not an error: anything but a
       // fresh table means the refresh didn't take.
       const { pricing } = await api.refreshUsagePricing();
-      if (pricing.status !== "fresh") {
-        setRatesError(pricing.source === "disabled"
-          ? "Rate fetching is turned off on this control plane."
-          : `${pricing.source} didn't return a usable rate table, so the rates are still ${pricing.status}. ` +
-            "Wollipog fetches them at most once a minute; the control plane's log has the cause.");
-      }
+      setRatesProblem(ratesRefreshProblem(pricing));
     } catch (cause) {
-      setRatesError(cause instanceof Error ? cause.message : "Unable to refresh rates");
+      setRatesProblem({
+        summary: "Rates couldn't be refreshed.",
+        details: [cause instanceof Error ? cause.message : "Unable to refresh rates"],
+      });
       setRatesRefreshing(false);
       return;
     }
@@ -769,7 +769,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
       tone="warning"
       title="Some Usage Is Missing"
       className="usage-coverage"
-      details={ratesError ?? undefined}
+      details={ratesProblem ? ratesProblem.details.map((line) => <p key={line}>{line}</p>) : undefined}
       actions={(machinesOffline && navigate) || coverageNeedsRates(coverage) ? (
         <>
           {machinesOffline && navigate && (
@@ -786,7 +786,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
       ) : undefined}
     >
       {coverage.map((item) => <p key={item.kind}>{coverageSentence(item)}</p>)}
-      {ratesError && <p>Rates couldn't be refreshed.</p>}
+      {ratesProblem && <p>{ratesProblem.summary}</p>}
     </Notice>
   );
 

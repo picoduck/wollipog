@@ -6,6 +6,7 @@ import { PROTOCOL_VERSION, type ControlPlaneToRunner } from "@wollipog/protocol"
 import { ControlPlaneDb } from "./db.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerUsageRoutes } from "./usage-routes.js";
+import { UsageRateTableService } from "./usage-rate-table.js";
 
 function human(role: HumanPrincipal["role"], organizationId = "org_personal"): HumanPrincipal {
   return {
@@ -321,6 +322,40 @@ test("usage responses carry rate-table status and members can force a bounded pr
   registerUsageRoutes(bare, db, () => human("viewer"));
   assert.equal((await bare.inject({ method: "GET", url: "/api/usage" })).json().pricing, undefined);
   assert.equal((await bare.inject({ method: "POST", url: "/api/usage/pricing/refresh" })).statusCode, 503);
+});
+
+test("a failed pricing refresh answers 200 with its reason, and a second one inside the floor says it was skipped (#4056)", async () => {
+  const db = ControlPlaneDb.open(":memory:");
+  let now = 2_000_000;
+  let calls = 0;
+  const service = new UsageRateTableService({
+    sourceUrl: "https://rates.example/prices.json",
+    cachePath: null,
+    now: () => now,
+    log: () => {},
+    fetchDocument: async () => {
+      calls += 1;
+      return { sample_spec: {} };
+    },
+  });
+  const app = Fastify();
+  registerUsageRoutes(app, db, () => human("viewer"), undefined, service);
+
+  const failed = await app.inject({ method: "POST", url: "/api/usage/pricing/refresh" });
+  assert.equal(failed.statusCode, 200);
+  assert.deepEqual(failed.json().pricing.lastRefreshError, { message: "rate table document contained no priced models", at: 2_000_000 });
+  assert.equal(failed.json().pricing.refreshSkipped, undefined);
+
+  now += 20_000;
+  const skipped = (await app.inject({ method: "POST", url: "/api/usage/pricing/refresh" })).json().pricing;
+  assert.equal(calls, 1);
+  assert.deepEqual(skipped.refreshSkipped, { nextAttemptAt: 2_060_000, retryAfterMs: 40_000 });
+  assert.equal(skipped.lastRefreshError.message, "rate table document contained no priced models");
+  const usage = (await app.inject({ method: "GET", url: "/api/usage" })).json().pricing;
+  assert.equal(usage.refreshSkipped, undefined, "the usage summary never claims a skipped refresh");
+  assert.equal(usage.lastRefreshError.message, "rate table document contained no priced models");
+  await app.close();
+  db.close();
 });
 
 test("the daily budget is readable by members, writable by admins, and per-user windows are scoped by role", async () => {

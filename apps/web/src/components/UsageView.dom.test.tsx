@@ -10,6 +10,7 @@ import type {
   UsageAggregationGranularity,
   UsageAggregationResponse,
   UsageAmount,
+  UsagePricingStatus,
   UserCostWindows,
 } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
@@ -1773,8 +1774,9 @@ test("a Refresh Rates failure says so and keeps its reason behind Show Details (
   await unmount();
 });
 
+// The answers below carry neither `lastRefreshError` nor `refreshSkipped`: a plane from before #4056.
 for (const status of ["cached", "unavailable"] as const) {
-  test(`a refresh the plane answers with ${status} rates is a failure too, and still reloads (#3016)`, async () => {
+  test(`a refresh an older plane answers with ${status} rates is a failure too, keeps today's wording, and still reloads (#3016, #4056)`, async () => {
     let usageCalls = 0;
     const usage: UsageAggregationResponse = {
       ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
@@ -1818,6 +1820,85 @@ test("Refresh Rates against a plane with rate fetching turned off says so (#3016
   await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
   await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
   assert.match(notice().textContent ?? "", /Rate fetching is turned off on this control plane\./);
+  await unmount();
+});
+
+function unpricedUsage(): UsageAggregationResponse {
+  return {
+    ...response([bucket(Date.UTC(2026, 0, 1), 100, 1)], "day"),
+    totals: amountOf(100, 1, { costSource: "unpriced", unpricedRecords: 3 }),
+  };
+}
+
+const RATE_SOURCE = "https://rates.example/table.json";
+
+test("a timed-out refresh shows the plane's reason behind Show Details, and a later successful one clears it (#4056)", async () => {
+  const answers: UsagePricingStatus[] = [
+    { status: "cached", source: RATE_SOURCE, fetchedAt: 1, knownModels: 9,
+      lastRefreshError: { message: "the rate source didn't answer within 30 seconds", at: 2 } },
+    { status: "fresh", source: RATE_SOURCE, fetchedAt: 3, knownModels: 10 },
+  ];
+  const client = {
+    ...usageClient(unpricedUsage()),
+    refreshUsagePricing: async () => ({ pricing: answers.shift()! }),
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const notice = () => apiPanel(container).querySelector(".notice")!;
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  assert.match(notice().querySelector(".notice-body")?.textContent ?? "", /Rates couldn't be refreshed\.$/);
+  assert.doesNotMatch(notice().textContent ?? "", /didn't answer/, "the reason waits behind Show Details");
+  await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+  assert.deepEqual([...notice().querySelectorAll(".notice-details-body > p")].map((node) => node.textContent), [
+    "https://rates.example/table.json couldn't be fetched: the rate source didn't answer within 30 seconds.",
+    "The rates are still cached.",
+  ]);
+  assert.doesNotMatch(notice().textContent ?? "", /control plane's log/, "a plane that sends the reason isn't sent to its log");
+
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  assert.doesNotMatch(notice().textContent ?? "", /couldn't be refreshed|didn't answer/, "a fresh table clears the failure");
+  assertNoDomNode(buttonNamed(notice(), "Show Details") ?? null, "nothing is left to show");
+  await unmount();
+});
+
+test("an invalid rate document shows its reason behind Show Details (#4056)", async () => {
+  const client = {
+    ...usageClient(unpricedUsage()),
+    refreshUsagePricing: async () => ({ pricing: {
+      status: "unavailable", source: RATE_SOURCE, fetchedAt: null, knownModels: 0,
+      lastRefreshError: { message: "rate table document isn't valid JSON", at: 2 },
+    } satisfies UsagePricingStatus }),
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const notice = () => apiPanel(container).querySelector(".notice")!;
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+  assert.match(notice().textContent ?? "", /couldn't be fetched: rate table document isn't valid JSON\.The rates are still unavailable\./);
+  await unmount();
+});
+
+test("a second Refresh Rates inside the refresh floor says it was skipped and when it can run, not a new failure (#4056)", async () => {
+  const lastRefreshError = { message: "rate table returned HTTP 503", at: 2 };
+  const answers: UsagePricingStatus[] = [
+    { status: "cached", source: RATE_SOURCE, fetchedAt: 1, knownModels: 9, lastRefreshError },
+    { status: "cached", source: RATE_SOURCE, fetchedAt: 1, knownModels: 9, lastRefreshError,
+      refreshSkipped: { nextAttemptAt: 60_002, retryAfterMs: 41_200 } },
+  ];
+  const client = {
+    ...usageClient(unpricedUsage()),
+    refreshUsagePricing: async () => ({ pricing: answers.shift()! }),
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const notice = () => apiPanel(container).querySelector(".notice")!;
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  const body = notice().querySelector(".notice-body")?.textContent ?? "";
+  assert.match(body, /This refresh was skipped because one ran less than a minute ago\.$/);
+  assert.doesNotMatch(body, /couldn't be refreshed/, "a skipped refresh isn't reported as a new failure");
+  await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+  assert.deepEqual([...notice().querySelectorAll(".notice-details-body > p")].map((node) => node.textContent), [
+    "Wollipog tries the rate source at most once a minute. Try again in 42 seconds.",
+    "The last attempt failed: rate table returned HTTP 503.",
+  ]);
   await unmount();
 });
 
