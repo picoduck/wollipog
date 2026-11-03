@@ -836,11 +836,25 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
 
 /** What one occurrence decides about, for matching a later request against an occurrence handed to
  * the campaign's owner (#4064). Its category and resourceKey always count, from any requester; so
- * does a resource the snapshot names (a pull request, a branch, an issue, a recommendation), so a
- * new key cannot route around the handoff. Matching too much only keeps a request with a person. */
+ * do its exact content and what the snapshot names (a pull request, a branch, an issue, a
+ * recommendation, a question, a publication title, evidence, a scope change), so neither a new key
+ * nor a recreated copy can route around the handoff. Matching too much only keeps a request with a
+ * person. A question genuinely reworded is a different question. */
 function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
-  const targets = [`key:${category}:${resourceKey}`];
+  const text = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${auditDigest(snapshot)}`];
   switch (snapshot.category) {
+    case "implementation_question":
+    case "owner_decision":
+      targets.push(`${snapshot.category}:question:${text(snapshot.question)}`);
+      break;
+    case "ui_evidence_approval":
+      for (const item of snapshot.evidence) targets.push(`${snapshot.category}:evidence:${item.sha256}`);
+      break;
+    case "campaign_issue_scope":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:+${[...snapshot.additions].sort((a, b) => a - b).join(",")}` +
+        `:-${[...snapshot.removals].sort((a, b) => a - b).join(",")}`);
+      break;
     case "pr_merge":
     case "review_round_extension":
       targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`);
@@ -853,6 +867,7 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
       break;
     case "follow_up_issue_publication":
       if (snapshot.recommendationId) targets.push(`${snapshot.category}:recommendation:${snapshot.recommendationId}`);
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:title:${text(snapshot.sanitizedTitle)}`);
       break;
   }
   return targets;
@@ -13914,10 +13929,13 @@ export class SessionsService {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
+    // A root's owner-kept cards (#4064) wait for a person without parking it, so the session leaves
+    // the pause once nothing else remains, exactly as if no card remained.
+    const parked = awaitsPendingInput(remaining);
     // A child parked for worktree recovery is input_required because the runner said so, not because
     // of this card, so settling the card neither idles nor runs it; a resume waits for recovery.
     const recovering = current.worktreeRecovery != null;
-    const restoreIdle = !recovering && !remaining && current.status === "input_required" &&
+    const restoreIdle = !recovering && !parked && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
     if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!) &&
@@ -13936,7 +13954,7 @@ export class SessionsService {
       this.replayRestoredPolicyIdle(current, sessionId, now);
       return;
     }
-    if (!remaining && current.status === "input_required" && !recovering) {
+    if (!parked && current.status === "input_required" && !recovering) {
       this.db.updateSessionStatus(
         sessionId,
         restoreIdle ? "idle" : "running",
@@ -13953,7 +13971,7 @@ export class SessionsService {
       // the card is present, so the last settlement must immediately surface any deferred gate.
       if (deferLifecycle) deferLifecycle("active", current);
       else {
-        if (!remaining) this.gateOnPolicy(sessionId, now);
+        if (!parked) this.gateOnPolicy(sessionId, now);
         this.clearSettledPolicyResumeStatus(sessionId);
         resume?.(false);
       }

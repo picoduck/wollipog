@@ -19061,8 +19061,9 @@ export class ControlPlaneDb {
       | { status: SessionStatus; pending_approval: string | null; cost_usd: number; cost_budget_usd: number | null }
       | undefined;
     const pending = parseJson<PendingApproval>(current?.pending_approval ?? null);
+    // A root's owner-kept card (#4064) is non-blocking: it waits for a person without parking the root.
     const keepWorkflowPause = !isTerminal(status) &&
-      pendingRequests(pending).some((request) => request.kind === "workflow_decision");
+      pendingRequests(pending).some((request) => request.kind === "workflow_decision" && !request.async);
     const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
     if (current && current.status !== effectiveStatus) this.stmt(`
       INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)

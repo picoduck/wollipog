@@ -109,7 +109,9 @@ test("an owner decision does not park the root or hold other campaign work (#406
     assert.equal(card.async, true, "its card does not hold the root");
     assert.equal(card.title, "Owner Decision Required");
     assert.deepEqual(card.options.map((option) => option.optionId), ["lease", "broker", "__workflow_deny__"]);
-    // The runner reporting the root idle does not park it on the card, so continuations still reach it.
+    // Runner status reports do not park it on the card, so continuations still reach it.
+    h.svc.onSessionStatus("root", "running");
+    assert.equal(h.db.getSession("root")!.status, "running");
     h.svc.onSessionStatus("root", "idle");
     assert.notEqual(h.db.getSession("root")!.status, "input_required");
     assert.equal(h.db.campaignContinuationLifecycle("root")?.hasPendingApproval, false);
@@ -223,5 +225,60 @@ test("owner decisions exist only for a Full Control root on a current runner (#4
     const secret = h.svc.createOwnerDecision("root", { requestId: "s", resourceKey: "s", question: "Please paste your API key here",
       options: [{ optionId: "a", label: "Done" }, { optionId: "b", label: "Skip" }] });
     assert.equal(secret.status, 403);
+  } finally { h.db.close(); }
+});
+
+test("a handed question recreated under a new key stays the owner's (#4064 review)", () => {
+  const h = harness();
+  try {
+    const snapshot = { category: "implementation_question" as const, question: "Which layout should the status page use?",
+      options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] };
+    const own = h.svc.createWorkflowDecision("root", { requestId: "layout-1", resourceKey: "layout", resourceSnapshot: snapshot });
+    assert.ok(own.ok && own.data);
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", own.data.occurrenceId, { reason: "The owner kept the layout" }).ok);
+    assert.ok(h.svc.withdrawWorkflowDecision("root", own.data.occurrenceId, { reason: "Ask again" }).ok);
+    for (const [requestId, resourceKey, question] of [["layout-2", "another-key", snapshot.question],
+      ["layout-3", "third-key", "  which LAYOUT should the status page   use? "]] as const) {
+      const again = h.svc.createWorkflowDecision("root", { requestId, resourceKey, resourceSnapshot: { ...snapshot, question } });
+      assert.ok(again.ok && again.data, again.error ?? "created");
+      assert.deepEqual([again.data.authority, again.data.authorityEvaluation?.reason], ["human", "owner_kept"], resourceKey);
+      assert.equal(h.rootResolve("root", again.data, "split").ok, false, "the root cannot decide it");
+    }
+  } finally { h.db.close(); }
+});
+
+test("handing a root's blocking decision to the owner clears the barrier while other owner cards wait (#4064 review)", () => {
+  const h = harness();
+  try {
+    const asked = h.ask();
+    assert.ok(asked.ok);
+    const own = h.svc.createWorkflowDecision("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
+      category: "implementation_question", question: "Which layout should the status page use?",
+      options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
+    assert.ok(own.ok && own.data);
+    h.svc.onSessionStatus("root", "idle");
+    assert.equal(h.db.getSession("root")!.status, "input_required", "the root's own blocking card holds it");
+    assert.ok(h.svc.handWorkflowDecisionToOwner("root", own.data.occurrenceId, { reason: "The owner kept the layout" }).ok);
+    const root = h.db.getSession("root")!;
+    assert.notEqual(root.status, "input_required");
+    assert.deepEqual(pendingRequests(root.pendingApproval).map((request) => request.async), [true, true]);
+    assert.equal(h.db.campaignContinuationLifecycle("root")?.hasPendingApproval, false);
+    assert.notEqual(h.db.campaignContinuationAdmission("root").reason,
+      "Automatic continuation is held by the campaign's current lifecycle or pending recovery.");
+  } finally { h.db.close(); }
+});
+
+test("a root resolving its own blocking decision leaves the pause while an owner decision waits (#4064 review)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.ask().ok);
+    const own = h.svc.createWorkflowDecision("root", { requestId: "layout", resourceKey: "layout", resourceSnapshot: {
+      category: "implementation_question", question: "Which layout should the status page use?",
+      options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
+    assert.ok(own.ok && own.data);
+    assert.equal(h.db.getSession("root")!.status, "input_required");
+    assert.ok(h.svc.resolveWorkflowDecision("root", "root", own.data.occurrenceId, { outcome: "approve", selectedOptionId: "split" },
+      "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    assert.notEqual(h.db.getSession("root")!.status, "input_required");
   } finally { h.db.close(); }
 });
