@@ -12,7 +12,11 @@ export type CampaignRecoveryReason = "authorized_action" | "transient_failure" |
   /** #4065: a person-owned follow-up publication the server could not admit; `admissionFailure` names why. */
   "publication_not_admitted" |
   /** #4065: the server refused a member's publication request for a condition it can correct. */
-  "correctable_refusal";
+  "correctable_refusal" |
+  /** #3362: a worker ended by a recorded Stop or archive request, not by a denial. Blocked like one. */
+  "intentional_stop" |
+  /** #3362: a stopped worker whose recorded provenance proves neither a Stop request nor a denial. */
+  "unverified_stop";
 export type CampaignRecoveryState = "ready" | "backoff" | "dispatched" | "waiting_human" |
   "blocked" | "resolved" | "cancelled";
 export interface CampaignRecoveryResource {
@@ -81,4 +85,6 @@ export const CAMPAIGN_RECOVERY_EXPLANATIONS: Record<CampaignRecoveryReason, stri
   request_declined: "Full Control declined a request for credentials, sign-in, wider provider access or a lasting permission grant. The campaign cannot supply these, so the work that needed it stays blocked while unrelated work continues. Nobody is asked and the request is never replayed.",
   publication_not_admitted: "The server could not admit this follow-up publication under the campaign's issue boundary, so a person reviews it. Recovery cannot admit it.",
   correctable_refusal: "The server refused a member's follow-up publication request for a condition the member can correct, and created nothing. Have it correct the request as the refusal says and request it again.",
+  intentional_stop: "The worker was stopped on purpose by a recorded Stop or archive request; nothing was denied. It remains blocked and recovery will not replace or restart it automatically.",
+  unverified_stop: "The worker stopped without a recorded Stop request, denial or failure that explains why, so the cause is unverified. It remains blocked and recovery will not replace or restart it automatically.",
 };

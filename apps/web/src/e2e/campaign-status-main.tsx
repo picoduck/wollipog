@@ -71,8 +71,9 @@ if (params.get("theme") === "light") document.documentElement.dataset.theme = "l
 const NOW = Date.now();
 const recoveryReason = params.get("recovery");
 const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
-  "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined"].includes(recoveryReason)
-  ? campaignRecoveryFixture(recoveryReason as import("@wollipog/protocol").CampaignRecoveryReason, NOW) : null;
+  "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined",
+  "hard_denial", "intentional_stop", "unverified_stop"].includes(recoveryReason)
+  ? campaignRecoveryFixture(recoveryReason as import("@wollipog/protocol").CampaignRecoveryReason, NOW, params.get("subject") === "worker") : null;
 const HOUR = 60 * MINUTE;
 
 const items: CampaignWorkItemSummary[] = [

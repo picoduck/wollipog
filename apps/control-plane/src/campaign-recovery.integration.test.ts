@@ -3,7 +3,7 @@ import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
   type SessionSnapshot } from "@wollipog/protocol";
-import { ControlPlaneDb } from "./db.js";
+import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
@@ -1528,4 +1528,156 @@ test("a failed GitLab pipeline routes to repair and a passed one resolves it (#3
     h.recovery.maintain(200);
     assert.equal(h.db.campaignProjection("root")!.recovery!.records.length, 0);
   } finally { h.db.close(); }
+});
+
+// #3362: a stopped worker's reason comes from the server-written stop provenance, never from agent
+// text, and every stop classification stays a hard block that recovery never replaces or restarts.
+function assignChild(h: ReturnType<typeof fixture>, childSessionId = "child") {
+  const planned = h.svc.recordCampaignPlan("root", { planComplete: true,
+    items: [{ key: "original:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+  assert.ok(planned.ok, planned.error ?? "plan refused");
+  const workItemId = planned.data!.items[0]!.workItemId;
+  const assigned = h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId });
+  assert.ok(assigned.ok, assigned.error ?? "assignment refused");
+  return workItemId;
+}
+const workerRecord = (h: ReturnType<typeof fixture>) =>
+  h.db.campaignRecovery.projection("root").records.find(item => item.action === "replace_worker");
+// Worker-replacement wakes only, from any record state: a child's own request still wakes the root.
+const wakes = (h: ReturnType<typeof fixture>) => Number((h.db.raw().prepare(`SELECT COUNT(*) AS n FROM orchestrator_campaign_events event
+  JOIN campaign_recovery record ON record.id=event.occurrence_id WHERE json_extract(record.record_json,'$.action')='replace_worker'`)
+  .get() as { n: number }).n);
+
+test("an intentional Stop of an assigned worker is recorded as an intentional stop, never a denial, and stays blocked (#3362)", () => {
+  const h = fixture();
+  try {
+    const workItemId = assignChild(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    assert.ok(h.svc.stop("child").ok);
+    assert.ok(h.db.getSession("child")!.stopOperation, "the Stop is a durable, server-recorded intent");
+    h.recovery.maintain(100);
+    assert.equal(workerRecord(h), undefined, "a Stop still settling is not yet recovery work");
+    h.svc.onSessionStatus("child", "stopped", undefined, undefined, "r");
+    assert.equal(h.db.getSession("child")!.stopOperation, undefined);
+    assert.equal(h.db.sessionStopProvenance("child")!.cause, "requested");
+    for (const now of [200, 10_000, 100_000, 10_000_000]) h.recovery.maintain(now);
+    const record = workerRecord(h)!;
+    assert.deepEqual([record.reason, record.state, record.effectiveOwner, record.requiredInput, record.attempts, record.resource.workItemId],
+      ["intentional_stop", "blocked", "orchestrator", "none", 0, workItemId]);
+    assert.match(record.explanation, /stopped on purpose by a recorded Stop or archive request; nothing was denied/);
+    assert.match(record.explanation, /will not replace or restart it automatically/);
+    assert.equal(wakes(h), 0, "an intentional stop never wakes the Orchestrator to replace the worker");
+    assert.equal(h.db.getSession("child")!.status, "stopped", "nothing restarted the stopped worker");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1);
+  } finally { h.db.close(); }
+});
+
+test("stop provenance, denial and failure each keep their own reason and restriction (#3362)", () => {
+  const cases: Array<[string, (h: ReturnType<typeof fixture>) => void, string]> = [
+    ["guardrail decline", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "guardrail" }), "hard_denial"],
+    ["runner-reported stop", h => h.db.updateSessionStatus("child", "stopped", 5, RUNNER_REPORTED_STOP), "unverified_stop"],
+    ["runner disconnect", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "runner_disconnect" }), "unverified_stop"],
+    ["launch never sent", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "not_launched", confirmation: "not_launched" }), "unverified_stop"],
+    ["unrecorded stop", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "unrecorded" }), "unverified_stop"],
+    ["failed worker", h => h.db.updateSessionStatus("child", "failed", 5), "transient_failure"],
+  ];
+  for (const [label, end, reason] of cases) {
+    for (const assignment of ["active", "unledgered"] as const) {
+      const h = fixture();
+      try {
+        const workItemId = assignment === "active" ? assignChild(h) : undefined;
+        h.db.updateSessionStatus("root", "idle", 4);
+        end(h);
+        for (const now of [100, 100_000]) h.recovery.maintain(now);
+        const record = workerRecord(h)!;
+        assert.deepEqual([record.reason, record.resource.workItemId], [reason, workItemId], `${label} (${assignment})`);
+        if (reason === "transient_failure") {
+          assert.ok(record.attempts > 0, "an ordinary failure keeps bounded automatic replacement");
+          assert.ok(wakes(h) > 0, "the replacement wake is observable, so the blocked cases' zero is meaningful");
+        } else {
+          assert.equal(record.state, "blocked", label);
+          assert.equal(record.attempts, 0, label);
+          assert.equal(wakes(h), 0, `${label} is never automatically replaced`);
+        }
+        if (reason === "unverified_stop") assert.match(record.explanation, /cause is unverified/);
+        if (reason !== "hard_denial") assert.doesNotMatch(record.explanation, /was denied\./, label);
+      } finally { h.db.close(); }
+    }
+  }
+});
+
+test("an ended assignment's stop is history, not recovery work (#3362)", () => {
+  const h = fixture();
+  try {
+    const workItemId = assignChild(h);
+    h.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    const reassigned = h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "unaffected" });
+    assert.ok(reassigned.ok, reassigned.error ?? "reassignment refused");
+    assert.equal(h.db.campaignWorkLedger.currentAssignment("child"), null);
+    h.recovery.maintain(100);
+    assert.equal(h.db.campaignRecovery.projection("root").records.some(item => item.resource.sessionId === "child"), false);
+  } finally { h.db.close(); }
+});
+
+test("a stored hard denial is never relabeled, and a stop label only escalates across workers (#3362)", () => {
+  const h = fixture();
+  try {
+    const workItemId = assignChild(h);
+    const revision = h.db.getSession("root")!.parentControlPolicy?.revision ?? 0;
+    h.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    const epoch = h.db.getSession("child")!.eventEpoch ?? 0;
+    // A record an earlier version wrote for this very stop keeps its denial: nothing softens it.
+    h.db.campaignRecovery.synchronize("root", revision, true, [{ action: "replace_worker", owner: "orchestrator",
+      reason: "hard_denial", resource: { kind: "worker", sessionId: "child", occurrenceId: `epoch:${epoch}`, workItemId },
+      signal: `child:${epoch}:stopped` }], 50);
+    for (const now of [100, 200]) h.recovery.maintain(now);
+    assert.deepEqual([workerRecord(h)!.reason, workerRecord(h)!.state], ["hard_denial", "blocked"]);
+  } finally { h.db.close(); }
+  // An intentional stop, then a replacement worker's guardrail denial before the next scan: the denial shows.
+  const escalated = fixture();
+  try {
+    const workItemId = assignChild(escalated);
+    escalated.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    escalated.recovery.maintain(100);
+    assert.equal(workerRecord(escalated)!.reason, "intentional_stop");
+    assert.ok(escalated.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "unaffected" }).ok);
+    escalated.db.updateSessionStatus("unaffected", "stopped", 6, { cause: "guardrail" });
+    for (const now of [200, 300]) escalated.recovery.maintain(now);
+    assert.deepEqual([workerRecord(escalated)!.resource.sessionId, workerRecord(escalated)!.reason, workerRecord(escalated)!.state],
+      ["unaffected", "hard_denial", "blocked"]);
+  } finally { escalated.db.close(); }
+});
+
+test("pause, archive, revocation and denial still prevent replacing a stopped worker (#3362)", () => {
+  for (const fence of ["pause", "archive_child", "archive_root", "revoke", "deny"] as const) {
+    const h = fixture();
+    try {
+      assignChild(h);
+      h.db.updateSessionStatus("root", "idle", 3);
+      if (fence === "deny") {
+        const decision = h.svc.createWorkflowDecision("child", { requestId: "stop-deny", resourceKey: "choice",
+          resourceSnapshot: { category: "implementation_question", question: "Which fixture should we implement?",
+            options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+        assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
+          { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+      }
+      assert.ok(h.svc.stop("child").ok);
+      h.svc.onSessionStatus("child", "stopped", undefined, undefined, "r");
+      h.db.updateSessionStatus("root", "idle", 4);
+      if (fence === "pause") h.db.updateSessionStatus("root", "input_required", 5);
+      if (fence === "archive_child") h.db.setSessionArchived("child", true, 5);
+      if (fence === "archive_root") h.db.setSessionArchived("root", true, 5);
+      if (fence === "revoke") h.db.updateSessionCampaignControl("root", { mode: "custom" }, 2, 5);
+      for (const now of [100, 100_000, 10_000_000]) h.recovery.maintain(now);
+      const projection = h.db.campaignRecovery.projection("root");
+      assert.equal(projection.automatic, 0, fence);
+      assert.equal(wakes(h), 0, fence);
+      assert.equal(h.db.getSession("child")!.status, "stopped", `${fence}: the worker was not restarted`);
+      if (fence === "pause") assert.equal(workerRecord(h)!.reason, "intentional_stop");
+      if (fence === "deny") {
+        assert.deepEqual(projection.records.map(item => item.reason).sort(), ["hard_denial", "intentional_stop"],
+          "the typed denial stays a denial beside the intentional stop");
+      }
+    } finally { h.db.close(); }
+  }
 });
