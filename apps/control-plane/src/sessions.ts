@@ -35,7 +35,8 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
+  CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
@@ -431,6 +432,11 @@ const CAMPAIGN_EVENT_TEXT_MAX_CHARS = 120;
 function boundedCampaignEventText(text: string): string {
   const flat = text.replace(/\s+/gu, " ").replaceAll("[", "(").replaceAll("]", ")").trim();
   return flat.length > CAMPAIGN_EVENT_TEXT_MAX_CHARS ? `${flat.slice(0, CAMPAIGN_EVENT_TEXT_MAX_CHARS - 1)}…` : flat;
+}
+
+/** One member's correctable publication refusal for one recommendation (#4065), hashed. */
+function publicationRefusalCoordinate(sessionId: string, recommendationId: string): string {
+  return recoveryCoordinate(`publication_refusal:${sessionId}:${recommendationId}`);
 }
 
 interface CampaignContinuationEventDetail {
@@ -6447,7 +6453,7 @@ export class SessionsService {
             recovery.policyRevision === this.db.parentControlPolicy(campaignSessionId)?.revision;
           return { actionable: pending, summary: { ...base, ...subject(event.subjectSessionId),
             recoveryId: recovery.id, action: recovery.action, reason: recovery.reason,
-            resource: recovery.resource, requiredInput: recovery.requiredInput,
+            ...(recovery.admissionFailure ? { admissionFailure: recovery.admissionFailure } : {}), resource: recovery.resource, requiredInput: recovery.requiredInput,
             attempts: recovery.attempts, maxAttempts: recovery.maxAttempts, pending } };
         }
         const occurrenceId = event.occurrenceId ?? "";
@@ -10421,6 +10427,12 @@ export class SessionsService {
       if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) {
         return "failure" in admitted ? fail("Publication authority changed during inspection; request it again", 409) : admitted;
       }
+      // A mistake the requester can fix in one step is refused, never put to a person (#4065). Only
+      // a Full Control issue boundary reaches these checks. A replayed requestId keeps its decision.
+      if ("failure" in admitted && CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES.has(admitted.failure) &&
+          boundedDecisionString(request.requestId, 256) && !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
+        return this.refuseCorrectablePublication(sessionId, normalized.data.recommendationId, admitted.failure);
+      }
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
       // preserve the original configured/human request path without a standing issue grant,
       // and record why on the decision so the person is never asked without a reason (#2940).
@@ -10615,6 +10627,23 @@ export class SessionsService {
     }
   }
 
+  /** Refuses a correctable publication request (#4065): a 409 with the failure code and its fixed
+   * sentence. Nothing is created or granted and no person is asked. A member's refusal is recorded
+   * for the root's recovery, which wakes the root as for any child request needing it; the root's
+   * own refusal reaches it directly. */
+  private refuseCorrectablePublication(sessionId: string, recommendationId: string,
+    failure: CampaignPublicationAdmissionFailure): ServiceResult<WorkflowDecisionView> {
+    const rootId = this.db.campaignRootForMember(sessionId);
+    const root = rootId && rootId !== sessionId ? this.db.getSession(rootId) : null;
+    if (root) {
+      const now = Date.now();
+      this.db.campaignRecovery.recordPublicationRefusal(root.id, sessionId, publicationRefusalCoordinate(sessionId, recommendationId),
+        failure, root.parentControlPolicy?.revision ?? 0, now);
+      this.campaignRecovery.synchronize(root, now);
+    }
+    return { ok: false, status: 409, error: CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure], errorDetails: { code: failure } };
+  }
+
   /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
    * any member whose gates the root controls may request it: the drafting child usually does. A
    * refusal names its condition, logged here and recorded on the human-owned fallback (#2940). */
@@ -10627,7 +10656,8 @@ export class SessionsService {
     const refused = (failure: CampaignPublicationAdmissionFailure, boundaryRevision?: number) => {
       this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
         ...(root ? { controllingSessionId: root.id } : {}), ...(boundaryRevision === undefined ? {} : { boundaryRevision }),
-        recommendationId: snapshot.recommendationId, outcome: "human_fallback", reason: failure }));
+        recommendationId: snapshot.recommendationId, outcome: CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES.has(failure) ? "refused" : "human_fallback",
+        reason: failure }));
       return { failure };
     };
     if (!caller || !root || !canAccess(sessionId) || !canAccess(root.id)) return refused("requester_outside_campaign");
@@ -11267,8 +11297,18 @@ export class SessionsService {
       authorityEvaluation.basis = "human_required";
       authorityEvaluation.reason = "evidence_review_unavailable";
     }
-    if (internal?.publicationAdmissionFailure && category === "follow_up_issue_publication" && authority === "human") {
-      authorityEvaluation.admissionFailure = internal.publicationAdmissionFailure;
+    if (category === "follow_up_issue_publication" && normalized.data.category === category && authority === "human") {
+      // Under an issue boundary no person-owned publication is recorded without its reason (#4065):
+      // a request that named no recommendation says so, and one that reached here without a
+      // bounded admission on the current authority says that. Custom campaigns are unchanged.
+      const control = controller.session.orchestratorPolicy?.control;
+      const issueBounded = control?.mode === "full_control" && control.boundary.issueAuthority ? control.boundary : null;
+      const failure = internal?.publicationAdmissionFailure ?? (issueBounded
+        ? !issueBounded.issueAuthority!.relatedFollowUps || !issueBounded.operations.includes(category) ? "no_issue_boundary"
+          : normalized.data.recommendationId ? "authority_unavailable" : "recommendation_missing"
+        : undefined);
+      if (failure) authorityEvaluation.admissionFailure = failure;
+      if (failure && issueBounded) authorityEvaluation.admissionMessage = CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
     }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
@@ -11302,6 +11342,12 @@ export class SessionsService {
       return ok(this.withMergeReviewEvidence(created.decision));
     }
     const decision = created.decision;
+    // The member requested this recommendation again, so its earlier correctable refusal is settled (#4065).
+    if (decision.resourceSnapshot.category === "follow_up_issue_publication" && decision.resourceSnapshot.recommendationId) {
+      const rootId = this.db.campaignRootForMember(sessionId);
+      if (rootId) this.db.campaignRecovery.retirePublicationRefusals(rootId, sessionId,
+        publicationRefusalCoordinate(sessionId, decision.resourceSnapshot.recommendationId));
+    }
     const approval = this.workflowDecisionApproval(decision);
     if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // Project the replacement before settling older occurrences. Otherwise a supersession after
