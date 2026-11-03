@@ -64,6 +64,7 @@ import {
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
+  workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
@@ -1877,6 +1878,7 @@ app.register(async (instance) => {
       case "edit_queued_prompt_result":
       case "provider_login_result":
       case "remove_provider_account_result":
+      case "remove_workspace_result":
       case "adopt_provider_profile_result":
       case "import_provider_credential_result":
       case "revoke_provider_profile_grant_result":
@@ -6504,6 +6506,68 @@ app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
     const message = (error as Error).message;
     return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
   }
+});
+
+// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
+// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
+// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
+// which keeps it removed across restarts, and older runners are refused with an update hint.
+app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  // A person removes a workspace, never an agent credential, and only one they may manage.
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  const runner = db.getRunner(runnerId);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  const source = db.workspaceSource(runnerId, workspaceId);
+  if (!source) return reply.code(404).send({ error: "workspace not found" });
+  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (source === "configured") {
+    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
+  }
+  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
+  // workspace while its runner is asked; a managed workspace is gone at this point.
+  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
+  if (!started) return reply.code(404).send({ error: "workspace not found" });
+  if (!started.ok) {
+    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
+  }
+  hub.runnerChanged(runnerId);
+  if (started.source === "managed") return { removed: true };
+  const requestId = `workspace_remove_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(runnerId, requestId, {
+      type: "remove_workspace",
+      requestId,
+      runnerId,
+      workspaceId,
+      path: started.path,
+    });
+    if (result.type !== "remove_workspace_result" || !result.ok) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return result.type === "remove_workspace_result"
+        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
+        : reply.code(502).send({ error: "unexpected runner reply" });
+    }
+  } catch (error) {
+    if (isRunnerRequestNotSentError(error)) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return reply.code(409).send({ error: "runner is offline" });
+    }
+    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
+    // restores it if the runner still has it.
+    return reply.code(504).send({
+      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
+    });
+  }
+  db.finishWorkspaceRemoval(runnerId, workspaceId);
+  return { removed: true };
 });
 
 app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {
