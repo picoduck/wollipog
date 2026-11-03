@@ -12,8 +12,9 @@ import {
 import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
   defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
-  type ReviewSessionDependencies,
+  reviewSessionDiscoveryReason, type ReviewSessionDependencies,
 } from "./review-sessions.js";
+import { configuredSessionWritableGrants, explainSessionWritableRefusal, SessionWritableRootError } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
 
 const rootUid = statSync("/").uid;
@@ -366,16 +367,32 @@ test("the runner's reviewer check names the configured grant that makes the revi
   t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
   const claude = join(realpathSync(root), "claude");
-  // The fixture can only live under the system temporary directory, so it stands in for the
-  // workspace root here; review-trust.test.ts covers the conventional HOME install itself.
+  // A workspace registered at the temporary directory is named, but removing it cannot help:
+  // the temporary directory is session-writable regardless. review-trust.test.ts covers HOME.
   const deps = defaultReviewSessionDependencies("/state", () => {}, () => [
     { path: tmpdir(), grant: `workspace "scratch"`, recovery: `remove workspace "scratch" from this machine` },
   ]);
   assert.throws(() => deps.verifyCommand(claude), {
-    message: `${claude} is inside a directory a session can write (${realpathSync(tmpdir())}), granted by workspace "scratch". ` +
-      `To use it, remove workspace "scratch" from this machine, or install the reviewer where no session can write ` +
-      `and set its agent's command to that absolute path`,
+    message: `${claude} is inside a directory a session can write (${realpathSync(tmpdir())}). To use it, install the reviewer ` +
+      `where no session can write and set its agent's command to that absolute path. Granted by workspace "scratch"`,
   });
+});
+
+test("a bounded capability reason keeps a recovery however many grants contain the reviewer", () => {
+  const home = "/home/operator";
+  const names = Array.from({ length: 8 }, (_, index) => `${index}-${"a-long-project-name-".repeat(5)}`);
+  const grants = configuredSessionWritableGrants({
+    workspaces: names.map((name, index) => ({ name, path: `/srv/project-${index}`, additionalDirectoryGrants: [home] })),
+    sessions: Array.from({ length: 12 }, (_, index) => ({ sessionId: `s_${"0".repeat(11)}${index}`, repoPath: home, worktreePath: null, env: {} })),
+  });
+  const relocation = "install the reviewer where no session can write and set its agent's command to that absolute path";
+  const full = explainSessionWritableRefusal(new SessionWritableRootError(`${home}/.local/bin`, home), grants, relocation, []) as Error;
+  const reason = reviewSessionDiscoveryReason(full);
+  assert.ok(reason.length <= 500, reason);
+  assert.ok(reason.startsWith(`${home}/.local/bin is inside a directory a session can write (${home}). To use it, ${relocation}, or `), reason);
+  // Labels are bounded, and the runner log (the whole message) keeps every grant.
+  for (const name of names) assert.ok(full.message.includes(`workspace "${name.slice(0, 63)}…"`), full.message);
+  assert.ok(full.message.endsWith(` and sessions ${Array.from({ length: 12 }, (_, index) => `s_${"0".repeat(11)}${index}`).join(", ")}`));
 });
 
 test("prepare checks out the exact pushed head privately and pins the patch in the prompt", async (t) => {

@@ -93,10 +93,9 @@ export function defaultReviewSessionDependencies(
   codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
-  const extraRoots = (grants = sessionWritableGrants()) => [
-    ...new Set(grants.map((grant) => grant.path)),
-    ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),
-  ];
+  const hostProviderHomes = () =>
+    [process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value));
+  const extraRoots = (grants = sessionWritableGrants()) => [...new Set(grants.map((grant) => grant.path)), ...hostProviderHomes()];
   return {
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
       encoding: "utf8", timeout: options.timeoutMs ?? 30_000, maxBuffer: 8_000_000,
@@ -137,8 +136,10 @@ export function defaultReviewSessionDependencies(
         verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection());
       } catch (error) {
         // Name the grant that makes the reviewer session-writable and how to withdraw it (#4122).
+        // Roots no configured grant names can only be avoided by moving the reviewer.
         throw explainSessionWritableRefusal(error, grants,
-          "install the reviewer where no session can write and set its agent's command to that absolute path");
+          "install the reviewer where no session can write and set its agent's command to that absolute path",
+          sessionWritableRoots(homedir(), dataDir, hostProviderHomes()));
       }
     },
     agents,

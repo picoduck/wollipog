@@ -199,7 +199,7 @@ export function configuredSessionWritableGrants(sources: SessionWritableSources)
   const hostEnv = sources.hostEnv ?? {};
   fromEnvironment((name) => hostEnv[name], { grant: "the runner's environment" });
   for (const workspace of sources.workspaces ?? []) {
-    const name = JSON.stringify(workspace.name);
+    const name = label(workspace.name);
     add(workspace.path, { grant: `workspace ${name}`, recovery: `remove workspace ${name} from this machine` });
     for (const path of workspace.additionalDirectoryGrants ?? []) {
       add(path, { grant: `a directory grant of workspace ${name}`, recovery: `remove that directory grant from workspace ${name}` });
@@ -212,10 +212,10 @@ export function configuredSessionWritableGrants(sources: SessionWritableSources)
     }
   }
   for (const account of sources.providerAccounts ?? []) {
-    add(account.directory, { grant: `provider account ${JSON.stringify(account.label)}` });
+    add(account.directory, { grant: `provider account ${label(account.label)}` });
   }
   for (const agent of sources.agents ?? []) {
-    const id = JSON.stringify(agent.id);
+    const id = label(agent.id);
     fromEnvironment((name) => {
       try { return resolveAgentEnvironmentValue(agent, name, hostEnv); } catch { return undefined; }
     }, { grant: `agent ${id}'s environment` }, (name) => `change ${name} in agent ${id}'s environment`);
@@ -236,10 +236,14 @@ export function configuredSessionWritablePaths(sources: SessionWritableSources):
   return [...new Set(configuredSessionWritableGrants(sources).map((grant) => grant.path))];
 }
 
-/** At most `limit` names, then a count of the rest. */
-function listed(names: readonly string[], limit = 3): string {
-  const shown = names.slice(0, limit).join(", ");
-  return names.length > limit ? `${shown} (+${names.length - limit} more)` : shown;
+/** "a", "a and b", "a, b and c". */
+function listed(items: readonly string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+
+/** A configured label, quoted and bounded. */
+function label(value: string): string {
+  return JSON.stringify(value.length > 64 ? `${value.slice(0, 63)}…` : value);
 }
 
 /**
@@ -249,28 +253,31 @@ function listed(names: readonly string[], limit = 3): string {
  * returned unchanged.
  */
 export function explainSessionWritableRefusal(error: unknown, grants: readonly SessionWritableGrant[],
-  relocation: string): unknown {
+  relocation: string, builtInRoots: readonly string[]): unknown {
   if (!(error instanceof SessionWritableRootError)) return error;
   const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
-  // Every grant that would refuse the path, not only the first root found, so withdrawing the
-  // named grants is enough. Built-in roots are checked first: when one refused the path, `root`
-  // is not a configured grant and only moving the program helps.
+  // Every grant that would refuse the path, not only the first root found.
   const matching = grants.filter((grant) => within(grant.path, error.path) || within(canonical(grant.path), error.path));
-  const configuredRoot = matching.some((grant) => grant.path === error.root || canonical(grant.path) === error.root);
   const sessions = [...new Set(matching.flatMap((grant) => grant.sessionId ? [grant.sessionId] : []))];
   const others = matching.filter((grant) => !grant.sessionId);
   const names = [...new Set(others.map((grant) => grant.grant))];
   const recoveries = [...new Set(others.flatMap((grant) => grant.recovery ? [grant.recovery] : []))];
-  if (sessions.length === 1) names.push(`session ${sessions[0]}`);
-  if (sessions.length > 1) names.push(`${sessions.length} sessions (${listed(sessions)})`);
-  if (sessions.length) recoveries.push(`delete ${sessions.length === 1 ? "session" : "sessions"} ${listed(sessions)}`);
-  // A grant without its own recovery (a provider account, the runner's own environment) can only
-  // be avoided by moving the program, so offer the withdrawals only when every grant has one.
-  const withdrawable = configuredRoot && recoveries.length > 0 && others.every((grant) => grant.recovery);
-  const source = names.length ? `, granted by ${names.join(" and ")}` : "";
-  const remedy = withdrawable ? `${recoveries.join(" and ")}, or ${relocation}` : relocation;
+  if (sessions.length) {
+    const named = `${sessions.length === 1 ? "session" : "sessions"} ${sessions.join(", ")}`;
+    names.push(named);
+    recoveries.push(`delete ${named}`);
+  }
+  // Withdrawing grants helps only when no built-in root (a default provider home, cache, runner
+  // state or temporary directory, whatever a configured grant also names) contains the path, and
+  // every grant has a withdrawal: a provider account or the runner's own environment has none.
+  const withdrawable = recoveries.length > 0 && others.every((grant) => grant.recovery) &&
+    !builtInRoots.some((root) => within(root, error.path) || within(canonical(root), error.path));
+  // Relocation always works and comes first, so a capability reason cut to its first 450
+  // characters still carries a complete recovery; the runner log keeps every grant.
+  const remedy = withdrawable ? `${relocation}, or ${listed(recoveries)}` : relocation;
+  const source = names.length ? `. Granted by ${listed(names)}` : "";
   // No final period: the control plane ends the sentence it embeds this reason in.
-  return new Error(`${error.message}${source}. To use it, ${remedy}`);
+  return new Error(`${error.message}. To use it, ${remedy}${source}`);
 }
 
 /**

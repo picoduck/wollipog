@@ -133,9 +133,10 @@ function conventionalClaude(home: string): { link: string; binary: string } {
   return { link, binary };
 }
 
-function refusal(path: string, roots: readonly string[], grants: Parameters<typeof explainSessionWritableRefusal>[1]): string {
+function refusal(path: string, roots: readonly string[], grants: Parameters<typeof explainSessionWritableRefusal>[1],
+  builtInRoots: readonly string[] = []): string {
   try { trustedPath(path, roots, uid, rootUid); } catch (error) {
-    return (explainSessionWritableRefusal(error, grants, RELOCATION) as Error).message;
+    return (explainSessionWritableRefusal(error, grants, RELOCATION, builtInRoots) as Error).message;
   }
   assert.fail(`${path} was trusted`);
 }
@@ -152,53 +153,57 @@ test("a home-directory workspace refuses the conventional Claude install by nami
     workspaces: [{ name: "home", path: home }, { name: "Project", path: project }],
     sessions: [projectSession, { sessionId: "s_home", repoPath: home, worktreePath: null, env: {} }],
   };
-  const grants = configuredSessionWritableGrants(sources);
-  const roots = [...homeWritableRoots(home), ...configuredSessionWritablePaths(sources)];
+  const builtIn = homeWritableRoots(home);
   // The review comes from a session in the separate project, yet the reviewer is shared: a session
   // in the home workspace could repoint `~/.local/bin/claude`, so the refusal stands.
-  assert.equal(refusal(link, roots, grants),
-    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}), granted by workspace "home" and ` +
-    `session s_home. To use it, remove workspace "home" from this machine and delete session s_home, or ${RELOCATION}`);
+  assert.equal(refusal(link, [...builtIn, ...configuredSessionWritablePaths(sources)], configuredSessionWritableGrants(sources), builtIn),
+    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}). To use it, ${RELOCATION}, or ` +
+    `remove workspace "home" from this machine and delete session s_home. Granted by workspace "home" and session s_home`);
 
   // Removing only the workspace keeps the independent grant of a session that can resume there.
   const withoutWorkspace = { ...sources, workspaces: [{ name: "Project", path: project }] };
-  assert.match(refusal(link, [...homeWritableRoots(home), ...configuredSessionWritablePaths(withoutWorkspace)],
-    configuredSessionWritableGrants(withoutWorkspace)), /granted by session s_home\. To use it, delete session s_home, or /u);
+  assert.match(refusal(link, [...builtIn, ...configuredSessionWritablePaths(withoutWorkspace)],
+    configuredSessionWritableGrants(withoutWorkspace), builtIn), /, or delete session s_home\. Granted by session s_home$/u);
 
   // Once neither grants HOME, the same installation is trusted for the separate project's review.
   const supported = { workspaces: [{ name: "Project", path: project }], sessions: [projectSession] };
-  assert.equal(trustedPath(link, [...homeWritableRoots(home), ...configuredSessionWritablePaths(supported)], uid, rootUid), binary);
+  assert.equal(trustedPath(link, [...builtIn, ...configuredSessionWritablePaths(supported)], uid, rootUid), binary);
 });
 
-test("refusals list many sessions briefly and offer only relocation for grants without a withdrawal", posixOnly, (t) => {
+test("refusals offer withdrawals only when withdrawing every named grant would be enough", posixOnly, (t) => {
   const root = mkdtempSync(join(tmpdir(), "review-grant-recovery-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   chmodSync(root, 0o700);
   const home = join(root, "home"); mkdirSync(home);
   const { link } = conventionalClaude(home);
+  const bin = join(home, ".local", "bin");
   const sessions = ["s_1", "s_2", "s_3", "s_4"].map((sessionId) => ({ sessionId, repoPath: home, worktreePath: null, env: {} }));
   assert.match(refusal(link, [home], configuredSessionWritableGrants({ sessions })),
-    /granted by 4 sessions \(s_1, s_2, s_3 \(\+1 more\)\)\. To use it, delete sessions s_1, s_2, s_3 \(\+1 more\), or install/u);
+    /, or delete sessions s_1, s_2, s_3, s_4\. Granted by sessions s_1, s_2, s_3, s_4$/u);
   // Every grant that would refuse the path is named, not only the first root found.
   const nested = configuredSessionWritableGrants({
     workspaces: [{ name: "home", path: home }, { name: "Project", path: join(root, "project"), additionalDirectoryGrants: [join(home, ".local")] }],
   });
   assert.match(refusal(link, [home, join(home, ".local")], nested), new RegExp(
-    `granted by workspace "home" and a directory grant of workspace "Project"\\. To use it, remove workspace "home" from this ` +
-    `machine and remove that directory grant from workspace "Project", or install`, "u"));
-  // When a built-in root refuses the path first, withdrawing configured grants cannot help.
-  assert.equal(refusal(link, [join(home, ".local"), home], configuredSessionWritableGrants({ workspaces: [{ name: "home", path: home }] })),
-    `${join(home, ".local", "bin")} is inside a directory a session can write (${join(home, ".local")}), granted by workspace "home". ` +
-    `To use it, ${RELOCATION}`);
+    `, or remove workspace "home" from this machine and remove that directory grant from workspace "Project"\\. ` +
+    `Granted by workspace "home" and a directory grant of workspace "Project"$`, "u"));
+  // A built-in root containing the path, even one a configured grant names too, is never withdrawn.
+  const homeWorkspace = configuredSessionWritableGrants({ workspaces: [{ name: "home", path: home }] });
+  for (const builtIn of [[join(home, ".local")], [home]]) {
+    assert.equal(refusal(link, [...builtIn, home], homeWorkspace, builtIn),
+      `${bin} is inside a directory a session can write (${builtIn[0]}). To use it, ${RELOCATION}. Granted by workspace "home"`);
+  }
+  // So is a grant whose canonical path is a built-in root.
+  const alias = join(root, "home-alias"); symlinkSync(home, alias);
+  assert.equal(refusal(link, [home], configuredSessionWritableGrants({ workspaces: [{ name: "alias", path: alias }] }), [alias]),
+    `${bin} is inside a directory a session can write (${home}). To use it, ${RELOCATION}. Granted by workspace "alias"`);
   // A provider account directory has no withdrawal short of moving the program.
   assert.equal(refusal(link, [home], configuredSessionWritableGrants({ providerAccounts: [{ label: "Work", directory: home }] })),
-    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}), granted by provider account "Work". ` +
-    `To use it, ${RELOCATION}`);
+    `${bin} is inside a directory a session can write (${home}). To use it, ${RELOCATION}. Granted by provider account "Work"`);
   // Built-in roots (provider homes, caches, temporary directories) have no configured grant.
-  assert.equal(refusal(link, [home], []),
-    `${join(home, ".local", "bin")} is inside a directory a session can write (${home}). To use it, ${RELOCATION}`);
+  assert.equal(refusal(link, [home], [], [home]), `${bin} is inside a directory a session can write (${home}). To use it, ${RELOCATION}`);
   const unrelated = new Error("claude is not installed");
-  assert.equal(explainSessionWritableRefusal(unrelated, [], RELOCATION), unrelated);
+  assert.equal(explainSessionWritableRefusal(unrelated, [], RELOCATION, []), unrelated);
 });
 
 test("agent and session environments name the variable that grants a root", () => {
