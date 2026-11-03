@@ -3746,6 +3746,9 @@ export interface CampaignContinuationEventRecord {
   createdAt: number;
 }
 
+/** What an idle campaign child is waiting on, so that its turn end needs no Orchestrator (#4073). */
+export type CampaignChildWait = "background_job";
+
 /** Who settled a campaign request: the campaign's own Orchestrator, an authenticated human, or
  * another actor (a policy, the system, or an agent that is not the campaign Orchestrator). */
 export type CampaignRequestResolver = "orchestrator" | "human" | "agent" | "policy" | "system";
@@ -20173,14 +20176,17 @@ export class ControlPlaneDb {
 
   /** When the earliest undelivered event that must wake the Orchestrator promptly was recorded,
    * across the whole pending queue rather than one bounded delivery slice (#3083). Prompt events are
-   * a child becoming ready or held, the last human blocker clearing, and a request removal not
-   * attributed to a non-human resolver that caused it: an unknown resolver may be a human. A server
-   * revocation a person's action led to (#3916) is as prompt as that person's own resolution. */
+   * a child completing, failing, stopping or being held, the last human blocker clearing, and a
+   * request removal not attributed to a non-human resolver that caused it: an unknown resolver may
+   * be a human. A server revocation a person's action led to (#3916) is as prompt as that person's
+   * own resolution. An idle child's turn end joins the coalescing window instead (#4073): it is
+   * often a status note between pushes, and the runner may already have resumed the child. */
   campaignContinuationPromptEventAt(campaignSessionId: string): number | null {
     const row = this.stmt(
       `SELECT MIN(event.created_at) AS at FROM orchestrator_campaign_events event
        WHERE event.campaign_session_id=? AND event.seq>? AND (
-         event.kind IN ('child_ready','child_blocked','human_blockers_cleared') OR
+         event.kind IN ('child_blocked','human_blockers_cleared') OR
+         (event.kind='child_ready' AND COALESCE(event.subject_status,'')!='idle') OR
          (event.kind='request_resolved' AND NOT EXISTS (
            SELECT 1 FROM orchestrator_campaign_request_resolutions resolution
            WHERE resolution.campaign_session_id=event.campaign_session_id
@@ -20197,7 +20203,37 @@ export class ControlPlaneDb {
     ).get(campaignSessionId, this.campaignContinuationCursor(campaignSessionId)));
   }
 
-  campaignContinuationChildCandidates(campaignSessionId: string): Array<{
+  /** What an idle campaign child is only waiting on, or null when its last turn end may be a report
+   * the Orchestrator has to verify (#4073). A child that ends its turn behind a live managed
+   * background job, such as a background `pr wait` on required CI or a subagent, is woken by the
+   * runner when that job ends, and that later turn end is the one that can report. A wait inside
+   * the turn, such as a blocking `wait_pull_request` call, never ends the turn. A job past the
+   * stall bound no longer counts, so a monitor that never fires cannot hide a finished report for
+   * longer than that (campaignChildWaitsExpired). Only an idle child can be waiting: a completed,
+   * failed or stopped one has ended. Add any new kind of wait here, so that every reader agrees. */
+  campaignChildWait(sessionId: string, now: number): CampaignChildWait | null {
+    return this.stmt(
+      `SELECT 1 FROM managed_background_jobs
+       WHERE session_id=? AND source_present=1 AND terminal_observed_at IS NULL AND registered_at>? LIMIT 1`,
+    ).get(sessionId, now - BACKGROUND_JOB_STALL_MS) ? "background_job" : null;
+  }
+
+  /** Whether a campaign descendant's live background job reached the stall bound in (after,
+   * through]: that idle child stopped waiting without any runner update that would show it. */
+  campaignChildWaitsExpired(campaignSessionId: string, after: number, through: number): boolean {
+    return Boolean(this.stmt(
+      `SELECT 1 FROM managed_background_jobs job JOIN sessions child ON child.id=job.session_id
+       WHERE job.session_id IN (SELECT value FROM json_each(?)) AND child.status='idle'
+         AND job.source_present=1 AND job.terminal_observed_at IS NULL
+         AND job.registered_at>? AND job.registered_at<=? LIMIT 1`,
+    ).get(JSON.stringify(this.campaignDescendantIds(campaignSessionId)),
+      after - BACKGROUND_JOB_STALL_MS, through - BACKGROUND_JOB_STALL_MS));
+  }
+
+  /** Unverified descendants whose latest turn end the Orchestrator still has to see: every
+   * completed, failed or stopped one, and every idle one with a report that is not only waiting
+   * (campaignChildWait). */
+  campaignContinuationChildCandidates(campaignSessionId: string, now = Date.now()): Array<{
     sessionId: string;
     status: SessionStatus;
     eventSeq: number;
@@ -20210,25 +20246,31 @@ export class ControlPlaneDb {
         | { status: SessionStatus }
         | undefined;
       if (!child || !["idle", "completed", "failed", "stopped"].includes(child.status)) continue;
+      if (child.status === "idle" && this.campaignChildWait(sessionId, now)) continue;
       const latest = this.stmt(
         `SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=?`,
       ).get(sessionId) as { seq: number };
       if (child.status === "idle" && !this.hasCompletedAgentReportAt(sessionId, latest.seq)) {
-        const report = this.stmt(
-          `SELECT MAX(seq) AS seq FROM session_events WHERE session_id=? AND (
-             kind='agent_response_completed' OR
-             (kind='agent_message' AND json_extract(payload,'$.final')=1
-              AND trim(json_extract(payload,'$.text'))!=''
-              AND json_type(payload,'$.parentToolUseId') IS NULL)
-           )`,
-        ).get(sessionId) as { seq: number | null };
-        if (report.seq == null) continue;
-        candidates.push({ sessionId, status: child.status, eventSeq: report.seq });
+        const report = this.latestTopLevelReportSeq(sessionId);
+        if (report == null) continue;
+        candidates.push({ sessionId, status: child.status, eventSeq: report });
       } else {
         candidates.push({ sessionId, status: child.status, eventSeq: latest.seq });
       }
     }
     return candidates;
+  }
+
+  /** The seq of the session's latest top-level report, superseded or not; null if it has none. */
+  latestTopLevelReportSeq(sessionId: string): number | null {
+    return (this.stmt(
+      `SELECT MAX(seq) AS seq FROM session_events WHERE session_id=? AND (
+         kind='agent_response_completed' OR
+         (kind='agent_message' AND json_extract(payload,'$.final')=1
+          AND trim(json_extract(payload,'$.text'))!=''
+          AND json_type(payload,'$.parentToolUseId') IS NULL)
+       )`,
+    ).get(sessionId) as { seq: number | null }).seq;
   }
 
   listOrchestratorCampaignSessionIds(runnerId?: string): string[] {
