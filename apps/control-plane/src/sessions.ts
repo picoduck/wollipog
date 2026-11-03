@@ -12342,6 +12342,11 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.status === "superseded" && decision.supersededBy) {
+      return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded", supersededBy: decision.supersededBy },
+        error: `workflow decision ${occurrenceId} was superseded by workflow decision ${decision.supersededBy}; ` +
+          "it is settled and has nothing left to reconcile" };
+    }
     if (decision.status !== "approved" &&
         !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
@@ -12466,16 +12471,18 @@ export class SessionsService {
       itemId: proof.providerItemId,
     })!;
     const now = Date.now();
-    const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
+    const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       sessionId,
       occurrenceId,
       admission.commandDigest,
       receiptDigest,
       now,
     );
-    if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+    if (!reconciled) return fail("workflow action proof was already used or the decision changed", 409);
+    const consumed = reconciled.decision;
     const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-reconciliation" };
     this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+    this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.retireResumeConsumedByRequester(consumed, now);
     this.recordGovernanceAudit(
       child,
@@ -14236,7 +14243,7 @@ export class SessionsService {
       headSha: proof.forgeHeadSha,
     })!;
     const now = Date.now();
-    const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
+    const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       decision.sessionId,
       decision.occurrenceId,
       decision.actionAdmission!.commandDigest,
@@ -14244,16 +14251,25 @@ export class SessionsService {
       now,
       { forgeAttested: true },
     );
-    if (!consumed) return null;
-    this.recordWorkflowDecisionAudit(
-      consumed,
-      "consumed",
-      { kind: "system", id: "workflow-decision-forge-reconciliation" },
-      now,
-    );
+    if (!reconciled) return null;
+    const consumed = reconciled.decision;
+    const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-reconciliation" };
+    this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+    this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.hub.sessionChangedById(consumed.sessionId);
     this.hub.sessionChangedById(consumed.controllingSessionId);
     return consumed;
+  }
+
+  /** Record each armed merge a reconciliation superseded (#3991). Its command is the one the
+   * reconciled occurrence proved merged, so it ends without replay, withdrawal or a new approval. */
+  private settleSupersededArmedMerges(occurrenceIds: string[], actor: GovernanceActor, now: number): void {
+    for (const occurrenceId of occurrenceIds) {
+      const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (!superseded) continue;
+      this.settleWorkflowDecisionPause(superseded.sessionId, occurrenceId, now);
+      this.recordWorkflowDecisionAudit(superseded, "superseded", actor, now);
+    }
   }
 
   private recordWorkflowDecisionAudit(

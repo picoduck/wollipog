@@ -6723,7 +6723,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         eventSeq: runnerSeq,
       };
     };
-    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200, target: SessionView = child) => {
+    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200, target: SessionView = child,
+      resourceKey = `picoduck/wollipog#${pullRequest}`) => {
       const headSha = String(pullRequest).padStart(40, "a").slice(-40);
       const snapshot = {
         category: "pr_merge" as const,
@@ -6738,7 +6739,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       };
       const decision = svc.createWorkflowDecision(target.id, {
         requestId: `guardian-${pullRequest}-${++sequence}`,
-        resourceKey: `picoduck/wollipog#${pullRequest}`,
+        resourceKey,
         resourceSnapshot: snapshot,
       });
       assert.ok(decision.ok && decision.data, decision.error);
@@ -7407,6 +7408,109 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
         reportEventSeq: report.seq, followUpsAccounted: true });
       assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("a same-head re-enqueue reconciles the landed occurrence and supersedes the ejected one (#3991)", async () => {
+    const { CodexAppServerDriver } = await import("../../runner/src/drivers/codex-app-server.js");
+    const { SessionManager } = await import("../../runner/src/session-manager.js");
+    const { db, hub, svc, child, parent, arm } = setup();
+    try {
+      // The first enqueue is ejected; a fresh approval under another key re-enqueues the same head.
+      const ejected = await arm(3991, 200, child, "picoduck/wollipog#3991");
+      hub.setSessionQueue(child.id, [], false, "session-turn-2");
+      const landed = await arm(3991, 200, child, "picoduck/wollipog#3991:re-enqueue");
+      assert.equal(ejected.command, landed.command);
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.status, "approved");
+      assert.equal(db.workflowDecisionByOccurrence(landed.decision.occurrenceId)?.status, "approved");
+      const admission = (id: string, armed: typeof landed) => ({
+        id, type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+        arguments: { occurrenceId: armed.decision.occurrenceId,
+          action: { kind: "pr_merge_enqueue", command: armed.command } },
+        status: "completed", error: null,
+        result: { content: [{ type: "text", text: JSON.stringify({ decision: armed.armed.data }) }] },
+      });
+      const enqueue = (id: string) => ({ id, type: "commandExecution", command: landed.command, status: "completed", exitCode: 0 });
+      const secondTurn = { id: "provider-session-turn-2", status: "completed", itemsView: "full",
+        items: [admission("admission-2", landed), enqueue("command-2")] as Record<string, unknown>[] };
+      const turns = [
+        { id: "provider-session-turn-1", status: "completed", itemsView: "full",
+          items: [admission("admission-1", ejected), enqueue("command-1")] },
+        secondTurn,
+      ];
+      const driver = new CodexAppServerDriver({ command: "never-spawned", args: [], cwd: "/fixture",
+        env: {}, config: {}, context: { kind: "native" } },
+      { onEvent() {}, onStderr() {}, onExit() {} });
+      Object.assign(driver, { threadId: "thread-1", peer: {
+        request: async () => ({ thread: { id: "thread-1", turns } }),
+      }, readRolloutProof: async () => null });
+      const manager = Object.create(SessionManager.prototype);
+      Object.assign(manager, {
+        store: { readMeta: () => ({ driver: "codex-app-server", agentSessionId: "thread-1",
+          repoPath: "/fixture", logEpoch: 0 }), readEvents: () => [] },
+        active: new Map([[child.id, { client: driver }]]),
+      });
+      manager.resolveWorktreePullRequestState = async () => ({ state: "merged", headOid: landed.snapshot.headSha });
+      hub.requestHandler = async (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        const { type, requestId, sessionId, ...payload } = message;
+        return { type: "workflow_action_reconciliation_result", requestId, sessionId,
+          ...await manager.reconcileWorkflowAction(child.id, payload) };
+      };
+      const reconcile = (armed: typeof landed) => svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+
+      secondTurn.items = [admission("admission-2", landed), enqueue("command-2"), enqueue("command-3")];
+      assert.equal((await reconcile(landed)).status, 409, "two successful commands after one admission stay ambiguous");
+      secondTurn.items = [enqueue("command-2")];
+      assert.equal((await reconcile(landed)).status, 409, "a command without its admission proves nothing");
+      secondTurn.items = [admission("admission-2", landed), enqueue("command-2")];
+      assert.equal((await reconcile(ejected)).status, 409, "the ejected admission did not precede the landed enqueue");
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.status, "approved");
+
+      const result = await reconcile(landed);
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      const settled = db.workflowDecisionByOccurrence(ejected.decision.occurrenceId);
+      assert.equal(settled?.status, "superseded", "the ejected armed occurrence ends without replay or withdrawal");
+      assert.equal(settled?.supersededBy, landed.decision.occurrenceId);
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === ejected.decision.occurrenceId &&
+        entry.outcome === "superseded" && entry.actor.id === "workflow-decision-action-reconciliation"));
+      const again = await reconcile(ejected);
+      assert.equal(again.status, 409);
+      assert.equal(again.errorDetails?.code, "workflow_decision_superseded");
+      assert.equal(again.errorDetails?.supersededBy, landed.decision.occurrenceId);
+
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("a Claude Code child's forge reconciliation supersedes its other armed occurrence of the same enqueue (#3991)", async () => {
+    const { db, hub, svc, child, parent, arm } = setup(AGENT_ID);
+    try {
+      const ejected = await arm(3992, 200, child, "picoduck/wollipog#3992");
+      const landed = await arm(3992, 200, child, "picoduck/wollipog#3992:re-enqueue");
+      const unrelated = await arm(3993);
+      hub.requestHandler = forgeProof(child, landed);
+      const result = await svc.reconcileWorkflowDecision(child.id, landed.decision.occurrenceId,
+        { resourceSnapshot: landed.snapshot }, () => true);
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.status, "superseded");
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.supersededBy, landed.decision.occurrenceId);
+      assert.equal(db.workflowDecisionByOccurrence(unrelated.decision.occurrenceId)?.status, "approved",
+        "an armed merge of another pull request keeps its grant");
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const blocked = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.equal(blocked.status, 409);
+      assert.match(blocked.error ?? "", new RegExp(unrelated.decision.occurrenceId, "u"));
+      assert.doesNotMatch(blocked.error ?? "", new RegExp(ejected.decision.occurrenceId, "u"));
     } finally { db.close(); }
   });
 

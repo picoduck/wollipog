@@ -2438,7 +2438,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "reconcile_workflow_decision",
-    description: "Reconcile an already-successful canonical PR merge action without executing it again. For a Codex App Server child the runner must prove one exact successful provider-history command and the forge must report the approved head as merged. A Claude Code child produces no command receipt, so call this once the PR reads MERGED; the forge's merged approved head is its proof. Stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
+    description: "Reconcile an already-successful canonical PR merge action without executing it again. For a Codex App Server child the runner must prove one exact successful provider-history command and the forge must report the approved head as merged. A Claude Code child produces no command receipt, so call this once the PR reads MERGED; the forge's merged approved head is its proof. After a same-head re-enqueue, reconcile the latest occurrence: its admission must precede the last successful exact command with no other admission between them, and your other armed occurrences of that command then read superseded. Stale, mismatched, replayed, unavailable, and mixed-version evidence fails closed.",
     inputSchema: {
       type: "object",
       properties: {
