@@ -89,6 +89,40 @@ Unlike session-level child verification, a later execution of the same child doe
 invalidate it: reassigning a child to item B leaves item A's verification, attempt, and accounting
 intact.
 
+### Recorded Delivery (`cwd_…`, v275, #4070)
+
+`record_campaign_work_item_delivery` records delivery that `verify_campaign_child` cannot, such as an
+item whose child was reassigned before it was verified for it. The control plane checks the evidence
+itself and inspects no worktree:
+
+- **Pull requests:** each must be in the campaign repository (the issue scope's, else the item's
+  issue's), be named by the item's reported stage, and be read from the forge at that moment as
+  merged into the repository's default branch. GitHub only: GitLab merge requests are refused, and
+  so is a runner that does not report the default branch.
+- **A report:** the exact completed top-level response of one of the caller's campaign children,
+  inside that child's attempt on this item (after its start boundary and, for a closed attempt, at or
+  before its end boundary, in the same event epoch). An attempt closed as `reassigned`,
+  `superseded`, or `delivered` counts; one the Orchestrator ended as `abandoned` or `failed` does
+  not. An open attempt's report counts only once that child's turn has finished. A report also adds
+  an ordinary `delivered` work-item verification of that attempt, so issue-closure proof reads it as
+  before.
+
+Either or both may be given, and everything given is checked. A later attempt on the item whose
+session is still working refuses the delivery, even when it is the same child's. Every check runs
+again after the forge answers, in the same turn as the write, so a change while the forge was being
+read cannot be recorded over. The record keeps the pull requests'
+merge commits and base branch, the report's child, attempt and sequence, a note, the recording
+Orchestrator, and the time. Recording closes the item's open attempt: as `delivered` when it is the
+report's attempt, else as `superseded`. The record holds while no attempt is opened on the item after
+it. It never closes an issue, merges, publishes, verifies or archives a child.
+
+### Handoff (v275, #4070)
+
+`update_campaign_work_item {handoff: {responsibleActor, reason, nextAction}}` records that the agent
+work on an item is done and who acts next; `null` withdraws it, and assigning the item again deletes
+it. An unfinished committed item handed to `human` or `external` no longer holds the campaign open
+(see Campaign Completion). A handoff to `orchestrator` or `child` still counts as agent work.
+
 ### Reported Stage
 
 `implementing`, `in_review`, `awaiting_checks`, `awaiting_approval`, `merge_queued`, `merged`, or
@@ -116,8 +150,9 @@ attempts, the observed status of the open attempt's session, its dependencies' d
 its verifications. The state is never stored. The first matching rule wins:
 
 1. `commitment` is `cancelled` → **cancelled**; `scope_removed` → **removed**.
-2. The item's latest attempt has a `delivered` verification → **delivered**. Opening a new attempt
-   on a delivered item reopens it visibly.
+2. The item's latest attempt has a `delivered` verification, or its latest recorded delivery
+   postdates every attempt → **delivered**. Opening a new attempt on a delivered item reopens it
+   visibly.
 3. The item has an open attempt:
    1. a recorded blocker → **blocked** (`recorded_blocker`);
    2. the session is deleted → **blocked** (`attempt_session_unavailable`);
@@ -139,12 +174,33 @@ its verifications. The state is never stored. The first matching rule wins:
    In both of the last two cases the item also carries the cause `dependency_unfinished` while any
    dependency is unfinished, so a planned item says what it is waiting on just as a queued one does.
 
-`delivered` therefore requires a work-item verification with outcome `delivered`. An idle session,
-a closed issue, a successful command, a reported `merged` stage, or a pull request in the merge
-queue never sets it.
+`delivered` therefore requires a work-item verification with outcome `delivered` or a recorded
+delivery the control plane checked. An idle session, a closed issue, a successful command, a reported
+`merged` stage, or a pull request in the merge queue never sets it.
 
 The unfinished states are `planned`, `queued`, `running`, `waiting`, and `blocked`. Accepted work
 waiting on dependencies or approvals stays unfinished.
+
+### Campaign Completion (#4070)
+
+`campaignTerminalStatus` in `db.ts` is the one place the end state is decided, once every child is
+verified (and, under Stop and Archive, archived and cleaned up) and nothing is pending:
+
+1. Original scoped work with eligible recovery keeps the campaign going; without eligible recovery
+   it is **blocked**, as before. Items handed to `human` or `external` are left out of this check.
+2. With no such handoff the campaign is **Verified Complete**, except that under Full Control any
+   unfinished committed item an agent still owns (an unhanded follow-up, or one whose handoff was
+   withdrawn or given to an agent) leaves it **blocked**. A Custom campaign reads its children alone,
+   as before.
+3. With one, it is **Complete with Handoffs** (`complete_with_handoffs`) only while every unfinished
+   committed item is handed to `human` or `external`; any other unfinished committed item, handed to
+   `orchestrator` or `child` or not handed at all, leaves it **blocked**.
+
+Both terminal statuses stop continuations, end Campaign Elapsed, and read the campaign's recovery
+records as resolved. A handed-off item that is assigned again, delivered, or joined by new unfinished
+work reopens the campaign on the next read. The projection's `handoffs` lists the handed-off items
+for the owner, and Campaign Status shows them under Handed Off. Dashboards older than v275 receive
+`complete_with_handoffs` as `waiting_human`.
 
 ## Orchestrator Operations
 
@@ -159,7 +215,8 @@ refused, not truncated.
 | Operation | Effect |
 | --- | --- |
 | `record_campaign_plan {items[], planComplete}` | Idempotent upsert by `key`, at most 100 items per call. Supplied fields replace; omitted fields are unchanged. Dependencies are named by key, within the call or already recorded. It never changes commitment, attempts, or verification. |
-| `update_campaign_work_item {workItemId, …}` | Title, issue, dispatch state, queue position, dependencies, commitment, stage, blocker, next action, and `endAttempt {reason: abandoned \| failed}`. `null` clears. |
+| `update_campaign_work_item {workItemId, …}` | Title, issue, dispatch state, queue position, dependencies, commitment, stage, blocker, next action, `handoff` (v275), and `endAttempt {reason: abandoned \| failed}`. `null` clears. |
+| `record_campaign_work_item_delivery {workItemId, pullRequests?, report?, note?}` | v275. Records delivery from checked evidence; see Recorded Delivery. |
 | `assign_campaign_work_item {workItemId, childSessionId}` | Opens an attempt; closes earlier open attempts as described above. The child must be a descendant of the calling Orchestrator (the same scope `verify_campaign_child` uses) and visible to it. Cancelled or removed items cannot be assigned until recommitted. |
 | `create_session {…, campaignWorkItemId}` | Protocol v220 (#3106). The Orchestrator names the child's work item when it creates the child. The item is checked before anything is written, and the child's attempt opens under the `assign_campaign_work_item` rules before the launch is sent, so the creation result already carries the open attempt in `campaignMembership`. If the attempt cannot be recorded (unknown item, an item in another campaign, a cancelled or removed item, or a caller that is not a campaign Orchestrator), no session is created, and the error names the reason. The session row, its campaign reservation and parent charges, and the attempt are written in one transaction, so a refused or failed recording leaves none of them behind. Pre-staged creation and creation with prompt images refuse the field. The runner's tool and CLI (`session create --work-item`) refuse it against a pre-v220 control plane, which would otherwise ignore it. Omitting it leaves the child unattributed until assigned, as before. |
 | `verify_campaign_child {…, workItem?: {id, outcome}}` | Existing verification, plus a work-item verification for the child's open attempt on that item. Without `workItem`, no item becomes delivered. |
@@ -421,8 +478,8 @@ queued before it was first assigned can show more Waiting or Queue Time than Ite
 durations are also measured on the server up to `times.asOf`, while a reader computes an open Item
 Elapsed against its own clock, so the two can differ by the age of the response.
 
-**Campaign Elapsed** ends at the time the campaign projection first observed `verified_complete`
-(`campaign_work_completion`). Completion is derived on read rather than written by any operation,
+**Campaign Elapsed** ends at the time the campaign projection first observed a terminal status,
+`verified_complete` or `complete_with_handoffs` (`campaign_work_completion`). Completion is derived on read rather than written by any operation,
 so the projection records the observation, and an observation of an unfinished campaign deletes it:
 a reopened campaign runs again until it next completes. A campaign created before recording began
 whose first observation is already complete finished before anything could see it, so it uses its

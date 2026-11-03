@@ -16,6 +16,8 @@
  * leaves the loaded list under a Couldn't Refresh Work Items notice.
  * With `budget=1`, `followUps=pending` puts the campaign at its follow-up limit with two follow-ups
  * waiting for the person's approval (#2940); Change Limit saves to the fixture.
+ * `handoffs=after` finishes the campaign with two items handed to people (#4070); `handoffs=before`
+ * is the same campaign as a server without handoffs reports it.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -24,6 +26,7 @@ import {
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
   type CampaignWorkItemDetail,
+  type CampaignWorkItemHandoff,
   type CampaignWorkItemSummary,
   type ControlPlaneToUi,
   type DescendantRequestView,
@@ -246,6 +249,53 @@ function baseSession(overrides: Partial<SessionView>): SessionView {
   } as SessionView;
 }
 
+/** `handoffs=before|after` (#4070): the agents are done. Every child is verified and cleaned up,
+ * nothing is pending, every other committed item is delivered, and two unfinished items belong to
+ * people: what `campaignTerminalStatus` turns into Complete with Handoffs, as its integration test
+ * shows. The same fixture both ways: `before` is how a server without handoffs reports it. */
+const handoffScenario = params.get("handoffs") === "before" || params.get("handoffs") === "after" ? params.get("handoffs") as "before" | "after" : null;
+const HANDED_OFF: Record<string, CampaignWorkItemHandoff> = {
+  cwi_3: { responsibleActor: "human", reason: "Private vulnerability reporting refused the agent's GitHub account.",
+    nextAction: "File the security advisory from a maintainer account.", recordedAt: NOW - 12 * MINUTE, recordedBySessionId: "s_root" },
+  cwi_6: { responsibleActor: "external", reason: "Integration runs need the hosting provider's change window.",
+    nextAction: "Ask the provider to schedule the change window, then run the integration suite.", recordedAt: NOW - 8 * MINUTE, recordedBySessionId: "s_root" },
+};
+if (handoffScenario) {
+  for (const [index, item] of items.entries()) {
+    if (item.commitment !== "committed") continue;
+    const handoff = HANDED_OFF[item.id];
+    items[index] = { ...item, primaryState: handoff ? "planned" : "delivered", stateCauses: [], currentAttempt: null, blocker: null,
+      ...(handoff && handoffScenario === "after" ? { handoff } : {}),
+      ...(handoff ? {} : { elapsed: { startedAt: item.elapsed.startedAt ?? NOW - 2 * HOUR, endedAt: NOW - 20 * MINUTE } }) };
+    details[item.id] = itemDetail(items[index]!, handoff ? { nextAction: handoff.nextAction } : {});
+  }
+}
+const handoffWork = (rev: number) => ({ ...recordedWork(rev),
+  counts: { committed: 8, delivered: 6, original: 6, followUp: 2, cancelled: 0, removed: 1,
+    byState: { planned: 2, queued: 0, running: 0, waiting: 0, blocked: 0, delivered: 6, cancelled: 0, removed: 1 } },
+  recommendations: { awaiting_adjudication: 0, accepted: 2, rejected: 1, deferred: 1, duplicate: 3 },
+  obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
+  ...(handoffScenario === "after" ? { elapsed: { startedAt: NOW - 3 * HOUR - 12 * MINUTE, endedAt: NOW - 8 * MINUTE } } : {}),
+});
+function handoffProjection(state: "before" | "after"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const declined = { ...campaignRecoveryFixture("request_declined", NOW), state: state === "after" ? "resolved" as const : "blocked" as const };
+  return {
+    status: state === "after" ? "complete_with_handoffs" : "blocked",
+    children: { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 3, cleanupPending: 0 },
+    limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    heldChildren: [],
+    recovery: state === "after"
+      ? { unattendedReady: false, automation: { state: "lifecycle_held" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [declined], truncated: false }
+      : { unattendedReady: false, automation: { state: "lifecycle_held",
+        reason: "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." },
+      automatic: 0, waitingHuman: 0, blocked: 1, records: [declined], truncated: false },
+    ...(state === "after" ? { handoffs: { total: 2, items: Object.entries(HANDED_OFF).map(([id, handoff]) => {
+      const item = items.find((candidate) => candidate.id === id)!;
+      return { workItemId: id, key: item.key, title: item.title, issue: item.issue, primaryState: item.primaryState, handoff };
+    }) } } : {}),
+  };
+}
+
 let revision = 1;
 const projectionFor = (rev: number) => campaignProjection(
   scenario === "legacy" ? null
@@ -261,7 +311,7 @@ const projectionFor = (rev: number) => campaignProjection(
       obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
       cost: undefined,
     })
-      : recordedWork(rev),
+      : handoffScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
     ...(params.get("budget") === "1" ? { budget: {
@@ -295,6 +345,7 @@ const projectionFor = (rev: number) => campaignProjection(
         recoveryAction: "Restart the session once the account is ready.",
       }],
     }],
+    ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
   },
 );
 

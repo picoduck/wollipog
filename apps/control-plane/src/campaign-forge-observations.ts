@@ -469,7 +469,9 @@ function validObservation(value: unknown): value is CampaignForgePullRequestObse
     validRollup(pr.checks) && validRollup(pr.requiredChecks) &&
     (queue === null || (typeof queue === "object" && QUEUE_STATES.has(queue.state as string) &&
       (queue.position === null || (Number.isSafeInteger(queue.position) && (queue.position as number) >= 0)))) &&
-    (pr.mergeCommitSha === null || (typeof pr.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(pr.mergeCommitSha)));
+    (pr.mergeCommitSha === null || (typeof pr.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(pr.mergeCommitSha))) &&
+    (pr.defaultBranch === undefined ||
+      (typeof pr.defaultBranch === "string" && pr.defaultBranch.length > 0 && pr.defaultBranch.length <= 256));
 }
 
 /** Store exactly the wire fields of a validated observation. */
@@ -486,5 +488,6 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     requiredChecks: rollup(pr.requiredChecks),
     mergeQueue: pr.mergeQueue ? { state: pr.mergeQueue.state, position: pr.mergeQueue.position } : null,
     mergeCommitSha: pr.mergeCommitSha,
+    ...(pr.defaultBranch !== undefined ? { defaultBranch: pr.defaultBranch } : {}),
   };
 }

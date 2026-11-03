@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
   CODEX_EXEC_RETIRED_REASON,
+  campaignStatusTerminal,
   isDurableSessionCommandErrorCode,
   isRetiredCodexExec,
   runnerSupportsProtocol,
@@ -263,7 +264,7 @@ export class SessionPromptOutbox {
             this.db.campaignContinuationAdmission(row.sessionId).state !== "available") ||
             (projection.status === "waiting_human" &&
             !this.db.campaignMayContinueWhileHumanWaiting(command.campaignContinuation.campaignSessionId)) ||
-            projection.status === "verified_complete") {
+            campaignStatusTerminal(projection.status)) {
           this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
           continue;
         }
