@@ -1469,6 +1469,8 @@ app.register(async (instance) => {
         svc.recoverCampaignReviewJobs(runnerId);
         svc.recoverSessionReviewJobs(runnerId);
         svc.recoverReviewSessions(runnerId);
+        // Every merge-queue watch on this runner resumes, or is reported lost to its session (#4071).
+        svc.recoverPullRequestWatches(runnerId);
         // Media reviewers live outside the Session inventory; read back their durable outcomes.
         videoEvidence.delegated.readback(runnerId);
         automations.tick(Date.now());
@@ -1533,6 +1535,9 @@ app.register(async (instance) => {
         break;
       case "review_session_update":
         if (runnerId) svc.onReviewSessionUpdate(runnerId, msg);
+        break;
+      case "pull_request_watch_update":
+        if (runnerId) svc.onPullRequestWatchUpdate(runnerId, msg);
         break;
       case "policy_hook_credential":
         {
@@ -4502,6 +4507,13 @@ app.post("/api/sessions/:id/review-sessions", async (req, reply) => {
   if (!principal) return reply;
   return respond(reply, svc.requestReviewSession(id, req.body as ReviewSessionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+// Merge-queue watches (#4071): only the session's own credential parks it on its own pull request.
+app.post("/api/sessions/:id/pull-request-watch", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.requestPullRequestWatch(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;

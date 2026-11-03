@@ -7,6 +7,8 @@ import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
+import { PullRequestWatcher } from "./pull-request-watches.js";
+import { contextGhRunner } from "./campaign-forge-status.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
@@ -1697,6 +1699,12 @@ const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-sn
 const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store, reviewDependencies);
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
+// Merge-queue watches live in the control plane, which resends each one on registration (#4071).
+const pullRequestWatcher = new PullRequestWatcher({
+  gh: contextGhRunner({ kind: "native" }, process.cwd()),
+  send: (update) => sendUp(update),
+  log,
+});
 sessions.setReviewSessions({
   markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),
   recordOutcome: (update) => reviewSessionLauncher.recordOutcome(update),
@@ -2956,6 +2964,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     case "cancel_session_review_job":
       sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
+      break;
+    case "pull_request_watch_start":
+      pullRequestWatcher.start(msg);
+      break;
+    case "pull_request_watch_cancel":
+      pullRequestWatcher.cancel(msg.watchId);
       break;
     case "priced_session_cost":
       sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd, msg);

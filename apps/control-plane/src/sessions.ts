@@ -40,6 +40,7 @@ import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
+  type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
@@ -864,6 +865,37 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
 
 function reviewContinuationPrompt(reviews: readonly ReviewSessionView[]): string {
   return reviews.flatMap(reviewContinuationOutcome).join("\n");
+}
+
+const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> = {
+  merged: "merged",
+  closed: "was closed without merging",
+  queue_failed: "is still in the merge queue, but GitHub marked its entry unmergeable",
+  queue_ejected: "left the merge queue without merging",
+  head_changed: "moved to another head",
+  checks_passed: "is not in the merge queue; its required checks passed",
+  checks_failed: "is not in the merge queue; its required checks failed",
+  no_required_checks: "is not in the merge queue, and its base requires no checks",
+};
+
+/** How one ended merge-queue watch reads in its session's wake (#4071). Every line is single-line
+ * by construction, so neither a reason nor a summary can forge a framing line. */
+export function pullRequestWatchWakeLines(watch: PullRequestWatchView & { summary: string | null }): string[] {
+  const oneLine = (text: string) => text.replace(/[\r\n]+/gu, " ");
+  const head = `${watch.repository}#${watch.number} at ${watch.headSha.slice(0, 12)}`;
+  const body = watch.state === "fired" && watch.outcome
+    ? [`${head} ${PULL_REQUEST_WATCH_OUTCOME_TEXT[watch.outcome]} (outcome ${watch.outcome}).`,
+      ...(watch.summary ? [`Summary: ${oneLine(watch.summary)}`] : [])]
+    : [`The watch on ${head} was lost: ${oneLine(watch.reason ?? "the runner stopped watching")}. ` +
+      "Nothing is watching it now: check it with wait_pull_request, or park on it again."];
+  return [
+    `[Wollipog Pull Request Watch — ${watch.watchId}]`,
+    ...body,
+    "Act on it: after a merge, reconcile an armed pr_merge whose occurrence is still unconsumed and finish cleanup; " +
+      "otherwise decide what the outcome needs. This wake grants no approval: re-enqueueing, merging and branch " +
+      "deletion keep their gates.",
+    "[End Wollipog Pull Request Watch]",
+  ];
 }
 
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
@@ -6186,6 +6218,13 @@ export class SessionsService {
     for (const sessionId of this.db.sessionsWithHeldReviewContinuations(runnerId)) {
       this.deliverHeldReviewContinuations(sessionId, now);
     }
+    // And for an ended merge-queue watch's wake to its parked session (#4071).
+    for (const commandId of this.db.pullRequestWatches.settledCommands(runnerId)) {
+      this.reconcilePullRequestWatchWakeCommand(commandId, now);
+    }
+    for (const sessionId of this.db.pullRequestWatches.sessionsWithHeldWakes(runnerId)) {
+      this.deliverHeldPullRequestWatchWakes(sessionId, now);
+    }
     this.reconcileReviewSessionDisposal(runnerId);
     return this.promptOutbox.flush(now, runnerId);
   }
@@ -6206,6 +6245,7 @@ export class SessionsService {
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
       this.reconcileReviewContinuationCommand(message.commandId, Date.now());
+      this.reconcilePullRequestWatchWakeCommand(message.commandId, Date.now());
     }
     return handled;
   }
@@ -9888,6 +9928,151 @@ export class SessionsService {
     if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId, now);
   }
 
+  /**
+   * Park a session on its own enqueued GitHub pull request (#4071). The control plane keeps the
+   * watch, so it survives a runner restart; the runner polls GitHub through its read-only `gh` login
+   * and reports the outcome once; the session is then woken by one durable prompt. Parking again
+   * replaces the previous watch. Nothing here grants authority: the wake is an ordinary prompt.
+   */
+  requestPullRequestWatch(callerSessionId: string, request: unknown,
+    canAccess: (id: string) => boolean = () => true): ServiceResult<{ watch: PullRequestWatchView }> {
+    const session = this.db.getSession(callerSessionId);
+    if (!session || !canAccess(session.id)) return fail("session not found", 404);
+    if (this.db.reviewSessions.isReviewSession(session.id)) return fail("A review session cannot park on a pull request.", 409);
+    const body = request as { repository?: unknown; number?: unknown; headSha?: unknown } | null;
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some((key) => !["repository", "number", "headSha"].includes(key)) ||
+        typeof body.repository !== "string" ||
+        !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(body.repository) ||
+        !Number.isSafeInteger(body.number) || (body.number as number) <= 0) {
+      return fail("a merge-queue watch needs {repository: \"owner/name\" on GitHub, number: a positive pull request number, headSha}", 400);
+    }
+    if (typeof body.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(body.headSha)) {
+      return fail("headSha must be the enqueued pull request's full 40-character lowercase head commit", 400);
+    }
+    if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot park", 409);
+    const runner = this.db.getRunner(session.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "pullRequestWatch")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "pullRequestWatch", "merge-queue watches"));
+    }
+    const now = Date.now();
+    const watchId = `prw_${randomUUID().replaceAll("-", "")}`;
+    const repository = body.repository;
+    const number = body.number as number;
+    const headSha = body.headSha;
+    const replaced = this.db.pullRequestWatches.register({ watchId, sessionId: session.id, runnerId: session.runnerId,
+      repository, number, headSha, now });
+    for (const id of replaced) this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_cancel", watchId: id });
+    // An offline runner receives it on registration, like every other watch still `watching`.
+    this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_start", watchId, sessionId: session.id, repository, number, headSha });
+    this.hub.sessionChangedById(session.id);
+    return ok({ watch: this.db.pullRequestWatches.view(watchId)! });
+  }
+
+  /** The runner's report of a watch's end: the first one counts, and owes the session its wake. */
+  onPullRequestWatchUpdate(runnerId: string, update: PullRequestWatchUpdate): void {
+    const now = Date.now();
+    const sessionId = this.db.pullRequestWatches.accept(runnerId, update, now);
+    if (!sessionId) return;
+    this.hub.sessionChangedById(sessionId);
+    this.deliverHeldPullRequestWatchWakes(sessionId, now);
+  }
+
+  /** On registration: resend every watch still `watching` on this runner, so a restarted runner
+   * resumes them. A runner that can no longer watch has each one reported lost to its session,
+   * whose wake then says so; a parked session is never left silently without a watch. */
+  recoverPullRequestWatches(runnerId: string): void {
+    const watches = this.db.pullRequestWatches.watchingOn(runnerId);
+    if (!watches.length) return;
+    const now = Date.now();
+    if (!runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "pullRequestWatch")) {
+      for (const watch of watches) {
+        if (!this.db.pullRequestWatches.markLost(watch.watchId, "the session's runner no longer supports merge-queue watches", now)) continue;
+        this.hub.sessionChangedById(watch.sessionId);
+        this.deliverHeldPullRequestWatchWakes(watch.sessionId, now);
+      }
+      return;
+    }
+    for (const watch of watches) this.hub.sendToRunner(runnerId, { type: "pull_request_watch_start", ...watch });
+  }
+
+  /** A session that ended or was archived no longer waits: stop its watch, and owe it no wake. */
+  private cancelPullRequestWatches(sessionId: string, reason: string, now = Date.now()): void {
+    const cancelled = this.db.pullRequestWatches.cancelForSession(sessionId, reason, now);
+    const runnerId = this.db.getSession(sessionId)?.runnerId;
+    if (runnerId) for (const watchId of cancelled) this.hub.sendToRunner(runnerId, { type: "pull_request_watch_cancel", watchId });
+  }
+
+  /**
+   * Wake a parked session with the outcomes its ended watches owe it (#4071): one framed prompt,
+   * carried by a durable command bound to every watch it names, so a reconnect or runner restart
+   * delivers it exactly once. Like a review continuation, it goes only to an idle session nothing
+   * would refuse it for; one mid-turn takes it at its next settle, through the retry sweep. A pending
+   * asynchronous question also holds it, so this automatic prompt can never dismiss that card.
+   * Returns why it is still held, or null once nothing is owed.
+   */
+  private deliverHeldPullRequestWatchWakes(sessionId: string, now = Date.now()): string | null {
+    const held = this.db.pullRequestWatches.heldWakes(sessionId);
+    if (!held.length) return null;
+    const session = this.db.getSession(sessionId);
+    if (!session) return "session not found";
+    if (session.status !== "idle") return `session is ${session.status}`;
+    if (!this.hub.isRunnerOnline(session.runnerId)) return "runner is offline";
+    if (session.worktreeRecovery) return "worktree recovery is required";
+    if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
+    if (pendingRequests(session.pendingApproval).some((request) => request.async)) return "a question is waiting for an answer";
+    const daily = this.dailyBudgetFor(sessionId);
+    if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    const ids = held.map((watch) => watch.watchId);
+    let claimed = false;
+    const sent = this.prompt(
+      sessionId, held.flatMap(pullRequestWatchWakeLines).join("\n"), [], undefined, undefined, undefined, "session", true, {
+        admitAs: "queued" as const,
+        durable: true,
+        stage: (runnerId, command, at) => this.promptOutbox.stagePullRequestWatchWake(ids, sessionId, runnerId, command, at),
+        // Without a durable command there is no receipt to follow: recorded delivered before the
+        // send, so a crash between the two can lose it but never send it twice.
+        claimImmediate: () => (claimed = this.db.pullRequestWatches.claimHeld(sessionId, ids, now)),
+      },
+    );
+    if (!sent.ok) {
+      if (claimed) this.db.pullRequestWatches.releaseClaim(sessionId, ids, Date.now());
+      return sent.error ?? "the wake was refused";
+    }
+    this.hub.sessionChangedById(sessionId);
+    return null;
+  }
+
+  /** Follow the durable command that carries a watch wake, as a review continuation's is. */
+  private reconcilePullRequestWatchWakeCommand(commandId: string, now: number): void {
+    const sessionId = this.db.pullRequestWatches.sessionForCommand(commandId);
+    if (!sessionId) return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    const session = this.db.getSession(sessionId);
+    const retryUnsent = session && !isTerminal(session.status) && !session.archived &&
+      command.errorCode === "COMMAND_CANCELLED" && command.error === AUTOMATIC_TURN_RESTART_CANCELLED_REASON;
+    // A never-sent command (worktree recovery, or Restart cancelling the automatic turn before it
+    // was submitted) keeps the wake owed, without replaying any user event or uncertain delivery.
+    if (command.state === "failed" && command.userEventSeq === undefined &&
+        (command.errorCode === "WORKTREE_RECOVERY_REQUIRED" || retryUnsent)) {
+      if (!this.db.holdPullRequestWatchWakeCommand(sessionId, commandId, now)) return;
+      this.settleQueuedAdmission(command, now);
+      this.hub.sessionChangedById(sessionId);
+      this.deliverHeldPullRequestWatchWakes(sessionId, now);
+      return;
+    }
+    const state = command.state === "started" || command.state === "completed" ? "delivered" as const
+      : command.state === "uncertain" ? "uncertain" as const
+      : command.state === "failed" ? "failed" as const
+      : null;
+    if (!state) return;
+    this.db.pullRequestWatches.setCommandState(commandId, state, now);
+    if (state === "failed") this.log.warn(`pull request watch wake failed for ${sessionId}: ${command.error ?? "unknown error"}`);
+    this.hub.sessionChangedById(sessionId);
+    this.settleQueuedAdmission(command, now);
+  }
+
   /** On registration: a runner without review sessions can no longer report its reviews. */
   recoverReviewSessions(runnerId: string): void {
     if (runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "reviewSession")) return;
@@ -13051,6 +13236,9 @@ export class SessionsService {
     if (actorId !== "session-restarted") {
       this.db.abandonRestartNotices(sessionId, Date.now());
       this.db.abandonReviewContinuations(sessionId, Date.now());
+      // An ended session waits for nothing: its merge-queue watch stops and owes no wake (#4071).
+      // A restarted one is still parked, and its watch keeps running.
+      this.cancelPullRequestWatches(sessionId, "the session ended");
     }
   }
 
@@ -13912,6 +14100,7 @@ export class SessionsService {
         // so does a finished review's continuation (#3369).
         this.deliverHeldRestartNotices(sessionId, now);
         this.deliverHeldReviewContinuations(sessionId, now);
+        this.deliverHeldPullRequestWatchWakes(sessionId, now);
       } else {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
@@ -17910,6 +18099,7 @@ export class SessionsService {
                 this.deliverHeldRestartNotices(snap.id, now);
                 this.applyStandingCampaignResponses(snap.id);
                 this.deliverHeldReviewContinuations(snap.id, now);
+                this.deliverHeldPullRequestWatchWakes(snap.id, now);
                 this.hub.sessionChangedById(snap.id);
                 recordAppliedVersion(snap.id);
               }
@@ -18001,6 +18191,7 @@ export class SessionsService {
         // A card the runner restores at registration gets its standing response, once (#2940).
         this.applyStandingCampaignResponses(snap.id);
         this.deliverHeldReviewContinuations(snap.id, now);
+        this.deliverHeldPullRequestWatchWakes(snap.id, now);
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
@@ -18286,6 +18477,7 @@ export class SessionsService {
     this.deliverHeldRestartNotices(sessionId, now);
     this.applyStandingCampaignResponses(sessionId);
     this.deliverHeldReviewContinuations(sessionId, now);
+    this.deliverHeldPullRequestWatchWakes(sessionId, now);
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
   }

@@ -220,6 +220,27 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
+MCP `park_on_pull_request` (#4071, protocol 271) lets a session stop waiting inside a turn. The
+session names its own enqueued GitHub pull request and exact head, gets a watch back, and ends its
+turn. The control plane stores the watch (`POST /api/sessions/:id/pull-request-watch`, own session
+credential only) and sends `pull_request_watch_start` to the session's runner. The runner repeats
+3-hour `wait_pull_request` waits through its own read-only `gh` login and reports the first outcome
+other than `timeout` (`merged`, `closed`, `queue_failed`, `queue_ejected`, `head_changed`, or for a
+pull request that is not queued, its checks' outcome) in `pull_request_watch_update`. The control
+plane accepts only the first report from the watch's runner, then wakes the session once: an idle
+session receives one durable `[Wollipog Pull Request Watch — <id>]` prompt with the outcome and the
+bounded wait summary (at most 16 KiB, on one line), carried exactly like a review continuation.
+Every runner registration resends the watches still watching on it, so a runner restart resumes
+them. A runner that cannot watch any more (an older version), or one that could not read GitHub
+for about half an hour, reports the watch `lost`, and the wake says so. Parking again replaces the
+watch; an ended or archived session's watch is cancelled and owes no wake. `get_session` shows the
+watch as `pullRequestWatch`, and `get_campaign` lists parked children as `parkedChildren`. While a
+child is parked (watching, or its wake not yet started), its turn end is no `child_ready`
+continuation for its Orchestrator; the woken child's next turn end is. The wake is an ordinary
+prompt and grants nothing: enqueueing, merging and branch deletion keep their typed gates. GitLab
+merge requests, older runners and older control planes are refused, so those sessions keep
+blocking waits.
+
 A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
 timeout, interval, budget, and read-only contract. Give it as a merge request URL,
 `<gitlab-host>/group/project!IID`, or an IID with `--repo <gitlab-host>/group/project`; the host is

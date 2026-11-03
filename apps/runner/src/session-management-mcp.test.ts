@@ -636,6 +636,7 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_session_events",
       "wait_session",
       "wait_pull_request",
+      "park_on_pull_request",
       "request_review_session",
       "get_review_session",
       "list_review_sessions",
@@ -683,6 +684,48 @@ test("tools/list returns the curated session and workflow tools with schemas", a
     assert.ok(t.description.length > 10, `${t.name} has a description`);
     assert.ok(t.inputSchema, `${t.name} has an input schema`);
   }
+});
+
+test("park_on_pull_request registers this session's own watch and tells it to end its turn (#4071)", async () => {
+  const head = "e".repeat(40);
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+    : { status: 200, body: { watch: { watchId: "prw_1", repository: "picoduck/wollipog", number: 7, headSha: head, state: "watching",
+      since: 1, continuation: "none" } } });
+  const result = await callTool(deps, "park_on_pull_request", {
+    pullRequest: "https://github.com/picoduck/wollipog/pull/7", headSha: head.toUpperCase(),
+  });
+  assert.equal(result.isError, undefined);
+  const body = resultJson(result);
+  assert.equal(body.watch.watchId, "prw_1");
+  assert.match(body.nextStep, /^End your turn now/u);
+  const post = calls.find((call) => call.method === "POST")!;
+  assert.equal(post.url, `${CP_URL}/api/sessions/${SELF_ID}/pull-request-watch`);
+  assert.deepEqual(post.body, { repository: "picoduck/wollipog", number: 7, headSha: head });
+});
+
+test("get_session shows the merge-queue watch a session is parked on", async () => {
+  const watch = { watchId: "prw_1", repository: "picoduck/wollipog", number: 7, headSha: "e".repeat(40), state: "watching",
+    since: 1, continuation: "none" };
+  const { deps } = makeDeps(() => ({ status: 200, body: { session: { id: "s_child", status: "idle", runnerId: "r1", pullRequestWatch: watch } } }));
+  const body = resultJson(await callTool(deps, "get_session", { sessionId: "s_child" }));
+  assert.deepEqual(body.pullRequestWatch ?? body.session?.pullRequestWatch, watch);
+});
+
+test("park_on_pull_request refuses GitLab, a short head and an older control plane before registering", async () => {
+  const head = "e".repeat(40);
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch - 1 } }
+    : { status: 200, body: {} });
+  const gitlab = await callTool(deps, "park_on_pull_request", { pullRequest: "gitlab.com/group/project!7", headSha: head });
+  assert.equal(gitlab.isError, true);
+  assert.match(gitlab.content[0].text, /GitHub pull requests only/u);
+  const short = await callTool(deps, "park_on_pull_request", { pullRequest: "picoduck/wollipog#7", headSha: "abc" });
+  assert.equal(short.isError, true);
+  const old = await callTool(deps, "park_on_pull_request", { pullRequest: "picoduck/wollipog#7", headSha: head });
+  assert.equal(old.isError, true);
+  assert.equal(JSON.parse(old.content[0].text).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch);
+  assert.equal(calls.filter((call) => call.method === "POST").length, 0);
 });
 
 test("wait-session polling backs off to the existing ten-second ceiling", () => {

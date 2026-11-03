@@ -1,4 +1,4 @@
-import { REVIEW_JOBS_RETIRED_REASON, type ProviderCredentialImportSource } from "@wollipog/protocol";
+import { CAMPAIGN_PARKED_CHILDREN_LIMIT, REVIEW_JOBS_RETIRED_REASON, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
@@ -23,6 +23,7 @@ import { SessionReviewJobs } from "./session-review-jobs.js";
 import { applyCampaignBehavior, campaignBehaviorProjection, changedCampaignBehavior, inheritCampaignBehavior } from "./campaign-behavior.js";
 import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } from "@wollipog/protocol";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
+import { PullRequestWatches } from "./pull-request-watches.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { attentionRequestRank, parseRatePricedUsage, ratePricedUsageKey, ratePricedUsageRecord, RATE_PRICED_USAGE_BUCKETS, RATE_PRICED_USAGE_MAX_ENTRIES, type RatePricedUsageBucket, type RatePricedUsageTotal } from "@wollipog/protocol";
@@ -5600,15 +5601,20 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
+  readonly pullRequestWatches: PullRequestWatches;
   readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
-   * reviews, their summary (#3369); nothing else for ordinary sessions. */
-  private reviewSessionProjection(sessionId: string): Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy"> {
+   * reviews, their summary (#3369); nothing else for ordinary sessions. Also the merge-queue watch
+   * a session is parked on (#4071). */
+  private reviewSessionProjection(sessionId: string):
+    Pick<SessionView, "kind" | "review" | "reviewRuns" | "reviewPolicy" | "pullRequestWatch"> {
     const review = this.reviewSessions.link(sessionId);
     if (review) return { kind: "review", review };
     const reviewRuns = this.reviewSessions.summaryFor(sessionId);
     const reviewPolicy = this.reviewSettings.sessionPolicy(sessionId);
-    return { ...(reviewRuns ? { reviewRuns } : {}), ...(reviewPolicy ? { reviewPolicy } : {}) };
+    const pullRequestWatch = this.pullRequestWatches.visibleFor(sessionId);
+    return { ...(reviewRuns ? { reviewRuns } : {}), ...(reviewPolicy ? { reviewPolicy } : {}),
+      ...(pullRequestWatch ? { pullRequestWatch } : {}) };
   }
 
   private constructor(
@@ -5629,6 +5635,7 @@ export class ControlPlaneDb {
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
       ReviewSessions.install(db);
+      PullRequestWatches.install(db);
       ReviewSettingsStore.install(db);
     }
     this.providerPublications = new ProviderProfilePublicationStore(db, controlPlaneInstanceId);
@@ -5639,6 +5646,7 @@ export class ControlPlaneDb {
     });
     this.sessionReviewJobs = new SessionReviewJobs(db);
     this.reviewSessions = new ReviewSessions(db);
+    this.pullRequestWatches = new PullRequestWatches(db);
     this.reviewSettings = new ReviewSettingsStore(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }
@@ -20210,6 +20218,9 @@ export class ControlPlaneDb {
         | { status: SessionStatus }
         | undefined;
       if (!child || !["idle", "completed", "failed", "stopped"].includes(child.status)) continue;
+      // A child parked on a merge-queue watch is waiting, not reporting (#4071): its turn end owes
+      // the Orchestrator nothing. The watch's outcome wakes the child, and what it does then does.
+      if (child.status === "idle" && this.pullRequestWatches.isParked(sessionId)) continue;
       const latest = this.stmt(
         `SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=?`,
       ).get(sessionId) as { seq: number };
@@ -20931,6 +20942,10 @@ export class ControlPlaneDb {
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
       ...(cleanupWorktrees.length ? { cleanupWorktrees } : {}),
       ...(heldChildren.length ? { heldChildren } : {}),
+      ...(() => {
+        const parkedChildren = this.pullRequestWatches.visibleAmong(childIds, CAMPAIGN_PARKED_CHILDREN_LIMIT);
+        return parkedChildren.length ? { parkedChildren } : {};
+      })(),
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
@@ -21613,6 +21628,38 @@ export class ControlPlaneDb {
     return this.stmt(
       "SELECT 1 FROM review_sessions WHERE requester_session_id=? AND continuation_state IN ('held','delivering') LIMIT 1",
     ).get(requesterSessionId) !== undefined;
+  }
+
+  /** Stage the command that carries a parked session's held watch wakes (#4071) and bind each to it
+   * in one transaction. Throws, staging nothing, unless every one is still held. */
+  stagePullRequestWatchWake(input: {
+    watchIds: readonly string[];
+    command: Parameters<ControlPlaneDb["stageSessionPromptCommand"]>[0];
+  }): SessionPromptCommandRecord {
+    this.db.exec("BEGIN");
+    try {
+      const staged = this.stageSessionPromptCommand(input.command);
+      this.pullRequestWatches.bindWakes(input.command.sessionId, input.watchIds, staged.commandId, input.command.now);
+      this.db.exec("COMMIT");
+      return staged;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** A proven-unsent wake command: owe its wakes again and retire its terminal row atomically. */
+  holdPullRequestWatchWakeCommand(sessionId: string, commandId: string, now: number): boolean {
+    this.db.exec("BEGIN");
+    try {
+      const held = this.pullRequestWatches.holdCommand(sessionId, commandId, now);
+      if (held) this.dismissTerminalSessionPromptCommand(sessionId, commandId, now);
+      this.db.exec("COMMIT");
+      return held;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
   }
 
   /** Stage the command that carries these held continuations and bind each to it in one
