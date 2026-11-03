@@ -7416,6 +7416,7 @@ test("Claude resume hands the driver the live requests still open after its chec
     assert.equal(h.launches.length, 1);
     assert.deepEqual(h.launches[0]!.options.claudeUsageCheckpoint, checkpoint);
     assert.deepEqual(h.launches[0]!.options.claudeLiveUsage, [live(7), live(8)]);
+    assert.equal(h.launches[0]!.options.claudeRepublicationInterrupted, true, "the checkpoint that would close it is stale (#4069)");
     // Live records are display-only: runner totals accrue the record that closes their window.
     const before = h.store.readMeta("resume-session")!;
     (h.manager as any).accrueMeta("resume-session", live(9));
@@ -7438,6 +7439,41 @@ test("Claude resume hands the driver the live requests still open after its chec
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
+  }
+});
+
+test("a restart inside an uncertain Claude total keeps every unaccounted request open and flags a stale checkpoint (#4069)", async () => {
+  const before = { sessionId: "claude-conversation", totalCostUsd: 1, models: {}, accountingScope: "conversation" as const };
+  const after = { ...before, totalCostUsd: 1.1 };
+  const live = (inputTokens: number) => ({ kind: "token_usage" as const, model: "claude-opus-5", inputTokens, outputTokens: 0,
+    liveUsage: "provisional" as const });
+  // The driver's batch for an uncertain total: each open request republished, then the marker that
+  // closes the window and journals the new baseline.
+  const batch = [{ ...live(50), liveUsage: "republished" as const }, { ...live(10), liveUsage: "republished" as const },
+    { kind: "token_usage" as const, accountingIncomplete: true as const, liveUsage: "settled" as const, claudeUsageCheckpoint: after }];
+  const expected = [
+    { claudeUsageCheckpoint: before, claudeLiveUsage: [live(50), live(10)], claudeRepublicationInterrupted: undefined },
+    { claudeUsageCheckpoint: before, claudeLiveUsage: [live(10)], claudeRepublicationInterrupted: true },
+    { claudeUsageCheckpoint: before, claudeLiveUsage: undefined, claudeRepublicationInterrupted: true },
+    { claudeUsageCheckpoint: after, claudeLiveUsage: undefined, claudeRepublicationInterrupted: undefined },
+  ];
+  for (let durable = 0; durable <= batch.length; durable++) {
+    const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native", agentVersion: "2.1.296",
+      agentSessionId: "claude-conversation", claudeUsageCheckpoint: before, claudeUsageCheckpointSeq: 0 });
+    try {
+      h.store.appendEvent("resume-session", live(50));
+      h.store.appendEvent("resume-session", live(10));
+      for (const event of batch.slice(0, durable)) h.store.appendEvent("resume-session", event);
+      h.manager.prompt("resume-session", "resume");
+      for (let index = 0; index < 20 && h.launches.length === 0; index++) await tick();
+      assert.equal(h.launches.length, 1);
+      const { claudeUsageCheckpoint, claudeLiveUsage, claudeRepublicationInterrupted } = h.launches[0]!.options;
+      assert.deepEqual({ claudeUsageCheckpoint, claudeLiveUsage, claudeRepublicationInterrupted }, expected[durable],
+        `after ${durable} durable records of the batch`);
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
   }
 });
 
