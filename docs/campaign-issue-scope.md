@@ -181,10 +181,22 @@ that drafted it, may request it; inspection and consumption run as the root. Tit
 one leading issue-form type tag such as `[Bug]: `, and the duplicate search uses that subject, so
 an older untagged issue is still found. Every bounded publication is admitted and consumed only
 through a runner that reports this subject search and comparison. The server verifies accepted lineage and scope
-capacity. When it cannot admit the request, the decision goes to the person, and its
-`authorityEvaluation.admissionFailure` names the failed condition (for example `title_mismatch`,
-`capacity_exhausted` or `inspection_failed`, or `no_issue_boundary` in a Custom campaign), which
-the server also logs. That decision stores the snapshot exactly as requested, including its
+capacity. Under a Full Control issue boundary, a failure the requester can correct in one step
+(`title_mismatch`, `recommendation_not_found`, `recommendation_not_accepted` or
+`recommendation_spent`) is refused: a 409 whose `code` names the failure and whose fixed sentence
+says how to correct the request. No decision is created, nobody is asked and nothing is granted. A
+member's refusal is recorded for the root as an Orchestrator-owned `reformulate_request` recovery
+record (`correctable_refusal`, with its `admissionFailure`), which wakes the root like other child
+requests needing it; the member's next request for that recommendation, or its verified report,
+settles it. When the server cannot admit the request for any other reason, the decision goes to the
+person, and its `authorityEvaluation.admissionFailure` names the failed condition (for example
+`capacity_exhausted`, `unsafe_payload`, `origin_outside_scope` or `inspection_failed`, or
+`no_issue_boundary` in a Custom campaign), which the server also logs. Under an issue boundary every
+person-owned publication carries one, with its fixed sentence in `admissionMessage`: a request that
+names no recommendation records `recommendation_missing`, and its sentence tells the requester that
+naming the accepted recommendation would let the Orchestrator review it. `capacity_exhausted` names
+Maximum Issues and the owner's route to raise it. Campaign recovery reports these decisions as
+`publication_not_admitted` with the recorded failure, not as a boundary enlargement. That decision stores the snapshot exactly as requested, including its
 `recommendationId`, so the person's card shows it and the requester consumes the same snapshot it
 sent. A named recommendation never makes a publication bounded: only the server's own
 `issueAdmission` does, and a person-approved publication's name binds scope only to a

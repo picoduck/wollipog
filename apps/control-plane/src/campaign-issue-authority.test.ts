@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
-  type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers,
-  ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure, issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignControl, type CampaignPublicationAdmissionFailure, type RunnerMetadata, type WorkflowDecisionView,
+  type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure,
+  issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
@@ -729,7 +730,8 @@ test("publication requires an accepted unique related recommendation, exact sani
     h.state.publicationOk=true;
     assert.ok((await h.svc.consumeWorkflowDecision("root",p.data!.occurrenceId,{resourceSnapshot:p.data!.resourceSnapshot})).ok);
     const replay=await h.svc.createWorkflowDecisionWithVideo("root",{requestId:"replay-pub",resourceKey:"pub",resourceSnapshot:snapshot});
-    assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","spent recommendations never mint another standing grant");
+    assert.deepEqual([replay.ok,replay.status,replay.errorDetails?.code],[false,409,"recommendation_spent"],"spent recommendations never mint another standing grant");
+    assert.equal(h.db.workflowDecisionByRequestId("root","replay-pub"),null);
   } finally { h.db.close(); }
 });
 
@@ -768,8 +770,9 @@ test("a child's accepted, in-scope publication with an issue-form title prefix i
     }
     const replay = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:"replay",resourceKey:"replay",
       resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:"Related repair",sanitizedBody:body,labels:[],recommendationId}});
-    assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","a consumed recommendation never mints a second standing grant");
-    assert.equal(replay.data!.authorityEvaluation?.admissionFailure,"recommendation_spent");
+    assert.deepEqual([replay.ok,replay.status,replay.errorDetails?.code],[false,409,"recommendation_spent"],
+      "a consumed recommendation never mints a second standing grant, nor asks a person to approve it (#4065)");
+    assert.equal(h.db.workflowDecisionByRequestId("child","replay"),null);
   } finally { h.db.close(); }
 });
 
@@ -800,18 +803,18 @@ test("every bounded publication needs a runner whose duplicate search and compar
   }
 });
 
-test("a child's publication outside the proof routes to the person with a visible admission failure (#2940)", async () => {
-  const cases: Array<{ name: string; expected: string; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
+test("a child's publication outside the proof is refused when it can correct it, and otherwise routes to the person with a visible admission failure (#2940, #4065)", async () => {
+  const cases: Array<{ name: string; expected: string; refused: boolean; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
     change?: (snapshot: { sanitizedTitle: string; sanitizedBody: string; labels: string[]; recommendationId: string }) => void }> = [
-    { name: "forged", expected: "recommendation_not_found", setup: () => "followup_forged" },
-    { name: "unaccepted", expected: "recommendation_not_accepted", setup: (h) => {
+    { name: "forged", expected: "recommendation_not_found", refused: true, setup: () => "followup_forged" },
+    { name: "unaccepted", expected: "recommendation_not_accepted", refused: true, setup: (h) => {
       const record = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title:"Related repair",originWorkItemIds:[h.item.id]});
       assert.ok(record.ok); return record.data!.id;
     } },
-    { name: "other title", expected: "title_mismatch", change: (s) => { s.sanitizedTitle = "[Bug]: A different repair"; } },
-    { name: "unsafe", expected: "unsafe_payload", change: (s) => { s.sanitizedBody += "\napi_key=secret-value"; } },
-    { name: "duplicate labels", expected: "unsafe_payload", change: (s) => { s.labels = ["bug", "bug"]; } },
-    { name: "over cap", expected: "capacity_exhausted", maximum: 1 },
+    { name: "other title", expected: "title_mismatch", refused: true, change: (s) => { s.sanitizedTitle = "[Bug]: A different repair"; } },
+    { name: "unsafe", expected: "unsafe_payload", refused: false, change: (s) => { s.sanitizedBody += "\napi_key=secret-value"; } },
+    { name: "duplicate labels", expected: "unsafe_payload", refused: false, change: (s) => { s.labels = ["bug", "bug"]; } },
+    { name: "over cap", expected: "capacity_exhausted", refused: false, maximum: 1 },
   ];
   for (const c of cases) {
     const h = harness(true, c.maximum ?? 5);
@@ -821,11 +824,24 @@ test("a child's publication outside the proof routes to the person with a visibl
       c.change?.(snapshot);
       const p = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:c.name,resourceKey:c.name,
         resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",...snapshot}});
+      if (c.refused) {
+        assert.deepEqual([p.ok,p.status,p.errorDetails?.code],[false,409,c.expected],c.name);
+        assert.equal(p.error,CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[c.expected as CampaignPublicationAdmissionFailure],c.name);
+        assert.ok(p.error!.startsWith(`${c.expected}: `) && p.error!.includes("Nothing was created"),c.name);
+        assert.equal(h.db.workflowDecisionByRequestId("child",c.name),null,`${c.name}: a refusal creates no decision`);
+        assert.equal(h.db.getSession("child")!.pendingApproval ?? null,null,`${c.name}: nobody is asked`);
+        assert.equal(h.db.campaignPublicationReservations("root").length,0,`${c.name}: nothing is reserved`);
+        continue;
+      }
       assert.ok(p.ok,`${c.name}: ${p.error}`);
       assert.equal(p.data!.authority,"human",c.name);
       assert.equal(p.data!.authorityEvaluation?.admissionFailure,c.expected,c.name);
+      assert.equal(p.data!.authorityEvaluation?.admissionMessage,CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[c.expected as CampaignPublicationAdmissionFailure],c.name);
       assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && p.data!.resourceSnapshot.recommendationId === recommendationId &&
         !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim is kept as sent (#3918) and carries no admission`);
+      if (c.expected === "capacity_exhausted") assert.match(p.data!.authorityEvaluation!.admissionMessage!,
+        /Maximum Issues.*Only the person who authorized Full Control can raise it: in Campaign Status.*An Orchestrator can't raise it\./u,
+        "the recorded text names the limit and the owner's route, as the scope refusal does");
     } finally { h.db.close(); }
   }
   const failedInspection = harness();
@@ -837,6 +853,138 @@ test("a child's publication outside the proof routes to the person with a visibl
     assert.ok(p.ok); assert.equal(p.data!.authority,"human");
     assert.equal(p.data!.authorityEvaluation?.admissionFailure,"inspection_failed");
   } finally { failedInspection.db.close(); }
+});
+
+const publicationRefusalRecord = (h: ReturnType<typeof harness>, sessionId = "child") =>
+  h.db.campaignProjection("root")!.recovery?.records.find(item => item.resource.sessionId === sessionId && item.action === "reformulate_request");
+
+// #4065, observed live: a child's title differed from the accepted recommendation's, so a person
+// was asked to approve a payload the Orchestrator could have reviewed after a one-line correction.
+test("#4065 a child's title mismatch creates nothing, reaches the root as recovery, and the corrected request is the Orchestrator's", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    const request = (title: string) => h.svc.createWorkflowDecisionWithVideo("child", { requestId: "publish", resourceKey: "publish",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: title, sanitizedBody: body,
+        labels: ["enhancement"], recommendationId } });
+    const eventsBefore = h.db.campaignContinuationEvents("root").length;
+    const refused = await request("[Feature]: Related repairs");
+    assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code], [false, 409, "title_mismatch"]);
+    assert.match(refused.error!, /^title_mismatch: .*Use that title exactly.*Nothing was created\.$/u);
+    assert.equal(h.db.workflowDecisionByRequestId("child", "publish"), null, "no decision is created");
+    assert.equal(h.db.getSession("child")!.pendingApproval ?? null, null, "nobody is notified with a request");
+    assert.equal(h.db.campaignProjection("root")!.pendingRequests?.human ?? 0, 0);
+    // The root learns of it the way it learns of other child requests that need it: a recovery
+    // record whose wake is a request_actionable continuation event.
+    const record = publicationRefusalRecord(h)!;
+    assert.ok(record, "the refusal is recorded for the root");
+    assert.deepEqual([record.reason, record.effectiveOwner, record.admissionFailure, record.requiredInput],
+      ["correctable_refusal", "orchestrator", "title_mismatch", "none"]);
+    assert.equal(record.state, "dispatched");
+    assert.ok(record.explanation.includes(CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.title_mismatch));
+    assert.deepEqual(h.db.campaignContinuationEvents("root").slice(eventsBefore).map((event) => [event.kind, event.subjectSessionId, event.occurrenceId]),
+      [["request_actionable", "child", record.id]]);
+    // The same requestId, corrected, is admitted and owned by the Orchestrator; the refusal settles.
+    const corrected = await request("[Feature]: Related repair");
+    assert.ok(corrected.ok, corrected.error ?? "corrected");
+    assert.equal(corrected.data!.authority, "orchestrator");
+    assert.equal(corrected.data!.authorityEvaluation?.admissionFailure, undefined);
+    const settled = publicationRefusalRecord(h);
+    assert.ok(!settled || settled.state === "resolved", "the corrected request settles the refusal");
+    assert.equal(h.db.campaignRecovery.publicationRefusals("root", h.db.getSession("root")!.parentControlPolicy?.revision ?? 0).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("#4065 each correctable failure is refused with its own condition, and the root's own refusal is not recorded as a child's", async () => {
+  const h = harness();
+  try {
+    const publish = (sessionId: string, requestId: string, recommendationId: string) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId,
+      resourceKey: requestId, resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair",
+        sanitizedBody: body, labels: [], recommendationId } });
+    const unknown = await publish("child", "unknown", "followup_unknown");
+    assert.deepEqual([unknown.status, unknown.errorDetails?.code], [409, "recommendation_not_found"]);
+    assert.equal(publicationRefusalRecord(h)!.admissionFailure, "recommendation_not_found");
+    const recorded = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Related repair", originWorkItemIds: [h.item.id] });
+    assert.ok(recorded.ok);
+    const unaccepted = await publish("child", "unaccepted", recorded.data!.id);
+    assert.deepEqual([unaccepted.status, unaccepted.errorDetails?.code], [409, "recommendation_not_accepted"]);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: recorded.data!.id, disposition: "accepted", reason: "Observed related work",
+      publicationRequired: true }).ok);
+    const admitted = await publish("child", "admitted", recorded.data!.id);
+    assert.equal(admitted.data?.authority, "orchestrator");
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot })).ok);
+    const spent = await publish("child", "spent", recorded.data!.id);
+    assert.deepEqual([spent.status, spent.errorDetails?.code], [409, "recommendation_spent"]);
+    for (const result of [unknown, unaccepted, spent]) {
+      const code = result.errorDetails!.code as CampaignPublicationAdmissionFailure;
+      assert.equal(result.error, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[code]);
+    }
+    for (const requestId of ["unknown", "unaccepted", "spent"]) assert.equal(h.db.workflowDecisionByRequestId("child", requestId), null, requestId);
+    // The root's own refusal reaches it in the response; no recovery wake repeats it.
+    const own = await publish("root", "root-unknown", "followup_root_unknown");
+    assert.deepEqual([own.status, own.errorDetails?.code], [409, "recommendation_not_found"]);
+    assert.equal(publicationRefusalRecord(h, "root"), undefined);
+  } finally { h.db.close(); }
+});
+
+test("#4065 a publication naming no recommendation goes to the person with recommendation_missing, and recovery shows it instead of a boundary enlargement", async () => {
+  const h = harness();
+  try {
+    const p = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "unnamed", resourceKey: "unnamed", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [] } });
+    assert.ok(p.ok, p.error ?? "unnamed");
+    assert.equal(p.data!.authority, "human");
+    assert.equal(p.data!.authorityEvaluation?.admissionFailure, "recommendation_missing");
+    assert.match(p.data!.authorityEvaluation!.admissionMessage!, /Naming the accepted recommendation's recommendationId would let the Orchestrator review it/u,
+      "the response tells the requester how the Orchestrator could review it");
+    new CampaignRecoveryService(h.db, () => {}, { info() {} }).maintain(Date.now());
+    const record = h.db.campaignProjection("root")!.recovery!.records.find(item => item.resource.occurrenceId === recoveryCoordinate(p.data!.occurrenceId))!;
+    assert.deepEqual([record.reason, record.effectiveOwner, record.state, record.admissionFailure, record.requiredInput],
+      ["publication_not_admitted", "human", "waiting_human", "recommendation_missing", "perform_human_required_action"]);
+    assert.ok(record.explanation.includes(CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.recommendation_missing));
+  } finally { h.db.close(); }
+  // A boundary that does not authorize related follow-ups still records why the person is asked.
+  const unrelated = harness();
+  try {
+    assert.ok(unrelated.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "follow_up_issue_publication"],
+      delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: false, maxIssues: 5, closureReasons: [] } }, 2, unrelated.principal).ok);
+    const p = await unrelated.svc.createWorkflowDecisionWithVideo("child", { requestId: "unrelated", resourceKey: "unrelated", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [] } });
+    assert.ok(p.ok, p.error ?? "unrelated");
+    assert.deepEqual([p.data!.authority, p.data!.authorityEvaluation?.admissionFailure], ["human", "no_issue_boundary"]);
+  } finally { unrelated.db.close(); }
+});
+
+test("#4065 an origin outside scope keeps the person fallback with its condition, and Custom campaigns are unchanged", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    // The owner replaces the origin's issue; the recommendation stays accepted.
+    const swap = await h.svc.proposeCampaignIssueScope("root", { requestId: "swap-origin", expectedRevision: 1, additions: [{ repository: "team/repo", number: 150 }],
+      removals: [{ repository: "team/repo", number: 100 }], explanation: "Owner replaces the origin" }, () => true, h.principal);
+    assert.ok(swap.ok, swap.error ?? "swap"); assert.ok(h.approve(swap.data!).ok);
+    const p = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "origin", resourceKey: "origin", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId } });
+    assert.ok(p.ok, p.error ?? "origin");
+    assert.deepEqual([p.data!.authority, p.data!.authorityEvaluation?.admissionFailure], ["human", "origin_outside_scope"]);
+    assert.equal(p.data!.authorityEvaluation?.admissionMessage, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.origin_outside_scope);
+  } finally { h.db.close(); }
+  const custom = harness(false);
+  try {
+    const rec = custom.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Custom repair", originWorkItemIds: [custom.item.id] });
+    assert.ok(rec.ok);
+    for (const [requestId, snapshot] of [["named-other-title", { recommendationId: rec.data!.id, sanitizedTitle: "Another repair" }],
+      ["unnamed", { sanitizedTitle: "Custom repair" }]] as const) {
+      const p = await custom.svc.createWorkflowDecisionWithVideo("child", { requestId, resourceKey: requestId, resourceSnapshot: {
+        category: "follow_up_issue_publication", repository: "team/repo", sanitizedBody: body, labels: [], ...snapshot } });
+      assert.ok(p.ok, `${requestId}: ${p.error}`);
+      assert.equal(p.data!.authority, "human", requestId);
+      assert.equal(p.data!.authorityEvaluation?.admissionFailure, "recommendationId" in snapshot ? "no_issue_boundary" : undefined, requestId);
+      assert.equal(p.data!.authorityEvaluation?.admissionMessage, undefined, requestId);
+    }
+  } finally { custom.db.close(); }
 });
 
 test("a follow-up past the approval limit cannot be published until the person admits it, and its slot then holds the issue (#2940)", async () => {
@@ -865,11 +1013,11 @@ test("a follow-up past the approval limit cannot be published until the person a
     const occurrenceId = /decision (workflow_[a-f0-9]+)/u.exec(over.error ?? "")?.[1];
     assert.ok(occurrenceId, over.error ?? "refusal");
 
-    // Publication is no way around the follow-up approval: the recommendation is not accepted yet.
+    // Publication is no way around the follow-up approval: the recommendation is not accepted yet,
+    // so the request is refused and creates nothing (#4065).
     const early = await publish("early");
-    assert.ok(early.ok, early.error ?? "publication");
-    assert.equal(early.data!.authority, "human");
-    assert.equal(early.data!.authorityEvaluation?.admissionFailure, "recommendation_not_accepted");
+    assert.deepEqual([early.ok, early.status, early.errorDetails?.code], [false, 409, "recommendation_not_accepted"]);
+    assert.equal(h.db.workflowDecisionByRequestId("child", "early"), null);
 
     const admission = h.db.workflowDecisionByOccurrence(occurrenceId)!;
     assert.equal(admission.category, "campaign_follow_up_admission");
@@ -1895,14 +2043,16 @@ async function humanApprovedPublication(h: ScopeHarness, options: { approver?: s
   const { approver = h.principal.userId, title = "Human approved repair", issue = 101, accept = true } = options;
   const rec = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds:[h.item.id]}); assert.ok(rec.ok,rec.error ?? "record");
   if (accept) assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Observed related work",publicationRequired:true}).ok);
-  // A failed inspection routes the child's request to the person, as #3814 and #3815 were.
+  // A failed inspection routes the child's request to the person, as #3814 and #3815 were. Naming
+  // an unaccepted recommendation is refused instead (#4065), so that request names none.
   h.state.publicationOk = false;
   const created = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:`human-${title}`,resourceKey:`human-${title}`,resourceSnapshot:{category:"follow_up_issue_publication",
-    repository:"team/repo",sanitizedTitle:`[Feature]: ${title}`,sanitizedBody:body,labels:[],recommendationId:rec.data!.id}});
+    repository:"team/repo",sanitizedTitle:`[Feature]: ${title}`,sanitizedBody:body,labels:[],...(accept ? { recommendationId:rec.data!.id } : {})}});
   h.state.publicationOk = true;
   assert.ok(created.ok,created.error ?? "publication"); const decision = created.data!;
   assert.equal(decision.authority,"human");
-  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && decision.resourceSnapshot.recommendationId === rec.data!.id);
+  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission &&
+    decision.resourceSnapshot.recommendationId === (accept ? rec.data!.id : undefined));
   const approved = h.svc.resolveWorkflowDecision("root","child",decision.occurrenceId,
     { outcome: "approve", ...options.resolution } as import("@wollipog/protocol").ResolveWorkflowDecisionRequest,"human",{kind:"human",id:approver},()=>true);
   assert.ok(approved.ok,approved.error ?? "human approval");
@@ -2255,13 +2405,17 @@ test("#3918 a person-approved publication's named recommendation never replaces 
   try {
     const alpha = acceptedRecommendation(h, "Alpha repair");
     h.state.publicationOk = true;
-    // The name claims Alpha for a Beta payload: bounded admission refuses, and the person decides.
+    // The name claims Alpha for a Beta payload: the requester is refused and can correct it (#4065).
     const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Feature]: Beta repair",
       sanitizedBody: body, labels: [], recommendationId: alpha };
-    const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
+    const refused = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
+    assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code], [false, 409, "title_mismatch"]);
+    // A person-owned decision recorded before that refusal existed still names Alpha; its name must
+    // never bind scope. The generic create stands in for that earlier route.
+    const created = h.svc.createWorkflowDecision("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
     assert.ok(created.ok, created.error ?? "request");
     assert.equal(created.data!.authority, "human");
-    assert.equal(created.data!.authorityEvaluation?.admissionFailure, "title_mismatch");
+    assert.equal(created.data!.authorityEvaluation?.admissionFailure, "authority_unavailable");
     assert.deepEqual(created.data!.resourceSnapshot, requested);
     assert.equal(h.db.campaignPublicationReservations("root").length, 0);
     assert.ok(humanApprove(h, "child", created.data!).ok);
