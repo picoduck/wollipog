@@ -5,11 +5,13 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
   READ_FILE_CAP,
+  bestFuzzyFiles,
   createWorkspaceReference,
   inspectWorkspaceReferenceDiff,
   listSessionFiles,
   normalizeRelPath,
   parseWslWorkspaceReferenceSearch,
+  parseWslWorkspaceVisit,
   readSessionFile,
   resolveWorkspaceReference,
   searchWorkspaceReferences,
@@ -180,6 +182,82 @@ test("native workspace search distinguishes exactly 50 flat-root matches from a 
   }
 });
 
+test("a fuzzy search returns files only, best first, inside the session root (#1263)", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-fuzzy-"));
+  const outside = mkdtempSync(join(tmpdir(), "wollipog-search-fuzzy-outside-"));
+  try {
+    mkdirSync(join(root, "apps", "web", "src", "components"), { recursive: true });
+    mkdirSync(join(root, "docs", "sdtsx-notes"), { recursive: true });
+    mkdirSync(join(root, ".git"));
+    writeFileSync(join(root, "apps", "web", "src", "components", "SessionDetail.tsx"), "");
+    writeFileSync(join(root, "docs", "sdtsx-notes", "readme.md"), "");
+    writeFileSync(join(root, "docs", "sidebar-details.tsx"), "");
+    writeFileSync(join(root, "docs", "unrelated.md"), "");
+    writeFileSync(join(root, ".git", "SessionDetail.tsx"), "");
+    writeFileSync(join(outside, "SessionDetail.tsx"), "");
+    let linked = true;
+    try {
+      symlinkSync(outside, join(root, "outside-link"), "dir");
+    } catch {
+      linked = false;
+    }
+
+    const found = await searchWorkspaceReferences(NATIVE, root, "sd tsx", "fuzzy");
+    assert.equal(found.match, "fuzzy");
+    assert.equal(found.truncated, false);
+    assert.equal(found.limit, undefined);
+    assert.deepEqual(found.results.map((candidate) => candidate.path), [
+      "apps/web/src/components/SessionDetail.tsx",
+      "docs/sidebar-details.tsx",
+      "docs/sdtsx-notes/readme.md",
+    ], "the folder named like the query is not a result; the file under it ranks below name matches");
+    assert.ok(found.results.every((candidate) => !candidate.isDirectory));
+    if (!linked) t.diagnostic("symlinks unavailable; the escape case was not exercised");
+
+    const substring = await searchWorkspaceReferences(NATIVE, root, "sdtsx");
+    assert.equal(substring.match, undefined, "without `match` the search keeps its substring contract");
+    assert.deepEqual(substring.results, [
+      { path: "docs/sdtsx-notes", isDirectory: true },
+      { path: "docs/sdtsx-notes/readme.md", isDirectory: false },
+    ]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(outside, { recursive: true, force: true });
+  }
+});
+
+test("a fuzzy search keeps the best 50 matches, not the first 50 found, and names the cap", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-fuzzy-cap-"));
+  try {
+    for (let index = 0; index < 60; index += 1) {
+      writeFileSync(join(root, `m-${String(index).padStart(2, "0")}-t.txt`), "");
+    }
+    mkdirSync(join(root, "deep", "er"), { recursive: true });
+    writeFileSync(join(root, "deep", "er", "mt.ts"), "");
+    const found = await searchWorkspaceReferences(NATIVE, root, "mt", "fuzzy");
+    assert.equal(found.results.length, 50);
+    assert.equal(found.results[0]?.path, "deep/er/mt.ts", "visited last, it still ranks first");
+    assert.equal(found.truncated, true);
+    assert.equal(found.limit, "results");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("bestFuzzyFiles reports the visit cap ahead of the result cap", () => {
+  const entries = Array.from({ length: 60 }, (_, index) => ({ path: `src/item-${index}.ts`, isDirectory: false }));
+  const visitBound = bestFuzzyFiles({ entries, truncated: true }, "item");
+  assert.equal(visitBound.results.length, 50);
+  assert.equal(visitBound.limit, "entries");
+  assert.equal(visitBound.truncated, true);
+
+  const complete = bestFuzzyFiles({ entries: entries.slice(0, 50), truncated: false }, "item");
+  assert.equal(complete.truncated, false);
+  assert.equal(complete.limit, undefined);
+  assert.deepEqual(complete.results.map((candidate) => candidate.path).slice(0, 2), ["src/item-0.ts", "src/item-1.ts"],
+    "equal scores keep the visit order");
+});
+
 test("workspace references bind root, target content, ranges, and diff identity", async () => {
   const root = makeFixture();
   try {
@@ -333,4 +411,18 @@ test("WSL search parsing bounds matches and reports both result and traversal tr
   const visitBound = parseWslWorkspaceReferenceSearch("f\tone\nf\ttwo\nf\tthree\n", "o", 2);
   assert.deepEqual(visitBound.results.map((candidate) => candidate.path), ["one", "two"]);
   assert.equal(visitBound.truncated, true);
+});
+
+test("WSL fuzzy search ranks the same bounded traversal and names a capped visit", () => {
+  const listing = "d\tsrc\nf\tsrc/sidebar.ts\r\nf\tsrc/components/SessionDetail.tsx\nf\tREADME.md\n";
+  const visit = parseWslWorkspaceVisit(listing);
+  assert.deepEqual(visit.entries[1], { path: "src/sidebar.ts", isDirectory: false }, "a CRLF row loses its CR");
+  assert.equal(visit.truncated, false);
+  const found = bestFuzzyFiles(visit, "sdtsx");
+  assert.deepEqual(found.results.map((candidate) => candidate.path), ["src/components/SessionDetail.tsx"]);
+  assert.equal(found.truncated, false);
+
+  const capped = bestFuzzyFiles(parseWslWorkspaceVisit(listing, 3), "s");
+  assert.equal(capped.limit, "entries");
+  assert.deepEqual(capped.results.map((candidate) => candidate.path), ["src/sidebar.ts", "src/components/SessionDetail.tsx"]);
 });

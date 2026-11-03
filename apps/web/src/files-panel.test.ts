@@ -207,26 +207,46 @@ test("git markers: untracked U, added or renamed A, everything else changed M, d
   assert.equal(unquotePorcelainPath("\"\\357\\273\\277check.ts\""), "\u{FEFF}check.ts");
 });
 
-test("Go to File: files only, changed or recent first, then name matches before path matches", () => {
+test("Go to File: files only, changed or recent first, then the best fuzzy match (#1263)", () => {
   const ranked = rankGoToFileResults([
     { path: "checks", isDirectory: true },
     { path: "checks/run.ts", isDirectory: false },
     { path: "src/checkout.ts", isDirectory: false },
     { path: "docs/check-list.md", isDirectory: false },
     { path: "src/precheck.ts", isDirectory: false },
-  ], "Check", (path) => path === "src/precheck.ts");
+    { path: "src/unrelated.ts", isDirectory: false },
+  ], "Check", new Set(["src/precheck.ts"]));
   assert.deepEqual(ranked.map((match) => match.path), [
     "src/precheck.ts",
     "src/checkout.ts",
     "docs/check-list.md",
     "checks/run.ts",
-  ]);
+  ], "a file that does not match is dropped, even from an older runner's answer");
   assert.deepEqual(ranked[0], {
-    path: "src/precheck.ts", name: "precheck.ts", folder: "src", matchIn: "name", range: { start: 3, end: 8 },
+    path: "src/precheck.ts", name: "precheck.ts", folder: "src", nameRanges: [{ start: 3, end: 8 }], folderRanges: [],
   });
   assert.deepEqual(ranked[3], {
-    path: "checks/run.ts", name: "run.ts", folder: "checks", matchIn: "folder", range: { start: 0, end: 5 },
+    path: "checks/run.ts", name: "run.ts", folder: "checks", nameRanges: [], folderRanges: [{ start: 0, end: 5 }],
   });
-  // A match across the folder and the name underlines nothing rather than the wrong letters.
-  assert.equal(rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "src/se", () => false)[0]?.matchIn, "path");
+  // Scattered letters underline each run; a match across the folder and the name underlines both.
+  assert.deepEqual(rankGoToFileResults([{ path: "apps/web/SessionDetail.tsx", isDirectory: false }], "sdtsx", new Set()), [{
+    path: "apps/web/SessionDetail.tsx",
+    name: "SessionDetail.tsx",
+    folder: "apps/web",
+    nameRanges: [{ start: 0, end: 1 }, { start: 7, end: 8 }, { start: 14, end: 17 }],
+    folderRanges: [],
+  }]);
+  const across = rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "src/se", new Set())[0];
+  assert.deepEqual([across?.folderRanges, across?.nameRanges], [[{ start: 0, end: 3 }], [{ start: 0, end: 2 }]]);
+});
+
+test("Go to File adds matching priority files only when the runner's answer was cut short", () => {
+  const results = [{ path: "src/session-list.ts", isDirectory: false }];
+  const priority = new Set(["deep/nested/session-store.ts", "README.md", "untracked-dir/"]);
+  assert.deepEqual(rankGoToFileResults(results, "session", priority).map((match) => match.path), ["src/session-list.ts"],
+    "a complete answer without it means the file is gone");
+  assert.deepEqual(rankGoToFileResults(results, "session", priority, true).map((match) => match.path), [
+    "deep/nested/session-store.ts",
+    "src/session-list.ts",
+  ], "a cut answer gains the changed or recent file that matches, first; folders and non-matches stay out");
 });

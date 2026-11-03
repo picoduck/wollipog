@@ -190,6 +190,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type SessionFileEntry,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
+  type WorkspaceReferenceSearchLimit,
+  type WorkspaceReferenceSearchMatch,
   type PromptAdmissionView,
   type PromptDelivery,
   type PromptImageInput,
@@ -18864,7 +18866,13 @@ export class SessionsService {
   async searchWorkspaceReferences(
     sessionId: string,
     query: string,
-  ): Promise<ServiceResult<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>> {
+    match?: WorkspaceReferenceSearchMatch,
+  ): Promise<ServiceResult<{
+    results: WorkspaceReferenceCandidate[];
+    truncated: boolean;
+    match?: WorkspaceReferenceSearchMatch;
+    limit?: WorkspaceReferenceSearchLimit;
+  }>> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
@@ -18873,11 +18881,17 @@ export class SessionsService {
     const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
     try {
       const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "search_workspace_references", requestId, sessionId, query,
+        type: "search_workspace_references", requestId, sessionId, query, ...(match ? { match } : {}),
       }, 20_000);
       if (res.type !== "search_workspace_references_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "could not search workspace paths", 502);
-      return ok({ results: res.results ?? [], truncated: res.truncated === true });
+      // A runner that predates `match` answers without echoing it: its results contain the query.
+      return ok({
+        results: res.results ?? [],
+        truncated: res.truncated === true,
+        ...(match && res.match === match ? { match } : {}),
+        ...(res.limit === "entries" || res.limit === "results" ? { limit: res.limit } : {}),
+      });
     } catch (err) {
       return fail((err as Error).message, 504);
     }

@@ -4,6 +4,7 @@ import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } fro
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
 export * from "./worktree-dirty-paths.js";
+export * from "./fuzzy-path-match.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
@@ -11709,7 +11710,16 @@ export interface SearchWorkspaceReferencesRequestMessage {
   requestId: string;
   sessionId: string;
   query: string;
+  /** Go to File (#1263): files only, matched by `fuzzyPathScore`, best first. Absent: paths that
+   * contain the query, files and folders, in traversal order. A runner that predates the field
+   * ignores it and answers without echoing it. */
+  match?: WorkspaceReferenceSearchMatch;
 }
+
+export type WorkspaceReferenceSearchMatch = "fuzzy";
+
+/** Which cap cut a truncated search: the entries the runner visits, or the results it returns. */
+export type WorkspaceReferenceSearchLimit = "entries" | "results";
 
 export interface SearchWorkspaceReferencesResultMessage {
   type: "search_workspace_references_result";
@@ -11718,6 +11728,10 @@ export interface SearchWorkspaceReferencesResultMessage {
   error?: string;
   results?: WorkspaceReferenceCandidate[];
   truncated?: boolean;
+  /** Echoes the request's `match` when the runner applied it. */
+  match?: WorkspaceReferenceSearchMatch;
+  /** Set on a truncated fuzzy search. */
+  limit?: WorkspaceReferenceSearchLimit;
 }
 
 /** Mint an immutable metadata-only attachment after runner-side path and diff validation. */
