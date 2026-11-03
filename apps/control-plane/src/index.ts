@@ -3723,11 +3723,14 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
 
 app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const q = req.query as { q?: unknown };
+  const q = req.query as { q?: unknown; match?: unknown };
   if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
-  const r = await svc.searchWorkspaceReferences(id, q.q);
+  if (q.match !== undefined && q.match !== "fuzzy") {
+    return reply.code(400).send({ error: "match must be fuzzy when given" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q, q.match);
   if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
