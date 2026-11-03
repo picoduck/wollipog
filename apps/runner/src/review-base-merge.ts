@@ -22,6 +22,12 @@ const MAX_CONFLICTED_FILE_BYTES = 2 * 1024 * 1024;
 
 const REGULAR_FILE = /^100(?:644|755)$/u;
 
+/** `output`, unless it holds U+FFFD: then an undecodable byte may hide behind it, so it throws. */
+function lossless(output: string): string {
+  if (output.includes("\u{FFFD}")) throw new Error("git output did not decode losslessly");
+  return output;
+}
+
 /** Every path that differs between two trees, with its modes and status, or null if unparsable. */
 async function rawChanges(git: BaseMergeGit, from: string, to: string):
   Promise<Array<{ path: string; oldMode: string; newMode: string; status: string }> | null> {
@@ -104,8 +110,19 @@ export function resolvedWithinConflicts(conflicted: string, resolved: string, ou
  * (each changed path's mode and blobs against its merge base) byte-identical, `resolution` for any
  * other strict base merge, and null for everything else, including any failure to prove it.
  */
-export async function classifyBaseMerge(git: BaseMergeGit, reference: string, head: string, baseSha: string): Promise<ReviewBaseMerge | null> {
+export async function classifyBaseMerge(raw: BaseMergeGit, reference: string, head: string, baseSha: string): Promise<ReviewBaseMerge | null> {
   if (![reference, head, baseSha].every((sha) => SHA.test(sha)) || reference === head) return null;
+  // Git output arrives decoded as UTF-8, so distinct invalid bytes (in a path or in content) all
+  // read as U+FFFD and would compare equal. Output that did not decode losslessly proves nothing.
+  const git: BaseMergeGit = async (args) => {
+    try {
+      return lossless(await raw(args));
+    } catch (error) {
+      const failed = error as { stdout?: unknown };
+      if (typeof failed.stdout === "string") lossless(failed.stdout);
+      throw error;
+    }
+  };
   try {
     const parents = (await git(["rev-list", "--parents", "-n", "1", "--end-of-options", head])).trim().split(" ");
     if (parents.length !== 3 || parents[0] !== head || parents[1] !== reference) return null;
@@ -122,10 +139,7 @@ export async function classifyBaseMerge(git: BaseMergeGit, reference: string, he
       const [text, resolution] = await Promise.all([
         git(["cat-file", "blob", `${automatic.tree}:${path}`]), git(["cat-file", "blob", `${head}:${path}`]),
       ]);
-      // Git output arrives decoded as UTF-8, so distinct invalid bytes all read as U+FFFD; such
-      // content cannot be compared byte for byte and proves nothing.
-      if (text.includes("�") || resolution.includes("�") ||
-          Buffer.byteLength(text) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(resolution) > MAX_CONFLICTED_FILE_BYTES ||
+      if (Buffer.byteLength(text) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(resolution) > MAX_CONFLICTED_FILE_BYTES ||
           !resolvedWithinConflicts(text, resolution, reference, merged)) return null;
     }
     const mergeBase = async (revision: string) => (await git(["merge-base", "--end-of-options", baseSha, revision])).trim();

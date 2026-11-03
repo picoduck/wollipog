@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -116,6 +116,26 @@ test("a resolution that changes a byte outside the conflict that UTF-8 cannot re
   writeFileSync(join(dir, "f.txt"), withByte(LINES.map((line) => line === "b" ? "b-resolved" : line), 0x81));
   const head = await commit("merge main, resolving b and changing the byte");
   assert.equal(await classify(dir, reviewed, head, base), null);
+});
+
+test("a base rename between filenames UTF-8 cannot represent never makes a merge equivalent", async (t) => {
+  const { dir, git, commit } = await repository(t);
+  // Two distinct paths whose names differ only in an invalid UTF-8 byte (0x80, then 0x81).
+  const path = (byte: number) => Buffer.concat([Buffer.from(`${dir}/x`), Buffer.from([byte]), Buffer.from(".txt")]);
+  await git("checkout", "-q", "main");
+  writeFileSync(path(0x80), `${LINES.join("\n")}\n`);
+  await commit("base adds the oddly named file");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-edit", "main");
+  writeFileSync(path(0x80), `${LINES.map((line) => line === "c" ? "c-pr" : line).join("\n")}\n`);
+  const reviewed = await commit("pull request edits the oddly named file");
+  // The base renames it to the other name; a clean merge carries the edit to the new path.
+  await git("checkout", "-q", "main");
+  renameSync(path(0x80), path(0x81));
+  const base = await commit("base renames the file");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-edit", "main");
+  assert.equal(await classify(dir, reviewed, await git("rev-parse", "HEAD"), base), null);
 });
 
 test("a clean merge carrying any other change is an ordinary commit", async (t) => {
