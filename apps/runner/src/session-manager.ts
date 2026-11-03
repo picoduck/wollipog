@@ -12,7 +12,7 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, 
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { contextGitRunner, executeBranchDeletion, executePullRequestEnqueue, type ForgeGitRunner } from "./forge-decision-action.js";
+import { executeBranchDeletion, executePullRequestEnqueue } from "./forge-decision-action.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -129,9 +129,9 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { ReviewWriterRegistry } from "./review-writers.js";
-import { join, resolve } from "node:path";
+import { join, parse as parsePath, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
@@ -19071,28 +19071,26 @@ export class SessionManager {
   }
 
   /** v278 (#4067): perform one approved forge action the control plane checked, through the
-   * requesting session's own `gh` and `git` logins and context. A fixed outcome, never tool output. */
+   * requesting session's own `gh` login and context. A fixed outcome, never tool output. `gh` runs
+   * from the filesystem root, never from the session's worktree, so no repository configuration the
+   * agent can write is read or executed on its behalf. */
   async forgeDecisionAction(
     message: ForgeDecisionActionMessage,
-    options: { gh?: GhRunner; git?: ForgeGitRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+    options: { gh?: GhRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<ForgeDecisionActionResultMessage> {
     const base = { type: "forge_decision_action_result" as const, requestId: message.requestId,
       sessionId: message.sessionId, occurrenceId: message.occurrenceId };
     const meta = this.store.readMeta(message.sessionId);
-    const roots = meta ? [...new Set([meta.worktreePath, meta.repoPath].filter(
-      (root): root is string => typeof root === "string" && root.length > 0))] : [];
-    // A merged branch's worktree may already be retired; its repository still has the remote. A WSL
-    // path is not checked from this side and is used as recorded.
-    const cwd = meta?.context?.kind === "wsl" ? roots[0] : roots.find((root) => existsSync(root));
-    if (!meta || !cwd) {
+    if (!meta) {
       return { ...base, outcome: "refused", refusal: { reason: "runner_unavailable",
-        summary: "The session has no repository on this runner to act from." } };
+        summary: "The session is not known to this runner." } };
     }
     try {
       const agentEnv = options.agentEnv?.(meta) ?? {};
-      const gh = options.gh ?? contextGhRunner(meta.context, cwd, agentEnv);
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
       const result = message.action?.kind === "branch_deletion"
-        ? await executeBranchDeletion(message.action, gh, options.git ?? contextGitRunner(meta.context, cwd, agentEnv))
+        ? await executeBranchDeletion(message.action, gh)
         : message.action?.kind === "pr_merge_enqueue"
           ? await executePullRequestEnqueue(message.action, gh)
           : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };

@@ -2,62 +2,37 @@
  * Wollipog-performed forge actions (#4067, protocol v278; see `@wollipog/protocol`
  * forge-decision-action). The control plane has already checked the approval, its authority and
  * its snapshot; this module performs exactly the one approved action through the child session's
- * own `gh` and `git` logins, after re-reading the forge, and reports a fixed outcome. Nothing
- * `gh` or `git` prints crosses back: every failure is a fixed code and sentence.
+ * own `gh` login, after re-reading the forge, and reports a fixed outcome. Nothing `gh` prints
+ * crosses back: every failure is a fixed code and sentence.
+ *
+ * Only `gh api` against an explicit `owner/repo` is used. No `git` runs in the session's worktree,
+ * so nothing the agent can write there (hooks, `core.sshCommand`, credential helpers, `insteadOf`
+ * rewrites, a changed `origin`) is ever executed or consulted by the runner on its behalf.
  *
  * - A branch deletion proves the pull request merged the approved head from the approved branch in
- *   the same repository, that no open pull request targets the branch, and that the remote tip is
- *   still the approved head, then pushes a compare-and-delete pinned to that head, so a tip that
- *   moves after the read is refused by the remote itself.
+ *   the same repository with the approved merge commit, that no open pull request targets the
+ *   branch, and that the remote tip is still the approved head. It then deletes the ref through
+ *   GitHub's `updateRefs` mutation with `beforeOid` set to that head, so GitHub itself refuses the
+ *   deletion if the tip moved after the read.
  * - An enqueue proves the pull request is open at the approved head, then runs the canonical
  *   `gh pr merge <url> --squash --match-head-commit <sha>`. A pull request already in the queue,
  *   or already merged at that head, is the approved action having taken effect.
  */
 import type {
-  AgentContext,
   ForgeDecisionAction,
   ForgeDecisionActionOutcome,
   ForgeDecisionActionRefusalReason,
 } from "@wollipog/protocol";
 import { forgeActionBranchName } from "@wollipog/protocol";
-import { classifyGhFailure, type GhOutcome, type GhRunner } from "./campaign-forge-status.js";
-import { runContextCommand } from "./context-command.js";
-import { parseForgeRemote } from "./git-ops.js";
+import { classifyGhFailure, type GhRunner } from "./campaign-forge-status.js";
 
-/** Runs `git` in the session's repository; same outcome shape as `GhRunner`. */
-export type ForgeGitRunner = (args: string[]) => Promise<GhOutcome>;
-
-const GIT_TIMEOUT_MS = 60_000;
 const REPOSITORY = /^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u;
 const SHA = /^[0-9a-f]{40}$/u;
+const ZERO_OID = "0".repeat(40);
 
 export interface ForgeDecisionActionResult {
   outcome: ForgeDecisionActionOutcome;
   refusal?: { reason: ForgeDecisionActionRefusalReason; summary: string };
-}
-
-/** `git` in the session's agent context and repository, with its agent's environment, so the push
- * uses the same credentials the child's own push used. Never prompts. */
-export function contextGitRunner(context: AgentContext, cwd: string, agentEnv: Record<string, string> = {}): ForgeGitRunner {
-  return async (args) => {
-    try {
-      const { stdout, stderr } = await runContextCommand(context, "git", args, {
-        cwd,
-        timeoutMs: GIT_TIMEOUT_MS,
-        maxBuffer: 1024 * 1024,
-        env: { ...agentEnv, GIT_TERMINAL_PROMPT: "0", GCM_INTERACTIVE: "never", NO_COLOR: "1" },
-      });
-      return { stdout, stderr, code: null, timedOut: false };
-    } catch (error) {
-      const failure = error as { stdout?: unknown; stderr?: unknown; code?: unknown; killed?: unknown; signal?: unknown };
-      return {
-        stdout: typeof failure.stdout === "string" ? failure.stdout : "",
-        stderr: typeof failure.stderr === "string" ? failure.stderr : String((error as Error)?.message ?? ""),
-        code: typeof failure.code === "number" || typeof failure.code === "string" ? failure.code : 1,
-        timedOut: failure.killed === true || typeof failure.signal === "string",
-      };
-    }
-  };
 }
 
 const refused = (reason: ForgeDecisionActionRefusalReason, summary: string): ForgeDecisionActionResult =>
@@ -94,41 +69,47 @@ async function readRepository(
 }
 
 const DELETION_QUERY = `query($owner:String!,$name:String!,$number:Int!,$ref:String!,$branch:String!){
-  repository(owner:$owner,name:$name){ nameWithOwner
+  repository(owner:$owner,name:$name){ id nameWithOwner
     pullRequest(number:$number){ number state headRefName headRefOid isCrossRepository mergeCommit{ oid } }
     ref(qualifiedName:$ref){ target{ oid } }
     pullRequests(states:OPEN, baseRefName:$branch, first:1){ totalCount }
   }
 }`;
 
-/** Whether `origin` (fetch and push) is the approved GitHub repository. */
-async function originIsRepository(git: ForgeGitRunner, repository: string): Promise<boolean> {
-  for (const args of [["remote", "get-url", "origin"], ["remote", "get-url", "--push", "origin"]]) {
-    const outcome = await git(args);
-    const remote = outcome.code === null ? parseForgeRemote(outcome.stdout) : null;
-    if (remote?.provider !== "github" || remote.project.toLowerCase() !== repository.toLowerCase()) return false;
-  }
-  return true;
+const DELETION_MUTATION = `mutation($repositoryId:ID!,$ref:GitRefname!,$before:GitObjectID!,$after:GitObjectID!){
+  updateRefs(input:{repositoryId:$repositoryId, refUpdates:[{name:$ref, beforeOid:$before, afterOid:$after}]}){ clientMutationId }
+}`;
+
+/** What the branch looks like now: gone, at a tip, or unreadable. */
+async function branchTip(gh: GhRunner, action: Extract<ForgeDecisionAction, { kind: "branch_deletion" }>): Promise<string | null | undefined> {
+  const read = await readRepository(gh, `query($owner:String!,$name:String!,$ref:String!){
+    repository(owner:$owner,name:$name){ nameWithOwner ref(qualifiedName:$ref){ target{ oid } } } }`,
+  action.repository, [["ref", `refs/heads/${action.branch}`]]);
+  if ("refusal" in read) return undefined;
+  if (read.data.ref === null) return null;
+  const tip = record(record(read.data.ref)?.target)?.oid;
+  return typeof tip === "string" ? tip : undefined;
 }
 
 export async function executeBranchDeletion(
   action: Extract<ForgeDecisionAction, { kind: "branch_deletion" }>,
   gh: GhRunner,
-  git: ForgeGitRunner,
 ): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !forgeActionBranchName(action.branch) || !Number.isSafeInteger(action.pullRequest) ||
       action.pullRequest < 1 || !SHA.test(action.headSha) || !SHA.test(action.mergeCommitSha)) {
     return refused("pull_request_mismatch", "The decision does not name a GitHub branch this runner can delete.");
   }
+  const ref = `refs/heads/${action.branch}`;
   const read = await readRepository(gh, DELETION_QUERY, action.repository, [
-    ["number", String(action.pullRequest)], ["ref", `refs/heads/${action.branch}`], ["branch", action.branch],
+    ["number", String(action.pullRequest)], ["ref", ref], ["branch", action.branch],
   ]);
   if ("refusal" in read) return read.refusal;
   const pr = record(read.data.pullRequest);
-  const ref = read.data.ref === null ? null : record(read.data.ref);
-  const tip = ref ? record(ref.target)?.oid : null;
+  const current = read.data.ref === null ? null : record(read.data.ref);
+  const tip = current ? record(current.target)?.oid : null;
   const dependents = record(read.data.pullRequests)?.totalCount;
-  if (!pr || pr.number !== action.pullRequest || (ref && typeof tip !== "string") || !Number.isSafeInteger(dependents)) {
+  if (!pr || pr.number !== action.pullRequest || (current && typeof tip !== "string") || !Number.isSafeInteger(dependents) ||
+      typeof read.data.id !== "string" || !read.data.id) {
     return refused("forge_unavailable", "GitHub returned an unexpected answer for the pull request.");
   }
   if (pr.state !== "MERGED" || pr.headRefName !== action.branch || pr.headRefOid !== action.headSha ||
@@ -138,27 +119,32 @@ export async function executeBranchDeletion(
   if ((dependents as number) > 0) {
     return refused("dependent_pull_request_open", "An open pull request targets this branch, so it was left alone.");
   }
-  if (ref === null) return { outcome: "already_deleted" };
+  if (current === null) return { outcome: "already_deleted" };
   if (tip !== action.headSha) {
     return refused("tip_moved", "The branch tip is no longer the approved merged head, so it was left alone.");
   }
-  if (!await originIsRepository(git, action.repository)) {
-    return refused("repository_mismatch", "The session's origin remote is not the approved repository.");
+  // GitHub applies `beforeOid` atomically: the deletion happens only while the tip is the head.
+  const deleted = await gh(["api", "graphql", "--hostname", "github.com", "-f", `query=${DELETION_MUTATION}`,
+    "-f", `repositoryId=${read.data.id}`, "-f", `ref=${ref}`, "-f", `before=${action.headSha}`, "-f", `after=${ZERO_OID}`]);
+  if (deleted.timedOut) return { outcome: "uncertain" };
+  let accepted = false;
+  if (deleted.code === null) {
+    try {
+      const response = record(JSON.parse(deleted.stdout));
+      accepted = Boolean(response && !response.errors && record(record(response.data)?.updateRefs));
+    } catch { accepted = false; }
   }
-  // The remote applies the lease atomically: the deletion happens only while the tip is the head.
-  const pushed = await git(["push", "--porcelain", "--no-verify",
-    `--force-with-lease=refs/heads/${action.branch}:${action.headSha}`, "origin", `:refs/heads/${action.branch}`]);
-  if (pushed.code === null) return { outcome: "deleted" };
-  if (pushed.timedOut) return { outcome: "uncertain" };
-  const text = `${pushed.stdout}\n${pushed.stderr}`;
-  if (/stale info|fetch first|non-fast-forward/iu.test(text)) {
+  if (accepted) return { outcome: "deleted" };
+  const failure = deleted.code === null ? null : classifyGhFailure(deleted);
+  if (failure && UNAVAILABLE_WORDS[failure]) return refused("forge_unavailable", `${UNAVAILABLE_WORDS[failure]} Nothing was deleted.`);
+  // GitHub refused the update. Read the branch again to say why, without trusting the error text.
+  const after = await branchTip(gh, action);
+  if (after === null) return { outcome: "already_deleted" };
+  if (typeof after === "string" && after !== action.headSha) {
     return refused("tip_moved", "The branch tip moved before the deletion, so it was left alone.");
   }
-  if (/remote ref does not exist/iu.test(text)) return { outcome: "already_deleted" };
-  if (/could not read Username|Authentication failed|Permission denied \(publickey\)|could not resolve host|unable to access|Connection (?:refused|reset|timed out)|Could not read from remote repository/iu.test(text)) {
-    return refused("forge_unavailable", "The remote could not be reached or refused this session's credentials; nothing was deleted.");
-  }
-  return refused("forge_refused", "The remote refused the deletion (for example, a branch protection rule); nothing was deleted.");
+  if (after === undefined) return { outcome: "uncertain" };
+  return refused("forge_refused", "GitHub refused the deletion (for example, a branch protection rule); nothing was deleted.");
 }
 
 const ENQUEUE_QUERY = `query($owner:String!,$name:String!,$number:Int!){

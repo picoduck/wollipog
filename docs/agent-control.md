@@ -2099,13 +2099,16 @@ refused. It may also execute its approved and armed GitHub `pr_merge`. Every con
 applies again: live ancestry, the policy revision, current authority, and, for a merge, review
 evidence, the reviewed head, and GitHub's closing references re-read before dispatch. The control
 plane then sends `forge_decision_action` to the child's runner. The runner acts through the
-child's own `gh` and `git` logins:
+child's own `gh` login, using only `gh api` and `gh pr merge` against the explicit repository, run
+from the filesystem root. No `git` runs in the child's worktree, so no repository configuration the
+agent can write (hooks, `core.sshCommand`, credential helpers, URL rewrites, a changed `origin`) is
+read or executed on its behalf:
 
 - A deletion first proves that the pull request merged the approved head from that branch in the
-  same repository with the approved merge commit, that no open pull request targets the branch,
-  and that `origin` is the approved repository. It then pushes
-  `--force-with-lease=refs/heads/<branch>:<head>` with an empty source, so the remote itself
-  refuses the deletion if the tip moved after the read.
+  same repository with the approved merge commit, and that no open pull request targets the
+  branch. It then deletes the ref with GitHub's `updateRefs` mutation, with `beforeOid` set to the
+  approved head and an all-zero `afterOid`, so GitHub itself refuses the deletion if the tip moved
+  after the read.
 - An enqueue first proves that the pull request is open at the approved head (already queued or
   already merged at that head counts as done). It then runs
   `gh pr merge <url> --squash --match-head-commit <sha>`, never `--delete-branch`.

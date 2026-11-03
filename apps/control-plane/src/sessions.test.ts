@@ -1432,6 +1432,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       "a stopped child with a retained worktree is not campaign-complete");
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
+    // #4067: the grandchild's merged pull request still owes its branch until the forge reports it gone.
+    assert.equal(db.campaignProjection(parent.id)?.status, "active");
+    assert.equal(db.campaignProjection(parent.id)?.mergedBranches?.pending, 1);
+    db.campaignForgeObservations.record(parent.id, RUNNER_ID, [{ ref: { repository: "picoduck/wollipog", number: 1091 }, observation: {
+      state: "merged", draft: false, headSha: "b".repeat(40), baseRef: "main", reviewDecision: "approved",
+      checks: { state: "passing", passing: 1, failing: 0, pending: 0 }, requiredChecks: { state: "passing", passing: 1, failing: 0, pending: 0 },
+      mergeQueue: null, mergeCommitSha: "c".repeat(40), defaultBranch: "main", headBranch: { name: "fix/nested", tipSha: null },
+    } }], Date.now());
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
       unique: 2, duplicates: 2,

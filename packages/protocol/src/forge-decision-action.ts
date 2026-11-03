@@ -7,8 +7,8 @@
  *
  * - `branch_deletion`: an approved `merged_branch_deletion` that names its merged pull request and
  *   head. The runner proves the pull request merged that exact head from that exact branch, that
- *   no open pull request targets the branch, and deletes it with a compare-and-delete push
- *   (`--force-with-lease` pinned to the approved head). A moved tip refuses and leaves it alone.
+ *   no open pull request targets the branch, and deletes it with GitHub's `updateRefs` mutation
+ *   pinned by `beforeOid` to the approved head. A moved tip refuses and leaves it alone.
  * - `pr_merge_enqueue`: an approved, armed GitHub `pr_merge`. The control plane re-reads the issues
  *   GitHub would close, then the runner runs the canonical `gh pr merge <url> --squash
  *   --match-head-commit <sha>` (never `--delete-branch`).
@@ -32,7 +32,8 @@ export type ForgeDecisionActionRefusalReason =
   | "pull_request_mismatch"
   /** The issues GitHub would close changed since approval. */
   | "closure_mismatch"
-  /** The session's `origin` is not the approved repository. */
+  /** The forge does not name the approved repository. Reserved; current runners report a mismatched
+   * repository as `forge_unavailable`. */
   | "repository_mismatch"
   /** The forge refused the write itself (protection rules, mergeability) and nothing changed. */
   | "forge_refused"
