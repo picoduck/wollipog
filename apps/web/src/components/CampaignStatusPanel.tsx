@@ -342,6 +342,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
               {view.costBreakdown.length > 0
                 ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.phrase} ${row.text}`).join(", ")}</span>
                 : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
+              {view.costUncertainty && <span className="campaign-status-meta">{view.costUncertainty}</span>}
             </dd>
           </div>
           {view.budget && !summary.campaign?.budget && <div><dt>Session Limits</dt><dd>{view.budget}</dd></div>}

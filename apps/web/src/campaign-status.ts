@@ -39,6 +39,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { formatCost, formatRecordedRelativeTime, titleCaseLabel } from "./format.js";
+import { claudeRunningTotalSentence } from "./usage-view-model.js";
 
 export const UNAVAILABLE = "Unavailable";
 
@@ -547,6 +548,8 @@ export interface CampaignSummaryView {
   elapsed: string;
   cost: CampaignCostView;
   costBreakdown: { phrase: string; text: string }[];
+  /** One sentence when some of the cost may repeat earlier turns' usage (#4069), else null. */
+  costUncertainty: string | null;
   budget: string | null;
   obligations: { phrase: string; count: number }[];
   recommendations: { awaiting: number; rejected: number; deferred: number; duplicate: number };
@@ -586,6 +589,8 @@ export function campaignSummaryView(
   now: number,
 ): CampaignSummaryView {
   const cost = campaignCostView(work.cost?.total);
+  // Turns that billed their conversation's running total (#4069) stay in the amount, named as uncertain.
+  const runningTotals = cost.priced ? work.cost?.runningTotalClaudeRecords ?? 0 : 0;
   // Each bucket keeps its own provenance where it differs from the total's, so an estimated or
   // partially priced bucket never reads as exact under a provider-reported total.
   const breakdown = work.cost && cost.priced ? [
@@ -609,6 +614,7 @@ export function campaignSummaryView(
     elapsed: measuredDuration(elapsedMs(work.elapsed, now)),
     cost,
     costBreakdown: breakdown,
+    costUncertainty: runningTotals > 0 ? claudeRunningTotalSentence(runningTotals, "this cost") : null,
     // The projection's budget caps the Orchestrator's own session. Say so; it is not campaign-wide.
     budget: limits?.costBudgetUsd != null ? `${formatCost(limits.costBudgetUsd) || "$0.00"} Orchestrator Session Budget` : null,
     obligations: [

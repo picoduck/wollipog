@@ -37,6 +37,7 @@ import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
+import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
@@ -179,6 +180,8 @@ import {
   type UsageAggregationResponse,
   type UsageAmount,
   type SessionModelUsage,
+  type SessionUsageResponse,
+  type ClaudeUsageCheckpoint,
   type UsageDailyBudgetPolicy,
   type UserCostWindows,
   type UsageRetentionPolicy,
@@ -2764,6 +2767,29 @@ CREATE TABLE IF NOT EXISTS usage_session_models (
   PRIMARY KEY (session_id, model),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+-- Claude turns that billed a conversation's running total as their own (#4069). Their cost stays
+-- in the ledger, which cannot be corrected automatically, and the cost views show it as uncertain.
+-- No foreign keys: like the aggregate buckets, a flag outlives its event and session.
+CREATE TABLE IF NOT EXISTS usage_claude_running_totals (
+  event_id        INTEGER PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  bucket_ts       INTEGER NOT NULL,
+  organization_id TEXT NOT NULL,
+  owner_kind      TEXT NOT NULL,
+  owner_id        TEXT NOT NULL,
+  runner_id       TEXT NOT NULL,
+  workspace_id    TEXT NOT NULL,
+  agent_id        TEXT NOT NULL,
+  driver          TEXT NOT NULL,
+  campaign_session_id TEXT,
+  cost_microusd   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_session ON usage_claude_running_totals(session_id);
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_campaign
+  ON usage_claude_running_totals(campaign_session_id, bucket_ts) WHERE campaign_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_bucket
+  ON usage_claude_running_totals(organization_id, bucket_ts);
 
 CREATE TABLE IF NOT EXISTS usage_hourly (
   bucket_ts           INTEGER NOT NULL,
@@ -7940,6 +7966,7 @@ export class ControlPlaneDb {
       controlPlane.captureUnresetLegacyCampaignReports();
       controlPlane.campaignWorkLedger.accounting.startRecording(Date.now());
       controlPlane.seedUsageAggregationBaseline(Date.now());
+      controlPlane.backfillClaudeRunningTotals();
       controlPlane.maintainUsageAggregation(Date.now());
       controlPlane.trackSessionAccessChanges();
       return controlPlane;
@@ -14978,6 +15005,78 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Flag a Claude turn whose records billed its conversation's running total (#4069). Only a
+   * process-scoped checkpoint can carry the defect, so other records cost nothing here. */
+  private flagClaudeRunningTotalInTransaction(
+    sessionId: string,
+    eventId: number,
+    payload: Extract<SessionEventPayload, { kind: "token_usage" }>,
+    occurredAt: number,
+    dimensions: UsageDimensions,
+  ): void {
+    if (payload.claudeUsageCheckpoint?.accountingScope !== "process") return;
+    const current = this.stmt("SELECT seq FROM session_events WHERE id=?").get(eventId) as { seq: number } | undefined;
+    if (!current) return;
+    // Only accrued records count, so no number of display-only records can hide the baseline.
+    const accrued = `session_id=? AND kind='token_usage' AND json_valid(payload) AND ${ACCRUED_USAGE_SQL}`;
+    const checkpointed = "json_type(payload, '$.claudeUsageCheckpoint')='object'";
+    const previous = this.stmt(
+      `SELECT seq FROM session_events WHERE ${accrued} AND ${checkpointed} AND seq<? ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, current.seq) as { seq: number } | undefined;
+    const before = this.stmt(
+      `SELECT COALESCE(SUM(CASE WHEN json_type(payload, '$.costUsd') IN ('real', 'integer')
+                                THEN json_extract(payload, '$.costUsd') ELSE 0 END), 0) AS billed
+         FROM session_events WHERE ${accrued} AND seq>? AND seq<?`,
+    ).get(sessionId, previous?.seq ?? -1, current.seq) as { billed: number };
+    const prior = this.stmt(
+      `SELECT payload FROM session_events WHERE ${accrued} AND ${checkpointed}
+          AND json_extract(payload, '$.claudeUsageCheckpoint.totalCostUsd')>0 AND seq<? ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, current.seq) as { payload: string } | undefined;
+    const billed = claudeTurnRunningTotal(payload, Number(before.billed),
+      prior ? (JSON.parse(prior.payload) as { claudeUsageCheckpoint: ClaudeUsageCheckpoint }).claudeUsageCheckpoint : null);
+    if (billed === null) return;
+    const owner = dimensions.scope.owner;
+    this.stmt(
+      `INSERT OR IGNORE INTO usage_claude_running_totals
+         (event_id, session_id, bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver,
+          campaign_session_id, cost_microusd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(eventId, sessionId, Math.floor(Math.max(0, occurredAt) / 3_600_000) * 3_600_000, dimensions.scope.organizationId,
+      owner.kind, owner.kind === "organization" ? owner.organizationId : owner.kind === "user" ? owner.userId : owner.teamId,
+      dimensions.runnerId, dimensions.workspaceId, dimensions.agentId, dimensions.driver,
+      // The campaign its usage is attributed to: attribution keeps a deleted contributor's cost.
+      this.campaignUsageMembership(sessionId)?.campaignSessionId ?? null, ControlPlaneDb.usageMicroUsd(billed));
+  }
+
+  /** One-time scan of history recorded before the flag existed (#4069). Records it cannot read, or
+   * whose session no longer resolves to an owner, stay unflagged. */
+  private backfillClaudeRunningTotals(): void {
+    const marker = this.stmt("SELECT value FROM control_plane_metadata WHERE key='claude_running_totals_v1_backfilled'")
+      .get() as { value: string } | undefined;
+    if (marker?.value === "1") return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const candidates = this.stmt(
+        `SELECT e.id, e.session_id, e.ts, e.payload FROM session_events e JOIN sessions s ON s.id=e.session_id
+          WHERE s.driver='claude-code' AND e.kind='token_usage'
+            AND json_valid(e.payload) AND json_extract(e.payload, '$.claudeUsageCheckpoint.accountingScope')='process'
+          ORDER BY e.id`,
+      ).all() as Array<{ id: number; session_id: string; ts: number; payload: string }>;
+      for (const candidate of candidates) {
+        const dimensions = this.usageDimensions(candidate.session_id);
+        if (dimensions) {
+          this.flagClaudeRunningTotalInTransaction(candidate.session_id, candidate.id, JSON.parse(candidate.payload),
+            Number(candidate.ts), dimensions);
+        }
+      }
+      this.stmt("INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES ('claude_running_totals_v1_backfilled', '1')").run();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private recordUsageEventInTransaction(
     sessionId: string,
     payload: SessionEventPayload,
@@ -14985,6 +15084,12 @@ export class ControlPlaneDb {
     source?: { historyEpoch: number | null; runnerSeq: number },
     eventId?: number,
   ): void {
+    // Before any coverage check: a snapshot may already have accrued this record's cost, and a
+    // hydrated history that arrives afterwards must still be flagged (#4069).
+    if (eventId !== undefined && payload.kind === "token_usage" && payload.claudeUsageCheckpoint?.accountingScope === "process") {
+      const dimensions = this.usageDimensions(sessionId);
+      if (dimensions?.driver === "claude-code") this.flagClaudeRunningTotalInTransaction(sessionId, eventId, payload, occurredAt, dimensions);
+    }
     if (source) {
       let state = this.stmt(
         `SELECT runner_history_epoch, covered_through_seq FROM usage_session_state WHERE session_id=?`,
@@ -15385,7 +15490,7 @@ export class ControlPlaneDb {
 
   /** A session's usage split by the model that produced it, most processed tokens first. The
    * session totals come from the same ledger so the two views agree. */
-  sessionUsageByModel(sessionId: string): { totals: UsageAmount; byModel: SessionModelUsage[] } {
+  sessionUsageByModel(sessionId: string): Omit<SessionUsageResponse, "sessionId" | "pricing"> {
     const measure = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
     const processed = `CASE WHEN driver IN ('codex', 'codex-app-server')
                          THEN input_tokens + cache_creation_tokens + output_tokens
@@ -15429,7 +15534,12 @@ export class ControlPlaneDb {
       cache_creation_tokens: 0, reasoning_tokens: 0, cache_savings_microusd: 0, provider_reported_records: 0,
       model_priced_records: 0, unpriced_records: 0, processed_tokens: 0,
     });
-    return { totals: amount(totals), byModel };
+    const repeated = this.stmt(
+      "SELECT COUNT(*) AS records, COALESCE(SUM(cost_microusd), 0) AS cost FROM usage_claude_running_totals WHERE session_id=?",
+    ).get(sessionId) as { records: number; cost: number };
+    return { totals: amount(totals), byModel,
+      ...(Number(repeated.records) > 0
+        ? { runningTotalRecords: { records: Number(repeated.records), costUsd: Number(repeated.cost) / 1_000_000 } } : {}) };
   }
 
   /** Lightweight provenance projection for SessionView. It uses the same source counters and
@@ -15530,6 +15640,10 @@ export class ControlPlaneDb {
     const where = whereFor(since);
     const source = sourceFor(granularity, where.sql);
     const sourceParams = granularity === "hour" ? where.params : [...where.params, ...where.params];
+    // Same visibility and dimension filters as the buckets: the flags carry their columns (#4069).
+    const runningTotalClaudeRecords = Number((this.stmt(
+      `SELECT COUNT(*) AS n FROM usage_claude_running_totals u WHERE ${where.sql}`,
+    ).get(...where.params) as { n: number }).n);
     const withSource = `WITH usage_source AS MATERIALIZED (${source})`;
     type AggregateRow = {
       input_tokens: number | null; output_tokens: number | null; cost_microusd: number | null;
@@ -15652,6 +15766,7 @@ export class ControlPlaneDb {
       granularity,
       hourlyDataAvailable: !hasRolledRows,
       legacyClaudeCostRecords: Number(aggregateRows.find((row) => row.kind === "driver" && row.key === "claude-code")?.provider_reported_records ?? 0),
+      ...(runningTotalClaudeRecords > 0 ? { runningTotalClaudeRecords } : {}),
       since,
       through: query.through,
       retention: policy,

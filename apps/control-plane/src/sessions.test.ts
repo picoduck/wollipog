@@ -29294,6 +29294,32 @@ test("the summary embedded in the root's view hides cost from contributors its w
   }
 });
 
+test("campaign cost names Claude turns that billed a running total as uncertain (#4069)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const itemId = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true }).data!.items[0]!.workItemId;
+    const child = spawn(parent.id, "Deliver a");
+    db.raw().prepare("UPDATE sessions SET driver='claude-code' WHERE id=?").run(child);
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: itemId, childSessionId: child }).ok);
+    const checkpoint = (totalCostUsd: number, cacheReadInputTokens: number) => ({ sessionId: "conversation", totalCostUsd,
+      accountingScope: "process" as const, models: { m: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens, cacheCreationInputTokens: 0 } } });
+    const turn = (costUsd: number, closing: ReturnType<typeof checkpoint>) =>
+      ({ kind: "token_usage" as const, inputTokens: 1, costUsd, costIsEstimate: true as const, claudeUsageCheckpoint: closing });
+    const summary = () => db.campaignWorkLedger.accounting.costSummary(parent.id, db.getSession(parent.id)!.createdAt);
+    db.appendEvent(child, turn(1, checkpoint(1, 100)), Date.now(), { accrueUsage: true });
+    assert.equal(summary().runningTotalClaudeRecords, undefined);
+    db.appendEvent(child, turn(3, checkpoint(3, 200)), Date.now(), { accrueUsage: true }); // the whole total again
+    assert.equal(summary().runningTotalClaudeRecords, 1);
+    assert.equal(knownUsd(summary().total), 4, "the amount is shown as recorded");
+    // A deleted contributor's cost stays in the campaign, and so does its uncertainty.
+    db.deleteSession(child);
+    assert.equal(knownUsd(summary().total), 4);
+    assert.equal(summary().runningTotalClaudeRecords, 1);
+  } finally {
+    db.close();
+  }
+});
+
 test("campaign cost follows session access: a hidden contributor hides its bucket, attempt, and item (#2417)", () => {
   const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
   try {

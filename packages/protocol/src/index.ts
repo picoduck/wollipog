@@ -6595,6 +6595,10 @@ export interface SessionUsageResponse {
   totals: UsageAmount;
   byModel: SessionModelUsage[];
   pricing?: UsagePricingStatus;
+  /** Claude turns whose records billed the conversation's running total instead of their own share
+   * (#4069), and what they billed. Their cost is in `totals`, which may therefore overstate the
+   * session; it cannot be corrected automatically. Absent when there are none, or from older planes. */
+  runningTotalRecords?: { records: number; costUsd: number };
 }
 
 /** The organization's per-user daily cost allowance (v105). `perUserUsd: null` ⇒ no daily budget. */
@@ -6722,6 +6726,9 @@ export interface UsageAggregationResponse {
   hourlyDataAvailable?: boolean;
   /** Native Claude records from the older accounting path, still requiring reconciliation. */
   legacyClaudeCostRecords?: number;
+  /** Claude turns in this range that billed their conversation's running total (#4069), so the
+   * cost may be overstated. Absent from older planes. */
+  runningTotalClaudeRecords?: number;
   since: number;
   through: number;
   retention: UsageRetentionPolicy;

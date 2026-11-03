@@ -403,19 +403,28 @@ export class CampaignWorkAccounting {
     const historyGap = startedAt === null || campaignCreatedAt < startedAt;
     const sums = { attempt: CAMPAIGN_USAGE_NONE, coordination: CAMPAIGN_USAGE_NONE, unattributed: CAMPAIGN_USAGE_NONE };
     const hidden = { attempt: false, coordination: false, unattributed: false };
-    for (const row of this.rows(campaignSessionId)) {
+    const rows = this.rows(campaignSessionId);
+    for (const row of rows) {
       sums[row.bucket] = addCampaignUsage(sums[row.bucket], amountOf(row));
       // A deleted contributor's share is visible to whoever may read the campaign itself.
       if (canSeeSession && !canSeeSession(row.session_id ?? campaignSessionId)) hidden[row.bucket] = true;
     }
     const metric = (bucket: keyof typeof sums) => hidden[bucket] ? NOT_AUTHORIZED : campaignCostMetric(sums[bucket], historyGap);
     const total = addCampaignUsage(addCampaignUsage(sums.attempt, sums.coordination), sums.unattributed);
+    const attributedSince = startedAt === null ? null : Math.max(campaignCreatedAt, startedAt);
+    // Turns in the contributing sessions, since attribution began, that billed a running total (#4069).
+    const runningTotalClaudeRecords = attributedSince === null || hidden.attempt || hidden.coordination || hidden.unattributed ? 0
+      : Number((this.stmt(
+        // Keyed by the campaign the flagged usage was attributed to, so a deleted contributor keeps it.
+        "SELECT COUNT(*) AS n FROM usage_claude_running_totals WHERE campaign_session_id=? AND bucket_ts>=?",
+      ).get(campaignSessionId, Math.floor(attributedSince / 3_600_000) * 3_600_000) as { n: number }).n);
     return {
       total: hidden.attempt || hidden.coordination || hidden.unattributed ? NOT_AUTHORIZED : campaignCostMetric(total, historyGap),
       workItems: metric("attempt"),
       coordination: metric("coordination"),
       unattributed: metric("unattributed"),
-      attributedSince: startedAt === null ? null : Math.max(campaignCreatedAt, startedAt),
+      attributedSince,
+      ...(runningTotalClaudeRecords > 0 ? { runningTotalClaudeRecords } : {}),
     };
   }
 

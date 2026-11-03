@@ -481,6 +481,9 @@ export interface CampaignCostSummary {
   unattributed: CampaignMetric<CampaignCostValue>;
   /** Earliest time from which attribution was recorded; earlier usage is not split. */
   attributedSince: number | null;
+  /** Claude turns in these buckets that billed their conversation's running total (#4069), so the
+   * cost may be overstated. Absent when there are none, or from older planes. */
+  runningTotalClaudeRecords?: number;
 }
 
 /** Wall-clock bounds. Elapsed is `(endedAt ?? now) - startedAt`, computed by the reader. */
