@@ -1926,17 +1926,16 @@ export async function mergedPullRequestContainingHead(
       // No destination ref: the objects land in the shared store and only this worktree's private
       // FETCH_HEAD is written, so nothing a session could later move records the result. Repository
       // configuration may be session-written, so nothing it names runs here: hooks and fsmonitor are
-      // off, HTTPS is the only transport (no configured SSH command), TLS is verified, and the
-      // credential helpers it lists are replaced by the forge CLI this probe already relies on,
-      // which answers only for hosts it is signed in to.
+      // off and HTTPS is the only transport (no configured SSH command). The fetch is anonymous: no
+      // credential helper runs and none is sent, so a configured proxy or CA has nothing to capture.
+      // A head that needs credentials is therefore unavailable proof and the worktree is retained.
       await runContextCommand(
         context,
         "git",
         [
           "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
           "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-          "-c", "http.sslVerify=true",
-          "-c", "credential.helper=", "-c", "credential.helper=!gh auth git-credential",
+          "-c", "http.sslVerify=true", "-c", "credential.helper=",
           ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
           "fetch", "--no-tags", "--no-recurse-submodules", "--quiet", "--",
           fetchUrl, `refs/pull/${candidate.number}/head`,
