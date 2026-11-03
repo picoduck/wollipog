@@ -3,7 +3,7 @@ import type { GithubIssueClosureRefusal, GithubIssueClosureSnapshot, SessionView
 import {
   campaignIssueForgeUrl, campaignRepositoryLocation, GITHUB_ISSUE_CLOSURE_FAILURE_REASONS, GITHUB_ISSUE_CLOSURE_RESULT_REFUSAL_REASONS,
   GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX, githubIssueClosureRefusal, isGithubIssueClosureRefusalReason, isTerminal,
-  normalizeGithubIssueClosureRefusal, validIssueAdmission,
+  normalizeGithubIssueClosureRefusal, normalizeIssueClosureDeliveryGaps, validIssueAdmission,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { redactOperationalTranscriptText } from "./share-projection.js";
@@ -64,6 +64,8 @@ function previousRefusal(value: unknown): GithubIssueClosureSnapshot["previousRe
  * not accepted as a way for an agent to assert current forge or child evidence. */
 export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): GithubIssueClosureSnapshot | null {
   if (value.deliveryFailure !== undefined && !bounded(value.deliveryFailure, 512)) return null;
+  const deliveryGaps = value.deliveryGaps === undefined ? undefined : normalizeIssueClosureDeliveryGaps(value.deliveryGaps);
+  if (deliveryGaps === null) return null;
   const previous = value.previousRefusal === undefined ? undefined : previousRefusal(value.previousRefusal);
   if (previous === null) return null;
   if (!validIssueAdmission(value.issueAdmission) || value.dispositionRecommendationId !== undefined && !bounded(value.dispositionRecommendationId, 256)) return null;
@@ -102,6 +104,7 @@ export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): G
     evidence: [...value.evidence] as string[], ...(value.comment === undefined ? {} : { comment: value.comment as string }),
     openPullRequests, activeChildren,
     ...(value.deliveryFailure === undefined ? {} : { deliveryFailure: value.deliveryFailure as string }),
+    ...(deliveryGaps === undefined ? {} : { deliveryGaps }),
     ...(value.delivery === undefined ? {} : { delivery: structuredClone(value.delivery) as GithubIssueClosureSnapshot["delivery"] }),
     ...(value.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: value.dispositionRecommendationId as string }),
     ...(value.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(value.issueAdmission) as GithubIssueClosureSnapshot["issueAdmission"] }),

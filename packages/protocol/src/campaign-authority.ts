@@ -55,7 +55,10 @@ export interface CampaignAuthorityEvaluation {
   basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization" | "standing_decline";
   reason: "custom_owner" | "authorized_operation" | "outside_boundary" | "protected_request" |
     "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable" | "provider_delivery_unavailable" |
-    "declined_request" | "unresolved_effects";
+    "declined_request" | "unresolved_effects" |
+    /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
+     * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
+    "closure_proof_incomplete";
   operation: CampaignAuthorityOperation;
   boundaryRevision?: number;
   /** Full Control only: which formerly human class this occurrence belongs to. Content-safe. */
