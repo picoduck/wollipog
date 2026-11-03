@@ -77,15 +77,21 @@ export class CampaignRecoveryService {
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),
         root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion);
         const owner = decision?.authority === "human" ? "human" : evaluated.owner;
+        // The condition recorded when the server could not admit a publication, not a boundary
+        // enlargement (#4065). A live re-evaluation never carries it, so it is read from the decision.
+        const admissionFailure = owner === "human" && decision?.category === "follow_up_issue_publication"
+          ? decision.authorityEvaluation?.admissionFailure : undefined;
         // Under Full Control the server declines sign-in itself; it never waits for the Human.
         const reason = request.kind === "authentication" && owner === "human"
           ? "missing_access" : request.kind === "question" && owner === "human" && !request.humanRequired &&
             evaluated.reason === "unverified_intent" ? "missing_human_information"
           : decision?.humanFallback ? "unsupported_capability"
+          : admissionFailure ? "publication_not_admitted"
           : requestReason({ ...evaluated, owner });
         observations.push({ action: decision?.category === "ui_evidence_approval" ? "review_evidence" : "answer_request",
           resource: { kind: "request", sessionId: session.id, occurrenceId: recoveryCoordinate(request.occurrenceId) },
-          reason, owner, signal: `${revision}:${owner}:${reason}` });
+          reason, owner, signal: `${revision}:${owner}:${reason}${admissionFailure ? `:${admissionFailure}` : ""}`,
+          ...(admissionFailure ? { admissionFailure } : {}) });
       }
       for (const hold of session.holds ?? []) {
         observations.push({ action: "recover_hold", resource: { kind: "hold", sessionId: session.id,
@@ -135,6 +141,18 @@ export class CampaignRecoveryService {
       observations.push({ action: "continue_without_request",
         resource: { kind: "request", sessionId: decline.sessionId, occurrenceId: decline.occurrenceId },
         reason: "request_declined", owner: "orchestrator", signal: `declined:${decline.requestClass}` });
+    }
+    // A member's correctable publication refusal (#4065) created no request, so it reaches the root
+    // as an Orchestrator-owned recovery record and its wake, like any child request needing it.
+    // The member's next request for that recommendation, or its verified report, settles it.
+    for (const refusal of this.db.campaignRecovery.publicationRefusals(root.id, revision)) {
+      if (this.db.campaignRecoveryVerifiedReport(root.id, refusal.sessionId)) {
+        this.db.campaignRecovery.retirePublicationRefusals(root.id, refusal.sessionId);
+        continue;
+      }
+      observations.push({ action: "reformulate_request",
+        resource: { kind: "request", sessionId: refusal.sessionId, occurrenceId: refusal.occurrenceId },
+        reason: "correctable_refusal", owner: "orchestrator", signal: `refused:${refusal.failure}`, admissionFailure: refusal.failure });
     }
     for (const job of this.db.campaignReviewJobs.recoveryJobs(root.id)) {
       const unknown = job.usageSettlement === "unavailable" || job.usageSettlement === "pending" && previous.some(item =>
