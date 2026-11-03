@@ -7181,6 +7181,8 @@ export class ControlPlaneDb {
     // #4067: a campaign's merged branches are found through its consumed merges' Orchestrators.
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_consumed_merges
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND status='consumed'`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_deletions
+      ON workflow_decisions(controlling_session_id) WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL`);
     admitChildBlockedCampaignEvents(db);
     preserveCampaignFollowUpOrigins(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
@@ -21123,6 +21125,18 @@ export class ControlPlaneDb {
     return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
   }
 
+  /** The controlling sessions of this campaign's branch deletions Wollipog acted on, found on their
+   * own: a deletion need not share its merge's controller. */
+  private campaignDeletionControllers(campaignId: string): string[] {
+    const ids = (this.stmt(
+      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='merged_branch_deletion' AND decision.forge_action IS NOT NULL
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
+    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
+  }
+
   /** Whether `sessionId` is `campaignId` or below it, by walking parents (bounded, cycle-safe). */
   private sessionWithinCampaign(sessionId: string, campaignId: string): boolean {
     let current: string | null = sessionId;
@@ -21179,7 +21193,7 @@ export class ControlPlaneDb {
        WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL AND session_id<>?
          AND controlling_session_id IN (SELECT value FROM json_each(?))
        ORDER BY created_at, occurrence_id`,
-    ).all(campaignId, JSON.stringify(controllers)) as Array<{ occurrence_id: string; resource_snapshot: string; forge_action: string }>) {
+    ).all(campaignId, JSON.stringify(this.campaignDeletionControllers(campaignId))) as Array<{ occurrence_id: string; resource_snapshot: string; forge_action: string }>) {
       const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
       const action = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action);
       if (snapshot?.category !== "merged_branch_deletion" || !action) continue;

@@ -237,6 +237,45 @@ test("a merge is tracked whoever resolved it: a person, a nested Orchestrator, o
   } finally { h.db.close(); }
 });
 
+test("a deletion counts whatever controller it has, even one with no merge of its own (#4067)", () => {
+  const h = fixture();
+  try {
+    const identity = h.db.localIdentityContext();
+    // Only a nested controller has a consumed merge; the root-controlled one is removed.
+    h.db.raw().prepare("DELETE FROM workflow_decisions WHERE occurrence_id='merge-4100'").run();
+    for (const [id, parent] of [["nested", "root"], ["grand", "nested"]] as const) {
+      h.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "agent", title: id, useWorktree: false,
+        driver: "claude-code", config: { model: "opus" }, now: 1, parentSessionId: parent,
+        scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
+    }
+    h.db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+      category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at)
+      VALUES ('nested-merge','nested-merge','grand','nested','pr_merge','picoduck/wollipog#4300',?,'digest',1,'orchestrator','consumed',3,4,5)`)
+      .run(JSON.stringify({ category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 4300, headSha: "a".repeat(40),
+        reviewResult: "merge", requiredChecks: { headSha: "a".repeat(40), status: "passed", checkedAt: 2,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } }));
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 4300 },
+      observation: observed("a".repeat(40), { headBranch: { name: "agent/grand", tipSha: "a".repeat(40) } }) }], 100);
+    // The descendant's deletion is controlled by the root, which has no consumed merge itself.
+    const deletion = (occurrence: string, forgeAction: Record<string, unknown>) => h.db.raw().prepare(`INSERT INTO workflow_decisions(
+      request_id,occurrence_id,session_id,controlling_session_id,category,resource_key,resource_snapshot,resource_digest,
+      policy_revision,authority,status,created_at,resolved_at,forge_action)
+      VALUES (?,?,'grand','root','merged_branch_deletion','branch:agent/grand',?,'digest',1,'orchestrator',?,?,7,?)`)
+      .run(occurrence, occurrence, JSON.stringify({ category: "merged_branch_deletion", repository: "picoduck/wollipog",
+        branch: "agent/grand", merged: true, mergeCommitSha: "b".repeat(40), pullRequest: 4300, headSha: "a".repeat(40),
+        dependentPullRequests: { checkedAt: 5, open: [] } }), forgeAction.outcome === "refused" ? "revoked" : "consumed",
+      forgeAction.outcome === "refused" ? 6 : 8, JSON.stringify(forgeAction));
+    deletion("root-refused", { kind: "branch_deletion", attempts: 1, outcome: "refused", updatedAt: 150,
+      refusal: { reason: "tip_moved", summary: "The branch tip is no longer the approved merged head, so it was left alone." } });
+    let row = h.db.campaignProjection("root")!.mergedBranches?.items[0];
+    assert.deepEqual([row?.pullRequest, row?.sessionId, row?.state, row?.decisionOccurrenceId], [4300, "grand", "pending", "root-refused"]);
+    assert.equal(row?.reason, "The last deletion was refused: The branch tip is no longer the approved merged head, so it was left alone.");
+    deletion("root-deleted", { kind: "branch_deletion", attempts: 1, outcome: "deleted", updatedAt: 160 });
+    row = h.db.campaignProjection("root")!.mergedBranches?.items[0];
+    assert.deepEqual([row?.state, row?.decisionOccurrenceId], ["deleted", "root-deleted"]);
+  } finally { h.db.close(); }
+});
+
 test("a fork's branch is not tracked, and an older observing runner keeps today's completion (#4067)", () => {
   const fork = fixture();
   try {
