@@ -12427,6 +12427,20 @@ export class SessionsService {
         if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return this.forgeActionResult(sessionId, parent.id, occurrenceId);
       }
+      // The review run may have moved during the forge read too: an uncited merge is only as good as
+      // the run's last valid head, checked again here with nothing awaited before dispatch.
+      if (snapshot.category === "pr_merge") {
+        const currentChild = this.db.getSession(sessionId)!;
+        const refused = this.mergeReviewEvidenceRefusal(currentChild, snapshot);
+        const run = this.db.reviewSessions.history(sessionId, { repository: snapshot.repository, number: snapshot.pullRequest });
+        if (refused || (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha)) {
+          finish("refused", { reason: "pull_request_mismatch",
+            summary: boundedForgeSummary(refused ?? "The review run moved to another head; the current head needs a valid review before merge.") });
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
       const requestId = `forge_decision_action_${randomUUID()}`;
       let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
       try {

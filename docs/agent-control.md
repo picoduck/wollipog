@@ -2246,12 +2246,14 @@ this fallback (`forgeActionFallback`).
 `get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
 child merged through a consumed `pr_merge`, it gives the head branch the forge last reported as
 `deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
-or `pending`. A pending branch keeps `campaignTerminalStatus` from `verified_complete` and leaves
-the campaign `active`. A retained one finishes it as `complete_with_handoffs`. The forge observer
-keeps re-reading a merged pull request while its branch remains, and `get_campaign` refreshes
-pending ones before answering. A fork's branch, an observation from an older runner, and every
-campaign observed by a runner older than v280 are not tracked, so those campaigns complete as
-before.
+or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
+too, and a handoff retains it even before the first read. A pending branch keeps
+`campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
+finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
+until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
+A pull request closed without merging, a fork's branch, a merged observation from an older runner,
+and every campaign observed by a runner older than v280 are not tracked, so those campaigns
+complete as before.
 
 An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
 `decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol

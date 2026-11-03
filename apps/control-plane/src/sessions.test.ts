@@ -7353,6 +7353,39 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("an uncited merge whose review run moves during the closure read never dispatches (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4074);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      let release!: () => void;
+      const reading = new Promise<void>((resolve) => { release = resolve; });
+      let asked!: () => void;
+      const preflightStarted = new Promise<void>((resolve) => { asked = resolve; });
+      hub.githubMergePreflight = async (message) => {
+        asked();
+        await reading;
+        return { type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId,
+          ok: true, check: { checkedAt: 3, closures: [] } };
+      };
+      const history = db.reviewSessions.history.bind(db.reviewSessions);
+      const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      await preflightStarted;
+      // Mid-read, a valid review of another head completes for the same pull request.
+      db.reviewSessions.history = ((sessionId, pullRequest) => ({ ...history(sessionId, pullRequest), epoch: 1,
+        lastValid: { headSha: "c".repeat(40) } })) as unknown as typeof db.reviewSessions.history;
+      release();
+      const result = await executing;
+      hub.githubMergePreflight = undefined;
+      db.reviewSessions.history = history;
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked");
+      assert.equal(result.data?.forgeAction?.refusal?.reason, "pull_request_mismatch");
+    } finally { db.close(); }
+  });
+
   await t.test("Wollipog performs only an armed enqueue, and only for a runner that supports it (#4067)", async () => {
     const { db, hub, svc, child, parent } = setup(AGENT_ID);
     try {

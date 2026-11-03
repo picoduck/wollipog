@@ -125,6 +125,43 @@ test("a merged branch retained with a reason finishes the campaign with handoffs
   } finally { h.db.close(); }
 });
 
+test("an approved enqueue still in the queue keeps the campaign going until its merge and branch are observed (#4067)", () => {
+  const h = fixture();
+  try {
+    // Wollipog's enqueue consumed the approval while the pull request was still open.
+    observe(h, observed("a".repeat(40), { state: "open", mergeCommitSha: null }), 100);
+    let projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "active", "an enqueued merge is not a finished campaign");
+    assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.branch, row.state, row.reason]),
+      [["agent/child", "pending", "The approved merge has not landed yet; its branch is cleaned up after it does."]]);
+    assert.deepEqual(h.db.campaignMergedBranchTargets(), [{ campaignId: "root", refs: [{ repository: "picoduck/wollipog", number: 4100 }] }],
+      "the background pass keeps reading it until it merges");
+    assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }])
+      .get("picoduck/wollipog#4100")?.finished, false);
+    observe(h, observed("a".repeat(40)), 200);
+    projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "active", "merged, but its branch is still on the remote");
+    observe(h, observed(null), 300);
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+    // A pull request closed without merging is not a merged branch.
+    observe(h, observed("a".repeat(40), { state: "closed", mergeCommitSha: null }), 400);
+    assert.equal(h.db.campaignProjection("root")!.mergedBranches, undefined);
+  } finally { h.db.close(); }
+});
+
+test("cleanup handed to a person before the first forge read retains the branch (#4067)", () => {
+  const h = fixture();
+  try {
+    assert.equal(h.db.campaignProjection("root")!.status, "active");
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item, handoff: { responsibleActor: "external",
+      reason: "The child's forge login is unavailable.", nextAction: "Delete the branch from a maintainer account." } }).ok);
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "complete_with_handoffs");
+    assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.branch, row.state, row.reason]),
+      [[null, "retained", "The child's forge login is unavailable."]]);
+  } finally { h.db.close(); }
+});
+
 test("a Wollipog deletion after the last read counts, and a refused one says why (#4067)", () => {
   const h = fixture();
   try {

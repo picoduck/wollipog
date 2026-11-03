@@ -21116,8 +21116,9 @@ export class ControlPlaneDb {
    * branch. `deleted` once the forge reports the branch gone, or once Wollipog deleted it after that
    * report; `retained` while the work item naming the pull request is handed to a person or an
    * outside party, with the handoff's reason; otherwise `pending`, including a pull request the
-   * forge has not been read for yet. A pull request not (yet) merged is not a merged branch, and a
-   * fork's branch, or one read by an older runner, is not tracked. A campaign whose observing
+   * forge has not been read for yet and one still open after its approved enqueue. A pull request
+   * closed without merging is not a merged branch, and a fork's branch, or a merged one read by an
+   * older runner, is not tracked. A campaign whose observing
    * runner predates v280 tracks nothing, as before. Reads rows only.
    */
   campaignMergedBranches(campaignId: string): CampaignMergedBranch[] {
@@ -21165,8 +21166,14 @@ export class ControlPlaneDb {
       const item = workItems.get(key);
       const base = { sessionId: merge.sessionId, ...(item ? { workItemId: item.workItemId } : {}), repository: merge.repository,
         pullRequest: merge.pullRequest, headSha: merge.headSha };
-      if (!value) {
-        rows.push({ ...base, branch: null, state: "pending", reason: "The forge has not been read for this merged pull request yet." });
+      // A handoff to a person or an outside party retains the branch whatever the forge last said,
+      // so cleanup handed off before the first successful read still lets the campaign finish.
+      const retained = item?.handoff ? { state: "retained" as const, reason: item.handoff.reason } : null;
+      if (!value || value.state === "open") {
+        // Unread, or approved and enqueued but not merged yet: the merge and its branch are still owed.
+        rows.push({ ...base, branch: value?.headBranch?.name ?? null, ...(retained ?? { state: "pending" as const,
+          reason: value ? "The approved merge has not landed yet; its branch is cleaned up after it does."
+            : "The forge has not been read for this merged pull request yet." }) });
         continue;
       }
       if (value.state !== "merged" || !value.headBranch) continue;
