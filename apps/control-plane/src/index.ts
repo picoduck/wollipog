@@ -6514,8 +6514,14 @@ app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
 // which keeps it removed across restarts, and older runners are refused with an update hint.
 app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
   const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  // A person removes a workspace, never an agent credential, and only one they may manage.
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
   const runner = db.getRunner(runnerId);
   if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
   const source = db.workspaceSource(runnerId, workspaceId);
   const workspace = runner.workspaces.find((candidate) => candidate.id === workspaceId);
   if (!source || !workspace) return reply.code(404).send({ error: "workspace not found" });
