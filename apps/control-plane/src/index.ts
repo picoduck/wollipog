@@ -96,6 +96,8 @@ import {
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
+  type CreateOwnerDecisionRequest,
+  type HandWorkflowDecisionToOwnerRequest,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
   type GetCampaignWorkItemsRequest,
@@ -4767,6 +4769,39 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/withdraw", async (r
     { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
+});
+
+// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
+// credential session; the service checks that it is the campaign's root and that only a person
+// can answer.
+app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// #4064: the root hands one of its pending Orchestrator-owned decisions to the campaign's owner.
+// `:id` is the caller's own credential session; the body names the requester when it is a child.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<HandWorkflowDecisionToOwnerRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  return respond(reply, svc.handWorkflowDecisionToOwner(id, occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {

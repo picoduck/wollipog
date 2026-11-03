@@ -184,12 +184,15 @@ export function decisionHelp(): string {
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
     "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
     "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",
+    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
+    "  decision hand-to-owner <occurrence-id> --reason <text> [--session <id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
     "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
     "Descendant reads and lists require control plane v214. Follow nextCursor until absent. Older runners can use an updated CLI or GET /api/sessions/:id/workflow-decisions[/<occurrence-id>] against v214 where a session token is provisioned. Provider-isolated sessions have only a relay key: upgrade the runner/CLI instead of seeking a bearer token. Older control planes expose pending requests only through list_descendant_requests. A 404 or missing list entry never proves consumption.",
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
+    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their choice comes back to you. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }

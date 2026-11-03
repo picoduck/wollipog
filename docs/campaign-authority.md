@@ -113,7 +113,27 @@ session ID. Later questions in the same revision are still dismissed but wake th
 further notice, so a root that answers each notice with another question cannot loop; the bound is
 the durable decline ledger's first-for-class record. Neither provider's dismissal can carry text
 (Claude Code sends a fixed deny message, Codex an empty answer set), so the guidance travels as a
-prompt. The dismissal is not blocked work.
+prompt. The dismissal is not blocked work. A root whose runner supports owner decisions (v281)
+receives `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE` instead, which also names the route for
+a decision the campaign's owner kept.
+
+Owner decisions (#4064) are that route. `request_owner_decision` creates an `owner_decision`
+workflow decision: a question with explicit options and decision material that the evaluator makes
+human-owned (`owner_kept`) in every mode, under any boundary or grant. Only the campaign's owner
+resolves it, through the same human approval route as other human-owned requests; the root, its
+children and any other person are refused. Its card on the root is non-blocking (`async`): it
+neither sets the root `input_required` nor holds prompts, PR-watch wakes or campaign
+continuations, while Campaign Status counts it as waiting on the owner and lists it under Waiting
+for You (`ownerDecisions`). The owner's choice returns as the decision's resume prompt. The root may
+withdraw its own pending owner decision. `hand_workflow_decision_to_owner` moves one pending,
+unarmed Orchestrator-owned occurrence to the owner, one way: it records `ownerHandoff`, the owner
+alone resolves it, and every later request in the campaign for the same resource (its category
+and key, or the pull request, branch, issue or recommendation it names) is human-owned too, so a
+withdrawal and a new request cannot move it back; an Orchestrator-owned twin requested before the
+handoff is revoked when anyone tries to use it. Both routes need a v281 root runner and control
+plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
+Custom campaigns are unchanged.
+
 The root's own pending typed workflow decisions never park its provider, so they never stop a
 standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.

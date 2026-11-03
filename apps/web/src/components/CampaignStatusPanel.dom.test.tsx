@@ -1534,3 +1534,36 @@ test("a quiet row re-read never blocks Show More and never replaces rows a page 
     await panel.dispose();
   }
 });
+
+test("decisions the owner kept are listed as waiting for them, and each opens its request (#4064)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_root", "occ_owner"), pendingRequest("s_child", "occ_merge")];
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 3, items: [
+        { occurrenceId: "occ_owner", sessionId: "s_root", category: "owner_decision",
+          summary: "Which credential design should the provider bridge use?", handedOff: false, createdAt: NOW },
+        { occurrenceId: "occ_merge", sessionId: "s_child", category: "pr_merge", summary: "Merge picoduck/wollipog#7", handedOff: true, createdAt: NOW },
+      ] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const text = panel.container.textContent ?? "";
+    assert.match(text, /Waiting for You/u);
+    assert.match(text, /Which credential design should the provider bridge use\?/u);
+    assert.match(text, /Asked by the Orchestrator/u);
+    assert.match(text, /Merge picoduck\/wollipog#7/u);
+    assert.match(text, /Handed over by the Orchestrator/u);
+    assert.match(text, /1 more decision waits for you under Requests\./u);
+    await click([...panel.container.querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Open Request: Merge picoduck/wollipog#7")!);
+    assert.equal(harnessRequests.selected.at(-1), JSON.stringify(["s_child", "occ_merge"]));
+    assert.equal(panel.state.mode, "requests");
+  } finally {
+    await panel.dispose();
+  }
+});

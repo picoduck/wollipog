@@ -184,6 +184,9 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw",
+  // A Full Control root's owner decisions and one-way handoffs to its owner (#4064).
+  "POST /api/sessions/:id/owner-decisions",
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner",
   "GET /api/sessions/:id/orchestrator-campaign",
   "POST /api/sessions/:id/orchestrator-campaign/follow-ups",
   "POST /api/sessions/:id/orchestrator-campaign/verify-child",

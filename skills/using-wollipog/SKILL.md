@@ -700,6 +700,32 @@ Issue closure does not attest implementation or campaign completion. Unsupported
 execution targets, or incomplete bounded conflict evidence refuse the operation clearly.
 
 
+## Decisions the Owner Kept
+
+Under Full Control the server dismisses a root Orchestrator's own questions, so asking in chat or
+with a question tool never reaches the person. When the campaign's owner kept a decision for
+themselves (for example a credential design, risk consent to merge a pull request, publishing
+follow-ups, or closing an epic), a root on control plane and runner protocol v281 hands it to them
+as a typed request instead:
+
+- `request_owner_decision` (CLI `wollipog decision ask-owner --request-id <id> --resource-key <key>
+  --question <text> --options '<json-array>' [--recommended <option-id>] [--material <text>]`) asks
+  the owner a question with explicit options. Put the decision material in `material`: links, the
+  exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign
+  Status without stopping your turn or other work, and only the owner can answer it. The chosen
+  option, or Do Not Proceed, comes back to you as a Workflow Decision prompt; `get_workflow_decision`
+  reads it at any time. You may withdraw your own pending one with `withdraw_workflow_decision`.
+  Full Control asks nobody for credentials or sign-in, so a question asking for a value is refused.
+- `hand_workflow_decision_to_owner` (CLI `wollipog decision hand-to-owner <occurrence-id> --reason
+  <text> [--session <child-id>]`) gives the owner one pending decision you own, such as a child's
+  `pr_merge` or your own issue closure. It is one way: you and every child are refused if you try
+  to resolve it, and every later request for the same resource in the campaign, under any key or
+  after a withdrawal, is the owner's too. A child keeps waiting on it; your own stops holding you.
+
+Neither tool exists for a child or under Custom, where a person already sees the campaign's
+requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
+decision yourself, and never ask the owner to approve one in chat.
+
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
