@@ -111,7 +111,7 @@ root's questions, and that the root decides Orchestrator-owned matters with the 
 approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
 session ID. Later questions in the same revision are still dismissed but wake the root with no
 further notice, so a root that answers each notice with another question cannot loop; the bound is
-the durable decline ledger's first-for-class record. Since v280 the guidance also rides on every
+the durable decline ledger's first-for-class record. Since v282 the guidance also rides on every
 dismissal itself where the provider result can carry text (see
 [Full Control Response Text](#full-control-response-text)); the notice remains as the wake-up and
 for runners and providers that cannot. The dismissal is not blocked work.
@@ -174,7 +174,7 @@ question" and saved that as memory (#4063). So when the server's Full Control po
 question or declines a tool call, for a root or a child, the control plane sends
 `automaticResponse: { policy: "full_control", basis? }` with that exact `answer_question` or
 `resolve_permission`. It sends the field only to a runner with capability
-`fullControlResponseAttribution` (v280), only with a dismissal or reject, and never with a person's
+`fullControlResponseAttribution` (v282), only with a dismissal or reject, and never with a person's
 answer or decision, which still read "The user dismissed the question." and "The user declined
 this tool call." The Orchestrator's own choice among a child's options carries no field either. Its
 forced decline of an occurrence the policy already declines does carry it, because the policy

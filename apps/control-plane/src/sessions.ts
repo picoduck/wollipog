@@ -9607,7 +9607,7 @@ export class SessionsService {
       // that nobody sees its questions and how to decide them itself, after this event settles; a
       // root that ended its turn on the dismissal is woken by this message rather than left idle.
       // Later questions are still dismissed but wake nothing: one notice per question could loop a
-      // root that answers each notice with another question. A v280 Claude Code runner also carries
+      // root that answers each notice with another question. A v282 Claude Code runner also carries
       // the guidance in every dismissal itself (#4063); this notice stays for older runners and for
       // providers whose dismissal has no text (Codex answers with an empty answer set).
       if (first) setImmediate(() => {
