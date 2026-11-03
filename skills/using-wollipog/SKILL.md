@@ -658,8 +658,9 @@ approve a human-owned request. A root may resolve an eligible Full Control occur
 its server-recorded standing authorization; the server rechecks it when the root resolves. Under
 Full Control nobody sees the root's own questions: the server dismisses them unanswered and tells
 the root to decide with these typed tools. Read `issueClosureResult`: `closed` and `already_closed`
-are verified outcomes, `refused` requires renewed review, and `uncertain` means GitHub may have
-accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
+are verified outcomes. `refused` wrote nothing and used up the approval: its `refusal.reason` and
+`refusal.summary` say why and name any pull request that changed, so address that and request a
+new closure. `uncertain` means GitHub may have accepted the action. Inspect uncertain outcomes without replaying the comment or closure.
 Issue closure does not attest implementation or campaign completion. Unsupported peers, nonlocal
 execution targets, or incomplete bounded conflict evidence refuse the operation clearly.
 

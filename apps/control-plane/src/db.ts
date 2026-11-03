@@ -1,4 +1,4 @@
-import { REVIEW_JOBS_RETIRED_REASON, type ProviderCredentialImportSource } from "@wollipog/protocol";
+import { normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 /**
@@ -22109,6 +22109,18 @@ export class ControlPlaneDb {
     this.stmt(`UPDATE workflow_decisions SET issue_closure_result=?
       WHERE occurrence_id=? AND category='issue_closure' AND status='consumed'`)
       .run(JSON.stringify(result), occurrenceId);
+  }
+
+  /** The refusal of this session's latest executed closure of `resourceKey`, when that execution was
+   * refused (#4059); a later closed or uncertain execution supersedes it. */
+  latestIssueClosureRefusal(sessionId: string, resourceKey: string): NonNullable<GithubIssueClosureSnapshot["previousRefusal"]> | null {
+    const row = this.stmt(`SELECT occurrence_id, issue_closure_result FROM workflow_decisions
+      WHERE session_id=? AND category='issue_closure' AND resource_key=? AND status='consumed' AND issue_closure_result IS NOT NULL
+      ORDER BY created_at DESC, occurrence_id DESC LIMIT 1`).get(sessionId, resourceKey) as { occurrence_id: string; issue_closure_result: string } | undefined;
+    if (!row) return null;
+    const result = JSON.parse(row.issue_closure_result) as GithubIssueClosureResult;
+    if (result.outcome !== "refused" || !Number.isSafeInteger(result.completedAt)) return null;
+    return { occurrenceId: row.occurrence_id, completedAt: result.completedAt, refusal: normalizeGithubIssueClosureRefusal(result.refusal) };
   }
 
   /** Consumption and its initial uncertainty are one durable write before dispatch. */

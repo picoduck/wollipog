@@ -35,7 +35,7 @@ import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compat
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryFailure, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
@@ -44,7 +44,7 @@ import {
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
-import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
@@ -10679,6 +10679,10 @@ export class SessionsService {
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
         activeChildren: issueClosureActiveChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue }) };
+      const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
+      // Whoever reviews this request sees why the last executed approval was refused (#4059).
+      const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
+      if (previousRefusal) snapshot.previousRefusal = previousRefusal;
       if (fullBoundary && fullBoundary.operations.includes("issue_closure")) {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
@@ -10707,7 +10711,7 @@ export class SessionsService {
       }
       const created = this.createWorkflowDecision(sessionId, {
         requestId: request.requestId,
-        resourceKey: `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`,
+        resourceKey,
         resourceSnapshot: snapshot,
       }, canAccess, { trustedIssueClosure: true });
       return created.ok ? ok({ decision: created.data }, created.status) : failAs(created);
@@ -10807,17 +10811,24 @@ export class SessionsService {
       }, 150_000);
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
           response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&
-          Number.isSafeInteger(response.result.completedAt)) result = response.result;
-      else if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && !response.ok) {
-        result = { outcome: "refused", completedAt: Date.now() };
+          Number.isSafeInteger(response.result.completedAt)) {
+        // Every refusal records why (#4059); a runner that predates reasons yields `unspecified`.
+        result = { outcome: response.result.outcome, completedAt: response.result.completedAt,
+          ...(response.result.outcome === "refused" ? { refusal: issueClosureResultRefusal(response.result.refusal) } : {}) };
+      } else if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && !response.ok) {
+        // The runner refuses with `ok: false` only before its mutation fence. Its message is kept,
+        // sanitized and bounded, rather than discarded.
+        result = { outcome: "refused", completedAt: Date.now(), refusal: issueClosureFailureRefusal(response.failure, response.error) };
       }
       // A malformed receipt after dispatch cannot prove that no mutation occurred.
     } catch (error) {
-      if (isRunnerRequestNotSentError(error)) result = { outcome: "refused", completedAt: Date.now() };
+      if (isRunnerRequestNotSentError(error)) {
+        result = { outcome: "refused", completedAt: Date.now(), refusal: githubIssueClosureRefusal("runner_unreachable") };
+      }
     }
     this.db.recordGithubIssueClosureResult(occurrenceId, result);
     this.log.info(JSON.stringify({ event: "github_issue_closure_result", sessionId, occurrenceId,
-      resourceDigest: decision.resourceDigest, outcome: result.outcome }));
+      resourceDigest: decision.resourceDigest, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
   }

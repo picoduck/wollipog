@@ -1,6 +1,7 @@
 import { useCallback, useRef, useState, type MutableRefObject } from "react";
 import { createRoot } from "react-dom/client";
 import {
+  githubIssueClosureRefusal,
   pendingRequests,
   prioritizedPendingRequests,
   removePendingRequest,
@@ -293,7 +294,8 @@ function followUpAdmissionSession(rebinding = false): SessionView {
   } };
 }
 
-function issueClosureSession(): SessionView {
+/** `refused`: the last approved closure was refused, so this request shows why (#4059). */
+function issueClosureSession(refused = false): SessionView {
   const base = evidenceSession();
   const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123,
     title: "Obsolete Task", url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64),
@@ -301,6 +303,8 @@ function issueClosureSession(): SessionView {
     evidence: ["Replacement issue #124 covers the current design."], comment: "Retired in favor of #124.",
     openPullRequests: [{ number: 77, title: "Earlier Implementation", url: "https://github.com/team/repo/pull/77", headSha: "b".repeat(40) }],
     activeChildren: [{ sessionId: "child", title: "Implement Issue 123", assignmentDigest: "c".repeat(64) }],
+    ...(refused ? { previousRefusal: { occurrenceId: "wd_occ_closure_1", completedAt: Date.UTC(2026, 10, 1, 17, 32),
+      refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) } } : {}),
   };
   return { ...base, title: "Campaign Issue Closure", pendingApproval: {
     ...base.pendingApproval!, title: "Issue Closure Approval Required", context: { input: JSON.stringify(snapshot) },
@@ -858,7 +862,7 @@ function ReadingKeys({ scrollRef }: {
 function Fixture() {
   const [keyboard, updateKeyboard] = useState(keyboardOpen);
   setKeyboard = updateKeyboard;
-  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
+  const [session, setSession] = useState(() => scenario === "automation-creation" ? automationCreationSession() : scenario === "issue-scope" ? issueScopeSession() : scenario === "follow-up-admission" ? followUpAdmissionSession() : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true) : scenario === "issue-closure-refused" ? issueClosureSession(true) : scenario === "issue-closure" ? issueClosureSession() : scenario === "continuation"
     ? continuationSession()
     : scenario === "held" || scenario === "both"
     ? heldCampaignSession()
@@ -1007,7 +1011,7 @@ function Fixture() {
       return updated;
     },
   } as ApiClient;
-  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "follow-up-admission" ? followUpAdmissionSession().pendingApproval! : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true).pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
+  const standaloneTemplate = scenario === "automation-creation" ? automationCreationSession().pendingApproval! : scenario === "issue-scope" ? issueScopeSession().pendingApproval! : scenario === "follow-up-admission" ? followUpAdmissionSession().pendingApproval! : scenario === "follow-up-rebinding" ? followUpAdmissionSession(true).pendingApproval! : scenario === "issue-closure-refused" ? issueClosureSession(true).pendingApproval! : scenario === "issue-closure" ? issueClosureSession().pendingApproval! : scenario === "standalone" || scenario === "worker"
     ? standaloneApprovalSession().pendingApproval!
     // Only a provider's permission has a transcript row; a policy ask or a pause is the control plane's.
     : DOCK_SCENARIOS[scenario]?.requests().find((request) => request.kind === "permission") ?? null;
