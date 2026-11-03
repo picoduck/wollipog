@@ -36,6 +36,7 @@ export const FLOORS = [
 
 export const EXCLUSIONS = [
   { command: "probe:claude-mcp-image", reason: "Needs a signed-in account and a real model to read pixels back. This suite instead checks at the stub that the image block reaches the model request; whether a model can read it stays manual." },
+  { command: "probe:claude-mcp-wait", reason: "Its acceptance run blocks one real 45-minute and one 60-minute wait behind the runner's wollipog entry; a manual measurement, not a suite probe. `--idle-ms` with `--without-limit` re-checks the per-server limit against a scaled idle limit in minutes." },
   { command: "probe:claude-media-reviewer --live", reason: "Paid run with the dedicated reviewer key inside the reviewer namespace; human-only. This suite measures the reviewer's flags, event order, init shape and usage fields against a stub." },
   { command: "auto-mode classifier decisions", reason: "Only a real model makes them. The stub answers classifier requests with \"allow\" so allow-controls can run; no classifier behaviour is claimed, and auto-mode can_use_tool frames (which need the classifier to escalate) stay covered by the recorded fixture replay." },
 ];

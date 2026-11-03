@@ -9,6 +9,7 @@ import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { GhRunner } from "./campaign-forge-status.js";
 import type { GlabRunner } from "./campaign-gitlab-status.js";
+import { CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS } from "./claude-wollipog-mcp.js";
 import {
   attachWslAgentControlBroker,
   validateWslAgentControlCliArgs,
@@ -315,8 +316,12 @@ test("broker authenticates exact MCP session and exposes only the Orchestrator t
   assert.equal(bootstrap.runtime, f.config.nodeRuntime);
   assert.equal(bootstrap.helper, f.config.helperPath);
   assert.equal(Buffer.from(bootstrap.token, "base64").toString(), f.config.token);
-  assert.equal(JSON.parse(Buffer.from(bootstrap.mcp, "base64").toString()).mcpServers.wollipog.env.WOLLIPOG_AGENT_CONTROL_SOCKET,
+  const wslMcp = JSON.parse(Buffer.from(bootstrap.mcp, "base64").toString());
+  assert.equal(wslMcp.mcpServers.wollipog.env.WOLLIPOG_AGENT_CONTROL_SOCKET,
     "/tmp/wollipog-agent-control/control.sock");
+  // The same per-server limit as a native launch's entry (#4072), and still the only server.
+  assert.deepEqual(Object.keys(wslMcp.mcpServers), ["wollipog"]);
+  assert.equal(wslMcp.mcpServers.wollipog.timeout, CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS);
   assert.doesNotMatch(f.lines[0]!, /wollipoga_/u, "credential bytes are never sent as plaintext framing");
   f.fromHelper.write(`${JSON.stringify({ type: "open", id: "mcp", v: 1, kind: "mcp", sessionId: f.config.sessionId, token: f.config.token })}\n`);
   await tick();
