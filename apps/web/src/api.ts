@@ -1784,6 +1784,13 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify(body) },
     ),
 
+  // Remove Workspace (#4123): unregisters it; nothing on disk is deleted.
+  removeMachineWorkspace: (runnerId: string, workspaceId: string) =>
+    req<{ removed: true }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/workspaces/${encodeURIComponent(workspaceId)}`,
+      { method: "DELETE" },
+    ),
+
   // Project menu: rename a workspace (CP-owned display-name override; empty name resets).
   renameWorkspace: (runnerId: string, workspaceId: string, name: string) =>
     req<{ ok: true }>(

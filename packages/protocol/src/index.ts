@@ -827,7 +827,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      ui_evidence_approval decision's images to a managed reviewer Session whose receipts and
 //      verdict the server records, and resolves with delegatedImageReview. The reviewer launches
 //      on the root's runner with only its two review tools; older peers keep direct review.
-export const PROTOCOL_VERSION = 276;
+// 277: workspace removal (#4123). DELETE /api/runners/:id/workspaces/:workspaceId unregisters a
+//      Workspace. A managed one is removed in the control plane; a configured one is sent as
+//      remove_workspace, and the runner records the removal in its data directory, stops
+//      advertising it and answers remove_workspace_result. Runner views tag each Workspace's
+//      `source`. Older runners keep their configured Workspaces and the control plane refuses.
+export const PROTOCOL_VERSION = 277;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -843,6 +848,7 @@ export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
+export * from "./workspace-removal.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -1041,6 +1047,9 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  /** v277 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
+   * Workspaces added in Wollipog are removed by the control plane on any runner. */
+  workspaceRemoval: 277,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -3715,6 +3724,8 @@ export interface WorkspaceInfo {
   scope?: ResourceScope;
   /** Principal-specific authority to manage this Location's access. Older control planes omit it. */
   canManage?: boolean;
+  /** Where the Workspace came from (#4123). Older control planes omit it. */
+  source?: import("./workspace-removal.js").WorkspaceSource;
 }
 
 /** How a durable Project Location entered the control-plane catalog. */
@@ -10327,6 +10338,7 @@ export type RunnerToControlPlane =
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | import("./workspace-removal.js").RemoveWorkspaceResultMessage
   | AdoptProviderProfileResultMessage
   | ImportProviderCredentialResultMessage
   | RevokeProviderProfileGrantResultMessage
@@ -12420,6 +12432,7 @@ export type ControlPlaneToRunner =
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
   | RemoveProviderAccountMessage
+  | import("./workspace-removal.js").RemoveWorkspaceMessage
   | AdoptProviderProfileMessage
   | ImportProviderCredentialMessage
   | RevokeProviderProfileGrantMessage

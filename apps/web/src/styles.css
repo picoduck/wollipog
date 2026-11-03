@@ -10490,6 +10490,9 @@ textarea {
   text-overflow: ellipsis;
   white-space: nowrap;
 }
+/* Remove… (#4123) keeps its size at the row's end; Remove Workspace shows the folder in the mono face. */
+.machine-workspaces > .row > .btn { flex: none; }
+.remove-workspace-path { font-family: var(--font-mono); }
 /* Skills on This Machine (#1981, #2989): a disclosure sized as the section titles around it. */
 .machine-skills > summary {
   color: var(--text);

@@ -300,7 +300,18 @@ import {
   SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   TERMINAL_STATUSES,
   campaignRepositoryLocation,
+  type WorkspaceRemovalBlocker,
+  type WorkspaceSource,
 } from "@wollipog/protocol";
+
+/** True when an automation's stored action or runner policy names this exact Workspace. */
+function targetsWorkspace(value: unknown, runnerId: string, workspaceId: string): boolean {
+  if (Array.isArray(value)) return value.some((item) => targetsWorkspace(item, runnerId, workspaceId));
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.runnerId === runnerId && record.workspaceId === workspaceId) return true;
+  return Object.values(record).some((item) => targetsWorkspace(item, runnerId, workspaceId));
+}
 
 function harnessInstallationFamily(driver: AgentDriverKind | undefined): HarnessInstallationSelection["family"] | null {
   if (driver === "codex" || driver === "codex-app-server") return "codex";
@@ -8706,6 +8717,55 @@ export class ControlPlaneDb {
     ).map((r) => r.id);
   }
 
+  /** Where a Machine's Workspace came from (#4123); a reported id wins over a managed one. */
+  workspaceSource(runnerId: string, workspaceId: string): WorkspaceSource | null {
+    if (this.stmt("SELECT 1 FROM workspaces WHERE runner_id=? AND id=?").get(runnerId, workspaceId)) return "configured";
+    return this.stmt("SELECT 1 FROM workspace_extras WHERE runner_id=? AND id=?").get(runnerId, workspaceId)
+      ? "managed"
+      : null;
+  }
+
+  /** What still uses a Workspace (#4123): Project Locations, sessions that are not archived, and
+   * automations that start work in it. Archived sessions keep their history and are not counted. */
+  workspaceRemovalBlockers(runnerId: string, workspaceId: string): WorkspaceRemovalBlocker[] {
+    const projects = this.stmt(
+      `SELECT DISTINCT p.id AS project_id, p.name AS project_name
+         FROM project_locations l JOIN projects p ON p.id = l.project_id
+        WHERE l.runner_id=? AND l.workspace_id=? AND l.removed_at IS NULL AND l.detached_at IS NULL
+        ORDER BY p.name, p.id`,
+    ).all(runnerId, workspaceId) as unknown as Array<{ project_id: string; project_name: string }>;
+    const sessions = (this.stmt(
+      "SELECT COUNT(*) AS count FROM sessions WHERE runner_id=? AND workspace_id=? AND archived=0",
+    ).get(runnerId, workspaceId) as { count: number }).count;
+    const automations = (this.stmt(
+      `SELECT automation_id, name, action_json, runner_policy FROM automations
+        WHERE deleted_at IS NULL ORDER BY name, automation_id`,
+    ).all() as unknown as Array<{ automation_id: string; name: string; action_json: string; runner_policy: string }>)
+      .filter((row) => [row.action_json, row.runner_policy]
+        .some((json) => targetsWorkspace(parseJson<unknown>(json), runnerId, workspaceId)));
+    return [
+      ...projects.map((row): WorkspaceRemovalBlocker => ({
+        kind: "project_location", projectId: row.project_id, projectName: row.project_name,
+      })),
+      ...(sessions > 0 ? [{ kind: "session" as const, count: sessions }] : []),
+      ...automations.map((row): WorkspaceRemovalBlocker => ({
+        kind: "automation", automationId: row.automation_id, automationName: row.name,
+      })),
+    ];
+  }
+
+  /** Forget a Workspace the control plane knows (#4123): its record, name override and ownership.
+   * A configured Workspace is forgotten only after its runner has recorded the removal. Projects,
+   * sessions, worktrees and files are untouched. */
+  unregisterWorkspace(runnerId: string, workspaceId: string): void {
+    this.atomic(() => {
+      this.stmt("DELETE FROM workspaces WHERE runner_id=? AND id=?").run(runnerId, workspaceId);
+      this.stmt("DELETE FROM workspace_extras WHERE runner_id=? AND id=?").run(runnerId, workspaceId);
+      this.stmt("DELETE FROM workspace_overrides WHERE runner_id=? AND workspace_id=?").run(runnerId, workspaceId);
+      this.stmt("DELETE FROM workspace_ownership WHERE runner_id=? AND workspace_id=?").run(runnerId, workspaceId);
+    });
+  }
+
   /* ----------------------------- Projects -------------------------------- */
 
   private insertProjectOwnership(projectId: string, scope: ResourceScope, now: number): void {
@@ -14226,6 +14286,7 @@ export class ControlPlaneDb {
         name: overrides.get(w.id) ?? w.name,
         path: w.path,
         ...(grants?.length ? { additionalDirectoryGrants: grants } : {}),
+        source: "configured",
       };
     });
     // CP-created projects (workspace_extras) are appended after the runner-reported ones; a
@@ -14233,7 +14294,7 @@ export class ControlPlaneDb {
     const reportedIds = new Set(reported.map((w) => w.id));
     const extras = this.workspaceExtras(row.runner_id)
       .filter((w) => !reportedIds.has(w.id))
-      .map<WorkspaceInfo>((w) => ({ id: w.id, name: overrides.get(w.id) ?? w.name, path: w.path }));
+      .map<WorkspaceInfo>((w) => ({ id: w.id, name: overrides.get(w.id) ?? w.name, path: w.path, source: "managed" }));
     const workspaces = [...reported, ...extras];
 
     const agents = (

@@ -64,6 +64,7 @@ import {
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
+  workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
@@ -1877,6 +1878,7 @@ app.register(async (instance) => {
       case "edit_queued_prompt_result":
       case "provider_login_result":
       case "remove_provider_account_result":
+      case "remove_workspace_result":
       case "adopt_provider_profile_result":
       case "import_provider_credential_result":
       case "revoke_provider_profile_grant_result":
@@ -6504,6 +6506,47 @@ app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
     const message = (error as Error).message;
     return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
   }
+});
+
+// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
+// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
+// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
+// which keeps it removed across restarts, and older runners are refused with an update hint.
+app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  const runner = db.getRunner(runnerId);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  const source = db.workspaceSource(runnerId, workspaceId);
+  const workspace = runner.workspaces.find((candidate) => candidate.id === workspaceId);
+  if (!source || !workspace) return reply.code(404).send({ error: "workspace not found" });
+  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (source === "configured") {
+    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
+  }
+  const blockers = db.workspaceRemovalBlockers(runnerId, workspaceId);
+  if (blockers.length) {
+    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(blockers), blockers });
+  }
+  if (source === "configured") {
+    const requestId = `workspace_remove_${randomUUID()}`;
+    try {
+      const result = await hub.requestFromRunner(runnerId, requestId, {
+        type: "remove_workspace",
+        requestId,
+        runnerId,
+        workspaceId,
+        path: workspace.path,
+      });
+      if (result.type !== "remove_workspace_result") return reply.code(502).send({ error: "unexpected runner reply" });
+      if (!result.ok) return reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." });
+    } catch (error) {
+      return reply.code(504).send({ error: (error as Error).message });
+    }
+  }
+  db.unregisterWorkspace(runnerId, workspaceId);
+  hub.runnerChanged(runnerId);
+  return { removed: true };
 });
 
 app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {
