@@ -185,13 +185,74 @@ export function selectProviderAccountForDiscovery(
   usable: (account: RunnerProviderAccount) => boolean,
   platform: NodeJS.Platform = process.platform,
 ): BoundProviderAccount | undefined {
-  const eligible = accounts.filter(usable);
-  const provider = providerForDriver(agent.driver ?? "acp");
-  if ((agent.defaultProviderAccountId && !eligible.some((account) => account.id === agent.defaultProviderAccountId)) ||
-      (provider && accounts.some((account) => account.provider === provider) && !eligible.some((account) => account.provider === provider))) {
+  const selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform);
+  const configured = selected ? accounts.find((account) => account.id === selected.id) : undefined;
+  if ((configured && !usable(configured)) || (agent.defaultProviderAccountId && !configured)) {
     throw new Error("The selected discovery account is not granted to this control plane.");
   }
-  return selectProviderAccount(eligible, agent, agent.driver ?? "acp", undefined, platform);
+  return selected;
+}
+
+/** Account authentication is independent of the currently selected account's readiness. A
+ * compatible installed CLI may probe another granted HOME even when its default is signed out. */
+export function providerAccountProbeAvailable(agent: AgentDefinition): boolean {
+  if (agent.driver === "codex-app-server" && agent.codexAppServer) return agent.codexAppServer.status === "supported";
+  if (agent.driver === "claude-code" && agent.claudeCode) return agent.claudeCode.status === "ready" || agent.claudeCode.status === "unauthenticated";
+  return agent.available === true && agent.driver !== "codex";
+}
+
+export async function probeProviderAccountsForDiscovery(input: {
+  accounts: RunnerProviderAccount[];
+  agents: AgentDefinition[];
+  usable(account: RunnerProviderAccount): boolean;
+  environment(agent: AgentDefinition): Record<string, string>;
+  probe(agent: AgentDefinition, env: Record<string, string>): Promise<ProviderAccountDefinition["authStatus"]>;
+  failed?(account: RunnerProviderAccount): void;
+}): Promise<Map<string, ProviderAccountDefinition["authStatus"]>> {
+  const statuses = new Map<string, ProviderAccountDefinition["authStatus"]>();
+  const installed = input.agents.filter(providerAccountProbeAvailable);
+  await Promise.all(input.accounts.map(async (account) => {
+    if (!input.usable(account)) { statuses.set(account.id, "unknown"); return; }
+    const agent = agentForProviderAccount(installed, account);
+    if (!agent) { statuses.set(account.id, "unknown"); return; }
+    try {
+      const env = { ...input.environment(agent), ...providerAccountEnvironment({ provider: account.provider, credentialHome: account.directory }) };
+      statuses.set(account.id, mergeProviderAccountAuthStatus(account, await input.probe(agent, env)));
+    } catch {
+      statuses.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
+      input.failed?.(account);
+    }
+  }));
+  return statuses;
+}
+
+/** With configured accounts, harness selection answers whether any granted compatible account
+ * is ready. Per-account observations remain authoritative and no saved default/binding changes. */
+export function projectProviderAccountDiscoveryReadiness(
+  agents: AgentDefinition[], accounts: RunnerProviderAccount[],
+  statuses: ReadonlyMap<string, ProviderAccountDefinition["authStatus"]>,
+  usable: (account: RunnerProviderAccount) => boolean,
+  platform: NodeJS.Platform = process.platform,
+): AgentDefinition[] {
+  return agents.map((agent) => {
+    const provider = providerForDriver(agent.driver ?? "acp");
+    const configured = provider ? accounts.filter((account) => account.provider === provider) : [];
+    if (!configured.length || !providerAccountProbeAvailable(agent) || agent.harnessSelectionBlocked) return agent;
+    const eligible = configured.filter((account) => usable(account) && providerAccountAgentContextCompatible(account, agent, platform));
+    const observations = eligible.map((account) => statuses.get(account.id) ?? "unknown");
+    const authStatus = observations.includes("authenticated") ? "authenticated" as const
+      : observations.length && observations.every((status) => status === "unauthenticated") ? "unauthenticated" as const : "unknown" as const;
+    return { ...agent, available: authStatus === "authenticated", authStatus,
+      unavailableReason: authStatus === "authenticated" ? undefined : authStatus === "unauthenticated"
+        ? "Sign in to a provider account before starting a session."
+        : "Provider accounts could not be inspected. Review their setup and ownership details.",
+      ...(agent.claudeCode ? { claudeCode: { ...agent.claudeCode,
+        status: authStatus === "unauthenticated" ? "unauthenticated" as const : "ready" as const,
+        auth: { status: authStatus, billingSource: "unknown" as const },
+        failure: authStatus === "unauthenticated" ? { code: "unauthenticated" as const,
+          message: "Sign in to a provider account before starting a session." } : undefined } } : {}),
+    };
+  });
 }
 
 function providerAccountContextMismatch(

@@ -193,6 +193,8 @@ import {
   providerAccountDefinition,
   providerAccountEnvironment,
   providerForDriver,
+  probeProviderAccountsForDiscovery,
+  projectProviderAccountDiscoveryReadiness,
   selectProviderAccount,
   selectProviderAccountForDiscovery,
   skillReconciliationProviderAccountPlan,
@@ -2248,39 +2250,24 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       else acpAuthStatus.delete(agent.id);
     }
     metadata.agents = overlayAcpAuthStatus(metadata.agents, acpAuthStatus);
-    log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
-      nativeProbeHome: "isolated", agents: metadata.agents.length,
-      available: metadata.agents.filter((agent) => agent.available === true).length,
-      signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
     metadata.editors = editors;
     if (refreshModels && metadata.executionTargets) {
       await Promise.all([containerTargets.refreshInstallations(), cloudTargets.refreshInstallations()]);
       metadata.executionTargets = [...containerTargets.definitions(), ...cloudTargets.definitions()];
     }
-    await Promise.all(config.providerAccounts.map(async (account) => {
-      const agent = agentForProviderAccount(metadata.agents, account);
-      // A profile this control plane is not granted is refused before acquisition; report it as
-      // unknown instead of letting the refusal fail the probe pass (#3239).
-      if (!agent || agent.available !== true || !providerProfileGrants.usable(account)) {
-        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
-        return;
-      }
-      const env = runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" });
-      Object.assign(env, providerAccountEnvironment({
-        provider: account.provider,
-        credentialHome: account.directory,
-      }));
-      try {
-        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(
-          account,
-          await sessions.probeProviderAccountAuthentication(agent, env),
-        ));
-      } catch (error) {
-        void error;
-        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
-        log(`${account.provider} provider-account authentication probe failed`);
-      }
-    }));
+    const accountStatus = await probeProviderAccountsForDiscovery({ accounts: config.providerAccounts, agents: metadata.agents,
+      usable: (account) => providerProfileGrants.usable(account),
+      environment: (agent) => runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" }),
+      probe: (agent, env) => sessions.probeProviderAccountAuthentication(agent, env),
+      failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
+    });
+    for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);
+    metadata.agents = projectProviderAccountDiscoveryReadiness(metadata.agents, config.providerAccounts, accountStatus,
+      (account) => providerProfileGrants.usable(account));
+    log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
+      nativeProbeHome: "isolated", agents: metadata.agents.length,
+      available: metadata.agents.filter((agent) => agent.available === true).length,
+      signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
     discoveryDone = true;
     const extra = metadata.agents.length - configAgents.length;
     log(

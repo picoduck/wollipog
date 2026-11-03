@@ -106,6 +106,12 @@ user commands remain visible. Model-cache fallback reads its admitted HOME. npm 
 retain the operator's userconfig source while their writable state stays isolated. Discovery
 never copies credentials or replaces an account or saved session binding.
 
+Each granted account is checked independently with a compatible installed harness, even when the
+default account is signed out. A ready account keeps the harness selectable for that account;
+the account rows retain their own authentication states. This aggregate readiness never changes
+the saved default, the account chosen by an implicit launch, or a session's recorded binding.
+An ungranted implicit default is refused rather than silently skipped during its inspection.
+
 An installed harness can report **Sign-In Required** while the Machine's SSH connection remains
 online. Use **Add Account** to complete supported sign-in into a persistent managed profile, then
 select that account for new sessions. Existing accounts and saved sessions keep their recorded
