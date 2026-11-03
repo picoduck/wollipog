@@ -15,7 +15,7 @@ const themes = ["dark", "light"];
  * whether its origin verified. Enabling an existing campaign uses its own Human-established scope. */
 function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean, existingCampaign = false, storedChildren = 3, verified = true) {
   const runner = { runnerId: "runner-1", connectedAt: 1, protocolVersion: PROTOCOL_VERSION, agents: [], workspaces: [],
-    runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 2 },
+    runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 3 },
       executionIsolation: runnerReady ? { mode: "provider", network: "inherit" } : { mode: "bwrap", network: "deny" },
       ...(runnerReady ? { campaignReview: { profile: CONTROLLED_REVIEW_PROFILE, controllerSha256: "c".repeat(64), executableSha256: "e".repeat(64),
         cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" } } : {}) },
@@ -35,7 +35,7 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
       ? { campaignScope: { repository: "example/full-control-fixture", issueNumbers: [12], authorizedByCaller: true } }
       : { inspection: verified ? { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: true,
         repository: "example/full-control-fixture", issueNumbers, digest: "d".repeat(64) }
-        : { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: false } }),
+        : { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: false, failure: "not_repository" as const } }),
     accountingError: () => null, dailyLimit: false, invalidPolicyIds: [], imageReview: { effectiveOwner: "orchestrator" }, humanRequiredRules: false,
     pacedVideoPeer: false, disclosuresAvailable: true, savedBudget: null }).preflight;
 }
@@ -197,7 +197,7 @@ for (const viewport of viewports) {
       await page.getByRole("button", { name: "Create Session", exact: true }).click();
       const alert = page.getByRole("alert").filter({ hasText: "Couldn't Start the Session" });
       await expect(alert).toHaveCount(1);
-      await expect(alert).toContainText("The registered workspace's origin could not be verified; check that it is a github.com repository.");
+      await expect(alert).toContainText("The project location is not a git repository with a valid HEAD.");
       await expectNoFullControlForm(page);
       expect(admissions).toHaveLength(0);
       await shoot(page, alert, `${captures}/launch-${viewport.name}-${theme}-blocked.png`);

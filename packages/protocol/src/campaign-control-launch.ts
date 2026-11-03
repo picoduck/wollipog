@@ -87,8 +87,20 @@ export interface CampaignLaunchInspectionMessage {
   type: "campaign_launch_inspect";
   requestId: string;
   workspaceId: string;
+  /** Resolved by authorized session preparation, never browser or agent input. */
+  workspacePath?: string;
   issueNumbers: number[];
 }
+
+export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
+  invalid_request: "The workspace inspection request is invalid.",
+  unknown_location: "The project location is unknown; select an available location.",
+  missing_path: "The project location path is missing or unavailable on the runner.",
+  not_repository: "The project location is not a git repository with a valid HEAD.",
+  unsupported_origin: "The project repository origin is unsupported; Full Control requires a github.com repository.",
+  issue_read_failed: "The selected issues could not be read and verified in the project repository.",
+} as const;
+export type CampaignLaunchInspectionFailure = keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS;
 
 /** Version 2 runners stop an inspection whose caller expired or went away (#3360). The runner
  * aborts only the inspection registered under this exact request id. */
@@ -106,6 +118,7 @@ export interface CampaignLaunchInspectionResult {
   issueNumbers?: number[];
   digest?: string;
   error?: string;
+  failure?: CampaignLaunchInspectionFailure;
   /** Set when the inspection stopped because its request was cancelled. Never admits a launch. */
   cancelled?: true;
 }

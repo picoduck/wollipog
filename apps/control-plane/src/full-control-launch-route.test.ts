@@ -21,6 +21,7 @@ import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
@@ -34,7 +35,7 @@ const request: CreateSessionRequest = { runnerId: "r", workspaceId: "w", project
 const review: ControlledReviewCapability = { profile: CONTROLLED_REVIEW_PROFILE, controllerSha256: "c".repeat(64), executableSha256: "e".repeat(64),
   cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" };
 const runtime: RunnerRuntimeInfo = { dataDir: "/fixture/data", worktreeRoot: "/fixture/data/worktrees", maxConcurrentSessions: 4,
-  campaignLaunchInspection: { version: 2 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
+  campaignLaunchInspection: { version: 3 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
 const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 } as const;
 const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
@@ -140,6 +141,60 @@ async function preflight(server: Awaited<ReturnType<typeof app>>["server"], body
 }
 const sessionCount = (f: ReturnType<typeof fixture>) => f.db.raw().prepare("SELECT count(*) AS n FROM sessions").get()!.n;
 
+test("launch inspection and ordinary session launch use the same authorized dynamic location path (#4090)", async () => {
+  const f = fixture();
+  const workspace = f.db.createWorkspace("r", { name: "SSH Project", path: "/fixture/home/project" }, f.scope);
+  const location = f.db.findProjectLocation("r", workspace.id)!;
+  const body = { ...launch, workspaceId: workspace.id, projectId: location.projectId, projectLocationId: location.id };
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true);
+    const inspection = f.sent.find((message) => message.type === "campaign_launch_inspect");
+    assert.equal(inspection?.type === "campaign_launch_inspect" && inspection.workspacePath, "/fixture/home/project");
+    assert.equal(inspection?.type === "campaign_launch_inspect" && inspection.workspaceId, workspace.id);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "dynamic-location", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const start = f.starts.find((message) => message.type === "start_session");
+    assert.equal(start?.type === "start_session" && start.spec.workspacePath, "/fixture/home/project");
+    assert.doesNotMatch(JSON.stringify(checked), /\/fixture\/home\/project/);
+    const count = f.sent.length;
+    const injected = await preflight(server, { ...body, workspacePath: "/foreign" } as FullControlLaunchRequest);
+    assert.equal(injected.response.statusCode, 400);
+    assert.equal(f.sent.length, count, "browser paths never reach the runner");
+    const unknown = await preflight(server, { ...body, projectLocationId: "unknown" });
+    assert.equal(unknown.response.statusCode, 409);
+    assert.equal(f.sent.length, count, "unknown locations never start inspection");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("preflight shows only closed failure reasons and refuses old inspection runners with update guidance (#4090)", async () => {
+  for (const version of [1, 2] as const) {
+    const f = fixture({ runtime: { ...runtime, campaignLaunchInspection: { version } } });
+    const { server } = await app(f);
+    try {
+      const { preflight: checked } = await preflight(server, launch);
+      assert.equal(checked!.ready, false);
+      assert.match(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason, /update the runner/);
+      assert.equal(f.sent.some((message) => message.type === "campaign_launch_inspect"), false);
+    } finally { await server.close(); f.db.close(); }
+  }
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const [failure, reason] of Object.entries(CAMPAIGN_LAUNCH_INSPECTION_ERRORS)) {
+      f.state.inspect = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId,
+        workspaceId: message.workspaceId, ok: false, failure: failure as keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS,
+        error: "secret://token /private/path RAW_OUTPUT" });
+      const { preflight: checked } = await preflight(server, launch);
+      assert.equal(checked!.ready, false);
+      assert.equal(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason, reason);
+      assert.doesNotMatch(JSON.stringify(checked), /secret:\/\/token|private\/path|RAW_OUTPUT/);
+    }
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("a ready Human launch preserves its authority while retired native review stays unavailable", async () => {
   const f = fixture();
   const { server, logs } = await app(f);
@@ -238,7 +293,7 @@ test("each genuine impossibility blocks launch with a specific reason and create
       id: "accounting_budget", reason: /^Cost checkpoints need a cost limit; enter one or remove the checkpoints\.$/ },
     { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract",
       reason: /^This machine needs a newer runner for campaign limits\. Update and restart the runner\.$/ },
-    { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
+    { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the authorized project location/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
   ];
   for (const item of cases) {
@@ -787,8 +842,8 @@ test("a cancelled caller stops only its own inspection, and older runners report
   f.state.inspect = () => null;
   const runner = f.db.getRunner("r")!;
   const caller = new AbortController();
-  const pending = inspectCampaignWorkspace(f.hub, runner, "w", [1, 2, 3], caller.signal, 60_000);
-  const other = inspectCampaignWorkspace(f.hub, runner, "w", [4], new AbortController().signal, 60_000);
+  const pending = inspectCampaignWorkspace(f.hub, runner, "w", [1, 2, 3], caller.signal, 60_000, "/fixture/repository");
+  const other = inspectCampaignWorkspace(f.hub, runner, "w", [4], new AbortController().signal, 60_000, "/fixture/repository");
   const [mine, theirs] = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<{ requestId: string }>;
   caller.abort();
   assert.equal(await pending, undefined);
@@ -810,7 +865,7 @@ test("a cancelled caller stops only its own inspection, and older runners report
     assert.equal(legacy.sent.filter((message) => message.type === "campaign_launch_inspect_cancel").length, 0,
       "a version-1 runner is never sent a message it cannot parse");
     const taskOnly = await preflight(server, { runnerId: "r", workspaceId: "w", task: "No issues" });
-    assert.match(taskOnly.preflight!.capabilities.find((item) => item.id === "repository_scope")!.reason, /select issue numbers or update the runner/);
+    assert.match(taskOnly.preflight!.capabilities.find((item) => item.id === "repository_scope")!.reason, /update the runner/);
   } finally { await server.close(); legacy.db.close(); }
 });
 
