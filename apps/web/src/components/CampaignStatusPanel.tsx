@@ -51,7 +51,7 @@ import {
 } from "../campaign-status.js";
 import { effortLabel, formatRecordedTimestamp, resolvedModelLabel, titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
-import { statusMeta } from "../status-meta.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
@@ -87,6 +87,15 @@ export function forgetCampaignStatusMemory(): void {
 }
 
 type AvailableCampaign = Extract<CampaignStatusAvailability, { kind: "available" }>;
+
+/** A work item's badge. An unfinished item handed to a person or an outside party reads Handed Off
+ * (#4070) whatever its derived state: no agent in the campaign is meant to act on it, and calling
+ * it Blocked would misstate whose turn it is. The derived state still filters and sorts it. */
+function workItemStatusMeta(item: Pick<CampaignWorkItemSummary, "primaryState" | "handoff">): StatusMeta {
+  const handedOff = (item.handoff?.responsibleActor === "human" || item.handoff?.responsibleActor === "external") &&
+    !["delivered", "cancelled", "removed"].includes(item.primaryState);
+  return handedOff ? { ...statusMeta("campaignWork", "planned"), label: "Handed Off" } : statusMeta("campaignWork", item.primaryState);
+}
 
 /** The request a work item waits on: the occurrence its blocker names, else its child session's. */
 export interface CampaignRequestTarget {
@@ -602,7 +611,7 @@ function CampaignWorkRow({
       <span className="campaign-work-row-line">
         <span className="campaign-work-row-title">{workItemTitle(item)}</span>
         {assignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
-        <StatusBadge meta={statusMeta("campaignWork", item.primaryState)} inline />
+        <StatusBadge meta={workItemStatusMeta(item)} inline />
       </span>
       <span className="campaign-work-row-line campaign-work-row-meta">
         <span>{workItemOriginLabel(item)}</span>
@@ -775,7 +784,7 @@ function CampaignWorkItemDetailView({
       {offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>}
       <div className="campaign-detail-head">
         <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{detail ? workItemTitle(detail) : "Work Item"}</h3>
-        {detail && <StatusBadge meta={statusMeta("campaignWork", detail.primaryState)} />}
+        {detail && <StatusBadge meta={workItemStatusMeta(detail)} />}
         {detail && isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
       </div>
     </>
@@ -925,7 +934,8 @@ function CampaignWorkItemDetailView({
                 <dd>{hold.reason}{hold.recoveryAction && <span className="campaign-status-meta">{hold.recoveryAction}</span>}</dd>
               </div>
             ))}
-            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor] : "None Recorded"}</dd></div>
+            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor]
+              : detail.handoff ? RESPONSIBLE_ACTOR_LABELS[detail.handoff.responsibleActor] : "None Recorded"}</dd></div>
             <div><dt>Next Action</dt><dd>{detail.nextAction ?? "None Recorded"}</dd></div>
             {detail.handoff && (
               <div>

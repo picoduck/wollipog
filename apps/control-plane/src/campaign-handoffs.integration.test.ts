@@ -92,6 +92,11 @@ test("a campaign whose only unfinished work is handed to a person completes with
     assert.deepEqual(projection.handoffs?.items.map((item) => [item.workItemId, item.title, item.issue?.number,
       item.handoff.responsibleActor, item.handoff.reason, item.handoff.nextAction]), [[h.advisory, "File the Advisory", 4070,
       "human", "Private vulnerability reporting refused the agent's account.", "File the advisory from a maintainer account."]]);
+    // The counts a terminal campaign reports: everything else delivered, nothing outstanding.
+    assert.deepEqual(projection.work?.counts.byState, { planned: 1, queued: 0, running: 0, waiting: 0, blocked: 0,
+      delivered: 1, cancelled: 0, removed: 0 });
+    assert.deepEqual(projection.work?.obligations, { verification: 0, adjudication: 0, publication: 0, cleanup: 0 });
+    assert.deepEqual([projection.children.active, projection.children.blocked, projection.children.verified], [0, 0, 2]);
     // Terminal: no continuation, Campaign Elapsed ends, and recovery reads as resolved without a warning.
     assert.equal(h.db.campaignContinuationAdmission("root").state, "lifecycle_held");
     assert.notEqual(projection.work?.elapsed.endedAt, null);
@@ -135,6 +140,37 @@ test("new unhanded work, or an agent taking the item back, reopens a campaign co
     const taken = h.db.campaignProjection("root")!;
     assert.notEqual(taken.status, "complete_with_handoffs");
     assert.equal(taken.handoffs, undefined);
+  } finally { h.db.close(); }
+});
+
+test("queued, running, or unverified work beside a handoff keeps the campaign out of the terminal state", () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+
+    // Queued, never dispatched.
+    const queued = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "follow-up:queued",
+      title: "Queued Follow-Up", origin: "follow_up", dispatchState: "queued" }] });
+    assert.ok(queued.ok, queued.error ?? "refused");
+    const queuedId = queued.data!.items[0]!.workItemId;
+    let projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.work?.counts.byState.queued, 1);
+    assert.equal(projection.status, "blocked");
+
+    // Assigned to a child that has finished its turn: the Orchestrator owes a verification.
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: queuedId, childSessionId: "other" }).ok);
+    projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.work?.obligations.verification, 1);
+    assert.notEqual(projection.status, "complete_with_handoffs");
+
+    // The child is working on it again.
+    h.db.updateSessionStatus("other", "running", Date.now());
+    projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.work?.counts.byState.running, 1);
+    assert.equal(projection.status, "active");
+    assert.equal(projection.handoffs?.total, 1, "the owner's item stays listed throughout");
   } finally { h.db.close(); }
 });
 
@@ -298,6 +334,86 @@ test("a delivery with an open attempt closes it, and another session still worki
     // A later assignment reopens the item: the recorded delivery no longer holds.
     assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "other" }).ok);
     assert.notEqual(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.primaryState, "delivered");
+  } finally { h.db.close(); }
+});
+
+test("an earlier report never delivers a later attempt the same child is still working on", async () => {
+  const h = reusedChild();
+  try {
+    // The child comes back to its first item and is working on it again.
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "child" }).ok);
+    h.db.updateSessionStatus("child", "running", Date.now());
+    const refused = await h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery,
+      report: { childSessionId: "child", reportEventSeq: h.firstReport } });
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", /still working on this item in a later attempt/u);
+    const item = h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!;
+    assert.equal(item.currentAttempt?.sessionId, "child", "the later attempt stays open");
+    assert.equal(item.deliveries?.length, 0);
+    assert.notEqual(item.primaryState, "delivered");
+  } finally { h.db.close(); }
+});
+
+test("everything a delivery rests on is checked again after the forge answers", async () => {
+  const h = reusedChild();
+  try {
+    const refs = [{ repository: "picoduck/wollipog", number: 4088 }];
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, stage: { stage: "merged", pullRequests: refs } }).ok);
+    let answer: (results: ForgeReadResult[]) => void = () => {};
+    h.svc.campaignForgeReadNow = (_campaignId, asked) => new Promise((resolve) => {
+      answer = (results) => resolve(results.length ? results : asked.map((ref) => ({ ref, observation: merged() })));
+    });
+    const pending = h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery, pullRequests: refs });
+    await new Promise((resolve) => setImmediate(resolve));
+    // While the forge is being read, the item goes back to a child that starts working on it.
+    assert.ok(h.svc.assignCampaignWorkItem("root", { workItemId: h.delivery, childSessionId: "other" }).ok);
+    h.db.updateSessionStatus("other", "running", Date.now());
+    answer([]);
+    const result = await pending;
+    assert.equal(result.status, 409);
+    assert.match(result.error ?? "", /still working on this item in a later attempt/u);
+    const item = h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!;
+    assert.equal(item.currentAttempt?.sessionId, "other", "the new attempt is not closed");
+    assert.equal(item.deliveries?.length, 0);
+
+    // The same for a stage that stops naming the pull request meanwhile.
+    h.db.updateSessionStatus("other", "idle", Date.now());
+    const again = h.svc.recordCampaignWorkItemDelivery("root", { workItemId: h.delivery, pullRequests: refs });
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.delivery, stage: { stage: "merged",
+      pullRequests: [{ repository: "picoduck/wollipog", number: 4099 }] } }).ok);
+    answer([]);
+    assert.match((await again).error ?? "", /not named by the work item's reported stage/u);
+    assert.equal(h.db.campaignWorkLedger.detail("root", h.delivery, Date.now())!.deliveries?.length, 0);
+  } finally { h.db.close(); }
+});
+
+test("withdrawing the last handoff, or handing the item to an agent, reopens rather than verifying the campaign", () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    // The original advisory item is out of scope here: only an unfinished follow-up is left.
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.advisory,
+      commitment: { state: "scope_removed", reason: "Covered by the follow-up." } }).ok);
+    const added = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "follow-up:advisory",
+      title: "File the Advisory", origin: "follow_up" }] });
+    assert.ok(added.ok, added.error ?? "refused");
+    const followUp = added.data!.items[0]!.workItemId;
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked", "an unhanded follow-up is agent work under Full Control");
+    assert.ok(handOff(h, followUp, "human").ok);
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    assert.notEqual(h.db.campaignProjection("root")!.work?.elapsed.endedAt, null);
+
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: followUp, handoff: null }).ok);
+    let projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "blocked");
+    assert.equal(projection.work?.elapsed.endedAt, null, "Campaign Elapsed resumes");
+    for (const actor of ["child", "orchestrator"] as const) {
+      assert.ok(handOff(h, followUp, actor).ok);
+      projection = h.db.campaignProjection("root")!;
+      assert.equal(projection.status, "blocked", `a handoff to ${actor} is agent work`);
+      assert.equal(projection.work?.elapsed.endedAt, null);
+    }
   } finally { h.db.close(); }
 });
 

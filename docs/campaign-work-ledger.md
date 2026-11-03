@@ -107,7 +107,10 @@ itself and inspects no worktree:
   an ordinary `delivered` work-item verification of that attempt, so issue-closure proof reads it as
   before.
 
-Either or both may be given, and everything given is checked. The record keeps the pull requests'
+Either or both may be given, and everything given is checked. A later attempt on the item whose
+session is still working refuses the delivery, even when it is the same child's. Every check runs
+again after the forge answers, in the same turn as the write, so a change while the forge was being
+read cannot be recorded over. The record keeps the pull requests'
 merge commits and base branch, the report's child, attempt and sequence, a note, the recording
 Orchestrator, and the time. Recording closes the item's open attempt: as `delivered` when it is the
 report's attempt, else as `superseded`. The record holds while no attempt is opened on the item after
@@ -118,7 +121,7 @@ it. It never closes an issue, merges, publishes, verifies or archives a child.
 `update_campaign_work_item {handoff: {responsibleActor, reason, nextAction}}` records that the agent
 work on an item is done and who acts next; `null` withdraws it, and assigning the item again deletes
 it. An unfinished committed item handed to `human` or `external` no longer holds the campaign open
-(see Campaign Completion). A handoff to `orchestrator` or `child` changes nothing about completion.
+(see Campaign Completion). A handoff to `orchestrator` or `child` still counts as agent work.
 
 ### Reported Stage
 
@@ -185,7 +188,10 @@ verified (and, under Stop and Archive, archived and cleaned up) and nothing is p
 
 1. Original scoped work with eligible recovery keeps the campaign going; without eligible recovery
    it is **blocked**, as before. Items handed to `human` or `external` are left out of this check.
-2. With no such handoff the campaign is **Verified Complete**, exactly as before.
+2. With no such handoff the campaign is **Verified Complete**, except that under Full Control any
+   unfinished committed item an agent still owns (an unhanded follow-up, or one whose handoff was
+   withdrawn or given to an agent) leaves it **blocked**. A Custom campaign reads its children alone,
+   as before.
 3. With one, it is **Complete with Handoffs** (`complete_with_handoffs`) only while every unfinished
    committed item is handed to `human` or `external`; any other unfinished committed item, handed to
    `orchestrator` or `child` or not handed at all, leaves it **blocked**.

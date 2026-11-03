@@ -996,10 +996,13 @@ test("a campaign complete with handoffs lists the owner's items, opens one, and 
     assert.match(text, /File the advisory from a maintainer account\./u);
     assert.doesNotMatch(text, /Authorized Recovery Unavailable|Recovery Blocked/u, "a finished campaign raises no recovery warning");
     assert.match(text, /Recovery Resolved/u);
+    assert.doesNotMatch(text, /stays blocked/u, "a resolved record does not describe blocked work");
+    assert.match(panel.container.querySelector(".campaign-work-row")?.textContent ?? "", /Handed Off/u);
     const open = panel.container.querySelector<HTMLButtonElement>("button[aria-label='Open Details for File the Advisory']");
     assert.ok(open);
     await click(open);
     assert.match(panel.container.textContent ?? "", /Handed to You: Private vulnerability reporting/u);
+    assert.match(panel.container.querySelector(".campaign-detail-head")?.textContent ?? "", /Handed Off/u);
   } finally {
     await panel.dispose();
   }

@@ -20912,10 +20912,12 @@ export class ControlPlaneDb {
   /**
    * The one place a campaign's end state is decided, once every child is verified and cleaned up and
    * no request is pending. Recovery that is ready keeps it going (or blocked without admission), and
-   * original scoped work with no eligible recovery holds it blocked, as before. Then the ledger
-   * decides (#4070): with no handoff it is Verified Complete; with handoffs to `human` or `external`
-   * it is Complete with Handoffs only while no unfinished committed item is left to an agent, and
-   * blocked otherwise. Reads rows only, never a SessionView.
+   * original scoped work with no eligible recovery holds it blocked, as before: that check alone
+   * judges in-scope original items, a fresh merged forge fact included. Then the ledger decides
+   * (#4070) for the rest of the unfinished committed work an agent still owns. Under Full Control
+   * any of it is blocked; a Custom campaign without handoffs reads its children alone, as before.
+   * With handoffs to `human` or `external` the campaign is Complete with Handoffs only while none
+   * of it is left, and blocked otherwise. Reads rows only, never a SessionView.
    */
   private campaignTerminalStatus(campaignId: string): OrchestratorCampaignStatus {
     const completion = this.campaignRecoveryCompletion(campaignId);
@@ -20924,11 +20926,19 @@ export class ControlPlaneDb {
     }
     if (completion.state === "recovery_held") return "blocked";
     const facts = this.campaignWorkLedger.completionFacts(campaignId);
-    if (!facts.handoffs.length) return "verified_complete";
+    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as { orchestrator_policy: string | null } | undefined;
+    const policy = orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null);
+    const fullControl = policy?.control?.mode === "full_control";
+    const scope = fullControl ? policy?.issueScope : undefined;
+    // The same in-scope test `campaignRecoveryCompletion` applies, so no item is judged twice.
+    const agentWork = facts.agentUnfinished.filter((item) => !(scope && item.origin === "original" && item.issue &&
+      item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
+      policy?.issueNumbers?.includes(item.issue.number)));
+    if (!facts.handoffs.length) return fullControl && agentWork.length > 0 ? "blocked" : "verified_complete";
     // Only a request or decision the root itself still has pending is left here (the children are
     // done), and the counts above already routed those an Orchestrator owns: a person's turn.
     if (completion.state === "children_unfinished") return "waiting_human";
-    return facts.agentUnfinished === 0 ? "complete_with_handoffs" : "blocked";
+    return agentWork.length === 0 ? "complete_with_handoffs" : "blocked";
   }
 
   /** The campaign status alone, for a session summary: identical to `campaignProjection().status`

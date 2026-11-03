@@ -25,7 +25,7 @@ import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
-import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
+import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
@@ -8929,31 +8929,74 @@ export class SessionsService {
     if (request.note !== undefined && (!boundedDecisionString(request.note, CAMPAIGN_WORK_LEDGER_LIMITS.textLength) || !request.note.trim())) {
       return fail(`note must be at most ${CAMPAIGN_WORK_LEDGER_LIMITS.textLength} characters`, 400);
     }
-    const item = this.db.campaignWorkLedger.detail(root.id, request.workItemId, Date.now());
-    if (!item) return fail("work item not found in this campaign", 404);
-
-    let reportIdentity: ReturnType<ControlPlaneDb["campaignReportIdentity"]> | null = null;
+    if (!this.db.campaignWorkLedger.detail(root.id, request.workItemId, Date.now())) return fail("work item not found in this campaign", 404);
     if (report) {
       const child = this.db.getSession(report.childSessionId);
       if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
         return fail("campaign child not found", 404);
       }
       await this.hydrateHistory(child.id);
-      reportIdentity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
-      if (reportIdentity.digest === null) {
+      if (this.db.campaignReportIdentity(child.id, report.reportEventSeq).digest === null) {
         await this.hydrateHistory(child.id, { force: true });
-        reportIdentity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
       }
+    }
+    let forge: ForgeReadResult[] | null = null;
+    if (refs.length) {
+      // Refuse what the evidence check would refuse anyway before asking the forge.
+      const early = this.campaignDeliveryEvidence(root, callerSessionId, request, null, canAccess);
+      if (!early.ok) return failAs(early);
+      if (!this.campaignForgeReadNow) return fail("forge reads are unavailable on this control plane", 503);
+      forge = await this.campaignForgeReadNow(root.id, refs).catch(() => null);
+      if (!forge) return fail("the campaign's runner could not read the forge; retry once it is online", 409);
+    }
+    // Nothing is awaited from here on: every check reads the ledger and sessions as they are now,
+    // and the write follows in the same turn, so nothing can change between the two.
+    const evidence = this.campaignDeliveryEvidence(root, callerSessionId, request, forge, canAccess);
+    if (!evidence.ok || !evidence.data) return failAs(evidence);
+    const now = Date.now();
+    const written = this.ledgerWrite(scope.data, () =>
+      this.db.campaignWorkLedger.recordDelivery(root.id, callerSessionId, evidence.data!, now));
+    if (!written.ok || !written.data) return failAs(written);
+    return ok({
+      revision: written.data.revision,
+      delivery: this.db.campaignWorkLedger.delivery(root.id, written.data.deliveryId)!,
+      item: this.db.campaignWorkLedger.detail(root.id, written.data.itemId, now, canAccess)!,
+    });
+  }
+
+  /**
+   * Every check a recorded delivery needs, synchronously against the current ledger and sessions,
+   * so the caller can write in the same turn (#4070). `forge` is the forge's answer for the request's
+   * pull requests; null checks everything else, before the forge is asked. History must already be
+   * local for a report.
+   */
+  private campaignDeliveryEvidence(
+    root: SessionView,
+    callerSessionId: string,
+    request: RecordCampaignWorkItemDeliveryRequest,
+    forge: ForgeReadResult[] | null,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<CampaignDeliveryEvidence> {
+    const item = this.db.campaignWorkLedger.detail(root.id, request.workItemId, Date.now());
+    if (!item) return fail("work item not found in this campaign", 404);
+    const report = request.report;
+    let reportEvidence: CampaignDeliveryEvidence["report"] = null;
+    let reportAttemptId: string | null = null;
+    if (report) {
+      const child = this.db.getSession(report.childSessionId);
+      if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
+        return fail("campaign child not found", 404);
+      }
+      const identity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
       // Only a top-level report has a digest.
-      if (reportIdentity.digest === null) return fail("reportEventSeq is not a completed top-level agent response", 409);
+      if (identity.digest === null) return fail("reportEventSeq is not a completed top-level agent response", 409);
       const attempt = this.db.campaignWorkLedger.reportAttempt(root.id, item.id,
-        { childSessionId: child.id, seq: reportIdentity.seq, eventEpoch: reportIdentity.eventEpoch });
+        { childSessionId: child.id, seq: identity.seq, eventEpoch: identity.eventEpoch });
       if (!attempt.ok) return fail(attempt.error, attempt.status);
       if (attempt.data.open) {
         // While the attempt is open, only a finished turn's latest report is final (the verify_campaign_child rule).
-        const current = this.db.getSession(child.id)!;
-        if (current.status !== "idle" && current.status !== "completed" &&
-            !(current.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
+        if (child.status !== "idle" && child.status !== "completed" &&
+            !(child.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
           return fail("the child is still working on this item; record its report once its turn has finished", 409);
         }
         if (!this.db.hasCompletedAgentReportAt(child.id, report.reportEventSeq)) {
@@ -8964,14 +9007,22 @@ export class SessionsService {
         // A closed attempt's report is the last one the child gave before that attempt closed.
         return fail("reportEventSeq is not the child's last report before its attempt on this work item closed", 409);
       }
+      reportAttemptId = attempt.data.attempt.id;
+      reportEvidence = { childSessionId: child.id, ...identity };
     }
-    const open = item.currentAttempt?.sessionId && item.currentAttempt.sessionId !== report?.childSessionId
-      ? this.db.getSession(item.currentAttempt.sessionId) : null;
-    if (open && !isTerminal(open.status) && open.status !== "idle") {
-      return fail(`session ${open.id} is still working on this item; stop or reassign it before recording delivery`, 409);
+    // A later attempt that is still working reopened the item: earlier evidence must not close it,
+    // even when the same child is the one working on it again.
+    const open = item.currentAttempt;
+    if (open && open.id !== reportAttemptId) {
+      const working = open.sessionId ? this.db.getSession(open.sessionId) : null;
+      if (working && !isTerminal(working.status) && working.status !== "idle") {
+        return fail(`session ${working.id} is still working on this item in a later attempt; ` +
+          "stop or reassign it before recording delivery", 409);
+      }
     }
 
-    const pullRequests: Array<{ repository: string; number: number; mergeCommitSha: string; baseRef: string }> = [];
+    const refs = request.pullRequests ?? [];
+    const pullRequests: CampaignDeliveryEvidence["pullRequests"] = [];
     if (refs.length) {
       const repository = root.orchestratorPolicy?.issueScope?.repository ?? item.issue?.repository;
       if (!repository) {
@@ -8992,12 +9043,8 @@ export class SessionsService {
           return fail(`pull request ${named(ref)} is not named by the work item's reported stage; ` +
             "report it with update_campaign_work_item first", 409);
         }
-      }
-      if (!this.campaignForgeReadNow) return fail("forge reads are unavailable on this control plane", 503);
-      const results = await this.campaignForgeReadNow(root.id, refs).catch(() => null);
-      if (!results) return fail("the campaign's runner could not read the forge; retry once it is online", 409);
-      for (const ref of refs) {
-        const result = results.find((candidate) => same(candidate.ref, ref));
+        if (!forge) continue;
+        const result = forge.find((candidate) => same(candidate.ref, ref));
         const observed = result?.observation;
         if (!observed || observed.forge === "gitlab") {
           return fail(`pull request ${named(ref)} could not be read from the forge` +
@@ -9016,20 +9063,7 @@ export class SessionsService {
         pullRequests.push({ repository: ref.repository, number: ref.number, mergeCommitSha: observed.mergeCommitSha, baseRef: observed.baseRef });
       }
     }
-
-    const now = Date.now();
-    const written = this.ledgerWrite(scope.data, () => this.db.campaignWorkLedger.recordDelivery(root.id, callerSessionId, {
-      workItemId: item.id,
-      pullRequests,
-      report: report && reportIdentity ? { childSessionId: report.childSessionId, ...reportIdentity } : null,
-      note: request.note?.trim() ?? null,
-    }, now));
-    if (!written.ok || !written.data) return failAs(written);
-    return ok({
-      revision: written.data.revision,
-      delivery: this.db.campaignWorkLedger.delivery(root.id, written.data.deliveryId)!,
-      item: this.db.campaignWorkLedger.detail(root.id, item.id, now, canAccess)!,
-    });
+    return ok({ workItemId: item.id, pullRequests, report: reportEvidence, note: request.note?.trim() ?? null });
   }
 
   assignCampaignWorkItem(

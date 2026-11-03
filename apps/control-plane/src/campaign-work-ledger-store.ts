@@ -425,7 +425,7 @@ interface LedgerSummaryPart {
   /** Unfinished committed items handed to `human` or `external`, oldest handoff first (#4070). */
   handoffs: OrchestratorCampaignHandoff[];
   /** Unfinished committed items without such a handoff: work an agent still owns. */
-  agentUnfinished: number;
+  agentUnfinished: Array<{ id: string; origin: CampaignWorkItemOrigin; issue: CampaignIssueRef | null }>;
 }
 
 /** Campaigns whose summary part stays cached. A miss only costs one recomputation. */
@@ -1557,7 +1557,7 @@ export class CampaignWorkLedgerStore {
 
   /** What campaign completion reads from the ledger (#4070): the handed-off items and how many
    * unfinished committed items an agent still owns. Shares the summary's cache. */
-  completionFacts(campaignId: string): { handoffs: OrchestratorCampaignHandoff[]; agentUnfinished: number } {
+  completionFacts(campaignId: string): Pick<LedgerSummaryPart, "handoffs" | "agentUnfinished"> {
     const part = this.summaryPart(campaignId);
     return { handoffs: part.handoffs, agentUnfinished: part.agentUnfinished };
   }
@@ -2085,7 +2085,7 @@ export class CampaignWorkLedgerStore {
         verification: 0,
         publication: 0,
         handoffs: [],
-        agentUnfinished: 0,
+        agentUnfinished: [],
       };
     }
     const open = this.stmt(
@@ -2105,7 +2105,7 @@ export class CampaignWorkLedgerStore {
     const byState = Object.fromEntries(CAMPAIGN_WORK_ITEM_PRIMARY_STATES.map((state) => [state, 0])) as
       Record<CampaignWorkItemPrimaryState, number>;
     let committed = 0, delivered = 0, original = 0, followUp = 0, cancelled = 0, removed = 0, verification = 0;
-    let agentUnfinished = 0;
+    const agentUnfinished: LedgerSummaryPart["agentUnfinished"] = [];
     const handoffs: OrchestratorCampaignHandoff[] = [];
     for (const item of snapshot.items) {
       const derived = snapshot.derived.get(item.id)!;
@@ -2123,7 +2123,7 @@ export class CampaignWorkLedgerStore {
             handoffs.push({ workItemId: item.id, key: item.item_key, title: item.title,
               issue: issueOf(item.issue_repository, item.issue_number), primaryState: derived.state, handoff: handoffView(handoff) });
           } else {
-            agentUnfinished += 1;
+            agentUnfinished.push({ id: item.id, origin: item.origin, issue: issueOf(item.issue_repository, item.issue_number) });
           }
         }
       }
