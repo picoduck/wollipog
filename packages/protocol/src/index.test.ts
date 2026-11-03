@@ -59,6 +59,7 @@ import {
   orchestratorExecutionPolicyRequirement,
   orchestratorIntegrationIsolationRequirement,
   runnerSupportsProtocol,
+  campaignStatusTerminal,
   BOARD_COLUMNS,
   archiveRequiresStop,
   scopeAudienceContained,
@@ -118,7 +119,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 272);
+  assert.equal(PROTOCOL_VERSION, 275);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -356,8 +357,13 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 272", () => {
-  assert.equal(PROTOCOL_VERSION, 272);
+test("PROTOCOL_VERSION is 275", () => {
+  assert.equal(PROTOCOL_VERSION, 275);
+  assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
+  assert.equal(runnerSupportsProtocol(275, "campaignHandoffs"), true);
+  assert.equal(campaignStatusTerminal("verified_complete"), true);
+  assert.equal(campaignStatusTerminal("complete_with_handoffs"), true);
+  for (const status of ["waiting_human", "active", "blocked", null, undefined] as const) assert.equal(campaignStatusTerminal(status), false);
   assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);

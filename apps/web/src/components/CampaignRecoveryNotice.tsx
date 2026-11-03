@@ -23,9 +23,11 @@ export function CampaignRecoveryNotice({ record }: { record: CampaignRecoveryRec
   const human = record.state === "waiting_human";
   const blocked = record.state === "blocked";
   const declined = record.reason === "request_declined";
+  // A finished campaign reads every record as resolved (#4070): nothing is left to recover.
+  const resolved = record.state === "resolved";
   return (
     <Notice tone={human || blocked ? "warning" : "neutral"}
-      title={human ? "Human Input Required" : declined ? "Request Declined" : blocked ? "Recovery Blocked" : "Authorized Recovery"}
+      title={resolved ? "Recovery Resolved" : human ? "Human Input Required" : declined ? "Request Declined" : blocked ? "Recovery Blocked" : "Authorized Recovery"}
       details={(
         <dl className="facts">
           <div><dt>Action</dt><dd>{actions[record.action]}</dd></div>
@@ -37,12 +39,14 @@ export function CampaignRecoveryNotice({ record }: { record: CampaignRecoveryRec
           <div><dt>Recovery Attempts</dt><dd>{record.attempts} of {record.maxAttempts}</dd></div>
           <div><dt>Attempted Recovery</dt><dd>{record.attemptedRecovery.length
             ? record.attemptedRecovery.map(action => actions[action]).join(", ")
-            : declined ? "None. The request stays declined." : "No authorized recovery attempt is available yet."}</dd></div>
-          <div><dt>Required Input</dt><dd>{inputs[record.requiredInput]}</dd></div>
+            : resolved ? "None needed." : declined ? "None. The request stays declined." : "No authorized recovery attempt is available yet."}</dd></div>
+          <div><dt>Required Input</dt><dd>{inputs[resolved ? "none" : record.requiredInput]}</dd></div>
         </dl>
       )}
     >
-      {record.explanation}
+      {resolved
+        ? "The campaign has finished, so this record needs no further recovery. Any handed-off work is listed under Handed Off."
+        : record.explanation}
     </Notice>
   );
 }

@@ -51,7 +51,7 @@ import {
 } from "../campaign-status.js";
 import { effortLabel, formatRecordedTimestamp, resolvedModelLabel, titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
-import { statusMeta } from "../status-meta.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
@@ -87,6 +87,15 @@ export function forgetCampaignStatusMemory(): void {
 }
 
 type AvailableCampaign = Extract<CampaignStatusAvailability, { kind: "available" }>;
+
+/** A work item's badge. An unfinished item handed to a person or an outside party reads Handed Off
+ * (#4070) whatever its derived state: no agent in the campaign is meant to act on it, and calling
+ * it Blocked would misstate whose turn it is. The derived state still filters and sorts it. */
+function workItemStatusMeta(item: Pick<CampaignWorkItemSummary, "primaryState" | "handoff">): StatusMeta {
+  const handedOff = (item.handoff?.responsibleActor === "human" || item.handoff?.responsibleActor === "external") &&
+    !["delivered", "cancelled", "removed"].includes(item.primaryState);
+  return handedOff ? { ...statusMeta("campaignWork", "planned"), label: "Handed Off" } : statusMeta("campaignWork", item.primaryState);
+}
 
 /** The request a work item waits on: the occurrence its blocker names, else its child session's. */
 export interface CampaignRequestTarget {
@@ -239,6 +248,14 @@ function AvailableCampaignStatus({
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
               <CampaignSummarySection data={data} now={now} />
+              {data.summary.campaign?.handoffs && (
+                <CampaignHandoffs
+                  handoffs={data.summary.campaign.handoffs}
+                  now={now}
+                  onOpen={(workItemId) => setMemory({ selectedItemId: workItemId, focusItemId: workItemId,
+                    scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
+                />
+              )}
               {data.summary.campaign?.recovery?.automation?.reason && (
                 <Notice tone="warning" title="Authorized Recovery Unavailable">
                   {data.summary.campaign.recovery.automation.reason}
@@ -275,6 +292,59 @@ function AvailableCampaignStatus({
         </>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Handed Off (#4070)
+ * ---------------------------------------------------------------------------------------------- */
+
+/** The owner's to-do list: unfinished items the campaign handed to a person or an outside party.
+ * The server lists them whenever any exist, so none is dropped once the agents are done. */
+function CampaignHandoffs({ handoffs, now, onOpen }: {
+  handoffs: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["handoffs"]>;
+  now: number;
+  onOpen: (workItemId: string) => void;
+}) {
+  const headingId = useId();
+  const hidden = handoffs.total - handoffs.items.length;
+  return (
+    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
+      <h3 id={headingId} className="section-title">Handed Off</h3>
+      <p className="section-note">
+        The agent work on {handoffs.total === 1 ? "this item is" : "these items is"} done. What happens next is up to the
+        person or outside party named.
+      </p>
+      <ul className="campaign-detail-list">
+        {handoffs.items.map((item) => (
+          <li key={item.workItemId}>
+            <dl className="facts">
+              <div>
+                <dt>Work Item</dt>
+                <dd>
+                  {workItemTitle(item)}
+                  {item.issue && item.title && <span className="campaign-status-meta">{issueRefLabel(item.issue)}</span>}
+                </dd>
+              </div>
+              <div><dt>Responsible</dt><dd>{RESPONSIBLE_ACTOR_LABELS[item.handoff.responsibleActor]}</dd></div>
+              <div><dt>Reason</dt><dd>{item.handoff.reason}</dd></div>
+              <div>
+                <dt>Next Action</dt>
+                <dd>
+                  {item.handoff.nextAction}
+                  <span className="campaign-status-meta">Handed off <RecordedTime at={item.handoff.recordedAt} now={now} /></span>
+                </dd>
+              </div>
+            </dl>
+            <button type="button" className="btn ghost sm" aria-label={`Open Details for ${workItemTitle(item)}`}
+              onClick={() => onOpen(item.workItemId)}>
+              Open Details
+            </button>
+          </li>
+        ))}
+      </ul>
+      {hidden > 0 && <p className="section-note">{hidden} more handed-off item{hidden === 1 ? " is" : "s are"} listed under Work Items.</p>}
+    </section>
   );
 }
 
@@ -542,7 +612,7 @@ function CampaignWorkRow({
       <span className="campaign-work-row-line">
         <span className="campaign-work-row-title">{workItemTitle(item)}</span>
         {assignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
-        <StatusBadge meta={statusMeta("campaignWork", item.primaryState)} inline />
+        <StatusBadge meta={workItemStatusMeta(item)} inline />
       </span>
       <span className="campaign-work-row-line campaign-work-row-meta">
         <span>{workItemOriginLabel(item)}</span>
@@ -715,7 +785,7 @@ function CampaignWorkItemDetailView({
       {offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>}
       <div className="campaign-detail-head">
         <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{detail ? workItemTitle(detail) : "Work Item"}</h3>
-        {detail && <StatusBadge meta={statusMeta("campaignWork", detail.primaryState)} />}
+        {detail && <StatusBadge meta={workItemStatusMeta(detail)} />}
         {detail && isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
       </div>
     </>
@@ -750,6 +820,8 @@ function CampaignWorkItemDetailView({
   const latestVerification = latestAttempt
     ? detail.verifications.filter((verification) => verification.attemptId === latestAttempt.id).at(-1) ?? null
     : null;
+  // A recorded delivery (#4070) shows while it is what the item's delivered state rests on.
+  const recordedDelivery = detail.primaryState === "delivered" ? detail.deliveries?.at(-1) ?? null : null;
   const held = currentSessionId ? heldChildren.find((child) => child.sessionId === currentSessionId) : undefined;
   const pullRequests = [
     ...(detail.observed.pullRequests?.map((entry) => entry.ref) ?? []),
@@ -863,8 +935,19 @@ function CampaignWorkItemDetailView({
                 <dd>{hold.reason}{hold.recoveryAction && <span className="campaign-status-meta">{hold.recoveryAction}</span>}</dd>
               </div>
             ))}
-            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor] : "None Recorded"}</dd></div>
+            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor]
+              : detail.handoff ? RESPONSIBLE_ACTOR_LABELS[detail.handoff.responsibleActor] : "None Recorded"}</dd></div>
             <div><dt>Next Action</dt><dd>{detail.nextAction ?? "None Recorded"}</dd></div>
+            {detail.handoff && (
+              <div>
+                <dt>Handoff</dt>
+                <dd>
+                  Handed to {RESPONSIBLE_ACTOR_LABELS[detail.handoff.responsibleActor]}: {detail.handoff.reason}
+                  <span className="campaign-status-note">Next action: {detail.handoff.nextAction}</span>
+                  <span className="campaign-status-meta">Recorded <RecordedTime at={detail.handoff.recordedAt} now={now} /></span>
+                </dd>
+              </div>
+            )}
           </DetailSection>
           {/* A request is answered in Requests when this session can reach it; a hold has nothing to
               answer, so a held child, like any request this session cannot see, is opened instead. */}
@@ -920,6 +1003,21 @@ function CampaignWorkItemDetailView({
                 </>
               ) : "Not Verified"}</dd>
             </div>
+            {recordedDelivery && (
+              <div>
+                <dt>Recorded Delivery</dt>
+                <dd>
+                  {[
+                    ...recordedDelivery.pullRequests.map((pr) => `${pullRequestShortLabel(pr)} merged`),
+                    ...(recordedDelivery.report ? [`report ${recordedDelivery.report.seq}`] : []),
+                  ].join(", ")}
+                  <span className="campaign-status-meta">
+                    Checked by Wollipog when the Orchestrator recorded it <RecordedTime at={recordedDelivery.recordedAt} now={now} />
+                  </span>
+                  {recordedDelivery.note && <span className="campaign-status-note">{recordedDelivery.note}</span>}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>Cleanup</dt>
               <dd><ObservedValue fact={detail.observed.cleanup} now={now} render={cleanupText} /></dd>

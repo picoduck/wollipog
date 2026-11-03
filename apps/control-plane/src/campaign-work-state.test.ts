@@ -40,6 +40,13 @@ test("delivered requires a delivered verification on the latest attempt", () => 
     "planned");
 });
 
+test("a recorded delivery that no later attempt superseded is delivered (#4070)", () => {
+  for (const latestAttempt of [null, { open: false, delivered: false }]) {
+    assert.equal(deriveCampaignWorkItemState(item({ latestAttempt, recordedDelivery: true, hasBlocker: true }), []).state,
+      "delivered");
+  }
+});
+
 test("an idle or completed child awaits verification rather than counting as delivered", () => {
   for (const status of ["idle", "completed"] as const) {
     assert.deepEqual(deriveCampaignWorkItemState(item(open({ status })), []),
@@ -120,16 +127,17 @@ const recordArbitrary = fc.record({
   openAttemptSession: fc.option(fc.record({
     status: sessionStatus, archived: fc.boolean(), held: fc.boolean(), pendingRequests: fc.nat(3),
   }), { nil: null }),
+  recordedDelivery: fc.boolean(),
 });
 const dependencyStates = fc.array(fc.constantFrom(
   "planned", "queued", "running", "waiting", "blocked", "delivered", "cancelled", "removed", "unresolvable",
 ) as fc.Arbitrary<never>, { maxLength: 4 });
 
-test("property: only a delivered verification on a committed item yields delivered", () => {
+test("property: only a delivered verification or a recorded delivery on a committed item yields delivered", () => {
   fc.assert(fc.property(recordArbitrary, dependencyStates, (record, dependencies) => {
     const { state } = deriveCampaignWorkItemState(record, dependencies);
     assert.equal(state === "delivered",
-      record.commitment === "committed" && record.latestAttempt?.delivered === true);
+      record.commitment === "committed" && (record.latestAttempt?.delivered === true || record.recordedDelivery));
     // Idleness, issue closure, reported stages, and merge enqueueing are not inputs at all, so no
     // session observation can make an unverified item delivered.
     if (record.commitment === "cancelled") assert.equal(state, "cancelled");
@@ -140,7 +148,7 @@ test("property: only a delivered verification on a committed item yields deliver
 test("property: every committed, undelivered item is unfinished", () => {
   fc.assert(fc.property(recordArbitrary, dependencyStates, (record, dependencies) => {
     const { state } = deriveCampaignWorkItemState(record, dependencies);
-    if (record.commitment === "committed" && !record.latestAttempt?.delivered) {
+    if (record.commitment === "committed" && !record.latestAttempt?.delivered && !record.recordedDelivery) {
       assert.ok(["planned", "queued", "running", "waiting", "blocked"].includes(state), state);
     }
   }));

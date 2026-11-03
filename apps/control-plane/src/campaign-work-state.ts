@@ -36,6 +36,9 @@ export interface CampaignWorkItemStateRecord {
   /** Observation of the open attempt's session; null when that session was deleted. Ignored
    * unless the latest attempt is open. */
   openAttemptSession: CampaignAttemptSessionObservation | null;
+  /** A recorded delivery (#4070) exists and no attempt was opened on the item after it. Omitted
+   * means none. */
+  recordedDelivery?: boolean;
 }
 
 export interface CampaignWorkItemDerivedState {
@@ -57,7 +60,7 @@ export function deriveCampaignWorkItemState(
   if (record.commitment === "cancelled") return { state: "cancelled", causes: [] };
   if (record.commitment === "scope_removed") return { state: "removed", causes: [] };
   const attempt = record.latestAttempt;
-  if (attempt?.delivered) return { state: "delivered", causes: [] };
+  if (attempt?.delivered || record.recordedDelivery) return { state: "delivered", causes: [] };
   if (attempt?.open) {
     if (record.hasBlocker) return { state: "blocked", causes: ["recorded_blocker"] };
     const session = record.openAttemptSession;

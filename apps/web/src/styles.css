@@ -5497,6 +5497,7 @@ body.shell-dock-dragging * {
   grid-template-columns: minmax(0, 8.5rem) minmax(0, 1fr);
 }
 .campaign-status-summary,
+.campaign-status-handoffs,
 .campaign-work,
 .campaign-detail-section {
   display: grid;

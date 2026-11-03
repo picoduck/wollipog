@@ -171,6 +171,21 @@ test("the batch is bounded and the query inlines only validated values", async (
   assert.match(query, /r0: repository\(owner:"picoduck",name:"wollipog"\)/u);
   assert.match(query, /isRequired\(pullRequestNumber:7\)/u);
   assert.match(query, /mergeQueueEntry\{position state\}/u);
+  assert.match(query, /defaultBranchRef\{name\}/u);
+});
+
+test("an observation carries the repository's default branch when GitHub reports a usable one (#4070)", async () => {
+  const read = async (repository: Record<string, unknown>) => {
+    const outcome = await observeForgeStatus([REF], stub(answer({ r0: { ...repository, pullRequest: pr({ state: "MERGED", mergeCommit: { oid: MERGE } }) } })));
+    assert.ok(outcome.ok && outcome.results[0]!.ok);
+    return outcome.results[0]!.ok ? outcome.results[0]!.observation as CampaignForgePullRequestObservation : null;
+  };
+  assert.equal((await read({ defaultBranchRef: { name: "main" } }))?.defaultBranch, "main");
+  for (const repository of [{}, { defaultBranchRef: null }, { defaultBranchRef: { name: "" } }, { defaultBranchRef: { name: 7 } }]) {
+    const observation = await read(repository);
+    assert.ok(observation, "a missing default branch never fails the observation");
+    assert.equal("defaultBranch" in observation, false);
+  }
 });
 
 test("required checks read passing only when GitHub's merge state confirms none is still missing", async () => {

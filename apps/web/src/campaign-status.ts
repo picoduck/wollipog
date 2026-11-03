@@ -525,6 +525,7 @@ const CAMPAIGN_LIFECYCLE_LABELS: Record<OrchestratorCampaignProjection["status"]
   active: "Active",
   blocked: "Blocked",
   verified_complete: "Verified Complete",
+  complete_with_handoffs: "Complete with Handoffs",
 };
 
 export function campaignLifecycleLabel(status: string): string {

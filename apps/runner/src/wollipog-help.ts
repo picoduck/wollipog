@@ -150,7 +150,10 @@ export function campaignHelp(): string {
 
 Commands:
   plan --input '<json>'                          Upsert work items by key: {items[], planComplete}
-  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, or endAttempt
+  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, handoff, or endAttempt
+  deliver <work-item-id> --input '<json>'        Record delivery from checked evidence (protocol v275+):
+                                                 {pullRequests?, report?: {childSessionId,
+                                                 reportEventSeq}, note?}
   assign <work-item-id> <child-session-id>       Record that a descendant now works on the item
   adjudicate <recommendation-id> --input '<json>'
                                                  Record {disposition, reason, resultingWorkItemKey?,
@@ -163,10 +166,12 @@ Commands:
 Only an injected Orchestrator session with control plane protocol v196+ may use these. Every
 record lands in the root campaign's ledger. Records grant no authority: they never dispatch,
 publish, merge, or resolve a decision. Record delivery with verify_campaign_child and its
-workItem; a reported merged stage does not mark an item delivered.
+workItem, or with deliver when merged pull requests or an earlier exact report prove it; a
+reported merged stage does not mark an item delivered. Hand an item whose next step belongs to a
+person to them with update-item's handoff.
 
 Tools: record_campaign_plan, update_campaign_work_item, assign_campaign_work_item,
-adjudicate_campaign_recommendation, get_campaign_work_items.
+record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items.
 `;
 }
 
