@@ -490,8 +490,28 @@ test("a parent row carries the chevron and family chip, and a child row its thre
       threeRow={false} threadDepth={1} threadLast
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
+    assert.doesNotMatch(container.querySelector(".inbox-row-shell")!.className, /thread-depth-2|thread-outer/);
     assertNoDomNode(container.querySelector(".inbox-thread-toggle"));
     assertNoDomNode(container.querySelector(".inbox-thread-family"));
+
+    // A review under a child (#4077): one step deeper, carrying the child's spine on to a later sibling.
+    const review = { ...child, id: "r1", title: "Review", parentSessionId: "c1", kind: "review" } as SessionView;
+    await act(async () => root.render(<InboxRow optionId="row" session={review} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={3} stalled={false} activityNow={0}
+      threeRow={false} threadDepth={2} threadLast threadOuterSpine
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-depth-2 thread-last thread-outer/);
+
+    // A child whose only descendant is its review names it as a review.
+    await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={2} stalled={false} activityNow={0}
+      threeRow={false} threadDepth={1}
+      threadChildren={JSON.stringify({ count: 1, reviews: 1, visibleCount: 1, waiting: 0, working: 0,
+        children: [{ id: "r1", title: "Review", state: "idle" }] })}
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "1 Review");
+    assert.equal(container.querySelector(".inbox-thread-family")?.getAttribute("aria-label"), "1 Review");
+    assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-label"), "Collapse Thread");
   } finally {
     await act(async () => root.unmount());
     container.remove();

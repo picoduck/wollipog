@@ -1366,7 +1366,10 @@ Rules
   Working**, or **Child Work Pending** without a pulse when no descendant is progressing. Human
   questions and approvals keep priority. Filtered children still contribute to status; an expand
   control appears only when child rows are available to show.
-  Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
+  Children indent under a 2px `--border-strong` spine with a tick into each row. A child's review or
+  child indents one more step under its own spine (#4077); anything deeper indents no further. A
+  spine ends at its last sibling, a child with descendants collapses like a top-level parent, and the
+  family chip names direct reviews as reviews ("2 Children · 1 Review"). A stalled parent or
   child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
   the leading edge is the selection bar.
 

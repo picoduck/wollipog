@@ -53,13 +53,16 @@ export interface InboxRowProps {
   activityNow: number;
   reminder?: SessionReminderView;
   /**
-   * The row's place in its thread (#896). `threadDepth` is 1 for a child rendered under its parent
-   * and 0 otherwise; `threadLast` marks the last visible child, where the spine ends.
+   * The row's place in its thread (#896). `threadDepth` is 1 for a child rendered under its parent,
+   * 2 for a review or grandchild under that child or anything deeper (#4077), and 0 otherwise;
+   * `threadLast` marks the last visible row on its spine, where the spine ends, and
+   * `threadOuterSpine` a depth-2 row that the depth-1 spine passes on its way to a later sibling.
    * `threadChildren` is the parent's rollup, JSON-encoded: a STRING, so that a parent row whose
    * children have not changed compares equal under the memo below, exactly like the primitives.
    */
   threadDepth?: number;
   threadLast?: boolean;
+  threadOuterSpine?: boolean;
   threadChildren?: string | null;
   threadCollapsed?: boolean;
   /** Whether archiving a running session stops it first, which decides the Archive button's label. */
@@ -136,6 +139,7 @@ function InboxRowInner({
   reminder,
   threadDepth = 0,
   threadLast = false,
+  threadOuterSpine = false,
   threadChildren = null,
   threadCollapsed = false,
   stopBeforeArchiveSupported = false,
@@ -315,7 +319,8 @@ function InboxRowInner({
       // opened row is not highlighted. The grid still knows which row is active.
       className={`inbox-row-shell${threeRow ? " stacked" : ""}${selected && !threeRow ? " selected" : ""}${
         unread ? " unread" : ""}${stalled ? " stalled" : ""}${children ? " thread-parent" : ""}${
-        threadDepth > 0 ? " thread-child" : ""}${threadLast ? " thread-last" : ""}`}
+        threadDepth > 0 ? " thread-child" : ""}${threadDepth > 1 ? " thread-depth-2" : ""}${
+        threadLast ? " thread-last" : ""}${threadOuterSpine ? " thread-outer" : ""}`}
       onContextMenu={(event) => {
         event.preventDefault();
         onSessionMenu(session.id, { x: event.clientX, y: event.clientY });
