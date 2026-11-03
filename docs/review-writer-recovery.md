@@ -47,8 +47,8 @@ session s_…
 ```
 
 Relocation comes first because it always works: the reviewer-unavailable reason a requester sees
-is cut to its first 450 characters when longer, and the runner log keeps the whole message with
-every grant.
+elides paths longer than 120 characters and is cut to its first 450 characters when longer than
+500, and the runner log keeps the whole message with full paths and every grant.
 
 Admission reads the configured grants again for every review. Recover with either route:
 

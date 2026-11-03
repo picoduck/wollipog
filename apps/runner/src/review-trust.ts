@@ -277,7 +277,22 @@ export function explainSessionWritableRefusal(error: unknown, grants: readonly S
   const remedy = withdrawable ? `${relocation}, or ${listed(recoveries)}` : relocation;
   const source = names.length ? `. Granted by ${listed(names)}` : "";
   // No final period: the control plane ends the sentence it embeds this reason in.
-  return new Error(`${error.message}. To use it, ${remedy}${source}`);
+  const explain = (path: string, root: string) =>
+    `${path} is inside a directory a session can write (${root}). To use it, ${remedy}${source}`;
+  return new SessionWritableRefusal(explain(error.path, error.root), explain(elided(error.path), elided(error.root)));
+}
+
+/** An explained refusal: the full message for the runner log, and a summary whose paths are
+ * bounded so the recovery survives the capability reason's length limit. */
+export class SessionWritableRefusal extends Error {
+  constructor(message: string, readonly summary: string) {
+    super(message);
+  }
+}
+
+/** A path of at most 120 characters, keeping its end. */
+function elided(path: string): string {
+  return path.length > 120 ? `…${path.slice(-119)}` : path;
 }
 
 /**

@@ -393,6 +393,17 @@ test("a bounded capability reason keeps a recovery however many grants contain t
   // Labels are bounded, and the runner log (the whole message) keeps every grant.
   for (const name of names) assert.ok(full.message.includes(`workspace "${name.slice(0, 63)}…"`), full.message);
   assert.ok(full.message.endsWith(` and sessions ${Array.from({ length: 12 }, (_, index) => `s_${"0".repeat(11)}${index}`).join(", ")}`));
+
+  // Long paths are elided in the reason, never in the logged message.
+  const longRoot = `/srv/${"a".repeat(400)}`;
+  const longGrants = configuredSessionWritableGrants({
+    workspaces: names.map((name, index) => ({ name, path: `/srv/project-${index}`, additionalDirectoryGrants: [longRoot] })),
+  });
+  const long = explainSessionWritableRefusal(new SessionWritableRootError(`${longRoot}/.local/bin`, longRoot), longGrants, relocation, []) as Error;
+  const longReason = reviewSessionDiscoveryReason(long);
+  assert.ok(longReason.length <= 500, longReason);
+  assert.match(longReason, new RegExp(`^…a{108}/\\.local/bin is inside a directory a session can write \\(…a{119}\\)\\. To use it, ${relocation}, or `, "u"));
+  assert.ok(long.message.startsWith(`${longRoot}/.local/bin is inside a directory a session can write (${longRoot}). To use it, `));
 });
 
 test("prepare checks out the exact pushed head privately and pins the patch in the prompt", async (t) => {

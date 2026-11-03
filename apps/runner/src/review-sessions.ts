@@ -37,7 +37,7 @@ import {
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
 } from "./review-snapshot.js";
 import {
-  discoverReviewTools, explainSessionWritableRefusal, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools,
+  discoverReviewTools, explainSessionWritableRefusal, reviewerInterpreter, SessionWritableRefusal, sessionWritableRoots, trustedPath, type ReviewTools,
   type CodexReviewerProtection, type SessionWritableGrant,
 } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
@@ -397,7 +397,9 @@ export interface ReviewLaunch {
 /** Capability reasons travel through agents_updated, whose control-plane validator caps each
  * at 500 characters. Keep the useful prefix; callers log the complete diagnostic locally. */
 export function reviewSessionDiscoveryReason(error: unknown): string {
-  const reason = (error instanceof Error ? error.message : String(error)) || "review-session discovery failed";
+  // An explained trust refusal reports its bounded summary; the runner log keeps the full message.
+  const reason = (error instanceof SessionWritableRefusal ? error.summary : error instanceof Error ? error.message : String(error)) ||
+    "review-session discovery failed";
   if (reason.length > 500 && reason.startsWith("Codex packages are unprotected")) {
     const ids = [...new Set([...reason.matchAll(/\bsession (s_[A-Za-z0-9_-]+)/gu)].map((match) => match[1]!))];
     if (ids.length) {
