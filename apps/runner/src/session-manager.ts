@@ -5622,7 +5622,7 @@ export class SessionManager {
 
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
    * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
-  async prepareDiscoveryProbe(agent: AgentDefinition, env: Record<string, string>): Promise<{ env?: Record<string, string>; settle(proofs: Promise<boolean>[]): Promise<void> }> {
+  async prepareDiscoveryProbe(agent: AgentDefinition, env: Record<string, string>, options: { useLaunchHome?: boolean } = {}): Promise<{ env?: Record<string, string>; settle(proofs: Promise<boolean>[]): Promise<void> }> {
     if (this.shuttingDown) throw new Error("provider-HOME ownership is unavailable");
     const context = agent.context ?? { kind: "native" as const };
     // WSL discovery already runs in its distro, outside the host credential HOME. Native lease
@@ -5635,8 +5635,8 @@ export class SessionManager {
     const explicitHome = Object.keys(env).some((key) => ["HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR"].includes(
       process.platform === "win32" ? key.toUpperCase() : key));
     const nativeProvider = ["claude-code", "codex", "codex-app-server", "pi"].includes(agent.driver ?? "acp");
-    const isolate = agent.source === "discovered" || (agent.source === "config" && nativeProvider && !explicitHome);
-    const probeEnv = isolate ? { ...env, ...isolatedDiscoveryEnvironment(this.stateDir) } : env;
+    const isolate = !options.useLaunchHome && (agent.source === "discovered" || (agent.source === "config" && nativeProvider && !explicitHome));
+    const probeEnv = isolate ? { ...env, ...isolatedDiscoveryEnvironment(this.stateDir, { ...this.runnerEnvironment, ...env }) } : env;
     const effectiveEnv = Object.fromEntries(Object.entries({ ...this.runnerEnvironment, ...probeEnv }).filter((entry): entry is [string, string] => entry[1] !== undefined));
     const reference = await this.providerHomeLeases.acquireReference({ driver: agent.driver ?? "acp", command: agent.command, context, env: effectiveEnv },
       { isCurrent: () => !this.shuttingDown });

@@ -456,13 +456,13 @@ test("a Codex replacement during discovery keeps the primary driver and rediscov
   }
 });
 
-test("a signed-out Codex retains installation availability and reports sign-in required separately", () => {
+test("a signed-out Codex is discovered but not ready, and signing in restores it", () => {
   const base = cfg({ id: "codex", name: "Codex", driver: "codex", source: "discovered" });
   const signedOut = codexAgentDefinitions({ ...base, authStatus: "unauthenticated" }, SUPPORTED_APP_SERVER, []);
   assert.deepEqual(signedOut.map((agent) => [agent.id, agent.available, agent.authStatus]), [
-    ["codex", true, "unauthenticated"],
+    ["codex", false, "unauthenticated"],
   ]);
-  // Neither missing nor unknown auth disables an installed harness for account setup.
+  // Only a confirmed missing login gates; unknown auth must not disable a working install.
   const unknown = codexAgentDefinitions({ ...base, authStatus: "unknown" }, SUPPORTED_APP_SERVER, []);
   assert.deepEqual(unknown.map((agent) => agent.available), [true]);
   const signedIn = codexAgentDefinitions({ ...base, authStatus: "authenticated" }, SUPPORTED_APP_SERVER, []);
@@ -491,9 +491,9 @@ test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing a
     discovered,
   )[0]!;
   assert.equal(disabled.available, false, "explicit config availability wins over the assertion");
-  // A key-less config row retains installation availability without claiming authentication.
+  // A key-less config row must not resurrect a gated discovery result.
   const plain = mergeAgents([cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server" })], discovered)[0]!;
-  assert.equal(plain.available, true);
+  assert.equal(plain.available, false);
   assert.equal(plain.authStatus, "unauthenticated");
 });
 

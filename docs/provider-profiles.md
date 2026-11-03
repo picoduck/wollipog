@@ -97,9 +97,14 @@ start; see [Managed Profiles](#managed-profiles).
 
 Native Claude Code, Codex and Pi installation discovery uses a private probe HOME beneath each
 runner's owner-namespaced data directory. Executable resolution still searches the OS account's
-installed binaries, while version, capability, authentication, update-help and model probes use
-the leased probe environment. Model-cache fallback reads that same HOME. Discovery never copies
-credentials into it or uses it to replace an account or a saved session binding.
+installed binaries. Version, compatibility and update-help probes use leased private state;
+authentication and models are inspected separately under the intended launch account's lease
+(or the legacy default HOME when no accounts are configured). A busy or ungranted launch HOME
+does not hide the installation: authentication stays unknown and no authenticated model catalog
+is invented. When the launch HOME can be inspected, existing sign-in state, Pi models and Claude
+user commands remain visible. Model-cache fallback reads its admitted HOME. npm release checks
+retain the operator's userconfig source while their writable state stays isolated. Discovery
+never copies credentials or replaces an account or saved session binding.
 
 An installed harness can report **Sign-In Required** while the Machine's SSH connection remains
 online. Use **Add Account** to complete supported sign-in into a persistent managed profile, then

@@ -20,9 +20,18 @@ test("upgrade readiness reports completed discovery and ownership refusals witho
     { id: "codex", name: "Codex", command: "codex", args: [], env: {}, available: true },
   ], providerAccounts: [{ id: "account-1", label: "Private Account", provider: "claude", authStatus: "authenticated" }] });
   assert.deepEqual(readiness, { connectedAt: 123, refreshed: true, agents: [
-    { id: "claude", available: false, ownershipBlocked: true }, { id: "codex", available: true, ownershipBlocked: false },
+    { id: "claude", available: false, installationAvailable: false, ownershipBlocked: true }, { id: "codex", available: true, installationAvailable: true, ownershipBlocked: false },
   ], accounts: [{ id: "account-1", authStatus: "authenticated" }] });
   assert.equal(runnerHarnessReadiness({ connectedAt: 124, agents: [] }).refreshed, false, "registration alone is not discovery readiness");
+});
+
+test("SSH readiness separates a supported installation from a busy or signed-out launch account", () => {
+  const readiness = runnerHarnessReadiness({ connectedAt: 1, agentsRefreshed: true, agents: [
+    { id: "codex", name: "Codex", command: "codex", args: [], env: {}, driver: "codex-app-server", available: false,
+      authStatus: "unknown", unavailableReason: "The launch account could not be inspected. Another runner is using it.",
+      codexAppServer: { status: "supported", appServerAvailable: true } },
+  ] });
+  assert.deepEqual(readiness.agents, [{ id: "codex", available: false, installationAvailable: true, ownershipBlocked: false }]);
 });
 
 function fixture(root: string, overrides: Partial<HostAdminRouteDeps> = {}): HostAdminRouteDeps {

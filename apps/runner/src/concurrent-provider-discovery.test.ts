@@ -14,7 +14,7 @@ import { ProviderLoginSupervisor } from "./provider-login.js";
 import type { RunnerProviderAccount } from "./config.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
 import { writeProviderProfileMarker } from "./provider-profile.js";
-import { providerAccountEnvironment } from "./provider-accounts.js";
+import { providerAccountEnvironment, providerForDriver } from "./provider-accounts.js";
 import type { SessionMeta } from "./session-store.js";
 
 // The discovery regression uses a deterministic ownership backend. The native journal and
@@ -62,6 +62,63 @@ function runner(root: string, owner: string, home: string, launches?: Record<str
   return manager;
 }
 
+test("a signed-in launch HOME keeps its auth and Pi models separate from empty installation probes", {
+  skip: process.platform === "win32", timeout: 60_000,
+}, async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-launch-home-discovery-"));
+  const home = join(root, "home");
+  mkdirSync(join(home, ".codex"), { recursive: true });
+  mkdirSync(join(home, ".pi", "agent"), { recursive: true });
+  mkdirSync(join(home, ".claude", "commands"), { recursive: true });
+  writeFileSync(join(home, ".codex", "auth.json"), "{}");
+  writeFileSync(join(home, ".pi", "agent", "auth.json"), "{}");
+  writeFileSync(join(home, ".claude", "commands", "review.md"), "fixture command");
+  writeFileSync(join(home, ".claude", ".credentials.json"), "{}");
+  const manager = runner(join(root, "runner"), "e", home);
+  const originalPath = process.env.PATH;
+  t.after(async () => {
+    process.env.PATH = originalPath;
+    manager.shutdownAll(); await manager.releaseProviderHomeLeasesAfterShutdown(true);
+    rmSync(root, { recursive: true, force: true });
+  });
+  const codex = join(root, "codex");
+  writeFileSync(codex, `#!${process.execPath}
+console.log(process.argv[2]==='--version'?'0.155.1':'Usage: codex app-server stdio:// generate-json-schema');
+`, { mode: 0o700 });
+  const claude = join(root, "claude");
+  writeFileSync(claude, `#!${process.execPath}
+if(process.argv[2]==='--version') console.log('2.1.277');
+else if(process.argv[2]==='auth') console.log(JSON.stringify({loggedIn:require('node:fs').existsSync(require('node:path').join(process.env.CLAUDE_CONFIG_DIR||require('node:path').join(process.env.HOME,'.claude'),'.credentials.json'))}));
+else console.log('--input-format <format> stream-json\\n--output-format <format> stream-json\\n--permission-mode <mode> (choices: "acceptEdits", "plan")');
+`, { mode: 0o700 });
+  const pi = join(root, "pi");
+  writeFileSync(pi, `#!${process.execPath}
+if(process.argv[2]==='--version') console.log('1.4.0');
+else {
+const home=process.env.PI_CODING_AGENT_DIR||require('node:path').join(process.env.HOME,'.pi','agent');
+process.env.WOLLIPOG_FAKE_PI_SCENARIO=require('node:fs').existsSync(require('node:path').join(home,'auth.json'))?'normal':'no-models';
+import(${JSON.stringify(new URL("./drivers/fixtures/fake-pi-rpc.mjs", import.meta.url).href)});
+}
+`, { mode: 0o700 });
+  process.env.PATH = `${root}:${originalPath ?? "/usr/bin:/bin"}`;
+  const options = {
+    authorize: (agent: import("@wollipog/protocol").AgentDefinition, env: Record<string, string>) => {
+      if (![codex, claude, pi].some((path) => agent.command === path || agent.args?.includes(path))) throw new Error("fixture only");
+      return manager.prepareDiscoveryProbe(agent, env);
+    },
+    authorizeLaunchHome: (agent: import("@wollipog/protocol").AgentDefinition, env: Record<string, string>) =>
+      manager.prepareDiscoveryProbe({ ...agent, source: "config" }, { ...env, HOME: home }),
+  };
+  const agents = await discoverAgents(options);
+  assert.equal(agents.find((agent) => agent.installation?.path === codex)?.authStatus, "authenticated");
+  const discoveredPi = agents.find((agent) => agent.installation?.path === pi);
+  assert.equal(discoveredPi?.available, true);
+  assert.equal(discoveredPi?.capabilities?.models.length, 2);
+  const discoveredClaude = agents.find((agent) => agent.installation?.path === claude);
+  assert.equal(discoveredClaude?.authStatus, "authenticated");
+  assert.ok(discoveredClaude?.capabilities?.slashCommands.some((command) => command.name === "review"));
+});
+
 test("a second runner discovers native Claude, Codex and Pi while the first holds the OS-user HOME", {
   skip: process.platform === "win32", timeout: 60_000,
 }, async (t) => {
@@ -92,14 +149,14 @@ else console.log('Usage: codex app-server stdio:// generate-json-schema');
   writeFileSync(claude, `#!${process.execPath}
 require('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify({home:process.env.HOME,codex:process.env.CODEX_HOME})+'\\n');
 if(process.argv[2]==='--version') console.log('2.1.277');
-else if(process.argv[2]==='auth') console.log('{"loggedIn":false}');
+else if(process.argv[2]==='auth') console.log(JSON.stringify({loggedIn:require('node:fs').existsSync(require('node:path').join(process.env.CLAUDE_CONFIG_DIR||require('node:path').join(process.env.HOME,'.claude'),'.credentials.json'))}));
 else console.log('--input-format <format> stream-json\\n--output-format <format> stream-json\\n--permission-mode <mode> (choices: "acceptEdits", "plan")');
 `, { mode: 0o700 });
   const piFixture = new URL("./drivers/fixtures/fake-pi-rpc.mjs", import.meta.url).href;
   writeFileSync(pi, `#!${process.execPath}
 require('node:fs').appendFileSync(${JSON.stringify(calls)}, JSON.stringify({home:process.env.HOME,codex:process.env.CODEX_HOME})+'\\n');
 if(process.argv[2]==='--version') console.log('1.4.0');
-else import(${JSON.stringify(piFixture)});
+else { process.env.WOLLIPOG_FAKE_PI_SCENARIO='no-models'; import(${JSON.stringify(piFixture)}); }
 `, { mode: 0o700 });
   process.env.PATH = `${root}:${originalPath ?? "/usr/bin:/bin"}`;
   assert.equal(await first.start({ sessionId: "first-session", workspaceId: "fixture", workspacePath: root,
@@ -116,21 +173,29 @@ else import(${JSON.stringify(piFixture)});
   await assert.rejects(second.prepareDiscoveryProbe(configured, { HOME: shared }),
     (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "foreign_owner",
     "an explicit configured HOME keeps its intended ownership checks");
-  const agents = await discoverAgents({ authorize: (agent, env) => {
+  let selectedAccount: RunnerProviderAccount | undefined;
+  const discover = () => discoverAgents({ authorizeLaunchHome: (agent, env) => second.prepareDiscoveryProbe(agent,
+    { ...env, ...(selectedAccount && providerForDriver(agent.driver ?? "acp") === selectedAccount.provider
+      ? providerAccountEnvironment({ provider: selectedAccount.provider, credentialHome: selectedAccount.directory }) : {}) }, { useLaunchHome: true }), authorize: (agent, env) => {
     if (![executable, claude, pi].some((path) => agent.command === path || agent.args?.includes(path))) throw new Error("fixture installation only");
     return second.prepareDiscoveryProbe(agent, env);
   } });
+  const agents = await discover();
   const codex = agents.find((agent) => agent.installation?.path === executable && agent.driver === "codex-app-server");
   assert.ok(codex);
-  assert.equal(codex.available, true, codex.unavailableReason ?? "installed fixture must remain available");
-  assert.equal(codex.authStatus, "unauthenticated", "an empty probe HOME cannot claim the other runner's sign-in");
+  assert.equal(codex.available, false, "the uninspected launch account is not launch-ready");
+  assert.equal(codex.codexAppServer?.status, "supported", "contention must not erase the installation's capability proof");
+  assert.doesNotMatch(codex.unavailableReason ?? "", /ownership blocked discovery/);
+  assert.equal(codex.authStatus, "unknown", "an uninspected launch HOME cannot be labeled signed in or signed out");
   const discoveredClaude = agents.find((agent) => agent.installation?.path === claude);
-  assert.equal(discoveredClaude?.available, true);
-  assert.equal(discoveredClaude?.authStatus, "unauthenticated");
+  assert.equal(discoveredClaude?.available, false);
+  assert.equal(discoveredClaude?.authStatus, "unknown");
   assert.equal(discoveredClaude?.claudeCode?.streamJsonInput, true);
   const discoveredPi = agents.find((agent) => agent.installation?.path === pi);
-  assert.equal(discoveredPi?.available, true);
+  assert.equal(discoveredPi?.available, false);
   assert.equal(discoveredPi?.capabilities?.modelSource, "live");
+  assert.deepEqual(discoveredPi?.capabilities?.models, [], "empty installation state must not invent authenticated Pi models");
+  assert.equal(discoveredPi?.authStatus, "unknown");
   const executions = readFileSync(calls, "utf8").trim().split("\n").map((line) => JSON.parse(line));
   assert.ok(executions.length >= 2);
   for (const execution of executions) {
@@ -158,7 +223,7 @@ else import(${JSON.stringify(piFixture)});
       assert.notEqual(options.env.CLAUDE_CONFIG_DIR, shared);
       return child;
     }) as never,
-    kill: (async () => true) as never, probe: async () => true, identify: async () => undefined,
+    kill: (async () => true) as never, probe: async (login) => { writeFileSync(join(login.directory, ".credentials.json"), "{}"); return true; }, identify: async () => undefined,
     writeAccounts: (path, next) => { writeFileSync(path, JSON.stringify({ runnerId: "second", providerAccounts: next })); },
     profiles: { root: managedProviderProfileRoot(shared), create: async (home, provider, profileId, grantId) => {
       writeProviderProfileMarker(home, { version: 1, kind: "wollipog-provider-profile", provider, profileId,
@@ -169,10 +234,14 @@ else import(${JSON.stringify(piFixture)});
   await supervisor.startAccount({ provider: "claude", label: "Isolated", profileGrantId: grant });
   child.emit("close", 0);
   const account = await accountAdded;
+  selectedAccount = account;
   assert.ok(account.profileId);
   assert.ok(account.directory.startsWith(managedProviderProfileRoot(shared)));
   assert.equal(readFileSync(join(shared, "credentials"), "utf8"), "other-runner-fixture-secret");
   assert.equal(owners.get(shared), "a");
+  const readyClaude = (await discover()).find((agent) => agent.installation?.path === claude);
+  assert.equal(readyClaude?.available, true, "setup makes the selected profile launch-ready despite the busy OS-user HOME");
+  assert.equal(readyClaude?.authStatus, "authenticated");
 
   const launches: Record<string, string>[] = [];
   const replacement = runner(join(root, "replacement"), "c", shared, launches);
@@ -184,7 +253,7 @@ else import(${JSON.stringify(piFixture)});
     meta.env = { HOME: shared, ...providerAccountEnvironment({ provider: account.provider, credentialHome: meta.providerCredentialHome! }) };
   };
   const launch = { sessionId: "isolated-session", workspaceId: "fixture", workspacePath: root,
-    agentId: discoveredClaude!.id, command: claude, args: [], env: {}, useWorktree: false,
+    agentId: readyClaude!.id, command: claude, args: [], env: {}, useWorktree: false,
     driver: "claude-code" as const, context: { kind: "native" as const }, providerAccountId: account.id };
   assert.equal(await replacement.start(launch), true);
   assert.equal(launches[0]?.CLAUDE_CONFIG_DIR, account.directory);

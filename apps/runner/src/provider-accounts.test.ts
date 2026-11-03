@@ -14,6 +14,7 @@ import {
   providerAccountDefinition,
   providerAccountEnvironment,
   selectProviderAccount,
+  selectProviderAccountForDiscovery,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 
@@ -25,6 +26,18 @@ const codexAgent = {
   id: "codex", name: "Codex", command: "codex", args: [], env: {},
   driver: "codex-app-server" as const, context: { kind: "native" as const },
 };
+
+test("discovery selects a usable persistent account and never falls back from an inaccessible default", () => {
+  const accounts = [
+    { id: "other", label: "Other", provider: "codex" as const, directory: "/profiles/other" },
+    { id: "own", label: "Own", provider: "codex" as const, directory: "/profiles/own" },
+  ];
+  const usable = (account: { id: string }) => account.id === "own";
+  assert.equal(selectProviderAccountForDiscovery(accounts, codexAgent, usable, "linux")?.credentialHome, "/profiles/own");
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, { ...codexAgent, defaultProviderAccountId: "other" }, usable, "linux"), /not granted/);
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, codexAgent, () => false, "linux"), /not granted/);
+  assert.equal(selectProviderAccountForDiscovery([], codexAgent, usable, "linux"), undefined, "only an account-free launch uses the legacy HOME");
+});
 
 test("selectProviderAccount honors an explicit account and maps only the provider credential variable", () => {
   const accounts = [

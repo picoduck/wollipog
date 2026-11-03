@@ -29,3 +29,11 @@ test("discovery refuses a HOME symlink before creating any child directories", {
   assert.throws(() => isolatedDiscoveryEnvironment(root), /private directory/);
   assert.deepEqual(readdirSync(target), []);
 });
+
+test("isolated npm checks retain the operator's userconfig source without copying it", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-discovery-npm-config-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  assert.equal(isolatedDiscoveryEnvironment(root, { HOME: "/operator" }).NPM_CONFIG_USERCONFIG, join("/operator", ".npmrc"));
+  assert.equal(isolatedDiscoveryEnvironment(root, { HOME: "/operator", NPM_CONFIG_USERCONFIG: "/policy/npmrc" }).NPM_CONFIG_USERCONFIG, "/policy/npmrc");
+  assert.equal(isolatedDiscoveryEnvironment(root, { HOME: "/operator", npm_config_userconfig: "/policy/lower-npmrc" }).NPM_CONFIG_USERCONFIG, "/policy/lower-npmrc");
+});

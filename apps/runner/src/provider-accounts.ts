@@ -177,6 +177,23 @@ export function selectProviderAccount(
   };
 }
 
+/** Discovery may inspect only accounts granted here. A configured but inaccessible account is
+ * not permission to fall back to the OS-user HOME or silently choose a different default. */
+export function selectProviderAccountForDiscovery(
+  accounts: RunnerProviderAccount[],
+  agent: Pick<AgentDefinition, "id" | "driver" | "context" | "defaultProviderAccountId">,
+  usable: (account: RunnerProviderAccount) => boolean,
+  platform: NodeJS.Platform = process.platform,
+): BoundProviderAccount | undefined {
+  const eligible = accounts.filter(usable);
+  const provider = providerForDriver(agent.driver ?? "acp");
+  if ((agent.defaultProviderAccountId && !eligible.some((account) => account.id === agent.defaultProviderAccountId)) ||
+      (provider && accounts.some((account) => account.provider === provider) && !eligible.some((account) => account.provider === provider))) {
+    throw new Error("The selected discovery account is not granted to this control plane.");
+  }
+  return selectProviderAccount(eligible, agent, agent.driver ?? "acp", undefined, platform);
+}
+
 function providerAccountContextMismatch(
   account: Pick<RunnerProviderAccount, "id">,
   agent: Pick<AgentDefinition, "context">,

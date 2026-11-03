@@ -194,6 +194,7 @@ import {
   providerAccountEnvironment,
   providerForDriver,
   selectProviderAccount,
+  selectProviderAccountForDiscovery,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
 import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
@@ -929,6 +930,9 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
     });
     void subscriptionUsage.refreshAccount(account.id)
       .catch(() => log("subscription usage refresh after Provider Sign-In failed"));
+    // Installation probes use empty private state; readiness comes from the selected persistent
+    // account, so a completed setup must refresh that separate leased observation.
+    void runDiscovery(false, false).catch(() => log("discovery after Provider Sign-In failed"));
   },
   removalBlocker: (account) => {
     const agent = config.agents.find((candidate) => candidate.defaultProviderAccountId === account.id);
@@ -2131,6 +2135,17 @@ let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
 let rediscoverRefreshSubscriptionUsage = false;
+
+/** Inspect the same account a new native launch would select, under its own lease. Installation
+ * discovery remains independent when this HOME is held by another runner. */
+async function authorizeDiscoveryLaunchHome(agent: AgentDefinition, env: Record<string, string>) {
+  const configured = config.agents.find((candidate) => candidate.id === agent.id);
+  const launchEnv = configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : { ...env };
+  const definition = configAgents.find((candidate) => candidate.id === agent.id) ?? agent;
+  const account = selectProviderAccountForDiscovery(config.providerAccounts, definition, (candidate) => providerProfileGrants.usable(candidate));
+  if (account) Object.assign(launchEnv, providerAccountEnvironment(account));
+  return sessions.prepareDiscoveryProbe(agent, launchEnv, { useLaunchHome: true });
+}
 /** At least one discovery pass has completed — its result is baked into metadata.agents. */
 let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
@@ -2180,7 +2195,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         })
       : Promise.resolve([]);
     const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
-      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
+      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env), authorizeLaunchHome: authorizeDiscoveryLaunchHome }),
       registryPromise,
       probeConfiguredAcpAgents(configAgents, (agentId) => {
         const configured = config.agents.find((agent) => agent.id === agentId);
@@ -2193,7 +2208,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       const configured = config.agents.find((agent) => agent.id === agentId);
       if (!configured) throw new Error("configured agent is unavailable");
       return resolveAgentEnvironment(configured);
-    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) });
+    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+      authorizeLaunchHome: authorizeDiscoveryLaunchHome });
     const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
@@ -2209,6 +2225,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
         authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+        authorizeLaunchHome: authorizeDiscoveryLaunchHome,
         resolveEnv: (agent) => {
           const configured = config.agents.find((candidate) => candidate.id === agent.id);
           return configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : agent.env;

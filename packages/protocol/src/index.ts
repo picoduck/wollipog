@@ -4247,7 +4247,7 @@ export interface HostAdminStatusView {
     harnessReadiness?: {
       connectedAt: number | null;
       refreshed: boolean;
-      agents: Array<{ id: string; available: boolean; ownershipBlocked: boolean }>;
+      agents: Array<{ id: string; available: boolean; installationAvailable?: boolean; ownershipBlocked: boolean }>;
       accounts?: Array<{ id: string; authStatus: ProviderAccountDefinition["authStatus"] }>;
     };
   }> };
