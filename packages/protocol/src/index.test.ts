@@ -362,6 +362,8 @@ test("PROTOCOL_VERSION is 281", () => {
   // Owner decisions need a v281 root runner and control plane (#4064).
   assert.equal(runnerSupportsProtocol(280, "ownerDecisions"), false);
   assert.equal(runnerSupportsProtocol(281, "ownerDecisions"), true);
+  assert.equal(runnerSupportsProtocol(278, "workspaceRemoval"), false);
+  assert.equal(runnerSupportsProtocol(279, "workspaceRemoval"), true);
   // An epic's closure reads its members only from a runner that returns them (#4060).
   assert.equal(runnerSupportsProtocol(277, "epicClosureMembers"), false);
   assert.equal(runnerSupportsProtocol(278, "epicClosureMembers"), true);

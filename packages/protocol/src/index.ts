@@ -836,6 +836,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      controller's runners are v277; older peers keep it with the person.
 // 278: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
 //      a Full Control completed closure of an in-scope epic can be proven from its closed members.
+// 279: workspace removal (#4123). DELETE /api/runners/:id/workspaces/:workspaceId unregisters a
+//      Workspace. A managed one is removed in the control plane; a configured one is sent as
+//      remove_workspace, and the runner records the removal in its data directory, stops
+//      advertising it and answers remove_workspace_result. Runner views tag each Workspace's
+//      `source`. Older runners keep their configured Workspaces and the control plane refuses.
 // 281: Owner decisions (#4064). A Full Control root asks its campaign's owner a typed question that
 //      only that person can answer (`owner_decision`), and hands a pending Orchestrator-owned
 //      occurrence to the owner, one way. Both need a v281 root runner and control plane; an older
@@ -856,6 +861,7 @@ export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
+export * from "./workspace-removal.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -1056,6 +1062,9 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  /** v279 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
+   * Workspaces added in Wollipog are removed by the control plane on any runner. */
+  workspaceRemoval: 279,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -3769,6 +3778,8 @@ export interface WorkspaceInfo {
   scope?: ResourceScope;
   /** Principal-specific authority to manage this Location's access. Older control planes omit it. */
   canManage?: boolean;
+  /** Where the Workspace came from (#4123). Older control planes omit it. */
+  source?: import("./workspace-removal.js").WorkspaceSource;
 }
 
 /** How a durable Project Location entered the control-plane catalog. */
@@ -10426,6 +10437,7 @@ export type RunnerToControlPlane =
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | import("./workspace-removal.js").RemoveWorkspaceResultMessage
   | AdoptProviderProfileResultMessage
   | ImportProviderCredentialResultMessage
   | RevokeProviderProfileGrantResultMessage
@@ -12519,6 +12531,7 @@ export type ControlPlaneToRunner =
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
   | RemoveProviderAccountMessage
+  | import("./workspace-removal.js").RemoveWorkspaceMessage
   | AdoptProviderProfileMessage
   | ImportProviderCredentialMessage
   | RevokeProviderProfileGrantMessage
