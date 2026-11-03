@@ -28,4 +28,13 @@ test("old peers receive default readiness; current peers keep explicit account a
   assert.equal(old.authStatus, "unauthenticated");
   assert.equal(old.providerAccountReadiness, undefined);
   assert.equal(agent.available, true);
+  const claude = { ...agent, claudeCode: { status: "ready" as const,
+    effortLevels: [], permissionModes: [], streamJsonInput: true, streamJsonImages: false,
+    controlProtocol: true, forkSession: false, replayUserMessages: false,
+    auth: { status: "authenticated" as const, billingSource: "unknown" as const } } };
+  const projected = projectProviderAccountReadinessForPeer(claude, false);
+  assert.equal(projected.claudeCode?.status, "unauthenticated");
+  assert.equal(projected.claudeCode?.auth.status, "unauthenticated");
+  assert.equal(projected.claudeCode?.failure?.code, "unauthenticated");
+  assert.equal(claude.claudeCode.status, "ready", "the original aggregate observation stays intact");
 });

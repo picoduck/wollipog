@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { test } from "node:test";
 import type { SessionLaunchSpec } from "@wollipog/protocol";
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import {
   agentForProviderAccount,
   agentsWithoutConfiguredProviderAccounts,
@@ -37,15 +38,43 @@ test("discovery selects a usable persistent account and never falls back from an
   ];
   const usable = (account: { id: string }) => account.id === "own";
   assert.equal(selectProviderAccount(accounts, codexAgent, "codex-app-server", undefined, "linux")?.id, "other");
-  assert.throws(() => selectProviderAccountForDiscovery(accounts, codexAgent, usable, "linux"), /not granted/,
-    "discovery cannot silently skip the account an implicit launch would choose");
+  assert.equal(selectProviderAccount(accounts, codexAgent, "codex-app-server", undefined, "linux", usable)?.id, "own");
+  assert.equal(selectProviderAccountForDiscovery(accounts, codexAgent, usable, "linux")?.id, "own",
+    "with no configured default, discovery matches grant-aware implicit session creation");
   assert.equal(selectProviderAccountForDiscovery(accounts, { ...codexAgent, defaultProviderAccountId: "own" }, usable, "linux")?.credentialHome, "/profiles/own");
   assert.throws(() => selectProviderAccountForDiscovery(accounts, { ...codexAgent, defaultProviderAccountId: "other" }, usable, "linux"), /not granted/);
-  assert.throws(() => selectProviderAccountForDiscovery(accounts, codexAgent, () => false, "linux"), /not granted/);
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, codexAgent, () => false, "linux"), /granted/);
   assert.equal(selectProviderAccountForDiscovery([], codexAgent, usable, "linux"), undefined, "only an account-free launch uses the legacy HOME");
+  assert.throws(() => selectProviderAccount([], { ...codexAgent, defaultProviderAccountId: "missing" },
+    "codex-app-server", undefined, "linux", usable), /not configured/,
+  "a removed configured default must not fall back to the legacy HOME");
 });
 
 for (const provider of ["claude", "codex"] as const) {
+  test(`implicit ${provider} readiness and launch skip an ungranted first account without replacing an explicit default`, () => {
+    const accounts = [
+      { id: "x", label: "Foreign", provider, directory: join(tmpdir(), "fixture-foreign") },
+      { id: "y", label: "Granted", provider, directory: join(tmpdir(), "fixture-granted") },
+    ];
+    const agent = provider === "claude" ? { ...claudeAgent, available: true,
+      claudeCode: { ...unavailableClaudeCode(), status: "ready" as const } }
+      : { ...codexAgent, available: true, codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+    const usable = (account: { id: string }) => account.id === "y";
+    const statuses = new Map([["x", "unknown" as const], ["y", "authenticated" as const]]);
+    const projected = projectProviderAccountDiscoveryReadiness([agent], accounts, statuses, usable)[0]!;
+    assert.deepEqual(projected.providerAccountReadiness, {
+      defaultAccountId: "y", defaultAuthStatus: "authenticated", readyAccountIds: ["y"],
+    });
+    assert.equal(agentAvailableForImplicitLaunch(projected), true);
+    assert.equal(selectProviderAccount(accounts, agent, agent.driver!, undefined, process.platform, usable)?.id, "y");
+    assert.equal(selectProviderAccountForDiscovery(accounts, agent, usable)?.id, "y");
+    const explicit = { ...agent, defaultProviderAccountId: "x" };
+    assert.equal(agentAvailableForImplicitLaunch(projectProviderAccountDiscoveryReadiness([explicit], accounts, statuses, usable)[0]!), false);
+    assert.throws(() => selectProviderAccountForDiscovery(accounts, explicit, usable), /not granted/);
+    assert.equal(selectProviderAccount(accounts, agent, agent.driver!, "x", process.platform, usable)?.id, "x",
+      "an explicit binding retains its identity for the existing structured profile/lease refusal");
+  });
+
   test(`a signed-out default ${provider} account does not suppress another granted account's probe or readiness`, async () => {
     const accounts = [
       { id: "a", label: "Expired", provider, directory: join(tmpdir(), "fixture-account-a") },

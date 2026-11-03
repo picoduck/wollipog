@@ -136,6 +136,7 @@ export function selectProviderAccount(
   driver: AgentDriverKind,
   requestedId?: string,
   platform: NodeJS.Platform = process.platform,
+  usable: (account: RunnerProviderAccount) => boolean = () => true,
 ): BoundProviderAccount | undefined {
   const provider = providerForDriver(driver);
   if (!provider) {
@@ -144,7 +145,8 @@ export function selectProviderAccount(
   }
   const matching = accounts.filter((candidate) => candidate.provider === provider);
   if (matching.length === 0) {
-    if (requestedId) throw new Error(`provider account '${requestedId}' is not configured`);
+    const missing = requestedId ?? agent?.defaultProviderAccountId;
+    if (missing) throw new Error(`provider account '${missing}' is not configured`);
     return undefined;
   }
   // Account directories use runner-host path syntax. A WSL agent may opt in explicitly (or via
@@ -154,12 +156,16 @@ export function selectProviderAccount(
   const selected = selectedId
     ? matching.find((candidate) => candidate.id === selectedId)
     : agent && (agent.context?.kind ?? "native") === "native"
-      ? matching.find((candidate) => providerAccountAgentContextCompatible(candidate, agent, platform))
+      ? matching.find((candidate) => usable(candidate) && providerAccountAgentContextCompatible(candidate, agent, platform))
       : undefined;
   if (selectedId && !selected) {
     throw new Error(`provider account '${selectedId}' is not configured for ${provider}`);
   }
   if (!selected) {
+    if (agent && (agent.context?.kind ?? "native") === "native" &&
+        matching.some((candidate) => providerAccountAgentContextCompatible(candidate, agent, platform))) {
+      throw new Error("No compatible provider account is granted to this control plane.");
+    }
     if (agent && (agent.context?.kind ?? "native") === "native" && matching[0]) {
       throw providerAccountContextMismatch(matching[0], agent);
     }
@@ -168,6 +174,8 @@ export function selectProviderAccount(
   if (agent && !providerAccountAgentContextCompatible(selected, agent, platform)) {
     throw providerAccountContextMismatch(selected, agent);
   }
+  // Preserve explicit bindings so the launch's existing profile/lease gate can return its
+  // structured refusal. Grant filtering changes only the otherwise implicit choice.
   return {
     id: selected.id,
     label: selected.label,
@@ -177,15 +185,15 @@ export function selectProviderAccount(
   };
 }
 
-/** Discovery may inspect only accounts granted here. A configured but inaccessible account is
- * not permission to fall back to the OS-user HOME or silently choose a different default. */
+/** Discovery and new implicit launches choose the first granted compatible account, matching
+ * control-plane session creation. An explicit/saved default is never silently substituted. */
 export function selectProviderAccountForDiscovery(
   accounts: RunnerProviderAccount[],
   agent: Pick<AgentDefinition, "id" | "driver" | "context" | "defaultProviderAccountId">,
   usable: (account: RunnerProviderAccount) => boolean,
   platform: NodeJS.Platform = process.platform,
 ): BoundProviderAccount | undefined {
-  const selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform);
+  const selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform, usable);
   const configured = selected ? accounts.find((account) => account.id === selected.id) : undefined;
   if ((configured && !usable(configured)) || (agent.defaultProviderAccountId && !configured)) {
     throw new Error("The selected discovery account is not granted to this control plane.");
@@ -250,7 +258,7 @@ export function projectProviderAccountDiscoveryReadiness(
     if (!configured.length || !providerAccountProbeAvailable(agent) || agent.harnessSelectionBlocked) return agent;
     const eligible = configured.filter((account) => usable(account) && providerAccountAgentContextCompatible(account, agent, platform));
     let selected: BoundProviderAccount | undefined;
-    try { selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform); }
+    try { selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform, usable); }
     catch { /* Invalid or incompatible defaults stay unknown; never choose another implicitly. */ }
     const readyAccountIds = eligible.filter((account) => configuredAuth || statuses.get(account.id) === "authenticated")
       .map((account) => account.id);

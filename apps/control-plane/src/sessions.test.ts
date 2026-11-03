@@ -9786,7 +9786,12 @@ test("a session without a chosen account never takes a profile only other contro
     { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
     { id: "ours", label: "Ours", provider: "claude", authStatus: "authenticated", profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "granted" } },
   ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent,
+    providerAccountReadiness: { defaultAccountId: "ours", defaultAuthStatus: "authenticated", readyAccountIds: ["ours"] },
+  } : agent);
   db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  assert.ok(db.getAgentLaunch(RUNNER_ID, AGENT_ID), "automatic admission agrees with direct creation's first granted account");
 
   const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
   assert.ok(created.ok && created.data, created.error);

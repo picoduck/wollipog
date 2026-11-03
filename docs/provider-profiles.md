@@ -110,7 +110,9 @@ Each granted account is checked independently with a compatible installed harnes
 default account is signed out. A ready account keeps the harness selectable for that account;
 the account rows retain their own authentication states. This aggregate readiness never changes
 the saved default, the account chosen by an implicit launch, or a session's recorded binding.
-An ungranted implicit default is refused rather than silently skipped during its inspection.
+An explicit or saved ungranted default is refused rather than silently replaced. When no default
+is configured, discovery and new implicit launches choose the first granted compatible account,
+matching control-plane session creation. With no granted account, neither falls back to HOME.
 Protocol v279 carries separate readiness for the unchanged default and ready explicit accounts.
 Automatic reviews use their runner default; automations, orchestration and implicit session creation
 check their effective Machine default. They skip or refuse a signed-out default even when another

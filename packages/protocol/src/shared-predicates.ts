@@ -60,6 +60,10 @@ export function projectProviderAccountReadinessForPeer(agent: AgentDefinition, s
     unavailableReason: agentAvailableForImplicitLaunch(agent) ? agent.unavailableReason
       : "The default provider account is not ready. Review its sign-in and ownership details.",
     ...(agent.claudeCode ? { claudeCode: { ...agent.claudeCode,
+      status: authStatus === "unauthenticated" ? "unauthenticated" : agent.claudeCode.status,
+      failure: authStatus === "unauthenticated" ? { code: "unauthenticated",
+        message: "Sign in to the default provider account before starting a session." }
+        : agent.claudeCode.failure?.code === "unauthenticated" ? undefined : agent.claudeCode.failure,
       auth: { ...agent.claudeCode.auth, status: authStatus } } } : {}),
   };
 }

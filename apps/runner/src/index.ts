@@ -1295,6 +1295,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         },
         spec.driver ?? "acp",
         spec.providerAccountId,
+        process.platform,
+        (account) => providerProfileGrants.usable(account),
       ),
   (meta) => {
     const provider = providerForDriver(meta.driver);
@@ -3415,6 +3417,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             config.providerAccounts,
             agent,
             agent.driver ?? "acp",
+            undefined,
+            process.platform,
+            (candidate) => providerProfileGrants.usable(candidate),
           );
         } catch {
           sendUp({

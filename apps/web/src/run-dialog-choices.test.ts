@@ -33,6 +33,11 @@ test("automatic run and automation choices use the effective default without sel
   assert.equal(bindableAgents(runner).length, 1);
   assert.equal(installationFor(runner, a.id)?.installationId, "cli");
   assert.equal(a.defaultProviderAccountId, "a");
+  const implicit = { ...a, defaultProviderAccountId: undefined, providerAccountReadiness: {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated" as const, readyAccountIds: ["b"],
+  } };
+  assert.deepEqual(defaultRunAgentIds([implicit]), [implicit.id], "the first granted implicit account can run");
+  assert.equal(defaultAgentId([implicit]), implicit.id);
 });
 
 test("defaultRunAgentIds picks at most three, one per driver before a second of any", () => {

@@ -282,6 +282,11 @@ test("review admission skips a signed-out implicit default even when explicit B 
   assert.deepEqual(result?.reviewers, []);
   assert.ok(result?.unavailable?.codex);
   assert.equal(agents[0]?.providerAccountReadiness?.defaultAccountId, "a");
+  agents[0]!.providerAccountReadiness = {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated", readyAccountIds: ["b"],
+  };
+  assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, [{ harness: "codex", agentId: "codex" }],
+    "an implicit granted default remains reviewable when an earlier account is not granted");
 });
 
 test("long writer refusals stay within the control plane capability limit", () => {
