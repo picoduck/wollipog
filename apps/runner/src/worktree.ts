@@ -1829,8 +1829,10 @@ export type MergedPullRequestContainment =
  *
  * Candidates are the merged pull requests the forge lists for the tip, plus a forge-verified merged
  * link, restricted to the repository the branch's remote is configured for (the configured URL,
- * before any transport rewrite). For each, the runner fetches `refs/pull/<n>/head` from that remote
- * itself and accepts the tip only when it is an ancestor of the head commit the forge reported. A
+ * before any transport rewrite). For each, the runner fetches `refs/pull/<n>/head` itself from that
+ * repository's GitHub endpoint, rebuilt from the validated identity, and accepts the tip only when it
+ * is an ancestor of the head commit the forge reported. Commits are content-addressed, so the server
+ * a fetch reaches cannot change what the ancestry check proves. A
  * local ref is never the comparison target, and a head the fetch cannot provide is unavailable proof
  * even when the object already exists locally. An open pull request, or one whose head shares only
  * a base with the tip, proves nothing. */
@@ -1840,13 +1842,15 @@ export async function mergedPullRequestContainingHead(
   options: WorktreeOptions & {
     /** Test-only subprocess seam for the forge CLI. Git always runs for real. */
     runForgeCommand?: typeof runContextCommand;
+    /** Test-only local repository standing in for the forge's Git endpoint. */
+    forgeFetchRepository?: string;
     /** A merged link whose head the forge already verified; checked before searching. */
     linkedPullRequest?: { url: string; headOid: string };
   } = {},
 ): Promise<MergedPullRequestContainment> {
   const context = options.context ?? nativeContext;
   let head: string;
-  let remoteName: string;
+  let fetchUrl: string;
   let project: string;
   try {
     const remote = (await command(
@@ -1866,13 +1870,20 @@ export async function mergedPullRequestContainingHead(
     }
     head = (await command(context, worktreePath, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { state: "unavailable" };
-    remoteName = remote || "origin";
     const remoteUrl = (await command(
-      context, worktreePath, ["config", "--get", "--default", "", `remote.${remoteName}.url`],
+      context, worktreePath, ["config", "--get", "--default", "", `remote.${remote || "origin"}.url`],
     )).trim();
     const parsed = parseForgeRemote(remoteUrl);
-    if (parsed?.provider !== "github" || parsed.host !== "github.com") return { state: "ineligible" };
+    if (parsed?.provider !== "github" || parsed.host !== "github.com" ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(parsed.project) || parsed.project.startsWith("-")) {
+      return { state: "ineligible" };
+    }
     project = parsed.project;
+    // Rebuild the endpoint from the validated identity: neither the configured remote name nor its
+    // raw URL ever reaches Git's argument list, so session-written configuration cannot add options.
+    fetchUrl = options.forgeFetchRepository ?? (/^(?:ssh:\/\/|[^/:\s]+@[^/:\s]+:)/iu.test(remoteUrl)
+      ? `ssh://git@github.com/${project}.git`
+      : `https://github.com/${project}.git`);
   } catch {
     return { state: "unavailable" };
   }
@@ -1915,11 +1926,18 @@ export async function mergedPullRequestContainingHead(
   for (const candidate of candidates.values()) {
     try {
       // No destination ref: the objects land in the shared store and only this worktree's private
-      // FETCH_HEAD is written, so nothing a session could later move records the result.
+      // FETCH_HEAD is written, so nothing a session could later move records the result. Hooks and
+      // fsmonitor stay off, and only the forge's own transports are allowed, even after a rewrite.
       await runContextCommand(
         context,
         "git",
-        ["fetch", "--no-tags", "--no-recurse-submodules", "--quiet", remoteName, `refs/pull/${candidate.number}/head`],
+        [
+          "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+          "-c", "protocol.allow=never", "-c", "protocol.https.allow=always", "-c", "protocol.ssh.allow=always",
+          ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
+          "fetch", "--no-tags", "--no-recurse-submodules", "--quiet", "--",
+          fetchUrl, `refs/pull/${candidate.number}/head`,
+        ],
         { cwd: worktreePath, timeoutMs: 60_000, env: { GIT_TERMINAL_PROMPT: "0" } },
       );
       const outside = (await command(

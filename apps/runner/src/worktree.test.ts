@@ -1029,10 +1029,8 @@ test("a takeover worktree whose tip is an earlier head of a squash-merged pull r
   try {
     const { repo, remote } = initRepoWithOrigin(root);
     execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
-    // The configured remote names the forge repository; a transport rewrite keeps every fetch local.
-    const forgeUrl = "https://github.com/picoduck/wollipog.git";
-    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", forgeUrl]);
-    execFileSync("git", ["-C", repo, "config", `url.${remote}.insteadOf`, forgeUrl]);
+    // The configured remote names the forge repository; the local bare repository serves its Git.
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://github.com/picoduck/wollipog.git"]);
     const git = (cwd: string, ...args: string[]) =>
       execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
     const store = new SessionStore(join(dataDir, "sessions"));
@@ -1055,7 +1053,7 @@ test("a takeover worktree whose tip is an earlier head of a squash-merged pull r
     git(takeover.path, "add", "takeover.txt");
     git(takeover.path, "commit", "-m", "takeover");
     const pushedHead = git(takeover.path, "rev-parse", "HEAD");
-    git(takeover.path, "push", forgeUrl, `HEAD:refs/heads/${prBranch}`);
+    git(takeover.path, "push", remote, `HEAD:refs/heads/${prBranch}`);
     assert.equal(git(takeover.path, "config", "--get", "--default", "", `branch.${takeover.branch}.remote`), "");
 
     // The pull request receives more commits outside this worktree, is squash-merged, and its
@@ -1069,13 +1067,13 @@ test("a takeover worktree whose tip is an earlier head of a squash-merged pull r
     git(other, "commit", "-m", "followup");
     const mergedHead = git(other, "rev-parse", "HEAD");
     git(other, "push", "--quiet", "origin", prBranch);
-    git(repo, "fetch", "--quiet", "origin", prBranch);
+    git(repo, "fetch", "--quiet", remote, prBranch);
     git(other, "checkout", "--quiet", "-b", "main", "origin/main");
     git(other, "merge", "--squash", prBranch);
     git(other, "commit", "-m", "Take over the orphaned change (#3506)");
     git(other, "push", "--quiet", "origin", "main");
     git(other, "push", "--quiet", "origin", "--delete", prBranch);
-    git(repo, "fetch", "--quiet", "origin");
+    git(repo, "fetch", "--quiet", remote, "+refs/heads/main:refs/remotes/origin/main");
     assert.equal(git(repo, "merge-base", "--is-ancestor", pushedHead, mergedHead), "");
     assert.equal(git(repo, "rev-list", "--count", `origin/main..${pushedHead}`), "1", "squash merge left the tip off main");
     // Another merged pull request that shares only the base with the takeover.
@@ -1102,7 +1100,7 @@ test("a takeover worktree whose tip is an earlier head of a squash-merged pull r
     internals.discoverMergedWorktreePullRequest = (path, branch, options) =>
       mergedWorktreePullRequestForBranch(path, branch, { ...options, runForgeCommand: forge });
     internals.probeMergedPullRequestContainment = (path, branch, options) =>
-      mergedPullRequestContainingHead(path, branch, { ...options, runForgeCommand: forge });
+      mergedPullRequestContainingHead(path, branch, { ...options, runForgeCommand: forge, forgeFetchRepository: remote });
     const notContained = /worktree retained: the branch has no upstream, and the worktree tip is not the head of, or contained in, a merged pull request$/;
     const merged3506 = { url: url(3506), state: "MERGED", headRefOid: mergedHead, headRefName: prBranch };
 
@@ -1206,33 +1204,51 @@ test("merged pull request containment fails closed on every unproven input (#406
       return { stdout, stderr: "" };
     };
 
-    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { runForgeCommand: answer(listed) }),
+    const served = { forgeFetchRepository: remote };
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
       { state: "ineligible" }, "a local path names no forge");
     assert.equal(forgeCalls, 0);
     git(repo, "remote", "set-url", "origin", forgeUrl);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
+      { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip });
+    // Without the test endpoint the fetch goes to the rebuilt forge URL. A configuration rewrite of
+    // it to a local path is refused by the transport allowlist, so the proof is unavailable.
     git(repo, "config", `url.${remote}.insteadOf`, forgeUrl);
     assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { runForgeCommand: answer(listed) }),
-      { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip });
-    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { runForgeCommand: answer("not json") }),
+      { state: "unavailable" }, "a rewritten forge endpoint outside the allowed transports proves nothing");
+    git(repo, "config", "--unset", `url.${remote}.insteadOf`);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer("not json") }),
       { state: "unavailable" }, "a malformed forge answer is not a negative");
     assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
       runForgeCommand: async () => { throw Object.assign(new Error("gh missing"), { code: "ENOENT" }); },
     }), { state: "ineligible" });
     assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
       runForgeCommand: async () => { throw new Error("rate limited"); },
     }), { state: "unavailable" });
     assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
       runForgeCommand: async () => { throw new Error("rate limited"); },
       linkedPullRequest: { url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip },
     }), { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip },
     "a forge-verified merged link is checked even when the search is unavailable");
     assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
       runForgeCommand: answer(JSON.stringify([{ url: "https://github.com/picoduck/wollipog/pull/8", state: "MERGED", headRefOid: tip }])),
     }), { state: "unavailable" }, "a pull request head the forge cannot serve proves nothing");
 
-    git(repo, "push", "--quiet", "-u", "origin", "feature");
+    // A configured remote name never reaches Git's arguments, whatever it says.
+    git(repo, "config", "branch.feature.remote", "--upload-pack=false");
+    git(repo, "config", "branch.feature.merge", "refs/heads/feature");
+    git(repo, "config", "remote.--upload-pack=false.url", forgeUrl);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
+      { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip });
+
+    git(repo, "config", "branch.feature.remote", "origin");
+    git(repo, "update-ref", "refs/remotes/origin/feature", tip);
     forgeCalls = 0;
-    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { runForgeCommand: answer(listed) }),
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
       { state: "ineligible" }, "a live upstream keeps the upstream rule");
     assert.equal(forgeCalls, 0);
   } finally {
