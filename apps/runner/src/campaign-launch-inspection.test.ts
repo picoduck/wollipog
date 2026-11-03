@@ -163,6 +163,36 @@ test("native git inspection succeeds for a subfolder with only home:. registered
   } finally { await rm(path, { recursive: true, force: true }); }
 });
 
+test("GitLab launch inspection preserves public and self-managed origins with exact issue reads", async () => {
+  const path = await mkdtemp(join(tmpdir(), "inspection-gitlab-"));
+  try {
+    for (const host of ["gitlab.com", "gitlab.example.com"]) {
+      for (const issueNumbers of [[], [7]]) {
+        const calls: string[][] = [];
+        const repository = `${host}/group/project`;
+        const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "gitlab",
+          workspaceId: "dynamic-location", workspacePath: path, issueNumbers }, [], async (_cwd, command, args) => {
+          calls.push([command, ...args]);
+          if (command === "git") return args[0] === "remote" ? `git@${host}:group/project.git`
+            : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+          assert.equal(command, "glab");
+          assert.equal(args[args.indexOf("--hostname") + 1], host);
+          return JSON.stringify(args[1]!.endsWith("/issues/7")
+            ? { id: 70, iid: 7, project_id: 42, title: "Private fixture issue", description: null,
+              state: "opened", web_url: `https://${repository}/-/issues/7`, updated_at: "2026-10-01T10:00:00Z", assignees: [], labels: [] }
+            : { id: 42, path_with_namespace: "group/project", web_url: `https://${repository}`, default_branch: "main" });
+        });
+        assert.equal(result.ok, true, JSON.stringify(result));
+        assert.equal(result.repository, repository);
+        assert.deepEqual(result.issueNumbers, issueNumbers);
+        assert.match(result.digest!, /^[a-f0-9]{64}$/);
+        assert.doesNotMatch(JSON.stringify(result), /Private fixture|inspection-gitlab|git@|\/tmp\//);
+        assert.equal(calls.filter(([command]) => command === "glab").length, issueNumbers.length ? 2 : 0);
+      }
+    }
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
 test("each inspection step has a fixed sanitized failure without command output or paths", async () => {
   const path = await mkdtemp(join(tmpdir(), "inspection-errors-"));
   try {
@@ -174,7 +204,7 @@ test("each inspection step has a fixed sanitized failure without command output 
       }, [{ id: "w", path }], async (_cwd, command, args) => {
         if ((failure === "not_repository" && args.includes("--is-inside-work-tree")) ||
             (failure === "issue_read_failed" && command === "gh")) throw new Error("secret://token /private/path RAW_OUTPUT");
-        if (args[0] === "remote") return failure === "unsupported_origin" ? "git@gitlab.example.com:owner/repo.git" : "git@github.com:owner/repo.git";
+        if (args[0] === "remote") return failure === "unsupported_origin" ? "file:///private/path" : "git@github.com:owner/repo.git";
         return args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
       });
       assert.equal(result.ok, false, failure);

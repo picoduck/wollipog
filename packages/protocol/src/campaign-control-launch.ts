@@ -97,7 +97,7 @@ export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
   unknown_location: "The project location is unknown; select an available location.",
   missing_path: "The project location path is missing or unavailable on the runner.",
   not_repository: "The project location is not a git repository with a valid HEAD.",
-  unsupported_origin: "The project repository origin is unsupported; Full Control requires a github.com repository.",
+  unsupported_origin: "The project repository origin is unsupported; Full Control requires a github.com or GitLab repository.",
   issue_read_failed: "The selected issues could not be read and verified in the project repository.",
 } as const;
 export type CampaignLaunchInspectionFailure = keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS;

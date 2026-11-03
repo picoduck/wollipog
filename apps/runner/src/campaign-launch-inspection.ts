@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { realpath } from "node:fs/promises";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionMessage, type CampaignLaunchInspectionResult } from "@wollipog/protocol";
 import { githubSlug } from "./git-ops.js";
+import { gitlabIssueOrigin } from "./gitlab-issue-closure.js";
 import { inspectCampaignIssueScope } from "./campaign-issue-scope.js";
 
 /** Runner-side ceiling, independent of whether the caller's cancellation ever arrives. */
@@ -53,7 +54,7 @@ export async function inspectCampaignLaunch(
     if (!/^[a-f0-9]{40,64}$/.test(head)) throw new Error("invalid repository head");
     failure = "unsupported_origin";
     const origin = (await owned(cwd, "git", ["remote", "get-url", "origin"])).trim();
-    if (!githubSlug(origin)) throw new Error("unsupported origin");
+    if (!githubSlug(origin) && !gitlabIssueOrigin(origin)) throw new Error("unsupported origin");
     failure = "issue_read_failed";
     const issueNumbers = [...message.issueNumbers].sort((a, b) => a - b);
     const { repository, candidates } = await inspectCampaignIssueScope((command, args) =>
