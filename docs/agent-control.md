@@ -220,7 +220,7 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
-MCP `park_on_pull_request` (#4071, protocol 271) lets a session stop waiting inside a turn. The
+MCP `park_on_pull_request` (#4071, protocol 272) lets a session stop waiting inside a turn. The
 session names its own enqueued GitHub pull request and exact head, gets a watch back, and ends its
 turn. The control plane stores the watch (`POST /api/sessions/:id/pull-request-watch`, own session
 credential only) and sends `pull_request_watch_start` to the session's runner. The runner repeats
