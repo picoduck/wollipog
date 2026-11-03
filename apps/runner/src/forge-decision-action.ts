@@ -177,10 +177,21 @@ export async function executePullRequestEnqueue(
   const merged = await gh(["pr", "merge", url, "--squash", "--match-head-commit", action.headSha]);
   if (merged.code === null) return { outcome: "enqueued" };
   if (merged.timedOut) return { outcome: "uncertain" };
+  // Only a failure that proves GitHub never accepted the write may be retried. A missing CLI or
+  // login fails before any request, and a rate limit or an explicit GitHub refusal is an answer
+  // that changed nothing. A transport failure (a reset connection, a 5xx, anything unrecognized)
+  // may have followed an accepted enqueue, so it is uncertain and is never replayed.
   const failure = classifyGhFailure(merged);
-  if (UNAVAILABLE_WORDS[failure]) return refused("forge_unavailable", `${UNAVAILABLE_WORDS[failure]} Nothing was enqueued.`);
+  if (failure === "forge_cli_missing" || failure === "forge_unauthenticated" || failure === "forge_rate_limited") {
+    return refused("forge_unavailable", `${UNAVAILABLE_WORDS[failure]} Nothing was enqueued.`);
+  }
+  if (failure !== "forge_error") return { outcome: "uncertain" };
   if (/head branch was modified|head commit .*does not match|expected head/iu.test(merged.stderr)) {
     return refused("pull_request_mismatch", "The pull request's head changed before the enqueue.");
   }
-  return refused("forge_refused", "GitHub refused the enqueue (for example, the pull request is not mergeable yet); nothing was enqueued.");
+  if (/GraphQL: |HTTP 4(?:0[0-9]|2[0-9])\b|not mergeable|is not mergeable|merge queue|required status|protected branch/iu.test(merged.stderr) &&
+      !/HTTP 5\d\d|connection|timeout|EOF/iu.test(merged.stderr)) {
+    return refused("forge_refused", "GitHub refused the enqueue (for example, the pull request is not mergeable yet); nothing was enqueued.");
+  }
+  return { outcome: "uncertain" };
 }

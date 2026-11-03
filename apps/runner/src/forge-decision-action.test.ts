@@ -125,4 +125,12 @@ test("an enqueue already in effect is reported, and a stale or refused one runs 
   assert.equal((await executePullRequestEnqueue(enqueue, signedOut.gh)).refusal?.reason, "forge_unavailable");
   const timedOut = answer({}, failed("", "SIGKILL", true));
   assert.deepEqual(await executePullRequestEnqueue(enqueue, timedOut.gh), { outcome: "uncertain" });
+  // A transport failure may follow an accepted enqueue: uncertain, never a retryable refusal.
+  for (const stderr of ["Post \"https://api.github.com/graphql\": read tcp: connection reset by peer", "HTTP 502: Bad Gateway",
+    "something unexpected happened"]) {
+    const ambiguous = answer({}, failed(stderr));
+    assert.deepEqual(await executePullRequestEnqueue(enqueue, ambiguous.gh), { outcome: "uncertain" }, stderr);
+  }
+  const limited = answer({}, failed("GraphQL: API rate limit exceeded"));
+  assert.equal((await executePullRequestEnqueue(enqueue, limited.gh)).refusal?.reason, "forge_unavailable");
 });

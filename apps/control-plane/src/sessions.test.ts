@@ -7320,6 +7320,38 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("an occurrence superseded while GitHub is read again never dispatches its enqueue (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4073);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      let release!: () => void;
+      const reading = new Promise<void>((resolve) => { release = resolve; });
+      let asked!: () => void;
+      const preflightStarted = new Promise<void>((resolve) => { asked = resolve; });
+      hub.githubMergePreflight = async (message) => {
+        asked();
+        await reading;
+        return { type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId,
+          ok: true, check: { checkedAt: 3, closures: [] } };
+      };
+      const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      await preflightStarted;
+      // A new request for the same pull request supersedes the armed occurrence mid-read.
+      const replacement = svc.createWorkflowDecision(child.id, { requestId: "replacement-4073",
+        resourceKey: "picoduck/wollipog#4073", resourceSnapshot: armed.snapshot });
+      assert.ok(replacement.ok, replacement.error);
+      release();
+      const result = await executing;
+      hub.githubMergePreflight = undefined;
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "superseded");
+      assert.notEqual(result.data?.forgeAction?.outcome, "enqueued");
+    } finally { db.close(); }
+  });
+
   await t.test("Wollipog performs only an armed enqueue, and only for a runner that supports it (#4067)", async () => {
     const { db, hub, svc, child, parent } = setup(AGENT_ID);
     try {

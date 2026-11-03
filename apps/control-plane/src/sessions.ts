@@ -12264,10 +12264,14 @@ export class SessionsService {
       const currentChild = this.db.getSession(sessionId);
       const currentParent = this.db.getSession(decision.controllingSessionId);
       const policy = currentParent?.parentControlPolicy;
-      return Boolean(currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
+      // The occurrence itself must still stand: one superseded, revoked or settled meanwhile (for
+      // example by a new request for the same resource during the forge read) never dispatches.
+      const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+      return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
+        currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
         canAccess(currentChild.id) && canAccess(currentParent.id) &&
         this.workflowDecisionRelationship(currentParent.id, currentChild.id) && policy.revision === decision.policyRevision &&
-        this.workflowDecisionAuthorityCurrent(currentParent, policy, this.db.workflowDecisionByOccurrence(occurrenceId) ?? decision));
+        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
     };
     if (!child || !parent || !authorityCurrent()) {
       if (decision.status === "approved") {
