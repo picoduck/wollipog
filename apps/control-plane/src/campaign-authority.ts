@@ -107,6 +107,8 @@ export function evaluateCampaignAuthority(
   } },
   controllerProtocol: number | null | undefined = protocol,
   peerContracts?: { requester?: unknown; controller?: unknown },
+  /** #4075: `ControlPlaneDb.reviewExtensionCap` for a review_round_extension snapshot. */
+  reviewExtensionCap?: "within" | "exceeded",
 ): CampaignAuthorityEvaluation {
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
@@ -122,7 +124,11 @@ export function evaluateCampaignAuthority(
     supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol, peerContracts?.requester).supported &&
       campaignAuthorityPreflight(control, controller.driver, controllerProtocol, peerContracts?.controller).supported : (protocol ?? 0) >= (snapshot ? 139 : 136),
     snapshot, request: pending, trustedSource: snapshot ? "workflow_route" : pending?.requestSource,
-    humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot });
+    humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot,
+    // Both the requester's runner and the controller's must support capped extensions (#4075).
+    ...(snapshot?.category === "review_round_extension" && reviewExtensionCap &&
+      runnerSupportsProtocol(protocol, "fullControlReviewExtensions") &&
+      runnerSupportsProtocol(controllerProtocol, "fullControlReviewExtensions") ? { reviewExtensionCap } : {}) });
   const repositoryBound = !pending || (controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
     controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId);
   const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||

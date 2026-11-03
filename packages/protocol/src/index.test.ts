@@ -362,6 +362,10 @@ test("PROTOCOL_VERSION is 278", () => {
   // An epic's closure reads its members only from a runner that returns them (#4060).
   assert.equal(runnerSupportsProtocol(277, "epicClosureMembers"), false);
   assert.equal(runnerSupportsProtocol(278, "epicClosureMembers"), true);
+  for (const capability of ["reviewBaseMergeRounds", "fullControlReviewExtensions"] as const) {
+    assert.equal(runnerSupportsProtocol(276, capability), false);
+    assert.equal(runnerSupportsProtocol(277, capability), true);
+  }
   assert.equal(runnerSupportsProtocol(275, "delegatedImageEvidenceReview"), false);
   assert.equal(runnerSupportsProtocol(276, "delegatedImageEvidenceReview"), true);
   assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
