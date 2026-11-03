@@ -10143,14 +10143,30 @@ export class SessionsService {
     this.settleQueuedAdmission(command, now);
     // A wake that never started leaves the child idle and no longer parked, and its parking report
     // was never recorded (campaignChildWait): record what is now ready, so its Orchestrator hears of it.
-    if (state !== "delivered") this.recordCampaignReadinessAfterWatch(sessionId, now);
+    if (state !== "delivered") this.recordCampaignReadinessAfterWatch(sessionId, commandId, now);
   }
 
-  /** A merge-queue watch stopped counting as a wait without the child's status changing (#4071). */
-  private recordCampaignReadinessAfterWatch(sessionId: string, now: number): void {
+  /** A merge-queue watch stopped counting as a wait without the child's status changing (#4071).
+   * A failed wake leaves the child idle, so its report is an ordinary ready candidate. An uncertain
+   * one leaves it queued, which no candidate covers, so record its turn end as it stands: the
+   * Orchestrator sees a queued child behind a wake that may or may not have started. */
+  private recordCampaignReadinessAfterWatch(sessionId: string, commandId: string, now: number): void {
     const campaignSessionId = this.db.campaignRootForMember(sessionId);
     if (!campaignSessionId || campaignSessionId === sessionId) return;
-    this.db.recordCampaignContinuationEvents(this.campaignChildReadyEvents(campaignSessionId, now));
+    const events = this.campaignChildReadyEvents(campaignSessionId, now);
+    const child = this.db.getSession(sessionId);
+    if (child?.status === "queued" && !events.some((event) => event.subjectSessionId === sessionId)) {
+      events.push({
+        eventId: `child-ready:${campaignSessionId}:${sessionId}:watch-wake:${commandId}`,
+        campaignSessionId,
+        kind: "child_ready",
+        subjectSessionId: sessionId,
+        subjectStatus: child.status,
+        occurrenceId: `event-seq:${this.db.latestTopLevelReportSeq(sessionId) ?? 0}`,
+        now,
+      });
+    }
+    this.db.recordCampaignContinuationEvents(events);
   }
 
   /** On registration: a runner without review sessions can no longer report its reviews. */
