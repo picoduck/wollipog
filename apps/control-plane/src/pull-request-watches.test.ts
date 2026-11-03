@@ -199,7 +199,7 @@ test("an archived session's watch stops polling and owes no wake", () => {
   const h = harness();
   try {
     const watch = park(h, "s2");
-    h.db.updateSessionStatus("s2", "stopped", 10);
+    h.db.updateSessionStatus("s2", "completed", 10);
     const archived = h.svc.setArchived("s2", true);
     assert.ok(archived.ok, archived.error ?? "archive refused");
     assert.equal(h.db.pullRequestWatches.view(watch.watchId)!.state, "cancelled");
