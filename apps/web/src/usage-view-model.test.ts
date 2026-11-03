@@ -25,6 +25,7 @@ import {
   OTHER_AGENTS_LABEL,
   periodLabel,
   processedTokens,
+  ratesRefreshProblem,
   subscriptionPlanLabel,
   todaySpendUsd,
   usageDriverLabels,
@@ -450,4 +451,26 @@ test("the daily budget is reached at settled spend plus running-turn estimates, 
     "compared in whole micro-dollars, so float sums never fall a hair short");
   assert.equal(todaySpendUsd({ todayUsd: 0.1, todayEstimateUsd: 0.2 }), 0.3);
   assert.equal(dailyBudgetReached({ todayUsd: 100, dailyBudgetUsd: null }), false, "no budget, nothing to reach");
+});
+
+test("a Refresh Rates answer that isn't fresh names why, a skipped one says when to retry, and an older plane keeps its wording (#4056)", () => {
+  const source = "https://rates.example/table.json";
+  assert.equal(ratesRefreshProblem({ status: "fresh", source, fetchedAt: 1, knownModels: 1 }), null);
+  assert.deepEqual(ratesRefreshProblem({ status: "fresh", source, fetchedAt: 1, knownModels: 1, refreshSkipped: { nextAttemptAt: 2, retryAfterMs: 20_000 } }), {
+    summary: "This refresh was skipped because one ran less than a minute ago.",
+    details: [
+      "Wollipog tries the rate source at most once a minute. Try again in 20 seconds.",
+      "The last attempt succeeded, so the rates are current.",
+    ],
+  }, "a skip is said even when the rates are fresh");
+  assert.deepEqual(ratesRefreshProblem({ status: "unavailable", source: "disabled", fetchedAt: null, knownModels: 0 })?.details,
+    ["Rate fetching is turned off on this control plane."]);
+  assert.deepEqual(ratesRefreshProblem({ status: "cached", source, fetchedAt: 1, knownModels: 1, lastRefreshError: { message: "already a sentence.", at: 1 } })?.details,
+    [`${source} couldn't be fetched: already a sentence.`, "The rates are still cached."]);
+  assert.deepEqual(ratesRefreshProblem({ status: "cached", source, fetchedAt: 1, knownModels: 1, refreshSkipped: { nextAttemptAt: 2, retryAfterMs: 300 } }), {
+    summary: "This refresh was skipped because one ran less than a minute ago.",
+    details: ["Wollipog tries the rate source at most once a minute. Try again in 1 second."],
+  });
+  assert.match(ratesRefreshProblem({ status: "cached", source, fetchedAt: 1, knownModels: 1 })?.details[0] ?? "",
+    /didn't return a usable rate table, so the rates are still cached\. .*the control plane's log has the cause\.$/);
 });

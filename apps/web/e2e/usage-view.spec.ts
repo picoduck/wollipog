@@ -344,6 +344,30 @@ test("light theme and one Some Usage Is Missing notice for an offline machine, u
   await expect(notice).toContainText("Build Box is offline");
 });
 
+for (const [failure, reason] of [
+  ["timeout", "the rate source didn't answer within 30 seconds."],
+  ["invalid", "rate table document isn't valid JSON."],
+] as const) {
+  test(`a Refresh Rates ${failure} shows its reason behind Show Details, and a second click inside a minute says it was skipped (#4056)`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 1000 });
+    await page.goto(`/usage-view-e2e.html?unpriced=1&ratesRefresh=${failure}`);
+    const notice = page.locator("#usage-api-panel .notice.t-warning");
+    await notice.getByRole("button", { name: "Refresh Rates" }).click();
+    await expect(notice.locator(".notice-body")).toContainText("Rates couldn't be refreshed.");
+    await notice.getByRole("button", { name: "Show Details" }).click();
+    await expect(notice.locator(".notice-details-body")).toContainText(`couldn't be fetched: ${reason}`);
+    await expect(notice.locator(".notice-details-body")).toContainText("The rates are still cached.");
+
+    await notice.getByRole("button", { name: "Refresh Rates" }).click();
+    await expect(notice.locator(".notice-body")).toContainText("This refresh was skipped because one ran less than a minute ago.");
+    await expect(notice.locator(".notice-body")).not.toContainText("Rates couldn't be refreshed.");
+    const details = notice.getByRole("button", { name: /Show Details|Hide Details/ });
+    if ((await details.textContent()) === "Show Details") await details.click();
+    await expect(notice.locator(".notice-details-body")).toContainText("Try again in 42 seconds.");
+    await expect(notice.locator(".notice-details-body")).toContainText(`The last attempt failed: ${reason}`);
+  });
+}
+
 test("an empty window is one empty state under the toolbar, with no zero figures (#3016)", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/usage-view-e2e.html?empty=1");
