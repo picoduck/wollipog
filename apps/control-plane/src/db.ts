@@ -23,6 +23,7 @@ import { SessionReviewJobs } from "./session-review-jobs.js";
 import { applyCampaignBehavior, campaignBehaviorProjection, changedCampaignBehavior, inheritCampaignBehavior } from "./campaign-behavior.js";
 import type { OrchestratorCampaignBehavior, OrchestratorCampaignBehaviorKey } from "@wollipog/protocol";
 import { ReviewSessions, type NewReviewSession } from "./review-sessions.js";
+import { DelegatedImageReviews, type NewDelegatedImageReview } from "./delegated-image-reviews.js";
 import { PullRequestWatches } from "./pull-request-watches.js";
 import { ReviewSettingsStore, type ReviewPolicyCapture } from "./review-settings.js";
 import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, ORCHESTRATOR_REVIEW_POLICY_KEYS, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
@@ -872,6 +873,7 @@ CREATE TABLE IF NOT EXISTS workflow_decisions (
   selected_option_id    TEXT,
   evidence_reviewed     TEXT,
   delegated_video_evidence TEXT,
+  delegated_image_review TEXT,
   rationale_digest      TEXT,
   human_fallback        TEXT,
   authority_evaluation  TEXT,
@@ -5604,6 +5606,7 @@ export class ControlPlaneDb {
   readonly campaignReviewJobs: CampaignReviewJobs;
   readonly sessionReviewJobs: SessionReviewJobs;
   readonly reviewSessions: ReviewSessions;
+  readonly delegatedImageReviews: DelegatedImageReviews;
   readonly pullRequestWatches: PullRequestWatches;
   readonly reviewSettings: ReviewSettingsStore;
   /** A review session's immutable kind and what it reviews (#3368); for a session that requested
@@ -5638,6 +5641,7 @@ export class ControlPlaneDb {
       CampaignReviewJobs.install(db);
       SessionReviewJobs.install(db);
       ReviewSessions.install(db);
+      DelegatedImageReviews.install(db);
       PullRequestWatches.install(db);
       ReviewSettingsStore.install(db);
     }
@@ -5649,6 +5653,7 @@ export class ControlPlaneDb {
     });
     this.sessionReviewJobs = new SessionReviewJobs(db);
     this.reviewSessions = new ReviewSessions(db);
+    this.delegatedImageReviews = new DelegatedImageReviews(db);
     // Only the owning connection writes watches, so only it may cache their visibility.
     this.pullRequestWatches = new PullRequestWatches(db, !attached);
     this.reviewSettings = new ReviewSettingsStore(db);
@@ -7103,6 +7108,8 @@ export class ControlPlaneDb {
       "child_message TEXT",
       "withdrawal TEXT",
       "delegated_video_evidence TEXT",
+      // #4074: the delegated image reviewer whose verdict backed an Orchestrator approval.
+      "delegated_image_review TEXT",
       "human_fallback TEXT",
       "authority_evaluation TEXT",
       "issue_closure_result TEXT",
@@ -16759,6 +16766,15 @@ export class ControlPlaneDb {
     });
   }
 
+  /** A delegated image reviewer (#4074) exists only together with the review that makes it one. */
+  createDelegatedImageReviewSession(input: NewSessionInput, review: NewDelegatedImageReview): SessionView {
+    return this.atomic(() => {
+      this.delegatedImageReviews.record(review, input.id, input.now);
+      this.createSession(input);
+      return this.getSession(input.id)!;
+    });
+  }
+
   createSession(input: NewSessionInput): SessionView {
     const budgetSource = input.reviewRequesterSessionId ?? input.parentSessionId;
     const budgetRoot = budgetSource ? this.campaignBudgets.governingRoot(budgetSource) : null;
@@ -21323,15 +21339,17 @@ export class ControlPlaneDb {
     childMessage?: string,
     oweResume = false,
     delegatedVideoEvidence?: WorkflowDecisionView["delegatedVideoEvidence"],
+    delegatedImageReview?: WorkflowDecisionView["delegatedImageReview"],
   ): WorkflowDecisionView | null {
     const owed = oweResume ? ", resume_state='held', resume_command_id=NULL, resume_updated_at=?" : "";
     const result = this.stmt(
       `UPDATE workflow_decisions SET status=?, selected_option_id=?, evidence_reviewed=?,
-       rationale_digest=?, child_message=?, delegated_video_evidence=?, resolved_at=?${owed}
+       rationale_digest=?, child_message=?, delegated_video_evidence=?, delegated_image_review=?, resolved_at=?${owed}
        WHERE occurrence_id=? AND status='pending' AND authority=?`,
     ).run(
       outcome, selectedOptionId ?? null, evidenceReviewed ? JSON.stringify(evidenceReviewed) : null,
-      rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
+      rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null,
+      delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
@@ -22135,6 +22153,8 @@ export class ControlPlaneDb {
       `UPDATE ui_evidence_review_receipts SET consumed_at=?
        WHERE occurrence_id=? AND consumed_at IS NULL AND revoked_at IS NULL`,
     ).run(now, occurrenceId);
+    // A resolved decision leaves no delegated image review able to back it (#4074).
+    this.delegatedImageReviews.endForOccurrence(occurrenceId, "decision_resolved", now);
   }
 
   revokeUiEvidenceReviewReceipts(occurrenceId: string, now: number): void {
@@ -22142,6 +22162,9 @@ export class ControlPlaneDb {
       `UPDATE ui_evidence_review_receipts SET revoked_at=?
        WHERE occurrence_id=? AND consumed_at IS NULL AND revoked_at IS NULL`,
     ).run(now, occurrenceId);
+    // Whatever revoked the receipts (supersession, revocation, policy or ownership change) ends the
+    // occurrence's delegated image review with them, so its verdict can never back an approval.
+    this.delegatedImageReviews.endForOccurrence(occurrenceId, "decision_revoked", now);
   }
 
   /** The reviewing client as the control plane currently knows it. */
@@ -32500,6 +32523,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     selected_option_id?: string | null;
     evidence_reviewed?: string | null;
     delegated_video_evidence?: string | null;
+    delegated_image_review?: string | null;
     human_fallback?: string | null;
     authority_evaluation?: string | null;
     created_at?: number;
@@ -32528,6 +32552,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   if (!resourceSnapshot) return null;
   const evidenceReviewed = parseJson<string[]>(row.evidence_reviewed ?? null);
   const delegatedVideoEvidence = parseJson<NonNullable<WorkflowDecisionView["delegatedVideoEvidence"]>>(row.delegated_video_evidence ?? null);
+  const delegatedImageReview = parseJson<NonNullable<WorkflowDecisionView["delegatedImageReview"]>>(row.delegated_image_review ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
   return {
@@ -32550,6 +32575,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
+    ...(delegatedImageReview ? { delegatedImageReview } : {}),
     createdAt: row.created_at!,
     ...(row.resolved_at != null ? { resolvedAt: row.resolved_at } : {}),
     ...(row.consumed_at != null ? { consumedAt: row.consumed_at } : {}),

@@ -2065,6 +2065,93 @@ to `resolve_descendant_workflow_decision`; a rejection is evidence for denying. 
 sends anything unless `/api/compatibility` declares the paced video review contract, and both are
 listed only for Orchestrators. See `docs/video-evidence-production.md`.
 
+#### Delegated Image Review
+
+Protocol v276 (#4074) lets an Orchestrator review a decision's images without loading them into its
+own conversation. With direct review, each image stays in the Orchestrator's context for the rest
+of the campaign, and every later turn pays to read it again.
+`prepare_descendant_ui_evidence_review` (`sessionId`, `occurrenceId`, `brief`) instead hands every
+image of a pending decision this root Orchestrator owns to a **delegated image reviewer**. The
+reviewer is a managed Session with a fresh context. The `brief`, at most 16,000 characters, holds
+the child's claims and the UI acceptance criteria. It is the reviewer's only context besides the
+images.
+
+`get_descendant_ui_evidence_review` (`reviewId`) returns the review's state. Once the reviewer
+finishes, it also returns a bounded verdict:
+
+- a pass or fail for each image, with at most 10 observed defects of 500 characters each;
+- a summary of at most 2,000 characters;
+- an approve or deny recommendation.
+
+The Orchestrator resolves the decision as before, with `resolve_descendant_workflow_decision`. It
+lists every evidence id in `evidenceReviewed` and passes the exact `delegatedImageReview`
+reference (`reviewId`, `verdictId`, `reviewerSessionId`) the read returned.
+
+The reviewer follows the video reviewer's provenance pattern, but for images:
+
+- **Same gates as direct review.** Preparing, each delivery, each acknowledgement and the verdict
+  re-run every gate direct review runs: root campaign controller, ancestry, audience, pending
+  status, policy revision and current authority. Only a decision whose evidence is all
+  artifact-backed images can be delegated, and only one the Orchestrator could inspect directly
+  right now. Delegation therefore never reaches evidence or a provider that direct review would
+  not.
+- **Created by the server.** The reviewer runs on the root's own runner, agent and model, as a
+  child of the root. It gets a server-pinned review prompt and no campaign assignment. Its cost is
+  bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
+  member like any child, so its cost is reserved against the allowance and shows in campaign
+  accounting. Like a review session, it holds no concurrency slot.
+- **Two tools only.** The runner launches it as a native Claude Code session with no built-in
+  tools, no slash commands, no user or project settings, and only the runner's management MCP
+  server. That server exposes exactly `review_evidence_image` and `submit_evidence_verdict`. The
+  control plane narrows the reviewer's credential to the matching three routes under
+  `/api/sessions/:id/delegated-image-review/` (`image`, `acknowledge`, `verdict`) plus
+  `GET /api/compatibility`. It also refuses prompts, steering, configuration, restarts and
+  children for a reviewer. Stop and archival still work.
+- **Never relaunched.** A runner never relaunches a reviewer, and it refuses the marker for any
+  other harness, an Orchestrator launch, a non-native context or an older control plane, before a
+  credential exists.
+- **Receipts recorded against the reviewer.** `review_evidence_image` uses the same digest-verified
+  handoff as `review_descendant_ui_evidence`. The server reads and re-hashes the bytes, revokes
+  the decision on a mismatch, and records a receipt bound to the reviewer, child, occurrence,
+  policy revision, evidence identifier, artifact and digest. The reviewer's runner re-hashes the
+  bytes and acknowledges the exact receipt before the image reaches the model.
+- **One verdict, only after every image.** The verdict is accepted once, and only when the
+  reviewer holds a current acknowledged receipt for every item. Nothing is delivered after it.
+  The child that produced the evidence, and the Orchestrator itself, can never be the reviewer.
+- **Approval checks everything again.** An approval on a reviewer verdict re-checks the
+  following against the server's own records:
+  - the review, the verdict and its digest;
+  - the reviewer identity, which must be neither the child nor the root;
+  - the occurrence, policy revision, resource digest and evidence digests the review was
+    prepared against;
+  - an approve recommendation;
+  - an unexpired, unconsumed and unrevoked reviewer receipt for every item, as named by the
+    verdict.
+
+  Repeated identifiers, a plain message forwarded from the reviewer, a deny recommendation, or a
+  reference with a single field changed are all refused. Approval spends the receipts and the
+  verdict. The resolution audit lists the receipt ids and the reviewer's identity, verdict id,
+  recommendation and verdict digest. The decision records the `delegatedImageReview` it rested on.
+- **Stale evidence fails closed.** Anything that revokes or supersedes the decision ends its review
+  with the reviewer's receipts: supersession, a policy or ownership change, an authority loss, or
+  a digest mismatch. A resolved decision ends any other live review. Receipts expire after an hour,
+  as they do under direct review, so an old verdict has to be prepared again.
+- **One review at a time.** An occurrence has at most one live review, and preparing again returns
+  it. A reviewer that ended its turn or Session without a verdict ends its review, so a fresh one
+  can be prepared.
+
+The path adds no setting, form or confirmation. It uses the existing UI Evidence Approval
+authority, and decision ownership does not change. Direct `review_descendant_ui_evidence` keeps
+working, and remains the route for one image or a targeted follow-up look.
+
+Where the path is unavailable, the Orchestrator keeps direct review and preparing refuses with the
+reason:
+
+- a runner before v276, refused with the shared capability sentence;
+- a control plane before v276, where the runner tools refuse before sending anything;
+- an Orchestrator not on Claude Code;
+- an offline runner.
+
 This boundary governs actions performed through Wollipog's workflow-decision tools. It cannot
 intercept a separate shell, forge client, browser, or other credential that can independently
 perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,

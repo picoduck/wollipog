@@ -23,7 +23,8 @@ const LIVE_COST = "CASE WHEN s.live_settling=0 AND s.live_cost_usd>0 THEN s.live
  * slot. A member without a session row, a native review job or a deleted session whose runner may
  * not have removed it yet, holds one until its usage settles. Reviewer sessions never hold one.
  * Every comparison is NULL-safe, and an indeterminate result still holds the slot. */
-const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id) AND CASE
+const OCCUPYING = `(m.active=1 AND NOT EXISTS (SELECT 1 FROM review_sessions WHERE review_session_id=m.session_id)
+  AND NOT EXISTS (SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=m.session_id) AND CASE
     WHEN s.id IS NULL THEN 1
     ELSE COALESCE(NOT (s.status IN ('completed','failed','stopped')
       AND NOT EXISTS (SELECT 1 FROM session_stop_intents WHERE session_id=m.session_id)
@@ -633,7 +634,8 @@ export class CampaignBudgetLedger {
       const spentCost = old ? old.live_cost > 0 ? roundUsdMicros(old.cost + old.live_cost) : old.cost : 0;
       if (old) allocation = { ...allocation, costUsd: allocation.costUsd ?? old.cost_limit ?? undefined, toolCalls: allocation.toolCalls ?? old.tool_limit ?? undefined };
       if (old && old.root_id !== rootId) throw new Error("session belongs to another allowance");
-      const review = this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(allocation.sessionId);
+      const review = this.sql.prepare("SELECT 1 FROM review_sessions WHERE review_session_id=?").get(allocation.sessionId) ??
+        this.sql.prepare("SELECT 1 FROM delegated_image_reviews WHERE reviewer_session_id=?").get(allocation.sessionId);
       if (!review && launch && !old?.occupying && allocation.sessionId !== rootId && v.authority.concurrency !== undefined && v.occupied >= v.authority.concurrency) throw new Error("campaign concurrency allowance reached");
       for (const [requested, spent, ceiling, userCeiling, remaining, prior] of [
         [allocation.costUsd, spentCost, v.authority.costUsd, old ? old.user_cost_limit : userLimits.costUsd, v.remaining.costUsd, old?.active ? Math.max(0,(old.cost_limit ?? 0)-spentCost) : 0],

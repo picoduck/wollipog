@@ -18,6 +18,7 @@ import {
   type McpFetch,
   type ToolResult,
 } from "./session-management-mcp.js";
+import { UI_EVIDENCE_REVIEWER_PRESET } from "./orchestrator-preset.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import type { GlabRunner } from "./campaign-gitlab-status.js";
@@ -985,6 +986,7 @@ export async function runWollipogCli(
     token,
     actorHeader: sessionId ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : null,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    uiEvidenceReviewer: env.WOLLIPOG_PERMISSION_PRESET === UI_EVIDENCE_REVIEWER_PRESET,
     controlPlaneProtocolVersion: compatibility.protocolVersion,
   });
   const data = payload(result);
@@ -1052,6 +1054,7 @@ export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> 
     token,
     actorHeader: WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    uiEvidenceReviewer: env.WOLLIPOG_PERMISSION_PRESET === UI_EVIDENCE_REVIEWER_PRESET,
   };
   serveSessionManagementMcp(process.stdin, process.stdout, deps);
   process.stdin.on("end", () => process.exit(0));
