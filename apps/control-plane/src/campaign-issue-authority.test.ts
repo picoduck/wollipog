@@ -2687,6 +2687,12 @@ test("#4062 a refused epic-member addition cannot be delivered through a dispatc
     // Work on the scoped epic is dispatched and merged as before.
     const scoped = h.launch(h.item.id);
     assert.ok(scoped.ok, scoped.error ?? "refused");
+    // Retargeting that dispatched item at the unscoped issue is a dispatch for it, refused the same way.
+    const retarget = h.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 101 } },
+      { key: "issue:101", issue: { repository: "team/repo", number: 101 } }], planComplete: true });
+    assert.equal(retarget.ok, false); assert.equal(retarget.status, 409);
+    assert.match(retarget.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(retarget.error!, SCOPE_ROUTE);
+    assert.deepEqual(h.db.campaignWorkLedger.detail("root", h.item.id, Date.now())!.issue, { repository: "team/repo", number: 100 });
     const delivered = await h.merge("child", 12, ["team/repo#100"]).request();
     assert.ok(delivered.ok, delivered.error ?? "refused");
     assert.equal(delivered.data!.authority, "orchestrator");
@@ -2754,6 +2760,27 @@ test("#4062 a merge that says Refs and closes nothing stays the Orchestrator's, 
     const assigned = custom.svc.assignCampaignWorkItem("root", { workItemId: unscoped, childSessionId: "child" });
     assert.ok(assigned.ok, assigned.error ?? "refused");
   } finally { custom.db.close(); }
+});
+
+test("#4062 a merge from a runner that cannot read closing references is the person's, whatever it declares", async () => {
+  const h = scopeGuardHarness();
+  try {
+    h.db.registerRunner(h.metadata, 1, 241);
+    // The pull request may also close an unscoped issue; a v241 runner is never asked.
+    h.closes.set(21, ["team/repo#100", "team/repo#101"]);
+    for (const [pullRequest, closing] of [[21, ["team/repo#100"]], [22, []]] as const) {
+      const created = await h.merge("child", pullRequest, [...closing]).request();
+      assert.ok(created.ok, created.error ?? "refused");
+      assert.equal(created.data!.authority, "human");
+      assert.equal(created.data!.authorityEvaluation?.reason, "unverified_closures");
+      const approved = h.svc.resolveDescendantRequest("root", "child", created.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.equal(approved.ok, false, "the Orchestrator cannot approve it");
+      assert.equal(h.db.workflowDecisionByOccurrence(created.data!.occurrenceId)!.status, "pending");
+    }
+    const unscoped = await h.merge("child", 23, ["team/repo#101"]).request();
+    assert.equal(unscoped.ok, false); assert.match(unscoped.error!, /team\/repo#101/);
+  } finally { h.db.close(); }
 });
 
 test("#4062 a scope that drops a merge's closing issue after it was requested is evaluated again before approval and arming", async () => {

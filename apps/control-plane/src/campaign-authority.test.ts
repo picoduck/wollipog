@@ -83,9 +83,10 @@ test("#4062 a Full Control merge is the Orchestrator's only while every issue it
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] })), delegated);
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["other/repo#2934", "picoduck/wollipog#2934", "picoduck/wollipog#3903"] })),
       { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["other/repo#2934", "picoduck/wollipog#3903"] });
-    // A runner older than that read (v241) proves nothing: only declared, in-scope closures stay delegated.
+    // A runner older than that read (v241) proves nothing, and neither does its declaration: a pull
+    // request declaring an in-scope closure could still close an unscoped issue unread.
     assert.deepEqual(evaluate(root, merge(), 241), unverified);
-    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), delegated);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), unverified);
     assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241),
       { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["picoduck/wollipog#3903"] });
     // Nothing reads a GitLab merge's closures.

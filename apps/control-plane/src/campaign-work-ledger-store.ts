@@ -935,6 +935,12 @@ export class CampaignWorkLedgerStore {
         };
         const revised = this.followUpRevision(campaignId, existing, next.title, next.issueRepository, next.issueNumber);
         if (revised) return revised;
+        // Retargeting dispatched work is a dispatch for its new issue, checked the same way (#4062).
+        if ((next.issueRepository !== existing.issue_repository || next.issueNumber !== existing.issue_number) &&
+            this.openAttemptForItem(existing.id)) {
+          const outside = this.hooks.admitDispatch?.(campaignId, itemIssue(next.issueRepository, next.issueNumber));
+          if (outside) return fail(`work item ${input.key} has an open attempt, so it cannot be retargeted: ${outside}`, 409);
+        }
         if (next.title !== existing.title || next.issueRepository !== existing.issue_repository ||
             next.issueNumber !== existing.issue_number || next.dispatchState !== existing.dispatch_state ||
             next.queuePosition !== existing.queue_position) {

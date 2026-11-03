@@ -83,7 +83,7 @@ export function campaignDispatchScopeRefusal(policy: SessionView["orchestratorPo
  * A GitHub merge's `intendedClosures` are exactly what GitHub would close: a v242 runner reads that
  * before the merge is requested and again before it is armed, and a mismatch refuses it (#3713).
  * Nothing reads a GitLab merge's closures, or a GitHub merge's from an older runner, so such a merge
- * is never assumed to close nothing: only declared closures that are all in scope keep it delegated. */
+ * is never assumed to close nothing, and its declaration proves nothing either: it is the person's. */
 function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: number | null | undefined,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): Pick<CampaignAuthorityEvaluation, "reason" | "unscopedClosures"> | null {
   const declared = snapshot.intendedClosures ?? [];
@@ -93,7 +93,7 @@ function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: 
   });
   if (unscoped.length) return { reason: "outside_issue_scope", unscopedClosures: unscoped };
   const read = snapshot.mergeMethod === undefined && runnerSupportsProtocol(protocol, "githubMergeClosingReferences");
-  return read || declared.length ? null : { reason: "unverified_closures" };
+  return read ? null : { reason: "unverified_closures" };
 }
 
 export function evaluateCampaignAuthority(
