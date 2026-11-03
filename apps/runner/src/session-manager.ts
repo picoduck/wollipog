@@ -9375,6 +9375,8 @@ export class SessionManager {
             // Live requests published after the checkpoint are still open: a later baseline that
             // cannot cover them must account them as observed (#3086).
             let live: ClaudeLiveUsage = [];
+            // A republication that no settled record closed was cut short: its checkpoint is stale.
+            let interrupted = false;
             let frozen: { logEpoch: number; throughSeq: number } | undefined;
             while (true) {
               const page = this.store.readEventPage(sessionId, { afterSeq: cursor, limit: HISTORY_PAGE_MAX_EVENTS, ...frozen });
@@ -9384,16 +9386,17 @@ export class SessionManager {
                 if (event.payload.claudeUsageCheckpoint?.sessionId === resumeId) {
                   checkpoint = event.payload.claudeUsageCheckpoint;
                 }
-                if (event.payload.liveUsage === "settled") live = [];
+                if (event.payload.liveUsage === "settled") { live = []; interrupted = false; }
                 else if (event.payload.liveUsage === "provisional") live.push(event.payload);
                 // Republished in order: a restart between two resumes after the last one written.
-                else if (event.payload.liveUsage === "republished") live.shift();
+                else if (event.payload.liveUsage === "republished") { live.shift(); interrupted = true; }
               }
               if (!page.page.hasMore) break;
               cursor = page.page.nextAfterSeq;
               frozen = { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
             }
-            return { ...resumed(), ...(live.length > 0 ? { claudeLiveUsage: live } : {}) };
+            return { ...resumed(), ...(live.length > 0 ? { claudeLiveUsage: live } : {}),
+              ...(interrupted ? { claudeRepublicationInterrupted: true } : {}) };
           })(),
           acpSessionContext: meta.acpSessionContext,
           isolation,

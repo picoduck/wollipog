@@ -138,8 +138,8 @@ test("a persisted baseline that no probe confirmed settles only totals that cove
   // The restored prefix lost the interrupted request: the total grew by 5 input tokens, not 50.
   const events = accounting.result("s", grown(15, 0.03));
   const { liveUsage: _live, ...ordinary } = live;
-  assert.deepEqual(events, [{ kind: "token_usage", accountingIncomplete: true, claudeUsageCheckpoint: accounting.checkpoint },
-    { ...ordinary, liveUsage: "settled" }], "the marker journals the new baseline before any request is republished");
+  assert.deepEqual(events, [{ ...ordinary, liveUsage: "republished" }, { kind: "token_usage", accountingIncomplete: true, liveUsage: "settled" }],
+    "the marker closes the window, where the caller journals the new baseline");
   assert.equal(accounting.checkpoint!.totalCostUsd, 0.04, "later turns are differences from this total");
   assert.ok(Math.abs(accounting.result("s", grown(16, 0.04))[0]!.costUsd! - 0.01) < 1e-10);
 });
@@ -152,18 +152,23 @@ test("a restart part-way through an uncertain result never counts a republished 
   start(accounting, "2.1.296");
   // Claude lost the interrupted 50-token request from its totals; the next 10-token request counts.
   const live = [accounting.request(req(50))!, accounting.request(req(10))!];
-  const batch = accounting.result("s", total(110));
-  assert.equal(batch.length, 3);
+  // As the driver emits it: the record that closes the window journals the new baseline.
+  const batch = accounting.result("s", total(110)).map((event, index, all) =>
+    index === all.length - 1 ? { ...event, claudeUsageCheckpoint: accounting.checkpoint! } : event);
+  assert.deepEqual(batch.map((event) => [event.liveUsage, event.accountingIncomplete]), [["republished", undefined], ["republished", undefined], ["settled", true]]);
   for (let durable = 0; durable <= batch.length; durable++) {
-    // Rebuild the relaunch as the session manager does from the durable prefix of the batch.
-    let checkpoint = persisted;
-    let open = [...live];
-    for (const event of batch.slice(0, durable)) {
-      if (event.claudeUsageCheckpoint) checkpoint = event.claudeUsageCheckpoint;
-      if (event.liveUsage === "settled") open = [];
-      else if (event.liveUsage === "republished") open.shift();
+    // Rebuild the relaunch as the session manager does: the last journaled checkpoint, then only
+    // the durable events after it (the old checkpoint was journaled before the live requests).
+    const log = [{ checkpoint: persisted }, ...live.map((event) => ({ event })), ...batch.slice(0, durable).map((event) => ({ event }))];
+    let checkpoint = persisted, open: typeof live = [], interrupted = false;
+    for (const entry of log) {
+      const event = "event" in entry ? entry.event : null;
+      if (!event || event.claudeUsageCheckpoint) { checkpoint = event?.claudeUsageCheckpoint ?? persisted; open = []; interrupted = false; continue; }
+      if (event.liveUsage === "settled") { open = []; interrupted = false; }
+      else if (event.liveUsage === "provisional") open.push(event);
+      else if (event.liveUsage === "republished") { open.shift(); interrupted = true; }
     }
-    const relaunched = new ClaudeUsageAccounting(undefined, checkpoint, open);
+    const relaunched = new ClaudeUsageAccounting(undefined, checkpoint, open, interrupted);
     start(relaunched, "2.1.296");
     relaunched.request(req(10));
     const after = relaunched.result("s", total(120));
@@ -182,7 +187,7 @@ test("an unknown scope never bills a resumed process's first total as a delta", 
 
   const resumed = new ClaudeUsageAccounting(undefined, claudeUsageCheckpoint("s", result(0.02, 0.01))!);
   start(resumed);
-  assert.deepEqual(resumed.result("s", grown(15, 0.03)), [{ kind: "token_usage", accountingIncomplete: true, claudeUsageCheckpoint: resumed.checkpoint }]);
+  assert.deepEqual(resumed.result("s", grown(15, 0.03)), [{ kind: "token_usage", accountingIncomplete: true }]);
   assert.equal(resumed.checkpoint!.accountingScope, "process");
   assert.ok(Math.abs(resumed.result("s", grown(16, 0.04))[0]!.costUsd! - 0.01) < 1e-10, "later totals of the same process are differences");
   start(resumed);

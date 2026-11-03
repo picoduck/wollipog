@@ -94,11 +94,17 @@ export class ClaudeUsageAccounting {
   /** The baseline is a persisted checkpoint that no resume probe confirmed this process restored. */
   private unprobed = false;
 
-  constructor(restoresUsage: boolean | undefined, checkpoint?: ClaudeUsageCheckpoint, live?: ClaudeLiveUsage) {
+  /** `republicationInterrupted`: a restart cut a republication short after the checkpoint, so part of
+   * the window is accounted while the checkpoint that should follow it was never journaled. A total
+   * measured from that stale checkpoint could include those requests again, so the next one is
+   * unproven: only the requests still open are accounted. */
+  constructor(restoresUsage: boolean | undefined, checkpoint?: ClaudeUsageCheckpoint, live?: ClaudeLiveUsage,
+    republicationInterrupted = false) {
     this.restoresUsage = restoresUsage;
     this.checkpoint = checkpoint?.accountingScope === (restoresUsage ? "conversation" : "process") ? checkpoint : null;
     this.retained = checkpoint?.accountingScope === "conversation" ? checkpoint : null;
     this.live = (live ?? []).filter((event) => event.liveUsage === "provisional").map((event) => ({ ...event }));
+    this.unproven = republicationInterrupted;
   }
 
   /** A new provider process starts. Its totals are interpreted once it reports its version
@@ -219,12 +225,11 @@ export class ClaudeUsageAccounting {
   }
 
   /** Account the requests observed live, and mark the record incomplete rather than exact. The
-   * marker comes first and carries the new baseline: a restart part-way through the batch then
-   * recovers that baseline with only the requests not yet republished still open, so neither a
-   * republished request nor the uncertainty is lost or counted again. */
+   * marker closes the window and journals the new baseline; a restart before it is recovered as an
+   * interrupted republication (see the constructor). */
   private uncertain(): UsageEvent[] {
     const observed = this.live.map((event): UsageEvent => ({ ...event, liveUsage: "republished" }));
-    return this.settle([{ kind: "token_usage", accountingIncomplete: true, claudeUsageCheckpoint: this.checkpoint! }, ...observed]);
+    return this.settle([...observed, { kind: "token_usage", accountingIncomplete: true }]);
   }
 
   /** Close the live window with `events`, the last of which (or a content-free marker) is
