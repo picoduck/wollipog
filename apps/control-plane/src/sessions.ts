@@ -6280,7 +6280,7 @@ export class SessionsService {
         const child = event.kind === "child_ready" && event.subjectSessionId ? turnEnds.get(event.subjectSessionId) : undefined;
         if (child && child.latestSeq !== event.seq) return [];
         try {
-          const detail = this.campaignContinuationEventDetail(campaignSessionId, event, sessions);
+          const detail = this.campaignContinuationEventDetail(campaignSessionId, event, sessions, now);
           return [child && child.count > 1 ? { ...detail, summary: { ...detail.summary, turnEnds: child.count } } : detail];
         } catch (error) {
           // Detail is a convenience. Never let it hold up delivery (or every other prompt this pass
@@ -6337,6 +6337,7 @@ export class SessionsService {
     campaignSessionId: string,
     event: CampaignContinuationEventRecord,
     sessions: Map<string, SessionView | null>,
+    now: number,
   ): CampaignContinuationEventDetail {
     const base = { seq: event.seq, kind: event.kind, createdAt: event.createdAt };
     const session = (id: string) => {
@@ -6425,11 +6426,19 @@ export class SessionsService {
         } };
       }
       case "child_ready": {
-        // A child running again at delivery has moved past this turn end (#4073). Whatever it
-        // reports next ends another turn, and that turn end is recorded on its own.
+        // A child running again at delivery, or one that reported again since and is now idle
+        // behind a live wait, has moved past this turn end (#4073). Its later turn end is recorded
+        // on its own: when it ends, or once that wait ends. A wait behind this very report is not
+        // enough, since this report's event is never recorded again.
         const current = subject(event.subjectSessionId);
-        return { actionable: !("childStatus" in current) || current.childStatus !== "running", summary: {
-          ...base, ...current, ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
+        const status = "childStatus" in current ? current.childStatus : undefined;
+        const reportSeq = Number(/^event-seq:(\d+)$/u.exec(event.occurrenceId ?? "")?.[1] ?? Number.NaN);
+        const waiting = status === "idle" && event.subjectSessionId &&
+          (this.db.latestTopLevelReportSeq(event.subjectSessionId) ?? 0) > reportSeq
+          ? this.db.campaignChildWait(event.subjectSessionId, now) : null;
+        return { actionable: status !== "running" && !waiting, summary: {
+          ...base, ...current, ...(waiting ? { waiting } : {}),
+          ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
         } };
       }
       case "child_blocked":

@@ -20251,21 +20251,26 @@ export class ControlPlaneDb {
         `SELECT COALESCE(MAX(seq),0) AS seq FROM session_events WHERE session_id=?`,
       ).get(sessionId) as { seq: number };
       if (child.status === "idle" && !this.hasCompletedAgentReportAt(sessionId, latest.seq)) {
-        const report = this.stmt(
-          `SELECT MAX(seq) AS seq FROM session_events WHERE session_id=? AND (
-             kind='agent_response_completed' OR
-             (kind='agent_message' AND json_extract(payload,'$.final')=1
-              AND trim(json_extract(payload,'$.text'))!=''
-              AND json_type(payload,'$.parentToolUseId') IS NULL)
-           )`,
-        ).get(sessionId) as { seq: number | null };
-        if (report.seq == null) continue;
-        candidates.push({ sessionId, status: child.status, eventSeq: report.seq });
+        const report = this.latestTopLevelReportSeq(sessionId);
+        if (report == null) continue;
+        candidates.push({ sessionId, status: child.status, eventSeq: report });
       } else {
         candidates.push({ sessionId, status: child.status, eventSeq: latest.seq });
       }
     }
     return candidates;
+  }
+
+  /** The seq of the session's latest top-level report, superseded or not; null if it has none. */
+  latestTopLevelReportSeq(sessionId: string): number | null {
+    return (this.stmt(
+      `SELECT MAX(seq) AS seq FROM session_events WHERE session_id=? AND (
+         kind='agent_response_completed' OR
+         (kind='agent_message' AND json_extract(payload,'$.final')=1
+          AND trim(json_extract(payload,'$.text'))!=''
+          AND json_type(payload,'$.parentToolUseId') IS NULL)
+       )`,
+    ).get(sessionId) as { seq: number | null }).seq;
   }
 
   listOrchestratorCampaignSessionIds(runnerId?: string): string[] {

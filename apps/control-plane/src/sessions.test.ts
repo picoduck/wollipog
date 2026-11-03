@@ -2862,6 +2862,56 @@ test("a child that ends its turn behind a live background job wakes nobody until
   }
 });
 
+test("a queued turn end that the child has since moved past into a wait asks for nothing (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, deliver } = harness;
+  const { job, update, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Pushed the review fix.");
+    const ciStart = Date.now();
+    const report = turnEnd("CI restarted; waiting on it in the background.", [job("ci", ciStart)]);
+    assert.equal(db.campaignContinuationEvents(root.id).length, 1, "only the first turn end was recorded");
+    const queued = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(queued);
+    assert.match(queued, /"kind":"child_ready",.*"childStatus":"idle","waiting":"background_job","status":"idle"/u);
+    assert.match(queued, /Action needed: no\./u);
+
+    update("idle", [job("ci", ciStart, Date.now())]);
+    const ended = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(ended, "the ended wait wakes the Orchestrator for the later report");
+    assert.match(ended, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.doesNotMatch(ended, /"waiting"/u);
+    assert.match(ended, /Action needed: yes/u);
+    assert.deepEqual(db.campaignContinuationChildCandidates(root.id).map((candidate) => candidate.eventSeq), [report]);
+  } finally {
+    db.close();
+  }
+});
+
+test("a child idle behind a wait on the very report its event names still asks for the sweep (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, deliver } = harness;
+  const { turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Final report.");
+    // A job appearing with no later report is not a moved-past turn end: this event is the only
+    // one the report gets, so it stays actionable.
+    db.raw().prepare(`INSERT INTO managed_background_jobs
+      (session_id,job_id,parent_turn_id,runner_id,launch_type,registered_at,last_observed_at)
+      VALUES (?,?,?,?,?,?,?)`).run(child.id, "late", "turn-late", RUNNER_ID, "shell", Date.now(), Date.now());
+    assert.equal(db.campaignChildWait(child.id, Date.now()), "background_job");
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.doesNotMatch(text, /"waiting"/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
 test("a waiting child that asks or stops still wakes the Orchestrator (#4073)", () => {
   const harness = continuationCampaign("questions");
   const { db, svc, root, child, deliver, ask } = harness;

@@ -98,8 +98,9 @@ has something to learn or do (#3083):
   - **`Action needed: no`** requires nothing pending for the Orchestrator, no held child, no report
     to verify, no required cleanup, no human or unattributed resolution, and no undelivered events
     beyond the bounded 64-event slice. It lets the turn end without the `get_campaign` and
-    `list_descendant_requests` sweep. A child that is only waiting has no report to verify, and a
-    `child_ready` whose child is running again at delivery asks for nothing: its next turn end is
+    `list_descendant_requests` sweep. A child that is only waiting has no report to verify. A
+    `child_ready` asks for nothing when its child is running again at delivery, or has reported
+    again since and is idle behind a live wait (shown as `waiting`). That later turn end is
     recorded on its own.
   - **Cost.** The delivery deadline comes from one query over the queue. Event details are built
     only when a continuation is actually staged, and session views are read once per pass.
