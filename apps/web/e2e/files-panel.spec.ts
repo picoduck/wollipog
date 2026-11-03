@@ -136,13 +136,13 @@ test.describe("at 400px", () => {
     await open(page);
     await goToFile(page).fill("sdtsx");
     const options = page.getByRole("option");
-    // The changed file leads; the better match follows with its matched letters marked.
+    // The strong name match leads; the changed file's scattered s…d…tsx does not lift it above.
     await expect(options).toHaveCount(2);
-    await expect(options.first()).toHaveAttribute("title", "apps/web/src/components/CheckBadge.tsx");
-    await expect(options.nth(1)).toHaveAttribute("title", "apps/web/src/components/SessionDetail.tsx");
-    await expect(options.nth(1).locator(".files-goto-name .files-goto-match")).toHaveText(["S", "D", "tsx"]);
+    await expect(options.first()).toHaveAttribute("title", "apps/web/src/components/SessionDetail.tsx");
+    await expect(options.first().locator(".files-goto-name .files-goto-match")).toHaveText(["S", "D", "tsx"]);
+    await expect(options.nth(1)).toHaveAttribute("title", "apps/web/src/components/CheckBadge.tsx");
     await goToFile(page).press("Enter");
-    await expect(page.locator(".crumbs .crumb.is-current")).toHaveText("CheckBadge.tsx");
+    await expect(page.locator(".crumbs .crumb.is-current")).toHaveText("SessionDetail.tsx");
   });
 
   test("an empty folder offers the way up", async ({ page }) => {

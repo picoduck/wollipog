@@ -240,6 +240,26 @@ test("Go to File: files only, changed or recent first, then the best fuzzy match
   assert.deepEqual([across?.folderRanges, across?.nameRanges], [[{ start: 0, end: 3 }], [{ start: 0, end: 2 }]]);
 });
 
+test("Go to File lifts a changed file only on a clean match: a scatter never tops a strong name match", () => {
+  const results = [
+    { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+    { path: "src/unrelated.ts", isDirectory: false },
+  ];
+  const changed = new Set(["apps/web/src/components/CheckBadge.tsx"]);
+  assert.deepEqual(rankGoToFileResults(results, "sdtsx", changed).map((match) => match.path), [
+    "apps/web/src/components/SessionDetail.tsx",
+    "apps/web/src/components/CheckBadge.tsx",
+  ], "the changed file's scattered s…d…tsx ranks by score, below the word-start name match");
+  assert.equal(rankGoToFileResults(results, "check", changed)[0]?.path, "apps/web/src/components/CheckBadge.tsx",
+    "on a clean match the changed file still leads");
+  assert.deepEqual(
+    rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "sdtsx", changed, true).map((match) => match.path),
+    [],
+    "a cut answer does not gain a priority file on a scattered match",
+  );
+});
+
 test("Go to File adds matching priority files only when the runner's answer was cut short", () => {
   const results = [{ path: "src/session-list.ts", isDirectory: false }];
   const priority = new Set(["deep/nested/session-store.ts", "README.md", "untracked-dir/"]);

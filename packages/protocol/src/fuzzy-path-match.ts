@@ -56,10 +56,37 @@ export function fuzzyPathMatch(path: string, needle: string): FuzzyPathMatch | n
   return align(path, needle, true);
 }
 
-/** Lower case one UTF-16 unit at a time, so offsets in the folded text are offsets in the original. */
+/** A run this long inside the file name reads as typing part of the name, even mid-word. */
+const CLEAN_NAME_RUN = 3;
+
+/**
+ * Whether a match reads as deliberate: every run of matched characters starts a word (a path
+ * segment, a separator or a camelCase hump) or is at least three characters of the file name.
+ * "sdtsx" in SessionDetail.tsx is clean (S, D, tsx); in CheckBadge.tsx it is not, since its "d"
+ * sits alone mid-word. Go to File lifts changed and recent files only on a clean match (#1263),
+ * so a coincidental scatter never outranks a stronger match just because the file was touched.
+ */
+export function fuzzyPathMatchIsClean(path: string, positions: readonly number[]): boolean {
+  const nameStart = path.lastIndexOf("/") + 1;
+  for (let start = 0; start < positions.length;) {
+    let end = start + 1;
+    while (end < positions.length && positions[end] === positions[end - 1]! + 1) end += 1;
+    const first = positions[start]!;
+    const wordStart = bonusAt(path, first, nameStart) - (first >= nameStart ? BONUS_NAME : 0) > 0;
+    if (!wordStart && !(first >= nameStart && end - start >= CLEAN_NAME_RUN)) return false;
+    start = end;
+  }
+  return positions.length > 0;
+}
+
+/**
+ * Lower case one UTF-16 unit at a time, so offsets in the folded text are offsets in the original,
+ * and the same way for the query and every path: whole-string lower-casing is contextual (a final Σ
+ * becomes ς), so it is used only for ASCII, where it is not.
+ */
 function foldCase(text: string): string {
-  const lower = text.toLowerCase();
-  if (lower.length === text.length) return lower;
+  // eslint-disable-next-line no-control-regex
+  if (/^[\x00-\x7f]*$/.test(text)) return text.toLowerCase();
   let folded = "";
   for (const unit of text.split("")) {
     const unitLower = unit.toLowerCase();
@@ -109,17 +136,28 @@ function align(path: string, needle: string, withPositions: boolean, budget?: Fu
   return best;
 }
 
+/**
+ * A run's carried bonus, as it can still matter: `runBonus` never pays less than a plain run, so
+ * every start bonus up to BONUS_CONSECUTIVE carries the same. The alignment keeps one state per
+ * level, since a lower score now with a higher carried bonus can win after more consecutive letters.
+ */
+const LEVEL_VALUES = [...new Set([0, BONUS_CAMEL, BONUS_WORD, BONUS_SEGMENT]
+  .flatMap((base) => [base, base + BONUS_NAME])
+  .map((bonus) => Math.max(bonus, BONUS_CONSECUTIVE)))].sort((a, b) => a - b);
+const LEVELS = LEVEL_VALUES.length;
+const LEVEL_OF = Array.from({ length: BONUS_SEGMENT + BONUS_NAME + 1 }, (_, bonus) =>
+  LEVEL_VALUES.indexOf(Math.max(bonus, BONUS_CONSECUTIVE)));
+
 // Scratch rows reused across calls; matching is synchronous, so no two calls share them at once.
-let scores = [new Float64Array(256), new Float64Array(256)];
-let runs = [new Int32Array(256), new Int32Array(256)];
+// Each holds LEVELS rows of the path's length: state (level, offset) lives at level * n + offset.
+let scores = [new Float64Array(256 * LEVELS), new Float64Array(256 * LEVELS)];
 let earliest = new Int32Array(64);
 let latest = new Int32Array(64);
 
 function reserve(n: number, m: number): void {
-  if (scores[0]!.length < n) {
-    const size = Math.max(n, scores[0]!.length * 2);
+  if (scores[0]!.length < n * LEVELS) {
+    const size = Math.max(n * LEVELS, scores[0]!.length * 2);
     scores = [new Float64Array(size), new Float64Array(size)];
-    runs = [new Int32Array(size), new Int32Array(size)];
   }
   if (earliest.length < m) {
     earliest = new Int32Array(Math.max(m, earliest.length * 2));
@@ -156,62 +194,95 @@ function alignFrom(
     return { score: scorePositions(path, positions, nameStart), positions: withPositions ? positions : [] };
   }
   if (budget) budget.cells -= cells;
-  // previous[j]: the best score with the previous query character at offset j; previousRun[j]: the
-  // bonus of the character that started its run. A run keeps its start's bonus, so "index" scores
-  // higher as a whole word in "src/indexer/" than as letters spread across "binder-example".
-  // Row i writes [earliest[i], latest[i]]; row i + 1 reads up to latest[i + 1] - 1, so each row
-  // clears through the end of the path first.
+  // previous[level * n + j]: the best score with the previous query character at offset j, in a run
+  // whose start carries `level`. A run keeps its start's bonus, so "index" scores higher as a whole
+  // word in "src/indexer/" than as letters spread across "binder-example". Row i writes
+  // [earliest[i], latest[i]]; row i + 1 reads from earliest[i], so each row clears from just before
+  // its earliest offset through the end of the path first.
   let previous = scores[0]!;
   let current = scores[1]!;
-  let previousRun = runs[0]!;
-  let currentRun = runs[1]!;
-  const from = withPositions ? new Int32Array(m * n).fill(-1) : null;
-  previous.fill(NONE, Math.max(0, earliest[0]! - 2), n);
+  // from[(i * LEVELS + level) * n + j]: the previous character's offset * LEVELS + its level.
+  const from = withPositions ? new Int32Array(m * LEVELS * n).fill(-1) : null;
+  const clear = (row: Float64Array, offset: number) => {
+    for (let level = 0; level < LEVELS; level += 1) row.fill(NONE, level * n + Math.max(0, offset - 2), level * n + n);
+  };
+  clear(previous, earliest[0]!);
   for (let j = earliest[0]!; j <= latest[0]!; j += 1) {
     if (haystack[j] !== needle[0]) continue;
     const bonus = bonusAt(path, j, nameStart);
-    previous[j] = SCORE_MATCH + bonus * FIRST_CHARACTER_MULTIPLIER;
-    previousRun[j] = bonus;
+    previous[LEVEL_OF[bonus]! * n + j] = SCORE_MATCH + bonus * FIRST_CHARACTER_MULTIPLIER;
   }
   for (let i = 1; i < m; i += 1) {
-    current.fill(NONE, Math.max(0, earliest[i]! - 2), n);
+    clear(current, earliest[i]!);
     let gap = NONE;
     let gapFrom = -1;
     for (let j = earliest[i - 1]! + 1; j <= latest[i]!; j += 1) {
-      // The best earlier character at least two back, less the gap between it and j.
+      // The best earlier character at least two back, in any run, less the gap between it and j.
       if (gap > NONE) gap += GAP_EXTEND;
       const skipped = j - 2;
-      if (skipped >= earliest[i - 1]! && previous[skipped]! > NONE && previous[skipped]! + GAP_START > gap) {
-        gap = previous[skipped]! + GAP_START;
-        gapFrom = skipped;
+      if (skipped >= earliest[i - 1]!) {
+        for (let level = 0; level < LEVELS; level += 1) {
+          const before = previous[level * n + skipped]!;
+          if (before > NONE && before + GAP_START > gap) {
+            gap = before + GAP_START;
+            gapFrom = skipped * LEVELS + level;
+          }
+        }
       }
       if (j < earliest[i]! || haystack[j] !== needle[i]) continue;
       const bonus = bonusAt(path, j, nameStart);
-      const run = previous[j - 1]! > NONE ? previous[j - 1]! + runBonus(bonus, previousRun[j - 1]!) : NONE;
-      const jump = gap > NONE ? gap + bonus : NONE;
-      if (run <= NONE && jump <= NONE) continue;
-      current[j] = Math.max(run, jump) + SCORE_MATCH;
-      currentRun[j] = run >= jump ? previousRun[j - 1]! : bonus;
-      if (from) from[i * n + j] = run >= jump ? j - 1 : gapFrom;
+      // Continue each run, keeping its level.
+      for (let level = 0; level < LEVELS; level += 1) {
+        const before = previous[level * n + j - 1]!;
+        if (before <= NONE) continue;
+        current[level * n + j] = before + SCORE_MATCH + Math.max(bonus, LEVEL_VALUES[level]!);
+        if (from) from[(i * LEVELS + level) * n + j] = (j - 1) * LEVELS + level;
+      }
+      // Or start a new run here after a gap.
+      if (gap > NONE) {
+        const level = LEVEL_OF[bonus]!;
+        const jump = gap + SCORE_MATCH + bonus;
+        if (jump > current[level * n + j]!) {
+          current[level * n + j] = jump;
+          if (from) from[(i * LEVELS + level) * n + j] = gapFrom;
+        }
+      }
     }
     [previous, current] = [current, previous];
-    [previousRun, currentRun] = [currentRun, previousRun];
   }
   let end = -1;
   for (let j = earliest[m - 1]!; j <= latest[m - 1]!; j += 1) {
-    if (previous[j]! > NONE && (end < 0 || previous[j]! > previous[end]!)) end = j;
+    for (let level = 0; level < LEVELS; level += 1) {
+      const at = level * n + j;
+      if (previous[at]! > NONE && (end < 0 || previous[at]! > previous[end]!)) end = at;
+    }
   }
   if (end < 0) return null;
+  const score = previous[end]!;
   const positions: number[] = [];
   if (from) {
-    for (let i = m - 1, j = end; i >= 0; j = from[i * n + j]!, i -= 1) positions.unshift(j);
+    let state = (end % n) * LEVELS + Math.floor(end / n);
+    for (let i = m - 1; i >= 0; i -= 1) {
+      const j = Math.floor(state / LEVELS);
+      positions.unshift(j);
+      state = from[(i * LEVELS + (state % LEVELS)) * n + j]!;
+    }
   }
-  return { score: previous[end]!, positions };
+  return { score, positions };
 }
 
 /** A character that continues a run scores at least its run's start, and at least a plain run. */
 function runBonus(own: number, runStart: number): number {
   return Math.max(own, runStart, BONUS_CONSECUTIVE);
+}
+
+/**
+ * The score the alignment maximizes, for one given placement of the query's characters (ascending
+ * offsets), before the file-name bonuses. Exported so tests can check the alignment against every
+ * placement.
+ */
+export function fuzzyPathPlacementScore(path: string, positions: readonly number[]): number {
+  return scorePositions(path, positions, path.lastIndexOf("/") + 1);
 }
 
 /** The same scoring as the alignment, for one given placement. */

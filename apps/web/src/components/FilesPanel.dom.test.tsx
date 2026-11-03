@@ -502,6 +502,31 @@ test("fuzzy Go to File: scattered letters find the file, recent and changed file
   }
 });
 
+test("a changed file whose letters only scatter never tops a strong name match; Enter opens the strong one", async () => {
+  searchResults = [
+    { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+  ];
+  changedFiles = [{ status: "M", path: "apps/web/src/components/CheckBadge.tsx" }];
+  shownSession = { ...session, id: "files-session-scatter" };
+  const mounted = await mount();
+  try {
+    await pressGoToFile();
+    await typeQuery(mounted, "sdtsx");
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), [
+      "apps/web/src/components/SessionDetail.tsx",
+      "apps/web/src/components/CheckBadge.tsx",
+    ]);
+    assert.equal(options(mounted)[1]!.querySelector(".files-git-marker")?.textContent, "MModified",
+      "the changed file is still listed, and marked");
+    await key(mounted, "Enter");
+    await settle();
+    assert.deepEqual(reads, ["apps/web/src/components/SessionDetail.tsx"], "Enter opens the strong match");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
 test("a recent file the runner's capped answer left out is still offered when it matches", async () => {
   searchResults = [{ path: "src/session.ts", isDirectory: false }];
   shownSession = { ...session, id: "files-session-capped" };

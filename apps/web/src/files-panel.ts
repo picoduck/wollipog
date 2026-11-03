@@ -3,6 +3,7 @@
 
 import {
   fuzzyPathMatch,
+  fuzzyPathMatchIsClean,
   fuzzyPathNeedle,
   type EditorInfo,
   type EditorLocationPrecision,
@@ -182,11 +183,14 @@ export interface GoToFileMatch {
 /**
  * Ranks the runner's bounded search for Go to File (#2852, #1263): files whose path holds the query's
  * characters in order (`fuzzyPathMatch`); git-changed files and files opened earlier in this session
- * first, then the best match, then the shorter path, as the runner chose them. Remaining ties keep
- * the runner's order, which is breadth-first, so shallower files come first.
+ * first when their match is clean (`fuzzyPathMatchIsClean`: each matched run starts a word or is
+ * three or more letters of the name), then the best match, then the shorter path, as the runner chose
+ * them. Remaining ties keep the runner's order, which is breadth-first, so shallower files come first.
+ * A priority file whose letters merely scatter through its path ranks by score like any other, so
+ * it cannot push a stronger match off the top row that Enter opens.
  *
- * A truncated answer can leave out a priority file, so those that match are added from `priority`.
- * A complete answer that lacks one means the file is gone, so nothing is added to it.
+ * A truncated answer can leave out a priority file, so those with a clean match are added from
+ * `priority`. A complete answer that lacks one means the file is gone, so nothing is added to it.
  */
 export function rankGoToFileResults(
   results: readonly { path: string; isDirectory: boolean }[],
@@ -196,16 +200,20 @@ export function rankGoToFileResults(
 ): GoToFileMatch[] {
   const needle = fuzzyPathNeedle(query);
   const paths = results.filter((result) => !result.isDirectory).map((result) => result.path);
+  const answered = paths.length;
   if (truncated) {
-    const answered = new Set(paths);
+    const listed = new Set(paths);
     for (const path of priority) {
-      if (!answered.has(path) && !path.endsWith("/")) paths.push(path);
+      if (!listed.has(path) && !path.endsWith("/")) paths.push(path);
     }
   }
   return paths
     .flatMap((path, index) => {
       const found = fuzzyPathMatch(path, needle);
-      return found ? [{ match: goToFileMatch(path, found.positions), index, score: found.score, first: priority.has(path) ? 0 : 1 }] : [];
+      if (!found) return [];
+      const lifted = priority.has(path) && fuzzyPathMatchIsClean(path, found.positions);
+      if (index >= answered && !lifted) return [];
+      return [{ match: goToFileMatch(path, found.positions), index, score: found.score, first: lifted ? 0 : 1 }];
     })
     .sort((a, b) => a.first - b.first || b.score - a.score || a.match.path.length - b.match.path.length || a.index - b.index)
     .map(({ match }) => match);

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { fuzzyPathMatch, fuzzyPathNeedle, fuzzyPathScore } from "./index.js";
+import { fuzzyPathMatch, fuzzyPathMatchIsClean, fuzzyPathNeedle, fuzzyPathPlacementScore, fuzzyPathScore } from "./index.js";
 
 const score = (path: string, query: string) => fuzzyPathScore(path, fuzzyPathNeedle(query));
 const matched = (path: string, query: string) =>
@@ -70,4 +70,71 @@ test("a shared alignment budget is spent per path and, once gone, still matches 
   assert.ok(cheap! <= full!, "the cheap placement never outscores the best one");
   assert.equal(spent.cells, 0);
   assert.equal(fuzzyPathScore("src/a.ts", needle, spent), null, "and still rejects a non-match");
+});
+
+test("a clean match starts each run at a word or types three letters of the name; a scatter is not clean", () => {
+  const clean = (path: string, query: string) => fuzzyPathMatchIsClean(path, fuzzyPathMatch(path, fuzzyPathNeedle(query))!.positions);
+  assert.equal(clean("apps/web/src/components/SessionDetail.tsx", "sdtsx"), true, "S, D and tsx each start a word");
+  assert.equal(clean("docs/sidebar-details.tsx", "sdtsx"), true);
+  assert.equal(clean("src/precheck.ts", "check"), true, "five letters of the name, mid-word");
+  assert.equal(clean("apps/web/src/components/CheckBadge.tsx", "sdtsx"), false, "a lone mid-word d is a coincidence");
+  assert.equal(clean("src/abcdefghijk.ts", "aek"), false);
+  assert.equal(clean("src/xyabz.ts", "ab"), false, "two mid-word letters are too few");
+  assert.equal(fuzzyPathMatchIsClean("src/a.ts", []), false);
+});
+
+test("the alignment keeps a lower-scoring run whose carried bonus wins later", () => {
+  // At "b" both placements score the same, but only the one that jumped from the slash carries its
+  // segment bonus into "c".
+  const path = `a/${"x".repeat(21)}a/bc`;
+  const found = fuzzyPathMatch(path, "a/bc");
+  assert.deepEqual(found?.positions, [0, 1, 25, 26]);
+  assert.equal(found?.score, fuzzyPathPlacementScore(path, [0, 1, 25, 26]));
+  assert.equal(found?.score, 97);
+});
+
+test("the query and every path fold case the same way, whatever else the path holds", () => {
+  // İ lower-cases to two units, and a whole-string fold turns a final Σ into ς.
+  assert.deepEqual(fuzzyPathMatch("İ/ΟΣ.ts", fuzzyPathNeedle("ΟΣ"))?.positions, [2, 3]);
+  assert.deepEqual(fuzzyPathMatch("src/ΟΣ.ts", fuzzyPathNeedle("ΟΣ"))?.positions, [4, 5]);
+  assert.deepEqual(fuzzyPathMatch("src/οσ.ts", fuzzyPathNeedle("ΟΣ"))?.positions, [4, 5]);
+});
+
+test("the alignment finds the best placement: exhaustive check over short paths", () => {
+  const NAME_ONLY = 40;
+  const NAME_EXACT = 64;
+  const NAME_PREFIX = 24;
+  // A deterministic generator, so a failure names a reproducible case.
+  let seed = 1263;
+  const next = () => (seed = (seed * 1103515245 + 12345) % 2 ** 31) / 2 ** 31;
+  const alphabet = "aAbB/-._1";
+  const placements = (path: string, needle: string): number[][] => {
+    const found: number[][] = [];
+    const walk = (i: number, from: number, taken: number[]) => {
+      if (i === needle.length) return void found.push([...taken]);
+      for (let j = from; j < path.length; j += 1) {
+        if (path[j]!.toLowerCase() === needle[i]) walk(i + 1, j + 1, [...taken, j]);
+      }
+    };
+    walk(0, 0, []);
+    return found;
+  };
+  for (let trial = 0; trial < 3_000; trial += 1) {
+    const path = Array.from({ length: 1 + Math.floor(next() * 12) }, () => alphabet[Math.floor(next() * alphabet.length)]).join("");
+    const needle = fuzzyPathNeedle(Array.from({ length: 1 + Math.floor(next() * 4) }, () => "ab/.1"[Math.floor(next() * 5)]).join(""));
+    const label = `${JSON.stringify(path)} / ${needle}`;
+    const all = placements(path, needle);
+    const found = fuzzyPathMatch(path, needle);
+    if (all.length === 0) {
+      assert.equal(found, null, label);
+      continue;
+    }
+    const nameStart = path.lastIndexOf("/") + 1;
+    const name = path.slice(nameStart).toLowerCase();
+    const named = name === needle ? NAME_EXACT : name.startsWith(needle) ? NAME_PREFIX : 0;
+    const total = (placement: readonly number[]) =>
+      fuzzyPathPlacementScore(path, placement) + (placement[0]! >= nameStart ? NAME_ONLY : 0) + named;
+    assert.equal(found?.score, Math.max(...all.map(total)), label);
+    assert.equal(total(found!.positions), found!.score, `the positions earn the score: ${label}`);
+  }
 });
