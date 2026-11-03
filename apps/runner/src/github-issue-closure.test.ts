@@ -194,3 +194,83 @@ test("completed closure verifies the delivered head, actual default-branch merge
     else await assert.rejects(inspect);
   }
 });
+
+/** An epic fixture (#4060): sub-issues and checklist members the runner reads with their states. */
+function epicFixture() {
+  const f = fixture();
+  f.repository.issue.body = "## Members\n- [x] #201\n- [ ] https://github.com/team/repo/issues/202\n- [ ] #123\n\n## Notes\n- [ ] #999";
+  const subIssues: Array<Record<string, unknown>> = [{ number: 200, state: "closed", state_reason: "completed", html_url: "https://github.com/team/repo/issues/200" }];
+  const issues = new Map<number, Record<string, unknown> | "fail">([
+    [201, { number: 201, state: "closed", state_reason: "completed", html_url: "https://github.com/team/repo/issues/201" }],
+    [202, { number: 202, state: "open", state_reason: null, html_url: "https://github.com/team/repo/issues/202" }],
+  ]);
+  let subIssuesFail = false;
+  const run = async (command: string, args: string[]) => {
+    const path = args.at(-1)!;
+    if (path === "repos/team/repo/issues/123/sub_issues?per_page=100") {
+      if (subIssuesFail) throw new Error("rate limited");
+      return JSON.stringify(subIssues);
+    }
+    const member = /^repos\/team\/repo\/issues\/(\d+)$/u.exec(path);
+    if (member) {
+      const raw = issues.get(Number(member[1]));
+      if (!raw || raw === "fail") throw new Error("not found");
+      return JSON.stringify(raw);
+    }
+    return f.run(command, args);
+  };
+  return { ...f, run, subIssues, issues, failSubIssues: () => { subIssuesFail = true; } };
+}
+
+test("an epic's members come from its sub-issues and member checklist, with each member's state (#4060)", async () => {
+  const f = epicFixture();
+  const plain = await inspectGithubIssueClosure(123, f.run);
+  assert.equal(plain.epicMembers, undefined, "members are read only when asked");
+  assert.equal(f.calls.some((call) => call.args.at(-1)?.includes("sub_issues")), false);
+  const read = await inspectGithubIssueClosure(123, f.run, undefined, true);
+  // The epic itself and a row outside the member section are never members.
+  assert.deepEqual(read.epicMembers, { readable: true, members: [
+    { number: 200, state: "completed" }, { number: 201, state: "completed" }, { number: 202, state: "open" }] });
+  assert.notEqual(read.forgeDigest, plain.forgeDigest, "the member read is bound into the digest");
+  assert.equal((await inspectGithubIssueClosure(123, f.run, undefined, true)).forgeDigest, read.forgeDigest);
+
+  f.issues.set(201, { number: 201, state: "closed", state_reason: "not_planned", html_url: "https://github.com/team/repo/issues/201" });
+  f.issues.set(202, "fail");
+  f.subIssues.push({ number: 203, state: "closed", state_reason: null, html_url: "https://github.com/team/repo/issues/203" });
+  assert.deepEqual((await inspectGithubIssueClosure(123, f.run, undefined, true)).epicMembers?.members, [
+    { number: 200, state: "completed" }, { number: 201, state: "closed_not_completed" }, { number: 202, state: "unreadable" },
+    { number: 203, state: "closed_not_completed" }]);
+});
+
+test("an epic's member list is unreadable as a whole when its sub-issues cannot be read in full (#4060)", async () => {
+  for (const change of [
+    (f: ReturnType<typeof epicFixture>) => f.failSubIssues(),
+    (f: ReturnType<typeof epicFixture>) => { f.subIssues.push({ number: 300, state: "open", html_url: "https://github.com/other/repo/issues/300" }); },
+    (f: ReturnType<typeof epicFixture>) => { f.subIssues.push({ number: 301, state: "open", html_url: "https://github.com/team/repo/issues/301", pull_request: {} }); },
+    (f: ReturnType<typeof epicFixture>) => { for (let n = 400; n < 500; n++) f.subIssues.push({ number: n, state: "open", html_url: `https://github.com/team/repo/issues/${n}` }); },
+  ]) {
+    const f = epicFixture(); change(f);
+    assert.deepEqual((await inspectGithubIssueClosure(123, f.run, undefined, true)).epicMembers, { readable: false, members: [] });
+  }
+});
+
+test("an approval proven from an epic's members is refused when a member joins or changes state (#4060)", async () => {
+  for (const change of [
+    (f: ReturnType<typeof epicFixture>) => { f.subIssues.push({ number: 204, state: "open", html_url: "https://github.com/team/repo/issues/204" }); },
+    (f: ReturnType<typeof epicFixture>) => { f.issues.set(201, { number: 201, state: "open", html_url: "https://github.com/team/repo/issues/201" }); },
+  ]) {
+    const f = epicFixture();
+    const { state: _state, ...inspection } = await inspectGithubIssueClosure(123, f.run, undefined, true);
+    const approved: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: "completed", explanation: "Members delivered.",
+      evidence: ["Every member closed."], activeChildren: [], issueAdmission: { boundaryRevision: 1, evidenceDigest: "a".repeat(64) } };
+    change(f);
+    const result = await executeGithubIssueClosure(approved, f.run, () => assert.fail("no mutation fence should begin"));
+    assert.equal(result.refusal?.reason, "epic_members_changed");
+    assert.equal(f.calls.filter((call) => call.args[0] === "issue").length, 0);
+  }
+  const f = epicFixture();
+  const { state: _state, ...inspection } = await inspectGithubIssueClosure(123, f.run, undefined, true);
+  const approved: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: "completed", explanation: "Members delivered.",
+    evidence: ["Every member closed."], activeChildren: [] };
+  assert.equal((await executeGithubIssueClosure(approved, f.run, () => true)).outcome, "closed", "an unchanged member read keeps the approval");
+});

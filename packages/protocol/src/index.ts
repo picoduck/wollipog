@@ -811,14 +811,16 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw. Older control planes have
 //      no route, so current clients refuse by name rather than sending it.
 // 270: FIFO processing barriers pace runner replay independently of WebSocket liveness.
-export const PROTOCOL_VERSION = 270;
+// 274: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
+//      a Full Control completed closure of an in-scope epic can be proven from its closed members.
+export const PROTOCOL_VERSION = 274;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
-import type { IssueClosureDeliveryGap } from "./issue-closure-delivery-gap.js";
+import type { IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
@@ -1181,6 +1183,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorIssueScope: 158,
   campaignIssueScopeChanges: 208,
   orchestratorIssueClosure: 194,
+  /** v274 issue-closure inspection reads an epic's sub-issues and member checklist with each member's
+   * state (#4060). Without it an epic's completed closure has only the work-item proof. */
+  epicClosureMembers: 274,
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
@@ -5109,6 +5114,10 @@ export interface GithubIssueClosureInspection {
    * omit it; a refusal of their snapshot cannot then name the PR that changed. */
   openPullRequests: Array<{ number: number; title: string; url: string; headSha: string; closesIssue?: boolean }>;
   delivery?: Array<{ number: number; headSha: string; mergeCommitSha: string }>;
+  /** v274 (#4060): present only when the inspection asked for them, and then part of `forgeDigest`:
+   * the epic's members from its sub-issues and member checklist, with each member's state. A GitLab
+   * runner omits it, so a GitLab epic keeps only the work-item proof. */
+  epicMembers?: IssueClosureEpicMembers;
 }
 
 export interface GithubIssueClosureRequest {
@@ -9635,7 +9644,9 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
 } & (
-  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }> }
+  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
+      /** v274 (#4060): also read the issue's epic members into the inspection and its digest. */
+      epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
 );
 

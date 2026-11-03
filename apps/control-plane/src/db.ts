@@ -5965,6 +5965,9 @@ export class ControlPlaneDb {
       for (const item of page.data.items) {
         if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
             !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
+        // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
+        // finished by that closure. Any item with an attempt still needs its own delivery.
+        if (item.attemptCount === 0 && !item.currentAttempt && this.memberProvenEpicClosure(campaignId, item.issue.repository, item.issue.number)) continue;
         // These are trusted work-item attestations, not agent stage prose or session-report verification.
         // Keep an unresolved incomplete attestation across new workers/heads. A legitimate later
         // delivery supersedes it; insertion order, not tied timestamps or random UUIDs, is chronology.
@@ -22168,6 +22171,23 @@ export class ControlPlaneDb {
     const result = JSON.parse(row.issue_closure_result) as GithubIssueClosureResult;
     if (result.outcome !== "refused" || !Number.isSafeInteger(result.completedAt)) return null;
     return { occurrenceId: row.occurrence_id, completedAt: result.completedAt, refusal: normalizeGithubIssueClosureRefusal(result.refusal) };
+  }
+
+  /** Whether the campaign root closed this issue as completed through an Orchestrator-owned closure
+   * proven from the epic's members (#4060) that the runner confirmed closed. An uncertain, refused,
+   * already-closed or person-owned closure does not count. */
+  memberProvenEpicClosure(campaignId: string, repository: string, issue: number): boolean {
+    const rows = this.stmt(`SELECT resource_snapshot, issue_closure_result FROM workflow_decisions
+      WHERE session_id=? AND controlling_session_id=? AND category='issue_closure' AND resource_key=? AND status='consumed'
+        AND authority='orchestrator' AND issue_closure_result IS NOT NULL`)
+      .all(campaignId, campaignId, `issue_closure:${repository.toLowerCase()}#${issue}`) as Array<{ resource_snapshot: string; issue_closure_result: string }>;
+    return rows.some((row) => {
+      const snapshot = parseJson<GithubIssueClosureSnapshot>(row.resource_snapshot);
+      const result = parseJson<GithubIssueClosureResult>(row.issue_closure_result);
+      return snapshot?.category === "issue_closure" && snapshot.reason === "completed" && snapshot.issue === issue &&
+        Boolean(snapshot.issueAdmission) && snapshot.epicMembers?.readable === true && snapshot.epicMembers.members.length > 0 &&
+        result?.outcome === "closed";
+    });
   }
 
   /** Consumption and its initial uncertainty are one durable write before dispatch. */
