@@ -7178,6 +7178,9 @@ export class ControlPlaneDb {
       ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
       ON workflow_decisions(resume_command_id) WHERE resume_state='delivering'`);
+    // #4067: a campaign's merged branches are found through its consumed merges' Orchestrators.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_consumed_merges
+      ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND status='consumed'`);
     admitChildBlockedCampaignEvents(db);
     preserveCampaignFollowUpOrigins(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
@@ -21105,6 +21108,34 @@ export class ControlPlaneDb {
       .filter((target) => target.refs.length > 0);
   }
 
+  /** The controlling sessions whose consumed `pr_merge` decisions belong to this campaign (#4067):
+   * the root and any session below it, keyed on the decision's controlling session whoever resolved
+   * it (a person, an Orchestrator, or forge reconciliation). Membership is plain ancestry, never a
+   * role, so a nested controller is never dropped. Read through the consumed-merge index, so a
+   * campaign without any costs one probe however many children it has. */
+  private campaignMergeControllers(campaignId: string): string[] {
+    const ids = (this.stmt(
+      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='pr_merge' AND decision.status='consumed'
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
+    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
+  }
+
+  /** Whether `sessionId` is `campaignId` or below it, by walking parents (bounded, cycle-safe). */
+  private sessionWithinCampaign(sessionId: string, campaignId: string): boolean {
+    let current: string | null = sessionId;
+    const seen = new Set<string>();
+    while (current && !seen.has(current) && seen.size < 256) {
+      if (current === campaignId) return true;
+      seen.add(current);
+      current = (this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(current) as
+        { parent_session_id: string | null } | undefined)?.parent_session_id ?? null;
+    }
+    return false;
+  }
+
   private campaignMergedBranchCounts(campaignId: string): { pending: number; retained: number } {
     const rows = this.campaignMergedBranches(campaignId);
     return { pending: rows.filter((row) => row.state === "pending").length, retained: rows.filter((row) => row.state === "retained").length };
@@ -21124,13 +21155,16 @@ export class ControlPlaneDb {
   campaignMergedBranches(campaignId: string): CampaignMergedBranch[] {
     const observer = this.campaignForgeObservingRunner(campaignId);
     if (!observer || !runnerSupportsProtocol(observer.protocolVersion, "forgeDecisionActions")) return [];
-    const childIds = this.campaignDescendantIds(campaignId);
-    if (!childIds.length) return [];
+    // Found through the deciding Orchestrator, never by walking every descendant: the projection is
+    // rebuilt as children change, and a campaign without a consumed merge costs one indexed probe.
+    const controllers = this.campaignMergeControllers(campaignId);
+    if (!controllers.length) return [];
     const merges = this.stmt(
       `SELECT session_id, resource_snapshot FROM workflow_decisions
-       WHERE category='pr_merge' AND status='consumed' AND session_id IN (SELECT value FROM json_each(?))
+       WHERE category='pr_merge' AND status='consumed' AND session_id<>?
+         AND controlling_session_id IN (SELECT value FROM json_each(?))
        ORDER BY consumed_at, occurrence_id`,
-    ).all(JSON.stringify(childIds)) as Array<{ session_id: string; resource_snapshot: string }>;
+    ).all(campaignId, JSON.stringify(controllers)) as Array<{ session_id: string; resource_snapshot: string }>;
     const latest = new Map<string, { sessionId: string; repository: string; pullRequest: number; headSha: string }>();
     for (const row of merges) {
       const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
@@ -21142,9 +21176,10 @@ export class ControlPlaneDb {
     const deletions = new Map<string, { occurrenceId: string; deletedAt?: number; refusal?: string }>();
     for (const row of this.stmt(
       `SELECT occurrence_id, resource_snapshot, forge_action FROM workflow_decisions
-       WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL AND session_id IN (SELECT value FROM json_each(?))
+       WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL AND session_id<>?
+         AND controlling_session_id IN (SELECT value FROM json_each(?))
        ORDER BY created_at, occurrence_id`,
-    ).all(JSON.stringify(childIds)) as Array<{ occurrence_id: string; resource_snapshot: string; forge_action: string }>) {
+    ).all(campaignId, JSON.stringify(controllers)) as Array<{ occurrence_id: string; resource_snapshot: string; forge_action: string }>) {
       const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
       const action = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action);
       if (snapshot?.category !== "merged_branch_deletion" || !action) continue;

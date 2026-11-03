@@ -191,6 +191,52 @@ test("a Wollipog deletion after the last read counts, and a refused one says why
   } finally { h.db.close(); }
 });
 
+test("a merge is tracked whoever resolved it: a person, a nested Orchestrator, or forge reconciliation (#4067)", () => {
+  const h = fixture();
+  try {
+    const identity = h.db.localIdentityContext();
+    // A nested Orchestrator under the campaign, with its own child.
+    for (const [id, parent] of [["nested", "root"], ["grand", "nested"]] as const) {
+      h.db.createSession({ id, runnerId: "r", workspaceId: "w", agentId: "agent", title: id, useWorktree: false,
+        driver: "claude-code", config: { model: "opus" }, now: 1, parentSessionId: parent,
+        scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
+    }
+    const merge = (occurrence: string, sessionId: string, controller: string, authority: "human" | "orchestrator",
+      pullRequest: number, status: "consumed" | "approved", action?: { command: string; digest: string }) =>
+      h.db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+        category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at,
+        action_kind,action_command,action_command_digest,action_armed_at)
+        VALUES (?,?,?,?,'pr_merge',?,?,'digest',1,?,?,3,4,?,?,?,?,?)`)
+        .run(occurrence, occurrence, sessionId, controller, `picoduck/wollipog#${pullRequest}`, JSON.stringify({ category: "pr_merge",
+          repository: "picoduck/wollipog", pullRequest, headSha: "e".repeat(40), reviewResult: "merge", requiredChecks: {
+            headSha: "e".repeat(40), status: "passed", checkedAt: 2, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } }),
+        authority, status, status === "consumed" ? 5 : null, action ? "pr_merge_enqueue" : null, action?.command ?? null,
+        action?.digest ?? null, action ? 4 : null);
+    // A person approved this one (a Custom campaign, or a human-owned gate under Full Control).
+    merge("by-person", "child", "root", "human", 4201, "consumed");
+    // A nested Orchestrator approved its own child's merge.
+    merge("by-nested", "grand", "nested", "orchestrator", 4202, "consumed");
+    // An armed merge the forge reconciled from its already merged head.
+    merge("by-forge", "child", "root", "orchestrator", 4203, "approved", { command: "gh pr merge 4203", digest: "f".repeat(64) });
+    const reconciled = h.db.consumeReconciledWorkflowDecisionActionWithReceipt("child", "by-forge", "f".repeat(64), "1".repeat(64),
+      Date.now(), { forgeAttested: true });
+    assert.equal(reconciled?.decision.status, "consumed");
+    const tracked = h.db.campaignProjection("root")!.mergedBranches?.items.map((row) => [row.pullRequest, row.sessionId, row.state])
+      .sort((a, b) => (a[0] as number) - (b[0] as number));
+    assert.deepEqual(tracked, [[4100, "child", "pending"], [4201, "child", "pending"], [4202, "grand", "pending"], [4203, "child", "pending"]]);
+    assert.notEqual(h.db.campaignStatusOnly("root"), "verified_complete");
+    // Another campaign's root never adds its merges here.
+    h.db.createSession({ id: "other-root", runnerId: "r", workspaceId: "w", agentId: "agent", title: "other", useWorktree: false,
+      driver: "claude-code", config: { model: "opus" }, now: 1,
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
+    h.db.createSession({ id: "other-child", runnerId: "r", workspaceId: "w", agentId: "agent", title: "other child", useWorktree: false,
+      driver: "claude-code", config: { model: "opus" }, now: 1, parentSessionId: "other-root",
+      scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
+    merge("elsewhere", "other-child", "other-root", "orchestrator", 4204, "consumed");
+    assert.equal(h.db.campaignProjection("root")!.mergedBranches?.total, 4);
+  } finally { h.db.close(); }
+});
+
 test("a fork's branch is not tracked, and an older observing runner keeps today's completion (#4067)", () => {
   const fork = fixture();
   try {
