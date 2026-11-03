@@ -231,6 +231,8 @@ const recordedWork = (revision: number) => workSummary(NOW, {
     coordination: knownCost(2.25),
     unattributed: knownCost(0, "providerReported", 0, 0),
     attributedSince: NOW - 3 * HOUR,
+    // Claude turns that billed their conversation's running total (#4069).
+    ...(params.get("runningTotals") === "1" ? { runningTotalClaudeRecords: 2 } : {}),
   },
 });
 
