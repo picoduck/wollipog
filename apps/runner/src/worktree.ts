@@ -1814,6 +1814,41 @@ export async function mergedWorktreePullRequestForBranch(
 /** Candidate merged pull requests checked per containment proof; each one costs a forge fetch. */
 const CONTAINING_PULL_REQUEST_CANDIDATES = 5;
 
+/** Configuration for the anonymous containment fetch (#4068). Repository configuration may be
+ * session-written, so nothing it names runs: hooks and fsmonitor are off, HTTPS is the only
+ * transport (no configured SSH command), and no credential helper or askpass program runs. Extra
+ * headers configured for any host or for github.com are cleared, and the environment below skips
+ * system and global configuration, so no runner credential is sent and a configured proxy or CA has
+ * nothing to capture. A head that needs credentials is therefore unavailable proof. */
+export const CONTAINMENT_FETCH_GIT_CONFIG: readonly string[] = [
+  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+  "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+  "-c", "http.sslVerify=true", "-c", "http.extraHeader=", "-c", "http.https://github.com/.extraHeader=",
+  "-c", "credential.helper=", "-c", "credential.interactive=false", "-c", "core.askPass=",
+];
+export const CONTAINMENT_FETCH_GIT_ENV: Readonly<Record<string, string>> = {
+  GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+};
+
+/** Whether every commit reachable from `tip` is reachable from `mergedHead`, read from the commits
+ * themselves (#4068). Replacement refs, a graft file and the commit-graph cache can each rewrite
+ * parents, so none of them is consulted. Throws when either commit is unavailable. */
+async function historyContains(
+  context: AgentContext,
+  cwd: string,
+  mergedHead: string,
+  tip: string,
+): Promise<boolean> {
+  const outside = (await runContextCommand(
+    context,
+    "git",
+    ["--no-replace-objects", "-c", "core.commitGraph=false", "rev-list", "--count", `${mergedHead}..${tip}`],
+    { cwd, timeoutMs: 30_000, env: { GIT_GRAFT_FILE: "/dev/null" } },
+  )).stdout.trim();
+  if (!/^\d+$/u.test(outside)) throw new Error("unexpected commit count");
+  return outside === "0";
+}
+
 export type MergedPullRequestContainment =
   | { state: "contained"; url: string; headOid: string }
   /** The forge answered and no merged pull request it listed contains the tip. */
@@ -1924,31 +1959,21 @@ export async function mergedPullRequestContainingHead(
   for (const candidate of candidates.values()) {
     try {
       // No destination ref: the objects land in the shared store and only this worktree's private
-      // FETCH_HEAD is written, so nothing a session could later move records the result. Repository
-      // configuration may be session-written, so nothing it names runs here: hooks and fsmonitor are
-      // off and HTTPS is the only transport (no configured SSH command). The fetch is anonymous: no
-      // credential helper or askpass program runs and no credential is sent, so a configured proxy
-      // or CA has nothing to capture.
-      // A head that needs credentials is therefore unavailable proof and the worktree is retained.
+      // FETCH_HEAD is written, so nothing a session could later move records the result.
       await runContextCommand(
         context,
         "git",
         [
-          "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
-          "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-          "-c", "http.sslVerify=true", "-c", "credential.helper=", "-c", "credential.interactive=false",
-          "-c", "core.askPass=",
+          ...CONTAINMENT_FETCH_GIT_CONFIG,
           ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
           "fetch", "--no-tags", "--no-recurse-submodules", "--quiet", "--",
           fetchUrl, `refs/pull/${candidate.number}/head`,
         ],
-        { cwd: worktreePath, timeoutMs: 60_000, env: { GIT_TERMINAL_PROMPT: "0" } },
+        { cwd: worktreePath, timeoutMs: 60_000, env: { ...CONTAINMENT_FETCH_GIT_ENV } },
       );
-      const outside = (await command(
-        context, worktreePath, ["rev-list", "--count", `${candidate.headOid}..${head}`],
-      )).trim();
-      if (outside === "0") return { state: "contained", url: candidate.url, headOid: candidate.headOid };
-      if (!/^\d+$/u.test(outside)) incomplete = true;
+      if (await historyContains(context, worktreePath, candidate.headOid, head)) {
+        return { state: "contained", url: candidate.url, headOid: candidate.headOid };
+      }
     } catch {
       incomplete = true;
     }
@@ -2072,12 +2097,7 @@ async function retainedRefDeliveryProven(
   if (record.verifiedMergedHead === record.expectedOid) return true;
   if (record.containingMergedHead && /^[a-f0-9]{40,64}$/u.test(record.containingMergedHead)) {
     try {
-      const outside = (await command(
-        context,
-        record.repoPath,
-        ["rev-list", "--count", `${record.containingMergedHead}..${record.expectedOid}`],
-      )).trim();
-      if (outside === "0") return true;
+      if (await historyContains(context, record.repoPath, record.containingMergedHead, record.expectedOid)) return true;
     } catch {
       // A head object that is no longer available cannot prove delivery; try the other proofs.
     }
@@ -2400,12 +2420,7 @@ export async function discardWorktreeIfSafe(
         if (!safeUntrackedHead && typeof containingHead === "string" && /^[a-f0-9]{40,64}$/u.test(containingHead)) {
           // Every commit of this exact head must be in the merged pull request's history (#4068).
           try {
-            const outside = (await command(
-              context,
-              repoPath,
-              ["rev-list", "--count", `${containingHead}..${head}`],
-            )).trim();
-            if (outside === "0") {
+            if (await historyContains(context, repoPath, containingHead, head)) {
               safeUntrackedHead = true;
               checkedOutContainingMergedHead = containingHead;
             }
