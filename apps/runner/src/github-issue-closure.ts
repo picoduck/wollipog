@@ -5,6 +5,7 @@ import type {
 import { campaignRepositoryLocation, githubIssueClosureRefusal } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
 import { githubSlug } from "./git-ops.js";
+import { readEpicMemberStates } from "./campaign-issue-scope.js";
 import { closeGitlabIssue, gitlabIssueOrigin, inspectGitlabIssueClosure } from "./gitlab-issue-closure.js";
 
 /** Bounded authoritative reads; incomplete conflict evidence is a refusal, never an empty list. */
@@ -68,7 +69,8 @@ export function issueClosureRun(context: AgentContext, cwd: string, agentEnv: Re
 
 /** Inspect an issue of the origin's repository: GitHub through `gh`, or a GitLab project (#3539,
  * v249) through `glab` with the same result shape and digest. */
-export async function inspectGithubIssueClosure(issue: number, run: Run, deliveryPullRequests?: Array<{number:number;headSha:string}>): Promise<GithubIssueClosureInspection> {
+export async function inspectGithubIssueClosure(issue: number, run: Run, deliveryPullRequests?: Array<{number:number;headSha:string}>,
+  epicMembers = false): Promise<GithubIssueClosureInspection> {
   if (!Number.isSafeInteger(issue) || issue < 1) throw new IssueClosureInspectionError("issue must be a positive integer");
   const origin = (await run("git", ["remote", "get-url", "origin"])).trim();
   const repository = githubSlug(origin);
@@ -129,18 +131,25 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
       delivery.push({ number: ref.number, headSha: ref.headSha, mergeCommitSha });
     }
   }
+  // Read only when asked (#4060), so the digest of every other closure is unchanged.
+  const members = epicMembers ? await readEpicMemberStates(run, canonicalRepository, issue, text(target.body)) : undefined;
   const forgeDigest = createHash("sha256").update(JSON.stringify({
     repository: canonicalRepository, issue, id: text(target.id), title, body: text(target.body),
     state: target.state, updatedAt: text(target.updatedAt), assignees, labels, relevant: relevant.map(closureDigestPullRequest),
+    ...(members ? { epicMembers: members } : {}),
   })).digest("hex");
   return { repository: canonicalRepository, issue, title, url, state: target.state as "OPEN" | "CLOSED", forgeDigest,
-    openPullRequests: relevant, ...(deliveryPullRequests === undefined ? {} : { delivery }) };
+    openPullRequests: relevant, ...(deliveryPullRequests === undefined ? {} : { delivery }), ...(members ? { epicMembers: members } : {}) };
 }
 
 /** Name what changed when the forge digest no longer matches (#4059): a related PR that joined or
  * left the set, then one whose closing reference changed, and otherwise the issue itself. A snapshot
  * from a runner that predates `closesIssue` can name only set changes. */
 function forgeChange(snapshot: GithubIssueClosureSnapshot, current: GithubIssueClosureInspection): GithubIssueClosureRefusal {
+  // An epic's member read is part of the digest only when the approval was proven from it (#4060).
+  if (snapshot.epicMembers && JSON.stringify(current.epicMembers) !== JSON.stringify(snapshot.epicMembers)) {
+    return githubIssueClosureRefusal("epic_members_changed");
+  }
   const approved = new Map(snapshot.openPullRequests.map((pr) => [pr.number, pr]));
   const now = new Map(current.openPullRequests.map((pr) => [pr.number, pr]));
   const moved = [...approved.keys()].filter((number) => !now.has(number)).concat([...now.keys()].filter((number) => !approved.has(number)));
@@ -170,7 +179,8 @@ export async function executeGithubIssueClosure(
   const result = (outcome: GithubIssueClosureResult["outcome"]): GithubIssueClosureResult => ({ outcome, completedAt: Date.now() });
   // Every refusal precedes the mutation fence, so it names its reason and nothing was written.
   const refused = (refusal: GithubIssueClosureRefusal): GithubIssueClosureResult => ({ ...result("refused"), refusal });
-  const current = await inspectGithubIssueClosure(snapshot.issue, run, snapshot.delivery?.map(({number,headSha}) => ({number,headSha})));
+  const current = await inspectGithubIssueClosure(snapshot.issue, run, snapshot.delivery?.map(({number,headSha}) => ({number,headSha})),
+    snapshot.epicMembers !== undefined);
   if (current.repository !== snapshot.repository) return refused(githubIssueClosureRefusal("repository_changed"));
   if (current.state === "CLOSED") return result("already_closed");
   if (current.forgeDigest !== snapshot.forgeDigest) return refused(forgeChange(snapshot, current));

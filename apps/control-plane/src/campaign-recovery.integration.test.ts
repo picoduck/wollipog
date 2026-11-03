@@ -1077,6 +1077,50 @@ for (const completion of ["retain", "stop_and_archive"] as const) {
   });
 }
 
+/** Record the root's consumed closure of #2938 as the runner reported it. */
+function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, occurrence: string,
+  change: { authority?: "human" | "orchestrator"; outcome?: "closed" | "uncertain" | "already_closed"; members?: boolean; admitted?: boolean } = {}) {
+  const snapshot = { category: "issue_closure", repository: "picoduck/wollipog", issue: 2938, title: "Epic",
+    url: "https://github.com/picoduck/wollipog/issues/2938", forgeDigest: "a".repeat(64), reason: "completed", explanation: "Members closed.",
+    evidence: ["Every member closed as completed."], openPullRequests: [], activeChildren: [],
+    ...(change.members === false ? {} : { epicMembers: { readable: true, members: [{ number: 2938_1, state: "completed" }] } }),
+    ...(change.admitted === false ? {} : { issueAdmission: { boundaryRevision: 1, evidenceDigest: "e".repeat(64) } }) };
+  h.db.raw().prepare(`INSERT INTO workflow_decisions (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
+    resource_snapshot, resource_digest, policy_revision, authority, status, created_at, issue_closure_result)
+    VALUES (?, ?, 'root', 'root', 'issue_closure', 'issue_closure:picoduck/wollipog#2938', ?, ?, 1, ?, 'consumed', ?, ?)`)
+    .run(occurrence, occurrence, JSON.stringify(snapshot), "f".repeat(64), change.authority ?? "orchestrator", h.now,
+      JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
+}
+
+test("an epic placeholder item is finished by its closure proven from members, and nothing else is (#4060)", () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    const placeholder = h.svc.recordCampaignPlan("root", { planComplete: true,
+      items: [{ key: "epic:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+    assert.ok(placeholder.ok, placeholder.error ?? "plan refused");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "a never-dispatched item is unfinished by default");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    // Only an Orchestrator-owned, member-proven completed closure the runner confirmed closed counts.
+    for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
+      ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
+      recordEpicClosure(h, `closure-${occurrence}`, change);
+      assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", occurrence);
+    }
+    recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "no scope_removed marking is needed");
+  } finally { h.db.close(); }
+});
+
+test("an epic closure proven from members does not finish the epic's own dispatched work (#4060)", () => {
+  const h = mergedWorkVerificationFixture("incomplete");
+  try {
+    recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "an item with an attempt keeps its own proof");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+  } finally { h.db.close(); }
+});
+
 test("incomplete original work survives replacement and a new head until current-attempt delivery", () => {
   const h = mergedWorkVerificationFixture("incomplete");
   try {

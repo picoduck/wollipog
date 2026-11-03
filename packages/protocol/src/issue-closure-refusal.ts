@@ -27,6 +27,8 @@ export const GITHUB_ISSUE_CLOSURE_REFUSAL_REASONS = [
   "related_pull_request_open",
   /** Orchestrator-owned closure: the verified delivery changed; `pullRequests` names each. */
   "delivery_changed",
+  /** A closure proven from an epic's members (#4060): a member joined, left or changed state. */
+  "epic_members_changed",
   /** The runner's campaign scope, scope revision or bounded closure authority no longer matches. */
   "campaign_authority_changed",
   /** The runner could not record its one-time mutation fence for this occurrence. */
@@ -46,7 +48,7 @@ export type GithubIssueClosureRefusalReason = typeof GITHUB_ISSUE_CLOSURE_REFUSA
 /** Reasons a runner's `refused` execution result may carry. */
 export const GITHUB_ISSUE_CLOSURE_RESULT_REFUSAL_REASONS: readonly GithubIssueClosureRefusalReason[] = [
   "repository_changed", "issue_changed", "related_pull_requests_changed", "closing_reference_changed",
-  "forge_evidence_changed", "related_pull_request_open", "delivery_changed", "mutation_fence_unavailable",
+  "forge_evidence_changed", "related_pull_request_open", "delivery_changed", "epic_members_changed", "mutation_fence_unavailable",
 ];
 
 /** Reasons a runner's `ok: false` closure reply may carry as its `failure`. */
@@ -79,6 +81,7 @@ const REASON_TEXT: Record<GithubIssueClosureRefusalReason, string> = {
   forge_evidence_changed: "The issue or its related pull requests changed after the closure was requested",
   related_pull_request_open: "A related pull request is still open",
   delivery_changed: "The verified delivery changed after the closure was requested",
+  epic_members_changed: "The epic's members, or their states, changed after the closure was requested",
   campaign_authority_changed: "The campaign's scope or closure authority changed before the closure ran",
   mutation_fence_unavailable: "The runner could not record its one-time closure attempt",
   evidence_unavailable: "The runner could not read complete issue evidence",
