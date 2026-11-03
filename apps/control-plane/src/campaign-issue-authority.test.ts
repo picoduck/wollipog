@@ -2,16 +2,22 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
 import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
-  type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
+  type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail, type IssueClosureDeliveryGap,
+  ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure, issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { campaignBoundaryCurrent } from "./campaign-authority.js";
-import { closureEvidence, closureDeliveryFailure, issueEvidenceDigest } from "./campaign-issue-authority.js";
+import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
+
+/** A related open pull request as the runner reports it, without a closing reference. */
+const openPullRequest = (number: number) => ({ number, title: "Work", url: `https://github.com/team/repo/pull/${number}`, headSha: "b".repeat(40) });
+/** Each gap's code and work item, without its derived action and summary. */
+const gapNames = (gaps: IssueClosureDeliveryGap[] | null | undefined) => gaps?.map((gap) => ({ code: gap.code, workItemId: gap.workItemId }));
 
 function harness(full = true, maximum = 5, issues = [100]) {
   const db = ControlPlaneDb.open(":memory:");
@@ -30,7 +36,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
   }
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
-  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
+  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false as boolean | number, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
@@ -45,7 +51,7 @@ function harness(full = true, maximum = 5, issues = [100]) {
         result: { outcome: "uncertain", completedAt: Date.now() } }; }
       return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, inspection: { repository: "team/repo", issue: message.issue,
         title: "Issue", url: `https://github.com/team/repo/issues/${message.issue}`, state: "OPEN", forgeDigest: "a".repeat(64),
-        openPullRequests: state.openPR ? [{ number: 10, title: "Work", url: "https://github.com/team/repo/pull/10", headSha: "b".repeat(40) }] : [],
+        openPullRequests: state.openPR === false ? [] : [openPullRequest(state.openPR === true ? 10 : state.openPR)],
         ...(message.deliveryPullRequests === undefined ? {} : { delivery: state.delivery }) } };
     }
     throw new Error("Unexpected runner command");
@@ -141,6 +147,8 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
     second.verifications = [];
     assert.equal((await h.svc.executeGithubIssueClosure("root", closure.data!.decision!.occurrenceId, closure.data!.decision!.resourceDigest)).ok, false);
     second.verifications = verified;
+    const codes = { unverified: "no_delivered_verification", undelivered: "work_item_not_delivered", unmerged: "no_merged_delivery_pull_request",
+      missing: "missing_work_item" } as const;
     for (const gap of ["unverified", "undelivered", "unmerged", "missing"] as const) {
       const saved = structuredClone(second);
       if (gap === "unverified") second.verifications = [];
@@ -148,12 +156,17 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
       if (gap === "unmerged") second.observed.pullRequests = [];
       if (gap === "missing") h.db.campaignWorkLedger.detail = (_c, id) => id === second.id ? null : details.get(id) ?? null;
       assert.equal(closureEvidence(h.db, h.db.getSession("root")!, snapshot), null, gap);
-      assert.match(closureDeliveryFailure(h.db, h.db.getSession("root")!, snapshot), new RegExp(`${gap}_work_item:`));
+      const named = { code: codes[gap], workItemId: second.id };
+      assert.deepEqual(gapNames(closureDeliveryGaps(h.db, h.db.getSession("root")!, snapshot, { proven: false, commentSafe: true })), [named], gap);
       const fallback = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: `gap-${gap}` });
       assert.ok(fallback.ok, fallback.error ?? "human fallback");
       assert.equal(fallback.data!.decision!.authority, "human");
-      assert.equal(fallback.data!.decision!.resourceSnapshot.category === "issue_closure" &&
-        fallback.data!.decision!.resourceSnapshot.deliveryFailure, closureDeliveryFailure(h.db, h.db.getSession("root")!, snapshot));
+      assert.equal(fallback.data!.decision!.authorityEvaluation?.reason, "closure_proof_incomplete", gap);
+      const fallbackSnapshot = fallback.data!.decision!.resourceSnapshot;
+      assert.ok(fallbackSnapshot.category === "issue_closure");
+      assert.deepEqual(gapNames(fallbackSnapshot.deliveryGaps), [named], gap);
+      assert.equal(fallbackSnapshot.deliveryFailure, `${codes[gap]}:${second.id}`);
+      assert.deepEqual(fallback.data!.proofGaps?.gaps, fallbackSnapshot.deliveryGaps);
       Object.assign(second, saved);
       h.db.campaignWorkLedger.detail = (campaign, id, now) => details.get(id) ?? original(campaign, id, now);
     }
@@ -2596,6 +2609,212 @@ test("#3915 a merge revoked by a policy change outside a scope approval, or one 
       "only the exact revision bump of the revoking scope approval is accepted");
     assert.equal(f.status(scoped.occurrenceId), "revoked");
   } finally { h.db.close(); }
+});
+
+/** A closure decision's resource snapshot, narrowed to an issue closure. */
+function closureSnapshot(decision: WorkflowDecisionView) {
+  const snapshot = decision.resourceSnapshot;
+  assert.equal(snapshot.category, "issue_closure");
+  if (snapshot.category !== "issue_closure") throw new Error("not an issue closure");
+  return snapshot;
+}
+
+test("#4058 a closure awaiting the child's verification names the item and the verify step; verifying then supersedes it", async () => {
+  const { h, observe, close } = delivery({ stage: [{ number: 10 }], verify: false });
+  try {
+    observe(10, "merged");
+    h.svc.onSessionStatus("child", "idle");
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Delivered.", final: true }, Date.now()).seq;
+    const first = await close("before-verification");
+    assert.ok(first.ok, first.error ?? "closure");
+    const pending = first.data!.decision!;
+    assert.equal(pending.authority, "human", "the person-owned fallback stays");
+    assert.deepEqual([pending.authorityEvaluation?.basis, pending.authorityEvaluation?.reason], ["human_required", "closure_proof_incomplete"]);
+    const snapshot = closureSnapshot(pending);
+    assert.deepEqual(gapNames(snapshot.deliveryGaps), [{ code: "attempt_awaiting_verification", workItemId: h.item.id }]);
+    assert.equal(snapshot.deliveryFailure, `attempt_awaiting_verification:${h.item.id}`);
+    const notice = first.data!.proofGaps!;
+    assert.equal(notice.reason, "closure_proof_incomplete");
+    assert.equal(notice.gaps[0]!.action, "verify_child");
+    assert.match(notice.gaps[0]!.summary, new RegExp(`Work item ${h.item.id} has a completed report awaiting verification\\. Verify .*verify_campaign_child`, "u"));
+    assert.match(notice.summary, /a person decides this request.*supersedes this one/u);
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: report, followUpsAccounted: true,
+      workItem: { id: h.item.id, outcome: "delivered" } }).ok);
+    const again = await close("after-verification");
+    assert.ok(again.ok, again.error ?? "closure");
+    assert.equal(again.data!.decision!.authority, "orchestrator", JSON.stringify(again.data!.decision!.authorityEvaluation));
+    assert.equal(again.data!.proofGaps, undefined);
+    assert.equal(closureSnapshot(again.data!.decision!).deliveryGaps, undefined);
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.occurrenceId)!.status, "superseded");
+  } finally { h.db.close(); }
+});
+
+test("#4058 a delivered item that lists no merged delivery pull request names that gap; recording it then supersedes the person's request", async () => {
+  const { h, observe, close } = delivery();
+  try {
+    observe(10, "merged");
+    const first = await close("unlisted-pr");
+    assert.ok(first.ok, first.error ?? "closure");
+    const pending = first.data!.decision!;
+    assert.equal(pending.authority, "human");
+    assert.equal(pending.authorityEvaluation?.reason, "closure_proof_incomplete");
+    assert.deepEqual(gapNames(closureSnapshot(pending).deliveryGaps), [{ code: "no_merged_delivery_pull_request", workItemId: h.item.id }]);
+    assert.equal(first.data!.proofGaps!.gaps[0]!.action, "record_delivery_pull_requests");
+    assert.match(first.data!.proofGaps!.gaps[0]!.summary, /update_campaign_work_item \(stage\.pullRequests\)/u);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      stage: { stage: "merged", pullRequests: [{ repository: "team/repo", number: 10 }] } }).ok);
+    const again = await close("listed-pr");
+    assert.ok(again.ok, again.error ?? "closure");
+    assert.equal(again.data!.decision!.authority, "orchestrator", JSON.stringify(again.data!.decision!.authorityEvaluation));
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.occurrenceId)!.status, "superseded");
+  } finally { h.db.close(); }
+});
+
+test("#4058 an open related pull request names its number and blocks until it merges or closes, even with only a timeline reference", async () => {
+  const { h, observe, close } = delivery({ stage: [{ number: 10 }] });
+  try {
+    observe(10, "merged");
+    // A sibling campaign PR mentioned the issue. The runner relates an open PR by closing reference,
+    // title, body or GitHub's timeline cross-reference; with the mention edited out, the timeline
+    // event remains, so the runner still reports it, and it keeps blocking delegated closure.
+    h.state.openPR = 11;
+    for (const requestId of ["sibling-mentions", "sibling-edited"]) {
+      const blocked = await close(requestId);
+      assert.ok(blocked.ok, blocked.error ?? "closure");
+      const decision = blocked.data!.decision!;
+      assert.equal(decision.authority, "human");
+      assert.equal(decision.authorityEvaluation?.reason, "closure_proof_incomplete");
+      const snapshot = closureSnapshot(decision);
+      assert.deepEqual(snapshot.deliveryGaps?.map(({ code, pullRequests }) => ({ code, pullRequests })),
+        [{ code: "open_related_pull_requests", pullRequests: [11] }], "only the open PR is named: the runner was not asked to confirm the merge");
+      assert.equal(snapshot.deliveryFailure, "open_related_pull_requests:#11");
+      const gap = blocked.data!.proofGaps!.gaps[0]!;
+      assert.equal(gap.action, "wait_for_pull_requests");
+      assert.match(gap.summary, /Related pull requests are open: #11\. .*timeline cross-references it\. It blocks delegated closure until each named pull request merges or closes/u);
+    }
+    h.state.openPR = false;
+    const again = await close("sibling-merged");
+    assert.ok(again.ok, again.error ?? "closure");
+    assert.equal(again.data!.decision!.authority, "orchestrator", JSON.stringify(again.data!.decision!.authorityEvaluation));
+  } finally { h.db.close(); }
+});
+
+test("#4058 an unsafe closing comment on a proven closure is its only gap", async () => {
+  const { h, observe } = delivery({ stage: [{ number: 10 }] });
+  try {
+    observe(10, "merged");
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "unsafe-comment", issue: 100, reason: "completed",
+      explanation: "Delivered by the merged pull request", evidence: ["Verified report"], comment: "Contact support@example.invalid" });
+    assert.ok(result.ok, result.error ?? "closure");
+    assert.equal(result.data!.decision!.authority, "human");
+    assert.equal(result.data!.decision!.authorityEvaluation?.reason, "closure_proof_incomplete");
+    assert.deepEqual(gapNames(closureSnapshot(result.data!.decision!).deliveryGaps), [{ code: "comment_unsafe", workItemId: undefined }]);
+    assert.equal(result.data!.proofGaps!.gaps[0]!.action, "revise_comment");
+  } finally { h.db.close(); }
+});
+
+test("#4058 a closure the boundary does not delegate stays outside_boundary, with no gaps", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure"],
+      delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: false, maxIssues: 5, closureReasons: ["not_planned"] } }, 2, h.principal).ok);
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "undelegated-reason", issue: 100, reason: "completed",
+      explanation: "Delivered", evidence: ["Verified report"] });
+    assert.ok(result.ok, result.error ?? "closure");
+    const decision = result.data!.decision!;
+    assert.equal(decision.authority, "human");
+    assert.equal(decision.authorityEvaluation?.reason, "outside_boundary");
+    assert.equal(closureSnapshot(decision).deliveryGaps, undefined);
+    assert.equal(closureSnapshot(decision).deliveryFailure, "outside_boundary");
+    assert.equal(result.data!.proofGaps, undefined);
+  } finally { h.db.close(); }
+});
+
+test("#4058 only a current boundary's in-scope, unadmitted closure with gaps is closure_proof_incomplete", async () => {
+  const { h, close } = delivery();
+  try {
+    const pending = (await close("evaluated")).data!.decision!;
+    assert.equal(pending.authorityEvaluation?.reason, "closure_proof_incomplete");
+    const root = h.db.getSession("root")!;
+    const policy = root.parentControlPolicy!;
+    const protocol = PROTOCOL_VERSION;
+    const snapshot = closureSnapshot(pending);
+    const reason = (controller: typeof root, resource: typeof snapshot, decisions = policy) =>
+      evaluateCampaignAuthority(controller, root, protocol, resource, decisions, protocol).reason;
+    assert.equal(reason(root, snapshot), "closure_proof_incomplete", "positive control");
+    assert.equal(reason(root, snapshot, { ...policy, revision: policy.revision + 1 }), "outside_boundary", "a stale boundary");
+    const unscoped = structuredClone(root);
+    unscoped.orchestratorPolicy!.issueNumbers = [];
+    assert.equal(reason(unscoped, snapshot), "outside_boundary", "an issue outside the scope");
+    const { deliveryGaps: _gaps, ...withoutGaps } = snapshot;
+    assert.equal(reason(root, withoutGaps), "outside_boundary", "no server-named gap");
+    assert.equal(reason(root, { ...snapshot, issueAdmission: { boundaryRevision: 999, evidenceDigest: "e".repeat(64) } }), "outside_boundary",
+      "an admission bound to another boundary revision");
+    assert.equal(reason(root, { ...snapshot, repository: "team/other" }), "outside_boundary", "another repository");
+  } finally { h.db.close(); }
+});
+
+test("#4058 gaps are canonical: action and summary derive from the code, and the compact line stays bounded", () => {
+  const gap = issueClosureDeliveryGap("unmerged_pull_request", { workItemId: "item-1", pullRequests: [12, 3, 12] });
+  assert.deepEqual([gap.pullRequests, gap.action], [[3, 12], "wait_for_pull_requests"]);
+  assert.deepEqual(normalizeIssueClosureDeliveryGaps([{ ...gap, action: "person_decides", summary: "forged" }]), [gap]);
+  assert.equal(normalizeIssueClosureDeliveryGaps([{ code: "from_a_newer_peer" }])![0]!.code, "delivery_unverified");
+  assert.equal(normalizeIssueClosureDeliveryGaps([]), null);
+  assert.equal(normalizeIssueClosureDeliveryGaps([{ code: "no_work_item", workItemId: "" }]), null);
+  const many = Array.from({ length: 32 }, (_, index) => issueClosureDeliveryGap("unmerged_pull_request",
+    { workItemId: `item-${"x".repeat(200)}-${index}`, pullRequests: Array.from({ length: 30 }, (_, n) => n + 1) }));
+  const line = issueClosureDeliveryFailure(many);
+  assert.ok(line.length <= ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, `${line.length}`);
+  assert.match(line, /^unmerged_pull_request:item-x+-0:#1,#2,#3,#4,#5,#6,#7,#8,#9,#10,\+20; \+31 more$/u, "a gap that would pass the bound is counted, never cut");
+  const short = issueClosureDeliveryFailure([issueClosureDeliveryGap("attempt_open", { workItemId: "a" }), issueClosureDeliveryGap("stale_pull_request", { workItemId: "b", pullRequests: [4] })]);
+  assert.equal(short, "attempt_open:a; stale_pull_request:b:#4");
+  assert.equal(issueClosureDeliveryFailure([issueClosureDeliveryGap("no_work_item")]), "no_work_item");
+});
+
+test("#4058 every named gap appears with and without a fixed-by plan, and naming it never admits the proof", () => {
+  for (const fixedBy of [false, true]) {
+    const h = harness();
+    try {
+      const merge = { number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) };
+      const base = { category: "issue_closure" as const, repository: "team/repo", issue: 100, title: "Issue", url: "https://github.com/team/repo/issues/100",
+        forgeDigest: "a".repeat(64), reason: "completed" as const, explanation: "Delivered", evidence: ["Verified report"], openPullRequests: [],
+        activeChildren: [], delivery: [merge] };
+      const delivered = () => ({ id: h.item.id, issue: { repository: "team/repo", number: 100 }, primaryState: "delivered", stateCauses: [], currentAttempt: null,
+        verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
+        observed: { pullRequests: [{ ref: { repository: "team/repo", number: 10 }, fact: { availability: "fresh", value: { state: "merged", ...merge } } }] },
+      }) as unknown as CampaignWorkItemDetail;
+      let detail = delivered();
+      h.db.campaignWorkLedger.detail = () => detail;
+      if (fixedBy) h.db.campaignWorkLedger.fixedBy = () => [h.item.id];
+      const root = () => h.db.getSession("root")!;
+      assert.ok(closureEvidence(h.db, root(), base), "positive control");
+      const fact = (value: object) => ({ ...detail.observed.pullRequests![0]!, fact: { availability: "fresh", value: { state: "merged", ...merge, ...value } } }) as never;
+      const cases: Array<[string, () => void, typeof base | (Omit<typeof base, "openPullRequests" | "delivery"> & Record<string, unknown>), object]> = [
+        ["awaiting verification", () => { detail.currentAttempt = { id: "a", sessionId: "child", sessionTitle: null }; detail.stateCauses = ["attempt_awaiting_verification"]; detail.primaryState = "waiting"; },
+          base, { code: "attempt_awaiting_verification", workItemId: h.item.id }],
+        ["attempt open", () => { detail.currentAttempt = { id: "a", sessionId: "child", sessionTitle: null }; detail.primaryState = "running"; },
+          base, { code: "attempt_open", workItemId: h.item.id }],
+        ["no verification", () => { detail.verifications = []; }, base, { code: "no_delivered_verification", workItemId: h.item.id }],
+        ["no pull request", () => { detail.observed.pullRequests = []; }, base, { code: "no_merged_delivery_pull_request", workItemId: h.item.id }],
+        ["unmerged", () => { detail.observed.pullRequests = [fact({ state: "open", mergeCommitSha: null })]; }, base,
+          { code: "unmerged_pull_request", workItemId: h.item.id, pullRequests: [10] }],
+        ["stale", () => { detail.observed.pullRequests![0]!.fact.availability = "stale" as "fresh"; }, base,
+          { code: "stale_pull_request", workItemId: h.item.id, pullRequests: [10] }],
+        ["open related", () => {}, { ...base, openPullRequests: [openPullRequest(11)], delivery: undefined } as never,
+          { code: "open_related_pull_requests", pullRequests: [11] }],
+        ["merge unconfirmed", () => {}, { ...base, delivery: undefined } as never, { code: "delivery_merge_unconfirmed", workItemId: h.item.id, pullRequests: [10] }],
+      ];
+      for (const [name, change, snapshot, expected] of cases) {
+        detail = delivered();
+        change();
+        const label = `${name}${fixedBy ? " (fixed-by)" : ""}`;
+        assert.equal(closureEvidence(h.db, root(), snapshot as typeof base), null, label);
+        const gaps = closureDeliveryGaps(h.db, root(), snapshot as typeof base, { proven: false, commentSafe: true })!;
+        assert.deepEqual(gaps.map(({ code, workItemId, pullRequests }) => ({ code, ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}) })),
+          [expected], label);
+      }
+    } finally { h.db.close(); }
+  }
 });
 
 /* ---------- #4062: the issue scope bounds dispatch and merges, not only typed closures ---------- */

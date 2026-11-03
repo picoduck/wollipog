@@ -132,10 +132,28 @@ export function evaluateCampaignAuthority(
   if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)) {
     // A stale boundary authorizes nothing, including the server's own Full Control declines.
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
-    return { ...rest, owner: "human", basis: "human_required", reason: "outside_boundary" };
+    return { ...rest, owner: "human", basis: "human_required",
+      reason: repositoryBound && closureProofIncomplete(controller, policy, protocol, controllerProtocol, snapshot) ? "closure_proof_incomplete" : "outside_boundary" };
   }
   const closures = full && evaluated.owner === "orchestrator" && snapshot?.category === "pr_merge"
     ? mergeClosureScope(controller.orchestratorPolicy, protocol, snapshot) : null;
   if (closures) return { ...evaluated, owner: "human", basis: "human_required", ...closures };
   return evaluated;
+}
+
+/** A closure the current boundary delegates, of an issue in scope, that the server admitted no
+ * proof for and named gaps instead (#4058). It names why a person decides it; it never changes who
+ * does. A stale boundary, an issue outside the scope or a reason the boundary does not delegate
+ * stays `outside_boundary`, as does an admission bound to another boundary revision. */
+function closureProofIncomplete(
+  controller: Pick<SessionView, "orchestratorPolicy" | "parentControlPolicy">, policy: ParentControlPolicy,
+  protocol: number | null | undefined, controllerProtocol: number | null | undefined, snapshot: WorkflowDecisionResourceSnapshot | undefined,
+): boolean {
+  const control = controller.orchestratorPolicy?.control;
+  if (snapshot?.category !== "issue_closure" || control?.mode !== "full_control" || !control.boundary.issueAuthority ||
+      snapshot.issueAdmission || !snapshot.deliveryGaps?.length || (protocol ?? 0) < 217 || (controllerProtocol ?? 0) < 217) return false;
+  const boundary = control.boundary;
+  return campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) && boundary.operations.includes("issue_closure") &&
+    boundary.issueAuthority!.closureReasons.includes(snapshot.reason) && snapshot.repository.toLowerCase() === boundary.repository.toLowerCase() &&
+    campaignIssueInScope(controller.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue });
 }
