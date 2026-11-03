@@ -716,6 +716,53 @@ test("a follow-up round over a merge keeps a conflict resolution in a file both 
   g.launcher.release("s_review");
 });
 
+/** A run whose epoch used all four rounds, its last one at the fixture's head. v277 control plane. */
+function exhausted(f: Fixture, vote: "UPVOTE" | "DOWNVOTE"): ReviewRunHistory {
+  const run = reviewed(f, vote);
+  return { ...run, lastValid: { ...run.lastValid!, round: 4 }, lastAttempt: { ...run.lastAttempt!, round: 4 }, validRounds: 4, baseMergeRounds: true };
+}
+
+test("a base merge with a conflict resolution gets a free round scoped to the merge's effect (#4075)", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 42; // was 40 on main\n");
+  git(f.worktree, "add", "app.ts");
+  push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 5, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["app.ts"], since: f.head, baseMerge: true,
+  }, "beyond the epoch's four rounds, without an extension");
+  assert.doesNotMatch(prepared.prompt, /lib\/module-/u);
+  f.launcher.release("s_review");
+  // A control plane that does not count base merges still refuses it at the round limit.
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: { ...exhausted(f, "DOWNVOTE"), baseMergeRounds: undefined } }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
+test("a pure base merge onto an upvoted head is recorded as an equivalence without a reviewer (#4075)", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared, { equivalent: true, checkout: "", prompt: "", baseSha: base, round: {
+    epoch: 1, round: 5, attempt: 1, mode: "equivalent", baseSha: base, scopeFiles: [], baseMerge: true, equivalentTo: f.head,
+  } });
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false, "no checkout is left behind");
+});
+
+test("a non-merge fix after the budget is used still needs an extension (#4075)", async (t) => {
+  const f = fixture(t);
+  moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "notes.md"), "Uses no fences.\n");
+  git(f.worktree, "add", "notes.md");
+  push(f, "-m", "a fix after the merge");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
 test("a head that no longer descends from the reviewed one starts an epoch that reviews the range-diff", async (t) => {
   const f = fixture(t);
   // The first round fetched the head that is about to be rewritten.

@@ -837,12 +837,18 @@ const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
  * bounded to single lines (compactReviewFinding) or quoted, so it can never forge a framing line. */
 function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
-  const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch})` : "";
+  // A base-merge round (#4075) is named as one, since it uses none of the epoch's rounds.
+  const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch}` +
+    `${review.round.baseMerge ? ", a base-branch merge round that does not count against the round budget" : ""})` : "";
   const separator = campaignRepositoryLocation(review.pullRequest.repository)?.forge === "gitlab" ? "!" : "#";
   const head = `${review.pullRequest.repository}${separator}${review.pullRequest.number} at ${review.headSha.slice(0, 12)}`;
   const verdict = review.verdict;
   let outcome: string;
-  if (review.state === "completed" && verdict?.valid) {
+  if (review.state === "completed" && verdict?.valid && review.round?.mode === "equivalent") {
+    outcome = `a recorded equivalence to the upvoted head ${review.round.equivalentTo!.slice(0, 12)}: this head only merges the ` +
+      "moved base branch and leaves the pull request's own diff unchanged, so no reviewer ran and that upvote carries over. " +
+      `Cite review session ${review.reviewSessionId} as this head's review`;
+  } else if (review.state === "completed" && verdict?.valid) {
     const blocking = review.findings.filter((finding) => finding.blocking).length;
     outcome = verdict.effectiveVote === "UPVOTE"
       ? `a valid UPVOTE${review.findings.length ? ` with ${review.findings.length} non-blocking finding(s)` : ""}`
@@ -10062,6 +10068,8 @@ export class SessionsService {
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
       policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha, true, configured?.configuration.roundBudget);
+      // #4075: a runner that proves base merges plans them outside the budget; older ones never do.
+      if (runnerSupportsProtocol(runner?.protocolVersion, "reviewBaseMergeRounds")) policy.history.baseMergeRounds = true;
       if (policy.history.postUpvoteExtension && !runnerSupportsProtocol(runner?.protocolVersion, "postUpvoteReviewExtensions")) {
         return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "postUpvoteReviewExtensions", "post-upvote review extensions"));
       }
@@ -11452,7 +11460,8 @@ export class SessionsService {
     const authority = evaluated.effectiveOwner;
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
-      this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id));
+      this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id),
+      this.reviewExtensionCap(child.id, normalized.data));
     // A refused scope change cannot be routed around through a merge's closing references (#4062):
     // the merge is refused with the issues named, rather than becoming a person's new decision.
     if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
@@ -12673,7 +12682,12 @@ export class SessionsService {
     const requester = this.db.getSession(childSessionId);
     return requester ? evaluateCampaignAuthority(controller, requester,
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
-      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+      this.campaignPeerContracts(controller, requester.id), this.reviewExtensionCap(requester.id, snapshot)).owner : "human";
+  }
+
+  /** #4075: the durable per-pull-request cap fact a review_round_extension's owner depends on. */
+  private reviewExtensionCap(requesterSessionId: string, snapshot: WorkflowDecisionResourceSnapshot): "within" | "exceeded" | undefined {
+    return snapshot.category === "review_round_extension" ? this.db.reviewExtensionCap(requesterSessionId, snapshot) : undefined;
   }
 
   /** Whether the Orchestrator can inspect every evidence item itself, before Full Control routing. */
@@ -12828,6 +12842,9 @@ export class SessionsService {
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
+    // Likewise a person's review round extension stays theirs when Full Control could now own it
+    // within the cap (#4075): a human decision never broadens authority.
+    if (decision.category === "review_round_extension" && decision.authority === "human") return true;
     if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
         !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
     return this.evaluateWorkflowDecisionAuthority(

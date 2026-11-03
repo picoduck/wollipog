@@ -14,7 +14,7 @@ export function recoveryCoordinate(value: string): string {
 export function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
   if (evaluation.owner === "orchestrator") return "authorized_action";
   switch (evaluation.reason) {
-    case "outside_boundary": case "outside_issue_scope": return "boundary_enlargement";
+    case "outside_boundary": case "outside_issue_scope": case "review_extension_cap_reached": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
     case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
     case "protected_request": case "human_required_rule": case "custom_owner": return "human_required_rule";
@@ -75,7 +75,8 @@ export class CampaignRecoveryService {
           repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined },
         this.db.getRunner(session.runnerId)?.protocolVersion,
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),
-        root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion);
+        root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion, undefined,
+        decision?.resourceSnapshot.category === "review_round_extension" ? this.db.reviewExtensionCap(session.id, decision.resourceSnapshot) : undefined);
         const owner = decision?.authority === "human" ? "human" : evaluated.owner;
         // The condition recorded when the server could not admit a publication, not a boundary
         // enlargement (#4065). A live re-evaluation never carries it, so it is read from the decision.

@@ -182,7 +182,8 @@ test("dashboards older than v275 read complete_with_handoffs as waiting for a pe
     const session = h.db.getSession("root")!;
     assert.equal(session.fullControlCampaignStatus, "complete_with_handoffs");
     assert.equal(session.orchestratorCampaign?.status, "complete_with_handoffs");
-    const legacy = projectCampaignHandoffsForUi({ type: "session_upsert", session }, PROTOCOL_VERSION - 1);
+    // The last protocol before handoffs, not PROTOCOL_VERSION - 1, which later versions move past.
+    const legacy = projectCampaignHandoffsForUi({ type: "session_upsert", session }, 274);
     assert.equal(legacy.session.fullControlCampaignStatus, "waiting_human");
     assert.equal(legacy.session.orchestratorCampaign?.status, "waiting_human");
     assert.equal(session.fullControlCampaignStatus, "complete_with_handoffs", "the projection copies, never mutates");

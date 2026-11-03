@@ -208,6 +208,7 @@ import {
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
   type WorkflowDecisionView,
+  type WorkflowDecisionResourceSnapshot,
   type PromptImageReference,
   type PromptSessionMessage,
   type AnswerRecoveredQuestionCommand,
@@ -21079,10 +21080,14 @@ export class ControlPlaneDb {
     ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
     const effectiveOwners = { ...policy.delegation.decisions };
     if (policy.control?.mode === "full_control") {
+      const protocol = this.getRunner(campaign.runner_id)?.protocolVersion;
       const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
-        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
+        protocol, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
         parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
-      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported);
+      // Review round extensions are the Orchestrator's within the per-pull-request cap only (#4075);
+      // each occurrence also checks its requester's runner and the durable count.
+      const cappedExtensions = runnerSupportsProtocol(protocol, "fullControlReviewExtensions");
+      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported, cappedExtensions);
     }
     // Preserve the saved choice while routing the effective gate to the human whenever this
     // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
@@ -21143,6 +21148,9 @@ export class ControlPlaneDb {
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
+      ...(policy.control?.mode === "full_control" && effectiveOwners.review_round_extension === "orchestrator" &&
+        policy.delegation.decisions.review_round_extension !== "orchestrator"
+        ? { reviewRoundExtensionCap: { scope: "pull_request" as const, extraRounds: "configured_round_budget" as const } } : {}),
       behavior: campaignBehaviorProjection(policy),
       ...(() => {
         const video = policy.control?.mode === "full_control"
@@ -21522,6 +21530,26 @@ export class ControlPlaneDb {
       rationaleDigest ?? null, childMessage ?? null, delegatedVideoEvidence ? JSON.stringify(delegatedVideoEvidence) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  /**
+   * #4075: whether granting this review_round_extension keeps its pull request's
+   * Orchestrator-granted extra rounds within the Full Control cap, which is the configured round
+   * budget of the requester's run once more. Every approved or consumed Orchestrator-owned extension
+   * of that pull request counts, whatever its requester, epoch or basis, except the occurrences this
+   * one replaces (the requester's own under the same canonical resource key, which grant nothing
+   * once it exists). Consumed grants never leave the count, so a re-request cannot reset it.
+   */
+  reviewExtensionCap(requesterSessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "review_round_extension" }>): "within" | "exceeded" {
+    const pullRequest = { repository: snapshot.repository, number: snapshot.pullRequest };
+    const key = `review_round_extension:${snapshot.repository}#${snapshot.pullRequest}:epoch-${snapshot.epoch}:rounds-${snapshot.roundsUsed}`;
+    const granted = this.stmt(`SELECT COALESCE(SUM(json_extract(resource_snapshot, '$.extraRounds')), 0) AS rounds
+      FROM workflow_decisions WHERE category='review_round_extension' AND authority='orchestrator'
+        AND status IN ('approved','consumed') AND json_extract(resource_snapshot, '$.pullRequest')=?
+        AND lower(json_extract(resource_snapshot, '$.repository'))=lower(?) AND NOT (session_id=? AND resource_key=?)`)
+      .get(snapshot.pullRequest, snapshot.repository, requesterSessionId, key) as { rounds: number };
+    return granted.rounds + snapshot.extraRounds <= this.reviewSessions.roundBudget(requesterSessionId, pullRequest) ? "within" : "exceeded";
   }
 
   /** Conditional terminal write and owed resume are atomic; approved grants are never touched. */
