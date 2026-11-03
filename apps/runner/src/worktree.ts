@@ -1927,7 +1927,8 @@ export async function mergedPullRequestContainingHead(
       // FETCH_HEAD is written, so nothing a session could later move records the result. Repository
       // configuration may be session-written, so nothing it names runs here: hooks and fsmonitor are
       // off and HTTPS is the only transport (no configured SSH command). The fetch is anonymous: no
-      // credential helper runs and none is sent, so a configured proxy or CA has nothing to capture.
+      // credential helper or askpass program runs and no credential is sent, so a configured proxy
+      // or CA has nothing to capture.
       // A head that needs credentials is therefore unavailable proof and the worktree is retained.
       await runContextCommand(
         context,
@@ -1935,7 +1936,8 @@ export async function mergedPullRequestContainingHead(
         [
           "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
           "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
-          "-c", "http.sslVerify=true", "-c", "credential.helper=",
+          "-c", "http.sslVerify=true", "-c", "credential.helper=", "-c", "credential.interactive=false",
+          "-c", "core.askPass=",
           ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
           "fetch", "--no-tags", "--no-recurse-submodules", "--quiet", "--",
           fetchUrl, `refs/pull/${candidate.number}/head`,
