@@ -17,8 +17,10 @@ import {
   shortcutReferenceGroups,
   shortcutUnavailableReason,
   type ShortcutDefinition,
+  type ShortcutId,
 } from "./shortcuts.js";
 import { GLOBAL_VIEW_ITEMS } from "./navigation.js";
+import { SESSION_TOOLS } from "./session-tools.js";
 
 function key(
   value: string,
@@ -513,4 +515,46 @@ test("Ctrl/⌘+; opens the Side Chat Panel from a session, is in the reference, 
     .find((group) => group.group === "Session")!;
   assert.deepEqual(session.rows.filter((row) => row.id === "open-side-chat").map((row) => [row.label, row.keys, row.reason]),
     [["Side Chat Panel", "Ctrl+;", null]]);
+});
+
+/** Chords an input method takes before the page sees them: Linux IBus Unicode entry and Microsoft
+ * Pinyin's simplified/traditional switch. */
+const INPUT_METHOD_RESERVED = new Set(["Ctrl+Shift+U", "Ctrl+Shift+F"]);
+
+test("the Side Panel toggle and every tool have one chord in the reference that no browser or input method claims (#1260)", () => {
+  const session = shortcutReferenceGroups({ scope: "Session", availability: AVAILABLE, keys: referenceKeys })
+    .find((group) => group.group === "Session")!;
+  for (const tool of SESSION_TOOLS) {
+    // Session Tools is the launcher, which the toggle reaches; the issue leaves its own chord optional.
+    if (tool.id !== "launcher") assert.ok(tool.shortcut, `${tool.name} has a chord`);
+  }
+  const chords: ShortcutId[] = ["toggle-side-panel", ...SESSION_TOOLS.flatMap((tool) => tool.shortcut ? [tool.shortcut] : [])];
+  assert.equal(new Set(chords).size, chords.length, "no two tools share a chord");
+  for (const id of chords) {
+    assert.equal(shortcut(id).scope, "Session", id);
+    assert.equal(session.rows.filter((row) => row.id === id).length, 1, `${id} is listed once`);
+    for (const mac of [false, true]) {
+      const keys = shortcutDisplay(id, mac);
+      assert.equal(BROWSER_RESERVED.has(keys), false, `${keys} is a browser's own chord`);
+      assert.equal(INPUT_METHOD_RESERVED.has(keys), false, `${keys} belongs to an input method`);
+    }
+  }
+  const added: ShortcutId[] = [
+    "open-browser", "open-agents", "open-background-work", "open-campaign-status", "open-requests", "open-decision-history",
+  ];
+  assert.deepEqual(added.map((id) => [shortcut(id).label, shortcutDisplay(id, false), shortcutDisplay(id, true)]), [
+    ["Browser Panel", "Ctrl+Shift+X", "⌘⇧X"],
+    ["Agents Panel", "Ctrl+Shift+M", "⌘⇧M"],
+    ["Background Work Panel", "Ctrl+Shift+Y", "⌘⇧Y"],
+    ["Campaign Status Panel", "Ctrl+Shift+K", "⌘⇧K"],
+    ["Requests Panel", "Ctrl+'", "⌘'"],
+    ["Decision History Panel", "Ctrl+Shift+H", "⌘⇧H"],
+  ]);
+  // Shift reports the capital letter; either primary modifier works, and no other modifier may drift in.
+  assert.equal(matchesShortcut(key("X", { ctrlKey: true, shiftKey: true }), "open-browser"), true);
+  assert.equal(matchesShortcut(key("X", { metaKey: true, shiftKey: true }), "open-browser"), true);
+  assert.equal(matchesShortcut(key("x", { ctrlKey: true }), "open-browser"), false, "Ctrl+X is Cut");
+  assert.equal(matchesShortcut(key("X", { ctrlKey: true, shiftKey: true, altKey: true }), "open-browser"), false);
+  assert.equal(matchesShortcut(key("'", { ctrlKey: true }), "open-requests"), true);
+  assert.equal(matchesShortcut(key("'"), "open-requests"), false, "a typed apostrophe is text");
 });
