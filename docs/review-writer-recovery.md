@@ -27,6 +27,45 @@ closed with the source named. `files` and local `systemd` sources are supported;
 source is non-contributing only when SSSD configuration, fragments, sockets and processes are
 provably absent. Unreadable evidence refuses the exception.
 
+## A Configured Grant Contains the Reviewer
+
+The conventional native Claude Code installation (`~/.local/bin/claude` linking into
+`~/.local/share/claude/versions/`) is trusted as long as nothing grants sessions write access to
+the directories on its resolution path. A workspace registered at the home directory does: any
+session started in it, or resumed from it, can write `~/.local/bin` and repoint the link. The
+reviewer is shared by every project on the runner, so this refuses reviews requested from other
+projects too. There is no exception for `~/.local`.
+
+The refusal names the directory, the writable root, the supported recoveries and every configured
+grant that contains the directory, for example:
+
+```text
+<home>/.local/bin is inside a directory a session can write (<home>). To use it, install the
+reviewer where no session can write and set its agent's command to that absolute path, or remove
+workspace "home" from this machine and delete session s_…. Granted by workspace "home" and
+session s_…
+```
+
+Relocation comes first because it always works: the reviewer-unavailable reason a requester sees
+elides paths longer than 120 characters and is cut to its first 450 characters when longer than
+500, and the runner log keeps the whole message with full paths and every grant.
+
+Admission reads the configured grants again for every review. Recover with either route:
+
+- **Withdraw the grants.** Remove the named workspace from the runner's `workspaces`
+  configuration (an operator change, applied when the runner next starts), then delete the named
+  sessions. A session keeps its project directory as a grant after its workspace is removed,
+  because it can still be resumed there. Register the projects you need as their own workspaces.
+- **Move the reviewer.** Install the reviewer in a directory no session can write, such as a
+  dedicated directory outside every workspace, provider home and cache, and set the Claude Code
+  agent's `command` to its absolute path. A reviewer found through `PATH` is checked at the first
+  match, so an earlier `~/.local/bin` entry would still be refused.
+
+Grants that only the second route resolves (a provider account directory, or a provider home in
+the runner's own environment) are named without a withdrawal, and so is everything when a
+built-in session-writable root (a default provider home, a shared cache, runner state or a
+temporary directory) contains the reviewer, even when a configured grant names the same directory.
+
 The writer registry and `--state-doctor review-writers` remain **non-blocking diagnostics**.
 Retaining them avoids coupling this admission change to process-tree containment and shutdown
 cleanup. Their exact proof rules still apply to retiring a diagnostic record, but neither a
