@@ -206,7 +206,6 @@ import {
   type CampaignMergedBranch,
   type CampaignForgePullRequestObservation,
   type CampaignPullRequestRef,
-  type WorkflowDecisionResourceSnapshot,
   campaignStatusTerminal,
   type OrchestratorFollowUpRecord,
   type CampaignAttemptBoundary,
@@ -217,6 +216,7 @@ import {
   type WorkflowDecisionAuthority,
   type WorkflowDecisionStatus,
   type WorkflowDecisionView,
+  type WorkflowDecisionResourceSnapshot,
   type PromptImageReference,
   type PromptSessionMessage,
   type AnswerRecoveredQuestionCommand,
@@ -21208,10 +21208,14 @@ export class ControlPlaneDb {
     ).get(resolvedCampaignId) as { unique_count: number | null; duplicate_count: number | null };
     const effectiveOwners = { ...policy.delegation.decisions };
     if (policy.control?.mode === "full_control") {
+      const protocol = this.getRunner(campaign.runner_id)?.protocolVersion;
       const supported = campaignAuthorityPreflight(policy.control, campaign.driver,
-        this.getRunner(campaign.runner_id)?.protocolVersion, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
+        protocol, this.campaignPeerContract(campaign.id)).supported && campaignBoundaryCurrent({ orchestratorPolicy: policy,
         parentControlPolicy: { revision: campaign.parent_control_policy_revision, decisions: policy.delegation.decisions } });
-      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported);
+      // Review round extensions are the Orchestrator's within the per-pull-request cap only (#4075);
+      // each occurrence also checks its requester's runner and the durable count.
+      const cappedExtensions = runnerSupportsProtocol(protocol, "fullControlReviewExtensions");
+      for (const category of WORKFLOW_DECISION_CATEGORIES) effectiveOwners[category] = campaignWorkflowOwner(policy.control, policy.delegation.decisions, category, supported, cappedExtensions);
     }
     // Preserve the saved choice while routing the effective gate to the human whenever this
     // Orchestrator's runner, harness, or model cannot inspect evidence bytes. A supported client
@@ -21272,6 +21276,9 @@ export class ControlPlaneDb {
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
       decisionOwners: effectiveOwners,
+      ...(policy.control?.mode === "full_control" && effectiveOwners.review_round_extension === "orchestrator" &&
+        policy.delegation.decisions.review_round_extension !== "orchestrator"
+        ? { reviewRoundExtensionCap: { scope: "pull_request" as const, extraRounds: "configured_round_budget" as const } } : {}),
       behavior: campaignBehaviorProjection(policy),
       ...(() => {
         const video = policy.control?.mode === "full_control"
@@ -21671,6 +21678,26 @@ export class ControlPlaneDb {
       delegatedImageReview ? JSON.stringify(delegatedImageReview) : null, now, ...(oweResume ? [now] : []), occurrenceId, expectedAuthority,
     );
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  /**
+   * #4075: whether granting this review_round_extension keeps its pull request's
+   * Orchestrator-granted extra rounds within the Full Control cap, which is the configured round
+   * budget of the requester's run once more. Every approved or consumed Orchestrator-owned extension
+   * of that pull request counts, whatever its requester, epoch or basis, except the occurrences this
+   * one replaces (the requester's own under the same canonical resource key, which grant nothing
+   * once it exists). Consumed grants never leave the count, so a re-request cannot reset it.
+   */
+  reviewExtensionCap(requesterSessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "review_round_extension" }>): "within" | "exceeded" {
+    const pullRequest = { repository: snapshot.repository, number: snapshot.pullRequest };
+    const key = `review_round_extension:${snapshot.repository}#${snapshot.pullRequest}:epoch-${snapshot.epoch}:rounds-${snapshot.roundsUsed}`;
+    const granted = this.stmt(`SELECT COALESCE(SUM(json_extract(resource_snapshot, '$.extraRounds')), 0) AS rounds
+      FROM workflow_decisions WHERE category='review_round_extension' AND authority='orchestrator'
+        AND status IN ('approved','consumed') AND json_extract(resource_snapshot, '$.pullRequest')=?
+        AND lower(json_extract(resource_snapshot, '$.repository'))=lower(?) AND NOT (session_id=? AND resource_key=?)`)
+      .get(snapshot.pullRequest, snapshot.repository, requesterSessionId, key) as { rounds: number };
+    return granted.rounds + snapshot.extraRounds <= this.reviewSessions.roundBudget(requesterSessionId, pullRequest) ? "within" : "exceeded";
   }
 
   /** Conditional terminal write and owed resume are atomic; approved grants are never touched. */
@@ -22825,7 +22852,10 @@ export class ControlPlaneDb {
 
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
    * auditable lifecycle-revoked state above. The eligibility check is repeated under the write
-   * lock so restart/revocation races cannot widen recovery. */
+   * lock so restart/revocation races cannot widen recovery. The proof shows the exact approved head
+   * merged, so the session's other approved occurrences armed with the same enqueue command (an
+   * ejected enqueue before a same-head re-enqueue, #3991) can never run to any other effect: they
+   * end superseded by this one in the same transaction, which only removes authority. */
   consumeReconciledWorkflowDecisionActionWithReceipt(
     sessionId: string,
     occurrenceId: string,
@@ -22833,7 +22863,7 @@ export class ControlPlaneDb {
     receiptDigest: string,
     now: number,
     options: { forgeAttested?: boolean } = {},
-  ): WorkflowDecisionView | null {
+  ): { decision: WorkflowDecisionView; supersededOccurrenceIds: string[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
@@ -22862,8 +22892,22 @@ export class ControlPlaneDb {
         this.db.exec("ROLLBACK");
         return null;
       }
+      const siblings = (this.stmt(
+        `SELECT occurrence_id FROM workflow_decisions
+         WHERE session_id=? AND category='pr_merge' AND status='approved' AND consumed_at IS NULL
+           AND action_command_digest=? AND occurrence_id<>?`,
+      ).all(sessionId, commandDigest, occurrenceId) as unknown as Array<{ occurrence_id: string }>)
+        .map((row) => row.occurrence_id);
+      const supersede = this.stmt(
+        `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
+         WHERE occurrence_id=? AND status='approved' AND consumed_at IS NULL`,
+      );
+      for (const sibling of siblings) {
+        supersede.run(now, occurrenceId, sibling);
+        this.retireWorkflowDecisionResume(sibling, now);
+      }
       this.db.exec("COMMIT");
-      return this.workflowDecisionByOccurrence(occurrenceId);
+      return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, supersededOccurrenceIds: siblings };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

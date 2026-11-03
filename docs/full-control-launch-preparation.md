@@ -25,7 +25,8 @@ campaign budget. Neither grants authority, and older settings APIs refuse saving
 no saved campaign budget, the campaign has no limit.
 
 The Full Control boundary owns every operation it lists, so the Custom per-decision owners never
-apply under it, whatever their toggles say (Review Round Extensions follow Parent Control, #3369).
+apply under it, whatever their toggles say. Review Round Extensions follow a Parent Control grant,
+and otherwise Full Control owns them only within its per-pull-request cap (#4075 changed #3369).
 When Full Control is chosen or in effect, Orchestrator Controls shows only the mode, its line, any
 inline blocker, and Enable Full Control or Revoke. Child Session Requests, Workflow Decisions, the
 evidence and retention notes, and Campaign Behavior return when Custom is chosen. On the

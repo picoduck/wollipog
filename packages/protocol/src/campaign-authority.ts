@@ -63,7 +63,10 @@ export interface CampaignAuthorityEvaluation {
     "unverified_closures" |
     /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
      * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
-    "closure_proof_incomplete";
+    "closure_proof_incomplete" |
+    /** #4075: a Full Control review_round_extension that would take this pull request's
+     * Orchestrator-granted rounds past the server-enforced cap. It stays the person's. */
+    "review_extension_cap_reached";
   operation: CampaignAuthorityOperation;
   boundaryRevision?: number;
   /** Full Control only: which formerly human class this occurrence belongs to. Content-safe. */
@@ -84,17 +87,20 @@ const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr
   "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
 
 /** Category-level projection only. A concrete request still needs provenance, resource and
- * sensitive-effect evaluation; this value is never a consumable grant. */
+ * sensitive-effect evaluation; this value is never a consumable grant. `fullControlReviewExtensions`
+ * says every peer supports capped Full Control extensions (v277); for review_round_extension,
+ * "orchestrator" then means within the per-pull-request cap only. */
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
-  category: WorkflowDecisionCategory, supported: boolean): "human" | "orchestrator" {
+  category: WorkflowDecisionCategory, supported: boolean, fullControlReviewExtensions = false): "human" | "orchestrator" {
   // A follow-up past the campaign's approval limit is the Human's in every mode (#2940).
   if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
-  // More review rounds than the policy allows are never part of Full Control's own authority: only
-  // an explicit Parent Control grant delegates them (#3369).
-  if (category === "review_round_extension") return decisions[category];
+  // An explicit Parent Control grant delegates extra review rounds without a cap (#3369). Otherwise
+  // Full Control owns them only up to the server-enforced cap per pull request (#4075).
+  if (category === "review_round_extension") return decisions[category] === "orchestrator" ||
+    (fullControlReviewExtensions && validCampaignControl(control)) ? "orchestrator" : "human";
   return validCampaignControl(control) && control.boundary.operations.includes(category) ? "orchestrator" : "human";
 }
 
@@ -603,6 +609,10 @@ export function resolveCampaignAuthority(input: {
   humanRequired?: boolean;
   /** Server-resolved workspace/worktree root, not a resource selector supplied by an agent. */
   repositoryRoot?: string;
+  /** #4075: for a review_round_extension, whether granting it keeps the pull request's
+   * Orchestrator-granted rounds within the server-enforced cap, counted durably by the server.
+   * Set only when every peer supports capped Full Control extensions; absent keeps them human. */
+  reviewExtensionCap?: "within" | "exceeded";
 }): CampaignAuthorityEvaluation {
   const request = input.request;
   const category = input.snapshot?.category;
@@ -627,6 +637,14 @@ export function resolveCampaignAuthority(input: {
     // Extra review rounds follow the explicit Parent Control grant under Full Control too: they are
     // never part of a boundary's own operations (#3369).
     const eligible = !input.root && (category ? campaignWorkflowOwner(input.control, input.decisions, category, true) === "orchestrator" : Boolean(request && parentControlRequestEligible(input.parentControl, request)));
+    // Without that grant, a current Full Control boundary still owns a child's extra rounds within
+    // the server-enforced cap of its pull request (#4075). Past the cap they stay the person's.
+    if (!eligible && category === "review_round_extension" && input.control?.mode === "full_control" && !input.root &&
+        input.reviewExtensionCap !== undefined && validCampaignControl(input.control) && input.trustedSource === "workflow_route" &&
+        input.snapshot!.repository.toLowerCase() === input.control.boundary.repository.toLowerCase()) {
+      return input.reviewExtensionCap === "within" ? result("orchestrator", "campaign_delegation", "authorized_operation")
+        : result("human", "human_required", "review_extension_cap_reached");
+    }
     return result(eligible ? "orchestrator" : "human", "custom_policy", "custom_owner");
   }
   if (!validCampaignControl(input.control)) return result("human", "human_required", "outside_boundary");

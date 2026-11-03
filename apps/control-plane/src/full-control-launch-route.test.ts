@@ -193,14 +193,14 @@ test("a ready Human launch preserves its authority while retired native review s
     assert.equal(root.agentId, "claude");
     assert.equal(root.parentControlPolicy!.revision, control.boundary.revision);
     for (const category of [...WORKFLOW_DECISION_CATEGORIES, "issue_closure", "campaign_issue_scope"] as const) {
-      // Extra review rounds are never part of Full Control's own authority (#3369).
+      // Without peers that support its cap, extra review rounds stay outside Full Control (#3369, #4075).
       assert.equal(campaignWorkflowOwner(control, root.parentControlPolicy!.decisions, category, true),
         category === "review_round_extension" ? "human" : "orchestrator", category);
     }
+    // A current runner supports the cap, so the campaign owns every category, extensions within it.
     const projection = f.db.campaignProjection(root.id)!;
-    for (const category of WORKFLOW_DECISION_CATEGORIES) {
-      assert.equal(projection.decisionOwners[category], category === "review_round_extension" ? "human" : "orchestrator", category);
-    }
+    for (const category of WORKFLOW_DECISION_CATEGORIES) assert.equal(projection.decisionOwners[category], "orchestrator", category);
+    assert.deepEqual(projection.reviewRoundExtensionCap, { scope: "pull_request", extraRounds: "configured_round_budget" });
     assert.equal(f.db.campaignBudgets.view(root.id)!.state, "active");
     assert.deepEqual(f.db.campaignBudgets.view(root.id)!.authority.controlledReview, review);
     assert.equal(projection.budget!.requiredNativeReview!.supported, false);
@@ -991,9 +991,9 @@ test("an existing campaign enables Full Control through one exact reviewed autho
     assert.equal(control.boundary.authorizedByUserId, f.human.userId);
     assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
     assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
+    // Review round extensions included, within their per-pull-request cap (#4075).
     for (const category of WORKFLOW_DECISION_CATEGORIES) {
-      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category],
-        category === "review_round_extension" ? "human" : "orchestrator", category);
+      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category], "orchestrator", category);
     }
     const replay = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
       payload: { expectedRevision, preflightDigest: enablePreflight.digest } });

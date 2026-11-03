@@ -827,6 +827,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      ui_evidence_approval decision's images to a managed reviewer Session whose receipts and
 //      verdict the server records, and resolves with delegatedImageReview. The reviewer launches
 //      on the root's runner with only its two review tools; older peers keep direct review.
+// 277: base-branch merges and capped Full Control review extensions (#4075). A runner proves a
+//      head is one strict merge of the moved base onto the last valid head; the control plane
+//      sends `history.baseMergeRounds` only to such a runner and then counts that round outside
+//      the epoch's budget, or records a reviewed-head equivalence (round mode `equivalent`) that
+//      the merge gate accepts. Under Full Control, the controlling Orchestrator owns
+//      review_round_extension up to a per-pull-request cap when both the requester's and the
+//      controller's runners are v277; older peers keep it with the person.
 // 279: Wollipog-performed forge actions (#4067). The requester of an approved
 //      `merged_branch_deletion` (which may now name `pullRequest` and `headSha`) or of an approved,
 //      armed GitHub `pr_merge` calls POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute;
@@ -1065,6 +1072,12 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
    * serves those tools to it (#4074). Checked against the root Orchestrator's runner, which hosts
    * the reviewer; the runner checks the control plane's version before offering the path. */
   delegatedImageEvidenceReview: 276,
+  /** v277 runner proves strict base-branch merges for review runs; the control plane then counts
+   * them outside the round budget and records equivalences (#4075). */
+  reviewBaseMergeRounds: 277,
+  /** v277 requester and controller runners: a Full Control Orchestrator owns review_round_extension
+   * within the server-enforced per-pull-request cap (#4075). Older peers keep it with the person. */
+  fullControlReviewExtensions: 277,
   targetHarnessInstallations: 176,
   harnessInstallations: 175,
   harnessSelectionBackgroundConsumers: 177,
@@ -3029,6 +3042,10 @@ export interface OrchestratorCampaignProjection {
   recovery?: import("./campaign-recovery.js").CampaignRecoveryProjection;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
+  /** v277 (#4075): present when Full Control, not a Parent Control grant, makes review_round_extension
+   * the Orchestrator's. It may grant each pull request at most its run's configured round budget of
+   * extra rounds in total; past that a request is the person's. */
+  reviewRoundExtensionCap?: { scope: "pull_request"; extraRounds: "configured_round_budget" };
   /** The root campaign's child behavior as the next child creation enforces it (#3580), with where
    * each value came from: `active_campaign` once a person changed it after launch. */
   behavior?: OrchestratorCampaignBehavior & {
