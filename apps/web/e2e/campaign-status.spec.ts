@@ -244,6 +244,26 @@ test("a ledger write reloads the shown list without an error", async ({ page }) 
   await expect(page.locator('.campaign-status [role="alert"]')).toHaveCount(0);
 });
 
+test("a campaign complete with handoffs lists the owner's items without a recovery warning (#4070)", async ({ page }) => {
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=before");
+  await expect(page.locator(".campaign-status-summary")).toContainText("Blocked");
+  await expect(page.getByText("Authorized Recovery Unavailable")).toBeVisible();
+  await expect(page.locator(".campaign-status-handoffs")).toHaveCount(0);
+
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=after");
+  await expect(page.locator(".campaign-status-summary")).toContainText("Complete with Handoffs");
+  const handoffs = page.locator(".campaign-status-handoffs");
+  await expect(handoffs.getByRole("heading", { name: "Handed Off" })).toBeVisible();
+  await expect(handoffs).toContainText("File the security advisory from a maintainer account.");
+  await expect(handoffs).toContainText("External");
+  await expect(page.getByText("Authorized Recovery Unavailable")).toHaveCount(0);
+  await expect(page.getByText("Recovery Blocked")).toHaveCount(0);
+  await expect(page.getByText("Recovery Resolved")).toBeVisible();
+  await handoffs.getByRole("button", { name: "Open Details for Ledger Read API" }).click();
+  await expect(page.locator("h3.campaign-detail-title")).toContainText("Ledger Read API");
+  await assertNoHorizontalOverflow(page, ".campaign-status");
+});
+
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");

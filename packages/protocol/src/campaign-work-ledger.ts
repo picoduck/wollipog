@@ -21,6 +21,7 @@ import type {
 export const CAMPAIGN_WORK_ITEM_ID_PREFIX = "cwi_";
 export const CAMPAIGN_ATTEMPT_ID_PREFIX = "catt_";
 export const CAMPAIGN_WORK_VERIFICATION_ID_PREFIX = "cwv_";
+export const CAMPAIGN_WORK_DELIVERY_ID_PREFIX = "cwd_";
 /** Recommendations keep the existing follow-up row identity (`followup_…`). */
 export const CAMPAIGN_RECOMMENDATION_ID_PREFIX = "followup_";
 
@@ -158,6 +159,18 @@ export interface CampaignWorkItemBlocker {
   recordedBySessionId: string | null;
 }
 
+/** v275 (#4070): the Orchestrator's record that the agent work on an item is done and its next step
+ * belongs to `responsibleActor`. Only a `human` or `external` handoff lets a campaign finish as
+ * `complete_with_handoffs`; one to `orchestrator` or `child` still blocks it. Assigning the item
+ * again clears it. It describes; it never closes an issue, merges, or publishes. */
+export interface CampaignWorkItemHandoff {
+  responsibleActor: CampaignResponsibleActor;
+  reason: string;
+  nextAction: string;
+  recordedAt: number;
+  recordedBySessionId: string | null;
+}
+
 /** Stages the Orchestrator reports. They are claims with a source and time, not observations,
  * and none of them changes the primary state: `merged` does not mean `delivered`. */
 export const CAMPAIGN_REPORTED_STAGES = [
@@ -276,6 +289,9 @@ export interface CampaignForgePullRequestObservation {
   /** The pull request's merge-queue entry, or null when it is not queued. */
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
+  /** v275: the repository's default branch. Absent from older runners, which cannot prove that a
+   * merge landed on it. */
+  defaultBranch?: string;
 }
 
 /** A GitLab pipeline status, collapsed: `pending` covers created, waiting_for_resource, preparing,
@@ -403,6 +419,21 @@ export interface CampaignWorkItemVerification {
   /** The verifying Orchestrator, which may be nested; null once it is deleted. */
   verifiedBySessionId: string | null;
   verifiedAt: number;
+}
+
+/** v275 (#4070): delivery the controlling Orchestrator recorded from evidence the control plane
+ * checked itself: pull requests the forge reported merged into the repository's default branch, a
+ * campaign child's exact completed report inside its attempt on the item, or both. A report also
+ * adds an ordinary delivered verification of that attempt. It holds until the item is assigned
+ * again. */
+export interface CampaignWorkItemRecordedDelivery {
+  id: string;
+  workItemId: string;
+  pullRequests: Array<CampaignPullRequestRef & { mergeCommitSha: string; baseRef: string }>;
+  report: { childSessionId: string | null; attemptId: string; seq: number } | null;
+  note: string | null;
+  recordedBySessionId: string | null;
+  recordedAt: number;
 }
 
 /* ------------------------------ Recommendations ------------------------------ */
@@ -578,6 +609,8 @@ export interface CampaignWorkItemSummary {
   attemptCount: number;
   stage: CampaignReportedStage | null;
   blocker: CampaignWorkItemBlocker | null;
+  /** v275 (#4070). Omitted by older control planes. */
+  handoff?: CampaignWorkItemHandoff | null;
   createdAt: number;
   updatedAt: number;
   /** Last ledger or observed-status change; drives the `activity` sort. */
@@ -594,6 +627,8 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
   commitmentRecord: CampaignWorkItemCommitment;
   attempts: CampaignAttempt[];
   verifications: CampaignWorkItemVerification[];
+  /** v275 (#4070): recorded deliveries, oldest first. Omitted by older control planes. */
+  deliveries?: CampaignWorkItemRecordedDelivery[];
   /** The recommendation this item was accepted from, if any. */
   sourceRecommendation: CampaignRecommendation | null;
   /** Recommendations naming this item as an origin. */
@@ -714,8 +749,30 @@ export interface UpdateCampaignWorkItemRequest {
   stage?: { stage: CampaignReportedStageKind; note?: string; pullRequests?: CampaignPullRequestRef[] } | null;
   blocker?: { reason: string; responsibleActor: CampaignResponsibleActor; requestOccurrenceId?: string } | null;
   nextAction?: string | null;
+  /** v275 (#4070): hand the item's next step to someone; `null` withdraws the handoff. */
+  handoff?: { responsibleActor: CampaignResponsibleActor; reason: string; nextAction: string } | null;
   /** Closes the item's open attempt without delivery. */
   endAttempt?: { reason: "abandoned" | "failed"; note?: string };
+}
+
+/** v275 `record_campaign_work_item_delivery` (#4070), root or nested Orchestrator only. Needs
+ * `pullRequests`, `report`, or both; every one given is checked:
+ * - each pull request must be in the campaign's repository, named by the item's reported stage, and
+ *   read from the forge now as merged into the repository's default branch;
+ * - the report must be the exact completed top-level response of a campaign child, inside that
+ *   child's attempt on this item, including one closed as `reassigned` or `superseded`.
+ * It inspects no worktree, and never closes an issue, merges, or publishes. */
+export interface RecordCampaignWorkItemDeliveryRequest {
+  workItemId: string;
+  pullRequests?: CampaignPullRequestRef[];
+  report?: { childSessionId: string; reportEventSeq: number };
+  note?: string;
+}
+
+export interface RecordCampaignWorkItemDeliveryResponse {
+  revision: number;
+  delivery: CampaignWorkItemRecordedDelivery;
+  item: CampaignWorkItemDetail;
 }
 
 export interface CampaignWorkItemMutationResponse {

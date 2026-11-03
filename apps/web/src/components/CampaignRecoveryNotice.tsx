@@ -23,9 +23,11 @@ export function CampaignRecoveryNotice({ record }: { record: CampaignRecoveryRec
   const human = record.state === "waiting_human";
   const blocked = record.state === "blocked";
   const declined = record.reason === "request_declined";
+  // A finished campaign reads every record as resolved (#4070): nothing is left to recover.
+  const resolved = record.state === "resolved";
   return (
     <Notice tone={human || blocked ? "warning" : "neutral"}
-      title={human ? "Human Input Required" : declined ? "Request Declined" : blocked ? "Recovery Blocked" : "Authorized Recovery"}
+      title={resolved ? "Recovery Resolved" : human ? "Human Input Required" : declined ? "Request Declined" : blocked ? "Recovery Blocked" : "Authorized Recovery"}
       details={(
         <dl className="facts">
           <div><dt>Action</dt><dd>{actions[record.action]}</dd></div>

@@ -969,6 +969,42 @@ test("a held child links to its session, and a blocker's request opens that requ
   }
 });
 
+test("a campaign complete with handoffs lists the owner's items, opens one, and shows no recovery warning (#4070)", async () => {
+  const handoff = { responsibleActor: "human" as const, reason: "Private vulnerability reporting refused the agent's account.",
+    nextAction: "File the advisory from a maintainer account.", recordedAt: NOW, recordedBySessionId: "s_root" };
+  const advisory = item("cwi_5", { title: "File the Advisory", primaryState: "planned", handoff });
+  const { client } = fakeClient(() => ({ revision: 1, items: [advisory], nextCursor: null }), { cwi_5: detailOf(advisory) });
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "complete_with_handoffs",
+      handoffs: { total: 1, items: [{ workItemId: "cwi_5", key: "original:advisory", title: "File the Advisory",
+        issue: { repository: "picoduck/wollipog", number: 4070 }, primaryState: "planned", handoff }] },
+      recovery: { unattendedReady: false, automation: { state: "lifecycle_held" }, automatic: 0, waitingHuman: 0, blocked: 0,
+        truncated: false, records: [{ id: "rec_1", action: "continue_without_request", reason: "request_declined", state: "resolved",
+          resource: { kind: "request", sessionId: "s_child", occurrenceId: "occ_9" }, effectiveOwner: "orchestrator", policyRevision: 1,
+          attempts: 0, maxAttempts: 4, attemptedRecovery: [], requiredInput: "none", explanation: "Declined.", createdAt: NOW, updatedAt: NOW }] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const text = panel.container.textContent ?? "";
+    assert.match(text, /Handed Off/u);
+    assert.match(text, /File the Advisory/u);
+    assert.match(text, /Private vulnerability reporting refused the agent's account\./u);
+    assert.match(text, /File the advisory from a maintainer account\./u);
+    assert.doesNotMatch(text, /Authorized Recovery Unavailable|Recovery Blocked/u, "a finished campaign raises no recovery warning");
+    assert.match(text, /Recovery Resolved/u);
+    const open = panel.container.querySelector<HTMLButtonElement>("button[aria-label='Open Details for File the Advisory']");
+    assert.ok(open);
+    await click(open);
+    assert.match(panel.container.textContent ?? "", /Handed to You: Private vulnerability reporting/u);
+  } finally {
+    await panel.dispose();
+  }
+});
+
 function pendingRequest(sessionId: string, occurrenceId: string): DescendantRequestView {
   return {
     sessionId, sessionTitle: sessionId, runnerId: "runner-1", runnerOnline: true, eventEpoch: 1, createdAt: NOW,

@@ -16,6 +16,8 @@
  * leaves the loaded list under a Couldn't Refresh Work Items notice.
  * With `budget=1`, `followUps=pending` puts the campaign at its follow-up limit with two follow-ups
  * waiting for the person's approval (#2940); Change Limit saves to the fixture.
+ * `handoffs=after` finishes the campaign with two items handed to people (#4070); `handoffs=before`
+ * is the same campaign as a server without handoffs reports it.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -244,6 +246,35 @@ function baseSession(overrides: Partial<SessionView>): SessionView {
   } as SessionView;
 }
 
+/** `handoffs=before|after` (#4070): every child verified and the remaining work owned by people.
+ * `before` is what a server without handoffs reports for that campaign; `after` completes with them. */
+const handoffScenario = params.get("handoffs") === "before" || params.get("handoffs") === "after" ? params.get("handoffs") as "before" | "after" : null;
+function handoffProjection(state: "before" | "after"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const declined = { ...campaignRecoveryFixture("request_declined", NOW), state: state === "after" ? "resolved" as const : "blocked" as const };
+  const handoff = (responsibleActor: "human" | "external", reason: string, nextAction: string, minutesAgo: number) =>
+    ({ responsibleActor, reason, nextAction, recordedAt: NOW - minutesAgo * MINUTE, recordedBySessionId: "s_root" });
+  return {
+    status: state === "after" ? "complete_with_handoffs" : "blocked",
+    children: { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 3, cleanupPending: 0 },
+    limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    heldChildren: [],
+    recovery: state === "after"
+      ? { unattendedReady: false, automation: { state: "lifecycle_held" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [declined], truncated: false }
+      : { unattendedReady: false, automation: { state: "lifecycle_held",
+        reason: "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." },
+      automatic: 0, waitingHuman: 0, blocked: 1, records: [declined], truncated: false },
+    ...(state === "after" ? { handoffs: { total: 2, items: [
+      { workItemId: "cwi_3", key: "original:2417:advisory", title: "Ledger Read API", issue: { repository: "picoduck/wollipog", number: 2417 },
+        primaryState: "blocked", handoff: handoff("human", "Private vulnerability reporting refused the agent's GitHub account.",
+          "File the security advisory from a maintainer account.", 12) },
+      { workItemId: "cwi_4", key: "original:2417:activation", title: "Activate the Ledger in Production", issue: null,
+        primaryState: "planned", handoff: handoff("external", "Activation needs the hosting provider's change window.",
+          "Ask the provider to schedule the change window, then enable the ledger.", 8) },
+    ] } } : {}),
+  };
+}
+if (handoffScenario === "after") details.cwi_3 = { ...details.cwi_3!, handoff: handoffProjection("after").handoffs!.items[0]!.handoff };
+
 let revision = 1;
 const projectionFor = (rev: number) => campaignProjection(
   scenario === "legacy" ? null
@@ -293,6 +324,7 @@ const projectionFor = (rev: number) => campaignProjection(
         recoveryAction: "Restart the session once the account is ready.",
       }],
     }],
+    ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
   },
 );
 

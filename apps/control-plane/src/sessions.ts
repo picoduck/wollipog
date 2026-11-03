@@ -87,6 +87,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   campaignIssueScopeChangesRequirement,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
+  campaignStatusTerminal,
   validatePromptImageInputs,
   validatePromptImages,
   summarizeQuestionAnswers,
@@ -169,6 +170,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type RecordCampaignPlanRequest,
   type RecordCampaignPlanResponse,
   type UpdateCampaignWorkItemRequest,
+  type RecordCampaignWorkItemDeliveryRequest,
+  type RecordCampaignWorkItemDeliveryResponse,
   type VerifyOrchestratorChildWorkItemResult,
   CAMPAIGN_WORK_LEDGER_LIMITS,
   type VerifyOrchestratorChildRequest,
@@ -6305,7 +6308,7 @@ export class SessionsService {
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
       const projection = this.db.campaignProjection(campaignSessionId);
       if (!projection || (projection.status === "waiting_human" &&
-          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || projection.status === "verified_complete" ||
+          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || campaignStatusTerminal(projection.status) ||
           !runnerSupportsProtocol(
             this.db.getRunner(campaign.runnerId)?.protocolVersion,
             "campaignContinuations",
@@ -8585,6 +8588,13 @@ export class SessionsService {
             const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
               type: "git_action", requestId, sessionId: child.id, worktreePath, action: { kind: "status" },
             }, 30_000);
+            // The runner no longer links this worktree to the child (it was retired, #4070): there is
+            // nothing of the child's left there to protect, and archival would not touch it.
+            if (result.type === "git_result" && !result.ok && result.code === "GIT_WORKTREE_UNLINKED") continue;
+            if (result.type === "git_result" && !result.ok) {
+              return fail(`runner could not inspect child worktree ${JSON.stringify(worktreePath)}` +
+                `${result.error ? `: ${result.error.slice(0, 300)}` : ""}; update Wollipog on the child's runner if this persists, then retry`, 409);
+            }
             const status = result.type === "git_result" && result.ok ? result.data?.status : undefined;
             if (!status || !Number.isSafeInteger(status.changedPathCount) || status.changedPathCount! < 0 ||
                 status.hasChanges !== (status.changedPathCount! > 0) || !Array.isArray(status.files)) {
@@ -8884,6 +8894,144 @@ export class SessionsService {
     return ok({ revision: updated.data.revision, item });
   }
 
+  /**
+   * `record_campaign_work_item_delivery` (#4070): a ledger write by the controlling Orchestrator,
+   * from evidence checked here rather than taken from the caller. Each pull request must be in the
+   * campaign's repository, named by the item's reported stage, and read from the forge now as merged
+   * into the repository's default branch. A report must be the exact completed top-level response of
+   * one of the caller's campaign children, inside that child's attempt on this item, even one
+   * closed as reassigned or superseded. Nothing here inspects a worktree, verifies or archives the
+   * child, closes an issue, merges, or publishes.
+   */
+  async recordCampaignWorkItemDelivery(
+    callerSessionId: string,
+    request: RecordCampaignWorkItemDeliveryRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<RecordCampaignWorkItemDeliveryResponse>> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    const root = scope.data.root;
+    if (typeof request !== "object" || request === null || !boundedDecisionString(request.workItemId, 256)) {
+      return fail("workItemId is required", 400);
+    }
+    const refs = request.pullRequests ?? [];
+    if (!Array.isArray(refs) || refs.length > CAMPAIGN_WORK_LEDGER_LIMITS.pullRequestsPerStage ||
+        refs.some((ref) => typeof ref !== "object" || ref === null || campaignRepositoryLocation(ref.repository) === null ||
+          !Number.isSafeInteger(ref.number) || ref.number < 1)) {
+      return fail(`pullRequests must list at most ${CAMPAIGN_WORK_LEDGER_LIMITS.pullRequestsPerStage} refs, each {repository, number}`, 400);
+    }
+    const report = request.report;
+    if (report !== undefined && (typeof report !== "object" || report === null ||
+        !boundedDecisionString(report.childSessionId, 256) || !Number.isSafeInteger(report.reportEventSeq) || report.reportEventSeq < 1)) {
+      return fail("report requires childSessionId and an exact reportEventSeq", 400);
+    }
+    if (!refs.length && !report) return fail("delivery needs pullRequests, a report, or both", 400);
+    if (request.note !== undefined && (!boundedDecisionString(request.note, CAMPAIGN_WORK_LEDGER_LIMITS.textLength) || !request.note.trim())) {
+      return fail(`note must be at most ${CAMPAIGN_WORK_LEDGER_LIMITS.textLength} characters`, 400);
+    }
+    const item = this.db.campaignWorkLedger.detail(root.id, request.workItemId, Date.now());
+    if (!item) return fail("work item not found in this campaign", 404);
+
+    let reportIdentity: ReturnType<ControlPlaneDb["campaignReportIdentity"]> | null = null;
+    if (report) {
+      const child = this.db.getSession(report.childSessionId);
+      if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
+        return fail("campaign child not found", 404);
+      }
+      await this.hydrateHistory(child.id);
+      reportIdentity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
+      if (reportIdentity.digest === null) {
+        await this.hydrateHistory(child.id, { force: true });
+        reportIdentity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
+      }
+      // Only a top-level report has a digest.
+      if (reportIdentity.digest === null) return fail("reportEventSeq is not a completed top-level agent response", 409);
+      const attempt = this.db.campaignWorkLedger.reportAttempt(root.id, item.id,
+        { childSessionId: child.id, seq: reportIdentity.seq, eventEpoch: reportIdentity.eventEpoch });
+      if (!attempt.ok) return fail(attempt.error, attempt.status);
+      if (attempt.data.open) {
+        // While the attempt is open, only a finished turn's latest report is final (the verify_campaign_child rule).
+        const current = this.db.getSession(child.id)!;
+        if (current.status !== "idle" && current.status !== "completed" &&
+            !(current.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
+          return fail("the child is still working on this item; record its report once its turn has finished", 409);
+        }
+        if (!this.db.hasCompletedAgentReportAt(child.id, report.reportEventSeq)) {
+          return fail("reportEventSeq is not the child's latest completed report", 409);
+        }
+      } else if (attempt.data.endSeq === null ||
+          this.db.lastAgentReportThrough(child.id, attempt.data.endSeq) !== report.reportEventSeq) {
+        // A closed attempt's report is the last one the child gave before that attempt closed.
+        return fail("reportEventSeq is not the child's last report before its attempt on this work item closed", 409);
+      }
+    }
+    const open = item.currentAttempt?.sessionId && item.currentAttempt.sessionId !== report?.childSessionId
+      ? this.db.getSession(item.currentAttempt.sessionId) : null;
+    if (open && !isTerminal(open.status) && open.status !== "idle") {
+      return fail(`session ${open.id} is still working on this item; stop or reassign it before recording delivery`, 409);
+    }
+
+    const pullRequests: Array<{ repository: string; number: number; mergeCommitSha: string; baseRef: string }> = [];
+    if (refs.length) {
+      const repository = root.orchestratorPolicy?.issueScope?.repository ?? item.issue?.repository;
+      if (!repository) {
+        return fail("the campaign has no repository to check pull requests against; record the work item's issue first", 409);
+      }
+      const named = (ref: { repository: string; number: number }) =>
+        `${ref.repository}${campaignRepositoryLocation(ref.repository)?.forge === "gitlab" ? "!" : "#"}${ref.number}`;
+      const same = (a: { repository: string; number: number }, b: { repository: string; number: number }) =>
+        a.repository.toLowerCase() === b.repository.toLowerCase() && a.number === b.number;
+      for (const ref of refs) {
+        if (ref.repository.toLowerCase() !== repository.toLowerCase()) {
+          return fail(`pull request ${named(ref)} is not in the campaign repository ${repository}`, 409);
+        }
+        if (campaignRepositoryLocation(ref.repository)?.forge !== "github") {
+          return fail("recording delivery from a GitLab merge request is not supported yet", 409);
+        }
+        if (!item.stage?.pullRequests.some((reported) => same(reported, ref))) {
+          return fail(`pull request ${named(ref)} is not named by the work item's reported stage; ` +
+            "report it with update_campaign_work_item first", 409);
+        }
+      }
+      if (!this.campaignForgeReadNow) return fail("forge reads are unavailable on this control plane", 503);
+      const results = await this.campaignForgeReadNow(root.id, refs).catch(() => null);
+      if (!results) return fail("the campaign's runner could not read the forge; retry once it is online", 409);
+      for (const ref of refs) {
+        const result = results.find((candidate) => same(candidate.ref, ref));
+        const observed = result?.observation;
+        if (!observed || observed.forge === "gitlab") {
+          return fail(`pull request ${named(ref)} could not be read from the forge` +
+            `${result?.failure ? ` (${result.failure})` : ""}; retry`, 409);
+        }
+        if (observed.state !== "merged" || !observed.mergeCommitSha) {
+          return fail(`pull request ${named(ref)} is not merged (the forge reports it ${observed.state})`, 409);
+        }
+        if (!observed.defaultBranch) {
+          return fail("the campaign's runner does not report the repository's default branch; " +
+            "update Wollipog on that runner and retry", 409);
+        }
+        if (observed.baseRef !== observed.defaultBranch) {
+          return fail(`pull request ${named(ref)} merged into ${observed.baseRef}, not the default branch ${observed.defaultBranch}`, 409);
+        }
+        pullRequests.push({ repository: ref.repository, number: ref.number, mergeCommitSha: observed.mergeCommitSha, baseRef: observed.baseRef });
+      }
+    }
+
+    const now = Date.now();
+    const written = this.ledgerWrite(scope.data, () => this.db.campaignWorkLedger.recordDelivery(root.id, callerSessionId, {
+      workItemId: item.id,
+      pullRequests,
+      report: report && reportIdentity ? { childSessionId: report.childSessionId, ...reportIdentity } : null,
+      note: request.note?.trim() ?? null,
+    }, now));
+    if (!written.ok || !written.data) return failAs(written);
+    return ok({
+      revision: written.data.revision,
+      delivery: this.db.campaignWorkLedger.delivery(root.id, written.data.deliveryId)!,
+      item: this.db.campaignWorkLedger.detail(root.id, item.id, now, canAccess)!,
+    });
+  }
+
   assignCampaignWorkItem(
     callerSessionId: string,
     request: AssignCampaignWorkItemRequest,
@@ -8993,7 +9141,7 @@ export class SessionsService {
     const projection = this.db.campaignProjection(root.id);
     const summary = ledger.summary(root.id, {
       campaignCreatedAt: root.createdAt,
-      complete: projection?.status === "verified_complete",
+      complete: campaignStatusTerminal(projection?.status),
       childSessionIds: this.db.campaignDescendantIds(root.id),
       cleanupPending: projection?.children.cleanupPending ?? 0,
       canSeeSession: canAccess,

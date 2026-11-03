@@ -11,6 +11,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   CAMPAIGN_ATTEMPT_ID_PREFIX,
   CAMPAIGN_REPORTED_STAGES,
+  CAMPAIGN_WORK_DELIVERY_ID_PREFIX,
   CAMPAIGN_WORK_ITEM_ID_PREFIX,
   CAMPAIGN_WORK_ITEM_PRIMARY_STATES,
   CAMPAIGN_WORK_ITEM_UNFINISHED_STATES,
@@ -42,8 +43,10 @@ import {
   type CampaignWorkItemCommitmentState,
   type CampaignWorkItemDetail,
   type CampaignWorkItemDispatchState,
+  type CampaignWorkItemHandoff,
   type CampaignWorkItemOrigin,
   type CampaignWorkItemPrimaryState,
+  type CampaignWorkItemRecordedDelivery,
   type CampaignWorkItemSummary,
   type CampaignWorkItemTimes,
   type CampaignWorkItemVerification,
@@ -51,6 +54,7 @@ import {
   type CampaignWorkItemsPage,
   type CampaignWorkItemsQuery,
   type CampaignWorkSummary,
+  type OrchestratorCampaignHandoff,
   type RecordCampaignPlanRequest,
   type RecordCampaignPlanResponse,
   type UpdateCampaignWorkItemRequest,
@@ -220,6 +224,46 @@ CREATE TABLE IF NOT EXISTS campaign_work_verifications (
 CREATE INDEX IF NOT EXISTS idx_campaign_work_verifications_item
   ON campaign_work_verifications(work_item_id, verified_at);
 
+-- v275 (#4070): an item's current handoff. Assigning the item again deletes it.
+CREATE TABLE IF NOT EXISTS campaign_work_handoffs (
+  work_item_id        TEXT PRIMARY KEY,
+  campaign_session_id TEXT NOT NULL,
+  responsible_actor   TEXT NOT NULL CHECK (responsible_actor IN ('human','orchestrator','child','external')),
+  reason              TEXT NOT NULL,
+  next_action         TEXT NOT NULL,
+  recorded_at         INTEGER NOT NULL,
+  recorded_by         TEXT,
+  FOREIGN KEY (work_item_id) REFERENCES campaign_work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (recorded_by) REFERENCES sessions(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_work_handoffs_campaign
+  ON campaign_work_handoffs(campaign_session_id);
+
+-- v275 (#4070): delivery recorded from checked evidence. It holds while no attempt was opened on the
+-- item after it: after_ordinal is the item's highest attempt ordinal when it was recorded.
+CREATE TABLE IF NOT EXISTS campaign_work_deliveries (
+  id                      TEXT PRIMARY KEY,
+  campaign_session_id     TEXT NOT NULL,
+  work_item_id            TEXT NOT NULL,
+  after_ordinal           INTEGER NOT NULL,
+  pull_requests           TEXT NOT NULL,
+  report_child_session_id TEXT,
+  report_attempt_id       TEXT,
+  report_seq              INTEGER,
+  evidence_key            TEXT NOT NULL,
+  note                    TEXT,
+  recorded_by             TEXT,
+  recorded_at             INTEGER NOT NULL,
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE,
+  FOREIGN KEY (work_item_id) REFERENCES campaign_work_items(id) ON DELETE CASCADE,
+  FOREIGN KEY (report_child_session_id) REFERENCES sessions(id) ON DELETE SET NULL,
+  FOREIGN KEY (report_attempt_id) REFERENCES campaign_work_attempts(id) ON DELETE CASCADE,
+  FOREIGN KEY (recorded_by) REFERENCES sessions(id) ON DELETE SET NULL
+);
+CREATE INDEX IF NOT EXISTS idx_campaign_work_deliveries_campaign
+  ON campaign_work_deliveries(campaign_session_id, work_item_id, recorded_at);
+
 -- Recommendation (follow-up) extensions. A missing disposition row means awaiting adjudication,
 -- or duplicate for a row the server already deduplicated.
 CREATE TABLE IF NOT EXISTS campaign_recommendation_origins (
@@ -378,6 +422,10 @@ interface LedgerSummaryPart {
   recommendations: CampaignWorkSummary["recommendations"];
   verification: number;
   publication: number;
+  /** Unfinished committed items handed to `human` or `external`, oldest handoff first (#4070). */
+  handoffs: OrchestratorCampaignHandoff[];
+  /** Unfinished committed items without such a handoff: work an agent still owns. */
+  agentUnfinished: number;
 }
 
 /** Campaigns whose summary part stays cached. A miss only costs one recomputation. */
@@ -411,6 +459,28 @@ interface VerificationRow {
   report_digest: string | null; report_ts: number | null; verified_by_session_id: string | null; verified_at: number;
 }
 
+interface HandoffRow {
+  work_item_id: string; responsible_actor: CampaignResponsibleActor; reason: string; next_action: string;
+  recorded_at: number; recorded_by: string | null;
+}
+
+interface DeliveryRow {
+  id: string; work_item_id: string; after_ordinal: number; pull_requests: string;
+  report_child_session_id: string | null; report_attempt_id: string | null; report_seq: number | null;
+  evidence_key: string; note: string | null; recorded_by: string | null; recorded_at: number;
+}
+
+/** Handoffs that let a campaign finish without the item (#4070). Any other one still blocks it. */
+const TERMINAL_HANDOFF_ACTORS: ReadonlySet<CampaignResponsibleActor> = new Set(["human", "external"]);
+
+/** Checked evidence for `recordDelivery`: the forge facts were read by the caller just before. */
+export interface CampaignDeliveryEvidence {
+  workItemId: string;
+  pullRequests: Array<CampaignPullRequestRef & { mergeCommitSha: string; baseRef: string }>;
+  report: { childSessionId: string; seq: number; eventEpoch: number | null; digest: string | null; ts: number | null } | null;
+  note: string | null;
+}
+
 interface RecommendationRow {
   id: string; origin_session_id: string | null; repository: string; title: string;
   recommendation_key: string | null; duplicate_of: string | null; created_at: number;
@@ -430,6 +500,8 @@ interface LedgerSnapshot {
   dependencies: Map<string, string[]>;
   attempts: Map<string, AttemptRow[]>;
   verifications: Map<string, VerificationRow[]>;
+  handoffs: Map<string, HandoffRow>;
+  deliveries: Map<string, DeliveryRow[]>;
   derived: Map<string, CampaignWorkItemDerivedState>;
   observations: Map<string, CampaignAttemptSessionObservation | null>;
   /** Usage attributed to each attempt (slice 6). */
@@ -487,6 +559,36 @@ function issueOf(repository: string | null, number: number | null): CampaignIssu
 }
 
 const FINISHED_STATES: ReadonlySet<CampaignWorkItemPrimaryState> = new Set(["delivered", "cancelled", "removed"]);
+
+/** The item's latest recorded delivery while it still holds: no attempt opened after it (#4070). */
+function currentDelivery(rows: readonly DeliveryRow[] | undefined, latest: AttemptRow | undefined): DeliveryRow | null {
+  const delivery = rows?.at(-1);
+  return delivery && delivery.after_ordinal === (latest?.ordinal ?? 0) ? delivery : null;
+}
+
+function handoffView(row: HandoffRow): CampaignWorkItemHandoff {
+  return {
+    responsibleActor: row.responsible_actor,
+    reason: row.reason,
+    nextAction: row.next_action,
+    recordedAt: row.recorded_at,
+    recordedBySessionId: row.recorded_by,
+  };
+}
+
+function deliveryView(row: DeliveryRow): CampaignWorkItemRecordedDelivery {
+  return {
+    id: row.id,
+    workItemId: row.work_item_id,
+    pullRequests: JSON.parse(row.pull_requests) as CampaignWorkItemRecordedDelivery["pullRequests"],
+    report: row.report_attempt_id !== null && row.report_seq !== null
+      ? { childSessionId: row.report_child_session_id, attemptId: row.report_attempt_id, seq: row.report_seq }
+      : null,
+    note: row.note,
+    recordedBySessionId: row.recorded_by,
+    recordedAt: row.recorded_at,
+  };
+}
 
 function observationKey(observation: CampaignAttemptSessionObservation | null): string {
   return observation
@@ -1020,7 +1122,7 @@ export class CampaignWorkLedgerStore {
       return fail("workItemId is required");
     }
     const fields = ["title", "issue", "dispatchState", "queuePosition", "dependsOn", "commitment", "stage",
-      "blocker", "nextAction", "endAttempt"] as const;
+      "blocker", "nextAction", "handoff", "endAttempt"] as const;
     if (!fields.some((field) => request[field] !== undefined)) return fail("no field to update");
     if (request.title !== undefined && request.title !== null && !boundedText(request.title, L.titleLength)) {
       return fail(`title must be at most ${L.titleLength} characters`);
@@ -1074,6 +1176,13 @@ export class CampaignWorkLedgerStore {
     if (request.nextAction !== undefined && request.nextAction !== null &&
         !boundedText(request.nextAction, L.textLength)) {
       return fail(`nextAction must be at most ${L.textLength} characters`);
+    }
+    const handoff = request.handoff;
+    if (handoff !== undefined && handoff !== null && (typeof handoff !== "object" ||
+        !["human", "orchestrator", "child", "external"].includes(handoff.responsibleActor) ||
+        !boundedText(handoff.reason, L.textLength) || !boundedText(handoff.nextAction, L.textLength))) {
+      return fail("handoff requires responsibleActor (human, orchestrator, child, or external), reason, and nextAction, " +
+        `each at most ${L.textLength} characters`);
     }
     const endAttempt = request.endAttempt;
     if (endAttempt !== undefined && (typeof endAttempt !== "object" || endAttempt === null ||
@@ -1129,6 +1238,26 @@ export class CampaignWorkLedgerStore {
           : [blocker.reason.trim(), blocker.responsibleActor, blocker.requestOccurrenceId ?? null, now, actorSessionId]));
       }
       let changed = sets.length > 0;
+      if (handoff !== undefined) {
+        const current = this.stmt("SELECT * FROM campaign_work_handoffs WHERE work_item_id=?").get(item.id) as HandoffRow | undefined;
+        if (handoff === null) {
+          if (current) {
+            this.stmt("DELETE FROM campaign_work_handoffs WHERE work_item_id=?").run(item.id);
+            changed = true;
+          }
+        } else if (!current || current.responsible_actor !== handoff.responsibleActor ||
+            current.reason !== handoff.reason.trim() || current.next_action !== handoff.nextAction.trim()) {
+          this.stmt(
+            `INSERT INTO campaign_work_handoffs
+               (work_item_id, campaign_session_id, responsible_actor, reason, next_action, recorded_at, recorded_by)
+             VALUES (?, ?, ?, ?, ?, ?, ?)
+             ON CONFLICT(work_item_id) DO UPDATE SET responsible_actor=excluded.responsible_actor,
+               reason=excluded.reason, next_action=excluded.next_action, recorded_at=excluded.recorded_at,
+               recorded_by=excluded.recorded_by`,
+          ).run(item.id, campaignId, handoff.responsibleActor, handoff.reason.trim(), handoff.nextAction.trim(), now, actorSessionId);
+          changed = true;
+        }
+      }
       if (request.dependsOn !== undefined) {
         const dependencies = this.replaceDependencies(campaignId,
           [{ itemId: item.id, label: "dependsOn", dependsOn: request.dependsOn }]);
@@ -1229,6 +1358,8 @@ export class CampaignWorkLedgerStore {
         boundary.runnerHistoryEpoch, boundary.seq,
       );
       this.accounting.recordAttemptOpened(id, now, this.hooks.observeSession(childSessionId));
+      // An agent took the item back, so its handoff no longer describes who acts next (#4070).
+      this.stmt("DELETE FROM campaign_work_handoffs WHERE work_item_id=?").run(item.id);
       this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, item.id);
       const attempt = this.stmt("SELECT * FROM campaign_work_attempts WHERE id=?").get(id) as unknown as AttemptRow;
       return done({ revision: this.bump(campaignId, now), attempt: this.attemptView(attempt), closedAttempts, created: true });
@@ -1299,6 +1430,136 @@ export class CampaignWorkLedgerStore {
       const row = this.stmt("SELECT * FROM campaign_work_verifications WHERE id=?").get(id) as unknown as VerificationRow;
       return done({ revision: this.bump(campaignId, now), verification: this.verificationView(row) });
     });
+  }
+
+  /* ------------------------------ Recorded delivery (#4070) ------------------------------ */
+
+  /** The child's attempt on this item whose event window holds the exact report, or the refusal.
+   * Any attempt the child had counts, open or closed as reassigned, superseded or delivered; one the
+   * Orchestrator ended as abandoned or failed does not. A window whose history was replaced since
+   * (another event epoch) proves nothing. */
+  reportAttempt(
+    campaignId: string,
+    workItemId: string,
+    report: { childSessionId: string; seq: number; eventEpoch: number | null },
+  ): LedgerResult<{ attempt: AttemptRow; open: boolean; endSeq: number | null }> {
+    const item = this.item(campaignId, workItemId);
+    if (!item) return fail("work item not found in this campaign", 404);
+    const attempts = this.stmt(
+      "SELECT * FROM campaign_work_attempts WHERE work_item_id=? AND session_id=? ORDER BY ordinal",
+    ).all(item.id, report.childSessionId) as unknown as AttemptRow[];
+    if (!attempts.length) return fail("the child never had an attempt on this work item", 409);
+    const sameEpoch = (epoch: number | null) => epoch !== null && report.eventEpoch !== null && epoch === report.eventEpoch;
+    const attempt = attempts.find((candidate) => candidate.end_reason !== "abandoned" && candidate.end_reason !== "failed" &&
+      sameEpoch(candidate.start_event_epoch) && report.seq > (candidate.start_seq ?? 0) &&
+      (candidate.ended_at === null ||
+        (sameEpoch(candidate.end_event_epoch) && candidate.end_seq !== null && report.seq <= candidate.end_seq)));
+    if (!attempt) {
+      return fail("the report is not inside the child's attempt on this work item (an attempt ended as abandoned or " +
+        "failed does not count, and history replaced since the attempt cannot be matched)", 409);
+    }
+    return done({ attempt, open: attempt.ended_at === null, endSeq: attempt.end_seq });
+  }
+
+  /**
+   * Records delivery from evidence the caller checked: pull requests the forge just reported merged,
+   * and the child's exact report, already shown to be a completed top-level response. A report also
+   * adds an ordinary delivered verification of its attempt. The item's open attempt closes as
+   * delivered when it is the report's, else as superseded. Repeating the same evidence is a no-op.
+   */
+  recordDelivery(
+    campaignId: string,
+    actorSessionId: string,
+    evidence: CampaignDeliveryEvidence,
+    now: number,
+  ): LedgerResult<{ revision: number; deliveryId: string; itemId: string }> {
+    return this.transact(() => {
+      const item = this.item(campaignId, evidence.workItemId);
+      if (!item) return fail<{ revision: number; deliveryId: string; itemId: string }>("work item not found in this campaign", 404);
+      if (item.commitment !== "committed") {
+        return fail(`a ${item.commitment === "cancelled" ? "cancelled" : "removed"} work item cannot be delivered; recommit it first`, 409);
+      }
+      const pullRequests = uniquePullRequests(evidence.pullRequests) as CampaignDeliveryEvidence["pullRequests"];
+      if (!pullRequests.length && !evidence.report) return fail("delivery needs pull requests, a report, or both");
+      const key = JSON.stringify([
+        pullRequests.map((ref) => `${ref.repository.toLowerCase()}#${ref.number}`).sort(),
+        evidence.report ? [evidence.report.childSessionId, evidence.report.seq, evidence.report.eventEpoch] : null,
+      ]);
+      const attempts = this.stmt("SELECT * FROM campaign_work_attempts WHERE work_item_id=? ORDER BY ordinal")
+        .all(item.id) as unknown as AttemptRow[];
+      const latest = attempts.at(-1);
+      const current = currentDelivery(this.stmt(
+        "SELECT * FROM campaign_work_deliveries WHERE work_item_id=? ORDER BY recorded_at, rowid",
+      ).all(item.id) as unknown as DeliveryRow[], latest);
+      if (current?.evidence_key === key) {
+        return done({ revision: this.revision(campaignId), deliveryId: current.id, itemId: item.id });
+      }
+      if (current || (latest && this.stmt(
+        "SELECT 1 FROM campaign_work_verifications WHERE attempt_id=? AND outcome='delivered'",
+      ).get(latest.id))) {
+        return fail("the work item is already delivered", 409);
+      }
+      let reportAttempt: AttemptRow | null = null;
+      if (evidence.report) {
+        const found = this.reportAttempt(campaignId, item.id, evidence.report);
+        if (!found.ok) return found;
+        reportAttempt = found.data.attempt;
+      }
+      const id = newId(CAMPAIGN_WORK_DELIVERY_ID_PREFIX);
+      this.stmt(
+        `INSERT INTO campaign_work_deliveries
+           (id, campaign_session_id, work_item_id, after_ordinal, pull_requests, report_child_session_id,
+            report_attempt_id, report_seq, evidence_key, note, recorded_by, recorded_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+      ).run(id, campaignId, item.id, latest?.ordinal ?? 0,
+        JSON.stringify(pullRequests.map(({ repository, number, mergeCommitSha, baseRef }) => ({ repository, number, mergeCommitSha, baseRef }))),
+        evidence.report?.childSessionId ?? null, reportAttempt?.id ?? null, evidence.report?.seq ?? null, key,
+        evidence.note, actorSessionId, now);
+      if (evidence.report && reportAttempt) {
+        const report = evidence.report;
+        const existing = this.stmt(
+          `SELECT 1 FROM campaign_work_verifications WHERE attempt_id=? AND outcome='delivered' AND report_seq=?
+             AND report_event_epoch IS ? AND report_digest IS ?`,
+        ).get(reportAttempt.id, report.seq, report.eventEpoch, report.digest);
+        if (!existing) {
+          this.stmt(
+            `INSERT INTO campaign_work_verifications
+             (id, campaign_session_id, work_item_id, attempt_id, child_session_id, outcome, report_seq,
+              report_event_epoch, report_digest, report_ts, verified_by_session_id, verified_at)
+             VALUES (?, ?, ?, ?, ?, 'delivered', ?, ?, ?, ?, ?, ?)`,
+          ).run(newId(CAMPAIGN_WORK_VERIFICATION_ID_PREFIX), campaignId, item.id, reportAttempt.id, report.childSessionId,
+            report.seq, report.eventEpoch, report.digest, report.ts, actorSessionId, now);
+        }
+      }
+      const open = attempts.find((attempt) => attempt.ended_at === null);
+      if (open) {
+        const own = open.id === reportAttempt?.id;
+        this.closeAttempt(open, own ? "delivered" : "superseded", now, own ? null : `delivery recorded as ${id}`);
+      }
+      this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, item.id);
+      return done({ revision: this.bump(campaignId, now), deliveryId: id, itemId: item.id });
+    });
+  }
+
+  delivery(campaignId: string, deliveryId: string): CampaignWorkItemRecordedDelivery | null {
+    const row = this.stmt("SELECT * FROM campaign_work_deliveries WHERE campaign_session_id=? AND id=?")
+      .get(campaignId, deliveryId) as DeliveryRow | undefined;
+    return row ? deliveryView(row) : null;
+  }
+
+  /** Items whose handoff to `human` or `external` lets the campaign finish without them (#4070).
+   * Whether each is still unfinished is the caller's to check. */
+  terminalHandoffItemIds(campaignId: string): Set<string> {
+    return new Set((this.stmt(
+      "SELECT work_item_id FROM campaign_work_handoffs WHERE campaign_session_id=? AND responsible_actor IN ('human','external')",
+    ).all(campaignId) as Array<{ work_item_id: string }>).map((row) => row.work_item_id));
+  }
+
+  /** What campaign completion reads from the ledger (#4070): the handed-off items and how many
+   * unfinished committed items an agent still owns. Shares the summary's cache. */
+  completionFacts(campaignId: string): { handoffs: OrchestratorCampaignHandoff[]; agentUnfinished: number } {
+    const part = this.summaryPart(campaignId);
+    return { handoffs: part.handoffs, agentUnfinished: part.agentUnfinished };
   }
 
   /* ------------------------------ Recommendations ------------------------------ */
@@ -1559,6 +1820,14 @@ export class CampaignWorkLedgerStore {
     ).all(campaignId) as unknown as VerificationRow[]) {
       verifications.set(row.work_item_id, [...(verifications.get(row.work_item_id) ?? []), row]);
     }
+    const handoffs = new Map((this.stmt("SELECT * FROM campaign_work_handoffs WHERE campaign_session_id=?")
+      .all(campaignId) as unknown as HandoffRow[]).map((row) => [row.work_item_id, row]));
+    const deliveries = new Map<string, DeliveryRow[]>();
+    for (const row of this.stmt(
+      "SELECT * FROM campaign_work_deliveries WHERE campaign_session_id=? ORDER BY work_item_id, recorded_at, rowid",
+    ).all(campaignId) as unknown as DeliveryRow[]) {
+      deliveries.set(row.work_item_id, [...(deliveries.get(row.work_item_id) ?? []), row]);
+    }
     const observations = new Map<string, CampaignAttemptSessionObservation | null>();
     const records = items.map((item) => {
       const latest = attempts.get(item.id)?.at(-1);
@@ -1578,6 +1847,7 @@ export class CampaignWorkLedgerStore {
             .some((verification) => verification.attempt_id === latest.id && verification.outcome === "delivered"),
         } : null,
         openAttemptSession: open?.session_id ? observations.get(open.session_id) ?? null : null,
+        recordedDelivery: currentDelivery(deliveries.get(item.id), latest) !== null,
       };
     });
     return {
@@ -1588,6 +1858,8 @@ export class CampaignWorkLedgerStore {
       dependencies,
       attempts,
       verifications,
+      handoffs,
+      deliveries,
       derived: deriveCampaignWorkItemStates(records),
       observations,
       usage: this.accounting.attemptUsage(campaignId),
@@ -1688,8 +1960,10 @@ export class CampaignWorkLedgerStore {
     const derived = snapshot.derived.get(item.id)!;
     const deliveredAt = derived.state === "delivered"
       ? (snapshot.verifications.get(item.id) ?? []).filter((verification) =>
-        verification.attempt_id === latest?.id && verification.outcome === "delivered").at(-1)?.verified_at ?? null
+        verification.attempt_id === latest?.id && verification.outcome === "delivered").at(-1)?.verified_at ??
+        currentDelivery(snapshot.deliveries.get(item.id), latest)?.recorded_at ?? null
       : null;
+    const handoff = snapshot.handoffs.get(item.id);
     return {
       id: item.id,
       key: item.item_key,
@@ -1718,6 +1992,7 @@ export class CampaignWorkLedgerStore {
         recordedAt: item.blocker_recorded_at!,
         recordedBySessionId: item.blocker_recorded_by,
       } : null,
+      handoff: handoff ? handoffView(handoff) : null,
       createdAt: item.created_at,
       updatedAt: item.updated_at,
       activityAt: item.updated_at,
@@ -1809,6 +2084,8 @@ export class CampaignWorkLedgerStore {
         },
         verification: 0,
         publication: 0,
+        handoffs: [],
+        agentUnfinished: 0,
       };
     }
     const open = this.stmt(
@@ -1828,6 +2105,8 @@ export class CampaignWorkLedgerStore {
     const byState = Object.fromEntries(CAMPAIGN_WORK_ITEM_PRIMARY_STATES.map((state) => [state, 0])) as
       Record<CampaignWorkItemPrimaryState, number>;
     let committed = 0, delivered = 0, original = 0, followUp = 0, cancelled = 0, removed = 0, verification = 0;
+    let agentUnfinished = 0;
+    const handoffs: OrchestratorCampaignHandoff[] = [];
     for (const item of snapshot.items) {
       const derived = snapshot.derived.get(item.id)!;
       byState[derived.state] += 1;
@@ -1838,6 +2117,15 @@ export class CampaignWorkLedgerStore {
         if (item.origin === "original") original += 1;
         else followUp += 1;
         if (derived.state === "delivered") delivered += 1;
+        else if (!FINISHED_STATES.has(derived.state)) {
+          const handoff = snapshot.handoffs.get(item.id);
+          if (handoff && TERMINAL_HANDOFF_ACTORS.has(handoff.responsible_actor)) {
+            handoffs.push({ workItemId: item.id, key: item.item_key, title: item.title,
+              issue: issueOf(item.issue_repository, item.issue_number), primaryState: derived.state, handoff: handoffView(handoff) });
+          } else {
+            agentUnfinished += 1;
+          }
+        }
       }
       if (derived.causes.includes("attempt_awaiting_verification")) verification += 1;
     }
@@ -1856,6 +2144,8 @@ export class CampaignWorkLedgerStore {
       recommendations,
       verification,
       publication,
+      handoffs: handoffs.sort((a, b) => a.handoff.recordedAt - b.handoff.recordedAt || a.workItemId.localeCompare(b.workItemId)),
+      agentUnfinished,
     };
     // The snapshot and the key were read in one synchronous call, so they describe the same state.
     // Inside a transaction they may yet roll back, and a later write would reuse the revision.
@@ -1874,8 +2164,9 @@ export class CampaignWorkLedgerStore {
     return (this.stmt(
       `SELECT MAX(verified_at) AS at FROM (
          SELECT verified_at FROM orchestrator_campaign_child_reports WHERE campaign_session_id=?
-         UNION ALL SELECT verified_at FROM campaign_work_verifications WHERE campaign_session_id=?)`,
-    ).get(campaignId, campaignId) as { at: number | null }).at;
+         UNION ALL SELECT verified_at FROM campaign_work_verifications WHERE campaign_session_id=?
+         UNION ALL SELECT recorded_at FROM campaign_work_deliveries WHERE campaign_session_id=?)`,
+    ).get(campaignId, campaignId, campaignId) as { at: number | null }).at;
   }
 
   /** `canSeeSession` applies the session-cost rule for the reader; omitted means every session. */
@@ -1962,6 +2253,7 @@ export class CampaignWorkLedgerStore {
       },
       attempts: attempts.map((attempt) => this.attemptView(attempt)),
       verifications: (snapshot.verifications.get(item.id) ?? []).map((row) => this.verificationView(row)),
+      deliveries: (snapshot.deliveries.get(item.id) ?? []).map(deliveryView),
       sourceRecommendation: recommendations.find((recommendation) =>
         recommendation.disposition === "accepted" && recommendation.resultingWorkItemId === item.id) ?? null,
       recommendations: recommendations.filter((recommendation) => recommendation.originWorkItemIds.includes(item.id)),
