@@ -25020,6 +25020,372 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
   }
 });
 
+/** #4074: hand a decision to a delegated image reviewer, approving the spawn the harness gates on. */
+function prepareImageReview(h: ReturnType<typeof uiEvidenceReviewHarness>, childId: string, occurrenceId: string,
+  brief = "The settings panel shows the new Review Model field under Reviews.") {
+  let prepared = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, childId, occurrenceId, brief, () => true);
+  if (prepared.status === 428) {
+    assert.ok(h.svc.approve(h.parent.id, h.db.getSession(h.parent.id)!.pendingApproval!.requestId, "allow").ok);
+    prepared = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, childId, occurrenceId, brief, () => true);
+  }
+  return prepared;
+}
+
+/** One delivery to the reviewer, as its own credential with the given access. */
+function reviewerImage(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, evidenceId: string,
+  canAccess: (sessionId: string) => boolean = () => true) {
+  return h.svc.reviewDelegatedImageEvidence(reviewerId, evidenceId, canAccess);
+}
+
+function reviewerVerdict(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, report: unknown,
+  canAccess: (sessionId: string) => boolean = () => true) {
+  return h.svc.submitDelegatedImageVerdict(reviewerId, report, canAccess);
+}
+
+/** The reviewer's complete look at one image: delivery plus its runner's acknowledgement. */
+function reviewerLook(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, evidenceId: string) {
+  const delivered = reviewerImage(h, reviewerId, evidenceId);
+  if (delivered.ok && delivered.data) {
+    assert.ok(h.svc.acknowledgeDelegatedImageEvidence(reviewerId, delivered.data.receipt.receiptId,
+      delivered.data.receipt.sha256, () => true).ok);
+  }
+  return delivered;
+}
+
+const passingVerdict = (ids: string[]) => ({
+  recommendation: "approve", summary: "Every image matches the claims.",
+  items: ids.map((evidenceId) => ({ evidenceId, outcome: "pass", defects: [] })),
+});
+
+test("a delegated image reviewer approves N images without any reaching the Orchestrator (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shots = ["light", "dark", "mobile"].map((label) => h.screenshot(child.id, label));
+    const ids = shots.map((shot) => shot.item.evidenceId);
+    const decision = h.request(child.id, "ui", shots.map((shot) => shot.item));
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "orchestrator");
+    const occurrence = decision.data.occurrenceId;
+
+    const prepared = prepareImageReview(h, child.id, occurrence);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    assert.equal(prepared.status, 201);
+    const reviewerId = prepared.data.reviewerSessionId;
+    assert.notEqual(reviewerId, child.id, "the child that produced the evidence is never its reviewer");
+    assert.notEqual(reviewerId, h.parent.id);
+    assert.deepEqual(prepared.data.evidenceIds, ids);
+    assert.equal(prepared.data.state, "running");
+    const reviewer = h.db.getSession(reviewerId)!;
+    assert.equal(reviewer.parentSessionId, h.parent.id, "the reviewer is an accounted child of the root");
+    assert.equal(reviewer.agentId, h.parent.agentId, "it runs on the Orchestrator's own agent");
+    assert.equal(reviewer.costBudgetUsd, 10);
+    assert.equal(reviewer.maxToolCalls, ids.length * 2 + 8);
+    const start = h.hub.sentOfType("start_session").find((message) => message.spec.sessionId === reviewerId)!;
+    assert.deepEqual(start.spec.uiEvidenceReviewer, { reviewId: prepared.data.reviewId });
+    assert.equal(start.spec.useWorktree, false);
+    assert.match(start.initialPrompt ?? "", /The settings panel shows the new Review Model field/u);
+    for (const id of ids) assert.ok(start.initialPrompt?.includes(JSON.stringify(id)));
+    assert.equal(start.initialImages, undefined, "the reviewer gets images only through receipted delivery");
+    assert.doesNotMatch(start.initialPrompt ?? "", /Wollipog Campaign Policy/u, "no campaign assignment reaches the reviewer");
+
+    // Preparing again while the review is live returns it rather than starting a second reviewer.
+    assert.equal(prepareImageReview(h, child.id, occurrence).data?.reviewId, prepared.data.reviewId);
+    // The child cannot act as a reviewer, and the Orchestrator has no reviewer routes of its own.
+    assert.equal(reviewerImage(h,child.id, ids[0]!).status, 403);
+    assert.equal(reviewerVerdict(h,child.id, passingVerdict(ids)).status, 403);
+    assert.equal(reviewerImage(h,h.parent.id, ids[0]!).status, 403);
+
+    // A verdict needs a current, acknowledged receipt for every image.
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409);
+    const unacknowledged = reviewerImage(h,reviewerId, ids[0]!);
+    assert.ok(unacknowledged.ok && unacknowledged.data, unacknowledged.error);
+    assert.equal(unacknowledged.data.receipt.reviewerSessionId, reviewerId, "the receipt is recorded against the reviewer");
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409,
+      "a delivery the runner never acknowledged supports nothing");
+    for (const id of ids) assert.ok(reviewerLook(h, reviewerId, id).ok);
+    assert.equal(reviewerImage(h,reviewerId, "not-on-the-decision").status, 404);
+    assert.equal(reviewerVerdict(h,reviewerId, { ...passingVerdict(ids), items: passingVerdict(ids).items.slice(1) }).status, 400,
+      "the verdict must cover every item");
+    assert.equal(reviewerVerdict(h,reviewerId, {
+      recommendation: "approve", summary: "Mixed.",
+      items: ids.map((evidenceId, index) => ({ evidenceId, outcome: index ? "pass" : "fail", defects: index ? [] : ["Clipped label"] })),
+    }).status, 400, "approve requires every item to pass");
+    const verdict = reviewerVerdict(h,reviewerId, passingVerdict([...ids].reverse()));
+    assert.ok(verdict.ok && verdict.data, verdict.error);
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409, "a reviewer submits one verdict");
+    assert.equal(reviewerImage(h,reviewerId, ids[0]!).status, 409, "nothing is delivered after the verdict");
+
+    // Nothing was delivered to the Orchestrator, so it holds no receipts of its own.
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(occurrence, h.parent.id, Date.now()), []);
+    const read = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true);
+    assert.ok(read.ok && read.data, read.error);
+    assert.equal(read.data.state, "verdict");
+    assert.deepEqual(read.data.verdict?.items.map((item) => item.evidenceId), ids, "items read in the decision's order");
+    assert.equal(read.data.verdict?.receiptIds.length, ids.length);
+    const reference = read.data.delegatedImageReview!;
+    assert.deepEqual(reference, { reviewId: prepared.data.reviewId, verdictId: verdict.data.verdictId, reviewerSessionId: reviewerId });
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(child.id, prepared.data.reviewId, () => true).status, 404);
+
+    const resolve = (resolution: Record<string, unknown>) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, ...resolution } as never, () => true);
+    assert.equal(resolve({}).status, 409, "repeating identifiers without the reviewer's provenance is refused");
+    assert.equal(resolve({ delegatedImageReview: { ...reference, verdictId: "uiimgverdict_forged" } }).status, 409);
+    assert.equal(resolve({ delegatedImageReview: { ...reference, reviewerSessionId: child.id } }).status, 409);
+    assert.equal(resolve({ delegatedImageReview: { ...reference, note: "forwarded message" } }).status, 400);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "deny", delegatedImageReview: reference } as never, () => true).status, 400);
+    const approved = resolve({ delegatedImageReview: reference });
+    assert.ok(approved.ok, approved.error);
+    const resolved = h.db.workflowDecisionByOccurrence(occurrence)!;
+    assert.equal(resolved.status, "approved");
+    assert.deepEqual(resolved.delegatedImageReview, reference);
+    const audit = h.db.listGovernanceAudit(child.id).find((record) => record.requestId === occurrence && record.outcome === "allowed");
+    assert.deepEqual(audit?.workflowDecision?.reviewReceiptIds?.sort(), [...read.data.verdict!.receiptIds].sort());
+    assert.equal(audit?.workflowDecision?.delegatedImageReview?.reviewerSessionId, reviewerId);
+    assert.equal(audit?.workflowDecision?.delegatedImageReview?.recommendation, "approve");
+    assert.match(audit?.workflowDecision?.delegatedImageReview?.verdictSha256 ?? "", /^[0-9a-f]{64}$/u);
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.state, "consumed");
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(occurrence, reviewerId, Date.now()), [], "approval spends the receipts");
+
+    // A spent verdict cannot back another occurrence of the same evidence.
+    const again = h.request(child.id, "ui-again", shots.map((shot) => shot.item));
+    assert.ok(again.ok && again.data);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, again.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, delegatedImageReview: reference } as never,
+      () => true).status, 409);
+    // A deny recommendation is evidence for denying, never an approval.
+    const second = prepareImageReview(h, child.id, again.data.occurrenceId);
+    assert.ok(second.ok && second.data, second.error);
+    for (const id of ids) assert.ok(reviewerLook(h, second.data.reviewerSessionId, id).ok);
+    assert.ok(reviewerVerdict(h,second.data.reviewerSessionId, {
+      recommendation: "deny", summary: "The dark theme clips the label.",
+      items: ids.map((evidenceId) => ({ evidenceId, outcome: evidenceId === "dark" ? "fail" : "pass",
+        defects: evidenceId === "dark" ? ["The Review Model label is clipped."] : [] })),
+    }).ok);
+    const denied = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, second.data.reviewId, () => true);
+    assert.equal(denied.data?.delegatedImageReview, undefined);
+    assert.deepEqual(denied.data?.verdict?.items.find((item) => item.evidenceId === "dark")?.defects, ["The Review Model label is clipped."]);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, again.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids,
+        delegatedImageReview: { reviewId: second.data.reviewId, verdictId: denied.data!.verdict!.verdictId,
+          reviewerSessionId: second.data.reviewerSessionId } } as never, () => true).status, 409);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("delegated image review fails closed on supersession, tampering, policy change and expiry (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const first = h.screenshot(child.id, "first");
+    const second = h.screenshot(child.id, "second");
+    const ids = ["first", "second"];
+
+    // A replacement occurrence supersedes the reviewed one: its review ends and nothing carries over.
+    const stale = h.request(child.id, "stale", [first.item, second.item]);
+    assert.ok(stale.ok && stale.data);
+    const staleReview = prepareImageReview(h, child.id, stale.data.occurrenceId);
+    assert.ok(staleReview.ok && staleReview.data, staleReview.error);
+    for (const id of ids) assert.ok(reviewerLook(h, staleReview.data.reviewerSessionId, id).ok);
+    const replacement = h.svc.createWorkflowDecision(child.id, {
+      requestId: "replacement", resourceKey: "stale-ui",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [first.item, second.item] },
+    });
+    assert.ok(replacement.ok && replacement.data);
+    assert.equal(reviewerVerdict(h,staleReview.data.reviewerSessionId, passingVerdict(ids)).status, 409);
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, staleReview.data.reviewId, () => true).data?.state, "ended");
+
+    // The verdict expires with its receipts: an approval must look again.
+    const fresh = prepareImageReview(h, child.id, replacement.data.occurrenceId);
+    assert.ok(fresh.ok && fresh.data, fresh.error);
+    for (const id of ids) assert.ok(reviewerLook(h, fresh.data.reviewerSessionId, id).ok);
+    const verdict = reviewerVerdict(h,fresh.data.reviewerSessionId, passingVerdict(ids));
+    assert.ok(verdict.ok && verdict.data);
+    assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, fresh.data.reviewerSessionId,
+      Date.now() + 2 * 60 * 60 * 1000).length, 0);
+
+    // Stored bytes that no longer match revoke the decision, ending its review.
+    const tampered = h.screenshot(child.id, "tampered");
+    const tamperedDecision = h.request(child.id, "tampered", [tampered.item, first.item]);
+    assert.ok(tamperedDecision.ok && tamperedDecision.data);
+    const tamperedReview = prepareImageReview(h, child.id, tamperedDecision.data.occurrenceId);
+    assert.ok(tamperedReview.ok && tamperedReview.data, tamperedReview.error);
+    h.db.deleteWorkflowArtifact(tampered.item.artifactId);
+    assert.equal(reviewerImage(h,tamperedReview.data.reviewerSessionId, "tampered").status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(tamperedDecision.data.occurrenceId)?.status, "revoked");
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, tamperedReview.data.reviewId, () => true).data?.state, "ended");
+
+    // A human policy change revokes the decision and the reviewer's verdict with it.
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id, { ...h.decisions, ui_evidence_approval: "human" }, 1,
+      { kind: "human", id: "owner" }).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data.occurrenceId)?.status, "revoked");
+    const ended = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, fresh.data.reviewId, () => true);
+    assert.equal(ended.data?.state, "ended");
+    assert.equal(ended.data?.delegatedImageReview, undefined);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, replacement.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids,
+        delegatedImageReview: { reviewId: fresh.data.reviewId, verdictId: verdict.data.verdictId,
+          reviewerSessionId: fresh.data.reviewerSessionId } } as never, () => true).status, 409);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("a delegated image reviewer loses evidence access when its audience no longer fits the decision's (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const local = h.db.localIdentityContext();
+    const personal: ResourceScope = { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } };
+    const organization: ResourceScope = { organizationId: local.organizationId,
+      owner: { kind: "organization", organizationId: local.organizationId } };
+    const child = h.createChild("UI Child");
+    const ids = ["a", "b"];
+    const decision = h.request(child.id, "ui", ids.map((label) => h.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const reviewerId = prepared.data.reviewerSessionId;
+    assert.deepEqual(h.db.sessionScope(reviewerId), h.db.sessionScope(h.parent.id), "the reviewer inherits the root's audience");
+
+    // A reviewer credential that can no longer reach the producing child receives nothing.
+    const receipts = () => h.db.validUiEvidenceReviewReceipts(decision.data!.occurrenceId, reviewerId, Date.now()).length;
+    assert.equal(reviewerImage(h, reviewerId, "a", (sessionId) => sessionId !== child.id).status, 404);
+    assert.equal(receipts(), 0, "no receipt is recorded for a refused delivery");
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.endedReason,
+      "audience_changed");
+
+    // Nor does a reviewer whose audience reaches beyond the child's or the root's.
+    const scope = (id: string, value: ResourceScope) =>
+      assert.ok(h.db.setResourceScope({ resource: "session", resourceId: id, scope: value, now: Date.now() }));
+    for (const [label, initial, change] of [
+      // Root, child and reviewer share the organization; then the child narrows to its owner.
+      ["narrowed child", organization, () => scope(child.id, personal)],
+      // Everyone is personal; then the reviewer alone is widened to the organization.
+      ["broadened reviewer", personal, (reviewerId: string) => scope(reviewerId, organization)],
+    ] as const) {
+      scope(h.parent.id, initial);
+      scope(child.id, initial);
+      const fresh = prepareImageReview(h, child.id, decision.data.occurrenceId);
+      assert.ok(fresh.ok && fresh.data, `${label}: ${fresh.error}`);
+      assert.deepEqual(h.db.sessionScope(fresh.data.reviewerSessionId), initial, label);
+      assert.ok(reviewerLook(h, fresh.data.reviewerSessionId, "a").ok, label);
+      change(fresh.data.reviewerSessionId);
+      assert.equal(reviewerImage(h, fresh.data.reviewerSessionId, "b").status, 404, label);
+      assert.equal(h.db.validUiEvidenceReviewReceipts(decision.data.occurrenceId, fresh.data.reviewerSessionId, Date.now())
+        .filter((receipt) => receipt.evidenceId === "b").length, 0, `${label}: no receipt`);
+      assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, fresh.data.reviewId, () => true).data?.state, "ended", label);
+    }
+    // And an Orchestrator whose audience is wider than the child's cannot delegate at all.
+    assert.ok(h.db.setResourceScope({ resource: "session", resourceId: h.parent.id, scope: organization, now: Date.now() }));
+    assert.ok(h.db.setResourceScope({ resource: "session", resourceId: child.id, scope: personal, now: Date.now() }));
+    assert.match(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.data.occurrenceId, "brief", () => true).error ?? "",
+      /audience reaches beyond the child's/u);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("an expired verdict is retired so a fresh reviewer can back the approval (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const ids = ["a", "b"];
+    const decision = h.request(child.id, "ui", ids.map((label) => h.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    const occurrence = decision.data.occurrenceId;
+    const first = prepareImageReview(h, child.id, occurrence);
+    assert.ok(first.ok && first.data, first.error);
+    for (const id of ids) assert.ok(reviewerLook(h, first.data.reviewerSessionId, id).ok);
+    const verdict = reviewerVerdict(h, first.data.reviewerSessionId, passingVerdict(ids));
+    assert.ok(verdict.ok && verdict.data);
+    // The receipts expire (the one-hour TTL) before the Orchestrator resolves.
+    h.db.raw().prepare("UPDATE ui_evidence_review_receipts SET expires_at=? WHERE reviewer_session_id=?")
+      .run(Date.now() - 1, first.data.reviewerSessionId);
+    const expiredReference = { reviewId: first.data.reviewId, verdictId: verdict.data.verdictId,
+      reviewerSessionId: first.data.reviewerSessionId };
+    const approve = (delegatedImageReview: unknown) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, delegatedImageReview } as never, () => true);
+    assert.equal(approve(expiredReference).status, 409, "an expired verdict cannot back an approval");
+
+    const second = prepareImageReview(h, child.id, occurrence);
+    assert.ok(second.ok && second.data, second.error);
+    assert.notEqual(second.data.reviewId, first.data.reviewId, "preparing again replaces the expired review");
+    assert.notEqual(second.data.reviewerSessionId, first.data.reviewerSessionId);
+    const retired = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, first.data.reviewId, () => true).data;
+    assert.equal(retired?.state, "ended");
+    assert.equal(retired?.endedReason, "verdict_expired");
+    for (const id of ids) assert.ok(reviewerLook(h, second.data.reviewerSessionId, id).ok);
+    assert.ok(reviewerVerdict(h, second.data.reviewerSessionId, passingVerdict(ids)).ok);
+    const reference = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, second.data.reviewId, () => true).data?.delegatedImageReview;
+    assert.ok(reference);
+    assert.equal(approve(expiredReference).status, 409);
+    assert.ok(approve(reference).ok, "the fresh reviewer's receipts back the approval");
+  } finally {
+    h.db.close();
+  }
+});
+
+test("delegated image reviewers take no other work, and older runners or video keep direct review (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "only");
+    const decision = h.request(child.id, "ui", [shot.item]);
+    assert.ok(decision.ok && decision.data);
+    assert.equal(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.data.occurrenceId, " ", () => true).status, 400,
+      "the reviewer needs the claims and criteria");
+    assert.equal(h.svc.prepareDescendantImageEvidenceReview(child.id, child.id, decision.data.occurrenceId, "brief", () => true).ok, false,
+      "only the owning Orchestrator can delegate");
+    const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const reviewerId = prepared.data.reviewerSessionId;
+    h.db.updateSessionStatus(reviewerId, "running", Date.now());
+    const prompted = h.svc.prompt(reviewerId, "Also review this pull request.");
+    assert.equal(prompted.status, 409);
+    assert.match(prompted.error ?? "", /delegated image reviewer/u);
+    assert.equal(h.svc.restart(reviewerId).status, 409);
+    // A reviewer whose turn ended without a verdict will never submit one; preparing again replaces it.
+    h.db.updateSessionStatus(reviewerId, "idle", Date.now());
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.endedReason,
+      "reviewer_finished_without_verdict");
+    const replacement = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(replacement.ok && replacement.data, replacement.error);
+    assert.notEqual(replacement.data.reviewerSessionId, reviewerId);
+    // Direct review keeps working for a targeted single-image check.
+    assert.ok(h.review(child.id, decision.data.occurrenceId, "only").ok);
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["only"] }, () => true).ok);
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, replacement.data.reviewId, () => true).data?.state, "ended",
+      "a resolved decision ends its live review");
+
+    // Video evidence is never handed to an image reviewer.
+    const clip = h.video(child.id, "clip");
+    const mixed = h.request(child.id, "mixed", [h.screenshot(child.id, "still").item, clip.item]);
+    assert.ok(mixed.ok && mixed.data);
+    if (mixed.data.authority === "orchestrator") {
+      assert.equal(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, mixed.data.occurrenceId, "brief", () => true).status, 409);
+    }
+  } finally {
+    h.db.close();
+  }
+  const old = uiEvidenceReviewHarness(RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview - 1);
+  try {
+    const child = old.createChild("UI Child");
+    const decision = old.request(child.id, "ui", ["a", "b"].map((label) => old.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    assert.equal(decision.data.authority, "orchestrator");
+    const refused = old.svc.prepareDescendantImageEvidenceReview(old.parent.id, child.id, decision.data.occurrenceId, "brief", () => true);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview);
+    assert.equal(old.db.campaignDescendantIds(old.parent.id).length, 1, "no reviewer was started");
+    for (const id of ["a", "b"]) assert.ok(old.review(child.id, decision.data.occurrenceId, id).ok, "direct review still works");
+  } finally {
+    old.db.close();
+  }
+});
+
 test("older runners, unattested installations, and text-only models keep UI evidence human-owned with an explanation", () => {
   for (const [protocol, imageModel, code] of [
     [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorUiEvidenceReview - 1, true, "runner_unsupported"],
