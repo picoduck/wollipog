@@ -1009,6 +1009,10 @@ test("CLI session wait exits 124 on a timeout result and 1 on an unknown state",
   assert.equal(timedOut.body.outcome, "timeout");
   assert.deepEqual(timedOut.body.waitingFor, ["completed"]);
   assert.equal(timedOut.body.session.status, "running");
+  assert.equal(timedOut.body.session.runnerId, undefined, "a timeout prints the compact status by default");
+  const full = await run("--for", "completed", "--timeout", "1", "--interval", "50", "--full");
+  assert.equal(full.code, 124);
+  assert.equal(full.body.session.runnerId, "r1", "--full prints the full metadata");
 
   const readsBefore = sessionReads.length;
   const refused = await run("--for", "needs_input");

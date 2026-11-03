@@ -13,6 +13,7 @@ import {
   supportsPacedVideoReviewPeer,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   MAX_SESSION_WORKTREE_REF_DELETIONS,
+  pendingRequests,
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
@@ -758,6 +759,24 @@ function mapSession(s: Json): Json {
     updatedAt: s?.updatedAt,
     archived: s?.archived ?? false,
     archiveStatus: s?.archiveStatus,
+  };
+}
+
+/** Longest string a compact wait status carries; ids and statuses are far shorter in practice. */
+const WAIT_STATUS_MAX_STRING = 64;
+
+/** What a `wait_session` timeout returns by default (#4071): enough to decide whether to keep
+ * waiting, at a fixed size however large the session's metadata grows. A waiter that times out
+ * repeatedly otherwise pays for the whole mapped session on every return. */
+export function compactWaitSessionStatus(s: Json): Json {
+  const text = (value: unknown) => typeof value === "string" ? value.slice(0, WAIT_STATUS_MAX_STRING) : null;
+  const finite = (value: unknown) => typeof value === "number" && Number.isFinite(value) ? value : null;
+  return {
+    id: text(s?.id),
+    status: text(s?.status),
+    attentionRevision: finite(s?.attention?.revision),
+    pendingRequestCount: pendingRequests(s?.pendingApproval).length,
+    lastActivityAt: finite(s?.attention?.meaningfulAt) ?? finite(s?.updatedAt),
   };
 }
 
@@ -2296,7 +2315,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "wait_session",
-    description: "Wait until a session reaches one of the requested states, then return its metadata with outcome \"reached\". When timeoutMs (default 60000) elapses first, the result is not an error: it has outcome \"timeout\" and the session's metadata from the last read, so call again to keep waiting. Unknown state names are refused at once; a missing session, a control-plane failure, or cancellation is an error.",
+    description: "Wait until a session reaches one of the requested states, then return its metadata with outcome \"reached\". When timeoutMs (default 60000) elapses first, the result is not an error: it has outcome \"timeout\" and a compact status from the last read (id, status, attentionRevision, pendingRequestCount, lastActivityAt), or the full metadata when fullMetadata is true. Call again to keep waiting, or end your turn instead of polling a long wait. Unknown state names are refused at once; a missing session, a control-plane failure, or cancellation is an error.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2313,6 +2332,7 @@ export const TOOLS: McpTool[] = [
           maximum: MAX_WAIT_SESSION_INTERVAL_MS,
           description: "Initial polling interval; successful nonterminal reads back off to 10 seconds.",
         },
+        fullMetadata: { type: "boolean", description: "Return the full session metadata on a timeout instead of the compact status." },
       },
       required: ["sessionId", "states"],
       additionalProperties: false,
@@ -2356,7 +2376,11 @@ export const TOOLS: McpTool[] = [
         intervalMs = nextWaitSessionIntervalMs(intervalMs);
       } while (now() <= deadline);
       // An elapsed timeout is the expected end of a bounded wait, not a failed call (#3269).
-      return textResult({ outcome: "timeout", waitingFor: [...wanted], session: mapSession(session) });
+      return textResult({
+        outcome: "timeout",
+        waitingFor: [...wanted],
+        session: args.fullMetadata === true ? mapSession(session) : compactWaitSessionStatus(session),
+      });
     },
   },
   {
