@@ -816,7 +816,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      pull_request_watch_start/cancel, the runner polls GitHub and answers with
 //      pull_request_watch_update, and the session is prompted once with the outcome. Sessions and
 //      campaigns show the watch. Older runners and control planes keep blocking waits.
-export const PROTOCOL_VERSION = 272;
+// 273: authorized project paths and sanitized Full Control inspection failures (#4090).
+export const PROTOCOL_VERSION = 273;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -838,6 +839,8 @@ export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
+export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
+export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.js";
 export type {
   CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
@@ -3868,8 +3871,9 @@ export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
-   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection. */
-  campaignLaunchInspection?: { version: 1 | 2 };
+   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection.
+   * Version 3 accepts authorized project location paths and returns closed failure codes. */
+  campaignLaunchInspection?: { version: 1 | 2 | 3 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */

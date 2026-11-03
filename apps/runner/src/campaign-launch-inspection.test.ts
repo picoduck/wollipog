@@ -3,8 +3,11 @@ import { test } from "node:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { tmpdir } from "node:os";
+import { execFile } from "node:child_process";
+import { promisify } from "node:util";
 import type { CampaignLaunchInspectionMessage } from "@wollipog/protocol";
 import { CampaignLaunchInspections, inspectCampaignLaunch } from "./campaign-launch-inspection.js";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, type CampaignLaunchInspectionFailure } from "@wollipog/protocol";
 
 test("registered workspace inspection reads exact issues and returns only sanitized identity and digest", async () => {
   const path = await mkdtemp(join(tmpdir(), "campaign-launch-inspection-"));
@@ -14,7 +17,7 @@ test("registered workspace inspection reads exact issues and returns only saniti
       async (cwd, command, args) => {
         calls.push([cwd, command, args]);
         assert.equal(cwd, path);
-        if (command === "git") return args[0] === "remote" ? "https://github.com/owner/repo.git" : "a".repeat(40);
+        if (command === "git") return args[0] === "remote" ? "https://github.com/owner/repo.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
         const number = Number(args.at(-1)!.split("/").at(-1));
         return JSON.stringify({ number, title: "Fixture issue", body: "Private fixture body", html_url: `https://github.com/owner/repo/issues/${number}` });
       });
@@ -22,7 +25,7 @@ test("registered workspace inspection reads exact issues and returns only saniti
     assert.deepEqual(result.issueNumbers, [1, 2]);
     assert.match(result.digest!, /^[a-f0-9]{64}$/);
     assert.doesNotMatch(JSON.stringify(result), /Private fixture|github\.com|\/tmp\//);
-    assert.equal(calls.length, 4);
+    assert.equal(calls.length, 5);
     let executed = false;
     const bad = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "read-2", workspaceId: "w", issueNumbers: [1], path: "/foreign" } as CampaignLaunchInspectionMessage,
       [{ id: "w", path }], async () => { executed = true; return ""; });
@@ -48,7 +51,7 @@ function parkedReads(path: string) {
   const run = async (cwd: string, command: string, args: string[], signal: AbortSignal) => {
     assert.equal(cwd, path);
     calls.push([command, ...args]);
-    if (command === "git") return args[0] === "remote" ? "https://github.com/owner/repo.git" : "a".repeat(40);
+    if (command === "git") return args[0] === "remote" ? "https://github.com/owner/repo.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
     const number = Number(args.at(-1)!.split("/").at(-1));
     await new Promise<void>((resolve, reject) => {
       pending.push({ args, signal, release: resolve });
@@ -122,5 +125,63 @@ test("a repository-only inspection verifies the origin without reading issues", 
     assert.equal(result.repository, "owner/repo");
     assert.deepEqual(result.issueNumbers, []);
     assert.equal(issueReads(reads.calls), 0);
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
+test("SSH home workspace inspection uses the authorized project subfolder, including dynamic ids", async () => {
+  const root = await mkdtemp(join(tmpdir(), "inspection-location-"));
+  const { mkdir } = await import("node:fs/promises");
+  const repository = join(root, "project");
+  await mkdir(repository);
+  try {
+    for (const workspaceId of ["home", "dynamic-location"]) {
+      const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "location", workspaceId,
+        workspacePath: repository, issueNumbers: [] } as CampaignLaunchInspectionMessage, [{ id: "home", path: root }],
+      async (cwd, command, args) => {
+        assert.equal(cwd, repository, "inspect the project, never the registered home root");
+        return args[0] === "remote" ? "git@github.com:owner/repo.git" : args.includes("--is-inside-work-tree") ? "true" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+      });
+      assert.equal(result.ok, true);
+    }
+  } finally { await rm(root, { recursive: true, force: true }); }
+});
+
+test("native git inspection succeeds for a subfolder with only home:. registered (#4090)", async () => {
+  const path = await mkdtemp(join(tmpdir(), "inspection-native-"));
+  const git = promisify(execFile);
+  try {
+    await git("git", ["init", path]);
+    await git("git", ["-C", path, "-c", "user.name=Fixture", "-c", "user.email=fixture@example.com", "commit", "--allow-empty", "-m", "Fixture"]);
+    await git("git", ["-C", path, "remote", "add", "origin", "git@github.com:owner/repo.git"]);
+    for (const workspaceId of ["home", "dynamic-location"]) {
+      const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "native", workspaceId,
+        workspacePath: path, issueNumbers: [] }, [{ id: "home", path: "." }]);
+      assert.equal(result.ok, true);
+      assert.equal(result.repository, "owner/repo");
+      assert.doesNotMatch(JSON.stringify(result), /inspection-native|git@|\/tmp\//);
+    }
+  } finally { await rm(path, { recursive: true, force: true }); }
+});
+
+test("each inspection step has a fixed sanitized failure without command output or paths", async () => {
+  const path = await mkdtemp(join(tmpdir(), "inspection-errors-"));
+  try {
+    for (const failure of Object.keys(CAMPAIGN_LAUNCH_INSPECTION_ERRORS) as CampaignLaunchInspectionFailure[]) {
+      const result = await inspectCampaignLaunch({ type: "campaign_launch_inspect", requestId: "failure",
+        workspaceId: failure === "unknown_location" ? "unknown" : "w", issueNumbers: [1],
+        ...(failure === "missing_path" ? { workspacePath: join(path, "absent") } : {}),
+        ...(failure === "invalid_request" ? { workspacePath: "" } : {}),
+      }, [{ id: "w", path }], async (_cwd, command, args) => {
+        if ((failure === "not_repository" && args.includes("--is-inside-work-tree")) ||
+            (failure === "issue_read_failed" && command === "gh")) throw new Error("secret://token /private/path RAW_OUTPUT");
+        if (args[0] === "remote") return failure === "unsupported_origin" ? "git@gitlab.example.com:owner/repo.git" : "git@github.com:owner/repo.git";
+        return args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+      });
+      assert.equal(result.ok, false, failure);
+      assert.equal(result.failure, failure);
+      assert.equal(result.error, CAMPAIGN_LAUNCH_INSPECTION_ERRORS[failure]);
+      assert.doesNotMatch(JSON.stringify(result), /secret|token|private|RAW_OUTPUT|gitlab|inspection-errors-/);
+      assert.equal(result.digest, undefined);
+    }
   } finally { await rm(path, { recursive: true, force: true }); }
 });
