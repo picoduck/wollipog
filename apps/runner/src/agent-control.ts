@@ -47,6 +47,7 @@ import {
   type WslAgentControlLaunch,
 } from "./wsl-agent-control.js";
 import { installWslBwrapLauncher } from "./wsl-bwrap-launcher.js";
+import { claudeWollipogMcpServer } from "./claude-wollipog-mcp.js";
 import {
   ORCHESTRATOR_ENV_KEY,
   CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
@@ -409,16 +410,7 @@ function writeMcpConfig(
   env: Record<string, string>,
 ): void {
   mkdirSync(dirname(file), { recursive: true });
-  const body = {
-    mcpServers: {
-      wollipog: {
-        type: "stdio",
-        command: launch.command,
-        args: [...launch.args],
-        env,
-      },
-    },
-  };
+  const body = { mcpServers: { wollipog: claudeWollipogMcpServer(launch, env) } };
   writeFileSync(file, JSON.stringify(body, null, 2), { mode: 0o600 });
   try { chmodSync(file, 0o600); } catch { /* Windows uses the owning account ACL. */ }
 }

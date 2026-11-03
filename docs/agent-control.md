@@ -726,6 +726,34 @@ model, with the direct-tools setting and without it. On codex-cli 0.165.0, a 150
 no model request with the setting. Without it, the call ran from an `exec` cell that two model
 requests polled.
 
+### Claude Code Sessions and the `wollipog` MCP Server
+
+Claude Code aborts a stdio MCP call that sends no response or progress for 30 minutes, whatever
+`timeoutMs` the call asked for (#4072). The `wollipog` server sends nothing while a wait blocks, so
+before this limit was raised a `wait_pull_request` of 40 or 50 minutes, or a `wait_session` of 50,
+failed at exactly 1800 seconds instead of returning its own result.
+
+**Per-call limit.** Every runner-written Claude `wollipog` entry sets the per-server
+`"timeout": 10860000` (3 hours 1 minute, `CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS`, the same as Codex's).
+The native `--mcp-config` file and the WSL bridge's `mcp.json` are both built by
+`claudeWollipogMcpServer`, so the two launch paths carry the same entry. In claude 2.1.312 the
+per-server `timeout` does two things for that server alone:
+- Its idle limit becomes the larger of the `timeout` and the global idle limit. A user's
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` still turns it off.
+- Its total per-call limit becomes the `timeout`, in place of `MCP_TOOL_TIMEOUT` and the 27.8-hour
+  default. No `wollipog` tool runs that long: `wait_pull_request` ends within 3 hours and 20
+  seconds, and `wait_session` within one hour.
+
+The setting sits in the runner-written file's `wollipog` entry alone, so other MCP servers and the
+user's own Claude settings are unchanged. The server sends no `notifications/progress`. Claude Code
+would accept them, but the configuration-only change covers the same calls without new protocol
+traffic for every harness.
+
+`pnpm probe:claude-mcp-wait` re-measures this against a real `claude -p`, a scripted local
+Messages API, and the runner's own `wait_pull_request` and `wait_session` handlers with stubbed
+reads, behind the exact entry the runner builds. `--without-limit` also runs the entry without its
+`timeout`, and `--idle-ms` scales the global idle limit down for a quick check.
+
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
 still bounds every child at creation. If none of those sources supplies a limit, the child remains
