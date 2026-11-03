@@ -1,4 +1,4 @@
-import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
+import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
@@ -754,6 +754,7 @@ CREATE TABLE IF NOT EXISTS runner_agents (
   claude_code TEXT,
   native_tui_accounting TEXT,
   default_provider_account_id TEXT,
+  provider_account_readiness TEXT,
   wsl_agent_control TEXT,
   acp TEXT,
   registry TEXT,
@@ -7208,7 +7209,7 @@ export class ControlPlaneDb {
     );
     db.prepare("DELETE FROM driver_telemetry_hourly WHERE bucket_ts < ?").run(Date.now() - 180 * 86_400_000);
     // Additive migrations for DBs created before discovery columns existed.
-    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
+    for (const col of ["version TEXT", "auth_status TEXT", "available INTEGER", "unavailable_reason TEXT", "source TEXT", "installation TEXT", "update_assessment TEXT", "codex_app_server TEXT", "claude_code TEXT", "native_tui_accounting TEXT", "default_provider_account_id TEXT", "provider_account_readiness TEXT", "wsl_agent_control TEXT", "acp TEXT", "registry TEXT", "acp_transport TEXT"]) {
       try {
         db.exec(`ALTER TABLE runner_agents ADD COLUMN ${col}`);
       } catch {
@@ -8241,8 +8242,8 @@ export class ControlPlaneDb {
     );
     const insRa = this.stmt(
       `INSERT INTO runner_agents
-         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+         (runner_id, agent_id, command, args, env, driver, context, capabilities, version, auth_status, available, unavailable_reason, source, installation, update_assessment, codex_app_server, claude_code, native_tui_accounting, default_provider_account_id, wsl_agent_control, acp, registry, acp_transport, provider_account_readiness)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
     );
     for (const a of agents) {
       upAgent.run(a.id, a.name, now);
@@ -8272,6 +8273,7 @@ export class ControlPlaneDb {
         a.acp ? JSON.stringify(a.acp) : null,
         a.registry ? JSON.stringify(a.registry) : null,
         a.acpTransport ?? null,
+        a.providerAccountReadiness ? JSON.stringify(a.providerAccountReadiness) : null,
       );
     }
   }
@@ -14251,6 +14253,7 @@ export class ControlPlaneDb {
                   ra.codex_app_server AS codex_app_server, ra.claude_code AS claude_code,
                   ra.native_tui_accounting AS native_tui_accounting,
                   ra.default_provider_account_id AS default_provider_account_id,
+                  ra.provider_account_readiness AS provider_account_readiness,
                   ra.wsl_agent_control AS wsl_agent_control,
                   ra.acp AS acp, ra.registry AS registry, ra.acp_transport AS acp_transport
              FROM runner_agents ra JOIN agent_definitions ad ON ad.id = ra.agent_id
@@ -14276,6 +14279,7 @@ export class ControlPlaneDb {
         claude_code: string | null;
         native_tui_accounting: string | null;
         default_provider_account_id: string | null;
+        provider_account_readiness: string | null;
         wsl_agent_control: string | null;
         acp: string | null;
         registry: string | null;
@@ -14303,6 +14307,7 @@ export class ControlPlaneDb {
       claudeCode: parseJson<AgentDefinition["claudeCode"]>(a.claude_code) ?? undefined,
       nativeTuiAccounting: parseJson<AgentDefinition["nativeTuiAccounting"]>(a.native_tui_accounting) ?? undefined,
       defaultProviderAccountId: a.default_provider_account_id ?? undefined,
+      providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(a.provider_account_readiness) ?? undefined,
       wslAgentControl: parseJson<AgentDefinition["wslAgentControl"]>(a.wsl_agent_control) ?? undefined,
       acp: parseJson<AgentDefinition["acp"]>(a.acp) ?? undefined,
       registry: parseJson<AgentDefinition["registry"]>(a.registry) ?? undefined,
@@ -14536,15 +14541,25 @@ export class ControlPlaneDb {
     return row?.unavailable_reason ?? null;
   }
 
-  getAgentLaunch(runnerId: string, agentId: string, targetBound = false): AgentLaunch | null {
+  getAgentLaunch(runnerId: string, agentId: string, targetBound = false,
+    options: { providerAccountId?: string; allowAccountSelection?: boolean } = {}): AgentLaunch | null {
     const row = this.stmt(
-      `SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control, installation
+      `SELECT command, args, env, driver, context, version, capabilities, wsl_agent_control, installation, provider_account_readiness
        FROM runner_agents WHERE runner_id=? AND agent_id=? ${targetBound ? "" : "AND available = 1"}`,
     )
       .get(runnerId, agentId) as unknown as
-      | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null; installation: string | null }
+      | { command: string; args: string; env: string; driver: string; context: string | null; version: string | null; capabilities: string | null; wsl_agent_control: string | null; installation: string | null; provider_account_readiness: string | null }
       | undefined;
     if (!row) return null;
+    if (!targetBound && !options.allowAccountSelection) {
+      const provider = providerForDriver(row.driver as AgentDriverKind);
+      const accountId = options.providerAccountId ?? (provider &&
+        (parseJson<AgentContext>(row.context)?.kind ?? "native") === "native"
+        ? this.machineProviderAccountDefault(runnerId, provider)?.accountId ?? undefined : undefined);
+      if (!agentAvailableForImplicitLaunch({ available: true,
+        providerAccountReadiness: parseJson<AgentDefinition["providerAccountReadiness"]>(row.provider_account_readiness) ?? undefined,
+      }, accountId)) return null;
+    }
     const family = harnessInstallationFamily(row.driver as AgentDriverKind);
     if (family && !targetBound) {
       const selected = this.stmt(

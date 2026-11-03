@@ -74,6 +74,9 @@ for (const provider of ["claude", "codex"] as const) {
     assert.equal(projected.available, true, "the harness remains selectable for the ready account");
     assert.equal(projected.authStatus, "authenticated");
     assert.equal(projected.defaultProviderAccountId, "a", "readiness must never rewrite the saved default");
+    assert.deepEqual(projected.providerAccountReadiness, {
+      defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+    });
     assert.equal(agent.available, false, "the original observation is not mutated");
     if (provider === "claude") assert.equal(projected.claudeCode?.status, "ready");
   });
@@ -99,6 +102,42 @@ test("account readiness remains gated when all accounts are signed out or ungran
   assert.equal(ungranted.available, false);
   assert.equal(ungranted.authStatus, "unknown", "a stored positive observation cannot grant access");
   assert.equal(projectProviderAccountDiscoveryReadiness([agent], [], new Map(), () => true)[0], agent);
+});
+
+test("WSL harnesses without an explicit account keep their legacy-HOME readiness despite native accounts", () => {
+  const agent = { ...codexAgent, context: { kind: "wsl" as const, distro: "Ubuntu" }, available: true,
+    authStatus: "authenticated" as const, codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  const accounts = [{ id: "native", label: "Native", provider: "codex" as const, directory: "C:\\profiles\\native" }];
+  assert.equal(selectProviderAccount(accounts, agent, "codex-app-server", undefined, "win32"), undefined);
+  assert.equal(projectProviderAccountDiscoveryReadiness([agent], accounts, new Map([["native", "authenticated"]]), () => true, "win32")[0], agent);
+  const explicit = { ...agent, defaultProviderAccountId: "native" };
+  assert.equal(projectProviderAccountDiscoveryReadiness([explicit], accounts, new Map([["native", "authenticated"]]), () => true, "win32")[0]?.available, false,
+    "an explicit account in the wrong execution context must not fall back to the legacy HOME");
+});
+
+test("configured API authentication and Claude billing metadata take precedence over unrelated signed-out accounts", () => {
+  const accounts = [
+    { id: "codex-expired", label: "Expired", provider: "codex" as const, directory: join(tmpdir(), "expired-codex") },
+    { id: "claude-expired", label: "Expired", provider: "claude" as const, directory: join(tmpdir(), "expired-claude") },
+  ];
+  const codex = { ...codexAgent, source: "config" as const, available: true, authStatus: "authenticated" as const,
+    codexBillingSource: "api" as const, codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  const claude = { ...claudeAgent, source: "config" as const, available: true, authStatus: "authenticated" as const,
+    claudeCode: { ...unavailableClaudeCode(), status: "ready" as const,
+      auth: { status: "authenticated" as const, method: "api_key" as const, billingSource: "api" as const } } };
+  const statuses = new Map(accounts.map((account) => [account.id, "unauthenticated" as const]));
+  const result = projectProviderAccountDiscoveryReadiness([codex, claude], accounts, statuses, () => true);
+  assert.deepEqual(result[0], { ...codex, providerAccountReadiness: {
+    defaultAccountId: "codex-expired", defaultAuthStatus: "authenticated", readyAccountIds: ["codex-expired"],
+  } });
+  assert.deepEqual(result[1], { ...claude, providerAccountReadiness: {
+    defaultAccountId: "claude-expired", defaultAuthStatus: "authenticated", readyAccountIds: ["claude-expired"],
+  } });
+  assert.equal(result[1]?.claudeCode?.auth.billingSource, "api");
+  const unrelated = { ...codexAgent, available: false, env: { ANTHROPIC_API_KEY: "fixture-other-provider" },
+    codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  assert.equal(projectProviderAccountDiscoveryReadiness([unrelated], accounts, statuses, () => true)[0]?.available, false,
+    "a key for a different provider cannot assert readiness");
 });
 
 test("selectProviderAccount honors an explicit account and maps only the provider credential variable", () => {

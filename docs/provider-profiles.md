@@ -111,6 +111,13 @@ default account is signed out. A ready account keeps the harness selectable for 
 the account rows retain their own authentication states. This aggregate readiness never changes
 the saved default, the account chosen by an implicit launch, or a session's recorded binding.
 An ungranted implicit default is refused rather than silently skipped during its inspection.
+Protocol v279 carries separate readiness for the unchanged default and ready explicit accounts.
+Automatic reviews use their runner default; automations, orchestration and implicit session creation
+check their effective Machine default. They skip or refuse a signed-out default even when another
+account is ready. Explicit account choices and existing session bindings remain unchanged. Older
+control planes receive conservative default-account availability instead of aggregate readiness.
+WSL without an explicit default keeps its discovered legacy HOME, and configured API/cloud auth
+retains its authentication and billing precedence.
 
 An installed harness can report **Sign-In Required** while the Machine's SSH connection remains
 online. Use **Add Account** to complete supported sign-in into a persistent managed profile, then

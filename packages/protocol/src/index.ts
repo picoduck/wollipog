@@ -836,7 +836,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      controller's runners are v277; older peers keep it with the person.
 // 278: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
 //      a Full Control completed closure of an in-scope epic can be proven from its closed members.
-export const PROTOCOL_VERSION = 278;
+// 279: distinguish explicit-account availability from effective-default readiness (#4078).
+export const PROTOCOL_VERSION = 279;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1112,6 +1113,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerProfiles: 225,
   /** v270 runner paces regenerable reconnect snapshots with FIFO processing acknowledgements. */
   runnerProcessingBarriers: 270,
+  /** Account-aware implicit launches; older peers receive conservative availability. */
+  providerAccountReadiness: 279,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
   reviewSession: 226,
@@ -3458,6 +3461,13 @@ export interface AgentDefinition {
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
   /** Opaque runner-local account selected when a client omits an explicit account. */
   defaultProviderAccountId?: string;
+  /** Secret-free observations; aggregate availability may offer a ready explicit account while
+   * the unchanged implicit default is signed out. Never contains credential paths or values. */
+  providerAccountReadiness?: {
+    defaultAccountId?: string;
+    defaultAuthStatus: "authenticated" | "unauthenticated" | "unknown";
+    readyAccountIds: string[];
+  };
   /** Secret-free Codex billing boundary derived locally from configured auth or CLI account state. */
   codexBillingSource?: "api" | "provider_account";
   /** Runtime-negotiated ACP capabilities safe for presentation; absent for native/legacy agents. */

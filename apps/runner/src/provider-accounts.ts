@@ -235,14 +235,38 @@ export function projectProviderAccountDiscoveryReadiness(
   platform: NodeJS.Platform = process.platform,
 ): AgentDefinition[] {
   return agents.map((agent) => {
+    // WSL never implicitly inherits a host account, even if its path happens to be POSIX.
+    // Without an explicit default it retains the independently discovered in-distro HOME.
+    if (agent.context?.kind === "wsl" && !agent.defaultProviderAccountId) return agent;
+    // Configured keys/cloud/gateway auth already won credential precedence before this
+    // projection. Account inventory must not undo that assertion or discard its billing data.
     const provider = providerForDriver(agent.driver ?? "acp");
+    const claudeAuth = agent.claudeCode?.auth;
+    const configuredAuth = provider === "codex" ? agent.codexBillingSource === "api" || agent.env.OPENAI_API_KEY
+      : provider === "claude" && (agent.env.ANTHROPIC_API_KEY || agent.env.ANTHROPIC_AUTH_TOKEN || agent.env.CLAUDE_CODE_OAUTH_TOKEN ||
+        (claudeAuth?.status === "authenticated" && (claudeAuth.method === "oauth_token" ||
+          ["api", "gateway", "bedrock", "vertex"].includes(claudeAuth.billingSource))));
     const configured = provider ? accounts.filter((account) => account.provider === provider) : [];
     if (!configured.length || !providerAccountProbeAvailable(agent) || agent.harnessSelectionBlocked) return agent;
     const eligible = configured.filter((account) => usable(account) && providerAccountAgentContextCompatible(account, agent, platform));
+    let selected: BoundProviderAccount | undefined;
+    try { selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform); }
+    catch { /* Invalid or incompatible defaults stay unknown; never choose another implicitly. */ }
+    const readyAccountIds = eligible.filter((account) => configuredAuth || statuses.get(account.id) === "authenticated")
+      .map((account) => account.id);
+    const providerAccountReadiness: NonNullable<AgentDefinition["providerAccountReadiness"]> = {
+      ...(selected ? { defaultAccountId: selected.id } : {}),
+      defaultAuthStatus: selected && eligible.some((account) => account.id === selected.id)
+        ? configuredAuth ? "authenticated" : statuses.get(selected.id) ?? "unknown" : "unknown",
+      readyAccountIds,
+    };
+    // Keep configured authentication and billing precedence, while representing grants and
+    // execution-context compatibility separately for automatic consumers.
+    if (configuredAuth) return { ...agent, providerAccountReadiness };
     const observations = eligible.map((account) => statuses.get(account.id) ?? "unknown");
     const authStatus = observations.includes("authenticated") ? "authenticated" as const
       : observations.length && observations.every((status) => status === "unauthenticated") ? "unauthenticated" as const : "unknown" as const;
-    return { ...agent, available: authStatus === "authenticated", authStatus,
+    return { ...agent, providerAccountReadiness, available: authStatus === "authenticated", authStatus,
       unavailableReason: authStatus === "authenticated" ? undefined : authStatus === "unauthenticated"
         ? "Sign in to a provider account before starting a session."
         : "Provider accounts could not be inspected. Review their setup and ownership details.",

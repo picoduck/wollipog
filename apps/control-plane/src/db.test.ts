@@ -2349,6 +2349,23 @@ test("agentsRefreshed: register resets the marker, a discovery push sets it (gap
   assert.equal(db.getRunner("runner-1")!.agentsRefreshed, false);
 });
 
+test("implicit launch admission uses effective default readiness and retains explicit selection", () => {
+  const db = withRunner();
+  const agent: AgentDefinition = { ...claudeAgent(), context: { kind: "native" }, defaultProviderAccountId: "a",
+    providerAccountReadiness: { defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"] } };
+  db.updateRunnerAgents("runner-1", [agent], 901);
+  assert.deepEqual(db.getRunner("runner-1")?.agents[0]?.providerAccountReadiness, agent.providerAccountReadiness);
+  assert.equal(db.getAgentLaunch("runner-1", agent.id), null, "automatic launch must not choose signed-out A");
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, false, { allowAccountSelection: true }), "manual selection can still offer B");
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, false, { providerAccountId: "b" }));
+  assert.equal(db.getAgentLaunch("runner-1", agent.id, false, { providerAccountId: "a" }), null);
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, true), "target-local credentials do not use the host default");
+  db.setMachineProviderAccountDefault("runner-1", "claude", "b", 0, 902);
+  assert.ok(db.getAgentLaunch("runner-1", agent.id), "a saved Machine default B takes precedence");
+  assert.equal(db.getRunner("runner-1")?.agents[0]?.defaultProviderAccountId, "a");
+  db.close();
+});
+
 test("getAgentLaunch returns command/args/env/driver/context/version", () => {
   const db = withRunner();
   const launch = db.getAgentLaunch("runner-1", "acp-agent");

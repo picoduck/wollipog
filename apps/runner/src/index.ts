@@ -1,6 +1,6 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { assertLegacyReviewsDrained, retiredReviewReceipt } from "./retired-review-jobs.js";
-import { reviewRetirementPeerRefusal } from "@wollipog/protocol";
+import { reviewRetirementPeerRefusal, projectProviderAccountReadinessForPeer } from "@wollipog/protocol";
 import { configuredSessionWritableGrants } from "./review-trust.js";
 import { configuredCodexHomes } from "./review-trust.js";
 import { reviewerInstallations } from "./reviewer-installations.js";
@@ -645,7 +645,8 @@ function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "dri
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
   return withMediaReviewerCapabilities(projectOrchestratorPresetForPeer(metadata.agents.map((agent) =>
-    invalidateStaleNativeInstallation(agent)), {
+    projectProviderAccountReadinessForPeer(invalidateStaleNativeInstallation(agent),
+      runnerSupportsProtocol(controlPlaneProtocolVersion, "providerAccountReadiness"))), {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
   }).filter((agent) =>

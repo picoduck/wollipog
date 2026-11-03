@@ -34,6 +34,12 @@ const agents: AgentDefinition[] = [
   agent("gemini", "Gemini", "acp", { authStatus: undefined }),
   agent("opencode", "OpenCode", "acp", { authStatus: "unauthenticated" }),
 ];
+if (scenario.startsWith("account-default")) {
+  agents.splice(1);
+  agents[0] = { ...agents[0]!, defaultProviderAccountId: "a", providerAccountReadiness: {
+    defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+  } };
+}
 
 const runners = [
   {
@@ -50,6 +56,12 @@ const runners = [
 ].map((runner) => ({
   ...runner, os: "linux", version: "1", connectedAt: NOW, lastSeen: NOW, protocolVersion: 141,
 })) as unknown as RunnerView[];
+if (scenario.startsWith("account-default")) {
+  runners[0]!.protocolVersion = 279;
+  if (scenario === "account-default-b") runners[0]!.providerAccountDefaults = [
+    { provider: "claude", accountId: "b", revision: 1 },
+  ];
+}
 
 const location = (projectId: string, id: string, runnerId: string, workspaceId: string, path: string, isDefault: boolean): ProjectLocationView => ({
   id, projectId, runnerId, workspaceId, name: path.split("/").at(-1)!, path, source: "managed",

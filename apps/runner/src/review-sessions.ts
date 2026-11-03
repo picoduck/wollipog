@@ -1,3 +1,4 @@
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 /**
  * Review sessions (#561, #3368): the runner side of a typed, read-only reviewer session.
  *
@@ -419,7 +420,7 @@ export function reviewSessionDiscoveryReason(error: unknown): string {
 /** The agent a harness's reviews launch through: the first available native agent using its driver. */
 function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionReviewHarness): AgentDefinition | undefined {
   return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
-    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true &&
+    (candidate.context ?? { kind: "native" }).kind === "native" && agentAvailableForImplicitLaunch(candidate) &&
     candidate.installation?.selection !== "other" && candidate.harnessSelectionBlocked !== true);
 }
 
