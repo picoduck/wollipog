@@ -18,21 +18,34 @@ export const SELECT_LINES_TOOLBAR_MIN_PANEL_PX = 360;
  * answers yes: a choice is never withdrawn on a width nobody measured.
  */
 export function usePanelAtLeast(element: HTMLElement | null, min: number): boolean {
+  return useContainerAtLeast(element, ".rpanel", min);
+}
+
+/**
+ * Whether the main column holding `element` (`.main`, the `app` container, §2.10) is at least `min`
+ * pixels wide: the room left after the rail and any docked panel, never the viewport's. Followed and
+ * defaulted as `usePanelAtLeast` is.
+ */
+export function useColumnAtLeast(element: HTMLElement | null, min: number): boolean {
+  return useContainerAtLeast(element, ".main", min);
+}
+
+function useContainerAtLeast(element: HTMLElement | null, container: string, min: number): boolean {
   const [wide, setWide] = useState(true);
   useLayoutEffect(() => {
-    const panel = element?.closest<HTMLElement>(".rpanel");
-    if (!panel || typeof ResizeObserver === "undefined") return;
+    const box = element?.closest<HTMLElement>(container);
+    if (!box || typeof ResizeObserver === "undefined") return;
     const apply = (width: number) => {
       if (width > 0) setWide(width >= min);
     };
-    // Before the first paint, so a narrow panel never flashes a layout it cannot hold.
-    apply(panel.clientWidth);
+    // Before the first paint, so a narrow container never flashes a layout it cannot hold.
+    apply(box.clientWidth);
     const observer = new ResizeObserver((entries) => {
       const entry = entries[entries.length - 1];
       if (entry) apply(entry.contentBoxSize?.[0]?.inlineSize ?? entry.contentRect.width);
     });
-    observer.observe(panel);
+    observer.observe(box);
     return () => observer.disconnect();
-  }, [element, min]);
+  }, [element, container, min]);
   return wide;
 }

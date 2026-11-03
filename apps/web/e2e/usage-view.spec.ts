@@ -616,6 +616,110 @@ test("at 390px the facts strip is rows, label left and value right", async ({ pa
   expect(await page.evaluate(() => document.documentElement.scrollWidth)).toBeLessThanOrEqual(390);
 });
 
+/** The toolbar's controls in order, each as one row's box, and the main column's edges. */
+async function toolbarRow(page: Page) {
+  return page.evaluate(() => {
+    const toolbar = document.querySelector<HTMLElement>(".usage-toolbar")!;
+    const main = document.querySelector<HTMLElement>(".main")!.getBoundingClientRect();
+    // A visually hidden status (position: absolute) takes no room in the row.
+    const controls = [...toolbar.children].filter((child) => getComputedStyle(child).position !== "absolute").map((control) => {
+      const box = control.getBoundingClientRect();
+      // A label cut short by an ellipsis, or spilling out of its button, counts as not fitting.
+      const label = control.querySelector<HTMLElement>(":scope > span") ?? control as HTMLElement;
+      return {
+        left: box.left, right: box.right, middle: box.top + box.height / 2,
+        clipped: label.scrollWidth > label.clientWidth,
+      };
+    });
+    return { controls, main: { left: main.left, right: main.right }, overflow: toolbar.scrollWidth - toolbar.clientWidth };
+  });
+}
+
+/** Desktop: Metric, Range, Group By and About. Compact: Metric, Range and Group By, and About. */
+async function expectOneToolbarRow(page: Page, count: 3 | 4) {
+  const { controls, main, overflow } = await toolbarRow(page);
+  expect(controls).toHaveLength(count);
+  // One row: every control's middle on one line, give or take a pixel of rounding.
+  for (const control of controls) expect(Math.abs(control.middle - controls[0]!.middle)).toBeLessThanOrEqual(1);
+  for (let index = 1; index < controls.length; index += 1) {
+    expect(controls[index - 1]!.right).toBeLessThanOrEqual(controls[index]!.left);
+  }
+  for (const control of controls) {
+    expect(control.left).toBeGreaterThanOrEqual(main.left);
+    expect(control.right).toBeLessThanOrEqual(main.right);
+    expect(control.clipped).toBe(false);
+  }
+  expect(overflow).toBeLessThanOrEqual(0);
+}
+
+test("the toolbar follows a desktop main column a docked panel narrows, not the viewport (#4029)", async ({ page }) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/usage-view-e2e.html");
+  const toolbar = page.locator(".usage-toolbar");
+  await expect(toolbar.getByRole("button", { name: "Range: Last 30 Days" })).toBeVisible();
+  // The narrowest column that keeps the desktop toolbar. It needs about 710px here and about 735px
+  // in CI's DejaVu Sans, so this also holds the edge's slack.
+  await page.addStyleTag({ content: ".main { width: 761px; }" });
+  await expect(toolbar.getByRole("radiogroup", { name: "Group By" })).toBeVisible();
+  await expect(toolbar.getByRole("button", { name: "About These Numbers" })).toHaveText("About These Numbers");
+  await expectOneToolbarRow(page, 4);
+
+  for (const width of [480, 640]) {
+    await page.addStyleTag({ content: `.main { width: ${width}px; }` });
+    const range = toolbar.getByRole("button", { name: "Range and Group By: 30 Days, Daily" });
+    const about = toolbar.getByRole("button", { name: "About These Numbers" });
+    await expect(range).toHaveText("30 Days, Daily");
+    await expect(about).toHaveText("");
+    await expect(toolbar.getByRole("radiogroup", { name: "Group By" })).toHaveCount(0);
+    for (const metric of ["Tokens", "Cost"] as const) {
+      await toolbar.getByRole("radio", { name: metric }).click();
+      await expect(toolbar.getByRole("radio", { name: metric })).toBeChecked();
+      await expectOneToolbarRow(page, 3);
+    }
+  }
+
+  // At 480px both menus still open by pointer and by keyboard, inside the viewport.
+  await page.addStyleTag({ content: ".main { width: 480px; }" });
+  const range = toolbar.getByRole("button", { name: "Range and Group By: 30 Days, Daily" });
+  await range.click();
+  const menu = page.getByRole("menu", { name: "Range and Group By" });
+  await expect(menu.locator(".menu-label")).toHaveText(["Range", "Group By"]);
+  await menu.getByRole("menuitemradio", { name: "Week" }).click();
+  await expect(page.locator(".usage-chart-svg title")).toContainText("Weekly");
+  const weekly = toolbar.getByRole("button", { name: "Range and Group By: 30 Days, Weekly" });
+  await expect(weekly).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(weekly).toBeFocused();
+  await page.keyboard.press("Enter");
+  await expect(menu).toBeVisible();
+  await page.keyboard.press("Escape");
+  await expect(menu).toBeHidden();
+  await expect(weekly).toBeFocused();
+
+  // Tab goes on to About, the row's last control. Each step waits for focus to land, since a
+  // closing menu hands it back to its button on the next task.
+  const about = toolbar.getByRole("button", { name: "About These Numbers" });
+  await page.keyboard.press("Tab");
+  await expect(about).toBeFocused();
+  await page.keyboard.press("Enter");
+  const popover = page.getByRole("dialog", { name: "About These Numbers" });
+  await expect(popover).toContainText("Recording started Jul 1, 2026.");
+  await expect(popover).toBeFocused();
+  const box = (await popover.boundingBox())!;
+  expect(box.x).toBeGreaterThanOrEqual(0);
+  expect(box.x + box.width).toBeLessThanOrEqual(1280);
+  await page.keyboard.press("Escape");
+  await expect(popover).toBeHidden();
+  await expect(about).toBeFocused();
+
+  // Given its width back, the column gets the desktop toolbar again, still grouped by week.
+  await page.addStyleTag({ content: ".main { width: 1280px; }" });
+  await expect(toolbar.getByRole("button", { name: "Range: Last 30 Days" })).toBeVisible();
+  await expect(toolbar.getByRole("radiogroup", { name: "Group By" }).getByRole("radio", { name: "Week" })).toBeChecked();
+  await expect(about).toHaveText("About These Numbers");
+});
+
 test("with 14 days of hourly retention Hour appears only on Last 7 Days", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/usage-view-e2e.html?hourlyDays=14");

@@ -17345,7 +17345,8 @@ button.review-finding-location {
 
 /* Usage accounting ------------------------------------------------------- */
 /* API Usage's one toolbar (#3010, §4.7): Metric, Range and Group By, then About These Numbers at the
-   trailing end. On phones Range and Group By are one menu button, so the row never wraps. */
+   trailing end. In a main column no wider than a phone (a phone, or a desktop column a docked panel
+   narrows, #4029) Range and Group By are one menu button, so the row never wraps. */
 .usage-toolbar { margin-bottom: var(--space-5); }
 .usage-toolbar > :last-child { margin-left: auto; }
 /* The range button gives way first on a narrow phone: its label ends in an ellipsis, the caret and
