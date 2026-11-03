@@ -178,6 +178,9 @@ provider command, and merged forge head; resume the same App Server session firs
 child's enqueue produces no permission receipt in auto or Full Access mode, so call it once the
 forge reports the PR merged; its proof is that merged approved head. Treat any unavailable or
 mismatched proof as a blocker rather than requesting a replacement approval or replaying the action.
+After a same-head re-enqueue, reconcile the latest occurrence, whose admission preceded the enqueue
+that landed. Each other armed occurrence of the same command in the session then reads
+`superseded` and no longer blocks `verify_campaign_child`; do not withdraw or reconcile it.
 
 Keep the campaign work ledger current (control plane protocol v196+; `wollipog campaign …` from the
 CLI). Every record lands in the root campaign, including from a nested Orchestrator:

@@ -22628,7 +22628,10 @@ export class ControlPlaneDb {
 
   /** Atomically claim one reconciliation proof and consume either a live approval or the narrowly
    * auditable lifecycle-revoked state above. The eligibility check is repeated under the write
-   * lock so restart/revocation races cannot widen recovery. */
+   * lock so restart/revocation races cannot widen recovery. The proof shows the exact approved head
+   * merged, so the session's other approved occurrences armed with the same enqueue command (an
+   * ejected enqueue before a same-head re-enqueue, #3991) can never run to any other effect: they
+   * end superseded by this one in the same transaction, which only removes authority. */
   consumeReconciledWorkflowDecisionActionWithReceipt(
     sessionId: string,
     occurrenceId: string,
@@ -22636,7 +22639,7 @@ export class ControlPlaneDb {
     receiptDigest: string,
     now: number,
     options: { forgeAttested?: boolean } = {},
-  ): WorkflowDecisionView | null {
+  ): { decision: WorkflowDecisionView; supersededOccurrenceIds: string[] } | null {
     this.db.exec("BEGIN IMMEDIATE");
     try {
       const decision = this.workflowDecisionByOccurrence(occurrenceId);
@@ -22665,8 +22668,22 @@ export class ControlPlaneDb {
         this.db.exec("ROLLBACK");
         return null;
       }
+      const siblings = (this.stmt(
+        `SELECT occurrence_id FROM workflow_decisions
+         WHERE session_id=? AND category='pr_merge' AND status='approved' AND consumed_at IS NULL
+           AND action_command_digest=? AND occurrence_id<>?`,
+      ).all(sessionId, commandDigest, occurrenceId) as unknown as Array<{ occurrence_id: string }>)
+        .map((row) => row.occurrence_id);
+      const supersede = this.stmt(
+        `UPDATE workflow_decisions SET status='superseded', resolved_at=?, superseded_by=?
+         WHERE occurrence_id=? AND status='approved' AND consumed_at IS NULL`,
+      );
+      for (const sibling of siblings) {
+        supersede.run(now, occurrenceId, sibling);
+        this.retireWorkflowDecisionResume(sibling, now);
+      }
       this.db.exec("COMMIT");
-      return this.workflowDecisionByOccurrence(occurrenceId);
+      return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, supersededOccurrenceIds: siblings };
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;
