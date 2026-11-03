@@ -702,7 +702,8 @@ export class ClaudeCodeDriver implements Driver {
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
-    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint, opts.claudeLiveUsage);
+    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint,
+      opts.claudeLiveUsage, opts.claudeRepublicationInterrupted === true);
     this.cwd = opts.cwd;
     this.config = opts.config;
     this.preparedHookArgs = [...opts.args];
@@ -886,7 +887,15 @@ export class ClaudeCodeDriver implements Driver {
       this.usageAccounting.checkpoint = { sessionId: this.sessionId, totalCostUsd: 0, models: {}, accountingScope: "conversation" };
       this.cb.onClaudeUsageCheckpoint?.(this.usageAccounting.checkpoint);
     }
-    this.emitUsageEvents(this.usageAccounting.beginProcess());
+    this.usageAccounting.beginProcess(this.firstTurn);
+  }
+
+  /** The running process's own version decides how its totals are accounted: the recorded one can
+   * be missing or stale after a runner restart (#4069). Usage before any report confirms it too. */
+  private confirmUsageProcess(version?: unknown): void {
+    const { events, baseline } = this.usageAccounting.confirmProcess(this.sessionId, typeof version === "string" ? version : undefined);
+    this.emitUsageEvents(events);
+    if (baseline) this.cb.onClaudeUsageCheckpoint?.(baseline);
   }
 
   private emitUsageEvents(events: ReturnType<ClaudeUsageAccounting["result"]>): void {
@@ -902,6 +911,7 @@ export class ClaudeCodeDriver implements Driver {
     // The control plane may have changed since `message_start`; only a v216+ peer shows, rather
     // than accrues, a provisional record.
     if (!request || this.cb.supportsLiveClaudeUsage?.() !== true) return;
+    this.confirmUsageProcess();
     const u = request.usage;
     const n = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
     const details = u.output_tokens_details && typeof u.output_tokens_details === "object"
@@ -924,8 +934,8 @@ export class ClaudeCodeDriver implements Driver {
     const checkpoint = this.usageAccounting.checkpoint !== before ? this.usageAccounting.checkpoint : null;
     events.forEach((event, index) => this.cb.onEvent({ ...event,
       ...(index === events.length - 1 && typeof result.duration_ms === "number" ? { durationMs: result.duration_ms } : {}),
-      ...(index === events.length - 1 && checkpoint && !event.accountingIncomplete
-        ? { claudeUsageCheckpoint: checkpoint } : {}),
+      // An incomplete record moves the baseline only when it closes an unproven total.
+      ...(index === events.length - 1 && checkpoint ? { claudeUsageCheckpoint: checkpoint } : {}),
     }));
     if (checkpoint) this.cb.onClaudeUsageCheckpoint?.(checkpoint);
   }
@@ -2980,6 +2990,7 @@ export class ClaudeCodeDriver implements Driver {
           this.cb.onModelResolved?.(msg.model);
         }
         if (msg.subtype === "init" && !parentId) {
+          this.confirmUsageProcess(msg.claude_code_version);
           // Null when this Claude Code release sends no list, so a remembered one is dropped.
           this.cb.onClaudeInitCatalog?.(parseClaudeInitCatalog(msg as Record<string, unknown>));
         }
@@ -3455,6 +3466,7 @@ export class ClaudeCodeDriver implements Driver {
             ...(typeof usage.cache_creation_input_tokens === "number" ? { cacheCreationInputTokens: usage.cache_creation_input_tokens } : {}),
             ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}), ...pp });
         } else {
+          this.confirmUsageProcess();
           this.emitUsageResult(msg);
         }
         // Token usage on a top-level result is proof the provider actually answered over the API,

@@ -34,7 +34,7 @@ import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryFailure, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
@@ -49,7 +49,8 @@ import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosure
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
-import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
+import { issueClosureDeliveryFailure, issueClosureProofGapNotice } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
  * runner commands, and ingests runner events back into the DB + UI broadcasts.
@@ -10703,7 +10704,7 @@ export class SessionsService {
     sessionId: string,
     request: GithubIssueClosureRequest,
     canAccess: (id: string) => boolean = () => true,
-  ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string }>> {
+  ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string; proofGaps?: IssueClosureProofGapNotice }>> {
     const session = this.db.getSession(sessionId);
     if (!session || !canAccess(sessionId)) return fail("session not found", 404);
     if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
@@ -10775,20 +10776,29 @@ export class SessionsService {
           }
         }
         const proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
-        if (!proof) {
-          snapshot.deliveryFailure = closureDeliveryFailure(this.db, this.db.getSession(sessionId)!, snapshot);
-          this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
-            boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback", reason: "delivery_or_disposition_unverified" }));
-        }
         const commentSafe = !request.comment || campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, []);
         if (proof && commentSafe) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
+        else {
+          // The person-owned route stays, but names every gap and what would fix it (#4058).
+          const gaps = closureDeliveryGaps(this.db, this.db.getSession(sessionId)!, snapshot, { proven: Boolean(proof), commentSafe });
+          if (gaps) snapshot.deliveryGaps = gaps;
+          snapshot.deliveryFailure = gaps ? issueClosureDeliveryFailure(gaps) : "outside_boundary";
+          this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+            boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback",
+            reason: gaps ? "closure_proof_incomplete" : "outside_boundary", ...(gaps ? { gaps: gaps.map((gap) => gap.code) } : {}) }));
+        }
       }
       const created = this.createWorkflowDecision(sessionId, {
         requestId: request.requestId,
         resourceKey,
         resourceSnapshot: snapshot,
       }, canAccess, { trustedIssueClosure: true });
-      return created.ok ? ok({ decision: created.data }, created.status) : failAs(created);
+      if (!created.ok) return failAs(created);
+      const decided = created.data!.resourceSnapshot;
+      // Say so beside the decision, so the root sees a person now decides and what it can fix (#4058).
+      const proofGaps = created.data!.authorityEvaluation?.reason === "closure_proof_incomplete" && decided.category === "issue_closure" &&
+        decided.deliveryGaps?.length ? issueClosureProofGapNotice(decided.deliveryGaps) : undefined;
+      return ok({ decision: created.data, ...(proofGaps ? { proofGaps } : {}) }, created.status);
     } catch {
       return fail("issue inspection failed or the runner did not respond; no closure was attempted", 409);
     }

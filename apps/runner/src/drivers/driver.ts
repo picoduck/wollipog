@@ -240,6 +240,9 @@ export interface DriverOptions {
   claudeUsageCheckpoint?: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Live request usage already published after `claudeUsageCheckpoint`, awaiting settlement. */
   claudeLiveUsage?: import("./claude-usage-accounting.js").ClaudeLiveUsage;
+  /** A restart cut a republication of that window short: part of it is accounted, and the
+   * checkpoint that would have closed it was never journaled (#4069). */
+  claudeRepublicationInterrupted?: boolean;
   /** Runner-owned session directory used for bounded hold sentinels and lifecycle reconciliation. */
   sessionStateDir?: string;
   /** Durable Claude task ids that a resumed transport must reconcile before declaring quiescence. */

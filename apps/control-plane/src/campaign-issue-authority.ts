@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
-  type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation } from "@wollipog/protocol";
+  type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
+  ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.js";
@@ -43,10 +44,19 @@ export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number):
         !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number))) return [];
     items.push(...cited as CampaignWorkItemDetail[]);
   }
+  const tracked = trackedIssueWork(db, root, issue);
+  if (!tracked) return [];
+  for (const detail of tracked) if (!items.some((existing) => existing.id === detail.id)) items.push(detail);
+  return items;
+}
+
+/** The ledger's own work items for this issue, without its fixed-by plan; null when the ledger cannot be read. */
+function trackedIssueWork(db: ControlPlaneDb, root: SessionView, issue: number): CampaignWorkItemDetail[] | null {
+  const items: CampaignWorkItemDetail[] = [];
   let cursor: string | undefined;
   do {
     const page = db.campaignWorkLedger.page(root.id, { state: "all", limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
-    if (!page.ok) return [];
+    if (!page.ok) return null;
     for (const item of page.data.items) if (item.issue?.number === issue &&
         item.issue.repository.toLowerCase() === root.orchestratorPolicy?.issueScope?.repository.toLowerCase()) {
       const detail = db.campaignWorkLedger.detail(root.id, item.id, Date.now());
@@ -275,25 +285,88 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
 }
 
-/** Stable server-derived gap information; never infer authority from explanation/evidence prose. */
-export function closureDeliveryFailure(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot): string {
+/** Every gap between a closure and delegated proof (#4058), or null when the boundary does not
+ * delegate this closure at all, which stays `outside_boundary`. It reads the same ledger, gates and
+ * forge facts as `closureEvidence`, but only to name what failed: `closureEvidence` never consults
+ * it, so a gap list can neither prove a closure nor loosen any condition of the proof. A request
+ * that fails the proof always gets at least one gap (`delivery_unverified` when no other applies). */
+export function closureDeliveryGaps(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot,
+  checked: { proven: boolean; commentSafe: boolean }): IssueClosureDeliveryGap[] | null {
+  const boundary = issueBoundary(root);
+  if (!boundary?.issueAuthority?.closureReasons.includes(snapshot.reason) || !boundary.operations.includes("issue_closure") ||
+      snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase() ||
+      !root.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue)) return null;
+  const gaps: IssueClosureDeliveryGap[] = [];
+  const add = (code: IssueClosureDeliveryGapCode, details: { workItemId?: string; pullRequests?: number[] } = {}) => {
+    if (gaps.length < ISSUE_CLOSURE_DELIVERY_GAPS_MAX) gaps.push(issueClosureDeliveryGap(code, details));
+  };
+  if (!checked.proven) deliveryGapsInto(db, root, snapshot, add, () => gaps.length);
+  if (!checked.commentSafe) add("comment_unsafe");
+  if (!gaps.length) add("delivery_unverified");
+  return gaps;
+}
+
+type AddGap = (code: IssueClosureDeliveryGapCode, details?: { workItemId?: string; pullRequests?: number[] }) => void;
+
+function deliveryGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, add: AddGap, count: () => number): void {
+  // Open related PRs block every reason. A PR whose title and body no longer mention the issue still
+  // counts while GitHub's timeline cross-references it: only its merge or closure ends that (#4058).
+  if (snapshot.openPullRequests.length) add("open_related_pull_requests", { pullRequests: snapshot.openPullRequests.map((pr) => pr.number) });
   const relationship = db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
-  const ids = relationship ? [...new Set([...relationship, ...issueWork(db, root, snapshot.issue).map((item) => item.id)])] : null;
-  if (ids) for (const id of ids) {
+  if (relationship && snapshot.reason !== "completed") add("fixed_by_completion_only");
+  const items: CampaignWorkItemDetail[] = [];
+  for (const id of relationship ?? []) {
     const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
-    if (!item) return `missing_work_item:${id}`;
+    if (!item) { add("missing_work_item", { workItemId: id }); continue; }
     if (!item.issue || item.issue.repository.toLowerCase() !== snapshot.repository.toLowerCase() ||
-        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) return `outside_scope:${id}`;
-    if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return `unverified_work_item:${id}`;
-    if (item.primaryState !== "delivered" || item.currentAttempt) return `undelivered_work_item:${id}`;
-    const candidates = deliveryCandidates(db, root, item, snapshot.issue);
-    if (!candidates.some(({ fact }) => fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha)) return `unmerged_work_item:${id}`;
-    if (candidates.some(({ fact }) => fact.availability !== "fresh")) return `stale_delivery:${id}`;
-    for (const { fact, approvedHeads } of candidates) {
-      if (fact.availability !== "fresh" || fact.value.state === "closed") continue;
-      if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) return `unmerged_work_item:${id}`;
-      if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) return `delivery_not_verified_at_exact_head:${id}`;
-    }
+        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) { add("work_item_outside_scope", { workItemId: id }); continue; }
+    items.push(item);
   }
-  return ids ? "delivery_not_verified_at_exact_head" : "delivery_or_disposition_unverified";
+  const tracked = trackedIssueWork(db, root, snapshot.issue);
+  if (!tracked) return add("delivery_unverified");
+  for (const item of tracked) if (!items.some((existing) => existing.id === item.id)) items.push(item);
+  if (!items.length) {
+    // A not-planned closure needs a recorded disposition, which needs a cancelled or removed item.
+    if (!relationship?.length) add(snapshot.reason === "not_planned" ? "disposition_unverified" : "no_work_item");
+    return;
+  }
+  if (snapshot.reason === "not_planned") {
+    const disposition = snapshot.dispositionRecommendationId && db.campaignWorkLedger.recommendation(root.id, snapshot.dispositionRecommendationId);
+    if (snapshot.dispositionRecommendationId && (!disposition || !["rejected", "duplicate"].includes(disposition.disposition) || !disposition.dispositionReason ||
+        !items.some((item) => disposition.originWorkItemIds.includes(item.id)))) add("disposition_unverified");
+    for (const item of items) if (!["cancelled", "scope_removed"].includes(item.commitment) || item.currentAttempt ||
+        !item.commitmentRecord.reason || !item.commitmentRecord.changedBySessionId) add("disposition_unverified", { workItemId: item.id });
+    return;
+  }
+  // The runner confirms merges only once everything else holds, so an unconfirmed merge is a gap of
+  // its own only when nothing else is: otherwise the runner was never asked.
+  const unconfirmed: Array<{ workItemId: string; pullRequests: number[] }> = [];
+  for (const item of items) {
+    if (item.currentAttempt) {
+      add(item.stateCauses.includes("attempt_awaiting_verification") ? "attempt_awaiting_verification" : "attempt_open", { workItemId: item.id });
+      continue;
+    }
+    if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) { add("no_delivered_verification", { workItemId: item.id }); continue; }
+    if (item.primaryState !== "delivered") { add("work_item_not_delivered", { workItemId: item.id }); continue; }
+    const before = count();
+    const outside: number[] = [], stale: number[] = [], open: number[] = [], wrongHead: number[] = [], unverified: number[] = [];
+    let merged = 0;
+    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
+      if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase()) outside.push(ref.number);
+      else if (fact.availability !== "fresh") stale.push(ref.number);
+      else if (fact.value.state === "closed") continue;
+      else if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) open.push(ref.number);
+      else if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) wrongHead.push(ref.number);
+      else if (!snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === fact.value.headSha &&
+          delivered.mergeCommitSha === fact.value.mergeCommitSha)) unverified.push(ref.number);
+      else merged++;
+    }
+    if (outside.length) add("pull_request_outside_repository", { workItemId: item.id, pullRequests: outside });
+    if (stale.length) add("stale_pull_request", { workItemId: item.id, pullRequests: stale });
+    if (open.length) add("unmerged_pull_request", { workItemId: item.id, pullRequests: open });
+    if (wrongHead.length) add("delivery_not_verified_at_exact_head", { workItemId: item.id, pullRequests: wrongHead });
+    if (unverified.length) unconfirmed.push({ workItemId: item.id, pullRequests: unverified });
+    else if (!merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
+  }
+  if (!count()) for (const gap of unconfirmed) add("delivery_merge_unconfirmed", gap);
 }

@@ -253,6 +253,48 @@ launch identity after forge inspection. A change refuses the close before record
 `campaign_issue_closure_authority_changed` identifies the request, occurrence and revisions without
 logging the issue payload or authority contents.
 
+### Closure Proof Gaps
+
+A completed or not-planned closure of an in-scope issue that the boundary delegates, but that fails
+the proof above, keeps the person-owned route (#4058). Its authority reason is
+`closure_proof_incomplete` rather than `outside_boundary`, and the server records what failed in
+the snapshot's `deliveryGaps`. `deliveryFailure` holds their compact line,
+`code[:workItemId][:#n,#m]` joined by `; `. The `request_github_issue_closure` response adds
+`proofGaps`: the same gaps, each with a fixed `action` and a derived `summary`, and a sentence
+saying a person now decides the request. A request whose gaps are fixed passes the proof, so it is
+Orchestrator-owned and supersedes the person's pending request for the same issue.
+
+| Gap | Action |
+| --- | --- |
+| `open_related_pull_requests` (numbers) | `wait_for_pull_requests`: each must merge or close |
+| `attempt_awaiting_verification` (item) | `verify_child`: `verify_campaign_child` with that item |
+| `attempt_open` (item) | `finish_attempt`: wait and verify, or end the attempt |
+| `no_work_item`, `no_delivered_verification`, `work_item_not_delivered` (item) | `deliver_work_item` |
+| `no_merged_delivery_pull_request`, `pull_request_outside_repository` (item) | `record_delivery_pull_requests`: the item's reported stage |
+| `unmerged_pull_request` (item, numbers) | `wait_for_pull_requests` |
+| `stale_pull_request`, `delivery_merge_unconfirmed` (item, numbers) | `request_again` |
+| `disposition_unverified` (item when it has one) | `record_disposition` |
+| `comment_unsafe` | `revise_comment` |
+| `missing_work_item`, `work_item_outside_scope` (item), `delivery_not_verified_at_exact_head` (item, numbers), `fixed_by_completion_only`, `delivery_unverified` | `person_decides` |
+
+Gaps name what failed; they never admit anything. They are derived from the same ledger, merge
+gates and forge facts as the proof, which does not read them, and every failed proof has at least
+one (`delivery_unverified` when nothing more specific applies). A merge the runner never confirmed
+is named only when nothing else failed, since the runner is asked only then. `outside_boundary`
+still covers a stale boundary, another repository, an issue outside the scope, a reason or
+operation the boundary does not delegate (whose `deliveryFailure` reads `outside_boundary`, with no
+gaps), and an admission bound to another boundary revision.
+
+**A timeline-only reference keeps blocking.** The runner relates an open pull request to the issue
+by closing reference, by a mention in its title or body, or by GitHub's `cross-referenced`
+timeline event. GitHub keeps that event after the mention is edited out, so a sibling PR that no
+longer mentions the issue and has no closing reference still blocks delegated closure until it
+merges or closes. This is deliberate: the timeline event is the only record the forge keeps of
+the relation, the snapshot does not carry the PR's body to re-check, and a body can be edited back
+at any moment. Treating an edited-out mention as unrelated would let an agent's edit remove a
+proof condition. The gap names each such PR and says it blocks until it merges or closes; the
+person-owned route stays available meanwhile.
+
 ### Closure Refusal Reasons
 
 A `refused` closure result always carries `refusal` (#4059): a `reason`, the related PRs it names,

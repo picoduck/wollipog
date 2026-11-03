@@ -1073,12 +1073,13 @@ test("persistent cumulative process cost is emitted as a per-turn delta while us
   driver.dispose();
 });
 
-test("persistent cost baseline resets when an evicted process resumes", async () => {
+test("an old CLI's persistent cost baseline resets when an evicted process resumes", async () => {
   const children: any[] = [];
   const events: SessionEventPayload[] = [];
   let idleCallback: (() => void) | null = null;
+  // A missing version no longer implies process totals (#4069); this CLI is known to predate 2.1.277.
   const driver = new ClaudeCodeDriver(
-    { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
+    { ...baseOpts, agentVersion: "2.1.276", env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
     { ...noopCb, onEvent: (event) => events.push(event) },
     {
       spawn: () => {

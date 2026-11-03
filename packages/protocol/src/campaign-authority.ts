@@ -60,7 +60,10 @@ export interface CampaignAuthorityEvaluation {
     "outside_issue_scope" |
     /** #4062: a Full Control merge whose closures nothing reads (a GitLab merge, or a GitHub merge
      * from a runner older than the closing-reference check) and whose declared ones prove nothing. */
-    "unverified_closures";
+    "unverified_closures" |
+    /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
+     * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
+    "closure_proof_incomplete";
   operation: CampaignAuthorityOperation;
   boundaryRevision?: number;
   /** Full Control only: which formerly human class this occurrence belongs to. Content-safe. */
