@@ -13,12 +13,20 @@ const bounded = (value: unknown, max: number): value is string => typeof value =
 const sha = (value: unknown): value is string => typeof value === "string" && /^[0-9a-f]{64}$/u.test(value);
 const record = (value: unknown): value is Record<string, unknown> => Boolean(value) && typeof value === "object" && !Array.isArray(value);
 
+/** The most runner text the sanitizer reads; far beyond what a refusal keeps. */
+const RUNNER_ERROR_SCAN_MAX = 16_384;
+
 /** A runner's message as a refusal keeps it (#4059): credentials and machine-local paths redacted,
- * control characters and runs of whitespace collapsed, and bounded. */
+ * control characters and runs of whitespace collapsed, and bounded. Redaction runs again after the
+ * text is normalized, since a control character between a credential's label and its value hides it
+ * from the first pass, and the output bound applies only to redacted text. */
 export function sanitizedIssueClosureRunnerError(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
-  const text = redactOperationalTranscriptText(value.slice(0, 4 * GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX))
-    .replace(/[\p{Cc}\p{Cf}]+/gu, " ").replace(/\s+/gu, " ").trim();
+  // An over-long message loses its trailing partial word, so no credential is cut below the length
+  // its pattern recognizes.
+  const scanned = value.length > RUNNER_ERROR_SCAN_MAX ? value.slice(0, RUNNER_ERROR_SCAN_MAX).replace(/\S*$/u, "") : value;
+  const printable = redactOperationalTranscriptText(scanned).replace(/[\p{Cc}\p{Cf}]+/gu, " ");
+  const text = redactOperationalTranscriptText(printable.replace(/\s+/gu, " ")).trim();
   if (!text) return undefined;
   return text.length > GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX ? `${text.slice(0, GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX - 1)}…` : text;
 }

@@ -1,9 +1,25 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeIssueClosureSnapshot } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, sanitizedIssueClosureRunnerError } from "./github-issue-closure.js";
 
 const DIGEST = "a".repeat(64);
 const HEAD = "b".repeat(40);
+
+test("a refused closure's runner message is redacted after control characters are normalized (#4059)", () => {
+  // A control character between a credential's label and its value hides it from a single pass.
+  for (const separator of ["\u0007", "\u0000", "​", "\t\n"]) {
+    const kept = sanitizedIssueClosureRunnerError(`GitHub refused: Bearer${separator}opaqueCredentialValue and password=${separator}hunter2`) ?? "";
+    assert.ok(!kept.includes("opaqueCredentialValue") && !kept.includes("hunter2"), JSON.stringify(kept));
+    assert.match(kept, /^GitHub refused: Bearer <redacted-secret>/u);
+  }
+  // A credential straddling the read bound loses its tail rather than slipping under its pattern.
+  const token = `ghp_${"A".repeat(36)}`;
+  const long = sanitizedIssueClosureRunnerError(`${token} ${"x ".repeat(8_190)}${token}`) ?? "";
+  assert.ok(!long.includes("ghp_") && long.length <= 300 && long.endsWith("…"), long.slice(0, 80));
+  assert.equal(sanitizedIssueClosureRunnerError(`${"word ".repeat(3_277)}ghp_${"B".repeat(36)}`)?.includes("ghp_"), false);
+  assert.equal(sanitizedIssueClosureRunnerError(" \u0007\n "), undefined);
+  assert.equal(sanitizedIssueClosureRunnerError(42), undefined);
+});
 
 function closure(repository: string, url: string, pullUrl: string): Record<string, unknown> {
   return { category: "issue_closure", repository, issue: 12, title: "Obsolete task", url, forgeDigest: DIGEST,
