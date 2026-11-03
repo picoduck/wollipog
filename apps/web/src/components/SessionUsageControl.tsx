@@ -5,6 +5,7 @@ import { formatCost, formatTokens, resolvedModelLabel } from "../format.js";
 import { costProvenanceNote, estimatedCostSourceUrl, inputTokenBasis, RUNNING_COUNTERS_BASIS_NOTE, sessionCostLabel,
   sessionUsageTotals } from "../session-cost.js";
 import { useLiveSession, useOptionalNavigate } from "../store.js";
+import { claudeRunningTotalSentence } from "../usage-view-model.js";
 import { useAnchoredPopover } from "./anchored-popover.js";
 import { ComposerButton } from "./ComposerControls.js";
 import { ChevronRightIcon } from "./Icons.js";
@@ -113,6 +114,9 @@ function SessionCostFigures({ session, models, detail }: {
         <p className="usage-popover-note">Some models have no known rate, so this cost is incomplete. Token counts are exact.</p>
       ) : !priced && (
         <p className="usage-popover-note">No rate is known for these models, so the cost isn't estimated. Token counts are exact.</p>
+      )}
+      {loaded?.runningTotalRecords && (
+        <p className="usage-popover-note">{claudeRunningTotalSentence(loaded.runningTotalRecords.records, "this cost")}</p>
       )}
       {!tokensReported ? (
         <p className="usage-popover-note">The provider reported this cost but no token counts, so there is no breakdown by model.</p>

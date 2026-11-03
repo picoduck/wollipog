@@ -84,7 +84,7 @@ own closure would pass. If a member joins, leaves or changes state before execut
 refuses the approval with `epic_members_changed`. A placeholder item of an epic closed this way no
 longer holds the campaign's completion, so the root need not mark it `scope_removed`; any epic
 item with an attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
-plan and issues without members are unchanged. The member read needs runner protocol 274 and a
+plan and issues without members are unchanged. The member read needs runner protocol 278 and a
 GitHub repository; elsewhere the epic keeps the own-work proof and its closure stays human-owned.
 
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision

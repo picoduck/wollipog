@@ -10250,6 +10250,57 @@ test("zeroed provider accounting is unpriced and historical Claude estimates rem
   assert.equal(usage.totals.costUsd, 1.1);
 });
 
+test("Claude turns that billed a running total are shown as uncertain in every cost view (#4069)", () => {
+  const root = mkdtempSync(join(tmpdir(), "claude-running-totals-"));
+  const file = join(root, "control-plane.sqlite");
+  const checkpoint = (totalCostUsd: number, cacheReadInputTokens: number, accountingScope: "process" | "conversation" = "process") => ({
+    sessionId: "conversation", totalCostUsd, accountingScope,
+    models: { "claude-opus-5": { inputTokens: 100, outputTokens: 50, cacheReadInputTokens, cacheCreationInputTokens: 10, costUSD: totalCostUsd } } });
+  const turn = (costUsd: number, closing: ReturnType<typeof checkpoint>) => ({ kind: "token_usage" as const, model: "claude-opus-5",
+    inputTokens: 1, costUsd, costIsEstimate: true as const, claudeUsageCheckpoint: closing });
+  const range = { since: 0, through: 10_000_000, granularity: "hour" as const };
+  let db = ControlPlaneDb.open(file);
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.appendEvent("sess-1", turn(15, checkpoint(15, 7_000)), 3_600_100, { accrueUsage: true });
+    // A long turn's display-only records never hide its baseline.
+    for (let request = 0; request < 600; request++) {
+      db.appendEvent("sess-1", { kind: "token_usage", model: "claude-opus-5", inputTokens: 1, liveUsage: "provisional" }, 3_600_150, { accrueUsage: true });
+    }
+    db.appendEvent("sess-1", turn(20, checkpoint(20, 7_400)), 3_600_200, { accrueUsage: true }); // the whole total again
+    db.appendEvent("sess-1", turn(5, checkpoint(25, 7_500)), 3_600_300, { accrueUsage: true }); // a correct delta
+    db.appendEvent("sess-1", turn(30, checkpoint(30, 7_600)), 3_600_400, { accrueUsage: true }); // the whole total again
+    const expected = { records: 2, costUsd: 50 };
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the session's cost view");
+    assert.equal(db.queryUsageAggregation(localOwner(), range).runningTotalClaudeRecords, 2, "the Usage view");
+    assert.equal(db.queryUsageAggregation(localOwner(), { ...range, driver: "codex" }).runningTotalClaudeRecords, undefined,
+      "with the same filters as its buckets");
+    assert.equal(db.queryUsageAggregation(localOwner(), range).totals.costUsd, 70, "the amount itself is unchanged");
+
+    // History recorded before the flag existed is found once, at startup.
+    db.raw().exec("DELETE FROM usage_claude_running_totals; DELETE FROM control_plane_metadata WHERE key='claude_running_totals_v1_backfilled'");
+    assert.equal(db.sessionUsageByModel("sess-1").runningTotalRecords, undefined);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the backfill runs once");
+
+    // A reconnect's snapshot accrues the cost first; history hydrated afterwards is still flagged.
+    db.createSession(newSession({ id: "snapshot-first", driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.updateSessionFromSnapshot("snapshot-first", snapshot({ id: "snapshot-first", driver: "claude-code", tokensIn: 2,
+      costUsd: 35, costIsEstimate: true, seq: 2 }), 3_600_500);
+    db.appendEvent("snapshot-first", turn(15, checkpoint(15, 7_000)), 3_600_600, { accrueUsage: true, runnerSeq: 1 });
+    db.appendEvent("snapshot-first", turn(20, checkpoint(20, 7_400)), 3_600_700, { accrueUsage: true, runnerSeq: 2 });
+    assert.deepEqual(db.sessionUsageByModel("snapshot-first").runningTotalRecords, { records: 1, costUsd: 20 });
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("new Claude snapshot catch-up preserves estimate provenance without a legacy warning", () => {
   const db = withRunner();
   db.createSessionFromSnapshot(snapshot({ id: "sdk-snapshot", driver: "claude-code", historyEpoch: 1,

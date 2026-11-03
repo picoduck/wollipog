@@ -183,7 +183,7 @@ from them. Every member must be in scope and closed as completed, and every disp
 of the epic must still be delivered; a placeholder item that was never dispatched neither blocks
 the closure nor, once the epic closes this way, the campaign's completion. A gap names each member
 that is open (close it through its own closure request first), closed another way, outside scope
-or unreadable. This needs runner protocol 274 on GitHub; elsewhere the epic's closure stays with
+or unreadable. This needs runner protocol 278 on GitHub; elsewhere the epic's closure stays with
 the person. It never applies to a not-planned closure or to an issue with a fixed-by plan.
 
 The CLI equivalents of steps 1, 2 and 4 are:

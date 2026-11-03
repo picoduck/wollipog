@@ -187,6 +187,7 @@ function aggregateResponse(granularity: UsageAggregationGranularity): UsageAggre
     granularity,
     retention,
     legacyClaudeCostRecords: params.get("legacyCosts") === "1" ? 10 : 0,
+    ...(params.get("runningTotals") === "1" ? { runningTotalClaudeRecords: 4 } : {}),
     pricing: ratesRefreshed ? { ...response.pricing!, status: "fresh" } : response.pricing,
     seriesByDriver: nextSeriesByDriver,
     series: [...buckets.entries()].map(([bucketTs, total]) => ({ bucketTs, ...total })).sort((a, b) => b.bucketTs - a.bucketTs),

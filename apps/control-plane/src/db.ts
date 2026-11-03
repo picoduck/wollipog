@@ -1,6 +1,7 @@
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
 /**
  * Control-plane persistence, backed by `node:sqlite` (built into Node >=22.5).
  * Using the built-in driver means there is no native module to compile — the
@@ -37,6 +38,7 @@ import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
+import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
@@ -179,6 +181,8 @@ import {
   type UsageAggregationResponse,
   type UsageAmount,
   type SessionModelUsage,
+  type SessionUsageResponse,
+  type ClaudeUsageCheckpoint,
   type UsageDailyBudgetPolicy,
   type UserCostWindows,
   type UsageRetentionPolicy,
@@ -192,6 +196,9 @@ import {
   type ParentControlPolicy,
   type OrchestratorCampaignPolicy,
   type OrchestratorCampaignProjection,
+  type OrchestratorCampaignStatus,
+  CAMPAIGN_HANDOFFS_LIMIT,
+  campaignStatusTerminal,
   type OrchestratorFollowUpRecord,
   type CampaignAttemptBoundary,
   type CampaignCostSummary,
@@ -2764,6 +2771,29 @@ CREATE TABLE IF NOT EXISTS usage_session_models (
   PRIMARY KEY (session_id, model),
   FOREIGN KEY (session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+
+-- Claude turns that billed a conversation's running total as their own (#4069). Their cost stays
+-- in the ledger, which cannot be corrected automatically, and the cost views show it as uncertain.
+-- No foreign keys: like the aggregate buckets, a flag outlives its event and session.
+CREATE TABLE IF NOT EXISTS usage_claude_running_totals (
+  event_id        INTEGER PRIMARY KEY,
+  session_id      TEXT NOT NULL,
+  bucket_ts       INTEGER NOT NULL,
+  organization_id TEXT NOT NULL,
+  owner_kind      TEXT NOT NULL,
+  owner_id        TEXT NOT NULL,
+  runner_id       TEXT NOT NULL,
+  workspace_id    TEXT NOT NULL,
+  agent_id        TEXT NOT NULL,
+  driver          TEXT NOT NULL,
+  campaign_session_id TEXT,
+  cost_microusd   INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_session ON usage_claude_running_totals(session_id);
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_campaign
+  ON usage_claude_running_totals(campaign_session_id, bucket_ts) WHERE campaign_session_id IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_usage_claude_running_totals_bucket
+  ON usage_claude_running_totals(organization_id, bucket_ts);
 
 CREATE TABLE IF NOT EXISTS usage_hourly (
   bucket_ts           INTEGER NOT NULL,
@@ -5966,12 +5996,16 @@ export class ControlPlaneDb {
       parentControlPolicy: this.parentControlPolicy(campaignId) ?? undefined });
     const records = this.campaignRecovery.activeRecords(campaignId);
     const recoveryIds = new Set<string>();
+    // An item handed to a person or an outside party is no longer the campaign's to recover (#4070);
+    // `campaignTerminalStatus` decides what it means for completion.
+    const handedOff = this.campaignWorkLedger.terminalHandoffItemIds(campaignId);
     let unfinished = false, cursor: string | undefined;
     do {
       const page = this.campaignWorkLedger.page(campaignId, { state: "unfinished", origin: "original", limit: 100,
         ...(cursor ? { cursor } : {}) }, now);
       if (!page.ok) return { state: "recovery_held", recoveryIds: [] };
       for (const item of page.data.items) {
+        if (handedOff.has(item.id)) continue;
         if (item.commitment !== "committed" || !item.issue || item.issue.repository.toLowerCase() !== scope.repository.toLowerCase() ||
             !scope.issueNumbers.includes(item.issue.number) || !policy.issueNumbers?.includes(item.issue.number)) continue;
         // A never-dispatched placeholder of an epic this campaign closed from its members (#4060) is
@@ -7943,6 +7977,7 @@ export class ControlPlaneDb {
       controlPlane.captureUnresetLegacyCampaignReports();
       controlPlane.campaignWorkLedger.accounting.startRecording(Date.now());
       controlPlane.seedUsageAggregationBaseline(Date.now());
+      controlPlane.backfillClaudeRunningTotals();
       controlPlane.maintainUsageAggregation(Date.now());
       controlPlane.trackSessionAccessChanges();
       return controlPlane;
@@ -12138,14 +12173,23 @@ export class ControlPlaneDb {
   private sessionSummaryReadBytes = 0;
 
   /** REST and dashboard connects share the exact authorized serialized list until a DB write. */
-  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false, supportsRetryExhaustion = true): string {
+  sessionListJsonForPrincipal(principal: AuthPrincipal, includeArchived = false, supportsRetryExhaustion = true,
+    supportsHandoffs = true): string {
     const cached = this.sessionSummaryRead(principal,includeArchived);
-    if (supportsRetryExhaustion) return cached.json;
+    if (supportsRetryExhaustion && supportsHandoffs) return cached.json;
+    if (supportsRetryExhaustion) {
+      // Only the campaign status needs a fallback (#4070), and only a campaign completed with
+      // handoffs has one, so this copy is rarely different and is not cached.
+      const payload={ sessions: cached.sessions };
+      const projected=projectCampaignHandoffsForUi(payload,null);
+      return projected===payload ? cached.json : JSON.stringify(projected);
+    }
     if (cached.legacyJson !== undefined) return cached.legacyJson;
     // This REST route sends serialized text, bypassing Fastify preSerialization. Keep canonical
     // data shared and cache the legacy projection lazily, only within the same memory budget.
+    // Every dashboard that predates the retry projection also predates campaign handoffs.
     const payload={ sessions: cached.sessions };
-    const legacy=projectBackgroundRetryExhaustionForUi(payload,null);
+    const legacy=projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload,null),null);
     const legacyJson=legacy===payload ? cached.json : JSON.stringify(legacy);
     const extraBytes=legacyJson===cached.json ? 0 : Buffer.byteLength(legacyJson);
     if (this.sessionSummaryReads.get(JSON.stringify([principal,includeArchived]))===cached &&
@@ -14981,6 +15025,78 @@ export class ControlPlaneDb {
     }
   }
 
+  /** Flag a Claude turn whose records billed its conversation's running total (#4069). Only a
+   * process-scoped checkpoint can carry the defect, so other records cost nothing here. */
+  private flagClaudeRunningTotalInTransaction(
+    sessionId: string,
+    eventId: number,
+    payload: Extract<SessionEventPayload, { kind: "token_usage" }>,
+    occurredAt: number,
+    dimensions: UsageDimensions,
+  ): void {
+    if (payload.claudeUsageCheckpoint?.accountingScope !== "process") return;
+    const current = this.stmt("SELECT seq FROM session_events WHERE id=?").get(eventId) as { seq: number } | undefined;
+    if (!current) return;
+    // Only accrued records count, so no number of display-only records can hide the baseline.
+    const accrued = `session_id=? AND kind='token_usage' AND json_valid(payload) AND ${ACCRUED_USAGE_SQL}`;
+    const checkpointed = "json_type(payload, '$.claudeUsageCheckpoint')='object'";
+    const previous = this.stmt(
+      `SELECT seq FROM session_events WHERE ${accrued} AND ${checkpointed} AND seq<? ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, current.seq) as { seq: number } | undefined;
+    const before = this.stmt(
+      `SELECT COALESCE(SUM(CASE WHEN json_type(payload, '$.costUsd') IN ('real', 'integer')
+                                THEN json_extract(payload, '$.costUsd') ELSE 0 END), 0) AS billed
+         FROM session_events WHERE ${accrued} AND seq>? AND seq<?`,
+    ).get(sessionId, previous?.seq ?? -1, current.seq) as { billed: number };
+    const prior = this.stmt(
+      `SELECT payload FROM session_events WHERE ${accrued} AND ${checkpointed}
+          AND json_extract(payload, '$.claudeUsageCheckpoint.totalCostUsd')>0 AND seq<? ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, current.seq) as { payload: string } | undefined;
+    const billed = claudeTurnRunningTotal(payload, Number(before.billed),
+      prior ? (JSON.parse(prior.payload) as { claudeUsageCheckpoint: ClaudeUsageCheckpoint }).claudeUsageCheckpoint : null);
+    if (billed === null) return;
+    const owner = dimensions.scope.owner;
+    this.stmt(
+      `INSERT OR IGNORE INTO usage_claude_running_totals
+         (event_id, session_id, bucket_ts, organization_id, owner_kind, owner_id, runner_id, workspace_id, agent_id, driver,
+          campaign_session_id, cost_microusd)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    ).run(eventId, sessionId, Math.floor(Math.max(0, occurredAt) / 3_600_000) * 3_600_000, dimensions.scope.organizationId,
+      owner.kind, owner.kind === "organization" ? owner.organizationId : owner.kind === "user" ? owner.userId : owner.teamId,
+      dimensions.runnerId, dimensions.workspaceId, dimensions.agentId, dimensions.driver,
+      // The campaign its usage is attributed to: attribution keeps a deleted contributor's cost.
+      this.campaignUsageMembership(sessionId)?.campaignSessionId ?? null, ControlPlaneDb.usageMicroUsd(billed));
+  }
+
+  /** One-time scan of history recorded before the flag existed (#4069). Records it cannot read, or
+   * whose session no longer resolves to an owner, stay unflagged. */
+  private backfillClaudeRunningTotals(): void {
+    const marker = this.stmt("SELECT value FROM control_plane_metadata WHERE key='claude_running_totals_v1_backfilled'")
+      .get() as { value: string } | undefined;
+    if (marker?.value === "1") return;
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const candidates = this.stmt(
+        `SELECT e.id, e.session_id, e.ts, e.payload FROM session_events e JOIN sessions s ON s.id=e.session_id
+          WHERE s.driver='claude-code' AND e.kind='token_usage'
+            AND json_valid(e.payload) AND json_extract(e.payload, '$.claudeUsageCheckpoint.accountingScope')='process'
+          ORDER BY e.id`,
+      ).all() as Array<{ id: number; session_id: string; ts: number; payload: string }>;
+      for (const candidate of candidates) {
+        const dimensions = this.usageDimensions(candidate.session_id);
+        if (dimensions) {
+          this.flagClaudeRunningTotalInTransaction(candidate.session_id, candidate.id, JSON.parse(candidate.payload),
+            Number(candidate.ts), dimensions);
+        }
+      }
+      this.stmt("INSERT OR REPLACE INTO control_plane_metadata (key, value) VALUES ('claude_running_totals_v1_backfilled', '1')").run();
+      this.db.exec("COMMIT");
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
   private recordUsageEventInTransaction(
     sessionId: string,
     payload: SessionEventPayload,
@@ -14988,6 +15104,12 @@ export class ControlPlaneDb {
     source?: { historyEpoch: number | null; runnerSeq: number },
     eventId?: number,
   ): void {
+    // Before any coverage check: a snapshot may already have accrued this record's cost, and a
+    // hydrated history that arrives afterwards must still be flagged (#4069).
+    if (eventId !== undefined && payload.kind === "token_usage" && payload.claudeUsageCheckpoint?.accountingScope === "process") {
+      const dimensions = this.usageDimensions(sessionId);
+      if (dimensions?.driver === "claude-code") this.flagClaudeRunningTotalInTransaction(sessionId, eventId, payload, occurredAt, dimensions);
+    }
     if (source) {
       let state = this.stmt(
         `SELECT runner_history_epoch, covered_through_seq FROM usage_session_state WHERE session_id=?`,
@@ -15388,7 +15510,7 @@ export class ControlPlaneDb {
 
   /** A session's usage split by the model that produced it, most processed tokens first. The
    * session totals come from the same ledger so the two views agree. */
-  sessionUsageByModel(sessionId: string): { totals: UsageAmount; byModel: SessionModelUsage[] } {
+  sessionUsageByModel(sessionId: string): Omit<SessionUsageResponse, "sessionId" | "pricing"> {
     const measure = `input_tokens, output_tokens, cost_microusd, ${USAGE_LEDGER_V103_COLUMNS.join(", ")}`;
     const processed = `CASE WHEN driver IN ('codex', 'codex-app-server')
                          THEN input_tokens + cache_creation_tokens + output_tokens
@@ -15432,7 +15554,12 @@ export class ControlPlaneDb {
       cache_creation_tokens: 0, reasoning_tokens: 0, cache_savings_microusd: 0, provider_reported_records: 0,
       model_priced_records: 0, unpriced_records: 0, processed_tokens: 0,
     });
-    return { totals: amount(totals), byModel };
+    const repeated = this.stmt(
+      "SELECT COUNT(*) AS records, COALESCE(SUM(cost_microusd), 0) AS cost FROM usage_claude_running_totals WHERE session_id=?",
+    ).get(sessionId) as { records: number; cost: number };
+    return { totals: amount(totals), byModel,
+      ...(Number(repeated.records) > 0
+        ? { runningTotalRecords: { records: Number(repeated.records), costUsd: Number(repeated.cost) / 1_000_000 } } : {}) };
   }
 
   /** Lightweight provenance projection for SessionView. It uses the same source counters and
@@ -15533,6 +15660,10 @@ export class ControlPlaneDb {
     const where = whereFor(since);
     const source = sourceFor(granularity, where.sql);
     const sourceParams = granularity === "hour" ? where.params : [...where.params, ...where.params];
+    // Same visibility and dimension filters as the buckets: the flags carry their columns (#4069).
+    const runningTotalClaudeRecords = Number((this.stmt(
+      `SELECT COUNT(*) AS n FROM usage_claude_running_totals u WHERE ${where.sql}`,
+    ).get(...where.params) as { n: number }).n);
     const withSource = `WITH usage_source AS MATERIALIZED (${source})`;
     type AggregateRow = {
       input_tokens: number | null; output_tokens: number | null; cost_microusd: number | null;
@@ -15655,6 +15786,7 @@ export class ControlPlaneDb {
       granularity,
       hourlyDataAvailable: !hasRolledRows,
       legacyClaudeCostRecords: Number(aggregateRows.find((row) => row.kind === "driver" && row.key === "claude-code")?.provider_reported_records ?? 0),
+      ...(runningTotalClaudeRecords > 0 ? { runningTotalClaudeRecords } : {}),
       since,
       through: query.through,
       retention: policy,
@@ -19833,6 +19965,17 @@ export class ControlPlaneDb {
     ).get(sessionId, eventSeq));
   }
 
+  /** The seq of the session's last top-level report at or before `throughSeq` (#4070): the report
+   * that closed a campaign attempt ending there, whatever the session reported later. */
+  lastAgentReportThrough(sessionId: string, throughSeq: number): number | null {
+    return (this.stmt(
+      `SELECT MAX(seq) AS seq FROM session_events
+       WHERE session_id=? AND seq<=? AND (kind='agent_response_completed' OR
+         (kind='agent_message' AND json_extract(payload, '$.final')=1 AND trim(json_extract(payload, '$.text'))!=''
+          AND json_type(payload, '$.parentToolUseId') IS NULL))`,
+    ).get(sessionId, throughSeq) as { seq: number | null }).seq;
+  }
+
   /** Seq of the session's last top-level report when no later report or assignment superseded it,
    * and null when its last word is not a report. The same predicate that keeps a stored
    * attestation valid, so a stopped session's report stays attestable after it ends (#1440). */
@@ -20868,12 +21011,7 @@ export class ControlPlaneDb {
       : blocked > 0 ? "blocked" as const
       : fullyVerified === total ? "verified_complete" as const
       : "active" as const;
-    if (childStatus === "verified_complete") {
-      const completion = this.campaignRecoveryCompletion(resolvedCampaignId);
-      if (completion.state === "recovery_ready") childStatus = this.campaignContinuationAdmission(resolvedCampaignId).state === "available"
-        ? "active" : "blocked";
-      else if (completion.state === "recovery_held") childStatus = "blocked";
-    }
+    if (childStatus === "verified_complete") childStatus = this.campaignTerminalStatus(resolvedCampaignId);
     // The continuation reads the child-derived status (its `held` state depends on it), and the
     // final status reads the continuation, so derive them in that order and never the reverse.
     const continuation = resolvedCampaignId === campaignSessionId
@@ -20887,6 +21025,38 @@ export class ControlPlaneDb {
       : undefined;
     const status = stalled && childStatus === "active" ? "blocked" as const : childStatus;
     return { childIds, pendingHuman, pendingOrchestrator, pendingGenericHuman, pendingGenericOrchestrator, humanRequestTokens, orchestratorRequestTokens, waitingHuman, active, blocked, fullyVerified, cleanupPending, cleanupWorktrees, heldChildren, total, continuation, stalled, status };
+  }
+
+  /**
+   * The one place a campaign's end state is decided, once every child is verified and cleaned up and
+   * no request is pending. Recovery that is ready keeps it going (or blocked without admission), and
+   * original scoped work with no eligible recovery holds it blocked, as before: that check alone
+   * judges in-scope original items, a fresh merged forge fact included. Then the ledger decides
+   * (#4070) for the rest of the unfinished committed work an agent still owns. Under Full Control
+   * any of it is blocked; a Custom campaign without handoffs reads its children alone, as before.
+   * With handoffs to `human` or `external` the campaign is Complete with Handoffs only while none
+   * of it is left, and blocked otherwise. Reads rows only, never a SessionView.
+   */
+  private campaignTerminalStatus(campaignId: string): OrchestratorCampaignStatus {
+    const completion = this.campaignRecoveryCompletion(campaignId);
+    if (completion.state === "recovery_ready") {
+      return this.campaignContinuationAdmission(campaignId).state === "available" ? "active" : "blocked";
+    }
+    if (completion.state === "recovery_held") return "blocked";
+    const facts = this.campaignWorkLedger.completionFacts(campaignId);
+    const row = this.stmt("SELECT orchestrator_policy FROM sessions WHERE id=?").get(campaignId) as { orchestrator_policy: string | null } | undefined;
+    const policy = orchestratorCampaignPolicyFromJson(row?.orchestrator_policy ?? null);
+    const fullControl = policy?.control?.mode === "full_control";
+    const scope = fullControl ? policy?.issueScope : undefined;
+    // The same in-scope test `campaignRecoveryCompletion` applies, so no item is judged twice.
+    const agentWork = facts.agentUnfinished.filter((item) => !(scope && item.origin === "original" && item.issue &&
+      item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
+      policy?.issueNumbers?.includes(item.issue.number)));
+    if (!facts.handoffs.length) return fullControl && agentWork.length > 0 ? "blocked" : "verified_complete";
+    // Only a request or decision the root itself still has pending is left here (the children are
+    // done), and the counts above already routed those an Orchestrator owns: a person's turn.
+    if (completion.state === "children_unfinished") return "waiting_human";
+    return agentWork.length === 0 ? "complete_with_handoffs" : "blocked";
   }
 
   /** The campaign status alone, for a session summary: identical to `campaignProjection().status`
@@ -20934,10 +21104,15 @@ export class ControlPlaneDb {
       effectiveOwners.ui_evidence_approval === "orchestrator" && directEvidenceReview.effectiveOwner === "human" && directEvidenceReview.fallback
       ? { effectiveOwner: "orchestrator", limitation: directEvidenceReview.fallback } : directEvidenceReview;
     effectiveOwners.ui_evidence_approval = uiEvidenceReview.effectiveOwner;
-    // Campaign Elapsed ends when the campaign first reaches verified completion and resumes if it
-    // reopens. Completion is derived, never written, so the projection records what it observes.
-    this.campaignWorkLedger.accounting.observeCompletion(resolvedCampaignId, status === "verified_complete", Date.now(),
+    // Campaign Elapsed ends when the campaign first reaches a terminal status (verified, or complete
+    // with handoffs) and resumes if it reopens. Completion is derived, never written, so the
+    // projection records what it observes.
+    const terminal = campaignStatusTerminal(status);
+    this.campaignWorkLedger.accounting.observeCompletion(resolvedCampaignId, terminal, Date.now(),
       () => this.campaignWorkLedger.lastVerifiedAt(resolvedCampaignId));
+    // The owner's to-do list rides on the root's own view only, like the ledger summary below.
+    const handoffs = resolvedCampaignId === campaignSessionId
+      ? this.campaignWorkLedger.completionFacts(resolvedCampaignId).handoffs : [];
     const limit = campaign.max_child_sessions ?? DEFAULT_LIVE_CHILD_LIMIT;
     const occupied = this.childSessionAllocations(resolvedCampaignId).liveCount;
     const budget=this.campaignBudgets.view(resolvedCampaignId);
@@ -20948,7 +21123,17 @@ export class ControlPlaneDb {
         : "Use review sessions for each member's own pushed PR; native campaign review jobs are retired.",
     };
     const recovery = policy.control?.mode === "full_control" ? this.campaignRecovery.projection(resolvedCampaignId) : undefined;
-    if (recovery) {
+    if (recovery && terminal) {
+      // A finished campaign has nothing left to recover (#4070): its records read as resolved and
+      // the automation as held without a reason, so none of them looks blocked or warns. The stored
+      // records are untouched and read as they are again if the campaign reopens.
+      recovery.records = recovery.records.map((record) => ({ ...record, state: "resolved" }));
+      recovery.automatic = 0;
+      recovery.waitingHuman = 0;
+      recovery.blocked = 0;
+      recovery.unattendedReady = false;
+      recovery.automation = { state: "lifecycle_held" };
+    } else if (recovery) {
       recovery.automation = this.campaignContinuationAdmission(resolvedCampaignId);
       recovery.unattendedReady &&= recovery.automation.state === "available";
     }
@@ -20969,6 +21154,9 @@ export class ControlPlaneDb {
       })(),
       ...(policy.control?.mode === "full_control"
         ? { fullControlHumanRequired: fullControlStandingHumanRequired(humanRequiredRulesExist(this.listGovernancePolicies())) } : {}),
+      ...(handoffs.length
+        ? { handoffs: { total: handoffs.length, items: handoffs.slice(0, CAMPAIGN_HANDOFFS_LIMIT).map((item) => structuredClone(item)) } }
+        : {}),
       limits: {
         maximumConcurrentChildren: limit,
         occupied,
@@ -21015,7 +21203,7 @@ export class ControlPlaneDb {
       // under the ledger revision and the open attempts' observed status (#2417).
       ...(resolvedCampaignId === campaignSessionId ? { work: this.campaignWorkLedger.summary(resolvedCampaignId, {
         campaignCreatedAt: campaign.created_at,
-        complete: status === "verified_complete",
+        complete: terminal,
         childSessionIds: childIds,
         cleanupPending,
         canSeeSession: this.campaignRootAudienceCanSee(resolvedCampaignId),
@@ -21069,7 +21257,7 @@ export class ControlPlaneDb {
       this.campaignContinuationAdmission(campaign.id).state !== "available" ||
       campaign.status === "input_required" || (campaignStatus === "waiting_human" &&
         !this.campaignMayContinueWhileHumanWaiting(campaign.id)) ||
-      campaignStatus === "verified_complete" || !runnerCompatible;
+      campaignStatusTerminal(campaignStatus) || !runnerCompatible;
     const state = latest?.state === "missing_result" ? "missing_result" as const
       : latest?.state === "failed" ? "failed" as const
       : held ? "held" as const

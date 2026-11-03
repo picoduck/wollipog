@@ -81,6 +81,7 @@ export function githubRepository(ref: CampaignPullRequestRef): { owner: string; 
  * as GraphQL literals (JSON string syntax) cannot change the query's shape. */
 export function forgeStatusQuery(refs: ReadonlyArray<{ owner: string; name: string; number: number }>): string {
   const fields = refs.map((ref, index) => `r${index}: repository(owner:${JSON.stringify(ref.owner)},name:${JSON.stringify(ref.name)}){
+    defaultBranchRef{name}
     pullRequest(number:${ref.number}){
       state isDraft headRefOid baseRefName reviewDecision mergeStateStatus
       mergeCommit{oid}
@@ -177,8 +178,9 @@ export function checkRollups(
   };
 }
 
-/** Validate one pull request node into the wire shape, or null when anything is off. */
-export function pullRequestObservation(node: unknown): CampaignForgePullRequestObservation | null {
+/** Validate one pull request node into the wire shape, or null when anything is off. A default
+ * branch name that is missing or malformed is left out rather than failing the observation. */
+export function pullRequestObservation(node: unknown, defaultBranch?: unknown): CampaignForgePullRequestObservation | null {
   const pr = record(node);
   if (!pr) return null;
   const state = STATE[pr.state as string];
@@ -210,6 +212,7 @@ export function pullRequestObservation(node: unknown): CampaignForgePullRequestO
     ...rollups,
     mergeQueue,
     mergeCommitSha: mergeCommit ? mergeCommit.oid as string : null,
+    ...(typeof defaultBranch === "string" && defaultBranch.length > 0 && defaultBranch.length <= 256 ? { defaultBranch } : {}),
   };
 }
 
@@ -282,12 +285,13 @@ async function observeGitHubStatus(refs: readonly CampaignPullRequestRef[], gh: 
       const alias = byIndex.get(index);
       if (!alias) return unsupported(ref);
       const clean = { repository: ref.repository, number: ref.number };
-      const node = record(data[alias])?.pullRequest;
+      const repository = record(data[alias]);
+      const node = repository?.pullRequest;
       if (node === null || node === undefined) {
         const type = aliasErrors.get(alias);
         return { ref: clean, ok: false, failure: type === "NOT_FOUND" || type === "FORBIDDEN" || type === undefined ? "forge_not_found" : "forge_error" };
       }
-      const observation = pullRequestObservation(node);
+      const observation = pullRequestObservation(node, record(repository?.defaultBranchRef)?.name);
       return observation ? { ref: clean, ok: true, observation } : { ref: clean, ok: false, failure: "forge_error" };
     }),
   };
