@@ -49,6 +49,36 @@ test("orchestrator credentials expose only session management and governance rea
   ]) assert.equal(isAgentControlApiRouteAllowed(method!, route!, "orchestrator"), false, route);
 });
 
+test("a delegated image reviewer credential reaches only its own review routes (#4074)", () => {
+  const reviewerRoutes = [
+    ["POST", "/api/sessions/:id/delegated-image-review/image"],
+    ["POST", "/api/sessions/:id/delegated-image-review/acknowledge"],
+    ["POST", "/api/sessions/:id/delegated-image-review/verdict"],
+  ] as const;
+  for (const [method, route] of reviewerRoutes) {
+    assert.equal(isAgentControlApiRouteAllowed(method, route, "normal", false, true), true, route);
+    // Neither an Orchestrator nor an ordinary session credential reaches the reviewer routes.
+    assert.equal(isAgentControlApiRouteAllowed(method, route, "orchestrator"), false, route);
+    assert.equal(isAgentControlApiRouteAllowed(method, route, "normal"), false, route);
+  }
+  assert.equal(isAgentControlApiRouteAllowed("GET", "/api/compatibility", "normal", false, true), true);
+  for (const [method, route] of [
+    ["GET", "/api/sessions"], ["POST", "/api/sessions"], ["POST", "/api/sessions/:id/prompt"],
+    ["POST", "/api/sessions/:id/workflow-decisions"],
+    ["POST", "/api/sessions/:id/descendant-requests/review-ui-evidence"],
+    ["POST", "/api/sessions/:id/descendant-requests/delegated-image-review"],
+    ["POST", "/api/sessions/:id/artifacts/screenshots"],
+    ["GET", "/api/sessions/:id/delegated-image-review/image"],
+  ] as const) assert.equal(isAgentControlApiRouteAllowed(method, route, "normal", false, true), false, route);
+  // The reviewer role narrows even an Orchestrator-role credential.
+  assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions", "orchestrator", false, true), false);
+  for (const route of ["/api/sessions/:id/descendant-requests/delegated-image-review",
+    "/api/sessions/:id/descendant-requests/delegated-image-review/get"]) {
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, "orchestrator"), true, route);
+    assert.equal(isAgentControlApiRouteAllowed("POST", route, "normal"), false, route);
+  }
+});
+
 test("policy hook claims bind one active Claude session to one exact POST route", () => {
   const base = {
     credentialValid: true,

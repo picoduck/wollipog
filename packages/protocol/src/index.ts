@@ -823,6 +823,10 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      receive the status as `waiting_human`. GitHub forge observations carry `defaultBranch`, and
 //      a `status` git action may name a non-selected worktree the session still links; one it no
 //      longer links fails with `GIT_WORKTREE_UNLINKED`.
+// 276: delegated image evidence review (#4074). An Orchestrator hands a pending
+//      ui_evidence_approval decision's images to a managed reviewer Session whose receipts and
+//      verdict the server records, and resolves with delegatedImageReview. The reviewer launches
+//      on the root's runner with only its two review tools; older peers keep direct review.
 // 279: Wollipog-performed forge actions (#4067). The requester of an approved
 //      `merged_branch_deletion` (which may now name `pullRequest` and `headSha`) or of an approved,
 //      armed GitHub `pr_merge` calls POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute;
@@ -842,6 +846,7 @@ export * from "./issue-closure-delivery-gap.js";
 import type { IssueClosureDeliveryGap } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
+export * from "./delegated-image-review.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
@@ -1056,6 +1061,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
+  /** v276 runner launches a delegated image evidence reviewer with only its two review tools and
+   * serves those tools to it (#4074). Checked against the root Orchestrator's runner, which hosts
+   * the reviewer; the runner checks the control plane's version before offering the path. */
+  delegatedImageEvidenceReview: 276,
   targetHarnessInstallations: 176,
   harnessInstallations: 175,
   harnessSelectionBackgroundConsumers: 177,
@@ -5435,6 +5444,9 @@ export interface WorkflowDecisionView {
   evidenceReviewed?: string[];
   /** Exact non-self media proof; never an assertion that the owner inspected video frames. */
   delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
+  /** v276 (#4074): the managed reviewer whose server-recorded receipts and verdict backed this
+   * approval. Never an assertion that the Orchestrator looked at the images itself. */
+  delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
   consumedAt?: number;
@@ -5474,6 +5486,9 @@ export interface ResolveWorkflowDecisionRequest {
   /** Production managed-media provenance for original video IDs. Server verifies every reference.
    * Only an admitted Orchestrator UI approval may supply it; human and legacy paths omit it. */
   delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
+  /** v276 (#4074): approve on a delegated image reviewer's verdict instead of the Orchestrator's
+   * own receipts. The server requires that reviewer's current receipt for every evidence item. */
+  delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
   /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
@@ -5826,6 +5841,9 @@ export interface GovernanceAuditEntry {
       frameCount: number;
     };
     reviewReceiptIds?: string[];
+    /** v276 (#4074): the delegated image reviewer and the digest of the verdict an approval rests on. */
+    delegatedImageReview?: { reviewId: string; verdictId: string; reviewerSessionId: string;
+      recommendation: "approve" | "deny"; verdictSha256: string };
     rationaleDigest?: string;
     /** v166: digest of the child-facing message; its text lives only on the decision. */
     childMessageDigest?: string;
@@ -10434,6 +10452,9 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  /** v276 (#4074): this Session is a delegated image evidence reviewer. The runner launches it with
+   * only its two review tools, and refuses the marker for a harness it cannot restrict that way. */
+  uiEvidenceReviewer?: { reviewId: string };
   /** Private prepared media marker. Generic start/restart must refuse it, even on mixed peers.
    * The dedicated dispatcher additionally needs the complete immutable grant and namespace. */
   mediaReviewPurpose?: { rootSessionId: string; childSessionId: string; admissionId: string;

@@ -50,6 +50,8 @@ import { installWslBwrapLauncher } from "./wsl-bwrap-launcher.js";
 import { claudeWollipogMcpServer } from "./claude-wollipog-mcp.js";
 import {
   ORCHESTRATOR_ENV_KEY,
+  UI_EVIDENCE_REVIEWER_PRESET,
+  uiEvidenceReviewerLaunchArgs,
   CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
   SESSION_CODEX_MCP_MARKER,
   additiveOrchestratorLaunchArgs,
@@ -479,7 +481,7 @@ function controlPlaneUpdateRequired(
  * socket and are scrubbed from durable session metadata by the existing env policy. */
 export function provisionAgentControl(
   spec: Pick<SessionLaunchSpec, "sessionId" | "driver" | "context" | "executionTarget" | "command" | "args" | "env"> &
-    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath">> &
+    Partial<Pick<SessionLaunchSpec, "config" | "acpSessionContext" | "workspacePath" | "uiEvidenceReviewer">> &
     // Persisted session metadata written before protocol v164 has no `integrationIsolation`, and a
     // resume re-provisions from exactly that metadata. Accept its absence here and resolve it to the
     // conservative value for the shape below, rather than forcing callers to invent one.
@@ -518,6 +520,13 @@ export function provisionAgentControl(
   const targetIsHost = !spec.executionTarget || spec.executionTarget.adapter === "host";
   const nativeHostExecution = context.kind === "native" && targetIsHost;
   const orchestrator = isOrchestratorLaunch(spec);
+  // A delegated image reviewer (#4074) launches only where this runner can restrict it to its two
+  // review tools. Anything else is refused before a credential exists, never launched unrestricted.
+  const uiEvidenceReviewer = spec.uiEvidenceReviewer !== undefined;
+  if (uiEvidenceReviewer && (!supported || orchestrator || spec.driver !== "claude-code" || !nativeHostExecution ||
+      !runnerSupportsProtocol(config.controlPlaneProtocolVersion, "delegatedImageEvidenceReview"))) {
+    throw new Error("a delegated image reviewer launches only as a native Claude Code session on the host, against a current control plane");
+  }
   // The coupled preset replaces the provider policy with the runner-owned planning surface. An
   // Orchestrator with an ordinary provider mode (protocol v160) keeps its normal launch and only
   // gains the additive orchestration arguments below.
@@ -779,7 +788,13 @@ export function provisionAgentControl(
     }
     spec.args.push("--extension", file);
   }
-  if (additiveOrchestrator) {
+  if (uiEvidenceReviewer) {
+    // Replace the whole controlled surface, as the coupled Orchestrator preset does. The runner's
+    // own settings document (hook provisioning) survives; the MCP config is re-appended below.
+    spec.env[ORCHESTRATOR_ENV_KEY] = UI_EVIDENCE_REVIEWER_PRESET;
+    spec.args = stripOrchestratorLaunchArgs(spec.args, spec.driver, runnerOwnedClaudeSettings);
+    spec.args.push(...uiEvidenceReviewerLaunchArgs());
+  } else if (additiveOrchestrator) {
     spec.env[ORCHESTRATOR_ENV_KEY] = "orchestrator";
     spec.args = stripAdditiveOrchestratorLaunchArgs(spec.args, spec.driver, orchestratorProjectPaths, integrationIsolation);
     if ((spec.driver === "codex" || spec.driver === "codex-app-server") && reservedCodexMcpNameCollision(spec.args)) {
@@ -839,6 +854,7 @@ export function provisionAgentControl(
     writeMcpConfig(file, runnerReentryCommand(host, "--agent-control-mcp"), {
       ...transportEnv,
       ...(orchestrator ? { [ORCHESTRATOR_ENV_KEY]: "orchestrator" } : {}),
+      ...(uiEvidenceReviewer ? { [ORCHESTRATOR_ENV_KEY]: UI_EVIDENCE_REVIEWER_PRESET } : {}),
     });
     let already = false;
     for (let i = 0; i < spec.args.length - 1; i++) {

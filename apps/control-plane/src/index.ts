@@ -2,6 +2,7 @@ import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaus
 import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
+import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
 import { AutomationCreationService } from "./automation-creation.js";
@@ -642,7 +643,9 @@ function authedApiPrincipal(
   const agentControl = authedAgentControl(req);
   const mediaPurpose = agentControl ? svc.mediaSessionPurposes.owns(agentControl.id) : false;
   if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose)) {
+  // A delegated image reviewer's credential reaches only its own review routes (#4074).
+  const imageReviewer = agentControl ? db.delegatedImageReviews.isReviewer(agentControl.id) : false;
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose, imageReviewer)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -802,6 +805,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
   const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? params.id : null;
   if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
+  if (typeof mediaTarget === "string" && db.delegatedImageReviews.isReviewer(mediaTarget) &&
+      !delegatedImageReviewerMutationAllowed(req.method, routePath)) return DELEGATED_IMAGE_REVIEWER_ERROR;
   const runnerId = typeof params.runnerId === "string" ? params.runnerId
     : typeof params.id === "string" && routePath.startsWith("/api/runners/") ? params.id : null;
   if (runnerId) {
@@ -4882,6 +4887,78 @@ app.post("/api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",
     return reply.code(400).send({ error: "receiptId and sha256 are required" });
   }
   return respond(reply, svc.acknowledgeDescendantUiEvidence(id, body.receiptId, body.sha256));
+});
+
+// Delegated image review (#4074). The controlling Orchestrator hands a decision's images to a
+// server-created reviewer Session and later reads its verdict; it never receives the images here.
+app.post("/api/sessions/:id/descendant-requests/delegated-image-review", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { sessionId?: unknown; occurrenceId?: unknown; brief?: unknown };
+  if (!validParentControlCoordinate(body?.sessionId) || !validParentControlCoordinate(body.occurrenceId) ||
+      typeof body.brief !== "string") {
+    return reply.code(400).send({ error: "sessionId, occurrenceId, and brief are required" });
+  }
+  return respond(reply, svc.prepareDescendantImageEvidenceReview(
+    id, body.sessionId, body.occurrenceId, body.brief, (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+app.post("/api/sessions/:id/descendant-requests/delegated-image-review/get", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { reviewId?: unknown };
+  if (!validParentControlCoordinate(body?.reviewId)) return reply.code(400).send({ error: "reviewId is required" });
+  return respond(reply, svc.delegatedImageReviewForOrchestrator(id, body.reviewId, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// The reviewer's own credential only: the review it belongs to is the one its Session was created
+// for, so it names no review, decision or child. Evidence bytes are never logged.
+app.post("/api/sessions/:id/delegated-image-review/image", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { evidenceId?: unknown };
+  if (typeof body?.evidenceId !== "string" || !body.evidenceId || body.evidenceId.length > 256) {
+    return reply.code(400).send({ error: "evidenceId is required" });
+  }
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.reviewDelegatedImageEvidence(id, body.evidenceId, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/delegated-image-review/acknowledge", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { receiptId?: unknown; sha256?: unknown };
+  if (!validParentControlCoordinate(body?.receiptId) ||
+      typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(body.sha256)) {
+    return reply.code(400).send({ error: "receiptId and sha256 are required" });
+  }
+  return respond(reply, svc.acknowledgeDelegatedImageEvidence(id, body.receiptId, body.sha256,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { report?: unknown };
+  return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {

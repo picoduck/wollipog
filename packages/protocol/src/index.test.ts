@@ -366,6 +366,8 @@ test("PROTOCOL_VERSION is 279", () => {
   for (const name of ["", "-d", "/x", "x/", "a..b", "a//b", ".hidden", "a/.b", "x.lock", "x.", "a b", "a~1", "a:b", "x".repeat(256)]) {
     assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
   }
+  assert.equal(runnerSupportsProtocol(275, "delegatedImageEvidenceReview"), false);
+  assert.equal(runnerSupportsProtocol(276, "delegatedImageEvidenceReview"), true);
   assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
   assert.equal(runnerSupportsProtocol(275, "campaignHandoffs"), true);
   assert.equal(campaignStatusTerminal("verified_complete"), true);

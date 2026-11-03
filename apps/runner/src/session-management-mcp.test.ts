@@ -419,6 +419,104 @@ test("review_descendant_ui_evidence returns the verified image and refuses bytes
   assert.equal(calls.length, before + 1, "refused bytes are never acknowledged");
 });
 
+test("a delegated image reviewer has exactly its two review tools, and nobody else has them (#4074)", async () => {
+  const reviewer = makeDeps();
+  reviewer.deps.uiEvidenceReviewer = true;
+  const listed = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, reviewer.deps);
+  assert.deepEqual((listed!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name).sort(),
+    ["review_evidence_image", "submit_evidence_verdict"]);
+  for (const name of ["create_session", "get_session", "request_workflow_decision", "review_descendant_ui_evidence",
+    "attach_session_artifact", "prompt_session"]) {
+    assert.equal((await callTool(reviewer.deps, name, {})).isError, true, name);
+    assert.equal((await executeManagerTool(name, {}, reviewer.deps)).isError, true, name);
+  }
+  assert.equal(reviewer.calls.length, 0);
+  for (const orchestrator of [false, true]) {
+    const other = makeDeps();
+    other.deps.orchestrator = orchestrator;
+    const names = ((await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, other.deps))!.result as { tools: { name: string }[] })
+      .tools.map((tool) => tool.name);
+    assert.equal(names.includes("review_evidence_image"), false);
+    assert.equal(names.includes("submit_evidence_verdict"), false);
+    assert.equal(names.includes("prepare_descendant_ui_evidence_review"), orchestrator);
+    assert.equal(names.includes("get_descendant_ui_evidence_review"), orchestrator);
+    assert.equal((await callTool(other.deps, "review_evidence_image", { evidenceId: "light" })).isError, true);
+    assert.equal(other.calls.length, 0);
+  }
+});
+
+test("the reviewer's image tool hands over only digest-verified, acknowledged bytes (#4074)", async () => {
+  const bytes = Buffer.from("reviewer evidence bytes");
+  const receipt = {
+    receiptId: "uireceipt_r", occurrenceId: "workflow_1", reviewerSessionId: SELF_ID, childSessionId: "child",
+    policyRevision: 3, evidenceId: "light", artifactId: "art_1",
+    sha256: createHash("sha256").update(bytes).digest("hex"), deliveredAt: 10,
+  };
+  let data = bytes.toString("base64");
+  let acknowledgeStatus = 200;
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/acknowledge")
+    ? { status: acknowledgeStatus, body: acknowledgeStatus === 200 ? { acknowledged: true } : { error: "replaced" } }
+    : call.url.endsWith("/verdict") ? { status: 200, body: { verdictId: "uiimgverdict_1" } }
+      : { status: 200, body: { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength, data } });
+  deps.uiEvidenceReviewer = true;
+  const shown = await callTool(deps, "review_evidence_image", { evidenceId: "light" });
+  assert.equal(calls.at(-2)?.url, `${CP_URL}/api/sessions/${SELF_ID}/delegated-image-review/image`);
+  assert.deepEqual(calls.at(-2)?.body, { evidenceId: "light" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/delegated-image-review/acknowledge`);
+  assert.deepEqual(calls.at(-1)?.body, { receiptId: "uireceipt_r", sha256: receipt.sha256 });
+  assert.deepEqual(shown.content[1], { type: "image", data, mimeType: "image/png" });
+  assert.deepEqual(resultJson(shown), { evidenceId: "light", mimeType: "image/png", sizeBytes: bytes.byteLength });
+
+  acknowledgeStatus = 409;
+  const unrecorded = await callTool(deps, "review_evidence_image", { evidenceId: "light" });
+  assert.equal(unrecorded.isError, true);
+  assert.equal(unrecorded.content.length, 1, "no image without a usable receipt");
+  acknowledgeStatus = 200;
+  data = Buffer.from("substituted").toString("base64");
+  const before = calls.length;
+  const substituted = await callTool(deps, "review_evidence_image", { evidenceId: "light" });
+  assert.equal(substituted.isError, true);
+  assert.equal(calls.length, before + 1, "mismatched bytes are never acknowledged");
+
+  const items = [{ evidenceId: "light", outcome: "pass", defects: [] }];
+  const submitted = await callTool(deps, "submit_evidence_verdict", { recommendation: "approve", summary: "Fine.", items });
+  assert.deepEqual(resultJson(submitted), { accepted: true, verdictId: "uiimgverdict_1" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/delegated-image-review/verdict`);
+  assert.deepEqual(calls.at(-1)?.body, { report: { recommendation: "approve", summary: "Fine.", items } });
+});
+
+test("delegated image review tools send nothing to an older control plane (#4074)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { reviewId: "uiimgreview_1" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview - 1;
+  const reference = { reviewId: "uiimgreview_1", verdictId: "uiimgverdict_1", reviewerSessionId: "reviewer" };
+  for (const [name, args] of [
+    ["prepare_descendant_ui_evidence_review", { sessionId: "child", occurrenceId: "occ", brief: "Claims." }],
+    ["get_descendant_ui_evidence_review", { reviewId: "uiimgreview_1" }],
+    ["resolve_descendant_workflow_decision", { sessionId: "child", occurrenceId: "occ", outcome: "approve",
+      evidenceReviewed: ["light"], delegatedImageReview: reference }],
+  ] as const) {
+    const refused = await callTool(deps, name, args);
+    assert.equal(refused.isError, true, name);
+    assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview);
+    assert.match(resultJson(refused).error, /review_descendant_ui_evidence/u);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", { sessionId: "child", occurrenceId: "occ",
+    outcome: "deny", delegatedImageReview: reference })).isError, true, "a denial never carries reviewer provenance");
+
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview;
+  const prepared = await callTool(deps, "prepare_descendant_ui_evidence_review", { sessionId: "child", occurrenceId: "occ", brief: "Claims." });
+  assert.equal(prepared.isError, undefined);
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/delegated-image-review`);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "occ", brief: "Claims." });
+  await callTool(deps, "resolve_descendant_workflow_decision", { sessionId: "child", occurrenceId: "occ", outcome: "approve",
+    evidenceReviewed: ["light"], delegatedImageReview: reference });
+  assert.deepEqual((calls.at(-1)?.body as { resolution: unknown }).resolution, {
+    action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["light"], delegatedImageReview: reference,
+  });
+});
+
 test("ordered video-frame deliveries retain one image and exact source-manifest metadata per call", async () => {
   const sourceSha256 = "a".repeat(64);
   const manifestSha256 = "b".repeat(64);
