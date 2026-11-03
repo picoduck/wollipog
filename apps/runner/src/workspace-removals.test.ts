@@ -114,6 +114,27 @@ test("a session that ran in a removed workspace keeps its directory grants for r
   assert.equal(trusted(removals, []), planted, "with no session left from it, removal withdraws the workspace's grants");
 });
 
+test("a reused workspace id keeps every removal's directory grants for its sessions, across a restart", (t) => {
+  const { dataDir, cleanup } = fixture();
+  t.after(cleanup);
+  const removals = new WorkspaceRemovals(dataDir);
+  const first: RunnerConfigWorkspace[] = [{ id: "w", name: "w", path: "/srv/old-project", additionalDirectoryGrants: ["/srv/old-tools"] }];
+  assert.equal(removeConfiguredWorkspace({
+    workspaces: first, removals, workspaceId: "w", path: "/srv/old-project", sessionRunningIn: () => false,
+  }).ok, true);
+  // The operator configures the same id for another folder, which brings it back, and it is removed again.
+  const second: RunnerConfigWorkspace[] = [{ id: "w", name: "w", path: "/srv/new-project", sharedWritableDirectories: ["/srv/new-shared"] }];
+  assert.deepEqual(removals.apply(second), []);
+  assert.equal(removeConfiguredWorkspace({
+    workspaces: second, removals, workspaceId: "w", path: "/srv/new-project", sessionRunningIn: () => false,
+  }).ok, true);
+  const old = { sessionId: "s_old", workspaceId: "w", repoPath: "/srv/old-project", worktreePath: null } as SessionMeta;
+  const paths = configuredSessionWritableGrants({ removedWorkspaces: new WorkspaceRemovals(dataDir).entries(), sessions: [old] })
+    .filter((grant) => grant.sessionId === "s_old").map((grant) => grant.path);
+  assert.ok(paths.includes("/srv/old-tools"), "the first removal's grant stays with the session that predates both");
+  assert.ok(paths.includes("/srv/new-shared"));
+});
+
 test("an unreadable removal record is reported and leaves the configuration as written", (t) => {
   const { dataDir, workspaces, cleanup } = fixture();
   t.after(cleanup);

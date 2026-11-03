@@ -224,14 +224,20 @@ export function configuredSessionWritableGrants(sources: SessionWritableSources)
       try { return resolveAgentEnvironmentValue(agent, name, hostEnv); } catch { return undefined; }
     }, { grant: `agent ${id}'s environment` }, (name) => `change ${name} in agent ${id}'s environment`);
   }
-  const removed = new Map((sources.removedWorkspaces ?? []).map((workspace) => [workspace.id, workspace]));
+  // An id can be removed more than once (each time for a different folder); a session keeps the
+  // directory grants of every removal under its workspace id, since it may predate any of them.
+  const removedGrants = new Map<string, string[]>();
+  for (const workspace of sources.removedWorkspaces ?? []) {
+    removedGrants.set(workspace.id, [...removedGrants.get(workspace.id) ?? [],
+      ...workspace.additionalDirectoryGrants ?? [], ...workspace.sharedWritableDirectories ?? []]);
+  }
   for (const meta of sources.sessions ?? []) {
     const session = { grant: `session ${meta.sessionId}`, recovery: `delete session ${meta.sessionId}`, sessionId: meta.sessionId };
-    const workspace = meta.workspaceId ? removed.get(meta.workspaceId) : undefined;
     for (const path of [meta.providerCredentialHome, meta.providerConversationHome, meta.pendingProviderCredentialHome,
       meta.repoPath, meta.worktreePath, ...(meta.worktrees ?? []).map((worktree) => worktree.path),
-      meta.adoptedProviderState?.sessionDir, ...(workspace?.additionalDirectoryGrants ?? []),
-      ...(workspace?.sharedWritableDirectories ?? [])]) add(path, session);
+      meta.adoptedProviderState?.sessionDir, ...(meta.workspaceId ? removedGrants.get(meta.workspaceId) ?? [] : [])]) {
+      add(path, session);
+    }
     const env = meta.env ?? {};
     fromEnvironment((name) => env[name], session);
   }
