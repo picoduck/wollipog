@@ -224,7 +224,10 @@ enqueued pull request remains unfinished until merge-group CI passes and the for
 
 Supervised children watch their own queued pull requests (see Waiting for Pull Request Checks).
 Do not watch a child's pull request yourself, run a watcher for it, or hold a turn open for it:
-the child wakes on the outcome, and its next turn end reaches you as usual. Only when a child
+the child wakes on the outcome, and its next turn end reaches you as usual. A child parked with
+`park_on_pull_request` shows its watch in `get_campaign` (`parkedChildren`) and `get_session`
+(`pullRequestWatch`); its parking turn end sends you no continuation, and the turn end after its
+wake does. A lost watch wakes the child with the reason, so it is never left silently. Only when a child
 reports that it has no way to wait on its pull request, watch that one with a single model-free
 wait (`wait_pull_request`, or a background `wollipog pr wait` that wakes you when it exits) and
 prompt the child on `merged`, `queue_ejected`, or `queue_failed`. A prompt queued to a running child
@@ -251,8 +254,11 @@ the turn with a short note and do not ask the user to send a message: Wollipog r
 session in that worktree and continues the task with one automatic turn.
 Discard permanently removes only a runner-owned worktree that is not used by a live provider, is
 clean, and has no commits ahead of its upstream. A forge-verified merged head may replace an
-upstream deleted with the remote branch, but only when it exactly matches the local head, whatever
-the pull request branch is named. An unchanged recorded branch may instead prove its stable head is
+upstream deleted with the remote branch when it exactly matches the local head, whatever the pull
+request branch is named. On GitHub, a merged pull request in the remote's repository also qualifies
+when the local head is an ancestor of that pull request's head, which the runner fetches from the
+forge itself: an earlier push of a pull request that later moved on and merged is retirable, while
+any local commit outside its history is kept. An unchanged recorded branch may instead prove its stable head is
 contained by the current remote-tracking default branch. Discard refuses attached, dirty, other
 upstream-less, or unpushed trees. Push a worktree branch with upstream tracking, for example
 `git push -u origin HEAD:<branch>`, so the tree stays retirable without forge recovery.
@@ -312,7 +318,8 @@ position and state, failed jobs with run links, and whether it merged.
   the wait's own timeout. Do not alternate short waits with sleeps.
 - Park during long waits (branch checks, a review, the merge queue): end your turn instead of
   holding it open, whenever something will wake you on the outcome. A finished review session
-  delivers its own continuation. For checks and the queue, a harness that wakes you when a
+  delivers its own continuation. For the merge queue, prefer `park_on_pull_request` (below). For
+  checks, or the queue where that tool is refused, a harness that wakes you when a
   background command exits can run one background `wollipog pr wait` at the longest timeout it
   allows for background commands; re-arm it once on `timeout`. Where nothing can wake you, make one
   blocking call at the longest timeout your harness survives. Never poll with repeated short waits,
@@ -323,9 +330,15 @@ position and state, failed jobs with run links, and whether it merged.
   check alone keeps the wait going, because GitHub may rebuild the group and still merge it.
 - After successful enqueueing and a confirmed queue entry, report it and park on your own entry
   until `merged`, `queue_ejected`, `queue_failed`, `closed`, or `head_changed`. Queues can take
-  hours. A supervising Orchestrator does not watch it for you; if you have no way to wait on it,
-  say so in your report and end your turn so the parent can. On `merged`, reconcile the armed
-  `pr_merge` if its occurrence is still unconsumed, and finish cleanup.
+  hours. Where the MCP tool `park_on_pull_request` exists, call it with the pull request and the
+  enqueued head, then end your turn: the runner watches the entry through its read-only `gh` login
+  with no model requests, and Wollipog prompts you once with the outcome and the same bounded summary
+  `wait_pull_request` returns. A runner restart resumes the watch, or the prompt says it was lost.
+  Parking again replaces the watch. It covers GitHub only; an older runner or control plane refuses
+  it, and then the background or blocking wait above applies. A supervising Orchestrator does not
+  watch the entry for you; if you have no way to wait on it, say so in your report and end your turn
+  so the parent can. The wake grants nothing. On `merged`, reconcile the armed `pr_merge` if its
+  occurrence is still unconsumed, and finish cleanup.
 - `queue_ejected` also covers an entry GitHub removed before the call started, for example on a
   merge-group check timeout between two waits: when the latest merge-queue event removed the current
   head and the pull request is still open, `mergeQueueRemoval` gives GitHub's `reason` (such as

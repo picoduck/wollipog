@@ -361,6 +361,8 @@ test("PROTOCOL_VERSION is 274", () => {
   // An epic's closure reads its members only from a runner that returns them (#4060).
   assert.equal(runnerSupportsProtocol(273, "epicClosureMembers"), false);
   assert.equal(runnerSupportsProtocol(274, "epicClosureMembers"), true);
+  assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
+  assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);
   assert.equal(runnerSupportsProtocol(270, "runnerProcessingBarriers"), true);
   assert.equal(runnerSupportsProtocol(268, "workflowDecisionWithdrawal"), false);

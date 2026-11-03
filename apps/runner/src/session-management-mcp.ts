@@ -338,6 +338,18 @@ async function reviewSessionCompatibilityError(deps: McpDeps): Promise<ToolResul
     : controlPlaneUpdateRequired(needsNewerWollipog("Review sessions need"), required, actual);
 }
 
+async function pullRequestWatchCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult(wollipogSupportUnverified("merge-queue watches", compatibility.message));
+    actual = compatibility.data?.protocolVersion;
+  }
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch;
+  return Number.isInteger(actual) && actual! >= required ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Merge-queue watches need"), required, actual);
+}
+
 async function issueClosureCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
   let actual = deps.controlPlaneProtocolVersion;
   if (!Number.isInteger(actual)) {
@@ -741,6 +753,8 @@ function mapSession(s: Json): Json {
     // A campaign child's root and its open work-item attempt, if any (#2417, #3106).
     ...(s?.campaignMembership ? { campaignMembership: s.campaignMembership } : {}),
     ...(s?.campaignRequests ? { campaignRequests: s.campaignRequests } : {}),
+    // The merge-queue watch a parked session waits on (#4071): repository, number, head, since.
+    ...(s?.pullRequestWatch ? { pullRequestWatch: s.pullRequestWatch } : {}),
     costUsd: s?.costUsd,
     // A running Claude turn's requests that no total includes yet, with a rate-table estimate (#3086).
     ...(s?.liveUsage ? { liveUsage: s.liveUsage } : {}),
@@ -2445,6 +2459,36 @@ export const TOOLS: McpTool[] = [
         ...(deps.pullRequestReadGraceMs !== undefined ? { readGraceMs: deps.pullRequestReadGraceMs } : {}),
       });
       return result.ok ? textResult(result.summary) : errorResult(result.error);
+    },
+  },
+  {
+    name: "park_on_pull_request",
+    description: "Park this session on its own enqueued GitHub pull request, then end your turn (#4071). The runner keeps watching the merge-queue entry through its read-only gh login with no model requests, and Wollipog prompts this session once, with the same bounded summary wait_pull_request returns, when the pull request merges, closes, its entry is marked unmergeable or leaves the queue, or its head moves; a pull request that is not in the queue reports its checks at once. The watch survives a runner restart, or the session is told it was lost. A supervising Orchestrator sees the watch and is not woken by this session's turn end, only by what it does after waking. Parking again replaces the previous watch. The wake grants nothing: re-enqueueing, merging and branch deletion keep their gates. A GitLab merge request, an older runner or an older control plane is refused: wait with wait_pull_request instead.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pullRequest: { type: "string", description: "Pull request number (with repository), owner/name#number, or a github.com pull request URL." },
+        repository: { type: "string", description: "GitHub owner/name; required with a bare number." },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The enqueued head; a different head wakes the session with head_changed." },
+      },
+      required: ["pullRequest", "headSha"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const ref = parsePullRequestRef(args?.pullRequest, args?.repository);
+      if ("error" in ref) return errorResult(ref.error);
+      if (campaignRepositoryLocation(ref.repository)?.forge === "gitlab") {
+        return errorResult("a merge-queue watch supports GitHub pull requests only; wait with wait_pull_request instead");
+      }
+      const headSha = typeof args?.headSha === "string" ? args.headSha.trim().toLowerCase() : "";
+      if (!/^[0-9a-f]{40}$/u.test(headSha)) return errorResult("headSha must be a full 40-character commit SHA");
+      const incompatible = await pullRequestWatchCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/pull-request-watch`,
+        { repository: ref.repository, number: ref.number, headSha });
+      if (!r.ok) return errorResult(r.message);
+      return textResult({ ...r.data, nextStep: "End your turn now with a short status. Wollipog prompts you once with the outcome." });
     },
   },
   {

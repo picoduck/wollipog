@@ -304,6 +304,7 @@ import {
   worktreeBranch,
   worktreeHead,
   mergedWorktreePullRequestForBranch,
+  mergedPullRequestContainingHead,
   worktreePullRequestState,
   changeRequestProvider,
   worktreeDiff,
@@ -311,6 +312,7 @@ import {
   type WorktreeCleanupRecord,
   type WorktreeHandle,
   type DiscoveredMergedPullRequest,
+  type MergedPullRequestContainment,
   type MissingUpstreamPullRequestIdentity,
   type RetainedWorktreeRefCandidate,
   type RetainedWorktreeRefRecord,
@@ -1095,6 +1097,18 @@ export function forgeProofOptions(
   };
 }
 
+/** Name what a refusal of a tree without an upstream actually failed (#4068). Every variant keeps
+ * the original prefix, which control planes already classify as a terminal retention. */
+function noUpstreamRefusal(containment: MergedPullRequestContainment["state"] | undefined): string {
+  if (containment === "not_contained") {
+    return "the branch has no upstream, and the worktree tip is not the head of, or contained in, a merged pull request";
+  }
+  if (containment === "unavailable") {
+    return "the branch has no upstream, and the forge could not prove whether a merged pull request contains the worktree tip";
+  }
+  return "the branch has no upstream";
+}
+
 /** The only linkage shape that may stand in for a vanished upstream during safe cleanup: a
  * terminal merged state carrying a forge-verified head OID. Anything else — an open or closed
  * pull request, or a merged record whose head was never verified — is not delivery proof. */
@@ -1702,6 +1716,9 @@ export class SessionManager {
    * discovery so an unmergeable branch is not asked about every pass. Entries are dropped when the
    * proof arrives and when the record leaves the journal, so the map tracks pending records only. */
   private readonly deferredMergedHeadRetryAt = new Map<string, number>();
+  /** The same backoff for replay's merged-pull-request containment probe (#4068), kept separate so
+   * a negative exact-head answer earlier in the same replay does not suppress it. */
+  private readonly deferredContainmentRetryAt = new Map<string, number>();
   /** Test seam for deterministic expiry without changing production time. */
   private worktreePullRequestDiscoveryNow: () => number = Date.now;
   private admissionRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1736,6 +1753,7 @@ export class SessionManager {
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
   private readWorktreeBranch: typeof worktreeBranch = worktreeBranch;
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
+  private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
@@ -3945,6 +3963,27 @@ export class SessionManager {
     return { probed: true, forgeUnavailable };
   }
 
+  /** When no merged pull request's head is exactly the tip, ask whether one contains it (#4068):
+   * a child pushed an earlier head of a pull request that later moved on and was squash-merged.
+   * The worktree's own forge-verified merged link is checked first, then the merged pull requests
+   * the forge lists for the tip. Like the successor proof, the result serves only the retirement
+   * that asked for it and never becomes the worktree's link. A tree checked out on another branch,
+   * or attached by its operator, is not probed. */
+  private async proveMergedPullRequestContainment(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+  ): Promise<MergedPullRequestContainment> {
+    if (worktree.source === "attached") return { state: "ineligible" };
+    const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: meta.context });
+    if (!checkedOutBranch || checkedOutBranch !== worktree.branch) return { state: "ineligible" };
+    const linked = worktree.pullRequest;
+    const linkedHead = verifiedMergedHeadOid(linked);
+    return this.probeMergedPullRequestContainment(worktree.path, checkedOutBranch, {
+      context: meta.context,
+      ...(linked && linkedHead ? { linkedPullRequest: { url: linked.url, headOid: linkedHead } } : {}),
+    });
+  }
+
   /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
    * proof-persistence step enters a lane, where current linkage and branch identity are rechecked.
    * A negative result is memoized against the full Git identity, so a changed head/upstream bypasses
@@ -4303,6 +4342,7 @@ export class SessionManager {
           identityProof: candidate.identityProof,
           reasons: candidate.reasons,
           ...(candidate.verifiedMergedHead ? { verifiedMergedHead: candidate.verifiedMergedHead } : {}),
+          ...(candidate.containingMergedHead ? { containingMergedHead: candidate.containingMergedHead } : {}),
           state: "pending",
           createdAt: now,
           updatedAt: now,
@@ -4341,6 +4381,7 @@ export class SessionManager {
           dataDir: this.dataDir,
           ownerHash: this.runnerOwnerHash,
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
+          ...(record.containingMergedHead ? { containingMergedHead: record.containingMergedHead } : {}),
           requireDelivered: record.trigger === "archive_retirement",
           retainRefs,
           beforeRemove,
@@ -4388,6 +4429,7 @@ export class SessionManager {
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
+      this.deferredContainmentRetryAt.delete(this.deferredMergedHeadKey(record));
       this.scheduleRetainedRefReclaims(record.sessionId, record.worktreeId, record.cleanupId);
       return true;
     } catch (error) {
@@ -4699,6 +4741,22 @@ export class SessionManager {
       meta = latest;
       worktree = current;
     }
+    let containment: MergedPullRequestContainment | undefined;
+    if (options.refreshMergedHead !== false && !deliveredHead && !successorHead) {
+      containment = await this.proveMergedPullRequestContainment(meta, worktree);
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+      const current = this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!current) {
+        return { removed: false, reason: "the worktree record was removed while checking forge state" };
+      }
+      if (current.id !== worktree.id || current.branch !== worktree.branch || current.source === "attached") {
+        return { removed: false, reason: "worktree linkage changed while checking forge state" };
+      }
+      meta = latest;
+      worktree = current;
+    }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
@@ -4760,6 +4818,8 @@ export class SessionManager {
       if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       // A later merged pull request from the same branch delivered this exact tip (#3981).
       if (successorHead) cleanup.verifiedMergedHead = successorHead;
+      // A merged pull request's history contains this tip (#4068); removal re-proves it.
+      if (containment?.state === "contained") cleanup.containingMergedHead = containment.headOid;
       if (teardownIdentityError) {
         const now = Date.now();
         cleanup.teardown = {
@@ -4797,6 +4857,10 @@ export class SessionManager {
             (result.reason === "unpushed" || result.reason === "not_delivered")) {
           return { removed: false, reason: "forge state is temporarily unavailable" };
         }
+        if (options.trigger === "archive_retirement" && containment?.state === "unavailable" &&
+            (result.reason === "no_upstream" || result.reason === "unpushed" || result.reason === "not_delivered")) {
+          return { removed: false, reason: "forge state is temporarily unavailable" };
+        }
         if (result.reason === "branch_changed") {
           return {
             removed: false,
@@ -4809,7 +4873,7 @@ export class SessionManager {
           detached_head: `the worktree has a detached HEAD instead of its registered branch ${JSON.stringify(worktree.branch)}`,
           not_runner_owned: "runner ownership could not be proven",
           dirty: "the worktree has uncommitted changes",
-          no_upstream: "the branch has no upstream",
+          no_upstream: noUpstreamRefusal(containment?.state),
           unpushed: "the branch has unpushed commits",
           not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
           unavailable: "Git state is unavailable or changed during cleanup",
@@ -17341,6 +17405,52 @@ export class SessionManager {
     return "proven";
   }
 
+  /** Replay's counterpart of the containment probe an explicit discard runs (#4068). A deferred
+   * record is journaled before that probe, so without this a tree whose tip is an earlier head of
+   * a merged pull request would be refused on every replay. A tip the record already proves exactly
+   * needs no probe. Negative and unavailable answers back off like the merged-head refresh. A newly
+   * proven head replaces the journaled one; any other answer leaves it, because safe removal
+   * re-proves containment of the current tip before deleting anything. Callers hold the session's
+   * worktree lane. */
+  private async refreshDeferredContainment(
+    record: WorktreeCleanupRecord,
+  ): Promise<MergedPullRequestContainment["state"] | "not_needed"> {
+    if (record.trigger === "pull_request_reconciliation") return "not_needed";
+    const locate = (meta: SessionMeta | null | undefined) => meta
+      ? this.attributedWorktrees(meta).find((item) =>
+        item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
+        (!record.branch || item.branch === record.branch))
+      : undefined;
+    const meta = this.store.readMeta(record.sessionId);
+    const worktree = locate(meta);
+    if (!meta || !worktree || worktree.source === "attached") return "not_needed";
+    let head: string;
+    try {
+      head = await worktreeHead(worktree.path, { context: meta.context });
+    } catch {
+      return "not_needed";
+    }
+    if (head === record.verifiedMergedHead) return "not_needed";
+    const backoffKey = this.deferredMergedHeadKey(record);
+    const retryAt = this.deferredContainmentRetryAt.get(backoffKey);
+    if (retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow()) return "unavailable";
+    const proof = await this.proveMergedPullRequestContainment(meta, worktree);
+    if (proof.state === "ineligible") return proof.state;
+    if (proof.state !== "contained") {
+      this.deferredContainmentRetryAt.set(
+        backoffKey,
+        this.worktreePullRequestDiscoveryNow() + WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS,
+      );
+      return proof.state;
+    }
+    const current = locate(this.store.readMeta(record.sessionId));
+    if (!current || current.source === "attached" || current.branch !== worktree.branch) return "unavailable";
+    this.deferredContainmentRetryAt.delete(backoffKey);
+    record.containingMergedHead = proof.headOid;
+    this.cleanupJournal.add(record);
+    return "contained";
+  }
+
   /** Exactly the cleanup journal's own record identity, so the backoff entry is dropped by the
    * same calls that retire the record it belongs to. */
   private deferredMergedHeadKey(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): string {
@@ -17387,6 +17497,7 @@ export class SessionManager {
       if (worktreeFenced()) return logFenced();
       let forgeState: "merged" | "unmerged" | "unavailable" = "unavailable";
       let successorState: Awaited<ReturnType<SessionManager["refreshDeferredSuccessorHead"]>> = "not_needed";
+      let containmentState: Awaited<ReturnType<SessionManager["refreshDeferredContainment"]>> = "not_needed";
       if (!record.worktreeRemovedAt) {
         forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
@@ -17406,6 +17517,8 @@ export class SessionManager {
           }
           return;
         }
+        containmentState = await this.refreshDeferredContainment(record);
+        if (worktreeFenced()) return logFenced();
       }
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
@@ -17431,6 +17544,9 @@ export class SessionManager {
                 (removal.reason === "no_upstream" || removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && successorState === "unavailable" &&
                 (removal.reason === "unpushed" || removal.reason === "not_delivered")) return;
+            if (record.trigger === "archive_retirement" && containmentState === "unavailable" &&
+                (removal.reason === "no_upstream" || removal.reason === "unpushed" ||
+                  removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && removal.reason !== "unavailable") {
               const reason = removal.reason === "branch_changed"
                 ? `the worktree is checked out on branch ${JSON.stringify(removal.checkedOutBranch)}, not its registered branch`
@@ -17438,7 +17554,7 @@ export class SessionManager {
                     detached_head: "the worktree has a detached HEAD",
                     not_runner_owned: "runner ownership could not be proven",
                     dirty: removal.dirtyPathsReason ?? "the worktree has uncommitted changes",
-                    no_upstream: "the branch has no upstream",
+                    no_upstream: noUpstreamRefusal(containmentState === "not_needed" ? undefined : containmentState),
                     unpushed: "the branch has unpushed commits",
                     not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
                   }[removal.reason];
@@ -17483,6 +17599,7 @@ export class SessionManager {
       }
       this.cleanupJournal.remove(record.sessionId, record.worktreeId ?? "legacy");
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
+      this.deferredContainmentRetryAt.delete(this.deferredMergedHeadKey(record));
       return true;
     } catch {
       // Journal persistence can fail after the external resources were successfully reclaimed.
