@@ -1,4 +1,7 @@
 import assert from "node:assert/strict";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
@@ -193,6 +196,27 @@ test("a parked child's turn end owes its Orchestrator nothing; the woken child's
     assert.deepEqual(ready(), ["s1"]);
     assert.equal(h.db.campaignProjection("root")?.parkedChildren, undefined);
   } finally { h.db.close(); }
+});
+
+test("only the owning connection caches watch visibility; an attached reader sees the owner's new watch", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-watch-attach-"));
+  const path = join(root, "control-plane.db");
+  const owner = ControlPlaneDb.open(path);
+  const reader = ControlPlaneDb.attach(path, { readOnly: true });
+  try {
+    assert.equal(owner.pullRequestWatches.visibleFor("s"), undefined, "the owner caches that nothing is visible");
+    assert.equal(reader.pullRequestWatches.visibleFor("s"), undefined);
+    assert.equal(reader.pullRequestWatches.isParked("s"), false);
+    owner.pullRequestWatches.register({ watchId: "w", sessionId: "s", runnerId: "r", repository: "owner/repo", number: 1,
+      headSha: HEAD, now: 1 });
+    assert.equal(owner.pullRequestWatches.visibleFor("s")?.watchId, "w", "a write clears the owner's cache");
+    assert.equal(reader.pullRequestWatches.visibleFor("s")?.watchId, "w", "the reader never cached the empty answer");
+    assert.equal(reader.pullRequestWatches.isParked("s"), true);
+  } finally {
+    reader.close();
+    owner.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("an archived session's watch stops polling and owes no wake", () => {

@@ -5646,7 +5646,8 @@ export class ControlPlaneDb {
     });
     this.sessionReviewJobs = new SessionReviewJobs(db);
     this.reviewSessions = new ReviewSessions(db);
-    this.pullRequestWatches = new PullRequestWatches(db);
+    // Only the owning connection writes watches, so only it may cache their visibility.
+    this.pullRequestWatches = new PullRequestWatches(db, !attached);
     this.reviewSettings = new ReviewSettingsStore(db);
     this.ingestRollback = hostRebooted && walPath !== null
       ? { settled: new Set(), runnerTails: new Map(), controlPlaneEvents: new Set() }

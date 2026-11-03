@@ -50,7 +50,10 @@ export class PullRequestWatches {
   /** Prepared once: session views read a watch for every session they project. */
   private readonly statements = new Map<string, ReturnType<DatabaseSync["prepare"]>>();
 
-  constructor(private readonly sql: DatabaseSync) {}
+  /** `ownsWrites`: this connection is the only one that writes the table (ControlPlaneDb.open), so
+   * it may cache whether any watch is visible. An attached reader must not: the owner's writes
+   * never reach its cache. */
+  constructor(private readonly sql: DatabaseSync, private readonly ownsWrites = false) {}
 
   private stmt(text: string): ReturnType<DatabaseSync["prepare"]> {
     let statement = this.statements.get(text);
@@ -62,8 +65,8 @@ export class PullRequestWatches {
   }
 
   /** Whether any watch is visible, so the per-session reads every session view makes cost nothing
-   * while none is. Unknown after any write; never cached inside an open transaction, which could
-   * still roll back. */
+   * while none is. Unknown after any write; cached only by the owning connection, and never inside
+   * an open transaction, which could still roll back. */
   private anyVisible: boolean | undefined;
 
   /** Every write goes through here, so the visibility answer is recomputed after it. */
@@ -75,7 +78,7 @@ export class PullRequestWatches {
   private noneVisible(): boolean {
     if (this.anyVisible !== undefined) return !this.anyVisible;
     const any = this.stmt(`SELECT 1 FROM pull_request_watches WHERE ${VISIBLE} LIMIT 1`).get() !== undefined;
-    if (!(this.sql as DatabaseSync & { isTransaction?: boolean }).isTransaction) this.anyVisible = any;
+    if (this.ownsWrites && !(this.sql as DatabaseSync & { isTransaction?: boolean }).isTransaction) this.anyVisible = any;
     return !any;
   }
 
