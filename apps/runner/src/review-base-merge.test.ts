@@ -75,6 +75,33 @@ test("a resolution with a change outside its conflicted hunk is an ordinary comm
   assert.equal(await classify(dir, reference, head, base), null);
 });
 
+test("a resolution that changes a conflicted file's mode or type is an ordinary commit", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  write("f.txt", LINES.map((line) => line === "b" ? "b-main" : line));
+  const base = await commit("base edits the same line");
+  await git("checkout", "-q", "pr");
+  await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+  write("f.txt", LINES.map((line) => line === "b" ? "b-resolved" : line));
+  await git("add", "f.txt");
+  await git("update-index", "--chmod=+x", "f.txt");
+  await git("commit", "-qm", "merge main, resolving b and making f executable");
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "an executable bit");
+
+  // The same conflict resolved by replacing the file with a symlink.
+  await git("reset", "-q", "--hard", reference);
+  await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+  writeFileSync(join(dir, "f.txt"), LINES.map((line) => line === "b" ? "b-resolved" : line).join("\n") + "\n");
+  await git("add", "f.txt");
+  const target = join(dir, "..", `${dir.split("/").at(-1)}-link-target`);
+  writeFileSync(target, `${LINES.map((line) => line === "b" ? "b-resolved" : line).join("\n")}\n`);
+  t.after(() => rmSync(target, { force: true }));
+  // A symlink whose target text is the resolved content: the blob matches, only the type differs.
+  const link = await git("hash-object", "-w", target);
+  await git("update-index", "--cacheinfo", `120000,${link},f.txt`);
+  await git("commit", "-qm", "merge main, resolving f into a symlink");
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "a type change");
+});
+
 test("a clean merge carrying any other change is an ordinary commit", async (t) => {
   const { dir, git, write, commit, reference } = await repository(t);
   write("g.txt", ["y"]);

@@ -6,8 +6,8 @@
  * The head must be a two-parent merge whose first parent is the reviewed head and whose second is a
  * commit of the pull request's current base that the reviewed head did not already contain. Its tree
  * may differ from Git's own merge of those parents only inside the conflicted hunks Git left: a
- * clean merge must match exactly, and a resolution may rewrite each conflict block but not the text
- * around it. Octopus merges, a merged parent outside the base branch, a commit after the merge, a
+ * clean merge must match exactly, and a resolution may rewrite each conflict block of a regular file
+ * but not the text around it, nor the file's mode or type. Octopus merges, a merged parent outside the base branch, a commit after the merge, a
  * path-level conflict (rename, delete, binary) or any change outside a conflict block fail the proof.
  */
 import type { ReviewBaseMerge } from "@wollipog/protocol";
@@ -20,7 +20,23 @@ const SHA = /^[0-9a-f]{40}$/u;
 const MAX_CONFLICTED_FILES = 64;
 const MAX_CONFLICTED_FILE_BYTES = 2 * 1024 * 1024;
 
-const paths = (output: string) => output.split("\0").filter(Boolean);
+const REGULAR_FILE = /^100(?:644|755)$/u;
+
+/** Every path that differs between two trees, with its modes and status, or null if unparsable. */
+async function rawChanges(git: BaseMergeGit, from: string, to: string):
+  Promise<Array<{ path: string; oldMode: string; newMode: string; status: string }> | null> {
+  const fields = (await git(["diff", "--raw", "--no-abbrev", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
+    "--end-of-options", from, to])).split("\0");
+  if ((fields.length - 1) % 2 !== 0 || fields.at(-1) !== "") return null;
+  const changes: Array<{ path: string; oldMode: string; newMode: string; status: string }> = [];
+  for (let index = 0; index + 1 < fields.length; index += 2) {
+    const header = /^:(\d{6}) (\d{6}) [0-9a-f]{40} [0-9a-f]{40} ([A-Z])$/u.exec(fields[index]!);
+    const path = fields[index + 1];
+    if (!header || !path) return null;
+    changes.push({ path, oldMode: header[1]!, newMode: header[2]!, status: header[3]! });
+  }
+  return changes;
+}
 
 async function ancestor(git: BaseMergeGit, commit: string, of: string): Promise<boolean> {
   return git(["merge-base", "--is-ancestor", "--end-of-options", commit, of]).then(() => true, () => false);
@@ -98,10 +114,11 @@ export async function classifyBaseMerge(git: BaseMergeGit, reference: string, he
     const automatic = await automaticMerge(git, reference, merged);
     if (!automatic || automatic.conflicted.length > MAX_CONFLICTED_FILES) return null;
     const conflicted = new Set(automatic.conflicted);
-    const differing = paths(await git(["diff", "--name-only", "-z", "--no-renames", "--no-ext-diff", "--no-textconv",
-      "--end-of-options", automatic.tree, `${head}^{tree}`]));
-    for (const path of differing) {
-      if (!conflicted.has(path)) return null;
+    const differing = await rawChanges(git, automatic.tree, `${head}^{tree}`);
+    if (!differing) return null;
+    for (const { path, oldMode, newMode, status } of differing) {
+      // Only a conflicted regular file's content may change: its mode, type and presence may not.
+      if (!conflicted.has(path) || status !== "M" || oldMode !== newMode || !REGULAR_FILE.test(newMode)) return null;
       const [text, resolution] = await Promise.all([
         git(["cat-file", "blob", `${automatic.tree}:${path}`]), git(["cat-file", "blob", `${head}:${path}`]),
       ]);
