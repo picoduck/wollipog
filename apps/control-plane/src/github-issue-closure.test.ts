@@ -1,23 +1,36 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { normalizeIssueClosureSnapshot, sanitizedIssueClosureRunnerError } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, sanitizedIssueClosureRunnerError, WITHHELD_RUNNER_ERROR } from "./github-issue-closure.js";
 
 const DIGEST = "a".repeat(64);
 const HEAD = "b".repeat(40);
 
-test("a refused closure's runner message is redacted after control characters are normalized (#4059)", () => {
-  // A control character between a credential's label and its value hides it from a single pass.
-  for (const separator of ["\u0007", "\u0000", "​", "\t\n"]) {
-    const kept = sanitizedIssueClosureRunnerError(`GitHub refused: Bearer${separator}opaqueCredentialValue and password=${separator}hunter2`) ?? "";
-    assert.ok(!kept.includes("opaqueCredentialValue") && !kept.includes("hunter2"), JSON.stringify(kept));
-    assert.match(kept, /^GitHub refused: Bearer <redacted-secret>/u);
+test("a refused closure keeps a runner message only with every credential redacted (#4059)", () => {
+  const messages = (separator: string) => [`Bearer${separator}secretValueA`, `password=${separator}secretValueB`,
+    `token:${separator}secretValueC`, `Authorization:${separator}Basic secretValueD`,
+    `https://user:${separator}secretValueE@github.com`, `api_key =${separator}"secretValueF"`, `https://user:secretValueG${separator}@github.com`];
+  // Whitespace of any kind between a credential's label and its value is redacted on one line.
+  // (Whitespace inside URL userinfo ends the URL, in raw text as on one line.)
+  for (const separator of [" ", "\t", "\n", "\r\n", " \n\t ", "\u000b", "\u000c", " "]) {
+    for (const message of messages(separator).filter((text) => !text.startsWith("https://"))) {
+      const kept = sanitizedIssueClosureRunnerError(`GitHub refused: ${message}`) ?? "";
+      assert.ok(kept.startsWith("GitHub refused: ") && !/secretValue|[\r\n\t]/u.test(kept), JSON.stringify([separator, kept]));
+    }
+  }
+  // Any other control or format character could hide a credential from one reading and split it in
+  // another, so the message is withheld.
+  for (const separator of ["\u0007", "\u0000", "​", "\u0007\n", "\n\u0007", "\u0007 ​", " \r\n\u0000 ", "\u0085", "‮"]) {
+    for (const message of messages(separator)) {
+      assert.equal(sanitizedIssueClosureRunnerError(`GitHub refused: ${message}`), WITHHELD_RUNNER_ERROR, JSON.stringify(separator));
+    }
   }
   // A credential straddling the read bound loses its tail rather than slipping under its pattern.
   const token = `ghp_${"A".repeat(36)}`;
   const long = sanitizedIssueClosureRunnerError(`${token} ${"x ".repeat(8_190)}${token}`) ?? "";
   assert.ok(!long.includes("ghp_") && long.length <= 300 && long.endsWith("…"), long.slice(0, 80));
   assert.equal(sanitizedIssueClosureRunnerError(`${"word ".repeat(3_277)}ghp_${"B".repeat(36)}`)?.includes("ghp_"), false);
-  assert.equal(sanitizedIssueClosureRunnerError(" \u0007\n "), undefined);
+  assert.equal(sanitizedIssueClosureRunnerError("Campaign scope revision is stale."), "Campaign scope revision is stale.");
+  assert.equal(sanitizedIssueClosureRunnerError(" \n\t "), undefined);
   assert.equal(sanitizedIssueClosureRunnerError(42), undefined);
 });
 

@@ -16,17 +16,23 @@ const record = (value: unknown): value is Record<string, unknown> => Boolean(val
 /** The most runner text the sanitizer reads; far beyond what a refusal keeps. */
 const RUNNER_ERROR_SCAN_MAX = 16_384;
 
-/** A runner's message as a refusal keeps it (#4059): credentials and machine-local paths redacted,
- * control characters and runs of whitespace collapsed, and bounded. Redaction runs again after the
- * text is normalized, since a control character between a credential's label and its value hides it
- * from the first pass, and the output bound applies only to redacted text. */
+/** What a refusal keeps of a runner message holding other control or format characters. */
+export const WITHHELD_RUNNER_ERROR = "The runner's message was withheld because it contained control characters.";
+
+/** A runner's message as a refusal keeps it (#4059): runs of whitespace collapsed to single spaces,
+ * then credentials and machine-local paths redacted, then bounded. Every redaction pattern already
+ * treats a tab or line break as whitespace, so on one line it matches at least what it would across
+ * lines. Any other control or format character could hide a credential from one reading and split
+ * it in another, so such a message is withheld rather than guessed at; runners send fixed sentences.
+ * The output bound applies only to redacted text. */
 export function sanitizedIssueClosureRunnerError(value: unknown): string | undefined {
   if (typeof value !== "string") return undefined;
+  // Every control and format character except tab, line feed, vertical tab, form feed and return.
+  if (/[\p{Cf}\0-\u0008\u000e-\u001f\u007f-\u009f]/u.test(value)) return WITHHELD_RUNNER_ERROR;
   // An over-long message loses its trailing partial word, so no credential is cut below the length
   // its pattern recognizes.
   const scanned = value.length > RUNNER_ERROR_SCAN_MAX ? value.slice(0, RUNNER_ERROR_SCAN_MAX).replace(/\S*$/u, "") : value;
-  const printable = redactOperationalTranscriptText(scanned).replace(/[\p{Cc}\p{Cf}]+/gu, " ");
-  const text = redactOperationalTranscriptText(printable.replace(/\s+/gu, " ")).trim();
+  const text = redactOperationalTranscriptText(scanned.replace(/\s+/gu, " ")).trim();
   if (!text) return undefined;
   return text.length > GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX ? `${text.slice(0, GITHUB_ISSUE_CLOSURE_RUNNER_ERROR_MAX - 1)}…` : text;
 }

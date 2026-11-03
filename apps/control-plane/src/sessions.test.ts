@@ -56,6 +56,7 @@ import {
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
+import { WITHHELD_RUNNER_ERROR } from "./github-issue-closure.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
@@ -27731,8 +27732,10 @@ test("a refused issue closure records why, keeps the runner's sanitized message,
       refusal: githubIssueClosureRefusal("runner_unreachable") } }, refusal: githubIssueClosureRefusal("unspecified") },
     { name: "classified failure", reply: { ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale" },
       refusal: githubIssueClosureRefusal("campaign_authority_changed", { runnerError: "Campaign scope revision is stale" }) },
-    { name: "older runner failure", reply: { ok: false, error: `GitHub said\u0007 no:\n token=${credential} ${"y".repeat(600)}` },
+    { name: "older runner failure", reply: { ok: false, error: `GitHub said\t no:\n token=${credential} ${"y".repeat(600)}` },
       refusal: githubIssueClosureRefusal("runner_failed", { runnerError: "" }) },
+    { name: "control characters", reply: { ok: false, error: `GitHub said\u0007 no: token=\u0007${credential}` },
+      refusal: githubIssueClosureRefusal("runner_failed", { runnerError: WITHHELD_RUNNER_ERROR }) },
     { name: "failure a reply cannot carry", reply: { ok: false, failure: "closing_reference_changed" }, refusal: githubIssueClosureRefusal("runner_failed") },
     { name: "never sent", reply: "not_sent", refusal: githubIssueClosureRefusal("runner_unreachable") },
   ];
