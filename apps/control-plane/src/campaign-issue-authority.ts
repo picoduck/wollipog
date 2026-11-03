@@ -102,7 +102,10 @@ export type CampaignScopeAdmissionFailure =
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
 export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdmissionFailure, { status: number; message: string }>> = {
-  capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed the human-established issue limit" },
+  // Names the limit and the owner's route to raise it (#4061); no agent can raise it.
+  capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed this campaign's Maximum Issues, the issue limit " +
+    "its Full Control authorization set. Only the person who authorized Full Control can raise it: in Campaign Status, raise the " +
+    "Follow-Up Limit, which raises Maximum Issues by as much, or choose No Limit. Ask that person; an Orchestrator can't raise it." },
   lineage_missing: { status: 403, message: "Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope. " +
     `Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   epic_not_authorized: { status: 403, message: `The named epic is not one this campaign's Full Control boundary authorizes; ${HUMAN_SCOPE_ROUTE}.` },
