@@ -695,12 +695,17 @@ test("the toolbar follows a desktop main column a docked panel narrows, not the 
   await expect(menu).toBeVisible();
   await page.keyboard.press("Escape");
   await expect(menu).toBeHidden();
+  await expect(weekly).toBeFocused();
 
+  // Tab goes on to About, the row's last control. Each step waits for focus to land, since a
+  // closing menu hands it back to its button on the next task.
   const about = toolbar.getByRole("button", { name: "About These Numbers" });
-  await about.focus();
+  await page.keyboard.press("Tab");
+  await expect(about).toBeFocused();
   await page.keyboard.press("Enter");
   const popover = page.getByRole("dialog", { name: "About These Numbers" });
   await expect(popover).toContainText("Recording started Jul 1, 2026.");
+  await expect(popover).toBeFocused();
   const box = (await popover.boundingBox())!;
   expect(box.x).toBeGreaterThanOrEqual(0);
   expect(box.x + box.width).toBeLessThanOrEqual(1280);
