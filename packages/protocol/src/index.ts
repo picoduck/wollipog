@@ -814,6 +814,8 @@ export const PROTOCOL_VERSION = 270;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
+export * from "./issue-closure-refusal.js";
+import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
 export * from "./campaign-budget.js";
@@ -5095,9 +5097,14 @@ export interface GithubIssueClosureInspection {
   title: string;
   url: string;
   state: "OPEN" | "CLOSED";
-  /** Digest of issue identity, contents, updatedAt, labels, assignees, and relevant open PRs. */
+  /** Digest of what a closure depends on: the issue's identity, contents, updatedAt, labels and
+   * assignees, and each related open PR's identity and closing reference (#4059). A related PR's
+   * title, body, head and updatedAt are left out, so routine activity on it keeps an approval;
+   * a body edit that changes whether it is related or closes the issue still changes the digest. */
   forgeDigest: string;
-  openPullRequests: Array<{ number: number; title: string; url: string; headSha: string }>;
+  /** `closesIssue` (#4059): the forge reports the PR closes this issue when merged. Older runners
+   * omit it; a refusal of their snapshot cannot then name the PR that changed. */
+  openPullRequests: Array<{ number: number; title: string; url: string; headSha: string; closesIssue?: boolean }>;
   delivery?: Array<{ number: number; headSha: string; mergeCommitSha: string }>;
 }
 
@@ -5123,11 +5130,17 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
   issueAdmission?: CampaignIssueAdmission;
   dispositionRecommendationId?: string;
+  /** Server-derived (#4059): the latest earlier closure of this issue by this Orchestrator that was
+   * refused, so whoever reviews the new request can see why the last approval was used up. */
+  previousRefusal?: { occurrenceId: string; completedAt: number; refusal: GithubIssueClosureRefusal };
 }
 
 export interface GithubIssueClosureResult {
   outcome: "closed" | "already_closed" | "refused" | "uncertain";
   completedAt: number;
+  /** Why a `refused` outcome was refused (#4059). The control plane records one for every refusal;
+   * a result stored by an older control plane omits it. */
+  refusal?: GithubIssueClosureRefusal;
 }
 
 export interface AutomationCreationRequest {
@@ -9619,6 +9632,9 @@ export interface GithubIssueClosureResultMessage {
   inspection?: GithubIssueClosureInspection;
   result?: GithubIssueClosureResult;
   error?: string;
+  /** Classification of an `ok: false` reply (#4059), one of `GITHUB_ISSUE_CLOSURE_FAILURE_REASONS`.
+   * Older runners omit it, and the control plane then records `runner_failed`. */
+  failure?: GithubIssueClosureRefusalReason;
 }
 
 /** Slice 8 of #2417: read the GitHub pull requests a campaign's work items name, on the runner

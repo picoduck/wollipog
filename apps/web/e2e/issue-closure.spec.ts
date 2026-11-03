@@ -23,4 +23,15 @@ for (const width of [1440, 390]) {
     await expect(record.locator(".tl-decision-outcome")).toHaveText("Rejected");
     await expect(record).not.toContainText(/→|\bdeny\b/);
   });
+
+  test(`a renewed issue closure shows why the last approval was refused at ${width}px (#4059)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/request-surfaces-e2e.html?scenario=issue-closure-refused");
+    const details = page.getByRole("region", { name: "Issue Closure Details" });
+    const note = details.getByRole("note");
+    await expect(note).toBeVisible();
+    await expect(note).toHaveText("The last approved closure of this issue was refused before anything was written, so it used up that approval. "
+      + "A related open pull request gained or lost a closing reference to the issue: #77.");
+    await expect(page.locator(".request-dock .request-card-foot").getByRole("button", { name: /^Approve/u })).toBeEnabled();
+  });
 }

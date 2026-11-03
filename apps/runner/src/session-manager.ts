@@ -19044,17 +19044,17 @@ export class SessionManager {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
-      return { ...base, ok: false, error: "Issue closure requires a runner-local Orchestrator repository" };
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
     if (this.campaignHostTargetRefusal(meta)) {
-      return { ...base, ok: false, error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {
-      return { ...base, ok: false, error: "Issue is outside the human-authorized campaign scope" };
+      return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
-    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
+    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
     const boundedAuthorityCurrent = (current: SessionMeta): boolean => {
       if (message.operation !== "execute" || !message.snapshot.issueAdmission) return true;
       const control = current.orchestrator?.control;
@@ -19065,15 +19065,15 @@ export class SessionManager {
         control.boundary.operations.includes("issue_closure") &&
         Boolean(control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason));
     };
-    if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
+    if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Bounded closure authority is unsynchronized" };
     const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
         const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests);
-        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Repository differs from the authorized scope" };
+        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
         return { ...base, ok: true, inspection };
       }
-      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Closure repository differs from the authorized scope" };
+      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
       const result = await executeGithubIssueClosure(message.snapshot, run, () => {
         const fresh = this.store.readMeta(message.sessionId);
@@ -19094,11 +19094,14 @@ export class SessionManager {
         }) !== null;
       });
       this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId,
-        occurrenceId: message.occurrenceId, outcome: result.outcome }));
+        occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
     } catch (error) {
-      return { ...base, ok: false, error: error instanceof IssueClosureInspectionError ? error.message
-        : "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+      // Execution throws only before its mutation fence: a mutation failure is an `uncertain` result.
+      return error instanceof IssueClosureInspectionError
+        ? { ...base, ok: false, failure: error.failure, error: error.message }
+        : { ...base, ok: false, failure: "evidence_unavailable",
+          error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
     }
   }
 

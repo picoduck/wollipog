@@ -135,8 +135,10 @@ The proposal requires requestId, issue, reason (completed or not_planned), expla
 evidence, and an optional exact comment. Repository and current work conflicts are derived
 by the runner and control plane. Only an injected root Orchestrator with protocol v194+
 may close a campaign-scoped issue. Approval expires after 30 minutes; changed evidence
-requires renewed human review. Read issueClosureResult to verify completion. If the
-result is uncertain, inspect GitHub and never replay the action or substitute a shell command.
+requires renewed human review. Read issueClosureResult to verify completion. A refused
+result wrote nothing; its refusal.reason and refusal.summary say why, and a new request is
+needed. If the result is uncertain, inspect GitHub and never replay the action or substitute
+a shell command.
 
 Issue scope: issue-scope get [--epic <number>]; issue-scope request --proposal <json>.
 Tools: get_campaign_issue_scope, request_campaign_issue_scope_change, request_github_issue_closure, close_github_issue; recover with decision get.

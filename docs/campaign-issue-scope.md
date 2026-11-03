@@ -207,6 +207,27 @@ launch identity after forge inspection. A change refuses the close before record
 `campaign_issue_closure_authority_changed` identifies the request, occurrence and revisions without
 logging the issue payload or authority contents.
 
+### Closure Refusal Reasons
+
+A `refused` closure result always carries `refusal` (#4059): a `reason`, the related PRs it names,
+the runner's sanitized and bounded message when there is one, `forgeWritten: false`,
+`nextStep: "request_new_closure"`, and a derived `summary`. Every refusal precedes the runner's
+mutation fence, so nothing was written; the approval is consumed and closing needs a new request,
+whose snapshot carries `previousRefusal` so its reviewer sees why the last approval was used up.
+Reasons are `repository_changed`, `issue_changed`, `related_pull_requests_changed`,
+`closing_reference_changed`, `forge_evidence_changed`, `related_pull_request_open`,
+`delivery_changed`, `campaign_authority_changed`, `mutation_fence_unavailable`,
+`evidence_unavailable`, `runner_failed`, `runner_unreachable` and `unspecified` (a runner that
+predates reasons). An `ok: false` runner reply without a classification records `runner_failed`.
+
+The forge digest binds the issue's identity, contents, `updatedAt`, labels and assignees, and each
+related open PR's number, address and closing reference to the issue. A related PR's title, body,
+head and `updatedAt` are not bound: a push, a merge from the default branch or a body edit keeps an
+approval unless it changes whether the PR relates to the issue or closes it, which refuses with the
+PR named. A snapshot that an older runner took while related PRs were open was digested the old
+way, so an upgraded runner refuses it as `forge_evidence_changed`, or names a set change; a snapshot
+without related PRs digests the same either way.
+
 Operational questions: why was this admission refused, who established its boundary, and which
 scope revision was applied? `campaign_issue_admission`, `campaign_authority_evaluated`, and
 `campaign_issue_scope_approved` provide entry point, request/occurrence, owner, reason and revision

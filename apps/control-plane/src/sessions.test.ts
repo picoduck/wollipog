@@ -50,6 +50,7 @@ import {
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKSPACE_REFERENCE_MIME_TYPE,
+  githubIssueClosureRefusal,
   pendingRequests,
   projectSessionEventPayloadForProtocol,
 } from "@wollipog/protocol";
@@ -27700,6 +27701,10 @@ test("issue closure requires an exact human decision and executes one durable ac
         assert.ok(result.ok && result.data, `${mode}: ${result.error}`);
         assert.equal(result.data.status, "consumed");
         assert.equal(result.data.issueClosureResult?.outcome, uncertain.has(mode) ? "uncertain" : refused.has(mode) ? "refused" : "closed");
+        // #4059: a refusal says why, keeps the runner's message and says nothing was written.
+        assert.deepEqual(result.data.issueClosureResult?.refusal, mode === "runner_refused"
+          ? githubIssueClosureRefusal("runner_failed", { runnerError: "GitHub inspection failed" })
+          : mode === "not_sent" ? githubIssueClosureRefusal("runner_unreachable") : undefined);
         assert.equal(executions, 1);
         assert.equal((await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest)).ok, false);
         assert.equal(executions, 1);
@@ -27710,6 +27715,83 @@ test("issue closure requires an exact human decision and executes one durable ac
         assert.equal(result.ok, false, `${mode}: no execution`);
         assert.equal(executions, 0);
       }
+    } finally { db.close(); }
+  }
+});
+
+test("a refused issue closure records why, keeps the runner's sanitized message, and shows it on the next request (#4059)", async () => {
+  type Reply = Omit<Extract<RunnerRequestResult, { type: "github_issue_closure_result" }>, "type" | "requestId" | "sessionId"> | "not_sent";
+  const credential = `ghp_${"A".repeat(36)}`;
+  const cases: Array<{ name: string; reply: Reply; refusal: ReturnType<typeof githubIssueClosureRefusal> }> = [
+    { name: "named PR", reply: { ok: true, result: { outcome: "refused", completedAt: 1,
+      refusal: { ...githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }), summary: "Forged." } } },
+    refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) },
+    { name: "older runner", reply: { ok: true, result: { outcome: "refused", completedAt: 1 } }, refusal: githubIssueClosureRefusal("unspecified") },
+    { name: "reason a result cannot carry", reply: { ok: true, result: { outcome: "refused", completedAt: 1,
+      refusal: githubIssueClosureRefusal("runner_unreachable") } }, refusal: githubIssueClosureRefusal("unspecified") },
+    { name: "classified failure", reply: { ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale" },
+      refusal: githubIssueClosureRefusal("campaign_authority_changed", { runnerError: "Campaign scope revision is stale" }) },
+    { name: "older runner failure", reply: { ok: false, error: `GitHub said\u0007 no:\n token=${credential} ${"y".repeat(600)}` },
+      refusal: githubIssueClosureRefusal("runner_failed", { runnerError: "" }) },
+    { name: "failure a reply cannot carry", reply: { ok: false, failure: "closing_reference_changed" }, refusal: githubIssueClosureRefusal("runner_failed") },
+    { name: "never sent", reply: "not_sent", refusal: githubIssueClosureRefusal("runner_unreachable") },
+  ];
+  for (const { name, reply, refusal } of cases) {
+    const { db, hub, svc } = makeHarness();
+    try {
+      const meta = runnerMeta();
+      meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = { models: [], effortLevels: [], slashCommands: [],
+        supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"] };
+      db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+        config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issues 123." },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+      assert.ok(created.ok && created.data, created.error);
+      const id = created.data.id;
+      db.updateSessionStatus(id, "running", Date.now());
+      let executions = 0;
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ok: true,
+          inspection: { repository: "team/repo", issue: 123, title: "Obsolete task", url: "https://github.com/team/repo/issues/123", state: "OPEN",
+            forgeDigest: "a".repeat(64), openPullRequests: [{ number: 77, title: "Work", url: "https://github.com/team/repo/pull/77",
+              headSha: "b".repeat(40), closesIssue: false }] } };
+        executions++;
+        if (reply === "not_sent") throw new RunnerRequestNotSentError();
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ...reply } as RunnerRequestResult;
+      };
+      const proposal = { requestId: "closure-1", issue: 123, reason: "not_planned" as const, explanation: "Retire obsolete work.",
+        evidence: ["Superseded by the new design."] };
+      const requested = await svc.requestGithubIssueClosure(id, proposal);
+      assert.ok(requested.ok && requested.data?.decision, requested.error);
+      const decision = requested.data.decision;
+      assert.ok(decision.resourceSnapshot.category === "issue_closure");
+      assert.equal(decision.resourceSnapshot.previousRefusal, undefined);
+      assert.deepEqual(decision.resourceSnapshot.openPullRequests.map((pr) => pr.closesIssue), [false]);
+      assert.ok(svc.approve(id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+      const executed = await svc.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
+      assert.ok(executed.ok && executed.data, `${name}: ${executed.error}`);
+      const recorded = executed.data.issueClosureResult;
+      assert.equal(recorded?.outcome, "refused", name);
+      if (name === "older runner failure") {
+        assert.equal(recorded?.refusal?.reason, "runner_failed");
+        const error = recorded?.refusal?.runnerError ?? "";
+        assert.ok(error.length <= 300 && error.endsWith("…"), `${name}: bounded`);
+        assert.ok(!error.includes(credential) && !/[\u0000-\u001f]/u.test(error), `${name}: sanitized ${error}`);
+        assert.match(error, /^GitHub said no: token=/u);
+      } else assert.deepEqual(recorded?.refusal, refusal, name);
+      assert.match(recorded?.refusal?.summary ?? "", /Nothing was written; request a new closure to try again\.$/u);
+      // The approval is used up: a replay never dispatches again.
+      assert.equal((await svc.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest)).ok, false);
+      assert.equal(executions, 1);
+      assert.deepEqual(db.workflowDecisionByOccurrence(decision.occurrenceId)?.issueClosureResult, recorded, "get_workflow_decision shows it");
+
+      // Whoever reviews the next request for this closure sees why the last approval was used up.
+      const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2" });
+      assert.ok(next.ok && next.data?.decision, next.error);
+      assert.ok(next.data.decision.resourceSnapshot.category === "issue_closure");
+      assert.deepEqual(next.data.decision.resourceSnapshot.previousRefusal,
+        { occurrenceId: decision.occurrenceId, completedAt: recorded!.completedAt, refusal: recorded!.refusal });
     } finally { db.close(); }
   }
 });
