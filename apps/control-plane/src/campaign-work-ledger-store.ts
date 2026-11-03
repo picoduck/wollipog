@@ -351,6 +351,9 @@ export interface CampaignWorkLedgerHooks {
   observeCleanup(sessionId: string): CampaignObservedCleanup["worktrees"] | null;
   boundary(sessionId: string): CampaignAttemptBoundary;
   atomic<T>(work: () => T): T;
+  /** Why a child may not be dispatched on an item tracking this issue, or null when it may (#4062).
+   * Recording the item is unaffected; only opening an attempt on it is checked. */
+  admitDispatch?(campaignId: string, issue: CampaignIssueRef | null): string | null;
   /** Counts a new follow-up work item against the campaign allowance: null when accepted, else the
    * refusal, whose `details` name a follow-up that needs the Human's approval (#2940). */
   acceptFollowUp?(campaignId: string, workItemId: string, subject: CampaignFollowUpSubject, content: CampaignFollowUpContent):
@@ -1160,6 +1163,8 @@ export class CampaignWorkLedgerStore {
     if (item.commitment !== "committed") {
       return fail(`a ${item.commitment === "cancelled" ? "cancelled" : "removed"} work item cannot be assigned; recommit it first`, 409);
     }
+    const refused = this.hooks.admitDispatch?.(campaignId, itemIssue(item.issue_repository, item.issue_number));
+    if (refused) return fail(refused, 409);
     return done(null);
   }
 

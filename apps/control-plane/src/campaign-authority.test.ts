@@ -64,6 +64,51 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   return { db, svc, principal, sent, enable, ask, generic, snapshot, make };
 }
 
+test("#4062 a Full Control merge is the Orchestrator's only while every issue it closes is in scope, and is never assumed to close nothing", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const root = h.db.getSession("root")!, child = h.db.getSession("child")!;
+    const head = "a".repeat(40);
+    const merge = (extra: Record<string, unknown> = {}) => ({ category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 7, headSha: head,
+      reviewResult: "merge", requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] }, ...extra }) as WorkflowDecisionResourceSnapshot;
+    const evaluate = (controller: typeof root, snapshot: WorkflowDecisionResourceSnapshot, protocol = PROTOCOL_VERSION) => {
+      const { owner, reason, unscopedClosures } = evaluateCampaignAuthority(controller, child, protocol, snapshot, controller.parentControlPolicy, PROTOCOL_VERSION);
+      return { owner, reason, ...(unscopedClosures ? { unscopedClosures } : {}) };
+    };
+    const delegated = { owner: "orchestrator", reason: "authorized_operation" };
+    const unverified = { owner: "human", reason: "unverified_closures" };
+    // A current runner reads what GitHub would close, so the declared closures are exact.
+    assert.deepEqual(evaluate(root, merge()), delegated, "a Refs-only merge closes nothing");
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] })), delegated);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["other/repo#2934", "picoduck/wollipog#2934", "picoduck/wollipog#3903"] })),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["other/repo#2934", "picoduck/wollipog#3903"] });
+    // A runner older than that read (v241) proves nothing: only declared, in-scope closures stay delegated.
+    assert.deepEqual(evaluate(root, merge(), 241), unverified);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), delegated);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["picoduck/wollipog#3903"] });
+    // Nothing reads a GitLab merge's closures.
+    const gitlab = "gitlab.example.com/platform/wollipog";
+    const control = structuredClone(root.orchestratorPolicy!.control!);
+    assert.ok(control.mode === "full_control");
+    control.boundary.repository = gitlab;
+    const onGitlab = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control,
+      issueScope: { ...root.orchestratorPolicy!.issueScope!, repository: gitlab } } };
+    assert.equal(campaignBoundaryCurrent(onGitlab), true);
+    assert.deepEqual(evaluate(onGitlab, merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false })), unverified);
+    // A scope that no longer names a closing issue takes the merge back from the Orchestrator.
+    const narrowed = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, issueNumbers: [],
+      issueScope: { ...root.orchestratorPolicy!.issueScope!, issueNumbers: [] } } };
+    assert.equal(evaluate(narrowed, merge({ intendedClosures: ["picoduck/wollipog#2934"] })).reason, "outside_issue_scope");
+    assert.deepEqual(evaluate(narrowed, merge()), delegated);
+    // Custom campaigns keep their saved owner whatever the merge closes.
+    const custom = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control: undefined },
+      parentControlPolicy: { revision: 1, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const } } };
+    assert.deepEqual(evaluate(custom, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241), { owner: "orchestrator", reason: "custom_owner" });
+  } finally { h.db.close(); }
+});
+
 test("pure media authority requires both participant contract inputs and never invents missing metadata", () => {
   const h = harness(223); try {
     assert.ok(h.enable().ok);
