@@ -1,1 +1,0 @@
-|.usage-daily-budget label|gap|4px

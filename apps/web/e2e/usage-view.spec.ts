@@ -15,6 +15,19 @@ test.use({ reducedMotion: "reduce" });
 
 const SHOT = "test-results/usage-view";
 
+/** A CSS colour as the page computes it ("rgb(248, 81, 73)"), for comparing against a token. */
+async function resolvedColor(page: Page, value: string): Promise<string> {
+  return page.evaluate((color) => {
+    const probe = document.createElement("span");
+    probe.style.color = color;
+    document.body.append(probe);
+    const computed = getComputedStyle(probe).color;
+    probe.remove();
+    return computed;
+  }, value);
+}
+const resolvedRed = (page: Page) => resolvedColor(page, "var(--red)");
+
 test("desktop: metric, chart interaction, and Group By as the one aggregation control", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
   await page.goto("/usage-view-e2e.html");
@@ -118,11 +131,133 @@ test("By Person: one Budget Reached badge and a warning meter, and admins can ch
   await expect(panel).toContainText("Today includes an estimate for running turns.");
   await page.screenshot({ path: `${SHOT}/desktop-dark-person.png`, fullPage: true });
 
-  await page.getByLabel("Daily Budget per User ($)").fill("30");
-  await page.getByRole("button", { name: "Save Daily Budget" }).click();
-  await expect(panel).toContainText("Daily budget saved.");
+  await page.getByRole("button", { name: "Change Budget…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Budget and History" });
+  const budget = dialog.getByLabel("Daily Budget per Person (Optional)");
+  await expect(budget).toBeFocused();
+  await budget.fill("30");
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await expect(dialog).toHaveCount(0);
+  const toast = page.locator(".toast").filter({ hasText: "Budget and history saved." });
+  await expect(toast).toContainText("Daily budget $30.00 per person. Hourly detail 30 days, daily totals 365 days.");
+  await expect(panel).toContainText("Each person can spend $30.00 per UTC day.");
   await expect(panel.locator(".status")).toHaveCount(0);
   await expect(ada).toContainText("$26.40 of $30.00");
+});
+
+test("Budget and History: an owner opens it from the header, a member sees neither opener nor form (#3015)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/usage-view-e2e.html");
+  await expect(page.locator(".page-header").getByRole("button", { name: "Budget and History…" })).toBeVisible();
+  // The page reports; its only primary is the dialog's Save Changes.
+  await expect(page.locator(".page .btn.primary")).toHaveCount(0);
+  await expect(page.locator(".page form, .page input")).toHaveCount(0);
+
+  await page.goto("/usage-view-e2e.html?member=1");
+  await expect(page.locator(".usage-headline-value")).toContainText("$");
+  await expect(page.getByRole("button", { name: "Budget and History…" })).toHaveCount(0);
+  await page.getByRole("tablist", { name: "Breakdown" }).getByRole("tab", { name: "By Person" }).click();
+  await expect(page.locator("#usage-breakdown-panel")).toContainText("Each person can spend $25.00 per UTC day.");
+  await expect(page.getByRole("button", { name: "Change Budget…" })).toHaveCount(0);
+  await expect(page.locator(".page form, .page input")).toHaveCount(0);
+});
+
+test("Budget and History: -5 and 500 show inline errors, send nothing and raise no browser bubble (#3015)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/usage-view-e2e.html");
+  await page.getByRole("button", { name: "Budget and History…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Budget and History" });
+  await dialog.getByLabel("Daily Budget per Person (Optional)").fill("-5");
+  await dialog.getByLabel("Hourly Detail").fill("500");
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const budget = dialog.getByLabel("Daily Budget per Person (Optional)");
+  const hourly = dialog.getByLabel("Hourly Detail");
+  await expect(budget).toHaveAttribute("aria-invalid", "true");
+  await expect(hourly).toHaveAttribute("aria-invalid", "true");
+  await expect(dialog.locator(".field-error")).toHaveText([
+    "Enter an amount of at least $0.01, or leave it empty for no limit.",
+    "Enter 1 to 90 days.",
+  ]);
+  await expect(dialog.locator(".modal-foot")).toContainText("Fix 2 fields to save.");
+  await expect(budget).toBeFocused();
+  // Both invalid fields draw the --red edge once the field transition settles (§8.5).
+  const red = await resolvedRed(page);
+  await expect(budget).toHaveCSS("border-top-color", red);
+  await expect(hourly).toHaveCSS("border-top-color", red);
+  // No native constraint: the form is noValidate and the fields carry no min or max.
+  for (const field of [budget, hourly]) {
+    expect(await field.evaluate((input: HTMLInputElement) => input.validationMessage)).toBe("");
+  }
+  await expect(dialog).toBeVisible();
+  await expect(page.locator(".toast")).toHaveCount(0);
+});
+
+test("Budget and History: a shorter period asks Shorten Usage History stacked on the desktop dialog (#3015)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/usage-view-e2e.html");
+  await page.getByRole("button", { name: "Budget and History…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Budget and History" });
+  await dialog.getByLabel("Hourly Detail").fill("14");
+  await expect(dialog.locator(".field-warn")).toHaveText("Shorter than now (30 days). Older hourly detail will be deleted.");
+  // A warning is not an error: no aria-invalid, and the edge settles to the ordinary outline.
+  const hourly = dialog.getByLabel("Hourly Detail");
+  await dialog.getByLabel("Daily Totals").focus();
+  await expect(hourly).not.toHaveAttribute("aria-invalid", /.*/);
+  await expect(hourly).toHaveCSS("border-top-color", await resolvedColor(page, "var(--control-outline)"));
+  await expect(hourly).not.toHaveCSS("border-top-color", await resolvedRed(page));
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Shorten Usage History" });
+  await expect(confirmation).toContainText(/Hourly detail older than 14 days is deleted now, so hourly charts will start at .+\. Daily totals are not affected\. This can't be undone\./);
+  // Stacked: both dialogs are visible, the confirmation above the form.
+  await expect(dialog).toBeVisible();
+  await expect(confirmation.getByRole("button", { name: "Back to Budget and History" })).toHaveCount(0);
+  await confirmation.getByRole("button", { name: "Cancel" }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(dialog.getByLabel("Hourly Detail")).toHaveValue("14");
+  await expect(dialog.getByRole("button", { name: "Save Changes" })).toBeFocused();
+
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  await confirmation.getByRole("button", { name: "Shorten History" }).click();
+  await expect(dialog).toHaveCount(0);
+  await expect(page.locator(".toast")).toContainText("Hourly detail 14 days, daily totals 365 days.");
+});
+
+test("Budget and History at 390px: More Actions opens the sheet, and the confirmation replaces it with Back (#3015)", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto("/usage-view-e2e.html");
+  await page.getByRole("button", { name: "More Actions" }).click();
+  await page.getByRole("menuitem", { name: "Budget and History…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Budget and History" });
+  await expect(dialog).toBeVisible();
+  await dialog.getByLabel("Daily Budget per Person (Optional)").fill("40");
+  await dialog.getByLabel("Hourly Detail").fill("14");
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const confirmation = page.getByRole("dialog", { name: "Shorten Usage History" });
+  await expect(confirmation).toBeVisible();
+  // One sheet: the form's panel is hidden under the confirmation, never a second sheet.
+  await expect(dialog).toBeHidden();
+  await expect(page.locator(".modal-backdrop:not(.stacked)")).toHaveCount(1);
+  await confirmation.getByRole("button", { name: "Back to Budget and History" }).click();
+  await expect(confirmation).toHaveCount(0);
+  await expect(dialog).toBeVisible();
+  await expect(dialog.getByLabel("Daily Budget per Person (Optional)")).toHaveValue("40");
+  await expect(dialog.getByLabel("Hourly Detail")).toHaveValue("14");
+  await expect(dialog.getByRole("button", { name: "Save Changes" })).toBeFocused();
+});
+
+test("Budget and History: when history fails after the budget saved, the notice says so (#3015)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 1000 });
+  await page.goto("/usage-view-e2e.html?retentionFails=1");
+  await page.getByRole("button", { name: "Budget and History…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Budget and History" });
+  await dialog.getByLabel("Daily Budget per Person (Optional)").fill("40");
+  await dialog.getByLabel("Daily Totals").fill("400");
+  await dialog.getByRole("button", { name: "Save Changes" }).click();
+  const notice = dialog.locator(".notice.t-danger");
+  await expect(notice).toContainText("Couldn't Save Changes");
+  await expect(notice).toContainText("The daily budget was saved. History wasn't changed.");
+  await notice.getByRole("button", { name: "Show Details" }).click();
+  await expect(notice).toContainText("Usage retention is temporarily unavailable.");
 });
 
 const BREAKDOWN_TABS = ["By Day", "By Model", "By Agent", "By Machine", "By Person"] as const;

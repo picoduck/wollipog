@@ -320,9 +320,6 @@ function Sample() {
             <FixtureMachine runner={boxRunner} box={box} />
             <FixtureMachine runner={nativeRunner} />
           </div>
-          {/* Usage's cards keep `.runner-card` and its density padding after the machine detail
-              stopped being a card (#2988). */}
-          <article className="runner-card"><span>A usage card</span></article>
           <div className="table-wrap"><table className="table"><tbody><tr><td>A usage cell</td></tr></tbody></table></div>
           <div className="codeview">
             <code className="codeview-lines">

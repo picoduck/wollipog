@@ -28,7 +28,8 @@ import "../styles.css";
  * that started yesterday, so the 30-day window is clamped to its first day, `?coverageDays=10` for
  * recording that started ten days ago, `?sparse=1` for usage on only three of the 30 days, and
  * `?refreshFailed=2` for a subscription refresh where two of three machines failed. A refresh takes
- * 600ms, so it can be seen.
+ * 600ms, so it can be seen. Budget and History (#3015): `?member=1` for a viewer who cannot manage
+ * them, `?retentionFails=1` for a retention save that fails after the budget saved.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -126,7 +127,7 @@ const response: UsageAggregationResponse = {
   since: SINCE,
   through: END + DAY,
   retention: { hourlyDays: Number(params.get("hourlyDays") ?? 30), dailyDays: 365, coverageStartedAt: COVERAGE_STARTED_AT },
-  canManageRetention: true,
+  canManageRetention: params.get("member") !== "1",
   privacy: "content-free aggregates only; no session ids, prompts, paths, tool inputs, event bodies, environment values, or auth data",
   totals,
   series,
@@ -177,6 +178,7 @@ function aggregateResponse(granularity: UsageAggregationGranularity): UsageAggre
   return {
     ...response,
     granularity,
+    retention,
     legacyClaudeCostRecords: params.get("legacyCosts") === "1" ? 10 : 0,
     seriesByDriver: nextSeriesByDriver,
     series: [...buckets.entries()].map(([bucketTs, total]) => ({ bucketTs, ...total })).sort((a, b) => b.bucketTs - a.bucketTs),
@@ -282,6 +284,7 @@ if (params.get("selectedUnavailable") === "1" && subscription.sources[0]) {
 }
 
 let dailyBudget: { perUserUsd: number | null; updatedAt: number | null } = { perUserUsd: 25, updatedAt: END };
+let retention = response.retention;
 const users = [
   { userId: "u-ada", userName: "Ada", todayUsd: 26.4, last7DaysUsd: 112.2, last30DaysUsd: 401.7 },
   // Grace has a turn running: the plane sends its open estimate beside her settled spend.
@@ -302,6 +305,11 @@ const client = {
       ...(dailyBudget.perUserUsd != null && todayEstimateUsd ? { todayEstimateUsd } : {}),
     })),
   }),
+  updateUsageRetention: async (input: { hourlyDays: number; dailyDays: number }) => {
+    if (params.get("retentionFails") === "1") throw new Error("Usage retention is temporarily unavailable.");
+    retention = { ...retention, ...input };
+    return { retention };
+  },
   usage: async (input: { granularity?: UsageAggregationGranularity }) => aggregateResponse(input.granularity ?? "day"),
   subscriptionUsage: async () => subscription,
   refreshSubscriptionUsage: async () => {
