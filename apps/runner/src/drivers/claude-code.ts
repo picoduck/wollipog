@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto";
 import { claudeFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BACKGROUND_HANDOFF_WAIT_MAX_MS, type AgentQuestion, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -2840,8 +2840,9 @@ export class ClaudeCodeDriver implements Driver {
   /** Answer a pending interactive approval by writing a control_response on the CLI's
    * stdin (the stdio permission-prompt-tool protocol). Returns true iff a live ask was
    * answered — false means nothing was waiting (unknown id / process gone) and the caller
-   * must surface that instead of pretending the decision landed. */
-  resolvePermission(requestId: string, optionId: string | null): boolean {
+   * must surface that instead of pretending the decision landed. A Full Control policy decline
+   * says that Wollipog declined it and no person saw it, never "the user" (#4063). */
+  resolvePermission(requestId: string, optionId: string | null, automaticResponse?: FullControlAutomaticResponse): boolean {
     const input = this.pendingApprovals.get(requestId);
     if (input === undefined) return false;
     this.pendingApprovals.delete(requestId);
@@ -2849,7 +2850,7 @@ export class ClaudeCodeDriver implements Driver {
     const allow = optionId === "allow";
     const response = allow
       ? { behavior: "allow", updatedInput: input }
-      : { behavior: "deny", message: "The user declined this tool call." };
+      : { behavior: "deny", message: automaticResponse ? fullControlAutomaticResponseText("tool", automaticResponse) : "The user declined this tool call." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
     if (!this.child) return false;
     try {
@@ -2863,14 +2864,15 @@ export class ClaudeCodeDriver implements Driver {
   /** Answer a pending AskUserQuestion: allow with `updatedInput = {questions, answers}` (the
    * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). An
    * explicit dismiss, or a legacy empty answer map, denies the ask so the agent does not hang. */
-  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss",
+    automaticResponse?: FullControlAutomaticResponse): boolean {
     const original = this.pendingApprovals.get(requestId);
     if (original === undefined) return false;
     this.pendingApprovals.delete(requestId);
     this.pendingAttentionOwners.delete(requestId);
     const response = action === "submit" || (action == null && Object.keys(answers).length > 0)
       ? { behavior: "allow", updatedInput: { ...(original as Json), answers } }
-      : { behavior: "deny", message: "The user dismissed the question." };
+      : { behavior: "deny", message: automaticResponse ? fullControlAutomaticResponseText("question", automaticResponse) : "The user dismissed the question." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
     if (!this.child) return false;
     try {

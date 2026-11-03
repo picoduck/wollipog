@@ -836,7 +836,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      controller's runners are v277; older peers keep it with the person.
 // 278: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
 //      a Full Control completed closure of an in-scope epic can be proven from its closed members.
-export const PROTOCOL_VERSION = 278;
+// 280: Full Control response attribution (#4063). When the server's Full Control policy dismisses a
+//      question or declines a tool call, `answer_question` and `resolve_permission` carry
+//      `automaticResponse`: the policy and, only when it is safe to name, the request class. A v280
+//      runner whose provider result carries text (Claude Code) tells the agent that Wollipog
+//      declined it under Full Control, that no person saw it and what to do instead. The field is
+//      sent only to a v280 runner; older runners keep the fixed person-worded text and the separate
+//      notices. A person's dismissal or decline never carries it.
+export const PROTOCOL_VERSION = 280;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1229,6 +1236,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v278 issue-closure inspection reads an epic's sub-issues and member checklist with each member's
    * state (#4060). Without it an epic's completed closure has only the work-item proof. */
   epicClosureMembers: 278,
+  /** v280 runner delivers a Full Control standing dismissal or decline with text naming the policy
+   * rather than a person (#4063). Older runners keep the fixed text and the separate notices. */
+  fullControlResponseAttribution: 280,
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
@@ -10885,6 +10895,8 @@ export interface ResolvePermissionMessage {
   resolvedByParentSessionId?: string;
   /** v211: who settled it, recorded on its `permission_resolved`. */
   resolvedBy?: PermissionResolver;
+  /** v280: present only when the server's Full Control policy declined this request (#4063). */
+  automaticResponse?: import("./campaign-authority.js").FullControlAutomaticResponse;
 }
 
 /** Answer a structured agent question (question_request). Answers are keyed by AgentQuestion.id
@@ -10905,6 +10917,8 @@ export interface AnswerQuestionMessage {
   answerSummary?: QuestionAnswerSummaryEntry[];
   /** v205: the organization user who submitted the answer, recorded on its `question_resolved`. */
   answeredByUserId?: string;
+  /** v280: present only on a dismissal by the server's Full Control policy (#4063). */
+  automaticResponse?: import("./campaign-authority.js").FullControlAutomaticResponse;
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).

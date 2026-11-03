@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, FULL_CONTROL_ROOT_QUESTION_MESSAGE, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   type ControlPlaneToRunner, type RunnerMetadata, type RunnerToControlPlane,
 } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks } from "../../runner/src/drivers/driver.js";
@@ -384,6 +385,45 @@ for (const ownDecisionPending of [true, false]) {
     } finally { h.close(); }
   });
 }
+
+for (const runnerProtocol of [PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlResponseAttribution - 1]) {
+  const current = runnerProtocol >= RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlResponseAttribution;
+  test(`a v${runnerProtocol} runner ${current ? "gets the Full Control attribution on every root question dismissal" : "keeps today's dismissal and the notice"} (#4063)`, async () => {
+    const h = bridge(undefined, 0, runnerProtocol);
+    try {
+      assert.ok(h.enable().ok);
+      const toRunner: ControlPlaneToRunner[] = [];
+      const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+      (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+      for (const index of [1, 2]) {
+        h.svc.onSessionEvent("root", { kind: "question_request", requestId: `ask-${index}`, occurrenceId: `request_ask_${index}`,
+          requestSource: "provider_question", questions: [{ id: "close", question: `Close #2940? (attempt ${index})`,
+            options: [{ label: "Approved in Wollipog" }, { label: "Leave it open" }] }] });
+        for (let tickIndex = 0; tickIndex < 4; tickIndex += 1) await tick();
+      }
+      const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+      assert.deepEqual(answers.map((message) => [message.requestId, message.action, message.automaticResponse]),
+        [1, 2].map((index) => [`ask-${index}`, "dismiss", current ? { policy: "full_control", basis: "root_questions" } : undefined]),
+        "a second question in the same revision is attributed too; an older runner is never sent the field");
+      assert.equal(toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" &&
+        message.text === FULL_CONTROL_ROOT_QUESTION_MESSAGE).length, 1, "the existing notice still arrives once per revision");
+    } finally { h.close(); }
+  });
+}
+
+test("a person's dismissal of a child question carries no Full Control attribution (#4063)", () => {
+  const h = bridge();
+  try {
+    const toRunner: ControlPlaneToRunner[] = [];
+    const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+    (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+    h.svc.onSessionEvent("child", { kind: "question_request", requestId: "person-ask", occurrenceId: "person_ask",
+      requestSource: "provider_question", questions: [{ id: "layout", question: "Stacked or split?", options: [{ label: "Stacked" }, { label: "Split" }] }] });
+    assert.ok(h.svc.answerQuestion("child", "person-ask", {}, { kind: "human", id: "owner" }, "dismiss", undefined, "person_ask").ok);
+    const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+    assert.deepEqual(answers.map((message) => [message.requestId, message.action, message.automaticResponse]), [["person-ask", "dismiss", undefined]]);
+  } finally { h.close(); }
+});
 
 test("a Full Control root that keeps asking gets every question dismissed but one guidance notice per policy revision (CR-1.1)", async () => {
   const h = bridge();
