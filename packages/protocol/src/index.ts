@@ -811,7 +811,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw. Older control planes have
 //      no route, so current clients refuse by name rather than sending it.
 // 270: FIFO processing barriers pace runner replay independently of WebSocket liveness.
-export const PROTOCOL_VERSION = 270;
+// 272: merge-queue watches (#4071). A session parks on its own enqueued pull request through
+//      POST /api/sessions/:id/pull-request-watch; the control plane sends
+//      pull_request_watch_start/cancel, the runner polls GitHub and answers with
+//      pull_request_watch_update, and the session is prompted once with the outcome. Sessions and
+//      campaigns show the watch. Older runners and control planes keep blocking waits.
+export const PROTOCOL_VERSION = 272;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -825,6 +830,7 @@ export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
+export * from "./pull-request-watch.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -1023,6 +1029,9 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
+   * Checked against the runner by the control plane and against the control plane by the runner. */
+  pullRequestWatch: 272,
   targetHarnessInstallations: 176,
   harnessInstallations: 175,
   harnessSelectionBackgroundConsumers: 177,
@@ -3013,6 +3022,9 @@ export interface OrchestratorCampaignProjection {
   /** Unverified children held from starting their next turn, with how to clear each (#1650).
    * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
   heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
+  /** v272: children parked on a merge-queue watch, and watches that ended but whose wake has not
+   * been delivered yet, newest first (#4071). Bounded; omitted when there are none. */
+  parkedChildren?: import("./pull-request-watch.js").CampaignParkedChild[];
   pendingDecisions: { human: number; orchestrator: number };
   /** All unresolved descendant requests, including provider questions/approvals and typed gates. */
   pendingRequests?: {
@@ -8105,6 +8117,9 @@ export interface SessionView {
   review?: import("./review-session.js").ReviewSessionLink;
   /** #3369: the review sessions this session requested, summarized. Omitted when it has none. */
   reviewRuns?: import("./review-session.js").ReviewRunsSummary;
+  /** v272: the merge-queue watch this session is parked on, or the latest one whose wake is still
+   * owed or was lost (#4071). Omitted otherwise and by older control planes. */
+  pullRequestWatch?: import("./pull-request-watch.js").PullRequestWatchView;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -10205,6 +10220,7 @@ export type RunnerToControlPlane =
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
   | import("./review-session.js").ReviewSessionUpdate
+  | import("./pull-request-watch.js").PullRequestWatchUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -12274,6 +12290,8 @@ export type ControlPlaneToRunner =
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | import("./session-review-job.js").SessionReviewJobCommand
+  | import("./pull-request-watch.js").PullRequestWatchStartCommand
+  | import("./pull-request-watch.js").PullRequestWatchCancelCommand
   | import("./session-review-job.js").CancelSessionReviewJobCommand
   | RegisteredMessage
   | ConfigureHarnessInstallationChoicesMessage
