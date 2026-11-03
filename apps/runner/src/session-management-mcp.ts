@@ -2182,7 +2182,7 @@ export const TOOLS: McpTool[] = [
       type: "object",
       properties: {
         requestId: { type: "string", description: "Caller-owned idempotency key" },
-        resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences" },
+        resourceKey: { type: "string", description: "Stable action target; a new occurrence supersedes older unconsumed occurrences, except a person-owned follow-up publication, which is never replaced: wait for it, consume it, or withdraw it first" },
         resourceSnapshot: WORKFLOW_DECISION_RESOURCE_SCHEMA,
       },
       required: ["requestId", "resourceKey", "resourceSnapshot"],
