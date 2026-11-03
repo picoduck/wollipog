@@ -746,7 +746,51 @@ test("wait_session timeout carries the last read's metadata", async () => {
   assert.equal(body.outcome, "timeout");
   assert.deepEqual(body.waitingFor, ["completed", "failed"]);
   assert.equal(body.session.status, "idle", "the newest read, not the first");
-  assert.equal(body.session.runnerId, "r1");
+  assert.equal(body.session.runnerId, undefined, "a timeout returns the compact status by default");
+});
+
+test("wait_session timeout returns a small fixed-size status however large the session is (#4071)", async () => {
+  const long = "x".repeat(20_000);
+  const request = (n: number) => ({ requestId: `req_${n}_${long}`, kind: "permission", title: long, options: [long] });
+  const session = {
+    id: `s_wait${long}`, status: `running${long}`, runnerId: long, title: long, workspaceId: long,
+    attention: { version: 1, revision: 4_294_967_295, humanActions: [], meaningfulAt: 1_793_680_214_379, result: null },
+    pendingApproval: { ...request(0), additionalRequests: [request(1), request(2)] },
+    holds: Array.from({ length: 50 }, () => ({ id: long, reason: long })),
+    orchestratorCampaign: { pendingRequests: Array.from({ length: 50 }, (_, n) => request(n)) },
+    campaignMembership: { note: long }, updatedAt: 1_793_680_214_000,
+  };
+  const { deps } = makeDeps(() => ({ status: 200, body: { session } }));
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+
+  const compact = await callTool(deps, "wait_session", { sessionId: "s_wait", states: ["completed"], timeoutMs: 1 });
+  const text = compact.content[0].text;
+  assert.ok(Buffer.byteLength(text) <= 512, `the timeout payload is ${Buffer.byteLength(text)} bytes`);
+  const body = JSON.parse(text);
+  assert.equal(body.outcome, "timeout");
+  assert.deepEqual(Object.keys(body.session).sort(),
+    ["attentionRevision", "id", "lastActivityAt", "pendingRequestCount", "status"]);
+  assert.equal(body.session.attentionRevision, 4_294_967_295);
+  assert.equal(body.session.pendingRequestCount, 3);
+  assert.equal(body.session.lastActivityAt, 1_793_680_214_379, "the CP's meaningful activity, not updatedAt");
+
+  const full = resultJson(await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["completed"], timeoutMs: 1, fullMetadata: true,
+  }));
+  assert.equal(full.outcome, "timeout");
+  assert.equal(full.session.runnerId, long, "fullMetadata keeps the mapped session");
+});
+
+test("wait_session compact status falls back to updatedAt and tolerates missing fields", async () => {
+  const { deps } = makeDeps(() => ({ status: 200, body: { session: { id: "s_wait", status: "idle", updatedAt: 42 } } }));
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+  const body = resultJson(await callTool(deps, "wait_session", { sessionId: "s_wait", states: ["completed"], timeoutMs: 1 }));
+  assert.deepEqual(body.session,
+    { id: "s_wait", status: "idle", attentionRevision: null, pendingRequestCount: 0, lastActivityAt: 42 });
 });
 
 test("wait_session reports the reached state with outcome reached", async () => {

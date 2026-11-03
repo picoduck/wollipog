@@ -736,6 +736,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
               states: (option(args, "--for") ?? "input_required,completed,failed,stopped").split(",").filter(Boolean),
               timeoutMs: numeric(option(args, "--timeout")),
               intervalMs: numeric(option(args, "--interval")),
+              ...(flag(args, "--full") ? { fullMetadata: true } : {}),
             },
           }
         : { error: "session wait requires an id" };

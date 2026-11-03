@@ -222,11 +222,13 @@ typed decisions plus sanitization, dependency checks, cross-model review, and ex
 enqueued pull request remains unfinished until merge-group CI passes and the forge reports actual
 `MERGED` state; continue supervising unrelated children while any one child waits for a human gate.
 
-Tell supervised children to end their turn after successful enqueueing and a confirmed queue entry.
-Watch every queued child pull request yourself with model-free waits (`wait_pull_request`,
-`wollipog pr wait`, or a background watcher that exits on a state change), then prompt its owning
-child on `merged`, `queue_ejected`, or `queue_failed`. A prompt queued to a running child waits for
-its turn to end; do not rely on mid-turn steering to stop a child already polling.
+Supervised children watch their own queued pull requests (see Waiting for Pull Request Checks).
+Do not watch a child's pull request yourself, run a watcher for it, or hold a turn open for it:
+the child wakes on the outcome, and its next turn end reaches you as usual. Only when a child
+reports that it has no way to wait on its pull request, watch that one with a single model-free
+wait (`wait_pull_request`, or a background `wollipog pr wait` that wakes you when it exits) and
+prompt the child on `merged`, `queue_ejected`, or `queue_failed`. A prompt queued to a running child
+waits for its turn to end; do not rely on mid-turn steering to stop a child already polling.
 
 Once a child is Idle or Completed, use its exact completed report event sequence with
 `verify_campaign_child` and attest that follow-ups were recorded. Pass `workItem` (`delivered` or
@@ -302,18 +304,23 @@ position and state, failed jobs with run links, and whether it merged.
   `direct_only_tool_namespaces` list (add `"mcp__wollipog"` to it), or in an Orchestrator that
   starts from a scratch directory (Strict Project Isolation) or runs inside WSL. Then
   make one call from one cell, followed by one `wait` on that cell with `yield_time_ms` as long as
-  the wait's own timeout. Do not alternate short waits with sleeps. A campaign child can instead
-  end its turn and let the parent watch.
+  the wait's own timeout. Do not alternate short waits with sleeps.
+- Park during long waits (branch checks, a review, the merge queue): end your turn instead of
+  holding it open, whenever something will wake you on the outcome. A finished review session
+  delivers its own continuation. For checks and the queue, a harness that wakes you when a
+  background command exits can run one background `wollipog pr wait` at the longest timeout it
+  allows for background commands; re-arm it once on `timeout`. Where nothing can wake you, make one
+  blocking call at the longest timeout your harness survives. Never poll with repeated short waits,
+  sleeps, or status reads: every check re-reads the whole conversation.
 - The wait grants nothing. Enqueueing, retrying, and merging keep their existing gates. After
   enqueueing, wait again: only `merged` means landed; `queue_failed` means GitHub marked the entry
   unmergeable and `queue_ejected` that it left the queue without merging. A failed merge-group
   check alone keeps the wait going, because GitHub may rebuild the group and still merge it.
-- A campaign child supervised by a parent Orchestrator ends its turn after successful enqueueing
-  and a confirmed queue entry instead of waiting on the merge queue. Queues can take hours, and
-  each repeated wait in a turn re-reads the conversation. The parent watches the queue and prompts
-  the child when the pull request merges or leaves it. In that new turn, reconcile the armed
-  `pr_merge` if its occurrence is still unconsumed, and finish cleanup after merge. Without a
-  supervising Orchestrator, keep waiting until `merged`.
+- After successful enqueueing and a confirmed queue entry, report it and park on your own entry
+  until `merged`, `queue_ejected`, `queue_failed`, `closed`, or `head_changed`. Queues can take
+  hours. A supervising Orchestrator does not watch it for you; if you have no way to wait on it,
+  say so in your report and end your turn so the parent can. On `merged`, reconcile the armed
+  `pr_merge` if its occurrence is still unconsumed, and finish cleanup.
 - `queue_ejected` also covers an entry GitHub removed before the call started, for example on a
   merge-group check timeout between two waits: when the latest merge-queue event removed the current
   head and the pull request is still open, `mergeQueueRemoval` gives GitHub's `reason` (such as

@@ -157,7 +157,7 @@ wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json
 wollipog session resolve-steering ID SUBMISSION_ID queue_again|dismiss --json
-wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
+wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] [--full] --json
 wollipog session stop ID --json
 wollipog session restart ID --json
 wollipog session archive ID --json
@@ -510,8 +510,10 @@ reads reaches the model and can appear in its output, as with the bridge.
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it
 `reached`, and the session's metadata. A bounded wait usually ends at its timeout (1 ms–1 hour,
 default 60 seconds), so that is a normal result rather than a tool error (#3269):
-`outcome: "timeout"`, the states it was `waitingFor`, and the session's metadata from its last read.
-Call again to keep waiting. A state outside `queued`, `starting`, `running`, `input_required`,
+`outcome: "timeout"`, the states it was `waitingFor`, and a compact status from its last read
+(`id`, `status`, `attentionRevision`, `pendingRequestCount`, `lastActivityAt`) whose size does not
+grow with the session's metadata (#4071). Pass `fullMetadata: true` (CLI `--full`) for the full
+metadata instead. Call again to keep waiting, or end the turn rather than polling a long wait. A state outside `queued`, `starting`, `running`, `input_required`,
 `idle`, `completed`, `failed`, and `stopped` is refused before any read, with the valid list. A
 missing session, a control-plane failure, and cancellation remain errors. The CLI exits 0 when
 reached, 124 on timeout, and 1 on an error.

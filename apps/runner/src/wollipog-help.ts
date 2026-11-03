@@ -84,7 +84,7 @@ export function sessionHelp(): string {
     "  session steering-get <session-id> <submission-id> [--json]",
     "  session resolve-steering <session-id> <submission-id> <queue_again|dismiss> [--json]",
     "  session handoff-result <session-id> --revision <result-revision> [--json]",
-    "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
+    "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--full] [--json]",
     "  session stop <session-id> [--json]",
     "  session stop-job <session-id> <job-id> [--json]",
     "  session release-hold <session-id> <hold-id> [--json]",
@@ -93,7 +93,7 @@ export function sessionHelp(): string {
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",
     "                     [--max-child-sessions <count>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "session wait --for defaults to input_required,completed,failed,stopped and accepts queued, starting, running, input_required, idle, completed, failed, and stopped; any other state is refused at once. --timeout defaults to 60000, up to 3600000. It prints outcome \"reached\" or, when the timeout elapses first, outcome \"timeout\" with the session's last-read metadata. Exit status: 0 reached; 124 timeout; 1 unknown state, missing session, or control-plane failure.",
+    "session wait --for defaults to input_required,completed,failed,stopped and accepts queued, starting, running, input_required, idle, completed, failed, and stopped; any other state is refused at once. --timeout defaults to 60000, up to 3600000. It prints outcome \"reached\" or, when the timeout elapses first, outcome \"timeout\" with a compact last-read status (id, status, attentionRevision, pendingRequestCount, lastActivityAt); --full returns the full metadata instead. Exit status: 0 reached; 124 timeout; 1 unknown state, missing session, or control-plane failure.",
     "session events without --after returns the newest events. With --after it pages forward from that seq; pass the returned lastSeq as the next --after, and eventEpoch as --event-epoch, while hasMore is true.",
     "For uncertain steering delivery, inspect the exact submission before resolving it. A pending resolution is not confirmed; read it before retrying the identical action. These commands use the same descendant scope as session prompt.",
   ].join("\n");
