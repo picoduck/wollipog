@@ -53,8 +53,9 @@ async function renderBar(props: {
   projectName?: string;
   projectControl?: ReactNode;
   onOpenProject?: () => void;
+  session?: Partial<SessionView>;
 }): Promise<Root> {
-  const session = { id: "session-bar", runnerId: "runner-1", title: GENERATED_TITLE, status: "idle" } as SessionView;
+  const session = { id: "session-bar", runnerId: "runner-1", title: GENERATED_TITLE, status: "idle", ...props.session } as SessionView;
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -115,6 +116,29 @@ test("the desktop bar is one header with Back, the project slot and the one-line
     assert.equal(button("More Actions").title, "More Actions");
   } finally {
     await cleanUp(root);
+  }
+});
+
+test("the bar's title leads with an Orchestrator or review session's type, and an ordinary one's does not (#4076)", async () => {
+  for (const [session, label] of [[{ role: "orchestrator" }, "Orchestrator Session"], [{ kind: "review" }, "Review Session"],
+    [{ role: "normal", kind: "standard" }, null]] as const) {
+    const root = await renderBar({ session });
+    try {
+      const title = page().querySelector("header.session-bar h1")!;
+      assert.equal(title.textContent, "Add a dark mode toggle to the site header");
+      if (!label) {
+        assertNoDomNode(title.querySelector(".session-type-icon"), "an ordinary session's title has no type mark");
+        continue;
+      }
+      const icon = title.firstElementChild!;
+      assert.ok(icon.classList.contains("session-type-icon"), `${label}: the mark comes before the title`);
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), label);
+      assert.equal(icon.getAttribute("title"), label);
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+    } finally {
+      await cleanUp(root);
+    }
   }
 });
 

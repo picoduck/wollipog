@@ -127,6 +127,7 @@ import {
   Repeat as LucideRepeat,
   Reply as LucideReply,
   RotateCcw as LucideRotateCcw,
+  ScanEye as LucideScanEye,
   ScrollText as LucideScrollText,
   Search as LucideSearch,
   SearchX as LucideSearchX,
@@ -957,8 +958,14 @@ export function GuardrailsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFence} {...props} />;
 }
 
-export function OrchestratorControlsIcon(props: IconProps) {
+/** An Orchestrator: its controls, Settings › Orchestrator, and an Orchestrator session's type (#4076). */
+export function OrchestratorIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWaypoints} {...props} />;
+}
+
+/** A review session's type (#4076). `Eye` already means show and hide. */
+export function ReviewSessionIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideScanEye} {...props} />;
 }
 
 export function ExternalLinkIcon(props: IconProps) {

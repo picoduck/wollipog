@@ -16,6 +16,7 @@ import { ActivityStrip } from "./ActivityStrip.js";
 import { SessionPinIndicator, ThreadDot } from "./common.js";
 import { AlarmClockIcon, ArchiveIcon, BranchIcon, ChevronRightIcon, MoreHorizontalIcon, PullRequestIcon } from "./Icons.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { inboxThreadChildrenLabel, type InboxThreadChildren } from "../inbox.js";
 
@@ -299,7 +300,7 @@ function InboxRowInner({
      880px or wider sets the chip in the status column, under the badge (§6.3). */
   const titleLine = (
     <span className="inbox-row-copy">
-      <span className="inbox-row-title">{title}</span>
+      <span className="inbox-row-title"><SessionTypeIcon session={session} />{title}</span>
       {familyChip}
     </span>
   );

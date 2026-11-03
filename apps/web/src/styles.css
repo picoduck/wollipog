@@ -13372,6 +13372,16 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   white-space: nowrap;
 }
 .inbox-row-shell.unread .inbox-row-title { font-weight: 600; }
+/* A session's type (#4076): the 14px mark at the start of a title, in the Sessions list, on a Board
+   card, in the session bars and on an Archived Sessions row. Inline, so each title's own ellipsis or
+   line clamp truncates only the text after it. Muted ink: type is shape alone, and status keeps
+   colour to itself. */
+.session-type-icon {
+  display: inline-flex;
+  margin-right: var(--space-1);
+  color: var(--text-dim);
+  vertical-align: -2px;
+}
 /* The one status (#2209, §11.1): the badge and a neutral "+N". */
 .row-status { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
 .row-status-more {

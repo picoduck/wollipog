@@ -114,6 +114,41 @@ test.describe("on the Sessions page", () => {
     });
   }
 
+  // #4076: the type mark is inline at the start of the title, so it takes the title's line and the
+  // title's own ellipsis truncates only the text after it. A review's mark is the same element.
+  for (const width of [320, 1000] as const) {
+    test(`an Orchestrator row's 14px mark leads its title on one line without shrinking, at ${width}px`, async ({ page }) => {
+      await useViewport(page, width);
+      const marks = await page.locator(".inbox-row").evaluateAll((rows) => rows.flatMap((row) => {
+        const title = row.querySelector<HTMLElement>(".inbox-row-title")!;
+        const mark = title.querySelector<HTMLElement>(".session-type-icon");
+        if (!mark) return [];
+        const glyph = mark.querySelector("svg")!.getBoundingClientRect();
+        const titleBox = title.getBoundingClientRect();
+        const style = getComputedStyle(title);
+        return [{
+          label: mark.getAttribute("aria-label"),
+          width: glyph.width,
+          height: glyph.height,
+          first: title.firstChild === mark,
+          offset: glyph.left - titleBox.left,
+          centre: (glyph.top + glyph.bottom) / 2 - (titleBox.top + titleBox.bottom) / 2,
+          oneLine: titleBox.height <= parseFloat(style.lineHeight) + 0.5,
+          clipped: title.scrollWidth > title.clientWidth + 1,
+          ellipsis: style.textOverflow,
+        }];
+      }));
+      expect(marks.map((mark) => mark.label)).toEqual(["Orchestrator Session"]);
+      for (const mark of marks) {
+        expect(mark, `${mark.label} is 14px`).toMatchObject({ width: 14, height: 14, first: true, oneLine: true, ellipsis: "ellipsis" });
+        expectGeometry(mark.offset, `${mark.label} starts the title`).toBeLessThanOrEqual(0.5);
+        expectGeometry(Math.abs(mark.centre), `${mark.label} sits on the title's line`).toBeLessThanOrEqual(2);
+        // The fixture's title runs past the narrowest list.
+        if (width === 320) expect(mark.clipped, `${mark.label}'s title still truncates`).toBe(true);
+      }
+    });
+  }
+
   test("at 1440×900 every row is exactly --row-h-2, branch or none, PR or none", async ({ page }) => {
     await useViewport(page, 1440, 900);
     const token = await rowToken(page);

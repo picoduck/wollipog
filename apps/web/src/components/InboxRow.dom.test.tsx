@@ -557,3 +557,36 @@ test("a filtered family keeps its active chip without an empty expand control (#
   }, { threadChildren: JSON.stringify({ count: 1, visibleCount: 0, working: 1, hasActiveWork: true, waiting: 0,
     children: [{ id: "child", title: "Child", state: "running" }] }) });
 });
+
+test("a row marks an Orchestrator or review session before its title in both shapes, follows a role change, and leaves an ordinary row bare (#4076)", async () => {
+  const typeIcon = (container: Element) => {
+    const title = container.querySelector(".inbox-row-title")!;
+    const icon = title.querySelector(".session-type-icon");
+    if (icon) assert.equal(title.firstElementChild, icon, "the mark comes before the title text");
+    return icon;
+  };
+  for (const threeRow of [false, true]) {
+    await withRow(baseSession({ role: "orchestrator", title: "Coordinate the campaign" }), async (container, rerender) => {
+      const icon = typeIcon(container)!;
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), "Orchestrator Session");
+      assert.equal(icon.getAttribute("title"), "Orchestrator Session");
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+      assert.equal(container.querySelector(".inbox-row-title")!.textContent, "Coordinate the campaign");
+
+      // A completed conversion back to a normal session takes the mark away without a remount.
+      await rerender({ session: baseSession({ role: "normal", title: "Coordinate the campaign" }) } as RowOptions);
+      assertNoDomNode(typeIcon(container), "a converted session draws no type mark");
+      await rerender({ session: baseSession({ role: "orchestrator", title: "Coordinate the campaign" }) } as RowOptions);
+      assert.equal(typeIcon(container)?.getAttribute("aria-label"), "Orchestrator Session");
+
+      await rerender({ session: baseSession({ kind: "review", title: "Review pull request 12" }) } as RowOptions);
+      assert.equal(typeIcon(container)?.getAttribute("aria-label"), "Review Session");
+      assert.equal(typeIcon(container)?.getAttribute("title"), "Review Session");
+
+      // An older control plane omits `kind` and `role`: the row is ordinary, as it was before.
+      await rerender({ session: baseSession({ title: "Fix the build" }) } as RowOptions);
+      assertNoDomNode(typeIcon(container), "an ordinary session draws no type mark");
+    }, { threeRow });
+  }
+});
