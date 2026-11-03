@@ -112,12 +112,16 @@ export interface ForgeDecisionActionResultMessage {
 /** Longest refusal summary kept on a decision. */
 export const FORGE_DECISION_ACTION_SUMMARY_LIMIT = 300;
 
-/** A branch name Wollipog will put in a ref: Git's own rules, conservatively. */
+/** A branch name Git itself accepts (`git check-ref-format --branch`, read conservatively), so every
+ * branch a forge can hold is tracked and can be acted on. It only ever travels as a GraphQL variable
+ * after `refs/heads/`, never as a shell word or a command-line option. Rejected: control characters
+ * and space, `~ ^ : ? * [ \`, `..`, `@{`, `//`, a lone `@`, a leading `-` or `/`, a trailing `/` or
+ * `.`, and any path component that starts with `.` or ends with `.lock`. */
 export function forgeActionBranchName(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 255 &&
-    /^[A-Za-z0-9._/-]+$/u.test(value) && !value.startsWith("-") && !value.startsWith("/") &&
-    !value.endsWith("/") && !value.endsWith(".") && !value.endsWith(".lock") &&
-    !value.includes("..") && !value.includes("//") && !value.split("/").some((part) => part.startsWith("."));
+    !/[\x00-\x20\x7f~^:?*[\\]/u.test(value) && value !== "@" && !value.startsWith("-") && !value.startsWith("/") &&
+    !value.endsWith("/") && !value.endsWith(".") && !value.includes("..") && !value.includes("//") &&
+    !value.includes("@{") && !value.split("/").some((part) => part.startsWith(".") || part.endsWith(".lock"));
 }
 
 /** One merged campaign pull request's head branch on the remote (`get_campaign.mergedBranches`). */

@@ -362,8 +362,12 @@ test("PROTOCOL_VERSION is 280", () => {
   assert.equal(PROTOCOL_VERSION, 280);
   assert.equal(runnerSupportsProtocol(279, "forgeDecisionActions"), false);
   assert.equal(runnerSupportsProtocol(280, "forgeDecisionActions"), true);
-  for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0"]) assert.equal(forgeActionBranchName(name), true, name);
-  for (const name of ["", "-d", "/x", "x/", "a..b", "a//b", ".hidden", "a/.b", "x.lock", "x.", "a b", "a~1", "a:b", "x".repeat(256)]) {
+  // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
+  for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
+    assert.equal(forgeActionBranchName(name), true, name);
+  }
+  for (const name of ["", "-d", "/x", "x/", "a..b", "a//b", ".hidden", "a/.b", "x.lock", "a/b.lock/c", "x.", "a b", "a~1", "a:b",
+    "a^b", "a?b", "a*b", "a[b", "a\\b", "a@{b", "@", "a\u0001b", "x".repeat(256)]) {
     assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
   }
   assert.equal(runnerSupportsProtocol(278, "workspaceRemoval"), false);

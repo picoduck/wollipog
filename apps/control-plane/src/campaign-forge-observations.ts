@@ -168,7 +168,10 @@ export class CampaignForgeObservationStore {
       const row = this.row(campaignId, ref);
       if (!row) return [];
       const value = row.value_json ? JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation : null;
-      const branchRemains = value?.forge === undefined && value?.state === "merged" && typeof value.headBranch?.tipSha === "string";
+      // A merged branch still on the remote, or a same-repository one the forge did not name usably,
+      // is cleanup still owed: keep reading it.
+      const branchRemains = value?.forge === undefined && value?.state === "merged" &&
+        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch && value.crossRepository === false));
       return [[forgeRefKey(ref), {
         readAt: Math.max(row.observed_at ?? 0, row.failed_at ?? 0),
         finished: !row.failure_reason && (value?.state === "merged" || value?.state === "closed") && !branchRemains,
@@ -475,7 +478,8 @@ function validObservation(value: unknown): value is CampaignForgePullRequestObse
     (pr.mergeCommitSha === null || (typeof pr.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(pr.mergeCommitSha))) &&
     (pr.defaultBranch === undefined ||
       (typeof pr.defaultBranch === "string" && pr.defaultBranch.length > 0 && pr.defaultBranch.length <= 256)) &&
-    (pr.headBranch === undefined || validHeadBranch(pr.headBranch));
+    (pr.headBranch === undefined || validHeadBranch(pr.headBranch)) &&
+    (pr.crossRepository === undefined || typeof pr.crossRepository === "boolean");
 }
 
 /** v280 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
@@ -501,5 +505,6 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     mergeCommitSha: pr.mergeCommitSha,
     ...(pr.defaultBranch !== undefined ? { defaultBranch: pr.defaultBranch } : {}),
     ...(pr.headBranch !== undefined ? { headBranch: { name: pr.headBranch.name, tipSha: pr.headBranch.tipSha } } : {}),
+    ...(pr.crossRepository !== undefined ? { crossRepository: pr.crossRepository } : {}),
   };
 }

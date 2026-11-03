@@ -2251,9 +2251,11 @@ too, and a handoff retains it even before the first read. A pending branch keeps
 `campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
 finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
 until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
-A pull request closed without merging, a fork's branch, a merged observation from an older runner,
-and every campaign observed by a runner older than v280 are not tracked, so those campaigns
-complete as before.
+A merged pull request whose branch the forge does not name usably, including one read before branches
+were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
+be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
+every campaign observed by a runner older than v280 are not tracked, so those campaigns complete
+as before.
 
 An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
 `decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol

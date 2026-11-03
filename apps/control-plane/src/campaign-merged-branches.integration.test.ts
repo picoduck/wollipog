@@ -276,10 +276,49 @@ test("a deletion counts whatever controller it has, even one with no merge of it
   } finally { h.db.close(); }
 });
 
+test("a merged branch with any name Git accepts stays pending until it is deleted or handed off (#4067)", () => {
+  for (const name of ["feature/foo+bar", "fix/issue#4067"]) {
+    const h = fixture();
+    try {
+      // The control plane stores the observation exactly as a runner reports it.
+      observe(h, observed("a".repeat(40), { headBranch: { name, tipSha: "a".repeat(40) } }));
+      let projection = h.db.campaignProjection("root")!;
+      assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.branch, row.state]), [[name, "pending"]], name);
+      assert.notEqual(projection.status, "verified_complete", name);
+      observe(h, observed(null, { headBranch: { name, tipSha: null } }), Date.now() + 1);
+      projection = h.db.campaignProjection("root")!;
+      assert.equal(projection.status, "verified_complete", name);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a merged branch the forge names unusably stays pending, never skipped, until handed off (#4067)", () => {
+  // `crossRepository: false` is a v280 runner's same-repository branch it could not name usably;
+  // an absent field is an observation from before the branch was reported. Both stay owed.
+  for (const crossRepository of [false, undefined]) {
+    const h = fixture();
+    try {
+      observe(h, observed(null, { headBranch: undefined, crossRepository }), 100);
+      const projection = h.db.campaignProjection("root")!;
+      assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.branch, row.state, row.reason, row.observedAt]),
+        [[null, "pending", "The forge reported no usable branch name for this merged pull request.", 100]], String(crossRepository));
+      assert.equal(projection.status, "active", "a validation gap can only keep the campaign going");
+      assert.equal(h.db.campaignStatusOnly("root"), "active");
+      assert.deepEqual(h.db.campaignMergedBranchTargets(), [{ campaignId: "root", refs: [{ repository: "picoduck/wollipog", number: 4100 }] }]);
+      assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }])
+        .get("picoduck/wollipog#4100")?.finished, crossRepository === undefined, "a v280 same-repository read keeps being re-read");
+      // A person can still take it over, and then the campaign finishes with handoffs.
+      assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item, handoff: { responsibleActor: "human",
+        reason: "The branch name is one Wollipog will not act on.", nextAction: "Delete the branch by hand." } }).ok);
+      assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+    } finally { h.db.close(); }
+  }
+});
+
 test("a fork's branch is not tracked, and an older observing runner keeps today's completion (#4067)", () => {
   const fork = fixture();
   try {
-    observe(fork, observed(null, { headBranch: undefined }));
+    observe(fork, observed(null, { headBranch: undefined, crossRepository: true }));
     assert.equal(fork.db.campaignProjection("root")!.status, "verified_complete");
     assert.equal(fork.db.campaignProjection("root")!.mergedBranches, undefined);
   } finally { fork.db.close(); }

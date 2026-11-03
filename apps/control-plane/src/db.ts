@@ -21394,7 +21394,16 @@ export class ControlPlaneDb {
             : "The forge has not been read for this merged pull request yet." }) });
         continue;
       }
-      if (value.state !== "merged" || !value.headBranch) continue;
+      // Closed without merging, or a fork's branch: not this campaign's cleanup.
+      if (value.state !== "merged" || value.crossRepository === true) continue;
+      if (!value.headBranch) {
+        // Fail closed: a merged in-campaign pull request whose branch the forge did not name usably
+        // (or an observation from before the branch was reported) stays owed. A deletion cannot be
+        // pinned to it, so only a handoff, or a later read that names the branch, settles it.
+        rows.push({ ...base, branch: null, ...(observed?.observed_at != null ? { observedAt: observed.observed_at } : {}),
+          ...(retained ?? { state: "pending" as const, reason: "The forge reported no usable branch name for this merged pull request." }) });
+        continue;
+      }
       const at = observed?.observed_at ?? undefined;
       const branch = value.headBranch.name;
       const deletion = deletions.get(`${merge.repository.toLowerCase()}#${branch}`);

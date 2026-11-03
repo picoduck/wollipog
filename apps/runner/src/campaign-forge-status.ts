@@ -216,6 +216,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
     mergeCommitSha: mergeCommit ? mergeCommit.oid as string : null,
     ...(typeof defaultBranch === "string" && defaultBranch.length > 0 && defaultBranch.length <= 256 ? { defaultBranch } : {}),
     ...(headBranch ? { headBranch } : {}),
+    ...(typeof pr.isCrossRepository === "boolean" ? { crossRepository: pr.isCrossRepository } : {}),
   };
 }
 
