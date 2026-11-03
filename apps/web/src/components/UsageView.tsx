@@ -15,7 +15,7 @@ import { agentDisplayName } from "../agent-presentation.js";
 import { runnerDisplay } from "../runners.js";
 import { statusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
-import { useHasStore, useOptionalStoreSelector, useStoreSelector } from "../store.js";
+import { useHasStore, useOptionalNavigate, useOptionalStoreSelector, useStoreSelector } from "../store.js";
 import {
   PERIOD_ROWS_SHOWN,
   activeDrivers,
@@ -23,6 +23,8 @@ import {
   breakdownRows,
   buildColumns,
   coverageMessages,
+  coverageNeedsRates,
+  coverageSentence,
   dailyBudgetReached,
   driverRows,
   formatCompactTokens,
@@ -34,6 +36,7 @@ import {
   processedTokens,
   todaySpendUsd,
   usageDriverLabels,
+  usageIsEmpty,
   usageWindowCaption,
   type BreakdownRow,
   type UsageAgentCandidate,
@@ -48,7 +51,7 @@ import { destination, type UsageTab } from "../navigation.js";
 import { safeExternalHref } from "../external-href.js";
 import { CountBadge } from "./CountBadge.js";
 import { Spinner } from "./common.js";
-import { ChevronDownIcon, RefreshIcon } from "./Icons.js";
+import { ChevronDownIcon, RefreshIcon, UsageIcon } from "./Icons.js";
 import { SubscriptionsTab, useSubscriptionUsage } from "./SubscriptionsTab.js";
 import { InfoPopover } from "./InfoPopover.js";
 import { ListFoot } from "./ListFoot.js";
@@ -57,8 +60,16 @@ import { MenuItem, MenuLabel, MenuNote, MenuSurface } from "./Menu.js";
 import { TabList } from "./Tabs.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { BudgetHistoryDialog } from "./BudgetHistoryDialog.js";
+import { Notice } from "./Notice.js";
+import { StaleContent } from "./StaleContent.js";
+import { State, useSnapshotState } from "./State.js";
+import { BusyButton } from "./ui/BusyButton.js";
 
 const RANGES = [7, 30, 90, 365] as const;
+/** §12.3: a first load shows nothing for 300ms, so a quick answer never flashes a skeleton. */
+export const USAGE_SKELETON_DELAY_MS = 300;
+/** The skeleton's chart columns: one per day of the default range. */
+const SKELETON_COLUMNS = 30;
 const LEGACY_USAGE_GRANULARITIES: readonly UsageAggregationGranularity[] = ["hour", "day"];
 const WEEK_CHECKING_REASON = "Checking whether this version of Wollipog supports weekly aggregation.";
 const WEEK_CHECK_FAILED_REASON = "Weekly availability could not be checked. Retry by choosing a range.";
@@ -139,14 +150,42 @@ function UsageMenuButton({ label, ariaLabel, menuLabel, disabled, title, keepOpe
   );
 }
 
-/** Reports the offline Machines the viewer can see. Mounted only under a store; a standalone
- * render (tests, harness pages) has no fleet and shows no machine notice. */
+/**
+ * The first load's placeholder (§12.3, #3016): the overview's own layout, a headline figure and
+ * three legend lines beside the chart's columns, under the one status line that says what is coming.
+ */
+function UsageSkeleton() {
+  return (
+    <>
+      <p className="usage-status-line" role="status">Loading usage…</p>
+      <div className="usage-overview" aria-hidden="true">
+        <div className="usage-headline">
+          <span className="skeleton-bar usage-skeleton-figure" />
+          <span className="skeleton-bar usage-skeleton-caption" />
+          <div className="usage-skeleton-legend">
+            {Array.from({ length: 3 }, (_, index) => <span className="skeleton-bar" key={index} />)}
+          </div>
+        </div>
+        <div className="usage-skeleton-chart">
+          {Array.from({ length: SKELETON_COLUMNS }, (_, index) => <span className="skeleton-bar" key={index} />)}
+        </div>
+      </div>
+    </>
+  );
+}
+
+/** Reports the offline Machines the viewer can see, by the names people gave them. Mounted only
+ * under a store; a standalone render (tests, harness pages) has no fleet and shows no machine notice. */
 function OfflineMachineWatcher({ onNames }: { onNames: (names: string[]) => void }) {
   const runners = useStoreSelector((state) => state.runners);
-  const names = useMemo(
-    () => [...runners.values()].filter((runner) => runner.status === "offline").map((runner) => runner.hostname).sort(),
-    [runners],
-  );
+  const boxes = useStoreSelector((state) => state.boxes);
+  const names = useMemo(() => {
+    const boxByRunner = new Map([...boxes.values()].map((box) => [box.runnerId, box]));
+    return [...runners.values()]
+      .filter((runner) => runner.status === "offline")
+      .map((runner) => runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId).name)
+      .sort((left, right) => left.localeCompare(right));
+  }, [runners, boxes]);
   useEffect(() => onNames(names), [names, onNames]);
   return null;
 }
@@ -241,9 +280,8 @@ function DimensionTable({ labelledBy, nameLabel, rows, metric }: {
           </tr>
         </thead>
         <tbody>
-          {rows.length === 0 ? (
-            <tr><td colSpan={4} className="usage-empty">No usage was observed in this period.</td></tr>
-          ) : rows.map((row) => (
+          {/* An empty window shows the page's one empty state instead of these tables (#3016). */}
+          {rows.map((row) => (
             <tr key={row.key}>
               <th scope="row" title={row.name}>{row.name}</th>
               <td className="num cell-meta cell-dim usage-share">
@@ -380,6 +418,12 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   // Budget and History (#3015): open, and whether Change Budget… opened it at the budget field.
   const [budgetHistory, setBudgetHistory] = useState<{ focusBudget: boolean } | null>(null);
   const subscriptions = useSubscriptionUsage();
+  // §12.5: while the control plane is unreachable the last figures stay, dimmed, under Reconnecting…
+  const { offline } = useSnapshotState();
+  const navigate = useOptionalNavigate();
+  const [showSkeleton, setShowSkeleton] = useState(false);
+  const [ratesRefreshing, setRatesRefreshing] = useState(false);
+  const [ratesError, setRatesError] = useState<string | null>(null);
 
   const load = useCallback(async (range: number, requestedGranularity: UsageAggregationGranularity) => {
     const generation = ++requestGeneration.current;
@@ -430,6 +474,51 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
     const timer = window.setTimeout(() => void load(days, granularity), 120);
     return () => window.clearTimeout(timer);
   }, [days, granularity, load]);
+
+  // A first load (nothing to keep on screen) shows its skeleton only after 300ms; a refetch keeps
+  // the previous render instead.
+  const firstLoad = loading && !data;
+  useEffect(() => {
+    setShowSkeleton(false);
+    if (!firstLoad || offline) return;
+    const timer = window.setTimeout(() => setShowSkeleton(true), USAGE_SKELETON_DELAY_MS);
+    return () => window.clearTimeout(timer);
+  }, [firstLoad, offline]);
+
+  // Back online, the figures kept while disconnected are reloaded: they may be out of date, and a
+  // request that failed while the plane was unreachable never said so.
+  const wasOffline = useRef(offline);
+  useEffect(() => {
+    if (wasOffline.current && !offline) void load(daysRef.current, granularityRef.current);
+    wasOffline.current = offline;
+  }, [offline, load]);
+
+  // Refresh Rates loads a newer rate table so models released since the last fetch are priced from
+  // now on, then reloads the window. Nothing already recorded is re-priced.
+  const refreshRates = async () => {
+    setRatesRefreshing(true);
+    setRatesError(null);
+    try {
+      // The plane answers a failed fetch with the rates it still has, not an error: anything but a
+      // fresh table means the refresh didn't take.
+      const { pricing } = await api.refreshUsagePricing();
+      if (pricing.status !== "fresh") {
+        setRatesError(pricing.source === "disabled"
+          ? "Rate fetching is turned off on this control plane."
+          : `${pricing.source} didn't return a usable rate table, so the rates are still ${pricing.status}. ` +
+            "Wollipog fetches them at most once a minute; the control plane's log has the cause.");
+      }
+    } catch (cause) {
+      setRatesError(cause instanceof Error ? cause.message : "Unable to refresh rates");
+      setRatesRefreshing(false);
+      return;
+    }
+    try {
+      await load(daysRef.current, granularityRef.current);
+    } finally {
+      setRatesRefreshing(false);
+    }
+  };
 
   const loadUsers = useCallback(async () => {
     // Settled apart, so a people list that fails never withholds the budget Budget and History needs.
@@ -497,9 +586,10 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
     }
     return map;
   }, [data]);
-  const notices = data
+  const coverage = data
     ? coverageMessages({ offlineMachines, legacyClaudeCostRecords: data.legacyClaudeCostRecords, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
     : [];
+  const empty = data ? usageIsEmpty(data.totals) : false;
   const includesCodexAppServer = Boolean(data && (
     data.byDriver.some((row) => row.key === "codex-app-server") ||
     (data.seriesByDriver ?? []).some((row) => row.driver === "codex-app-server")
@@ -672,6 +762,59 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
     </div>
   );
 
+  // What the totals leave out, said once above them (§13.2), each gap with the action that helps.
+  const machinesOffline = coverage.some((item) => item.kind === "offline-machines");
+  const coverageNotice = coverage.length > 0 && (
+    <Notice
+      tone="warning"
+      title="Some Usage Is Missing"
+      className="usage-coverage"
+      details={ratesError ?? undefined}
+      actions={(machinesOffline && navigate) || coverageNeedsRates(coverage) ? (
+        <>
+          {machinesOffline && navigate && (
+            <button type="button" className="btn sm" onClick={() => navigate({ name: "runners", section: "machines" })}>
+              View Machines
+            </button>
+          )}
+          {coverageNeedsRates(coverage) && (
+            <BusyButton className="btn sm" busy={ratesRefreshing} progress="Refreshing rates…" onClick={() => void refreshRates()}>
+              Refresh Rates
+            </BusyButton>
+          )}
+        </>
+      ) : undefined}
+    >
+      {coverage.map((item) => <p key={item.kind}>{coverageSentence(item)}</p>)}
+      {ratesError && <p>Rates couldn't be refreshed.</p>}
+    </Notice>
+  );
+
+  // An empty window is said once, in place of the overview, the facts and the breakdown (§12.1).
+  const shownRange = dataRange ?? days;
+  const longestRange = rangeChoices.at(-1)?.range;
+  const offerLongest = longestRange !== undefined && longestRange > shownRange;
+  const emptyState = (
+    <State
+      pageLevel
+      icon={<UsageIcon />}
+      title={`No Usage in the Last ${shownRange} Days`}
+      actions={offerLongest || navigate ? (
+        <>
+          {offerLongest && (
+            <button type="button" className="btn primary" onClick={() => selectRange(String(longestRange))}>
+              Show Last {longestRange} Days
+            </button>
+          )}
+          {navigate && <button type="button" className="btn ghost" onClick={() => navigate({ name: "inbox" })}>Go to Sessions</button>}
+        </>
+      ) : undefined}
+    >
+      Usage is recorded each time an agent finishes a turn on a connected machine.{" "}
+      {offerLongest ? "Try a longer range, or start a session." : "Start a session to record some."}
+    </State>
+  );
+
   return (
     <section className="page wide" aria-labelledby="page-title">
       {hasStore && <OfflineMachineWatcher onNames={onOfflineNames} />}
@@ -722,25 +865,37 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
       ) : (
         <div id="usage-api-panel" role="tabpanel" aria-labelledby="usage-api-tab">
           {toolbar}
-          {loading && !data && <div className="usage-state" role="status">Loading usage…</div>}
-          {error && <div className="usage-state error" role="alert">{error}</div>}
-          {data && (
-            /* Refetches keep the previous render in place instead of flashing a skeleton: the frame
-               holds and the numbers update where they stand. */
+          {/* One state at a time (§12): offline, loading, error, empty, then the content. */}
+          {offline && (!data || empty) ? (
+            <State variant="offline" pageLevel>Reconnecting…</State>
+          ) : firstLoad ? (
+            showSkeleton && <UsageSkeleton />
+          ) : error && !offline ? (
+            <State
+              variant="error"
+              pageLevel
+              title="Couldn't Load Usage"
+              details={error}
+              actions={<button type="button" className="btn sm" onClick={() => void load(days, granularity)}>Retry</button>}
+            >
+              Wollipog didn't answer. Recording continues, and nothing is lost.
+            </State>
+          ) : data && (
+            <>
+            {offline && <Notice compact tone="neutral" role="status" className="list-reconnecting">Reconnecting…</Notice>}
+            <StaleContent stale={offline}>
+            {/* Refetches keep the previous render in place instead of flashing a skeleton: the frame
+               holds and the numbers update where they stand. */}
             <div aria-busy={loading}>
-              {notices.length > 0 && (
-                <div className="usage-notice" role="note" aria-label="Coverage">
-                  {notices.map((notice) => <p key={notice}>{notice}</p>)}
-                </div>
-              )}
+              {coverageNotice}
 
+              {empty ? emptyState : (<>
               <section className="usage-overview" aria-label="Overview">
                 <div className="usage-headline">
                   <span className="usage-headline-value">{formatMetric(metricValue(data.totals, metric), metric)}</span>
                   <span className="usage-headline-note">{usageWindowCaption(metric, data)}</span>
                   {/* The chart's only legend: each driver's swatch, name, share and amount. */}
                   <ul className="usage-driver-list" aria-label="By Driver">
-                    {rows.length === 0 && <li className="usage-headline-note">No driver has usage in this period.</li>}
                     {rows.map((row) => (
                       <li className="usage-driver-row" key={row.driver}>
                         <SeriesSwatch driver={row.driver} />
@@ -811,9 +966,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
                             </tr>
                           </thead>
                           <tbody>
-                            {data.series.length === 0 ? (
-                              <tr><td colSpan={drivers.length + 3} className="usage-empty">No usage was observed in this period.</td></tr>
-                            ) : periodRows.map((bucket, index) => {
+                            {periodRows.map((bucket, index) => {
                               const trailing = metric === "cost"
                                 ? `${formatCompactTokens(processedTokens(bucket))} tokens`
                                 : `${formatMoney(bucket.costUsd)} estimated`;
@@ -892,16 +1045,21 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
                           </button>
                         )}
                       </div>
-                      {usersError && <div className="usage-state error" role="alert">{usersError}</div>}
+                      {usersError && (
+                        <Notice tone="danger" compact role="alert">{usersError}</Notice>
+                      )}
                       {users ? <PersonTable users={users} /> : !usersError && (
-                        <div className="usage-state" role="status">Loading people…</div>
+                        <State variant="loading" compact>Loading people…</State>
                       )}
                     </>
                   )}
                 </div>
               </section>
+              </>)}
 
             </div>
+            </StaleContent>
+            </>
           )}
         </div>
       )}

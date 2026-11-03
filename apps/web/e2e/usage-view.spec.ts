@@ -325,17 +325,62 @@ test("at 834px the time table folds its trailing column under the date and keeps
   await expect(table.locator(".usage-period-meta").first()).toBeHidden();
 });
 
-test("light theme and the coverage notice for unpriced records and a cached rate table", async ({ page }) => {
+test("light theme and one Some Usage Is Missing notice for an offline machine, unpriced turns and cached rates (#3016)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 1000 });
-  await page.goto("/usage-view-e2e.html?theme=light&unpriced=1");
-  const notice = page.locator(".usage-notice");
-  await expect(notice).toContainText("could not be fully priced");
-  await expect(notice).toContainText("could not be refreshed");
+  await page.goto("/usage-view-e2e.html?theme=light&unpriced=1&offlineMachine=1");
+  const notice = page.locator("#usage-api-panel .notice.t-warning");
+  await expect(notice).toHaveCount(1);
+  await expect(notice.locator(".notice-title")).toHaveText("Some Usage Is Missing");
+  await expect(notice).toContainText("Build Box is offline, so usage it hasn't reported yet isn't counted.");
+  await expect(notice).toContainText(/\d+ turns have no price because no rate is known for their model\./);
+  await expect(notice).toContainText("Rates couldn't be updated, so costs use the last rates Wollipog loaded.");
+  await expect(notice.getByRole("button", { name: "View Machines" })).toBeVisible();
+  await expect(notice.getByRole("button", { name: "Refresh Rates" })).toBeVisible();
   await page.screenshot({ path: `${SHOT}/desktop-light-unpriced.png`, fullPage: true });
 
-  await page.goto("/usage-view-e2e.html?theme=light&empty=1");
-  await expect(page.locator(".usage-chart-empty")).toBeVisible();
-  await expect(page.locator(".usage-notice")).toHaveCount(0);
+  await notice.getByRole("button", { name: "Refresh Rates" }).click();
+  // The refreshed table is fresh, so only the gaps it cannot fix remain.
+  await expect(notice).not.toContainText("Rates couldn't be updated");
+  await expect(notice).toContainText("Build Box is offline");
+});
+
+test("an empty window is one empty state under the toolbar, with no zero figures (#3016)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?empty=1");
+  const panel = page.locator("#usage-api-panel");
+  await expect(panel.locator(".state")).toHaveCount(1);
+  await expect(panel.locator(".state-title")).toHaveText("No Usage in the Last 30 Days");
+  await expect(panel.locator(".usage-toolbar")).toBeVisible();
+  await expect(panel.locator(".usage-overview, dl.facts, table, .notice")).toHaveCount(0);
+  await expect(panel).not.toContainText("$0.00");
+  await panel.getByRole("button", { name: "Show Last 365 Days" }).click();
+  await expect(panel.locator(".state-title")).toHaveText("No Usage in the Last 365 Days");
+  await expect(panel.getByRole("button", { name: "Range: Last 365 Days" })).toBeVisible();
+});
+
+test("a first load shows the overview's skeleton, and a failed one Couldn't Load Usage with Retry (#3016)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?state=loading");
+  const panel = page.locator("#usage-api-panel");
+  await expect(panel.getByRole("status").filter({ hasText: "Loading usage…" })).toBeVisible();
+  await expect(panel.locator(".usage-skeleton-chart > .skeleton-bar")).toHaveCount(30);
+
+  await page.goto("/usage-view-e2e.html?state=error");
+  const alert = panel.getByRole("alert");
+  await expect(alert.locator(".notice-title")).toHaveText("Couldn't Load Usage");
+  await expect(alert.getByRole("button", { name: "Retry" })).toBeVisible();
+  await expect(alert).not.toContainText("502 Bad Gateway");
+  await alert.getByRole("button", { name: "Show Details" }).click();
+  await expect(alert).toContainText("502 Bad Gateway");
+});
+
+test("when the connection drops the last figures stay, dimmed, under Reconnecting… (#3016)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await page.goto("/usage-view-e2e.html?offline=1");
+  const panel = page.locator("#usage-api-panel");
+  await expect(panel.getByRole("status").filter({ hasText: "Reconnecting…" })).toBeVisible();
+  await expect(panel.locator(".is-stale .usage-headline-value")).toBeVisible();
+  await expect(panel.getByRole("alert")).toHaveCount(0);
 });
 
 test.describe("with a touch pointer", () => {

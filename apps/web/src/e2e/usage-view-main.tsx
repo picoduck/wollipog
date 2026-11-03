@@ -30,6 +30,9 @@ import "../styles.css";
  * `?refreshFailed=2` for a subscription refresh where two of three machines failed. A refresh takes
  * 600ms, so it can be seen. Budget and History (#3015): `?member=1` for a viewer who cannot manage
  * them, `?retentionFails=1` for a retention save that fails after the budget saved.
+ * The page's states (#3016): `?state=loading` for a first load that never answers, `?state=error`
+ * for one that fails, `?offline=1` for a connection that drops after the page loads, and
+ * `?offlineMachine=1` for Build Box offline.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -151,6 +154,9 @@ const response: UsageAggregationResponse = {
   },
 };
 
+// Refresh Rates loads a fresh table, which the next answer reports.
+let ratesRefreshed = false;
+
 function aggregateResponse(granularity: UsageAggregationGranularity): UsageAggregationResponse {
   const bucketStart = (timestamp: number) => {
     if (granularity === "hour") return timestamp + 3 * 3_600_000;
@@ -180,6 +186,7 @@ function aggregateResponse(granularity: UsageAggregationGranularity): UsageAggre
     granularity,
     retention,
     legacyClaudeCostRecords: params.get("legacyCosts") === "1" ? 10 : 0,
+    pricing: ratesRefreshed ? { ...response.pricing!, status: "fresh" } : response.pricing,
     seriesByDriver: nextSeriesByDriver,
     series: [...buckets.entries()].map(([bucketTs, total]) => ({ bucketTs, ...total })).sort((a, b) => b.bucketTs - a.bucketTs),
   };
@@ -310,7 +317,16 @@ const client = {
     retention = { ...retention, ...input };
     return { retention };
   },
-  usage: async (input: { granularity?: UsageAggregationGranularity }) => aggregateResponse(input.granularity ?? "day"),
+  usage: async (input: { granularity?: UsageAggregationGranularity }) => {
+    // `?state=loading`: the first answer never comes; `?state=error`: every answer fails.
+    if (params.get("state") === "loading") return await new Promise<never>(() => {});
+    if (params.get("state") === "error") throw new Error("Request failed: 502 Bad Gateway (GET /api/usage)");
+    return aggregateResponse(input.granularity ?? "day");
+  },
+  refreshUsagePricing: async () => {
+    ratesRefreshed = true;
+    return { pricing: { ...response.pricing!, status: "fresh" as const } };
+  },
   subscriptionUsage: async () => subscription,
   refreshSubscriptionUsage: async () => {
     await new Promise((resolve) => setTimeout(resolve, 600));
@@ -351,7 +367,9 @@ const runners: RunnerView[] = params.get("anonymous") === "1" ? [] : [
   { runnerId: "r-build-box", displayName: "Build Box" },
   { runnerId: "r-studio", displayName: "Studio Mac" },
 ].map(({ runnerId, displayName }) => ({
-  runnerId, displayName, hostname: runnerId.slice(2), os: "linux", version: "1", status: "online",
+  runnerId, displayName, hostname: runnerId.slice(2), os: "linux", version: "1",
+  // `?offlineMachine=1`: Build Box is offline, so the notice says its usage may be missing.
+  status: params.get("offlineMachine") === "1" && runnerId === "r-build-box" ? "offline" : "online",
   workspaces: [], connectedAt: END, lastSeen: END,
   agents: drivers.filter((entry) => entry.runnerId === runnerId).map((entry) => ({
     id: entry.agentId, name: entry.agentName, command: entry.agentId, args: [], env: {}, driver: entry.driver, available: true,
@@ -359,6 +377,9 @@ const runners: RunnerView[] = params.get("anonymous") === "1" ? [] : [
   })),
 } as unknown as RunnerView));
 
+// `?offline=1`: the connection drops once the page has loaded and never comes back.
+const dropConnection = params.get("offline") === "1";
+let dropped = false;
 class FixtureSocket implements UiSocket {
   readonly readyState = UI_SOCKET_OPEN;
   onopen: (() => void) | null = null;
@@ -367,9 +388,17 @@ class FixtureSocket implements UiSocket {
   onerror: (() => void) | null = null;
   constructor() {
     window.setTimeout(() => {
-      this.onopen?.();
+      // After the drop, every reconnect attempt stays unanswered.
+      if (dropped || !this.onopen) return;
+      this.onopen();
       const snapshot = { type: "snapshot", runners, boxes: [], sessions: [], runs: [], pods: [] } as unknown as UiSnapshotMessage;
       this.onmessage?.({ data: JSON.stringify(snapshot) });
+      if (dropConnection) {
+        window.setTimeout(() => {
+          dropped = true;
+          this.onclose?.({ code: 1006 });
+        }, 600);
+      }
     }, 0);
   }
   send() {}

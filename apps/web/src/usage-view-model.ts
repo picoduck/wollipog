@@ -536,28 +536,62 @@ export function axisLabelIndexes(count: number, limit = 8, lastClearance = 1): n
 }
 
 export interface CoverageNotice {
+  /** Offline Machines by display name (`runnerDisplay()`), never by hostname. */
   offlineMachines: string[];
   unpricedRecords: number;
   legacyClaudeCostRecords?: number;
   pricing?: UsageAggregationResponse["pricing"];
 }
 
-/** The sentences the coverage block shows; empty when totals are complete and fully priced. */
-export function coverageMessages(notice: CoverageNotice): string[] {
-  const messages: string[] = [];
-  if (notice.offlineMachines.length > 0) {
-    messages.push(`${notice.offlineMachines.join(", ")} ${notice.offlineMachines.length === 1 ? "is" : "are"} offline; usage it has not yet reported is missing from these totals.`);
+/** One gap in the totals (#3016): what is missing, so the notice can say it and offer its fix. */
+export type CoverageItem =
+  | { kind: "offline-machines"; machines: string[] }
+  | { kind: "unpriced"; records: number }
+  | { kind: "legacy-claude"; records: number }
+  | { kind: "rates-unavailable" }
+  | { kind: "rates-cached" };
+
+/** What is missing from the totals, in the order the notice says it; empty when they are complete
+ * and fully priced. */
+export function coverageMessages(notice: CoverageNotice): CoverageItem[] {
+  const items: CoverageItem[] = [];
+  if (notice.offlineMachines.length > 0) items.push({ kind: "offline-machines", machines: notice.offlineMachines });
+  if (notice.unpricedRecords > 0) items.push({ kind: "unpriced", records: notice.unpricedRecords });
+  const legacy = notice.legacyClaudeCostRecords ?? 0;
+  if (legacy > 0) items.push({ kind: "legacy-claude", records: legacy });
+  if (notice.pricing?.status === "unavailable") items.push({ kind: "rates-unavailable" });
+  else if (notice.pricing?.status === "cached") items.push({ kind: "rates-cached" });
+  return items;
+}
+
+const MACHINE_LIST = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+
+/** One sentence per gap, in the person's words: a turn rather than a record, a Machine by name. */
+export function coverageSentence(item: CoverageItem): string {
+  switch (item.kind) {
+    case "offline-machines": {
+      const one = item.machines.length === 1;
+      return `${MACHINE_LIST.format(item.machines)} ${one ? "is" : "are"} offline, so usage ${one ? "it hasn't" : "they haven't"} reported yet isn't counted.`;
+    }
+    case "unpriced":
+      return item.records === 1
+        ? "1 turn has no price because no rate is known for its model."
+        : `${item.records.toLocaleString("en-US")} turns have no price because no rate is known for their model.`;
+    case "legacy-claude":
+      return "Some older Claude Code costs were recorded in a way that can count a resumed session's spending more than once.";
+    case "rates-unavailable":
+      return "No rates are loaded, so turns without a cost from their provider have no price.";
+    case "rates-cached":
+      return "Rates couldn't be updated, so costs use the last rates Wollipog loaded.";
   }
-  if ((notice.legacyClaudeCostRecords ?? 0) > 0) {
-    messages.push("Some Claude Code costs use an older accounting method. Resumed spending may be counted more than once; these historical costs have not been reconciled.");
-  }
-  if (notice.unpricedRecords > 0) {
-    messages.push(`${notice.unpricedRecords.toLocaleString("en-US")} usage ${notice.unpricedRecords === 1 ? "record could" : "records could"} not be fully priced; their missing cost is excluded.`);
-  }
-  if (notice.pricing?.status === "unavailable") {
-    messages.push("No model rate table is loaded; usage without a provider-reported cost is unpriced.");
-  } else if (notice.pricing?.status === "cached") {
-    messages.push("The model rate table could not be refreshed; estimates use the last cached rates.");
-  }
-  return messages;
+}
+
+/** Whether loading newer rates could help: something is unpriced, or the rates are missing or old. */
+export function coverageNeedsRates(items: readonly CoverageItem[]): boolean {
+  return items.some((item) => item.kind === "unpriced" || item.kind === "rates-unavailable" || item.kind === "rates-cached");
+}
+
+/** A window with nothing in it (#3016): no processed tokens and no cost. */
+export function usageIsEmpty(totals: UsageAmount): boolean {
+  return processedTokens(totals) === 0 && totals.costUsd === 0;
 }
