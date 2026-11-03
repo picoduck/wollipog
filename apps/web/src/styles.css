@@ -14,7 +14,7 @@
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
-  --usage-series-5: #c65d86;
+  --usage-series-5: #c7648b;
   /* The dim tiers, for text that sits on a TINTED row rather than a plain surface.
      A diff gutter, a slash-menu source, a syntax comment: each declares only a colour and inherits
      its ground from a container that paints a 16% wash of accent, green or red. The plain dim tiers
@@ -19539,7 +19539,7 @@ a.tab { text-decoration: none; }
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
-  --usage-series-5: #c65d86;
+  --usage-series-5: #c7648b;
   --diff-add-bg: #152c20;
   --diff-delete-bg: #321e22;
   --modal-backdrop: rgba(7, 9, 12, 0.62);
@@ -19689,7 +19689,7 @@ a.tab { text-decoration: none; }
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
-  --usage-series-5: #c65d86;
+  --usage-series-5: #c7648b;
   --diff-add-bg: #3a443f;
   --diff-delete-bg: #31272c;
   --modal-backdrop: rgba(20, 22, 26, 0.62);
@@ -19839,7 +19839,7 @@ a.tab { text-decoration: none; }
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
-  --usage-series-5: #c65d86;
+  --usage-series-5: #c7648b;
   --diff-add-bg: #2e4b41;
   --diff-delete-bg: #4a3c46;
   --modal-backdrop: rgba(20, 21, 27, 0.62);
@@ -19989,7 +19989,7 @@ a.tab { text-decoration: none; }
   --usage-series-2: #3987e5;
   --usage-series-3: #199e70;
   --usage-series-4: #9085e9;
-  --usage-series-5: #c65d86;
+  --usage-series-5: #c7648b;
   --diff-add-bg: #3b4624;
   --diff-delete-bg: #493839;
   --modal-backdrop: rgba(20, 20, 17, 0.62);

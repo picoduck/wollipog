@@ -305,10 +305,9 @@ test("usage chart series and hover fills stay distinct and visible in every pale
   assert.ok(hoverSeriesFraction > 0 && hoverSeriesFraction <= 1,
     "the usage hover's series percentage must be a fraction in (0, 1]");
 
-  // The slots measured against the grounds, and every slot in the chart's stacking order from the
-  // baseline up. Pi's slot 5 is not held to the 3:1 ground floor here: it measures 2.98:1 on
-  // Dracula's dark --bg-elev, and its token is shared by every scheme.
-  const slots = [1, 2, 3, 4] as const;
+  // Every slot measured against the grounds, and every slot in the chart's stacking order from the
+  // baseline up. Dracula's dark --bg-elev is the tightest ground: slot 5 measures 3.16:1 there.
+  const slots = [1, 2, 3, 4, 5] as const;
   const stacked = DRIVER_ORDER.map((driver) => DRIVER_PRESENTATION[driver].slot);
   assert.deepEqual([...stacked].sort(), [1, 2, 3, 4, 5], "every slot stacks exactly once");
   const failures: string[] = [];
@@ -360,9 +359,9 @@ test("usage chart series and hover fills stay distinct and visible in every pale
     }
   }
   // Literals, because deriving these from the enumerators lets a removed scheme, slot, surface, or
-  // vision model shorten both the work and its supposed guard. Five schemes x two themes x four
+  // vision model shorten both the work and its supposed guard. Five schemes x two themes x five
   // slots x two grounds x two states; then four stacked pairs x four vision models.
-  assert.equal(contrastChecks, 160, "usage contrast coverage must span the complete palette matrix");
+  assert.equal(contrastChecks, 200,"usage contrast coverage must span the complete palette matrix");
   assert.equal(separationChecks, 160, "usage separation coverage must span every stacked pair and vision model");
   assert.deepEqual(failures, [], "usage chart colours must preserve their contrast and categorical separation");
 });
