@@ -64,15 +64,25 @@ has something to learn or do (#3083):
   resolver. The governance audit records the same revocation with a `system` actor and
   `workflowDecision.revocation: { reason, triggeredBy }`, where `triggeredBy` keeps the actor's id.
   A person's own denial still reads `resolvedBy: "human"`.
+- **A waiting child wakes nobody (#4073).** An unverified idle child records `child_ready` only
+  when it is not waiting. Waiting means a live managed background job, such as a background
+  `pr wait` on required CI or a subagent; `campaignChildWait` in `db.ts` is the one definition.
+  The runner resumes the child when that job ends, and the turn that follows is the one that can
+  report. A job ending with no such turn records the event on the runner update that ends it. A job
+  past the stall bound (`BACKGROUND_JOB_STALL_MS`) stops counting, and the five-second check
+  records the event then, so a monitor that never fires cannot hide a finished report. A completed,
+  failed or stopped child, a held one, and any request a waiting child makes are reported as before.
 - **Bursts share one turn.** These events are delivered after a one-second fan-in:
-  - `child_ready`, `child_blocked` and `human_blockers_cleared`;
+  - `child_ready` for a child that completed, failed or stopped, `child_blocked` and
+    `human_blockers_cleared`;
   - a `request_resolved` whose removal was caused by a human, by a server revocation a human's
     action led to, or by no recorded resolver at all (an unknown resolver may have been a human).
 
-  Any other event waits 30 seconds from the oldest undelivered event. Urgency is judged across
-  the whole pending queue, not just one 64-event delivery slice. A prompt event carries everything
-  pending with it, so the window never delays a human gate. The control plane checks every five
-  seconds.
+  Any other event, including an idle child's `child_ready`, waits 30 seconds from the oldest
+  undelivered event. Urgency is judged across the whole pending queue, not just one 64-event
+  delivery slice. A prompt event carries everything pending with it, so the window never delays a
+  human gate. The control plane checks every five seconds. Several `child_ready` events for one
+  child in a delivery are shown as one entry, with its latest status and a `turnEnds` count.
 - **The payload says whether to act.** Each event names:
   - its request's category and title;
   - the child's current status;
@@ -88,7 +98,10 @@ has something to learn or do (#3083):
   - **`Action needed: no`** requires nothing pending for the Orchestrator, no held child, no report
     to verify, no required cleanup, no human or unattributed resolution, and no undelivered events
     beyond the bounded 64-event slice. It lets the turn end without the `get_campaign` and
-    `list_descendant_requests` sweep.
+    `list_descendant_requests` sweep. A child that is only waiting has no report to verify. A
+    `child_ready` asks for nothing when its child is running again at delivery, or has reported
+    again since and is idle behind a live wait (shown as `waiting`). That later turn end is
+    recorded on its own.
   - **Cost.** The delivery deadline comes from one query over the queue. Event details are built
     only when a continuation is actually staged, and session views are read once per pass.
 

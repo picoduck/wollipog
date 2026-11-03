@@ -50,6 +50,7 @@ import { unarchiveSession } from "../session-unarchive.js";
 import { writeClipboardText } from "../clipboard.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
 import { historicalBackgroundResultRecovery } from "../background-delivery-status.js";
 
@@ -727,6 +728,7 @@ export function SessionHeader({
             tabIndex={titleId ? -1 : undefined}
             title={displayTitle}
           >
+            <SessionTypeIcon session={session} />
             {displayTitle}
           </h1>
         </>

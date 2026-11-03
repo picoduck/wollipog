@@ -144,6 +144,8 @@ import type {
   WorktreeSetupConfigStatus,
   WorkspaceReference,
   WorkspaceReferenceCandidate,
+  WorkspaceReferenceSearchLimit,
+  WorkspaceReferenceSearchMatch,
   WorkflowArtifact,
   WorkflowArtifactPage,
   WorkflowDefinition,
@@ -1591,9 +1593,15 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
     ),
 
-  searchWorkspaceReferences: (sessionId: string, query: string) =>
-    req<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query }).toString()}`,
+  /** `match` is echoed only when the runner and control plane applied it (#1263). */
+  searchWorkspaceReferences: (sessionId: string, query: string, match?: WorkspaceReferenceSearchMatch) =>
+    req<{
+      results: WorkspaceReferenceCandidate[];
+      truncated: boolean;
+      match?: WorkspaceReferenceSearchMatch;
+      limit?: WorkspaceReferenceSearchLimit;
+    }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query, ...(match ? { match } : {}) }).toString()}`,
     ),
 
   createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>

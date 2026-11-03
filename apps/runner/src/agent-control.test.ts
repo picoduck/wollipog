@@ -45,9 +45,12 @@ import {
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
 import { AGENT_CONTROL_RELAY_FIFO_ENV, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
+import { CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS } from "./claude-wollipog-mcp.js";
+import { PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
 import {
   CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
   CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING,
+  CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
   SESSION_CODEX_MCP_MARKER,
 } from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
@@ -893,6 +896,10 @@ test("Claude receives the general MCP config without changing the agent identity
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.equal(config.mcpServers.wollipog.command, "/opt/wollipog-runner");
     assert.deepEqual(config.mcpServers.wollipog.args, ["--agent-control-mcp"]);
+    // Claude Code's 30-minute idle abort must not cut a pending wait short (#4072); the limit lives
+    // only in this entry, and this file names no other server.
+    assert.deepEqual(Object.keys(config.mcpServers), ["wollipog"]);
+    assert.equal(config.mcpServers.wollipog.timeout, CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS);
     assert.equal(JSON.stringify(config).includes(readFileSync(agentControlTokenPath(root, launch.sessionId), "utf8")), false);
     assert.equal(launch.agentId, "codex", "provisioning never changes or advertises the agent identity");
 
@@ -906,6 +913,16 @@ test("Claude receives the general MCP config without changing the agent identity
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the Claude wollipog entry's limit outlasts the longest pull request wait, as Codex's does (#4072)", () => {
+  // Claude Code takes the larger of this and its 30-minute idle limit, and this also replaces the
+  // server's total per-call limit, so it must cover a three-hour wait plus one in-flight read and
+  // still be a bound.
+  assert.ok(CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS >= PULL_REQUEST_WAIT_MAX_TIMEOUT_MS + PULL_REQUEST_WAIT_READ_GRACE_MS);
+  assert.ok(CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS < PULL_REQUEST_WAIT_MAX_TIMEOUT_MS + 30 * 60_000);
+  assert.equal(CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC * 1000,
+    "both harnesses state one per-call limit");
 });
 
 test("retained Claude sessions shed runner-owned control state on downgrade and re-provision deterministically", () => {

@@ -6,6 +6,7 @@ import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { serveSessionManagementMcp, type McpFetch } from "./session-management-mcp.js";
 import { runPullRequestCli, runWollipogCli } from "./wollipog-cli.js";
+import { claudeWollipogMcpServer } from "./claude-wollipog-mcp.js";
 
 export const WSL_AGENT_CONTROL_PROTOCOL = 1 as const;
 export const WSL_AGENT_CONTROL_HELPER_PATH = "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs";
@@ -224,16 +225,14 @@ export function attachWslAgentControlBroker(
     runtime: config.nodeRuntime,
     helper: config.helperPath,
     token: Buffer.from(config.token).toString("base64"),
-    mcp: Buffer.from(JSON.stringify({ mcpServers: { wollipog: {
-      type: "stdio",
-      command: config.nodeRuntime,
-      args: [config.helperPath, "mcp"],
-      env: {
+    mcp: Buffer.from(JSON.stringify({ mcpServers: { wollipog: claudeWollipogMcpServer(
+      { command: config.nodeRuntime, args: [config.helperPath, "mcp"] },
+      {
         WOLLIPOG_SESSION_ID: config.sessionId,
         WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
         WOLLIPOG_AGENT_CONTROL_SOCKET: WSL_AGENT_CONTROL_PRIVATE_SOCKET,
       },
-    } } })).toString("base64"),
+    ) } })).toString("base64"),
   });
   return dispose;
 }

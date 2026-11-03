@@ -10,6 +10,8 @@ owner can inspect an epic's umbrella and members, select candidates, and request
 Native GitHub sub-issues and leading checklist issues in explicitly named member sections are candidates.
 Dependencies, cross-repository members, and incidental references never grant authority. An incomplete or
 oversized inspection fails closed; use an explicit set of up to 100 repository-qualified issues instead.
+Under Full Control, recorded work outside authority is never dispatched, and a merge that would close
+an unscoped issue needs the campaign owner (see [What the Scope Bounds Under Full Control](#what-the-scope-bounds-under-full-control)).
 
 The root agent can use `get_campaign_issue_scope` and `request_campaign_issue_scope_change` to prepare the
 same proposal after a human's prompt. Custom approval is human-owned; bounded Full Control admission
@@ -59,6 +61,38 @@ Operational questions: which human approved the change, which revision is author
 active participant synchronize? Workflow audit plus `campaign_issue_scope_approved`,
 `campaign_issue_scope_synchronized`, and `campaign_issue_scope_sync_pending` answer these with session,
 occurrence, and revision identifiers, without logging prompts, credentials, or issue bodies.
+
+## What the Scope Bounds Under Full Control
+
+Under Full Control the issue scope bounds what the Orchestrator may deliver and close on its own,
+whatever route a closure takes (#4062). Recording a work item for an unscoped issue stays allowed, and
+Campaign Status lists it as recorded work outside authority, but:
+
+- Dispatching a child on it is refused: `create_session` with that `campaignWorkItemId`, and
+  `assign_campaign_work_item`, both fail with a message naming the issue and the scope route
+  (`request_campaign_issue_scope_change`). A refused scope change cannot be routed around by
+  recommitting the item and dispatching it again; only the campaign owner can then add the issue.
+  An item that tracks no issue is unaffected.
+- A merge that would close an issue outside the current scope is never Orchestrator-owned. A GitHub
+  `pr_merge` whose `intendedClosures` name such an issue is refused before any decision is created,
+  and the refusal names each one; write "Refs #N" for an issue that must stay open, or add the issue
+  to the scope first. On a v242 runner the declared closures are exactly what GitHub would close
+  (closing keywords and linked issues): the runner reads them before the request and again before
+  arming, and any difference is refused (#3713). A merge whose closures are all in scope, or that
+  closes nothing, keeps its ownership.
+- A merge whose closures nothing reads is never assumed to close nothing. A GitHub merge from a
+  runner older than v242, and a GitLab merge request (whose closing references are not read at
+  all), are human-owned (`unverified_closures`) whatever they declare: an unread pull request that
+  declares an in-scope closure could still close an unscoped issue. A declared unscoped closure is
+  still refused, as above.
+- Retargeting a work item that has an open attempt at an issue outside the scope, through
+  `record_campaign_plan` or `update_campaign_work_item`, is refused like a dispatch. Linking an accepted follow-up's published issue to its item stays allowed, because that
+  record must precede the issue's scope addition; its merge still cannot close the issue unscoped.
+- Ownership follows the current scope. A merge is evaluated again when it is approved, when it is
+  consumed, and once more after the arming read of GitHub against the controller as it is then. A
+  scope that no longer names a closing issue revokes the merge, and a new request for it is refused.
+
+Custom campaigns keep their saved owners for both dispatch and merges.
 
 ## GitLab Repositories
 

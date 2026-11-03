@@ -2816,3 +2816,244 @@ test("#4058 every named gap appears with and without a fixed-by plan, and naming
     } finally { h.db.close(); }
   }
 });
+
+/* ---------- #4062: the issue scope bounds dispatch and merges, not only typed closures ---------- */
+
+/** A Full Control campaign that delegates merges, whose runner reports what each pull request
+ * would close from `closes` (GitHub's read, #3713). */
+function scopeGuardHarness(maxIssues = 5, issues = [100]) {
+  const h = harness(false, maxIssues, issues);
+  const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+  assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100",
+    operations: ["campaign_issue_scope", "issue_closure", "pr_merge", "implementation_question"], delegatablePolicyIds: [],
+    issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues, closureReasons: ["completed"] } }, revision, h.principal).ok);
+  const sql = (h.db as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+  const closes = new Map<number, string[]>();
+  /** Runs once inside the next GitHub read, as a concurrent change would. */
+  const during = { preflight: null as (() => void) | null };
+  const runner = h.hub.requestFromRunner;
+  h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+    if (message.type !== "github_merge_preflight") return runner(runnerId, requestId, message, timeout);
+    const change = during.preflight; during.preflight = null; change?.();
+    return { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1,
+      closures: (closes.get(message.pullRequest) ?? []).map((issue) => ({ issue, sources: ["description" as const], excerpt: `Closes #${issue.split("#")[1]}` })) } };
+  };
+  /** The campaign's scope as the server would store it, naming only `numbers`. */
+  const narrowScope = (numbers: number[]) => {
+    const policy = structuredClone(h.db.getSession("root")!.orchestratorPolicy!);
+    policy.issueNumbers = numbers; policy.issueScope = { ...policy.issueScope!, issueNumbers: numbers };
+    sql.prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+  };
+  const itemFor = (key: string, number: number) => {
+    const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now()); assert.ok(page.ok);
+    const existing = page.data.items.find((item) => item.key === key);
+    if (existing) return existing.id;
+    const plan = h.svc.recordCampaignPlan("root", { items: [...page.data.items.map((item) => ({ key: item.key, ...(item.issue ? { issue: item.issue } : {}) })),
+      { key, issue: { repository: "team/repo", number } }], planComplete: true });
+    assert.ok(plan.ok, plan.error ?? "a work item for an unscoped issue may still be recorded");
+    return plan.data!.items.find((item) => item.key === key)!.workItemId;
+  };
+  const launch = (campaignWorkItemId: string) => {
+    const request = { runnerId: "r", workspaceId: "w", agentId: "codex", prompt: "Deliver the item", campaignWorkItemId };
+    const context = { parentSessionId: "root" };
+    let result = h.svc.createSession(request, undefined, undefined, false, false, false, context);
+    if (result.status === 428) {
+      assert.ok(h.svc.approve("root", h.db.getSession("root")!.pendingApproval!.requestId, "allow").ok);
+      result = h.svc.createSession(request, undefined, undefined, false, false, false, context);
+    }
+    return result;
+  };
+  const merge = (sessionId: string, pullRequest: number, closing: string[]) => {
+    closes.set(pullRequest, closing);
+    const headSha = String(pullRequest).padStart(40, "a");
+    const snapshot = { category: "pr_merge" as const, repository: "team/repo", pullRequest, headSha, reviewResult: "merge" as const,
+      requiredChecks: { headSha, status: "passed" as const, checkedAt: 10, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+      ...(closing.length ? { intendedClosures: closing } : {}) };
+    return { snapshot, request: () => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId: `merge-${pullRequest}`,
+      resourceKey: `team/repo#${pullRequest}`, resourceSnapshot: snapshot }) };
+  };
+  const children = () => (sql.prepare("SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id='root'").get() as { n: number }).n;
+  const decisions = (sessionId: string) => h.svc.workflowDecisions(sessionId, undefined, 50).data!.decisions;
+  return { ...h, closes, during, narrowScope, itemFor, launch, merge, children, decisions };
+}
+
+const SCOPE_ROUTE = /outside this Full Control campaign's issue scope.*request_campaign_issue_scope_change/;
+
+test("#4062 a refused epic-member addition cannot be delivered through a dispatch and a merge that closes it", async () => {
+  const h = scopeGuardHarness(1);
+  try {
+    // The root's request to add the epic's member is refused: the scope is at its limit.
+    const refused = await h.proposal("add-101", 101);
+    assert.equal(refusalCode(refused), "capacity_exhausted");
+    // Recording the work stays allowed; the ledger is not authority.
+    const member = h.itemFor("issue:101", 101);
+    const children = h.children();
+    const launched = h.launch(member);
+    assert.equal(launched.ok, false); assert.equal(launched.status, 409);
+    assert.match(launched.error!, /team\/repo#101/); assert.match(launched.error!, SCOPE_ROUTE);
+    assert.equal(h.children(), children, "no child was created for the unscoped issue");
+    const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: member, childSessionId: "child" });
+    assert.equal(assigned.ok, false); assert.equal(assigned.status, 409); assert.match(assigned.error!, SCOPE_ROUTE);
+    assert.equal(h.db.campaignWorkLedger.currentAssignment("child"), null);
+
+    // A merge that would close it is refused with the issue named, and nobody gets a decision.
+    const closing = await h.merge("child", 11, ["team/repo#101"]).request();
+    assert.equal(closing.ok, false); assert.equal(closing.status, 409);
+    assert.match(closing.error!, /outside this Full Control campaign's issue scope: team\/repo#101\./);
+    assert.match(closing.error!, /Refs #N.*request_campaign_issue_scope_change/);
+    assert.deepEqual(h.decisions("child"), []);
+
+    // Work on the scoped epic is dispatched and merged as before.
+    const scoped = h.launch(h.item.id);
+    assert.ok(scoped.ok, scoped.error ?? "refused");
+    // Retargeting that dispatched item at the unscoped issue is a dispatch for it, refused the same way.
+    const retarget = h.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 101 } },
+      { key: "issue:101", issue: { repository: "team/repo", number: 101 } }], planComplete: true });
+    assert.equal(retarget.ok, false); assert.equal(retarget.status, 409);
+    assert.match(retarget.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(retarget.error!, SCOPE_ROUTE);
+    const launchedChild = scoped.data!.id;
+    const updated = h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, issue: { repository: "team/repo", number: 101 } });
+    assert.equal(updated.ok, false); assert.equal(updated.status, 409);
+    assert.match(updated.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(updated.error!, SCOPE_ROUTE);
+    assert.deepEqual(h.db.campaignWorkLedger.detail("root", h.item.id, Date.now())!.issue, { repository: "team/repo", number: 100 });
+    assert.equal(h.db.campaignWorkLedger.currentAssignment(launchedChild)?.workItemId, h.item.id);
+    const delivered = await h.merge("child", 12, ["team/repo#100"]).request();
+    assert.ok(delivered.ok, delivered.error ?? "refused");
+    assert.equal(delivered.data!.authority, "orchestrator");
+    assert.equal(delivered.data!.authorityEvaluation?.reason, "authorized_operation");
+  } finally { h.db.close(); }
+});
+
+test("#4062 a refused follow-up addition cannot be delivered through a recommit, a dispatch and a merge that closes it", async () => {
+  const h = scopeGuardHarness();
+  try {
+    const refused = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-follow-up", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 103 }], removals: [], explanation: "Verified follow-up" });
+    assert.equal(refusalCode(refused), "lineage_missing");
+    const followUp = h.itemFor("follow-up:103", 103);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: followUp, commitment: { state: "scope_removed", reason: "Not in scope." } }).ok);
+    // Recommitting the item is recording, which stays allowed; dispatching it is not.
+    const recommitted = h.svc.updateCampaignWorkItem("root", { workItemId: followUp, commitment: { state: "committed" } });
+    assert.ok(recommitted.ok, recommitted.error ?? "refused");
+    const launched = h.launch(followUp);
+    assert.equal(launched.ok, false); assert.equal(launched.status, 409);
+    assert.match(launched.error!, /team\/repo#103/); assert.match(launched.error!, SCOPE_ROUTE);
+
+    const closing = await h.merge("child", 13, ["team/repo#103"]).request();
+    assert.equal(closing.ok, false); assert.equal(closing.status, 409);
+    assert.match(closing.error!, /team\/repo#103/);
+    // Mixed closures name only the unscoped issues, each of them.
+    const mixed = await h.merge("child", 14, ["other/repo#100", "team/repo#100", "team/repo#103"]).request();
+    assert.equal(mixed.ok, false);
+    assert.match(mixed.error!, /issue scope: other\/repo#100, team\/repo#103\./);
+    assert.deepEqual(h.decisions("child"), []);
+  } finally { h.db.close(); }
+});
+
+test("#4062 a merge that says Refs and closes nothing stays the Orchestrator's, and Custom campaigns are unchanged", async () => {
+  const h = scopeGuardHarness();
+  try {
+    // This campaign's own pull requests reference their issue without closing it.
+    const refs = await h.merge("child", 15, []).request();
+    assert.ok(refs.ok, refs.error ?? "refused");
+    assert.equal(refs.data!.authority, "orchestrator");
+    assert.equal(refs.data!.resourceSnapshot.category === "pr_merge" && refs.data!.resourceSnapshot.intendedClosures, undefined);
+  } finally { h.db.close(); }
+  const custom = harness(false);
+  try {
+    const closes = ["team/repo#101"];
+    const runner = custom.hub.requestFromRunner;
+    custom.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => message.type === "github_merge_preflight"
+      ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1,
+        closures: closes.map((issue) => ({ issue, sources: ["description" as const], excerpt: "Closes #101" })) } }
+      : runner(runnerId, requestId, message, timeout);
+    const policy = custom.db.getSession("root")!.parentControlPolicy!;
+    assert.ok(custom.svc.setParentControlPolicy("root", { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
+    const headSha = "f".repeat(40);
+    const created = await custom.svc.createWorkflowDecisionWithVideo("child", { requestId: "custom-merge", resourceKey: "team/repo#16", resourceSnapshot: {
+      category: "pr_merge", repository: "team/repo", pullRequest: 16, headSha, reviewResult: "merge", intendedClosures: closes,
+      requiredChecks: { headSha, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] } } });
+    assert.ok(created.ok, created.error ?? "refused");
+    assert.equal(created.data!.authority, "orchestrator", "a Custom campaign's saved merge owner still applies to an unscoped closure");
+    assert.equal(created.data!.authorityEvaluation?.reason, "custom_owner");
+    // Dispatch on an unscoped issue's item is unchanged under Custom, too.
+    const plan = custom.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 100 } },
+      { key: "issue:101", issue: { repository: "team/repo", number: 101 } }], planComplete: true });
+    assert.ok(plan.ok, plan.error ?? "plan");
+    const unscoped = plan.data!.items.find((item) => item.key === "issue:101")!.workItemId;
+    const assigned = custom.svc.assignCampaignWorkItem("root", { workItemId: unscoped, childSessionId: "child" });
+    assert.ok(assigned.ok, assigned.error ?? "refused");
+  } finally { custom.db.close(); }
+});
+
+test("#4062 a merge from a runner that cannot read closing references is the person's, whatever it declares", async () => {
+  const h = scopeGuardHarness();
+  try {
+    h.db.registerRunner(h.metadata, 1, 241);
+    // The pull request may also close an unscoped issue; a v241 runner is never asked.
+    h.closes.set(21, ["team/repo#100", "team/repo#101"]);
+    for (const [pullRequest, closing] of [[21, ["team/repo#100"]], [22, []]] as const) {
+      const created = await h.merge("child", pullRequest, [...closing]).request();
+      assert.ok(created.ok, created.error ?? "refused");
+      assert.equal(created.data!.authority, "human");
+      assert.equal(created.data!.authorityEvaluation?.reason, "unverified_closures");
+      const approved = h.svc.resolveDescendantRequest("root", "child", created.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.equal(approved.ok, false, "the Orchestrator cannot approve it");
+      assert.equal(h.db.workflowDecisionByOccurrence(created.data!.occurrenceId)!.status, "pending");
+    }
+    const unscoped = await h.merge("child", 23, ["team/repo#101"]).request();
+    assert.equal(unscoped.ok, false); assert.match(unscoped.error!, /team\/repo#101/);
+  } finally { h.db.close(); }
+});
+
+test("#4062 a scope that drops a merge's closing issue after it was requested is evaluated again before approval and arming", async () => {
+  const h = scopeGuardHarness(5, [100, 101]);
+  try {
+    h.db.createSession({ id: "merger", runnerId: "r", workspaceId: "w", agentId: "codex", title: "merger", parentSessionId: "root",
+      driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+    h.db.updateSessionStatus("merger", "running", Date.now());
+    const approvedFirst = h.merge("merger", 17, ["team/repo#101"]);
+    const pendingFirst = h.merge("merger", 18, ["team/repo#101"]);
+    const approved = await approvedFirst.request(), pending = await pendingFirst.request();
+    assert.ok(approved.ok && pending.ok, approved.error ?? pending.error ?? "refused");
+    assert.equal(approved.data!.authority, "orchestrator"); assert.equal(pending.data!.authority, "orchestrator");
+    assert.ok(h.svc.resolveDescendantRequest("root", "merger", approved.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+
+    // The campaign's scope no longer names the issue both merges would close.
+    h.narrowScope([100]);
+
+    const armed = await h.svc.consumeWorkflowDecision("merger", approved.data!.occurrenceId, { resourceSnapshot: approvedFirst.snapshot,
+      action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(approvedFirst.snapshot) } });
+    assert.equal(armed.ok, false); assert.equal(armed.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(approved.data!.occurrenceId)!.status, "revoked");
+    const late = h.svc.resolveDescendantRequest("root", "merger", pending.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(late.ok, false);
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.data!.occurrenceId)!.status, "revoked");
+    const again = await h.merge("merger", 19, ["team/repo#101"]).request();
+    assert.equal(again.ok, false); assert.match(again.error!, /team\/repo#101/);
+  } finally { h.db.close(); }
+});
+
+test("#4062 a scope that drops a merge's closing issue while GitHub is read for arming leaves the merge unarmed", async () => {
+  const h = scopeGuardHarness(5, [100, 101]);
+  try {
+    h.db.createSession({ id: "merger", runnerId: "r", workspaceId: "w", agentId: "codex", title: "merger", parentSessionId: "root",
+      driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+    h.db.updateSessionStatus("merger", "running", Date.now());
+    const merge = h.merge("merger", 20, ["team/repo#101"]);
+    const created = await merge.request();
+    assert.ok(created.ok, created.error ?? "refused");
+    assert.ok(h.svc.resolveDescendantRequest("root", "merger", created.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    h.during.preflight = () => h.narrowScope([100]);
+    const armed = await h.svc.consumeWorkflowDecision("merger", created.data!.occurrenceId, { resourceSnapshot: merge.snapshot,
+      action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(merge.snapshot) } });
+    assert.equal(armed.ok, false); assert.equal(armed.status, 409);
+    assert.match(armed.error!, /authority changed while arming/);
+    const decision = h.db.workflowDecisionByOccurrence(created.data!.occurrenceId)!;
+    assert.equal(decision.status, "revoked"); assert.equal(decision.actionAdmission, undefined);
+  } finally { h.db.close(); }
+});

@@ -3602,14 +3602,17 @@ textarea {
   text-align: left;
   cursor: pointer;
 }
-/* The stretched primary click (§5.3). Controls written after it are positioned, so they stack above. */
-.card-open::after {
+/* The stretched primary click (§5.3). Controls written after it are positioned, so they stack above.
+   It is the button's ::before, so the type mark at the start of the title (#4076), positioned,
+   follows it in tree order and stacks above it too: hovering the mark shows its tooltip. */
+.card-open::before {
   content: "";
   position: absolute;
   inset: 0;
   border-radius: inherit;
 }
 /* The ring is the card's; the button's own stays transparent, so forced colors still draws one. */
+.card-open > .session-type-icon { position: relative; }
 .card-open:focus-visible { outline: 2px solid transparent; }
 .card:has(> .card-open:focus-visible) {
   outline: var(--focus-width) solid var(--focus);
@@ -13188,10 +13191,14 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 }
 /* Children indent under a 2px spine drawn per row: each child row carries the vertical segment for
    its own height (a phone card's margins included, so consecutive segments join) and a horizontal
-   tick into its row; the last child's segment stops at the tick. The rows are absolutely positioned
-   by the virtualizer, which is why the spine cannot be one element on a wrapper. */
+   tick into its row; the last row on a spine stops its segment at the tick. The rows are absolutely
+   positioned by the virtualizer, which is why the spine cannot be one element on a wrapper.
+   A review or grandchild (#4077) indents one more step under its own spine, joined to its parent
+   above it; while its parent's spine runs on to a later sibling, the row carries that segment too. */
 .inbox-row-shell.thread-child { margin-left: 26px; }
+.inbox-row-shell.thread-child.thread-depth-2 { margin-left: 52px; }
 .inbox-row-shell.thread-child::after,
+.inbox-row-shell.thread-outer::before,
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before {
   position: absolute;
   background: var(--border-strong);
@@ -13199,7 +13206,9 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   pointer-events: none;
 }
 .inbox-row-shell.thread-child::after { top: 0; bottom: 0; left: -15px; width: 2px; }
-.inbox-row-shell.stacked.thread-child::after { top: calc(-1 * var(--space-1)); bottom: calc(-1 * var(--space-1)); }
+.inbox-row-shell.thread-outer::before { top: 0; bottom: 0; left: -41px; width: 2px; }
+.inbox-row-shell.stacked.thread-child::after,
+.inbox-row-shell.stacked.thread-outer::before { top: calc(-1 * var(--space-1)); bottom: calc(-1 * var(--space-1)); }
 .inbox-row-shell.thread-child.thread-last::after { bottom: 50%; }
 .inbox-row-shell.thread-child .inbox-row-primary-cell::before { top: 50%; left: -15px; width: 11px; height: 2px; }
 /* The family chip on a parent's title line (#2215): dots first, then the rollup. A list 880px or wider
@@ -13372,6 +13381,16 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   white-space: nowrap;
 }
 .inbox-row-shell.unread .inbox-row-title { font-weight: 600; }
+/* A session's type (#4076): the 14px mark at the start of a title, in the Sessions list, on a Board
+   card, in the session bars and on an Archived Sessions row. Inline, so each title's own ellipsis or
+   line clamp truncates only the text after it. Muted ink: type is shape alone, and status keeps
+   colour to itself. */
+.session-type-icon {
+  display: inline-flex;
+  margin-right: var(--space-1);
+  color: var(--text-dim);
+  vertical-align: -2px;
+}
 /* The one status (#2209, §11.1): the badge and a neutral "+N". */
 .row-status { display: inline-flex; flex: none; align-items: center; gap: var(--space-1); }
 .row-status-more {
@@ -13493,6 +13512,7 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   .inbox-row-shell.selected .inbox-row-primary-cell::after { width: var(--space-1); background: Highlight; }
   .inbox-unread-dot { background: CanvasText; }
   .inbox-row-shell.thread-child::after,
+  .inbox-row-shell.thread-outer::before,
   .inbox-row-shell.thread-child .inbox-row-primary-cell::before { background: GrayText; }
   .inbox-thread-dots > .inbox-thread-dot { background: CanvasText; }
 }
@@ -13703,8 +13723,10 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
   /* Under the phone app bar the first card starts 8px down, its own 4px margin after this 4px, so
      the first row is at most 56px below the top of the page (#2211). */
   .inbox-list { padding-top: var(--space-1); }
-  /* A phone has no width for a 26px indent: the spine narrows (#896). */
+  /* A phone has no width for a 26px indent: the spine narrows (#896), at both depths (#4077). */
   .inbox-row-shell.thread-child { margin-left: 14px; }
+  .inbox-row-shell.thread-child.thread-depth-2 { margin-left: 28px; }
+  .inbox-row-shell.thread-outer::before { left: -23px; }
   .inbox-row-shell.thread-child::after,
   .inbox-row-shell.thread-child .inbox-row-primary-cell::before { left: -9px; }
   .inbox-row-shell.thread-child .inbox-row-primary-cell::before { width: 6px; }

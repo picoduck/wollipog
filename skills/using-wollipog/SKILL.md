@@ -294,6 +294,11 @@ position and state, failed jobs with run links, and whether it merged.
   through the model. Its per-call limit is 3 hours 1 minute, so any `timeoutMs` up to the 3-hour
   maximum fits. Without the `wollipog` MCP server (an older runner, or your own server under that
   name), Codex's default limit is 5 minutes: keep `timeoutMs` at or below the 4-minute default.
+- In Claude Code, the per-call limit of the runner's `wollipog` MCP server is also 3 hours 1 minute.
+  It replaces Claude Code's 30-minute limit on a call that sends nothing back, for this server only,
+  so any `wait_pull_request` `timeoutMs` up to 3 hours and any `wait_session` `timeoutMs` up to its
+  1-hour maximum return the tool's own result. On an older runner, Claude Code aborts any call that
+  stays silent for 30 minutes: keep `timeoutMs` at or below 25 minutes (1,500,000).
 - Under Codex code mode, where an `exec` tool runs scripts that call other tools, the wait is
   model-free only as a direct tool call. When Codex accepts it, the runner keeps the `wollipog`
   tools outside `exec`, so call `wait_pull_request` as its own tool call, never from a script.
