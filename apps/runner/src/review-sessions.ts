@@ -30,8 +30,9 @@ import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_BUDGET, REVIEW_ROUND_REFUSALS, reviewerHarnessFor,
   type AgentDefinition, type ReviewAttemptEvidence, type ReviewAttemptRound, type ReviewAttemptVerdictView,
   type ReviewLaunchPolicy, type ReviewReportFinding, type ReviewRunHistory, type ReviewSessionCapability,
-  type ReviewSessionUpdate, type SessionReviewHarness,
+  type ReviewSessionUpdate, type SessionReviewHarness, type ReviewBaseMerge,
 } from "@wollipog/protocol";
+import { classifyBaseMerge } from "./review-base-merge.js";
 import {
   bindPullRequestScope, PUSHED_HEAD, refuseReview, reviewRepository, ReviewScopeRefusal, SAFE_GIT, SESSION_IDENTITY,
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
@@ -370,6 +371,9 @@ export interface PreparedReview {
   baseSha: string;
   /** The attempt's place in its review run. */
   round: ReviewAttemptRound;
+  /** v277 (#4075): the head was proven equivalent to an upvoted head, so no reviewer launches and
+   * `checkout` and `prompt` are empty. */
+  equivalent?: true;
 }
 
 /** What the session manager observed of a reviewer's one turn. */
@@ -576,10 +580,26 @@ export class ReviewSessionLauncher {
         descends = await git(["merge-base", "--is-ancestor", "--end-of-options", reference.headSha, policy.headSha], 30_000)
           .then(() => true, () => false);
       }
-      const plan = planReviewRound(history, { headSha: policy.headSha, ...(policy.fullReason ? { fullReason: policy.fullReason } : {}) }, descends);
+      // #4075: only a control plane that counts base-merge rounds asks; the proof runs without the
+      // user's global or system Git configuration, so no configured merge driver can run.
+      let baseMerge: ReviewBaseMerge | null = null;
+      if (history.baseMergeRounds && history.lastValid && descends === true && !policy.fullReason) {
+        const isolated = { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+        baseMerge = await classifyBaseMerge((args) => this.deps.exec(verified.git, [...SAFE_GIT, "--git-dir", mirror, ...args],
+          { timeoutMs: 30_000, env: isolated }), history.lastValid.headSha, policy.headSha, baseSha);
+      }
+      const plan = planReviewRound(history, { headSha: policy.headSha, ...(policy.fullReason ? { fullReason: policy.fullReason } : {}) }, descends, baseMerge);
       if ("refusal" in plan) refuseReview(plan.refusal);
       let { mode } = plan as Exclude<typeof plan, { refusal: string }>;
       const planned = plan as Exclude<typeof plan, { refusal: string }>;
+      if (mode === "equivalent") {
+        // Nothing to review: the control plane records the equivalence from its own check.
+        this.removeCheckout(sessionId);
+        return { equivalent: true, checkout: "", prompt: "", baseSha, round: {
+          epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles: [],
+          baseMerge: true, equivalentTo: planned.equivalentTo!,
+        } };
+      }
       // A rebase round needs the earlier history; without it the new epoch reviews in full.
       if (mode === "rebase" && !(planned.rebasedFrom && await has(planned.rebasedFrom.baseSha) && await has(planned.rebasedFrom.headSha))) {
         mode = "full";
@@ -632,6 +652,8 @@ export class ReviewSessionLauncher {
         epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles,
         ...(mode === "delta" ? { since: planned.since! } : {}),
         ...(mode === "rebase" ? { rebasedFrom: planned.rebasedFrom! } : {}),
+        // A base-merge round reviews only the merge's effect on the pull request's own diff.
+        ...(planned.baseMerge && mergedBase ? { baseMerge: true as const } : {}),
       };
       const inScope = new Set(scopeFiles);
       const contextFiles = mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path));

@@ -140,7 +140,15 @@ export interface ReviewAttemptRound {
   scopeFiles: string[];
   since?: string;
   rebasedFrom?: { baseSha: string; headSha: string };
+  /** v277 (#4075): a base-merge round, which does not count against the epoch's round budget. */
+  baseMerge?: true;
+  /** v277, with mode `equivalent`: the upvoted head whose review this head's equivalence carries. */
+  equivalentTo?: string;
 }
+
+/** v277: the output of an equivalence record, where no reviewer ran. */
+export const REVIEW_EQUIVALENCE_OUTPUT = "No reviewer ran: the runner proved this head only merges the moved base branch " +
+  "into an upvoted head and leaves the pull request's own diff unchanged, so that upvote carries over.";
 
 export interface ReviewAttemptVerdictView {
   valid: boolean;
@@ -204,6 +212,7 @@ const REVIEW_SESSION_REASONS = new Set([
   "this pull request has reached its review round limit",
   "this review round has used its attempts",
   "the reviewer timed out",
+  "the recorded equivalence no longer matches the review run",
 ]);
 
 export function sanitizedReviewSessionReason(value: unknown): string {

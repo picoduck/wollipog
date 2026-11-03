@@ -59,6 +59,58 @@ test("a head that does not descend from the reviewed one starts a new epoch over
     { epoch: 2, round: 1, attempt: 1, mode: "full", openFindings: [finding] });
 });
 
+test("a proven base merge with a conflict resolution gets a delta round that does not use the epoch's budget (#4075)", () => {
+  const exhausted = history({ validRounds: 4, lastValid: { ...history().lastValid!, round: 4 },
+    lastAttempt: { headSha: A, round: 4, attempt: 1, valid: true }, baseMergeRounds: true });
+  assert.deepEqual(planReviewRound(exhausted, { headSha: B }, true, "resolution"),
+    { epoch: 1, round: 5, attempt: 1, mode: "delta", since: A, openFindings: [finding], baseMerge: true });
+  // The same with rounds left: still free, still scoped to the merge.
+  assert.deepEqual(planReviewRound(history({ baseMergeRounds: true }), { headSha: B }, true, "resolution"),
+    { epoch: 1, round: 2, attempt: 1, mode: "delta", since: A, openFindings: [finding], baseMerge: true });
+  // A retry of an invalid base-merge attempt keeps its round and the attempt limit.
+  const retrying = { ...exhausted, lastAttempt: { headSha: B, round: 5, attempt: 1, valid: false }, consumedInLastRound: 1 };
+  assert.deepEqual(planReviewRound(retrying, { headSha: B }, true, "resolution"),
+    { epoch: 1, round: 5, attempt: 2, mode: "delta", since: A, openFindings: [finding], baseMerge: true });
+  assert.deepEqual(planReviewRound({ ...retrying, consumedInLastRound: 2 }, { headSha: B }, true, "resolution"),
+    { refusal: REVIEW_ROUND_REFUSALS.attemptLimit });
+  // An ordinary fix pushed after an invalid base-merge attempt cannot inherit its free round.
+  const freeRetry = { ...retrying, lastAttempt: { ...retrying.lastAttempt, baseMerge: true as const } };
+  assert.deepEqual(planReviewRound(freeRetry, { headSha: C }, true, null), { refusal: REVIEW_ROUND_REFUSALS.roundLimit });
+  assert.equal((planReviewRound(freeRetry, { headSha: B }, true, "resolution") as { attempt: number }).attempt, 2);
+  // With rounds left, the ordinary head simply retries the round, as any retry does.
+  assert.equal((planReviewRound({ ...freeRetry, validRounds: 3 }, { headSha: C }, true, null) as { round: number }).round, 5);
+});
+
+test("a pure base merge onto an upvoted head records an equivalence instead of a review (#4075)", () => {
+  const upvoted = history({ validRounds: 4, lastValid: { ...history().lastValid!, round: 4, vote: "UPVOTE", findings: [] },
+    lastAttempt: { headSha: A, round: 4, attempt: 1, valid: true }, baseMergeRounds: true });
+  assert.deepEqual(planReviewRound(upvoted, { headSha: B }, true, "equivalent"),
+    { epoch: 1, round: 5, attempt: 1, mode: "equivalent", equivalentTo: A, baseMerge: true, openFindings: [] });
+  // After a downvote there is nothing to carry: the free round reviews the merge (an empty delta is refused by the runner).
+  assert.deepEqual(planReviewRound({ ...upvoted, lastValid: { ...upvoted.lastValid!, vote: "DOWNVOTE", findings: [finding] } }, { headSha: B }, true, "equivalent"),
+    { epoch: 1, round: 5, attempt: 1, mode: "delta", since: A, openFindings: [finding], baseMerge: true });
+});
+
+test("anything but a proven base merge on the last valid head counts as before (#4075)", () => {
+  const exhausted = history({ validRounds: 4, lastValid: { ...history().lastValid!, round: 4 },
+    lastAttempt: { headSha: A, round: 4, attempt: 1, valid: true }, baseMergeRounds: true });
+  // A non-merge fix after the budget is used still needs an extension.
+  assert.deepEqual(planReviewRound(exhausted, { headSha: B }, true, null), { refusal: REVIEW_ROUND_REFUSALS.roundLimit });
+  // A control plane that does not count base merges (an older peer) keeps counting them.
+  assert.deepEqual(planReviewRound({ ...exhausted, baseMergeRounds: undefined }, { headSha: B }, true, "resolution"),
+    { refusal: REVIEW_ROUND_REFUSALS.roundLimit });
+  assert.deepEqual(planReviewRound({ ...exhausted, baseMergeRounds: undefined }, { headSha: B }, true, "equivalent"),
+    { refusal: REVIEW_ROUND_REFUSALS.roundLimit });
+  // A requested full review is never a base-merge round.
+  assert.deepEqual(planReviewRound(exhausted, { headSha: B, fullReason: "all of it" }, true, "resolution"),
+    { refusal: REVIEW_ROUND_REFUSALS.roundLimit });
+  // Unproven ancestry is a rewrite, whatever the runner claimed.
+  assert.equal((planReviewRound(exhausted, { headSha: B }, null, "resolution") as { epoch: number }).epoch, 2);
+  // Before any valid round there is no reviewed head to merge onto.
+  const noValid = history({ lastValid: null, validRounds: 0, lastAttempt: { headSha: A, round: 1, attempt: 1, valid: false }, baseMergeRounds: true });
+  assert.equal((planReviewRound(noValid, { headSha: B }, true, "equivalent") as { mode: string }).mode, "full");
+});
+
 test("an invalid first attempt of a rebase epoch is retried over the same range-diff with the carried findings", () => {
   // Epoch 2 started from epoch 1's valid round at A; its first attempt at C was invalid.
   const retrying = history({

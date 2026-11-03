@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
-  REVIEW_ATTEMPTS_PER_ROUND, REVIEW_ROUND_BUDGET, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, validateReviewReport,
+  REVIEW_ATTEMPTS_PER_ROUND, REVIEW_EQUIVALENCE_OUTPUT, REVIEW_ROUND_BUDGET, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, validateReviewReport,
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewContinuationState, type ReviewFailureClass, type ReviewReport, type ReviewReportFinding,
   type ReviewRunHistory, type ReviewSessionAdmission, type ReviewSessionLink, type ReviewSessionState, type ReviewSessionUpdate, type ReviewSessionView,
   type ReviewRunsSummary, type ReviewSessionsPage, type SessionReviewHarness,
@@ -20,7 +20,7 @@ const TERMINAL = new Set<string>(["completed", "failed", "cancelled"]);
 const UPDATE_STATES = new Set<string>(["running", "completed", "failed", "cancelled"]);
 const ACTIVE = "('requested','running')";
 const SHA = /^[0-9a-f]{40}$/u;
-const MODES = new Set<string>(["full", "delta", "rebase"]);
+const MODES = new Set<string>(["full", "delta", "rebase", "equivalent"]);
 const VOTES = new Set<string>(["UPVOTE", "DOWNVOTE", "INVALID"]);
 const FAILURE_CLASSES = new Set<string>([
   "runner_config", "snapshot", "sandbox", "transport", "timeout", "malformed_output", "tool_policy", "evidence_contract",
@@ -54,10 +54,17 @@ function parsedRound(value: unknown): ReviewAttemptRound | null {
   const from = round.mode === "rebase" ? round.rebasedFrom : undefined;
   if (round.mode === "rebase" && !(from && typeof from === "object" && typeof from.baseSha === "string" && SHA.test(from.baseSha) &&
       typeof from.headSha === "string" && SHA.test(from.headSha))) return null;
+  // v277 (#4075): only a delta round can be a base-merge round, and an equivalence always is one.
+  const equivalentTo = round.mode === "equivalent" ? round.equivalentTo : undefined;
+  if (round.mode === "equivalent" && (typeof equivalentTo !== "string" || !SHA.test(equivalentTo) || round.baseMerge !== true ||
+      round.scopeFiles.length)) return null;
+  if (round.baseMerge !== undefined && (round.baseMerge !== true || (round.mode !== "delta" && round.mode !== "equivalent"))) return null;
   return {
     epoch: round.epoch, round: round.round, attempt: round.attempt, mode: round.mode, baseSha: round.baseSha, scopeFiles: [...round.scopeFiles],
     ...(since ? { since } : {}),
     ...(from ? { rebasedFrom: { baseSha: from.baseSha, headSha: from.headSha } } : {}),
+    ...(round.baseMerge ? { baseMerge: true as const } : {}),
+    ...(equivalentTo ? { equivalentTo } : {}),
   };
 }
 
@@ -338,9 +345,11 @@ export class ReviewSessions {
       // A consumed decision may have been consumed explicitly before its review request. Until
       // its exact head has started a planned extra round, it grants no budget to any other head.
       // Afterwards its remaining rounds belong to the epoch, including subsequent fixed heads.
+      // A base-merge round (#4075) uses no granted round, so it activates nothing.
       const activated = row.status === "consumed" && this.sql.prepare(`SELECT 1 FROM review_sessions
         WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND head_sha=?
-          AND json_extract(round_json, '$.epoch')=? AND json_extract(round_json, '$.round')>? LIMIT 1`)
+          AND json_extract(round_json, '$.epoch')=? AND json_extract(round_json, '$.round')>?
+          AND json_extract(round_json, '$.baseMerge') IS NULL LIMIT 1`)
         .get(requesterSessionId, pullRequest.repository, pullRequest.number, snapshot.headSha, epoch, snapshot.roundsUsed as number);
       if (!activated) {
         // An unused grant is valid only for the exact review state it described. This also fences
@@ -363,12 +372,17 @@ export class ReviewSessions {
     return { rounds, approved, ...(postUpvoteExtension ? { postUpvoteExtension } : {}) };
   }
 
-  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true,
-    initialBudget = REVIEW_ROUND_BUDGET): ReviewRunHistory {
-    // A setting change never expands an ongoing run. Only typed extensions grant more rounds.
+  /** The round budget a run was configured with at its first review, or `initialBudget` before it
+   * has one. A setting change never expands an ongoing run. Only typed extensions grant more rounds. */
+  roundBudget(requesterSessionId: string, pullRequest: { repository: string; number: number }, initialBudget = REVIEW_ROUND_BUDGET): number {
     const saved = this.sql.prepare(`SELECT round_budget FROM review_sessions WHERE requester_session_id=?
       AND repository=? COLLATE NOCASE AND pr_number=? ORDER BY rowid LIMIT 1`)
       .get(requesterSessionId, pullRequest.repository, pullRequest.number) as { round_budget: number } | undefined;
+    return saved?.round_budget ?? initialBudget;
+  }
+
+  history(requesterSessionId: string, pullRequest: { repository: string; number: number }, headSha?: string, includeExtensions = true,
+    initialBudget = REVIEW_ROUND_BUDGET): ReviewRunHistory {
     const rows = this.sql.prepare(`SELECT head_sha, round_json, verdict_json, findings_json FROM review_sessions
       WHERE requester_session_id=? AND repository=? COLLATE NOCASE AND pr_number=? AND round_json IS NOT NULL ORDER BY rowid`)
       .all(requesterSessionId, pullRequest.repository, pullRequest.number) as Array<Pick<Row, "head_sha" | "round_json" | "verdict_json" | "findings_json">>;
@@ -378,7 +392,7 @@ export class ReviewSessions {
     });
     const history: ReviewRunHistory = {
       epoch: 0, lastValid: null, lastAttempt: null, validRounds: 0, consumedInLastRound: 0,
-      roundBudget: saved?.round_budget ?? initialBudget, attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
+      roundBudget: this.roundBudget(requesterSessionId, pullRequest, initialBudget), attemptsPerRound: REVIEW_ATTEMPTS_PER_ROUND,
     };
     const epoch = Math.max(0, ...attempts.map((attempt) => attempt.round.epoch));
     if (!epoch) return history;
@@ -390,7 +404,8 @@ export class ReviewSessions {
       history.roundBudget += extensions.rounds;
       if (extensions.postUpvoteExtension) history.postUpvoteExtension = extensions.postUpvoteExtension;
     }
-    history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid };
+    history.lastAttempt = { headSha: last.headSha, round: last.round.round, attempt: last.round.attempt, valid: !!last.verdict?.valid,
+      ...(last.round.baseMerge ? { baseMerge: true as const } : {}) };
     const validVote = (attempt: typeof attempts[number]) => {
       const vote = attempt.verdict?.effectiveVote;
       return attempt.verdict?.valid && (vote === "UPVOTE" || vote === "DOWNVOTE") ? vote : null;
@@ -399,7 +414,8 @@ export class ReviewSessions {
       if (attempt.round.round === last.round.round && attempt.verdict?.consumed) history.consumedInLastRound += 1;
       const vote = validVote(attempt);
       if (!vote) continue;
-      history.validRounds += 1;
+      // A base-merge round or equivalence (#4075) becomes the reference but uses none of the budget.
+      if (attempt.round.baseMerge !== true) history.validRounds += 1;
       history.lastValid = {
         headSha: attempt.headSha, baseSha: attempt.round.baseSha, round: attempt.round.round, vote,
         findings: json<ReviewReportFinding[]>(attempt.findings) ?? [],
@@ -453,7 +469,12 @@ export class ReviewSessions {
       "UPDATE review_sessions SET admission_json=?, updated_at=? WHERE review_session_id=? AND admission_json IS NULL",
     ).run(JSON.stringify(admission), now, row.review_session_id).changes > 0;
     // The round is planned once; a later report cannot move the attempt to another round.
-    const round = json<ReviewAttemptRound>(row.round_json) ?? (update.round === undefined ? null : parsedRound(update.round));
+    const reported = update.round === undefined ? null : parsedRound(update.round);
+    const round = json<ReviewAttemptRound>(row.round_json) ?? this.checkedRound(row, reported);
+    // An equivalence (#4075) is terminal and recorded only from the control plane's own check.
+    if (reported?.mode === "equivalent" && row.round_json === null) {
+      return update.state === "running" ? observed : this.acceptEquivalence(row, round, update.state, now);
+    }
     if (update.state === "running") {
       const planned = row.round_json === null && round !== null && this.sql.prepare(
         "UPDATE review_sessions SET round_json=?, updated_at=? WHERE review_session_id=? AND round_json IS NULL",
@@ -467,10 +488,10 @@ export class ReviewSessions {
     const reason = state === "completed" ? null
       : sanitizedReviewSessionReason(update.state === "completed" ? "the review ended without a result" : update.reason);
     const truncated = state === "completed" && (output!.truncated || update.outputTruncated === true);
-    const reported = update.verdict === undefined ? null : parsedVerdict(update.verdict);
+    const parsed = update.verdict === undefined ? null : parsedVerdict(update.verdict);
     // A verdict that does not parse still means the reviewer ran: its attempt is invalid.
-    const judged = update.verdict !== undefined && !reported
-      ? invalidVerdict("evidence_contract", ["the runner's verdict was malformed"]) : reported;
+    const judged = update.verdict !== undefined && !parsed
+      ? invalidVerdict("evidence_contract", ["the runner's verdict was malformed"]) : parsed;
     const { verdict, findings } = settledVerdict(row, state, round,
       judged, state === "completed" ? { text: output!.text, truncated } : null);
     // The requester is owed one continuation, recorded with the outcome so a crash cannot lose it.
@@ -480,6 +501,43 @@ export class ReviewSessions {
       state, state === "completed" ? output!.text : null, truncated ? 1 : 0, reason,
       round ? JSON.stringify(round) : null, verdict ? JSON.stringify(verdict) : null, findings.length ? JSON.stringify(findings) : null,
       state === "cancelled" ? null : "held", now, now, row.review_session_id,
+    );
+    return true;
+  }
+
+  /**
+   * A reported round, checked against the run before it is recorded (#4075). The runner proves a
+   * base merge from its mirror; the control plane accepts the claim only for the run's current epoch
+   * and directly on its last valid head (an equivalence: on an upvote). A delta round that fails the
+   * check counts against the budget; an equivalence that fails it is not recorded at all.
+   */
+  private checkedRound(row: Row, round: ReviewAttemptRound | null): ReviewAttemptRound | null {
+    if (!round?.baseMerge) return round;
+    const run = this.history(row.requester_session_id, { repository: row.repository, number: row.pr_number }, undefined, false);
+    const reference = round.mode === "equivalent" ? round.equivalentTo : round.since;
+    if (run.lastValid && round.epoch === run.epoch && reference === run.lastValid.headSha && row.head_sha !== reference &&
+        (round.mode !== "equivalent" || run.lastValid.vote === "UPVOTE")) return round;
+    if (round.mode === "equivalent") return null;
+    const { baseMerge: _baseMerge, ...counted } = round;
+    return counted;
+  }
+
+  /**
+   * Record a reviewed-head equivalence (#4075): no reviewer ran, and the head carries the upvote of
+   * the head it is equivalent to, with that upvote's findings. The control plane writes the verdict
+   * and the output itself; a runner's own are ignored. Anything unproven fails without a round.
+   */
+  private acceptEquivalence(row: Row, round: ReviewAttemptRound | null, state: ReviewSessionUpdate["state"], now: number): boolean {
+    const run = this.history(row.requester_session_id, { repository: row.repository, number: row.pr_number }, undefined, false);
+    const proven = state === "completed" && round?.mode === "equivalent" && run.lastValid?.vote === "UPVOTE" ? run.lastValid : null;
+    const verdict: ReviewAttemptVerdictView | null = proven
+      ? { valid: true, consumed: false, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] } : null;
+    this.sql.prepare(`UPDATE review_sessions SET state=?, output=?, output_truncated=0, reason=?, round_json=?, verdict_json=?,
+      findings_json=?, continuation_state='held', continuation_updated_at=?, updated_at=? WHERE review_session_id=?`).run(
+      proven ? "completed" : "failed", proven ? REVIEW_EQUIVALENCE_OUTPUT : null,
+      proven ? null : sanitizedReviewSessionReason("the recorded equivalence no longer matches the review run"),
+      proven ? JSON.stringify(round) : null, verdict ? JSON.stringify(verdict) : null,
+      proven?.findings.length ? JSON.stringify(proven.findings) : null, now, now, row.review_session_id,
     );
     return true;
   }

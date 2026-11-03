@@ -1,0 +1,132 @@
+import assert from "node:assert/strict";
+import { execFile } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { test } from "node:test";
+import { promisify } from "node:util";
+import { classifyBaseMerge, resolvedWithinConflicts } from "./review-base-merge.js";
+
+const execFileAsync = promisify(execFile);
+const ENV = {
+  ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.com",
+  GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.com",
+};
+const LINES = ["a", "b", "c", "d", "e", "f", "g", "h"];
+
+/** A repository whose pull request branch `pr` changed line b of f.txt, and whose `main` then moved. */
+async function repository(t: { after(fn: () => void): void }) {
+  const dir = mkdtempSync(join(tmpdir(), "review-base-merge-"));
+  t.after(() => rmSync(dir, { recursive: true, force: true }));
+  const git = async (...args: string[]) => (await execFileAsync("git", ["-C", dir, ...args], { encoding: "utf8", env: ENV })).stdout.trim();
+  const write = (name: string, lines: string[]) => writeFileSync(join(dir, name), `${lines.join("\n")}\n`);
+  const commit = async (message: string) => { await git("add", "-A"); await git("commit", "-qm", message); return git("rev-parse", "HEAD"); };
+  await git("init", "-q", "-b", "main");
+  write("f.txt", LINES);
+  write("g.txt", ["x"]);
+  await commit("base");
+  await git("checkout", "-qb", "pr");
+  write("f.txt", LINES.map((line) => line === "b" ? "b-pr" : line));
+  const reference = await commit("pull request");
+  await git("checkout", "-q", "main");
+  return { dir, git, write, commit, reference };
+}
+
+const classify = (dir: string, reference: string, head: string, base: string) => classifyBaseMerge(
+  async (args) => (await execFileAsync("git", ["-C", dir, ...args], { encoding: "utf8", env: ENV })).stdout, reference, head, base);
+
+test("a merge of the moved base that leaves the pull request's own diff unchanged is equivalent", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  write("g.txt", ["y"]);
+  const base = await commit("base moves elsewhere");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-edit", "main");
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), "equivalent");
+});
+
+test("a clean merge that changes the pull request's diff, or a conflict resolved inside its hunk, is a resolution", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  write("f.txt", LINES.map((line) => line === "g" ? "g-main" : line));
+  const clean = await commit("base edits another hunk of the same file");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-edit", "main");
+  const merged = await git("rev-parse", "HEAD");
+  assert.equal(await classify(dir, reference, merged, clean), "resolution");
+
+  // The base then changes the pull request's own line: a conflict, resolved inside its hunk.
+  await git("checkout", "-q", "main");
+  write("f.txt", LINES.map((line) => line === "g" ? "g-main" : line === "b" ? "b-main" : line));
+  const conflicting = await commit("base edits the same line");
+  await git("checkout", "-q", "pr");
+  await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+  write("f.txt", LINES.map((line) => line === "g" ? "g-main" : line === "b" ? "b-pr-and-main" : line));
+  const resolved = await commit("merge main, resolving b");
+  assert.equal(await classify(dir, merged, resolved, conflicting), "resolution");
+});
+
+test("a resolution with a change outside its conflicted hunk is an ordinary commit", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  write("f.txt", LINES.map((line) => line === "b" ? "b-main" : line));
+  const base = await commit("base edits the same line");
+  await git("checkout", "-q", "pr");
+  await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+  write("f.txt", LINES.map((line) => line === "b" ? "b-resolved" : line === "f" ? "f-sneaked-in" : line));
+  const head = await commit("merge main, resolving b and editing f");
+  assert.equal(await classify(dir, reference, head, base), null);
+});
+
+test("a clean merge carrying any other change is an ordinary commit", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  write("g.txt", ["y"]);
+  const base = await commit("base moves elsewhere");
+  await git("checkout", "-q", "pr");
+  await git("merge", "-q", "--no-commit", "main");
+  write("h.txt", ["new"]);
+  const head = await commit("merge main with an extra file");
+  assert.equal(await classify(dir, reference, head, base), null);
+});
+
+test("octopus merges, merges of other branches, merges in the other direction and commits after the merge are ordinary", async (t) => {
+  const { dir, git, write, commit, reference } = await repository(t);
+  write("g.txt", ["y"]);
+  const base = await commit("base moves elsewhere");
+  await git("checkout", "-qb", "side", reference);
+  write("s.txt", ["side"]);
+  const side = await commit("a side branch");
+  await git("checkout", "-q", "pr");
+
+  await git("merge", "-q", "--no-edit", "main", "side");
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "an octopus merge");
+
+  await git("reset", "-q", "--hard", reference);
+  await git("merge", "-q", "--no-edit", "--no-ff", side);
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "a merged parent outside the base branch");
+
+  await git("reset", "-q", "--hard", reference);
+  await git("merge", "-q", "--no-edit", "main");
+  write("f.txt", LINES.map((line) => line === "b" ? "b-fixed" : line));
+  const fixed = await commit("a fix after the merge");
+  assert.equal(await classify(dir, reference, fixed, base), null, "a commit after the merge");
+
+  await git("checkout", "-qb", "reverse", base);
+  await git("merge", "-q", "--no-edit", reference);
+  assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "the reviewed head is not the first parent");
+
+  // A merge of a base commit the reviewed head already contained moves nothing.
+  const stale = await git("commit-tree", `${reference}^{tree}`, "-p", reference, "-p", `${reference}~1`, "-m", "merge an old base");
+  assert.equal(await classify(dir, reference, stale, base), null, "a base commit already contained");
+});
+
+test("only text inside each labelled conflict block may change", () => {
+  const ours = "1".repeat(40), theirs = "2".repeat(40);
+  const conflicted = `a\n<<<<<<< ${ours}\nb1\n=======\nb2\n>>>>>>> ${theirs}\nc\n<<<<<<< ${ours}\nd1\n=======\nd2\n>>>>>>> ${theirs}\ne\n`;
+  assert.equal(resolvedWithinConflicts(conflicted, "a\nb\nc\nd\ne\n", ours, theirs), true);
+  assert.equal(resolvedWithinConflicts(conflicted, "a\nc\ne\n", ours, theirs), true, "a block may resolve to nothing");
+  assert.equal(resolvedWithinConflicts(conflicted, "a\nb\nC\nd\ne\n", ours, theirs), false, "clean text between blocks changed");
+  assert.equal(resolvedWithinConflicts(conflicted, "A\nb\nc\nd\ne\n", ours, theirs), false, "clean text before the first block changed");
+  assert.equal(resolvedWithinConflicts(conflicted, "a\nb\nc\nd\ne\nf\n", ours, theirs), false, "text after the last block changed");
+  assert.equal(resolvedWithinConflicts("a\nb\n", "a\nb\n", ours, theirs), false, "no conflict block proves nothing");
+  assert.equal(resolvedWithinConflicts(`a\n<<<<<<< ${ours}\nb\n`, "a\n", ours, theirs), false, "an unterminated block");
+  assert.equal(resolvedWithinConflicts(`a\n<<<<<<< other\nb\n=======\nc\n>>>>>>> ${theirs}\n`, "a\nb\n", ours, theirs), false,
+    "markers must name the exact parents");
+});

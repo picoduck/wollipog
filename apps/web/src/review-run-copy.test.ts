@@ -48,6 +48,11 @@ test("a review's round names its epoch, a retried attempt and what it reviewed",
   const round = { epoch: 2, round: 1, attempt: 1, mode: "rebase" as const, baseSha: "b".repeat(40), scopeFiles: [] };
   assert.equal(reviewRunRound(round), "Round 1 · Epoch 2 · Range-Diff After Rewrite");
   assert.equal(reviewRunRound({ ...round, attempt: 2, mode: "full" }), "Round 1 · Epoch 2 · Attempt 2 · Full Review");
+  // #4075: a base-merge round uses no budget, and an equivalence ran no reviewer.
+  assert.equal(reviewRunRound({ ...round, round: 5, mode: "delta", since: "a".repeat(40), baseMerge: true }),
+    "Round 5 · Epoch 2 · Changes Since Last Round · Base-Branch Merge");
+  assert.equal(reviewRunRound({ ...round, round: 5, mode: "equivalent", baseMerge: true, equivalentTo: "a".repeat(40) }),
+    "Round 5 · Epoch 2 · Equivalent to Upvoted Head");
 });
 
 test("a review that ended without a vote says why: the contract's first reasons, or the runner's", () => {
