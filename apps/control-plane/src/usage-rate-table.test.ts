@@ -258,15 +258,17 @@ test("the real fetch reports an HTTP error and a document that isn't JSON by the
 });
 
 test("a source URL carrying credentials never reaches the reported failure (#4056)", async () => {
-  const service = new UsageRateTableService({
-    sourceUrl: "https://mirror-user:mirror-pass@rates.example/prices.json?access=abc123#frag",
-    cachePath: null,
-    log: () => {},
-  });
-  const status = await service.ensure(true);
-  const message = status.lastRefreshError?.message ?? "";
-  assert.ok(message.length > 0, "the failure is reported");
-  assert.doesNotMatch(message, /mirror-user|mirror-pass|abc123|frag/);
+  for (const sourceUrl of [
+    "https://mirror-user:mirror-pass@rates.example/prices.json?access=abc123#frag",
+    "https://mirror-user:first@mirror-pass@rates.example/prices.json",
+    "https://mirror-user:mirror/pass@rates.example/prices.json",
+  ]) {
+    const service = new UsageRateTableService({ sourceUrl, cachePath: null, log: () => {} });
+    const status = await service.ensure(true);
+    const message = status.lastRefreshError?.message ?? "";
+    assert.ok(message.length > 0, `the failure is reported for ${sourceUrl}`);
+    assert.doesNotMatch(message, /mirror-user|mirror-pass|first|pass|abc123|frag/, message);
+  }
 });
 
 test("a refresh failure is one bounded line without headers or credentials (#4056)", () => {
@@ -283,6 +285,10 @@ test("a refresh failure is one bounded line without headers or credentials (#405
   assert.doesNotMatch(leaky, /\n/);
   assert.doesNotMatch(leaky, /user:pw|sig=abc|dXNlcjpwdw|s3cr3t|eyJhbGciOi/);
   assert.match(leaky, /^request to https:\/\/rates\.example\/p\.json failed Authorization: \[redacted\]/);
+  assert.equal(describeRefreshFailure(new Error("redirected to https://a:b@c:d@mirror.example/x failed"), null),
+    "redirected to https://mirror.example/x failed", "every @ in an authority is userinfo");
+  assert.equal(describeRefreshFailure(new Error("Failed to parse URL from https://u:p/q@h"), null, "https://u:p/q@h"),
+    "Failed to parse URL from the configured rate source", "a configured source that doesn't parse isn't repeated");
 
   const long = describeRefreshFailure(new Error("x".repeat(5_000)), null);
   assert.equal(long.length, USAGE_PRICING_ERROR_MAX_LENGTH);

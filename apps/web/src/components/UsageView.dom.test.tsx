@@ -1902,6 +1902,29 @@ test("a second Refresh Rates inside the refresh floor says it was skipped and wh
   await unmount();
 });
 
+test("a second Refresh Rates after a successful one inside the floor says it was skipped too (#4056)", async () => {
+  const answers: UsagePricingStatus[] = [
+    { status: "fresh", source: RATE_SOURCE, fetchedAt: 3, knownModels: 10 },
+    { status: "fresh", source: RATE_SOURCE, fetchedAt: 3, knownModels: 10, refreshSkipped: { nextAttemptAt: 60_003, retryAfterMs: 50_000 } },
+  ];
+  const client = {
+    ...usageClient(unpricedUsage()),
+    refreshUsagePricing: async () => ({ pricing: answers.shift()! }),
+  } as unknown as ApiClient;
+  const { container, unmount } = await renderStandalone(client);
+  const notice = () => apiPanel(container).querySelector(".notice")!;
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  assertNoDomNode(buttonNamed(notice(), "Show Details") ?? null, "a refresh that took says nothing more");
+  await act(async () => { buttonNamed(notice(), "Refresh Rates")!.click(); await drain(); await drain(); });
+  assert.match(notice().querySelector(".notice-body")?.textContent ?? "", /This refresh was skipped because one ran less than a minute ago\.$/);
+  await act(async () => { buttonNamed(notice(), "Show Details")!.click(); await Promise.resolve(); });
+  assert.deepEqual([...notice().querySelectorAll(".notice-details-body > p")].map((node) => node.textContent), [
+    "Wollipog tries the rate source at most once a minute. Try again in 50 seconds.",
+    "The last attempt succeeded, so the rates are current.",
+  ]);
+  await unmount();
+});
+
 test("a first load shows the overview's skeleton only after 300ms; a refetch keeps the figures under aria-busy (#3016)", async () => {
   const pending: Array<(value: UsageAggregationResponse) => void> = [];
   const client = {

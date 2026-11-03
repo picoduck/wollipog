@@ -456,8 +456,13 @@ test("the daily budget is reached at settled spend plus running-turn estimates, 
 test("a Refresh Rates answer that isn't fresh names why, a skipped one says when to retry, and an older plane keeps its wording (#4056)", () => {
   const source = "https://rates.example/table.json";
   assert.equal(ratesRefreshProblem({ status: "fresh", source, fetchedAt: 1, knownModels: 1 }), null);
-  assert.equal(ratesRefreshProblem({ status: "fresh", source, fetchedAt: 1, knownModels: 1, refreshSkipped: { nextAttemptAt: 2, retryAfterMs: 1 } }), null,
-    "a fresh table is a refresh that took, skipped or not");
+  assert.deepEqual(ratesRefreshProblem({ status: "fresh", source, fetchedAt: 1, knownModels: 1, refreshSkipped: { nextAttemptAt: 2, retryAfterMs: 20_000 } }), {
+    summary: "This refresh was skipped because one ran less than a minute ago.",
+    details: [
+      "Wollipog tries the rate source at most once a minute. Try again in 20 seconds.",
+      "The last attempt succeeded, so the rates are current.",
+    ],
+  }, "a skip is said even when the rates are fresh");
   assert.deepEqual(ratesRefreshProblem({ status: "unavailable", source: "disabled", fetchedAt: null, knownModels: 0 })?.details,
     ["Rate fetching is turned off on this control plane."]);
   assert.deepEqual(ratesRefreshProblem({ status: "cached", source, fetchedAt: 1, knownModels: 1, lastRefreshError: { message: "already a sentence.", at: 1 } })?.details,

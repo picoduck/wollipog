@@ -69,22 +69,34 @@ async function defaultFetchDocument(url: string, signal: AbortSignal): Promise<u
 
 const HEADER_LINE = /\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)\s*[:=][^\r\n]*/gi;
 
+/** The source URL without credentials, query or fragment; one that doesn't parse isn't repeated. */
+function displaySourceUrl(sourceUrl: string): string {
+  try {
+    const url = new URL(sourceUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return "the configured rate source";
+  }
+}
+
 /**
  * One line, at most USAGE_PRICING_ERROR_MAX_LENGTH characters, saying why a refresh failed (#4056).
  * Members who can press Refresh Rates read it, so header values, URL credentials and query strings
- * are removed before it is kept.
+ * are removed before it is kept. The configured source is replaced whole, whatever it contains;
+ * any other URL loses everything up to the last `@` of its authority.
  */
-export function describeRefreshFailure(error: unknown, timeoutMs: number | null): string {
+export function describeRefreshFailure(error: unknown, timeoutMs: number | null, sourceUrl?: string): string {
   if (timeoutMs !== null) return `the rate source didn't answer within ${Math.round(timeoutMs / 1000)} seconds`;
   let text = error instanceof Error ? error.message : String(error);
   // fetch reports a network failure as "fetch failed" and keeps the reason, such as ENOTFOUND, on `cause`.
   const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
   const code = typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
   if (typeof code === "string" && !text.includes(code)) text = `${text} (${code})`;
+  if (sourceUrl) text = text.split(sourceUrl).join(displaySourceUrl(sourceUrl));
   const line = text
     .replace(HEADER_LINE, "$1: [redacted]")
     .replace(/\bbearer\s+\S+/gi, "Bearer [redacted]")
-    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#@]*@/gi, "$1")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1")
     .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#]\S*/gi, "$1")
     .replace(/\s+/g, " ")
     .trim();
@@ -169,7 +181,7 @@ export class UsageRateTableService {
     } catch (error) {
       // Whatever is being served is now past its TTL and must not keep claiming to be fresh.
       if (this.table) this.state = "cached";
-      this.lastError = { message: describeRefreshFailure(error, controller.signal.aborted ? timeoutMs : null), at: this.now() };
+      this.lastError = { message: describeRefreshFailure(error, controller.signal.aborted ? timeoutMs : null, url), at: this.now() };
       this.log(`usage pricing refresh failed; ${this.table ? "serving the cached rate table" : "cost estimates are unavailable"}: ${
         error instanceof Error ? error.message : String(error)
       }`);

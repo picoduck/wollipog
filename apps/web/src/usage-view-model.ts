@@ -606,10 +606,9 @@ function asSentence(text: string): string {
   return /[.!?…]$/.test(text) ? text : `${text}.`;
 }
 
-/** Why a Refresh Rates answer isn't a fresh table (#3016, #4056), or `null` when it is. A plane
- * that predates #4056 sends neither the failure nor the skip, so it keeps the general wording. */
+/** Why a Refresh Rates answer didn't fetch a fresh table (#3016, #4056), or `null` when it did. A
+ * plane that predates #4056 sends neither the failure nor the skip, so it keeps the general wording. */
 export function ratesRefreshProblem(pricing: UsagePricingStatus): RatesRefreshProblem | null {
-  if (pricing.status === "fresh") return null;
   if (pricing.source === "disabled") return { summary: COULD_NOT_REFRESH, details: ["Rate fetching is turned off on this control plane."] };
   const failure = pricing.lastRefreshError?.message;
   if (pricing.refreshSkipped) {
@@ -618,10 +617,13 @@ export function ratesRefreshProblem(pricing: UsagePricingStatus): RatesRefreshPr
       summary: "This refresh was skipped because one ran less than a minute ago.",
       details: [
         `Wollipog tries the rate source at most once a minute. Try again in ${seconds === 1 ? "1 second" : `${seconds} seconds`}.`,
-        ...(failure ? [`The last attempt failed: ${asSentence(failure)}`] : []),
-      ],
+        // A failed attempt leaves the rates cached or unavailable, so fresh rates mean it succeeded.
+        failure ? `The last attempt failed: ${asSentence(failure)}`
+          : pricing.status === "fresh" ? "The last attempt succeeded, so the rates are current." : null,
+      ].filter((line): line is string => line !== null),
     };
   }
+  if (pricing.status === "fresh") return null;
   if (failure) {
     return {
       summary: COULD_NOT_REFRESH,
