@@ -292,6 +292,10 @@ export interface CampaignForgePullRequestObservation {
   /** v275: the repository's default branch. Absent from older runners, which cannot prove that a
    * merge landed on it. */
   defaultBranch?: string;
+  /** v280 (#4067): the pull request's head branch and its current tip, `null` once the branch is
+   * deleted. Reported only for a branch in the pull request's own repository; absent from older
+   * runners and for a fork's branch, which merged-branch cleanup does not track. */
+  headBranch?: { name: string; tipSha: string | null };
 }
 
 /** A GitLab pipeline status, collapsed: `pending` covers created, waiting_for_resource, preparing,

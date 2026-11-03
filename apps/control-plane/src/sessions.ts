@@ -1,5 +1,8 @@
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
+import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFUSALS, FORGE_DECISION_ACTION_SUCCESSES,
+  FORGE_DECISION_ACTION_SUMMARY_LIMIT, type ExecuteWorkflowDecisionRequest, type ForgeDecisionAction,
+  type ForgeDecisionActionRefusalReason, type ForgeDecisionActionResultMessage, type WorkflowDecisionForgeAction } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
@@ -419,6 +422,14 @@ export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
 /** The child runner's GitHub read for a merge's closing references (#3713): one `gh` call of at
  * most 30 seconds. The session tools wait 75 seconds for a merge request or consume. */
 export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
+/** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
+export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
+
+/** A runner's refusal summary, kept bounded and single-line on the decision. */
+function boundedForgeSummary(value: unknown): string {
+  const text = typeof value === "string" ? value.replace(/[\x00-\x1f\x7f]+/gu, " ").trim() : "";
+  return (text || "The action was refused.").slice(0, FORGE_DECISION_ACTION_SUMMARY_LIMIT);
+}
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -1169,8 +1180,17 @@ export function normalizeWorkflowDecisionSnapshot(
       return fail("branch deletion decisions require exact merged-branch and dependent-PR evidence");
     }
     if (open.length > 0) return fail("branch deletion cannot be authorized while dependent PRs remain open", 409);
+    // v280 (#4067): the merged pull request and head Wollipog's own deletion is pinned to. Emitted
+    // only when present, so an earlier snapshot keeps its digest.
+    const pullRequest = value.pullRequest === undefined ? undefined
+      : Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0 ? value.pullRequest as number : null;
+    const headSha = value.headSha === undefined ? undefined : sha(value.headSha);
+    if (pullRequest === null || headSha === null || (pullRequest === undefined) !== (headSha === undefined)) {
+      return fail("a branch deletion names its merged pullRequest and headSha together, or neither");
+    }
     return ok({ category, repository: repo, branch: value.branch, merged: true,
       mergeCommitSha: value.mergeCommitSha as string,
+      ...(pullRequest !== undefined ? { pullRequest, headSha: headSha! } : {}),
       dependentPullRequests: { checkedAt: checked, open: [] } });
   }
   if (category === "follow_up_issue_publication") {
@@ -2042,6 +2062,8 @@ export class SessionsService {
   private readonly titleGenerationOwnership = new Map<string, "generated" | "user">();
   /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
   private readonly forgeMergeSettlements = new Set<string>();
+  /** Occurrences whose Wollipog-performed forge action is being dispatched (#4067). */
+  private readonly forgeActionsInFlight = new Set<string>();
   private readonly archiveWorktreeRetirements = new Set<string>();
   /** Full Control campaigns whose first message is being established (#2940). */
   private readonly firstMessagesInFlight = new Set<string>();
@@ -12279,6 +12301,218 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
     return ok(this.withMergeReviewEvidence(consumed));
+  }
+
+  /**
+   * Wollipog performs one approved forge action itself (#4067), so an approval never depends on the
+   * requester's provider agreeing to run its command: Claude Code's `auto` classifier, for one,
+   * decides inline and can refuse an approved command without the runner ever seeing a prompt.
+   * The classifier is not touched; the requester's own commands stay subject to it.
+   *
+   * Only the requester may ask, only for its own approved `merged_branch_deletion` that names the
+   * merged pull request and head, or its own approved and armed GitHub `pr_merge`, under every
+   * check consumption applies (live ancestry, unchanged policy revision, current authority, and for
+   * a merge its review evidence, reviewed head and closing references, re-read from GitHub). The
+   * child's runner then performs exactly that action through the child's own forge login.
+   *
+   * One approval, one action: a success consumes it once (a deletion through ordinary consumption,
+   * an enqueue against a one-occurrence receipt, a merged head against the forge receipt nothing
+   * else may reuse). A refusal proving the snapshot stale revokes it. A refusal that changed nothing
+   * leaves it approved, so it can be retried or reconciled, within FORGE_DECISION_ACTION_MAX_ATTEMPTS.
+   * An uncertain enqueue is never replayed; it is reconciled once the forge reads MERGED. A deletion
+   * its requester consumed before its own command was refused may still be performed here, because
+   * the compare-and-delete pinned to the approved head cannot do more than the approval allowed.
+   */
+  async executeWorkflowDecision(
+    sessionId: string,
+    occurrenceId: string,
+    request: ExecuteWorkflowDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== sessionId || !canAccess(sessionId)) return fail("workflow decision not found", 404);
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge") {
+      return fail("Wollipog performs only an approved merged_branch_deletion or an armed pr_merge", 403);
+    }
+    if (typeof request?.resourceDigest !== "string" || request.resourceDigest !== decision.resourceDigest) {
+      return fail("the resource digest does not match this decision; read get_workflow_decision and pass its resourceDigest", 409);
+    }
+    const kind: WorkflowDecisionForgeAction["kind"] = snapshot.category === "pr_merge" ? "pr_merge_enqueue" : "branch_deletion";
+    const performed = decision.forgeAction && (FORGE_DECISION_ACTION_SUCCESSES as ReadonlySet<string>).has(decision.forgeAction.outcome);
+    const consumedDeletion = kind === "branch_deletion" && decision.status === "consumed" && !performed;
+    if (decision.status !== "approved" && !consumedDeletion) {
+      return fail(performed ? `Wollipog already performed this decision (${decision.forgeAction!.outcome})`
+        : `workflow decision cannot be executed from ${decision.status} state`, 409);
+    }
+    const child = this.db.getSession(sessionId);
+    const parent = this.db.getSession(decision.controllingSessionId);
+    if (child) {
+      const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
+      if (unsupported) return unsupported;
+    }
+    const authorityCurrent = (): boolean => {
+      const currentChild = this.db.getSession(sessionId);
+      const currentParent = this.db.getSession(decision.controllingSessionId);
+      const policy = currentParent?.parentControlPolicy;
+      // The occurrence itself must still stand: one superseded, revoked or settled meanwhile (for
+      // example by a new request for the same resource during the forge read) never dispatches.
+      const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+      return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
+        currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
+        canAccess(currentChild.id) && canAccess(currentParent.id) &&
+        this.workflowDecisionRelationship(currentParent.id, currentChild.id) && policy.revision === decision.policyRevision &&
+        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
+    };
+    if (!child || !parent || !authorityCurrent()) {
+      if (decision.status === "approved") {
+        this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+      }
+      return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
+    }
+    let action: ForgeDecisionAction;
+    if (snapshot.category === "merged_branch_deletion") {
+      if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
+        return fail("Wollipog performs branch deletions on GitHub only; nothing was deleted", 409);
+      }
+      if (snapshot.pullRequest === undefined || snapshot.headSha === undefined) {
+        return fail("this deletion decision does not name its merged pullRequest and headSha, which Wollipog's compare-and-delete " +
+          "is pinned to; withdraw it and request a new merged_branch_deletion that includes both", 409);
+      }
+      action = { kind: "branch_deletion", repository: snapshot.repository, branch: snapshot.branch, pullRequest: snapshot.pullRequest,
+        headSha: snapshot.headSha, mergeCommitSha: snapshot.mergeCommitSha };
+    } else {
+      const command = canonicalPrMergeEnqueueCommand(snapshot);
+      const admission = decision.actionAdmission;
+      if (snapshot.mergeMethod !== undefined) return fail("Wollipog performs GitHub enqueues only; nothing was enqueued", 409);
+      if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+          admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+        return fail("arm the merge first: consume_workflow_decision with its exact pr_merge_enqueue action, then execute it", 409);
+      }
+      const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (refused || (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha)) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail(refused ?? "the current pull request head needs a valid review before merge", 409);
+      }
+      action = { kind: "pr_merge_enqueue", repository: snapshot.repository, pullRequest: snapshot.pullRequest, headSha: snapshot.headSha };
+    }
+    if (!this.hub.isRunnerOnline(child.runnerId)) return fail("the session's runner is offline; nothing was performed", 409);
+    if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
+    this.forgeActionsInFlight.add(occurrenceId);
+    try {
+      const begun = this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
+      if (!begun) {
+        const current = this.db.workflowDecisionByOccurrence(occurrenceId);
+        return fail(current?.forgeAction?.outcome === "uncertain" && kind === "pr_merge_enqueue"
+          ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
+          : "this decision has no attempt left, is being performed, or was already performed; read get_workflow_decision", 409);
+      }
+      const finish = (outcome: WorkflowDecisionForgeAction["outcome"], refusal?: WorkflowDecisionForgeAction["refusal"]) => {
+        this.db.recordWorkflowDecisionForgeAction(occurrenceId, { ...begun, outcome, ...(refusal ? { refusal } : {}), updatedAt: Date.now() });
+      };
+      if (snapshot.category === "pr_merge") {
+        // The description can change after arming, so GitHub is read again, as arming did (#3713).
+        const checked = await this.githubMergeClosures(child, snapshot);
+        if (!checked.ok) {
+          const reason: ForgeDecisionActionRefusalReason = checked.revoke ? "closure_mismatch" : "forge_unavailable";
+          finish("refused", { reason, summary: boundedForgeSummary(checked.message) });
+          if (checked.revoke) this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
+      if (!authorityCurrent()) {
+        finish("refused", { reason: "runner_unavailable", summary: "Authority changed while the action was being prepared; nothing was performed." });
+        const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+        if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      const requestId = `forge_decision_action_${randomUUID()}`;
+      let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
+      try {
+        answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "forge_decision_action", requestId, sessionId, occurrenceId, action,
+        }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
+      } catch (error) {
+        if (isRunnerRequestNotSentError(error)) {
+          finish("refused", { reason: "runner_unavailable", summary: "The session's runner could not be asked; nothing was performed." });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
+      const valid = answer?.type === "forge_decision_action_result" && answer.sessionId === sessionId &&
+        answer.occurrenceId === occurrenceId && typeof answer.outcome === "string";
+      const outcome = valid ? answer!.outcome! : "uncertain";
+      const allowed: ReadonlySet<string> = kind === "branch_deletion"
+        ? new Set(["deleted", "already_deleted", "refused", "uncertain"])
+        : new Set(["enqueued", "already_queued", "already_merged", "refused", "uncertain"]);
+      if (!allowed.has(outcome)) {
+        finish("uncertain");
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      if (outcome === "refused") {
+        const reason = FORGE_DECISION_ACTION_REFUSAL_REASONS.includes(answer!.refusal?.reason as ForgeDecisionActionRefusalReason)
+          ? answer!.refusal!.reason : "forge_refused";
+        finish("refused", { reason, summary: boundedForgeSummary(answer!.refusal?.summary) });
+        const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+        if (FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) && latest?.status === "approved") {
+          this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        }
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      if (outcome === "uncertain") {
+        finish("uncertain");
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      finish(outcome);
+      const now = Date.now();
+      const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (latest?.status === "approved") {
+        const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-action" };
+        let consumed: WorkflowDecisionView | null;
+        if (snapshot.category === "pr_merge" && outcome === "already_merged") {
+          consumed = this.consumeForgeAttestedMerge(latest, snapshot, { forgeHeadSha: snapshot.headSha });
+        } else if (snapshot.category === "pr_merge") {
+          // One enqueue per occurrence; a later re-approved enqueue of the same head is its own action.
+          const receiptDigest = auditDigest({ transport: "wollipog-enqueue", occurrenceId, repository: snapshot.repository,
+            pullRequest: snapshot.pullRequest, headSha: snapshot.headSha })!;
+          const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(sessionId, occurrenceId,
+            latest.actionAdmission!.commandDigest, receiptDigest, now, { forgeAttested: true });
+          consumed = reconciled?.decision ?? null;
+          if (reconciled) {
+            this.recordWorkflowDecisionAudit(reconciled.decision, "consumed", actor, now);
+            this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
+          }
+        } else {
+          consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+          if (consumed) this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+        }
+        if (consumed) this.retireResumeConsumedByRequester(consumed, now);
+        else this.log.warn(`forge action ${outcome} for ${occurrenceId} took effect but its approval could not be consumed`);
+      }
+      if (snapshot.category === "merged_branch_deletion" && snapshot.pullRequest !== undefined) {
+        this.refreshMergedBranchObservation(sessionId, snapshot.repository, snapshot.pullRequest);
+      }
+      return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+    } finally {
+      this.forgeActionsInFlight.delete(occurrenceId);
+    }
+  }
+
+  private forgeActionResult(sessionId: string, parentId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId)!;
+    this.log.info(JSON.stringify({ event: "forge_decision_action_result", sessionId, occurrenceId,
+      kind: decision.forgeAction?.kind, outcome: decision.forgeAction?.outcome, status: decision.status,
+      ...(decision.forgeAction?.refusal ? { reason: decision.forgeAction.refusal.reason } : {}) }));
+    this.hub.sessionChangedById(sessionId);
+    this.hub.sessionChangedById(parentId);
+    return ok(this.withMergeReviewEvidence(decision));
+  }
+
+  /** Read the deleted branch's pull request again so the campaign sees it gone (#4067). */
+  private refreshMergedBranchObservation(sessionId: string, repository: string, pullRequest: number): void {
+    const campaign = this.db.campaignAncestryRoot(sessionId);
+    if (typeof campaign !== "object" || !campaign.hasPolicy || !this.campaignForgeReadNow) return;
+    void this.campaignForgeReadNow(campaign.id, [{ repository, number: pullRequest }]).catch(() => null);
   }
 
   /**

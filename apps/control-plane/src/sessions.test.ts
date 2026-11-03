@@ -16,6 +16,8 @@ import type {
   ProjectView,
   QueuedPromptView,
   ReconcileWorkflowActionMessage,
+  type ForgeDecisionActionMessage,
+  type ForgeDecisionActionResultMessage,
   ResourceScope,
   RunnerMetadata,
   RunView,
@@ -1430,6 +1432,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       "a stopped child with a retained worktree is not campaign-complete");
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
+    // #4067: the grandchild's merged pull request still owes its branch until the forge reports it gone.
+    assert.equal(db.campaignProjection(parent.id)?.status, "active");
+    assert.equal(db.campaignProjection(parent.id)?.mergedBranches?.pending, 1);
+    db.campaignForgeObservations.record(parent.id, RUNNER_ID, [{ ref: { repository: "picoduck/wollipog", number: 1091 }, observation: {
+      state: "merged", draft: false, headSha: "b".repeat(40), baseRef: "main", reviewDecision: "approved",
+      checks: { state: "passing", passing: 1, failing: 0, pending: 0 }, requiredChecks: { state: "passing", passing: 1, failing: 0, pending: 0 },
+      mergeQueue: null, mergeCommitSha: "c".repeat(40), defaultBranch: "main", headBranch: { name: "fix/nested", tipSha: null },
+    } }], Date.now());
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
       unique: 2, duplicates: 2,
@@ -7190,6 +7200,267 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       );
       assert.equal(crossSession.status, 409, "another child cannot settle its grant with the same merge");
       assert.equal(db.workflowDecisionByOccurrence(foreign.decision.occurrenceId)?.status, "approved");
+    } finally { db.close(); }
+  });
+
+  /** #4067: the child's runner answers a Wollipog-performed forge action with `outcome`. */
+  const forgeAction = (
+    child: SessionView,
+    answer: (message: ForgeDecisionActionMessage) => Pick<ForgeDecisionActionResultMessage, "outcome" | "refusal">,
+    seen: ForgeDecisionActionMessage[] = [],
+  ) => (message: ControlPlaneToRunner): RunnerRequestResult => {
+    if (message.type !== "forge_decision_action") throw new Error(`unexpected runner request ${message.type}`);
+    seen.push(message);
+    return { type: "forge_decision_action_result", requestId: message.requestId, sessionId: child.id,
+      occurrenceId: message.occurrenceId, ...answer(message) };
+  };
+
+  await t.test("an approved enqueue the provider refused is performed once by Wollipog itself (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      // Claude Code's auto classifier refused the armed command: no receipt, nothing ran.
+      const armed = await arm(4067);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), seen);
+
+      const stale = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId, { resourceDigest: "0".repeat(64) });
+      assert.equal(stale.status, 409, "a digest that is not the decision's is refused");
+      assert.equal(seen.length, 0);
+
+      const result = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(result.data?.forgeAction?.outcome, "enqueued");
+      assert.equal(result.data?.forgeAction?.attempts, 1);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(seen[0]!.action, { kind: "pr_merge_enqueue", repository: "picoduck/wollipog", pullRequest: 4067,
+        headSha: armed.snapshot.headSha }, "exactly the approved head; the runner adds no --delete-branch");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === armed.decision.occurrenceId &&
+        entry.outcome === "consumed" && entry.actor.id === "workflow-decision-forge-action"));
+
+      const replay = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.equal(replay.status, 409, "one approval authorizes one action");
+      assert.equal(seen.length, 1, "nothing is dispatched again");
+
+      // An enqueue of the same head under a later, separately approved occurrence is its own action.
+      const reapproved = await arm(4067);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_queued" }), seen);
+      const again = await svc.executeWorkflowDecision(child.id, reapproved.decision.occurrenceId,
+        { resourceDigest: reapproved.decision.resourceDigest });
+      assert.equal(again.data?.status, "consumed", again.error);
+      assert.equal(again.data?.forgeAction?.outcome, "already_queued");
+    } finally { db.close(); }
+  });
+
+  await t.test("a refused enqueue that never ran stays approved for a retry, and a stale one is revoked (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4068);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "forge_refused", summary: "GitHub refused the enqueue; nothing was enqueued." } }));
+      const refused = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.ok(refused.ok, refused.error);
+      assert.equal(refused.data?.status, "approved", "an enqueue that never ran is not consumed");
+      assert.deepEqual(refused.data?.forgeAction?.refusal, { reason: "forge_refused",
+        summary: "GitHub refused the enqueue; nothing was enqueued." });
+      assert.ok(refused.data?.actionAdmission, "it stays armed, so it can be retried or reconciled");
+
+      // The runner could not even be asked for the action: also nothing ran.
+      hub.deliveryHandler = (_runnerId, message) => message.type !== "forge_decision_action";
+      const unsent = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      hub.deliveryHandler = undefined;
+      assert.equal(unsent.data?.status, "approved");
+      assert.equal(unsent.data?.forgeAction?.refusal?.reason, "runner_unavailable");
+
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }));
+      const retried = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.equal(retried.data?.status, "consumed", retried.error);
+      assert.equal(retried.data?.forgeAction?.attempts, 3);
+
+      const moved = await arm(4069);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "pull_request_mismatch", summary: "The pull request's head is no longer the approved head." } }));
+      const stale = await svc.executeWorkflowDecision(child.id, moved.decision.occurrenceId,
+        { resourceDigest: moved.decision.resourceDigest });
+      assert.equal(stale.data?.status, "revoked", "a stale snapshot revokes the approval");
+
+      // A closure GitHub would now make that the approval does not describe revokes it before dispatch.
+      const closing = await arm(4070);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      hub.githubMergePreflight = (message) => ({ type: "github_merge_preflight_result", requestId: message.requestId,
+        sessionId: message.sessionId, ok: true, check: { checkedAt: 2, closures: [{ issue: "picoduck/wollipog#1", sources: ["linked"] }] } });
+      const closures = await svc.executeWorkflowDecision(child.id, closing.decision.occurrenceId,
+        { resourceDigest: closing.decision.resourceDigest });
+      hub.githubMergePreflight = undefined;
+      assert.equal(closures.data?.status, "revoked");
+      assert.equal(closures.data?.forgeAction?.refusal?.reason, "closure_mismatch");
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+
+      // An uncertain enqueue is never replayed; the forge's merged head reconciles it.
+      const uncertain = await arm(4071);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      const unknown = await svc.executeWorkflowDecision(child.id, uncertain.decision.occurrenceId,
+        { resourceDigest: uncertain.decision.resourceDigest });
+      assert.equal(unknown.data?.status, "approved");
+      assert.equal(unknown.data?.forgeAction?.outcome, "uncertain");
+      const replay = await svc.executeWorkflowDecision(child.id, uncertain.decision.occurrenceId,
+        { resourceDigest: uncertain.decision.resourceDigest });
+      assert.equal(replay.status, 409);
+      assert.match(replay.error ?? "", /reconcile_workflow_decision/u);
+      hub.requestHandler = forgeProof(child, uncertain);
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, uncertain.decision.occurrenceId,
+        { resourceSnapshot: uncertain.snapshot }, () => true);
+      assert.equal(reconciled.data?.status, "consumed", reconciled.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("an occurrence superseded while GitHub is read again never dispatches its enqueue (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4073);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      let release!: () => void;
+      const reading = new Promise<void>((resolve) => { release = resolve; });
+      let asked!: () => void;
+      const preflightStarted = new Promise<void>((resolve) => { asked = resolve; });
+      hub.githubMergePreflight = async (message) => {
+        asked();
+        await reading;
+        return { type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId,
+          ok: true, check: { checkedAt: 3, closures: [] } };
+      };
+      const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      await preflightStarted;
+      // A new request for the same pull request supersedes the armed occurrence mid-read.
+      const replacement = svc.createWorkflowDecision(child.id, { requestId: "replacement-4073",
+        resourceKey: "picoduck/wollipog#4073", resourceSnapshot: armed.snapshot });
+      assert.ok(replacement.ok, replacement.error);
+      release();
+      const result = await executing;
+      hub.githubMergePreflight = undefined;
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "superseded");
+      assert.notEqual(result.data?.forgeAction?.outcome, "enqueued");
+    } finally { db.close(); }
+  });
+
+  await t.test("Wollipog performs only an armed enqueue, and only for a runner that supports it (#4067)", async () => {
+    const { db, hub, svc, child, parent } = setup(AGENT_ID);
+    try {
+      const headSha = "b".repeat(40);
+      const snapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4072, headSha,
+        reviewResult: "merge" as const, requiredChecks: { headSha, status: "passed" as const, checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
+      const decision = svc.createWorkflowDecision(child.id, { requestId: "unarmed", resourceKey: "picoduck/wollipog#4072", resourceSnapshot: snapshot });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), seen);
+      const unarmed = await svc.executeWorkflowDecision(child.id, decision.data.occurrenceId, { resourceDigest: decision.data.resourceDigest });
+      assert.equal(unarmed.status, 409);
+      assert.match(unarmed.error ?? "", /arm the merge first/u);
+
+      db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions - 1);
+      const old = await svc.executeWorkflowDecision(child.id, decision.data.occurrenceId, { resourceDigest: decision.data.resourceDigest });
+      assert.equal(old.status, 409, "an older runner keeps today's behavior");
+      assert.equal(seen.length, 0);
+      assert.equal(db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "approved");
+    } finally { db.close(); }
+  });
+
+  await t.test("Wollipog deletes an approved merged branch by compare-and-delete, even after the provider refused it (#4067)", async () => {
+    const { db, hub, svc, child, parent } = setup(AGENT_ID);
+    try {
+      assert.ok(svc.setParentControlPolicy(parent.id, { implementation_question: "human", pr_merge: "orchestrator",
+        merged_branch_deletion: "orchestrator", follow_up_issue_publication: "human", ui_evidence_approval: "human",
+        review_round_extension: "human" }, 1).ok);
+      let sequence = 0;
+      const approveDeletion = (extra: Record<string, unknown> = { pullRequest: 4067, headSha: "a".repeat(40) }) => {
+        const snapshot = { category: "merged_branch_deletion" as const, repository: "picoduck/wollipog", branch: `agent/${child.id}`,
+          merged: true as const, mergeCommitSha: "c".repeat(40), ...extra, dependentPullRequests: { checkedAt: 10, open: [] } };
+        const created = svc.createWorkflowDecision(child.id, { requestId: `delete-${++sequence}`, resourceKey: `branch:agent/${child.id}`,
+          resourceSnapshot: snapshot });
+        assert.ok(created.ok && created.data, created.error);
+        assert.ok(svc.resolveDescendantRequest(parent.id, child.id, created.data.occurrenceId,
+          { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+        return { decision: created.data, snapshot };
+      };
+      const half = svc.createWorkflowDecision(child.id, { requestId: "half", resourceKey: "branch:half", resourceSnapshot: {
+        category: "merged_branch_deletion", repository: "picoduck/wollipog", branch: "agent/x", merged: true,
+        mergeCommitSha: "c".repeat(40), pullRequest: 1, dependentPullRequests: { checkedAt: 10, open: [] } } });
+      assert.equal(half.status, 400, "pullRequest and headSha come together");
+
+      // The child consumed the approval and ran `git push --delete`; the provider refused it.
+      const refusedByProvider = approveDeletion();
+      const consumed = await svc.consumeWorkflowDecision(child.id, refusedByProvider.decision.occurrenceId,
+        { resourceSnapshot: refusedByProvider.snapshot });
+      assert.equal(consumed.data?.status, "consumed", consumed.error);
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "deleted" }), seen);
+      const deleted = await svc.executeWorkflowDecision(child.id, refusedByProvider.decision.occurrenceId,
+        { resourceDigest: refusedByProvider.decision.resourceDigest });
+      assert.ok(deleted.ok, deleted.error);
+      assert.equal(deleted.data?.forgeAction?.outcome, "deleted");
+      assert.deepEqual(seen[0]!.action, { kind: "branch_deletion", repository: "picoduck/wollipog", branch: `agent/${child.id}`,
+        pullRequest: 4067, headSha: "a".repeat(40), mergeCommitSha: "c".repeat(40) });
+      const twice = await svc.executeWorkflowDecision(child.id, refusedByProvider.decision.occurrenceId,
+        { resourceDigest: refusedByProvider.decision.resourceDigest });
+      assert.equal(twice.status, 409, "a performed deletion is not performed again");
+      assert.equal(seen.length, 1);
+
+      // Executed instead of consumed: the success consumes it.
+      const direct = approveDeletion();
+      const performed = await svc.executeWorkflowDecision(child.id, direct.decision.occurrenceId,
+        { resourceDigest: direct.decision.resourceDigest });
+      assert.equal(performed.data?.status, "consumed", performed.error);
+
+      // The remote tip moved after approval: refused, the branch is left alone, the approval revoked.
+      const moved = approveDeletion();
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "tip_moved", summary: "The branch tip is no longer the approved merged head, so it was left alone." } }), seen);
+      const tip = await svc.executeWorkflowDecision(child.id, moved.decision.occurrenceId, { resourceDigest: moved.decision.resourceDigest });
+      assert.equal(tip.data?.status, "revoked");
+      assert.equal(tip.data?.forgeAction?.refusal?.reason, "tip_moved");
+      assert.equal((await svc.executeWorkflowDecision(child.id, moved.decision.occurrenceId,
+        { resourceDigest: moved.decision.resourceDigest })).status, 409);
+
+      // A dependent pull request opened after approval: the same.
+      const dependent = approveDeletion();
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "dependent_pull_request_open", summary: "An open pull request targets this branch, so it was left alone." } }), seen);
+      const opened = await svc.executeWorkflowDecision(child.id, dependent.decision.occurrenceId,
+        { resourceDigest: dependent.decision.resourceDigest });
+      assert.equal(opened.data?.status, "revoked");
+
+      // An uncertain deletion may be repeated: compare-and-delete cannot do more than approved.
+      const unsure = approveDeletion();
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }), seen);
+      assert.equal((await svc.executeWorkflowDecision(child.id, unsure.decision.occurrenceId,
+        { resourceDigest: unsure.decision.resourceDigest })).data?.status, "approved");
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_deleted" }), seen);
+      const settledDeletion = await svc.executeWorkflowDecision(child.id, unsure.decision.occurrenceId,
+        { resourceDigest: unsure.decision.resourceDigest });
+      assert.equal(settledDeletion.data?.status, "consumed");
+      assert.equal(settledDeletion.data?.forgeAction?.outcome, "already_deleted");
+
+      // A decision without the merged head is not something Wollipog can pin a deletion to.
+      const unpinned = approveDeletion({});
+      const before = seen.length;
+      const refusal = await svc.executeWorkflowDecision(child.id, unpinned.decision.occurrenceId,
+        { resourceDigest: unpinned.decision.resourceDigest });
+      assert.equal(refusal.status, 409);
+      assert.match(refusal.error ?? "", /pullRequest and headSha/u);
+      assert.equal(seen.length, before);
     } finally { db.close(); }
   });
 
