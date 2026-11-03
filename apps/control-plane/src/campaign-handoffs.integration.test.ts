@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
   type CampaignForgePullRequestObservation, type CampaignPullRequestRef, type ControlPlaneToRunner,
   type RunnerMetadata, type RunnerToControlPlane } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
@@ -182,7 +182,8 @@ test("dashboards older than v275 read complete_with_handoffs as waiting for a pe
     const session = h.db.getSession("root")!;
     assert.equal(session.fullControlCampaignStatus, "complete_with_handoffs");
     assert.equal(session.orchestratorCampaign?.status, "complete_with_handoffs");
-    const legacy = projectCampaignHandoffsForUi({ type: "session_upsert", session }, PROTOCOL_VERSION - 1);
+    const legacy = projectCampaignHandoffsForUi({ type: "session_upsert", session },
+      RUNNER_CAPABILITY_MIN_PROTOCOL.campaignHandoffs - 1);
     assert.equal(legacy.session.fullControlCampaignStatus, "waiting_human");
     assert.equal(legacy.session.orchestratorCampaign?.status, "waiting_human");
     assert.equal(session.fullControlCampaignStatus, "complete_with_handoffs", "the projection copies, never mutates");

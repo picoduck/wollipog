@@ -7,6 +7,11 @@ import { basename } from "node:path";
 import type { Readable, Writable } from "node:stream";
 import {
   campaignRepositoryLocation,
+  DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS,
+  DELEGATED_IMAGE_REVIEW_DEFECT_MAX_CHARS,
+  DELEGATED_IMAGE_REVIEW_MAX_DEFECTS,
+  DELEGATED_IMAGE_REVIEW_SUMMARY_MAX_CHARS,
+  DELEGATED_IMAGE_REVIEW_TOOLS,
   isOrchestratorOnlyCapabilities,
   POLICY_HOOK_ABANDONMENT_MS,
   PACED_VIDEO_REVIEW_MIN_PROTOCOL,
@@ -101,6 +106,8 @@ export interface McpDeps {
    * actorHeader entirely. */
   actorHeader?: typeof WOLLIPOG_AGENT_ACTOR_SESSION_HEADER | null;
   orchestrator?: boolean;
+  /** A delegated image evidence reviewer (#4074) sees only its two review tools. */
+  uiEvidenceReviewer?: boolean;
   /** Deterministic scheduling hooks for wait-session tests. */
   now?: () => number;
   sleep?: (milliseconds: number) => Promise<void>;
@@ -336,6 +343,20 @@ async function reviewSessionCompatibilityError(deps: McpDeps): Promise<ToolResul
   const required = RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession;
   return Number.isInteger(actual) && actual! >= required ? null
     : controlPlaneUpdateRequired(needsNewerWollipog("Review sessions need"), required, actual);
+}
+
+async function delegatedImageReviewCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const compatibility = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!compatibility.ok) return errorResult(wollipogSupportUnverified("delegated image evidence review", compatibility.message));
+    actual = compatibility.data?.protocolVersion;
+  }
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview;
+  return Number.isInteger(actual) && actual! >= required ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Delegated image evidence review needs",
+      `${UPDATE_AND_TRY_AGAIN} Meanwhile, inspect each image directly with review_descendant_ui_evidence. Nothing was sent.`),
+    required, actual);
 }
 
 async function pullRequestWatchCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
@@ -1151,6 +1172,7 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question", "resolve_descendant_approval",
   "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence", "request_workflow_decision", "get_workflow_decision", "consume_workflow_decision",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
+  "prepare_descendant_ui_evidence_review", "get_descendant_ui_evidence_review",
   "reconcile_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
@@ -1162,7 +1184,21 @@ const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campa
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
   "resolve_descendant_approval", "resolve_descendant_workflow_decision", "withdraw_descendant_workflow_decision", "review_descendant_ui_evidence",
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
+  "prepare_descendant_ui_evidence_review", "get_descendant_ui_evidence_review",
 ]);
+/** A delegated image reviewer (#4074) has exactly these tools, and nobody else has them. */
+const UI_EVIDENCE_REVIEWER_TOOLS: ReadonlySet<string> = new Set(DELEGATED_IMAGE_REVIEW_TOOLS);
+
+/** Why this caller may not use the named tool, or null. One rule for listing, MCP calls and the CLI. */
+function toolRefusal(name: string, deps: McpDeps): string | null {
+  if (deps.uiEvidenceReviewer) {
+    return UI_EVIDENCE_REVIEWER_TOOLS.has(name) ? null : "a delegated image reviewer has only its two review tools";
+  }
+  if (UI_EVIDENCE_REVIEWER_TOOLS.has(name)) return "this tool belongs to a delegated image reviewer";
+  if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return "the orchestrator preset does not allow this tool";
+  if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return "this tool requires the orchestrator preset";
+  return null;
+}
 
 /** Delegated video review exists only on a control plane that declares the exact private paced
  * contract right now. A cached public protocol number is never enough (#1321). */
@@ -1960,6 +1996,13 @@ export const TOOLS: McpTool[] = [
             verdictId: { type: "string", maxLength: 256 }, reviewerSessionId: { type: "string", maxLength: 256 } },
           required: ["evidenceId", "reviewId", "verdictId", "reviewerSessionId"], additionalProperties: false,
         }, description: "Exact original video IDs and actual non-self managed media Session verdict references; requires protected production readiness, not an ordinary worker message" },
+        delegatedImageReview: {
+          type: "object",
+          properties: { reviewId: { type: "string", maxLength: 256 }, verdictId: { type: "string", maxLength: 256 },
+            reviewerSessionId: { type: "string", maxLength: 256 } },
+          required: ["reviewId", "verdictId", "reviewerSessionId"], additionalProperties: false,
+          description: "Approve on a delegated image reviewer's verdict: pass exactly the delegatedImageReview that get_descendant_ui_evidence_review returned, with evidenceReviewed listing every evidence id. The server requires that reviewer's current receipt for every image. Approval only",
+        },
         rationale: { type: "string", description: "Audit-only: never retained or shown to the child; only its digest is recorded" },
         childMessage: {
           type: "string",
@@ -1994,6 +2037,16 @@ export const TOOLS: McpTool[] = [
           return errorResult("Delegated video provenance requires the exact private media contract; no approval was sent");
         }
       }
+      if (args?.delegatedImageReview !== undefined) {
+        const image = args.delegatedImageReview;
+        if (!image || typeof image !== "object" || Array.isArray(image) || args.outcome !== "approve") {
+          return errorResult("delegatedImageReview is valid only for approval and must be the reference get_descendant_ui_evidence_review returned");
+        }
+        // An older control plane would drop the field and then refuse for missing receipts, or
+        // worse, judge the approval on the Orchestrator's own receipts. Never send it there.
+        const compatibilityError = await delegatedImageReviewCompatibilityError(deps);
+        if (compatibilityError) return compatibilityError;
+      }
       if (args?.childMessage !== undefined) {
         if (typeof args.childMessage !== "string") return errorResult("childMessage must be a string");
         const compatibilityError = await workflowDecisionChildMessageCompatibilityError(deps);
@@ -2012,6 +2065,7 @@ export const TOOLS: McpTool[] = [
             ...(typeof args.selectedOptionId === "string" ? { selectedOptionId: args.selectedOptionId } : {}),
             ...(Array.isArray(args.evidenceReviewed) ? { evidenceReviewed: args.evidenceReviewed } : {}),
             ...(Array.isArray(args.delegatedVideoEvidence) ? { delegatedVideoEvidence: args.delegatedVideoEvidence } : {}),
+            ...(args.delegatedImageReview !== undefined ? { delegatedImageReview: args.delegatedImageReview } : {}),
             ...(typeof args.rationale === "string" ? { rationale: args.rationale } : {}),
             ...(typeof args.childMessage === "string" ? { childMessage: args.childMessage } : {}),
           },
@@ -2073,7 +2127,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "review_descendant_ui_evidence",
-    description: "Inspect one evidence image of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns. Returns the digest-verified image and makes the server record a review receipt. Approval requires a current receipt for every evidence item, so call this once per evidenceId, actually look at each image, and only then resolve the decision.",
+    description: "Inspect one evidence image of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns. Returns the digest-verified image and makes the server record a review receipt. Approval requires a current receipt for every evidence item, so call this once per evidenceId, actually look at each image, and only then resolve the decision. Each image stays in your context; for a decision with several images, prefer prepare_descendant_ui_evidence_review, and keep this tool for a single image or a targeted follow-up look.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2121,6 +2175,125 @@ export const TOOLS: McpTool[] = [
           { type: "image", data: delivery.data, mimeType: delivery.mimeType },
         ],
       };
+    },
+  },
+  {
+    name: "prepare_descendant_ui_evidence_review",
+    description: "Hand every image of an exact pending descendant ui_evidence_approval decision that this Orchestrator owns to a managed reviewer Session with a fresh context, so the images never enter your own conversation. The server starts the reviewer on your runner, agent and model, charges it to the campaign, and records its receipts and verdict. Prefer this for a decision with several images; use review_descendant_ui_evidence for a single image or a targeted follow-up look. The brief is the reviewer's only context: state the child's claims and the UI acceptance criteria each image must meet. Returns the review id and reviewer session id. Wait for the reviewer (end your turn, or wait_session on it), then read the verdict with get_descendant_ui_evidence_review. Preparing again while a review is live returns that review.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        sessionId: { type: "string", description: "The child that requested the decision" },
+        occurrenceId: { type: "string" },
+        brief: { type: "string", minLength: 1, maxLength: DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS,
+          description: "The child's claims and the UI acceptance criteria to check each image against" },
+      },
+      required: ["sessionId", "occurrenceId", "brief"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.sessionId !== "string" || !args.sessionId ||
+          typeof args?.occurrenceId !== "string" || !args.occurrenceId ||
+          typeof args?.brief !== "string" || !args.brief.trim() || args.brief.length > DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS) {
+        return errorResult(`sessionId, occurrenceId, and a brief of at most ${DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS} characters are required`);
+      }
+      const incompatible = await delegatedImageReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/delegated-image-review`,
+        { sessionId: args.sessionId, occurrenceId: args.occurrenceId, brief: args.brief });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: "get_descendant_ui_evidence_review",
+    description: "Read a delegated image review this Orchestrator prepared: its state, and once the reviewer finished, its verdict with each image's outcome and observed defects. While an approving verdict can still back an approval, the result carries the exact delegatedImageReview reference to pass to resolve_descendant_workflow_decision together with evidenceReviewed listing every evidence id. A deny recommendation is evidence for denying with a childMessage. A review that ended without a verdict can be prepared again.",
+    inputSchema: {
+      type: "object",
+      properties: { reviewId: { type: "string", maxLength: 256 } },
+      required: ["reviewId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.reviewId !== "string" || !args.reviewId || args.reviewId.length > 256) return errorResult("reviewId is required");
+      const incompatible = await delegatedImageReviewCompatibilityError(deps);
+      if (incompatible) return incompatible;
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/descendant-requests/delegated-image-review/get`,
+        { reviewId: args.reviewId });
+      return r.ok ? textResult(r.data) : errorResult(r.message);
+    },
+  },
+  {
+    name: DELEGATED_IMAGE_REVIEW_TOOLS[0],
+    description: "Look at one evidence image of the decision you are reviewing. Returns the digest-verified image, and the server records that you were shown it. Call this once for every evidence id in your task before submitting the verdict.",
+    inputSchema: {
+      type: "object",
+      properties: { evidenceId: { type: "string", maxLength: 256 } },
+      required: ["evidenceId"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      if (typeof args?.evidenceId !== "string" || !args.evidenceId || args.evidenceId.length > 256) {
+        return errorResult("evidenceId is required");
+      }
+      const self = encodeURIComponent(deps.selfSessionId);
+      const r = await cpFetch(deps, "POST", `/api/sessions/${self}/delegated-image-review/image`, { evidenceId: args.evidenceId });
+      if (!r.ok) return errorResult(r.message);
+      const delivery = r.data as UiEvidenceReviewDelivery;
+      // The same handoff as direct review: re-hash the exact bytes about to reach the model, and
+      // return them only once the server has acknowledged that exact receipt.
+      const bytes = Buffer.from(delivery.data, "base64");
+      if (createHash("sha256").update(bytes).digest("hex") !== delivery.receipt.sha256 ||
+          bytes.byteLength !== delivery.sizeBytes) {
+        return errorResult("delivered evidence does not match the digest bound to this decision; fail this item");
+      }
+      const acknowledged = await cpFetch(deps, "POST", `/api/sessions/${self}/delegated-image-review/acknowledge`,
+        { receiptId: delivery.receipt.receiptId, sha256: delivery.receipt.sha256 });
+      if (!acknowledged.ok) return errorResult(`evidence review could not be recorded: ${acknowledged.message}`);
+      return {
+        content: [
+          { type: "text", text: JSON.stringify({ evidenceId: delivery.receipt.evidenceId, mimeType: delivery.mimeType, sizeBytes: delivery.sizeBytes }) },
+          { type: "image", data: delivery.data, mimeType: delivery.mimeType },
+        ],
+      };
+    },
+  },
+  {
+    name: DELEGATED_IMAGE_REVIEW_TOOLS[1],
+    description: "Submit your one verdict, after you have looked at every evidence image. List every evidence id once: \"pass\" with no defects, or \"fail\" with the defects you observed. Recommend \"approve\" only when every item passes, otherwise \"deny\". The server accepts it only if it recorded that you were shown every image.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        recommendation: { type: "string", enum: ["approve", "deny"] },
+        summary: { type: "string", minLength: 1, maxLength: DELEGATED_IMAGE_REVIEW_SUMMARY_MAX_CHARS },
+        items: {
+          type: "array",
+          items: {
+            type: "object",
+            properties: {
+              evidenceId: { type: "string", maxLength: 256 },
+              outcome: { type: "string", enum: ["pass", "fail"] },
+              defects: { type: "array", maxItems: DELEGATED_IMAGE_REVIEW_MAX_DEFECTS,
+                items: { type: "string", minLength: 1, maxLength: DELEGATED_IMAGE_REVIEW_DEFECT_MAX_CHARS } },
+            },
+            required: ["evidenceId", "outcome", "defects"],
+            additionalProperties: false,
+          },
+        },
+      },
+      required: ["recommendation", "summary", "items"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("this tool requires a session identity");
+      const report = { recommendation: args?.recommendation, summary: args?.summary, items: args?.items };
+      const r = await cpFetch(deps, "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/delegated-image-review/verdict`, { report });
+      return r.ok ? textResult({ accepted: true, verdictId: (r.data as { verdictId?: string })?.verdictId }) : errorResult(r.message);
     },
   },
   {
@@ -3629,9 +3802,8 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
       return isRequest ? reply({}) : null;
     case "tools/list":
       return isRequest
-        ? reply({ tools: TOOLS.filter((tool) => deps.orchestrator
-          ? ORCHESTRATOR_TOOLS.has(tool.name)
-          : !PARENT_CONTROL_TOOLS.has(tool.name)).map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
+        ? reply({ tools: TOOLS.filter((tool) => toolRefusal(tool.name, deps) === null)
+          .map(({ name, description, inputSchema }) => ({ name, description, inputSchema })) })
         : null;
     case "tools/call": {
       if (!isRequest) return null;
@@ -3639,8 +3811,8 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
       if (typeof name !== "string") return rpcError(-32602, "tools/call requires params.name");
       if (RETIRED_REVIEW_TOOL_NAMES.some((retired) => retired === name)) return reply(errorResult(REVIEW_JOBS_RETIRED_REASON));
       const tool = TOOLS.find((t) => t.name === name);
-      if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return reply(errorResult("the orchestrator preset does not allow this tool"));
-      if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return reply(errorResult("this tool requires the orchestrator preset"));
+      const refused = toolRefusal(name, deps);
+      if (refused) return reply(errorResult(refused));
       // Unknown tool → an isError TOOL result (not a protocol error) so the model can
       // recover in-conversation instead of the client tearing the turn down.
       if (!tool) return reply(errorResult(`unknown tool '${name}'`));
@@ -3660,8 +3832,8 @@ export async function dispatch(msg: unknown, deps: McpDeps): Promise<Json | null
  * schemas, response projection, self-targeting checks, and REST routes cannot drift. */
 export async function executeManagerTool(name: string, args: Json, deps: McpDeps): Promise<ToolResult> {
   if (RETIRED_REVIEW_TOOL_NAMES.some((retired) => retired === name)) return errorResult(REVIEW_JOBS_RETIRED_REASON);
-  if (deps.orchestrator && !ORCHESTRATOR_TOOLS.has(name)) return errorResult("the orchestrator preset does not allow this tool");
-  if (!deps.orchestrator && PARENT_CONTROL_TOOLS.has(name)) return errorResult("this tool requires the orchestrator preset");
+  const refused = toolRefusal(name, deps);
+  if (refused) return errorResult(refused);
   const tool = TOOLS.find((candidate) => candidate.name === name);
   if (!tool) return errorResult(`unknown tool '${name}'`);
   try {
