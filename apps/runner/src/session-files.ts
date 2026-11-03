@@ -26,6 +26,10 @@ import { run } from "./discovery/resolve.js";
 /** Cap on returned file content — enough for any source/doc file the viewer should render. */
 export const READ_FILE_CAP = 512 * 1024;
 const WORKSPACE_SEARCH_VISIT_CAP = 20_000;
+/** Installed dependencies, which would otherwise spend the visit cap before the project's own
+ * files (#4095). Searches skip a directory with this name at any depth; the folder view still
+ * lists it. The WSL `find` script names it too. */
+const WORKSPACE_SEARCH_SKIPPED_DIRECTORY = "node_modules";
 const WORKSPACE_DIRECTORY_ENTRY_CAP = 2_000;
 /** Full fuzzy alignment work one search may spend, in cells; past it, paths are placed greedily. */
 export const WORKSPACE_FUZZY_ALIGNMENT_BUDGET = 4_000_000;
@@ -115,7 +119,7 @@ export async function searchWorkspaceReferences(
     throw new Error("enter 1-256 searchable characters");
   }
   if (match === "fuzzy") {
-    const visit = context.kind === "wsl" ? await wslVisit(context.distro, root) : nativeVisit(root);
+    const visit = context.kind === "wsl" ? await wslVisit(context.distro, root) : nativeWorkspaceVisit(root);
     return bestFuzzyFiles(visit, fuzzyPathNeedle(query));
   }
   return context.kind === "wsl"
@@ -438,8 +442,9 @@ function nativeRead(root: string, rel: string): SessionFileContent {
 }
 
 /** Every entry under the canonical root, breadth first, until the visit cap. `.git` and symlinks
- * count toward the cap but are neither returned nor entered. */
-function nativeVisit(root: string): WorkspaceVisit {
+ * count toward the cap but are neither returned nor entered. A `node_modules` directory is skipped
+ * without counting, so dependencies never truncate the search. Exported for cap tests. */
+export function nativeWorkspaceVisit(root: string, visitCap = WORKSPACE_SEARCH_VISIT_CAP): WorkspaceVisit {
   const canonicalRoot = canonicalNativeTarget(root).root;
   const pending = [""];
   const entries: WorkspaceReferenceCandidate[] = [];
@@ -455,7 +460,8 @@ function nativeVisit(root: string): WorkspaceVisit {
       continue;
     }
     for (const entry of listed) {
-      if (visited >= WORKSPACE_SEARCH_VISIT_CAP) {
+      if (entry.name === WORKSPACE_SEARCH_SKIPPED_DIRECTORY && entry.isDirectory()) continue;
+      if (visited >= visitCap) {
         visitOverflow = true;
         break;
       }
@@ -471,7 +477,7 @@ function nativeVisit(root: string): WorkspaceVisit {
 }
 
 function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
-  return containingQuery(nativeVisit(root), query);
+  return containingQuery(nativeWorkspaceVisit(root), query);
 }
 
 /** Files and folders whose path contains the lower-cased query, the first ones visited. */
@@ -531,10 +537,13 @@ export function wslReadArgs(distro: string, root: string, rel: string, cap: numb
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel, String(cap)];
 }
 
+/** wsl.exe argv for the one bounded search traversal. Pruned entries print nothing, so a
+ * `node_modules` directory, like `.git`, never reaches the `head` that bounds the visit; nor does
+ * the root itself (`-mindepth 1`), which would otherwise take one of its rows. */
 export function wslSearchArgs(distro: string, root: string, visitCap: number): string[] {
   const script =
     'r=$(readlink -f -- "$1") || exit 3; cd "$r" || exit 3; ' +
-    'find . -path ./.git -prune -o -type l -prune -o \\( -type f -o -type d \\) -printf "%y\\t%P\\n" 2>/dev/null | head -n "$2"';
+    'find . -mindepth 1 \\( -path ./.git -o -type d -name node_modules \\) -prune -o -type l -prune -o \\( -type f -o -type d \\) -printf "%y\\t%P\\n" 2>/dev/null | head -n "$2"';
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, String(visitCap + 1)];
 }
 
