@@ -38,7 +38,7 @@ test("workspaces carry their source and an unused managed workspace unregisters 
 
   db.renameWorkspace(runner.runnerId, managed.id, "Renamed Notes");
   assert.deepEqual(db.workspaceRemovalBlockers(runner.runnerId, managed.id), []);
-  db.unregisterWorkspace(runner.runnerId, managed.id);
+  assert.deepEqual(db.beginWorkspaceRemoval(runner.runnerId, managed.id), { ok: true, source: "managed", path: "/srv/notes" });
   assert.deepEqual(db.getRunner(runner.runnerId)?.workspaces.map((workspace) => workspace.id), ["home"]);
   assert.equal(db.workspaceSource(runner.runnerId, managed.id), null);
   assert.equal(db.workspaceScope(runner.runnerId, managed.id), null);
@@ -82,8 +82,50 @@ test("project locations, unarchived sessions and automations block removal; arch
     { kind: "automation", automationId: "auto-nightly", automationName: "Nightly" },
   ]);
 
-  // Unregistering never touches sessions or project history.
-  db.unregisterWorkspace(runner.runnerId, "home");
-  assert.equal(db.getSession("session-history")?.workspaceId, "home");
-  assert.equal(db.getSession("session-live")?.archived, true);
+  // Starting a removal re-checks in the same transaction, so a blocker refuses it.
+  assert.deepEqual(db.beginWorkspaceRemoval(runner.runnerId, "home"), {
+    ok: false, blockers: [{ kind: "automation", automationId: "auto-nightly", automationName: "Nightly" }],
+  });
+  assert.equal(db.workspaceSource(runner.runnerId, "home"), "configured", "a refusal hides nothing");
+});
+
+test("a configured removal hides the workspace until the runner answers, and registration settles an unanswered one", () => {
+  const { db } = fixture();
+  const identity = db.localIdentityContext();
+  const location = db.listProjects(true).flatMap((project) => project.locations).find((candidate) => candidate.workspaceId === "home")!;
+  db.removeProjectLocation(location.id, 3);
+  db.renameWorkspace(runner.runnerId, "home", "Home Folder");
+  const scope = db.workspaceScope(runner.runnerId, "home");
+  const project = db.createProject({
+    name: "Late Project",
+    scope: { organizationId: identity.organizationId, owner: { kind: "organization", organizationId: identity.organizationId } },
+    now: 4,
+  });
+
+  // Hidden while pending: nothing new can come to depend on it.
+  assert.deepEqual(db.beginWorkspaceRemoval(runner.runnerId, "home", 5), { ok: true, source: "configured", path: "/home/person" });
+  assert.ok(!db.getRunner(runner.runnerId)!.workspaces.some((workspace) => workspace.id === "home"));
+  assert.equal(db.workspaceSource(runner.runnerId, "home"), null);
+  assert.equal(db.getWorkspacePath(runner.runnerId, "home"), null, "no session can launch there");
+  assert.throws(() => db.addProjectLocation(project.id, { runnerId: runner.runnerId, workspaceId: "home" }), /workspace not found/u);
+
+  // A refusal restores the record, its name and its ownership.
+  db.cancelWorkspaceRemoval(runner.runnerId, "home");
+  assert.equal(db.getRunner(runner.runnerId)?.workspaces.find((workspace) => workspace.id === "home")?.name, "Home Folder");
+  assert.deepEqual(db.workspaceScope(runner.runnerId, "home"), scope);
+
+  // Unanswered, then the runner registers still reporting it: it did not happen.
+  db.beginWorkspaceRemoval(runner.runnerId, "home", 6);
+  db.registerRunner(runner, 7);
+  assert.equal(db.getRunner(runner.runnerId)?.workspaces.find((workspace) => workspace.id === "home")?.name, "Home Folder");
+  assert.deepEqual(db.workspaceScope(runner.runnerId, "home"), scope);
+
+  // Unanswered, then the runner registers without it: it happened, and stays removed.
+  db.beginWorkspaceRemoval(runner.runnerId, "home", 8);
+  db.registerRunner({ ...runner, workspaces: [] }, 9);
+  db.registerRunner({ ...runner, workspaces: [] }, 10);
+  assert.equal(db.workspaceSource(runner.runnerId, "home"), null);
+  assert.equal(db.workspaceScope(runner.runnerId, "home"), null);
+  assert.equal(db.listProjects(true).flatMap((candidate) => candidate.locations)
+    .filter((candidate) => candidate.workspaceId === "home").length, 0, "no project location came back");
 });

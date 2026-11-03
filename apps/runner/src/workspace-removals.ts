@@ -7,6 +7,10 @@
  * An entry matches only the exact id and path it removed, so an operator who configures a
  * different folder under the same id gets that Workspace back. Restoring the exact Workspace means
  * deleting its entry from this file.
+ *
+ * Each entry keeps the folder and directory grants sessions could write while the Workspace was
+ * configured. Removal ends new use, not what earlier sessions may have left there, so reviewer
+ * trust keeps treating those directories as session-writable for as long as the entry exists.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -19,7 +23,13 @@ export interface WorkspaceRemovalEntry {
   id: string;
   path: string;
   removedAt: number;
+  /** The Workspace's directory grants when it was removed: still session-writable history. */
+  additionalDirectoryGrants?: string[];
+  sharedWritableDirectories?: string[];
 }
+
+const stringList = (value: unknown): value is string[] | undefined =>
+  value === undefined || (Array.isArray(value) && value.every((item) => typeof item === "string"));
 
 interface WorkspaceRemovalsFile {
   version: 1;
@@ -41,7 +51,8 @@ export class WorkspaceRemovals {
       const parsed = JSON.parse(readFileSync(this.file, "utf8")) as Partial<WorkspaceRemovalsFile>;
       if (parsed.version !== 1 || !Array.isArray(parsed.removed)) throw new Error("unrecognized format");
       return parsed.removed.filter((entry): entry is WorkspaceRemovalEntry =>
-        typeof entry?.id === "string" && typeof entry.path === "string" && typeof entry.removedAt === "number");
+        typeof entry?.id === "string" && typeof entry.path === "string" && typeof entry.removedAt === "number" &&
+        stringList(entry.additionalDirectoryGrants) && stringList(entry.sharedWritableDirectories));
     } catch (error) {
       this.warn(`ignoring unreadable ${this.file}: ${(error as Error).message}`);
       return [];
@@ -52,14 +63,31 @@ export class WorkspaceRemovals {
     return entries.some((entry) => entry.id === workspace.id && entry.path === workspace.path);
   }
 
-  record(workspace: Pick<RunnerConfigWorkspace, "id" | "path">, now = Date.now()): void {
+  record(
+    workspace: Pick<RunnerConfigWorkspace, "id" | "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">,
+    now = Date.now(),
+  ): void {
     const entries = this.entries();
     if (this.removed(workspace, entries)) return;
-    const contents: WorkspaceRemovalsFile = {
-      version: 1,
-      removed: [...entries, { id: workspace.id, path: workspace.path, removedAt: now }],
+    const entry: WorkspaceRemovalEntry = {
+      id: workspace.id,
+      path: workspace.path,
+      removedAt: now,
+      ...(workspace.additionalDirectoryGrants?.length ? { additionalDirectoryGrants: [...workspace.additionalDirectoryGrants] } : {}),
+      ...(workspace.sharedWritableDirectories?.length ? { sharedWritableDirectories: [...workspace.sharedWritableDirectories] } : {}),
     };
+    const contents: WorkspaceRemovalsFile = { version: 1, removed: [...entries, entry] };
     protectedWrite(this.file, `${JSON.stringify(contents, null, 2)}\n`, "workspace removal record");
+  }
+
+  /** Removed Workspaces' session-writable directories, for reviewer trust and other boundaries
+   * that must keep treating them as written by earlier sessions. */
+  writableHistory(): Array<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">> {
+    return this.entries().map((entry) => ({
+      path: entry.path,
+      additionalDirectoryGrants: entry.additionalDirectoryGrants,
+      sharedWritableDirectories: entry.sharedWritableDirectories,
+    }));
   }
 
   /** Drop every recorded removal from `workspaces` in place, returning what was dropped. */

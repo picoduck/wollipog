@@ -6523,35 +6523,50 @@ app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) 
     return reply.code(404).send({ error: "workspace not found" });
   }
   const source = db.workspaceSource(runnerId, workspaceId);
-  const workspace = runner.workspaces.find((candidate) => candidate.id === workspaceId);
-  if (!source || !workspace) return reply.code(404).send({ error: "workspace not found" });
+  if (!source) return reply.code(404).send({ error: "workspace not found" });
   if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
   if (source === "configured") {
     const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
     if (unsupported) return reply.code(409).send(failureBody(unsupported));
   }
-  const blockers = db.workspaceRemovalBlockers(runnerId, workspaceId);
-  if (blockers.length) {
-    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(blockers), blockers });
+  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
+  // workspace while its runner is asked; a managed workspace is gone at this point.
+  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
+  if (!started) return reply.code(404).send({ error: "workspace not found" });
+  if (!started.ok) {
+    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
   }
-  if (source === "configured") {
-    const requestId = `workspace_remove_${randomUUID()}`;
-    try {
-      const result = await hub.requestFromRunner(runnerId, requestId, {
-        type: "remove_workspace",
-        requestId,
-        runnerId,
-        workspaceId,
-        path: workspace.path,
-      });
-      if (result.type !== "remove_workspace_result") return reply.code(502).send({ error: "unexpected runner reply" });
-      if (!result.ok) return reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." });
-    } catch (error) {
-      return reply.code(504).send({ error: (error as Error).message });
-    }
-  }
-  db.unregisterWorkspace(runnerId, workspaceId);
   hub.runnerChanged(runnerId);
+  if (started.source === "managed") return { removed: true };
+  const requestId = `workspace_remove_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(runnerId, requestId, {
+      type: "remove_workspace",
+      requestId,
+      runnerId,
+      workspaceId,
+      path: started.path,
+    });
+    if (result.type !== "remove_workspace_result" || !result.ok) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return result.type === "remove_workspace_result"
+        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
+        : reply.code(502).send({ error: "unexpected runner reply" });
+    }
+  } catch (error) {
+    if (isRunnerRequestNotSentError(error)) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return reply.code(409).send({ error: "runner is offline" });
+    }
+    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
+    // restores it if the runner still has it.
+    return reply.code(504).send({
+      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
+    });
+  }
+  db.finishWorkspaceRemoval(runnerId, workspaceId);
   return { removed: true };
 });
 

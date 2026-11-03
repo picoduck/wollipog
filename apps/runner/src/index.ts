@@ -1005,7 +1005,8 @@ setCampaignCredentialRoots(() => {
     providerAccountDirectories: config.providerAccounts.map((account) => account.directory),
     agentEnvs: [process.env, ...config.agents.map(agentEnv), ...sessions.map((meta) => meta.env)],
     credentialHomes: sessions.flatMap((meta) => [meta.providerCredentialHome, meta.pendingProviderCredentialHome]),
-    workspacePaths: config.workspaces.map((workspace) => workspace.path), userHome: homedir(),
+    workspacePaths: [...config.workspaces, ...workspaceRemovals.writableHistory()].map((workspace) => workspace.path),
+    userHome: homedir(),
   });
 });
 store.scrubLegacyAgentEnv();
@@ -1688,8 +1689,10 @@ function recoverStaleSessionCommands(): void {
 
 sessions.setSend(sendUp);
 // Shared trusted-tool roots for review sessions.
+// A removed Workspace's directories stay session-writable history (#4123).
 const sessionWritablePaths = () => configuredSessionWritablePaths({
-  workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
+  workspaces: [...config.workspaces, ...workspaceRemovals.writableHistory()],
+  providerAccounts: config.providerAccounts, agents: config.agents,
   sessions: store.listSessions(), hostEnv: process.env,
 });
 sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
@@ -1727,7 +1730,8 @@ const mediaReviewRoot = resolve(config.dataDir, "media-review");
 mkdirSync(join(mediaReviewRoot, "sessions"), { recursive: true, mode: 0o700 });
 /** Operator state the reviewer namespace must never expose (it mounts none of it in any case). */
 function mediaReviewerForbiddenRoots(): string[] {
-  const roots = [...config.workspaces.map((workspace) => workspace.path), resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
+  const roots = [...[...config.workspaces, ...workspaceRemovals.writableHistory()].map((workspace) => workspace.path),
+    resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
   return [...new Set(roots.filter((path) => {
     try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; }
   }).map((path) => realpathSync(path)))].slice(0, 32);

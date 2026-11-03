@@ -253,6 +253,13 @@ test("Remove Workspace unregisters managed and configured workspaces with regist
 
   const removalResponse = remove("site");
   const removal = await inbox.take((message) => message.type === "remove_workspace");
+  // While the runner has not answered, nothing new can come to depend on the workspace.
+  const lateLocation = await fetch(`${httpBase}/api/projects/${location.projectId}/locations`, {
+    method: "POST",
+    headers: { ...owner, "content-type": "application/json" },
+    body: JSON.stringify({ runnerId: runner.runnerId, workspaceId: "site" }),
+  });
+  assert.equal(lateLocation.status, 404, "a pending removal fences new project locations");
   socket.send(JSON.stringify({ type: "remove_workspace_result", requestId: removal.requestId, ok: true }));
   const removalReply = await removalResponse;
   assert.equal(removalReply.status, 200);
