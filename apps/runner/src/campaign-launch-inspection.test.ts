@@ -139,7 +139,7 @@ test("SSH home workspace inspection uses the authorized project subfolder, inclu
         workspacePath: repository, issueNumbers: [] } as CampaignLaunchInspectionMessage, [{ id: "home", path: root }],
       async (cwd, command, args) => {
         assert.equal(cwd, repository, "inspect the project, never the registered home root");
-        return args[0] === "remote" ? "git@github.com:owner/repo.git" : args.includes("--is-inside-work-tree") ? "true" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
+        return args[0] === "remote" ? "git@github.com:owner/repo.git" : args.includes("--is-inside-work-tree") ? "true" : "a".repeat(40);
       });
       assert.equal(result.ok, true);
     }
