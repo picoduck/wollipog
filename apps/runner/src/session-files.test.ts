@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
+import { spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { mkdtempSync, mkdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -9,6 +10,7 @@ import {
   createWorkspaceReference,
   inspectWorkspaceReferenceDiff,
   listSessionFiles,
+  nativeWorkspaceVisit,
   normalizeRelPath,
   parseWslWorkspaceReferenceSearch,
   parseWslWorkspaceVisit,
@@ -244,6 +246,47 @@ test("a fuzzy search keeps the best 50 matches, not the first 50 found, and name
   }
 });
 
+/** `src/a.ts` and `notes.txt` beside two `node_modules` directories, one nested. A file that is
+ * merely named `node_modules` is kept: only directories are skipped. */
+function makeDependencyFixture(): string {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-search-ignored-"));
+  mkdirSync(join(root, "node_modules", "pkg"), { recursive: true });
+  mkdirSync(join(root, "src", "node_modules"), { recursive: true });
+  mkdirSync(join(root, "docs"));
+  for (let index = 0; index < 5; index += 1) writeFileSync(join(root, "node_modules", "pkg", `dep-${index}.ts`), "");
+  writeFileSync(join(root, "src", "node_modules", "nested.ts"), "");
+  writeFileSync(join(root, "src", "a.ts"), "");
+  writeFileSync(join(root, "docs", "node_modules"), "");
+  writeFileSync(join(root, "notes.txt"), "");
+  return root;
+}
+
+const DEPENDENCY_FIXTURE_ENTRIES = ["docs", "docs/node_modules", "notes.txt", "src", "src/a.ts"];
+
+test("native search skips node_modules directories without counting them against the visit cap (#4095)", async () => {
+  const root = makeDependencyFixture();
+  try {
+    const exact = nativeWorkspaceVisit(root, DEPENDENCY_FIXTURE_ENTRIES.length);
+    assert.deepEqual(exact.entries.map((candidate) => candidate.path).sort(), DEPENDENCY_FIXTURE_ENTRIES);
+    assert.equal(exact.truncated, false, "the skipped trees spend none of the cap");
+    assert.equal(nativeWorkspaceVisit(root, DEPENDENCY_FIXTURE_ENTRIES.length - 1).truncated, true,
+      "the cap still bounds the project's own entries");
+
+    const fuzzy = await searchWorkspaceReferences(NATIVE, root, "dep", "fuzzy");
+    assert.deepEqual(fuzzy.results, []);
+    assert.equal(fuzzy.limit, undefined);
+    const substring = await searchWorkspaceReferences(NATIVE, root, "node_modules");
+    assert.deepEqual(substring.results, [{ path: "docs/node_modules", isDirectory: false }]);
+    assert.equal(substring.truncated, false);
+
+    const listing = await listSessionFiles(NATIVE, root, "");
+    assert.ok(listing.entries.some((entry) => entry.path === "node_modules" && entry.isDir),
+      "the folder view still lists the skipped directory");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("bestFuzzyFiles bounds its total alignment work and still ranks every match", () => {
   const entries = [
     { path: "src/sidebar-details.tsx", isDirectory: false },
@@ -405,6 +448,8 @@ test("wslSearchArgs: preserves find grouping and emits type metadata in one boun
   assert.deepEqual(args.slice(0, 5), ["-d", "Ubuntu", "--exec", "sh", "-c"]);
   assert.match(args[5]!, /\\\( -type f -o -type d \\\)/, "the shell receives escaped find grouping");
   assert.match(args[5]!, /-printf "%y\\t%P\\n"/, "one traversal returns both type and path");
+  assert.match(args[5]!, /find \. -mindepth 1 \\\( -path \.\/\.git -o -type d -name node_modules \\\) -prune/,
+    "the root, .git and node_modules directories never print, so none of them takes a row");
   assert.equal(args[7], "/home/u/repo");
   assert.equal(args[8], "20001", "one sentinel row distinguishes a capped traversal");
 });
@@ -438,4 +483,31 @@ test("WSL fuzzy search ranks the same bounded traversal and names a capped visit
   const capped = bestFuzzyFiles(parseWslWorkspaceVisit(listing, 3), "s");
   assert.equal(capped.limit, "entries");
   assert.deepEqual(capped.results.map((candidate) => candidate.path), ["src/sidebar.ts", "src/components/SessionDetail.tsx"]);
+});
+
+test("the WSL search script prunes node_modules before its bounded listing counts it (#4095)", (t) => {
+  if (process.platform !== "linux") {
+    t.skip("the WSL script needs GNU find, which only a Linux host has");
+    return;
+  }
+  const root = makeDependencyFixture();
+  try {
+    const cap = DEPENDENCY_FIXTURE_ENTRIES.length;
+    // The argv after `--exec` is what the distro runs; Linux runs the same `sh -c` script directly.
+    const ran = spawnSync("sh", wslSearchArgs("Ubuntu", root, cap).slice(4), { encoding: "utf8" });
+    assert.equal(ran.status, 0, ran.stderr);
+    assert.equal(ran.stdout.split("\n").filter(Boolean).length, cap, "neither the root nor a pruned entry reaches `head`");
+    const visit = parseWslWorkspaceVisit(ran.stdout, cap);
+    assert.deepEqual(visit.entries.map((candidate) => candidate.path).sort(), DEPENDENCY_FIXTURE_ENTRIES);
+    assert.deepEqual(visit.entries.find((candidate) => candidate.path === "docs/node_modules"),
+      { path: "docs/node_modules", isDirectory: false });
+    assert.equal(visit.truncated, false, "the skipped trees spend none of the cap");
+
+    const capped = spawnSync("sh", wslSearchArgs("Ubuntu", root, cap - 1).slice(4), { encoding: "utf8" });
+    assert.equal(capped.status, 0, capped.stderr);
+    assert.equal(parseWslWorkspaceVisit(capped.stdout, cap - 1).truncated, true,
+      "the cap still bounds the project's own entries");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
