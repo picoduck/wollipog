@@ -122,7 +122,10 @@ export async function classifyBaseMerge(git: BaseMergeGit, reference: string, he
       const [text, resolution] = await Promise.all([
         git(["cat-file", "blob", `${automatic.tree}:${path}`]), git(["cat-file", "blob", `${head}:${path}`]),
       ]);
-      if (Buffer.byteLength(text) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(resolution) > MAX_CONFLICTED_FILE_BYTES ||
+      // Git output arrives decoded as UTF-8, so distinct invalid bytes all read as U+FFFD; such
+      // content cannot be compared byte for byte and proves nothing.
+      if (text.includes("�") || resolution.includes("�") ||
+          Buffer.byteLength(text) > MAX_CONFLICTED_FILE_BYTES || Buffer.byteLength(resolution) > MAX_CONFLICTED_FILE_BYTES ||
           !resolvedWithinConflicts(text, resolution, reference, merged)) return null;
     }
     const mergeBase = async (revision: string) => (await git(["merge-base", "--end-of-options", baseSha, revision])).trim();

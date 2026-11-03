@@ -102,6 +102,22 @@ test("a resolution that changes a conflicted file's mode or type is an ordinary 
   assert.equal(await classify(dir, reference, await git("rev-parse", "HEAD"), base), null, "a type change");
 });
 
+test("a resolution that changes a byte outside the conflict that UTF-8 cannot represent is an ordinary commit", async (t) => {
+  const { dir, git, commit } = await repository(t);
+  // An invalid UTF-8 byte (0x80) outside the conflict, on both sides of the merge.
+  const withByte = (lines: string[], byte: number) => Buffer.concat([Buffer.from(`${lines.join("\n")}\n`), Buffer.from([byte, 0x0a])]);
+  writeFileSync(join(dir, "f.txt"), withByte(LINES.map((line) => line === "b" ? "b-main" : line), 0x80));
+  const base = await commit("base edits the same line");
+  await git("checkout", "-q", "pr");
+  writeFileSync(join(dir, "f.txt"), withByte(LINES.map((line) => line === "b" ? "b-pr" : line), 0x80));
+  const reviewed = await commit("pull request keeps the byte");
+  await assert.rejects(git("merge", "-q", "--no-edit", "main"));
+  // The resolution also turns 0x80 into 0x81; both decode to U+FFFD.
+  writeFileSync(join(dir, "f.txt"), withByte(LINES.map((line) => line === "b" ? "b-resolved" : line), 0x81));
+  const head = await commit("merge main, resolving b and changing the byte");
+  assert.equal(await classify(dir, reviewed, head, base), null);
+});
+
 test("a clean merge carrying any other change is an ordinary commit", async (t) => {
   const { dir, git, write, commit, reference } = await repository(t);
   write("g.txt", ["y"]);
