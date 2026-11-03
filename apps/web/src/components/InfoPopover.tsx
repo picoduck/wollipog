@@ -2,7 +2,6 @@ import { useLayoutEffect, useState, type ReactNode } from "react";
 import { InfoIcon } from "./Icons.js";
 import { useDismissiblePopover } from "./interactions.js";
 import { MenuSurface } from "./Menu.js";
-import { useIsMobile } from "./useIsMobile.js";
 
 /**
  * A panel tool's About popover (docs/design-system.md §4.9, §9.2; #2856): the explanation a tool
@@ -22,30 +21,20 @@ interface InfoPopoverProps {
   size?: "sm";
   /**
    * At a toolbar's trailing end (Usage and Cost's About These Numbers, #3010): a ghost button with
-   * the icon and its name on desktop, the icon alone on phones.
+   * the icon and its name. The toolbar drops the name, leaving the icon, when its main column is
+   * no wider than a phone (#4029).
    */
   labelled?: boolean;
   children: ReactNode;
 }
 
-export function InfoPopover({ labelled = false, ...props }: InfoPopoverProps) {
-  // Only a labelled one follows the width; an icon is an icon at every width, so the rest never
-  // subscribe to the viewport.
-  return labelled ? <LabelledInfoPopover {...props} /> : <InfoPopoverControl {...props} showLabel={false} />;
-}
-
-function LabelledInfoPopover(props: Omit<InfoPopoverProps, "labelled">) {
-  const phone = useIsMobile();
-  return <InfoPopoverControl {...props} showLabel={!phone} />;
-}
-
-function InfoPopoverControl({
+export function InfoPopover({
   tool,
   facts,
   size,
-  showLabel,
+  labelled: showLabel = false,
   children,
-}: Omit<InfoPopoverProps, "labelled"> & { showLabel: boolean }) {
+}: InfoPopoverProps) {
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "info-popover");
   const name = `About ${tool}`;
