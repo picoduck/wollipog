@@ -418,6 +418,52 @@ test("withdrawing the last handoff, or handing the item to an agent, reopens rat
   } finally { h.db.close(); }
 });
 
+test("reassigning an item to the child that still holds it clears the item's handoff", () => {
+  const h = fixture();
+  try {
+    finishChildren(h);
+    assert.ok(handOff(h, h.advisory, "human").ok);
+    const added = h.svc.recordCampaignPlan("root", { planComplete: true, items: [{ key: "follow-up:docs",
+      title: "Docs", origin: "follow_up" }] });
+    assert.ok(added.ok, added.error ?? "refused");
+    const followUp = added.data!.items[0]!.workItemId;
+    const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: followUp, childSessionId: "other" });
+    assert.ok(assigned.ok && assigned.data!.created, assigned.error ?? "refused");
+    const attemptId = assigned.data!.attempt.id;
+    // The child reports and is verified, but its attempt on the follow-up stays open.
+    const verified = h.svc.verifyCampaignChild("root", { childSessionId: "other", reportEventSeq: h.report("other"),
+      followUpsAccounted: true });
+    assert.ok(verified.ok, verified.error ?? "verification refused");
+    assert.ok(handOff(h, followUp, "human").ok);
+    assert.equal(h.db.campaignProjection("root")!.status, "complete_with_handoffs");
+
+    const before = h.db.campaignWorkLedger.revision("root");
+    const again = h.svc.assignCampaignWorkItem("root", { workItemId: followUp, childSessionId: "other" });
+    assert.ok(again.ok, again.error ?? "refused");
+    // The same attempt, and nothing closed: only the handoff goes.
+    assert.equal(again.data!.attempt.id, attemptId);
+    assert.equal(again.data!.created, false);
+    assert.deepEqual(again.data!.closedAttempts, []);
+    const item = h.db.campaignWorkLedger.detail("root", followUp, Date.now())!;
+    assert.equal(item.handoff, null);
+    assert.deepEqual(item.attempts.map((attempt) => [attempt.id, attempt.endReason]), [[attemptId, null]]);
+    const after = h.db.campaignWorkLedger.revision("root");
+    assert.ok(after > before, "clearing the handoff is a ledger write");
+    assert.equal(again.data!.revision, after);
+    // The agent owns unfinished work again, so the remaining handoff no longer completes the campaign.
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "blocked");
+    assert.deepEqual(projection.handoffs?.items.map((handed) => handed.workItemId), [h.advisory]);
+
+    // With no handoff left to clear, reassigning the holder is a no-op.
+    const repeated = h.svc.assignCampaignWorkItem("root", { workItemId: followUp, childSessionId: "other" });
+    assert.ok(repeated.ok, repeated.error ?? "refused");
+    assert.equal(repeated.data!.attempt.id, attemptId);
+    assert.equal(repeated.data!.revision, after);
+    assert.equal(h.db.campaignWorkLedger.revision("root"), after);
+  } finally { h.db.close(); }
+});
+
 /** Answers the verification's worktree inspection the way a v275 runner does. */
 function inspectWorktrees(h: Fixture, answer: (worktreePath: string) => Extract<RunnerToControlPlane, { type: "git_result" }>) {
   const inspected: string[] = [];
