@@ -363,6 +363,8 @@ test("PROTOCOL_VERSION is 277", () => {
     assert.equal(runnerSupportsProtocol(276, capability), false);
     assert.equal(runnerSupportsProtocol(277, capability), true);
   }
+  assert.equal(runnerSupportsProtocol(275, "delegatedImageEvidenceReview"), false);
+  assert.equal(runnerSupportsProtocol(276, "delegatedImageEvidenceReview"), true);
   assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
   assert.equal(runnerSupportsProtocol(275, "campaignHandoffs"), true);
   assert.equal(campaignStatusTerminal("verified_complete"), true);

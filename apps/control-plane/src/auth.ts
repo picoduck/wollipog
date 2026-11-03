@@ -1,4 +1,5 @@
 import { mediaReviewerApiRouteAllowed } from "./media-session-route-policy.js";
+import { delegatedImageReviewerApiRouteAllowed } from "./delegated-image-reviews.js";
 /**
  * Per-device bearer auth for the UI-facing surface (REST + /ui socket).
  *
@@ -216,14 +217,20 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   // the media methods, and child or implementation credentials reach neither.
   "POST /api/sessions/:id/video-evidence-review/prepare",
   "POST /api/sessions/:id/video-evidence-review/provenance",
+  // Delegated image review (#4074): the Orchestrator prepares and reads; only the reviewer's own
+  // credential reaches the delivery and verdict routes.
+  "POST /api/sessions/:id/descendant-requests/delegated-image-review",
+  "POST /api/sessions/:id/descendant-requests/delegated-image-review/get",
   "POST /api/sessions/:id/worktrees", "POST /api/sessions/:id/worktrees/attach",
   "POST /api/sessions/:id/worktrees/select", "POST /api/sessions/:id/worktrees/discard",
   "POST /api/sessions/:id/worktrees/delete-refs",
 ]);
 
 /** `role` is the credential session's current role; the legacy preset literal is accepted for it. */
-export function isAgentControlApiRouteAllowed(method: string, routePath: string, role?: SessionRole | string | null, mediaPurpose = false): boolean {
+export function isAgentControlApiRouteAllowed(method: string, routePath: string, role?: SessionRole | string | null, mediaPurpose = false,
+  imageReviewer = false): boolean {
   if (mediaPurpose) return mediaReviewerApiRouteAllowed(method.toUpperCase(), routePath);
+  if (imageReviewer) return delegatedImageReviewerApiRouteAllowed(method.toUpperCase(), routePath);
   if (role === "orchestrator") return ORCHESTRATOR_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
   return AGENT_CONTROL_API_ROUTES.has(`${method.toUpperCase()} ${routePath}`);
 }

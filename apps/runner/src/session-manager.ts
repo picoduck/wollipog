@@ -6888,6 +6888,13 @@ export class SessionManager {
       reportMaterialized(false);
       return false;
     }
+    // A delegated image reviewer (#4074) is never relaunched, least of all as an ordinary session.
+    const priorImageReviewer = this.store.readMeta(spec.sessionId)?.uiEvidenceReviewer;
+    if (priorImageReviewer || (spec.uiEvidenceReviewer && this.store.has(spec.sessionId))) {
+      durable?.failed("a delegated image reviewer runs once and cannot be relaunched", "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
     if (spec.review) {
       const review = await this.prepareReviewLaunch(spec, initialPrompt ?? "", authorization.error);
       if ("error" in review) {
@@ -7236,6 +7243,7 @@ export class SessionManager {
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
+      ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
         ...(this.preparedReviewRounds.has(spec.sessionId) ? { round: this.preparedReviewRounds.get(spec.sessionId)! } : {}),

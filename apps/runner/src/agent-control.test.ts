@@ -136,6 +136,60 @@ test("native Windows retains a safe argument-array CLI fallback", () => {
   }
 });
 
+test("a delegated image reviewer launches with only its two review tools, or not at all (#4074)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-image-reviewer-control-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const };
+    const launch = spec("claude-code");
+    launch.agentId = "claude";
+    launch.command = "claude";
+    // User flags that would widen the reviewer are replaced, never kept beside the preset.
+    launch.args = ["--allowedTools", "Bash", "--dangerously-skip-permissions", "--mcp-config", "/home/user/extra.json"];
+    launch.uiEvidenceReviewer = { reviewId: "uiimgreview_1" };
+    provisionAgentControl(launch, control, () => {}, host);
+    const args = [...launch.args];
+    assert.equal(launch.env.WOLLIPOG_PERMISSION_PRESET, "ui_evidence_reviewer");
+    const value = (flag: string) => launch.args[launch.args.indexOf(flag) + 1];
+    assert.equal(value("--tools"), "", "no built-in tools");
+    assert.equal(value("--allowedTools"), "mcp__wollipog__review_evidence_image,mcp__wollipog__submit_evidence_verdict");
+    assert.equal(value("--permission-mode"), "dontAsk");
+    assert.equal(value("--setting-sources"), "");
+    assert.ok(launch.args.includes("--strict-mcp-config"));
+    assert.ok(launch.args.includes("--disable-slash-commands"));
+    assert.equal(launch.args.includes("--dangerously-skip-permissions"), false);
+    assert.equal(launch.args.includes("Bash"), false);
+    assert.deepEqual(launch.args.flatMap((arg, index) => arg === "--mcp-config" ? [launch.args[index + 1]] : []),
+      [agentControlMcpConfigPath(root, launch.sessionId)], "only the runner's own management server");
+    const mcp = JSON.parse(readFileSync(agentControlMcpConfigPath(root, launch.sessionId), "utf8"));
+    assert.equal(mcp.mcpServers.wollipog.env.WOLLIPOG_PERMISSION_PRESET, "ui_evidence_reviewer",
+      "the management server serves the reviewer role");
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.deepEqual(launch.args, args, "resume is idempotent");
+
+    for (const [label, refused, options] of [
+      ["Codex", Object.assign(spec("codex"), { uiEvidenceReviewer: { reviewId: "r" } }), control],
+      ["an Orchestrator", Object.assign(spec("claude-code"), { uiEvidenceReviewer: { reviewId: "r" }, role: "orchestrator",
+        config: { permissionMode: "orchestrator" } }), control],
+      ["an older control plane", Object.assign(spec("claude-code"), { uiEvidenceReviewer: { reviewId: "r" } }),
+        { ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview - 1 }],
+      ["a WSL context", Object.assign(spec("claude-code"), { uiEvidenceReviewer: { reviewId: "r" },
+        context: { kind: "wsl", distro: "Ubuntu" } }), control],
+    ] as const) {
+      const refusedSpec = refused as SessionLaunchSpec;
+      refusedSpec.sessionId = `s_refused_${label.replace(/\W+/gu, "_")}`;
+      assert.throws(() => provisionAgentControl(refusedSpec, options, () => {}, host),
+        /delegated image reviewer launches only/u, label);
+      assert.equal(existsSync(agentControlTokenPath(root, refusedSpec.sessionId)), false, `${label}: no credential before refusal`);
+    }
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("orchestrator provisioning restricts native tools and refuses unsupported launch boundaries", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-control-"));
   try {
