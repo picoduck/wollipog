@@ -478,7 +478,7 @@ function validObservation(value: unknown): value is CampaignForgePullRequestObse
     (pr.headBranch === undefined || validHeadBranch(pr.headBranch));
 }
 
-/** v278 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
+/** v279 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
 function validHeadBranch(value: unknown): boolean {
   const branch = value as Record<string, unknown> | null;
   return Boolean(branch) && typeof branch === "object" && forgeActionBranchName(branch!.name) &&

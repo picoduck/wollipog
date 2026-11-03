@@ -1157,7 +1157,7 @@ export function normalizeWorkflowDecisionSnapshot(
       return fail("branch deletion decisions require exact merged-branch and dependent-PR evidence");
     }
     if (open.length > 0) return fail("branch deletion cannot be authorized while dependent PRs remain open", 409);
-    // v278 (#4067): the merged pull request and head Wollipog's own deletion is pinned to. Emitted
+    // v279 (#4067): the merged pull request and head Wollipog's own deletion is pinned to. Emitted
     // only when present, so an earlier snapshot keeps its digest.
     const pullRequest = value.pullRequest === undefined ? undefined
       : Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0 ? value.pullRequest as number : null;

@@ -19070,7 +19070,7 @@ export class SessionManager {
     }
   }
 
-  /** v278 (#4067): perform one approved forge action the control plane checked, through the
+  /** v279 (#4067): perform one approved forge action the control plane checked, through the
    * requesting session's own `gh` login and context. A fixed outcome, never tool output. `gh` runs
    * from the filesystem root, never from the session's worktree, so no repository configuration the
    * agent can write is read or executed on its behalf. */

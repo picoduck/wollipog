@@ -21099,7 +21099,7 @@ export class ControlPlaneDb {
    * outside party, with the handoff's reason; otherwise `pending`, including a pull request the
    * forge has not been read for yet. A pull request not (yet) merged is not a merged branch, and a
    * fork's branch, or one read by an older runner, is not tracked. A campaign whose observing
-   * runner predates v278 tracks nothing, as before. Reads rows only.
+   * runner predates v279 tracks nothing, as before. Reads rows only.
    */
   campaignMergedBranches(campaignId: string): CampaignMergedBranch[] {
     const observer = this.campaignForgeObservingRunner(campaignId);

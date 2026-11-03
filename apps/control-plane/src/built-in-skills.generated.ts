@@ -496,7 +496,7 @@ export const BUILT_IN_SKILL_SOURCES: readonly BuiltInSkillSource[] = [
           "wrapper, or a permission-mode change. Call `execute_workflow_decision` (or `wollipog decision",
           "execute <occurrence-id> --resource-digest <sha256>`) with the occurrence's `resourceDigest` instead,",
           "and Wollipog performs the one approved forge action itself through your session's forge login",
-          "(control plane protocol v278). For a `merged_branch_deletion`, include the merged `pullRequest` and",
+          "(control plane protocol v279). For a `merged_branch_deletion`, include the merged `pullRequest` and",
           "its `headSha` in the snapshot you request. Wollipog then deletes that exact branch only while its",
           "remote tip is still that head and no open pull request targets it. You can execute the deletion",
           "instead of consuming it, or after a consumed command was refused. For an armed GitHub `pr_merge`,",

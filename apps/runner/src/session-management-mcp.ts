@@ -1150,8 +1150,8 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       properties: {
         category: { const: "merged_branch_deletion" }, repository: { type: "string" }, branch: { type: "string" },
         merged: { const: true }, mergeCommitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-        pullRequest: { type: "integer", minimum: 1, description: "The merged pull request (v278); with headSha, lets execute_workflow_decision delete it" },
-        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The merged pull request's head, the tip the deletion is pinned to (v278)" },
+        pullRequest: { type: "integer", minimum: 1, description: "The merged pull request (v279); with headSha, lets execute_workflow_decision delete it" },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The merged pull request's head, the tip the deletion is pinned to (v279)" },
         dependentPullRequests: { type: "object", properties: {
           checkedAt: { type: "integer", minimum: 1 }, open: { type: "array", maxItems: 0 },
         }, required: ["checkedAt", "open"], additionalProperties: false },
@@ -2322,7 +2322,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "execute_workflow_decision",
-    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED). Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v278.",
+    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED). Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v279.",
     inputSchema: {
       type: "object",
       properties: {

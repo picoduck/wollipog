@@ -1,5 +1,5 @@
 /**
- * Wollipog-performed forge actions (#4067, protocol v278). A provider's own permission classifier
+ * Wollipog-performed forge actions (#4067, protocol v279). A provider's own permission classifier
  * can refuse an approved command (Claude Code `auto` mode decides inline, so its refusal never
  * reaches the runner's permission channel). Wollipog holds the typed approval, so for the two
  * approved forge writes a campaign depends on it performs the one approved action itself, bound

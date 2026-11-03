@@ -823,7 +823,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      receive the status as `waiting_human`. GitHub forge observations carry `defaultBranch`, and
 //      a `status` git action may name a non-selected worktree the session still links; one it no
 //      longer links fails with `GIT_WORKTREE_UNLINKED`.
-// 278: Wollipog-performed forge actions (#4067). The requester of an approved
+// 279: Wollipog-performed forge actions (#4067). The requester of an approved
 //      `merged_branch_deletion` (which may now name `pullRequest` and `headSha`) or of an approved,
 //      armed GitHub `pr_merge` calls POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute;
 //      the control plane sends `forge_decision_action` to the child's runner, which deletes the
@@ -832,7 +832,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      GitHub forge observations carry `headBranch`, and the campaign projection lists
 //      `mergedBranches`; a pending merged branch keeps a campaign from `verified_complete`. Older
 //      runners never receive the action, and their campaigns keep today's completion.
-export const PROTOCOL_VERSION = 278;
+export const PROTOCOL_VERSION = 279;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1046,10 +1046,10 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
-  /** v278 Wollipog performs an approved branch deletion or armed enqueue itself (#4067), and GitHub
+  /** v279 Wollipog performs an approved branch deletion or armed enqueue itself (#4067), and GitHub
    * forge observations report the head branch that merged-branch cleanup tracks. Checked against
    * the child's runner, and against the control plane by the runner's tools. */
-  forgeDecisionActions: 278,
+  forgeDecisionActions: 279,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -3071,7 +3071,7 @@ export interface OrchestratorCampaignProjection {
     status: "pending" | "deferred" | "refused";
     reason: string;
   }>;
-  /** v278 (#4067): the head branches of the campaign's merged pull requests (those its children
+  /** v279 (#4067): the head branches of the campaign's merged pull requests (those its children
    * merged through approved `pr_merge` decisions) and whether each is deleted, retained with a
    * reason, or pending on the remote. A pending branch keeps the campaign from `verified_complete`.
    * Pending first, bounded by CAMPAIGN_MERGED_BRANCHES_LIMIT; the counts are complete. Omitted
@@ -5318,7 +5318,7 @@ export type WorkflowDecisionResourceSnapshot =
       branch: string;
       merged: true;
       mergeCommitSha: string;
-      /** v278 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
+      /** v279 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
        * itself only when both are present; omitted, the snapshot and its digest are unchanged. */
       pullRequest?: number;
       headSha?: string;
@@ -5439,7 +5439,7 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
-  /** v278 (#4067): what Wollipog did when it performed this approved forge action itself. */
+  /** v279 (#4067): what Wollipog did when it performed this approved forge action itself. */
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;

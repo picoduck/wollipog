@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 278);
+  assert.equal(PROTOCOL_VERSION, 279);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,10 +358,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 278", () => {
-  assert.equal(PROTOCOL_VERSION, 278);
-  assert.equal(runnerSupportsProtocol(277, "forgeDecisionActions"), false);
-  assert.equal(runnerSupportsProtocol(278, "forgeDecisionActions"), true);
+test("PROTOCOL_VERSION is 279", () => {
+  assert.equal(PROTOCOL_VERSION, 279);
+  assert.equal(runnerSupportsProtocol(278, "forgeDecisionActions"), false);
+  assert.equal(runnerSupportsProtocol(279, "forgeDecisionActions"), true);
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0"]) assert.equal(forgeActionBranchName(name), true, name);
   for (const name of ["", "-d", "/x", "x/", "a..b", "a//b", ".hidden", "a/.b", "x.lock", "x.", "a b", "a~1", "a:b", "x".repeat(256)]) {
     assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
