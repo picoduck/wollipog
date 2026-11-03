@@ -816,6 +816,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      pull_request_watch_start/cancel, the runner polls GitHub and answers with
 //      pull_request_watch_update, and the session is prompted once with the outcome. Sessions and
 //      campaigns show the watch. Older runners and control planes keep blocking waits.
+// 275: campaign handoffs (#4070). Campaign status gains terminal `complete_with_handoffs`, the
+//      projection lists `handoffs`, `update_campaign_work_item` records an item's `handoff`, and
+//      POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery records delivery
+//      from forge-verified merged pull requests or a child's exact report. Dashboards below 275
+//      receive the status as `waiting_human`. GitHub forge observations carry `defaultBranch`, and
+//      a `status` git action may name a non-selected worktree the session still links; one it no
+//      longer links fails with `GIT_WORKTREE_UNLINKED`.
 // 276: delegated image evidence review (#4074). An Orchestrator hands a pending
 //      ui_evidence_approval decision's images to a managed reviewer Session whose receipts and
 //      verdict the server records, and resolves with delegatedImageReview. The reviewer launches
@@ -1034,6 +1041,9 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
+   * status for dashboards and the delivery and handoff ledger writes for runner tools. */
+  campaignHandoffs: 275,
   /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
    * Checked against the runner by the control plane and against the control plane by the runner. */
   pullRequestWatch: 272,
@@ -2919,12 +2929,36 @@ export type FullControlFirstMessageScope =
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see
  * `OrchestratorCampaignProjection.stalled`). `waiting_human` and `verified_complete` take
- * precedence over a stalled continuation. */
+ * precedence over a stalled continuation.
+ *
+ * v275 `complete_with_handoffs` (#4070) is terminal like `verified_complete`: every child is
+ * verified and cleaned up, nothing is pending, and every unfinished committed work item is handed to
+ * `human` or `external` (`OrchestratorCampaignProjection.handoffs`). Dashboards older than
+ * `campaignHandoffs` receive it as `waiting_human`, never as active work. */
 export type OrchestratorCampaignStatus =
   | "waiting_human"
   | "active"
   | "blocked"
-  | "verified_complete";
+  | "verified_complete"
+  | "complete_with_handoffs";
+
+/** Statuses after which the campaign takes no more automatic turns and Campaign Elapsed ends. */
+export function campaignStatusTerminal(status: OrchestratorCampaignStatus | null | undefined): boolean {
+  return status === "verified_complete" || status === "complete_with_handoffs";
+}
+
+/** One unfinished work item the campaign handed to a person or an outside party (#4070). */
+export interface OrchestratorCampaignHandoff {
+  workItemId: string;
+  key: string;
+  title: string | null;
+  issue: import("./campaign-work-ledger.js").CampaignIssueRef | null;
+  primaryState: import("./campaign-work-ledger.js").CampaignWorkItemPrimaryState;
+  handoff: import("./campaign-work-ledger.js").CampaignWorkItemHandoff;
+}
+
+/** Handed-off items the projection lists at most; `total` keeps the full count. */
+export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 
 /** Why an Orchestrator assigned UI Evidence Approval cannot exercise it. Client-scoped codes
  * describe the campaign; evidence-scoped codes describe one exact decision. */
@@ -3004,6 +3038,10 @@ export interface OrchestratorCampaignProjection {
   /** Full Control only: the request classes that still come to the Human for this campaign
    * (#2940), today at most `human_required_rules` while such a rule exists. */
   fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
+  /** v275: unfinished committed work items handed to `human` or `external`, oldest handoff first
+   * (#4070). The owner's to-do list; omitted when there are none. Bounded by
+   * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */
+  handoffs?: { total: number; items: OrchestratorCampaignHandoff[] };
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -6613,6 +6651,10 @@ export interface SessionUsageResponse {
   totals: UsageAmount;
   byModel: SessionModelUsage[];
   pricing?: UsagePricingStatus;
+  /** Claude turns whose records billed the conversation's running total instead of their own share
+   * (#4069), and what they billed. Their cost is in `totals`, which may therefore overstate the
+   * session; it cannot be corrected automatically. Absent when there are none, or from older planes. */
+  runningTotalRecords?: { records: number; costUsd: number };
 }
 
 /** The organization's per-user daily cost allowance (v105). `perUserUsd: null` ⇒ no daily budget. */
@@ -6740,6 +6782,9 @@ export interface UsageAggregationResponse {
   hourlyDataAvailable?: boolean;
   /** Native Claude records from the older accounting path, still requiring reconciliation. */
   legacyClaudeCostRecords?: number;
+  /** Claude turns in this range that billed their conversation's running total (#4069), so the
+   * cost may be overstated. Absent from older planes. */
+  runningTotalClaudeRecords?: number;
   since: number;
   through: number;
   retention: UsageRetentionPolicy;
@@ -12289,7 +12334,9 @@ export interface GitActionData {
 }
 
 /** Machine-readable failure classes handled across the runner/control-plane/UI boundary. */
-export type GitErrorCode = "GIT_STALE" | "GIT_APPLY_FAILED" | "GIT_NO_REPOSITORY";
+/** v275 `GIT_WORKTREE_UNLINKED`: the request named a worktree the session no longer links on the
+ * runner, so there is nothing of the session's left there to inspect. */
+export type GitErrorCode = "GIT_STALE" | "GIT_APPLY_FAILED" | "GIT_NO_REPOSITORY" | "GIT_WORKTREE_UNLINKED";
 
 export interface GitActionResultMessage {
   type: "git_result";

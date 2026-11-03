@@ -392,6 +392,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const body = input();
       return "error" in body ? body : { tool: "update_campaign_work_item", input: { ...body.value, workItemId: operand(2) } };
     }
+    if (verb === "deliver" && operand(2)) {
+      const body = input();
+      return "error" in body ? body : { tool: "record_campaign_work_item_delivery", input: { ...body.value, workItemId: operand(2) } };
+    }
     if (verb === "assign" && operand(2) && operand(3)) {
       return { tool: "assign_campaign_work_item", input: { workItemId: operand(2), childSessionId: operand(3) } };
     }
@@ -418,7 +422,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (flag(args, "--recommendations")) query.includeRecommendations = true;
       return { tool: "get_campaign_work_items", input: query };
     }
-    return { error: "use campaign plan, update-item, assign, adjudicate, or work-items; see wollipog help campaign" };
+    return { error: "use campaign plan, update-item, deliver, assign, adjudicate, or work-items; see wollipog help campaign" };
   }
   // Like artifact, this group reads only its fixed leading words. Keeping its JSON value options
   // out of the shared positional-option set ensures an unrelated command cannot become valid just
@@ -966,6 +970,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
     : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
+    : parsed.tool === "record_campaign_work_item_delivery"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignHandoffs
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
       "adjudicate_campaign_recommendation", "get_campaign_work_items"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger

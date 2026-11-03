@@ -14,6 +14,7 @@ import {
   coverageMessages,
   coverageNeedsRates,
   coverageSentence,
+  coverageTitle,
   dailyBudgetReached,
   DRIVER_ORDER,
   DRIVER_PRESENTATION,
@@ -386,6 +387,19 @@ test("coverage items name offline machines, unpriced turns and rate-table state,
     [{ kind: "rates-unavailable" }]);
   assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, pricing: undefined }), [], "a pre-v103 plane sends no pricing block");
   assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 0 }), []);
+});
+
+test("Claude turns that billed a running total make the totals uncertain, not exact (#4069)", () => {
+  const items = coverageMessages({ offlineMachines: [], unpricedRecords: 0, legacyClaudeCostRecords: 1, runningTotalClaudeRecords: 3 });
+  assert.deepEqual(items, [{ kind: "legacy-claude", records: 1 }, { kind: "running-total-claude", records: 3 }]);
+  assert.equal(coverageSentence(items[1]!),
+    "3 Claude Code turns may also include the cost of earlier turns in the same conversation, so these totals may be overstated.");
+  assert.equal(coverageSentence({ kind: "running-total-claude", records: 1 }),
+    "1 Claude Code turn may also include the cost of earlier turns in the same conversation, so these totals may be overstated.");
+  assert.equal(coverageNeedsRates(items), false, "new rates cannot help");
+  assert.equal(coverageTitle(items), "Some Costs May Be Overstated", "nothing is missing");
+  assert.equal(coverageTitle([...items, { kind: "unpriced", records: 1 }]), "Some Usage Is Missing");
+  assert.deepEqual(coverageMessages({ offlineMachines: [], unpricedRecords: 0, runningTotalClaudeRecords: 0 }), []);
 });
 
 test("coverage sentences agree with their count, and only pricing gaps offer new rates (#3016)", () => {

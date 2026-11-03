@@ -59,6 +59,7 @@ import {
   orchestratorExecutionPolicyRequirement,
   orchestratorIntegrationIsolationRequirement,
   runnerSupportsProtocol,
+  campaignStatusTerminal,
   BOARD_COLUMNS,
   archiveRequiresStop,
   scopeAudienceContained,
@@ -360,6 +361,11 @@ test("PROTOCOL_VERSION is 276", () => {
   assert.equal(PROTOCOL_VERSION, 276);
   assert.equal(runnerSupportsProtocol(275, "delegatedImageEvidenceReview"), false);
   assert.equal(runnerSupportsProtocol(276, "delegatedImageEvidenceReview"), true);
+  assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
+  assert.equal(runnerSupportsProtocol(275, "campaignHandoffs"), true);
+  assert.equal(campaignStatusTerminal("verified_complete"), true);
+  assert.equal(campaignStatusTerminal("complete_with_handoffs"), true);
+  for (const status of ["waiting_human", "active", "blocked", null, undefined] as const) assert.equal(campaignStatusTerminal(status), false);
   assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);

@@ -71,8 +71,11 @@ export interface CampaignAuthorityEvaluation {
   /** The server answers this occurrence itself with its one-time reject or dismissal. A
    * declined occurrence can never be approved or answered by anyone acting for the campaign. */
   disposition?: "decline";
-  /** A publication that named a recommendation the server could not admit (#2940). */
+  /** A publication the server could not admit (#2940). Under an issue boundary every human-owned
+   * publication carries one, including one that names no recommendation (#4065). */
   admissionFailure?: CampaignPublicationAdmissionFailure;
+  /** The fixed sentence for `admissionFailure` from CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES. */
+  admissionMessage?: string;
   /** With `outside_issue_scope`: each issue the merge would close outside the scope, as sorted `owner/repo#N`. */
   unscopedClosures?: string[];
 }

@@ -1,4 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
 import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
@@ -100,6 +101,7 @@ import {
   type GetCampaignWorkItemsRequest,
   type RecordCampaignPlanRequest,
   type UpdateCampaignWorkItemRequest,
+  type RecordCampaignWorkItemDeliveryRequest,
   type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
@@ -1230,7 +1232,7 @@ app.addHook("preSerialization", (req, _reply, payload, done) => {
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
-  done(null, projectBackgroundRetryExhaustionForUi(payload, protocol));
+  done(null, projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
 });
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
@@ -4260,8 +4262,9 @@ app.get("/api/sessions", async (req,reply) => {
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
   const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
+  const supportsHandoffs = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "campaignHandoffs");
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,supportsHandoffs)
     : '{"sessions":[]}');
 });
 
@@ -4604,6 +4607,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (re
   if (!principal) return reply;
   return respond(reply, svc.updateCampaignWorkItem(id,
     { ...(req.body as Omit<UpdateCampaignWorkItemRequest, "workItemId">), workItemId: itemId },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery", async (req, reply) => {
+  const { id, itemId } = req.params as { id: string; itemId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, await svc.recordCampaignWorkItemDelivery(id,
+    { ...(req.body as Omit<RecordCampaignWorkItemDeliveryRequest, "workItemId">), workItemId: itemId },
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 

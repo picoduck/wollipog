@@ -541,6 +541,7 @@ export interface CoverageNotice {
   offlineMachines: string[];
   unpricedRecords: number;
   legacyClaudeCostRecords?: number;
+  runningTotalClaudeRecords?: number;
   pricing?: UsageAggregationResponse["pricing"];
 }
 
@@ -549,6 +550,7 @@ export type CoverageItem =
   | { kind: "offline-machines"; machines: string[] }
   | { kind: "unpriced"; records: number }
   | { kind: "legacy-claude"; records: number }
+  | { kind: "running-total-claude"; records: number }
   | { kind: "rates-unavailable" }
   | { kind: "rates-cached" };
 
@@ -560,12 +562,21 @@ export function coverageMessages(notice: CoverageNotice): CoverageItem[] {
   if (notice.unpricedRecords > 0) items.push({ kind: "unpriced", records: notice.unpricedRecords });
   const legacy = notice.legacyClaudeCostRecords ?? 0;
   if (legacy > 0) items.push({ kind: "legacy-claude", records: legacy });
+  const runningTotals = notice.runningTotalClaudeRecords ?? 0;
+  if (runningTotals > 0) items.push({ kind: "running-total-claude", records: runningTotals });
   if (notice.pricing?.status === "unavailable") items.push({ kind: "rates-unavailable" });
   else if (notice.pricing?.status === "cached") items.push({ kind: "rates-cached" });
   return items;
 }
 
 const MACHINE_LIST = new Intl.ListFormat("en", { style: "long", type: "conjunction" });
+
+/** Claude Code turns that billed their conversation's running total after a runner restart (#4069).
+ * Their cost cannot be corrected automatically, so it is named as uncertain rather than exact. */
+export function claudeRunningTotalSentence(records: number, figure: string): string {
+  const turns = records === 1 ? "1 Claude Code turn" : `${records.toLocaleString("en-US")} Claude Code turns`;
+  return `${turns} may also include the cost of earlier turns in the same conversation, so ${figure} may be overstated.`;
+}
 
 /** One sentence per gap, in the person's words: a turn rather than a record, a Machine by name. */
 export function coverageSentence(item: CoverageItem): string {
@@ -580,11 +591,21 @@ export function coverageSentence(item: CoverageItem): string {
         : `${item.records.toLocaleString("en-US")} turns have no price because no rate is known for their model.`;
     case "legacy-claude":
       return "Some older Claude Code costs were recorded in a way that can count a resumed session's spending more than once.";
+    case "running-total-claude":
+      return claudeRunningTotalSentence(item.records, "these totals");
     case "rates-unavailable":
       return "No rates are loaded, so turns without a cost from their provider have no price.";
     case "rates-cached":
       return "Rates couldn't be updated, so costs use the last rates Wollipog loaded.";
   }
+}
+
+/** The coverage notice's title. Costs that may count spending twice are not missing usage, so a
+ * notice that reports only those says what it does report. */
+export function coverageTitle(items: readonly CoverageItem[]): string {
+  return items.every((item) => item.kind === "running-total-claude" || item.kind === "legacy-claude")
+    ? "Some Costs May Be Overstated"
+    : "Some Usage Is Missing";
 }
 
 /** Whether loading newer rates could help: something is unpriced, or the rates are missing or old. */

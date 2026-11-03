@@ -25,6 +25,7 @@ import {
   coverageMessages,
   coverageNeedsRates,
   coverageSentence,
+  coverageTitle,
   dailyBudgetReached,
   driverRows,
   formatCompactTokens,
@@ -598,7 +599,8 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
     return map;
   }, [data]);
   const coverage = data
-    ? coverageMessages({ offlineMachines, legacyClaudeCostRecords: data.legacyClaudeCostRecords, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
+    ? coverageMessages({ offlineMachines, legacyClaudeCostRecords: data.legacyClaudeCostRecords,
+      runningTotalClaudeRecords: data.runningTotalClaudeRecords, unpricedRecords: data.totals.unpricedRecords ?? 0, pricing: data.pricing })
     : [];
   const empty = data ? usageIsEmpty(data.totals) : false;
   const includesCodexAppServer = Boolean(data && (
@@ -778,7 +780,7 @@ export function UsageView({ tab: routeTab, onSelectTab, onOpenConnections }: {
   const coverageNotice = coverage.length > 0 && (
     <Notice
       tone="warning"
-      title="Some Usage Is Missing"
+      title={coverageTitle(coverage)}
       className="usage-coverage"
       details={ratesProblem ? ratesProblem.details.map((line) => <p key={line}>{line}</p>) : undefined}
       actions={(machinesOffline && navigate) || coverageNeedsRates(coverage) ? (
