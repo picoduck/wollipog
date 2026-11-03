@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { RunnerConfigWorkspace } from "./config.js";
-import { configuredSessionWritablePaths, trustedExecutable } from "./review-trust.js";
+import { configuredSessionWritableGrants, trustedExecutable } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
 import { removeConfiguredWorkspace, WORKSPACE_REMOVALS_FILE, WorkspaceRemovals } from "./workspace-removals.js";
 
@@ -76,7 +76,7 @@ test("removal is refused while a session runs there, for a changed folder, and f
   assert.equal(existsSync(join(dataDir, WORKSPACE_REMOVALS_FILE)), false);
 });
 
-test("a removed workspace's granted directories stay session-writable for reviewer trust, across a restart", { skip: process.platform === "win32" }, (t) => {
+test("a session that ran in a removed workspace keeps its directory grants for reviewer trust, across a restart", { skip: process.platform === "win32" }, (t) => {
   const { dataDir, home, cleanup } = fixture();
   t.after(cleanup);
   const granted = join(dataDir, "granted-tools");
@@ -91,24 +91,27 @@ test("a removed workspace's granted directories stay session-writable for review
   ];
   const uid = process.getuid?.() ?? -1;
   const rootUid = statSync("/").uid;
-  const trustRoots = (removals: WorkspaceRemovals) => configuredSessionWritablePaths({
-    workspaces: [...workspaces, ...removals.writableHistory()],
-    sessions: [{ repoPath: home, worktreePath: null } as SessionMeta],
+  const archived = { sessionId: "s_archived", workspaceId: "home", repoPath: home, worktreePath: null } as SessionMeta;
+  const grants = (removals: WorkspaceRemovals, sessions: SessionMeta[]) => configuredSessionWritableGrants({
+    workspaces, removedWorkspaces: removals.entries(), sessions,
   });
+  const trusted = (removals: WorkspaceRemovals, sessions: SessionMeta[]) =>
+    trustedExecutable("codex", granted, [...new Set(grants(removals, sessions).map((grant) => grant.path))], uid, rootUid);
   const removals = new WorkspaceRemovals(dataDir);
-  assert.throws(() => trustedExecutable("codex", granted, trustRoots(removals), uid, rootUid), /a session can write/u);
+  assert.throws(() => trusted(removals, [archived]), /a session can write/u);
 
   assert.equal(removeConfiguredWorkspace({
     workspaces, removals, workspaceId: "home", path: home, sessionRunningIn: () => false,
   }).ok, true);
   assert.equal(workspaces.length, 0);
-  assert.throws(() => trustedExecutable("codex", granted, trustRoots(removals), uid, rootUid), /a session can write/u,
-    "removal ends new use, not what earlier sessions left");
-  assert.throws(() => trustedExecutable("codex", granted, trustRoots(new WorkspaceRemovals(dataDir)), uid, rootUid),
-    /a session can write/u, "the record keeps the grant across a restart");
-  assert.deepEqual(new WorkspaceRemovals(dataDir).writableHistory(), [{
-    path: home, additionalDirectoryGrants: [granted], sharedWritableDirectories: [join(dataDir, "shared")],
-  }]);
+  assert.throws(() => trusted(removals, [archived]), /a session can write/u,
+    "removal ends new use, not what the session that ran there could write");
+  assert.throws(() => trusted(new WorkspaceRemovals(dataDir), [archived]), /a session can write/u,
+    "the record keeps the grant across a restart");
+  assert.deepEqual(grants(removals, [archived]).filter((grant) => grant.path === granted), [{
+    path: granted, grant: "session s_archived", recovery: "delete session s_archived", sessionId: "s_archived",
+  }], "the grant is named as the session's, so deleting the session is its withdrawal");
+  assert.equal(trusted(removals, []), planted, "with no session left from it, removal withdraws the workspace's grants");
 });
 
 test("an unreadable removal record is reported and leaves the configuration as written", (t) => {

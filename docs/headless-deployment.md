@@ -162,9 +162,10 @@ from then on. The configuration file itself is not edited. To restore the worksp
 entry from that file and restart the runner. Configuring a different folder under the same id
 brings the workspace back without that step.
 
-While an entry exists, the runner keeps treating that workspace's folder and its directory grants as
-writable by sessions, for example when it decides which reviewer programs to trust. Removal stops
-new use, but it cannot undo what earlier sessions may have written there.
+Removal stops new use, but it cannot undo what earlier sessions may have written. When the runner
+decides which reviewer programs to trust, a stored session that ran in the removed workspace keeps
+its project directory and that workspace's directory grants as writable until the session is
+deleted (see `docs/review-writer-recovery.md`).
 
 ## Operate
 

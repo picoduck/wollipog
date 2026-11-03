@@ -1,7 +1,7 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
 import { assertLegacyReviewsDrained, retiredReviewReceipt } from "./retired-review-jobs.js";
 import { reviewRetirementPeerRefusal } from "@wollipog/protocol";
-import { configuredSessionWritablePaths } from "./review-trust.js";
+import { configuredSessionWritableGrants } from "./review-trust.js";
 import { configuredCodexHomes } from "./review-trust.js";
 import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
@@ -1688,11 +1688,11 @@ function recoverStaleSessionCommands(): void {
 }
 
 sessions.setSend(sendUp);
-// Shared trusted-tool roots for review sessions.
-// A removed Workspace's directories stay session-writable history (#4123).
-const sessionWritablePaths = () => configuredSessionWritablePaths({
-  workspaces: [...config.workspaces, ...workspaceRemovals.writableHistory()],
-  providerAccounts: config.providerAccounts, agents: config.agents,
+// Shared trusted-tool roots for review sessions, with the configuration that grants each. A removed
+// Workspace's directory grants stay with the sessions that ran there (#4123).
+const sessionWritableGrants = () => configuredSessionWritableGrants({
+  workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
+  removedWorkspaces: workspaceRemovals.entries(),
   sessions: store.listSessions(), hostEnv: process.env,
 });
 sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
@@ -1702,7 +1702,7 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
 const codexProtection = () => sessions.codexReviewerProtection();
 sessions.setReviewerInstallations(() => reviewerInstallations(agentsForControlPlane(),
   (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
-const reviewDependencies = defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
+const reviewDependencies = defaultReviewSessionDependencies(config.dataDir, log, sessionWritableGrants, agentsForControlPlane,
   (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
   codexProtection);
 const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), reviewDependencies.exec, log);

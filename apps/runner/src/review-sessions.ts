@@ -38,7 +38,8 @@ import {
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
 } from "./review-snapshot.js";
 import {
-  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools, type CodexReviewerProtection,
+  discoverReviewTools, explainSessionWritableRefusal, reviewerInterpreter, SessionWritableRefusal, sessionWritableRoots, trustedPath, type ReviewTools,
+  type CodexReviewerProtection, type SessionWritableGrant,
 } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
 
@@ -86,17 +87,16 @@ export interface ReviewSessionDependencies {
 export function defaultReviewSessionDependencies(
   dataDir: string,
   log: (message: string) => void,
-  /** Directories sessions can write (see `configuredSessionWritablePaths`), read at each use. */
-  sessionWritablePaths: () => readonly string[] = () => [],
+  /** Directories sessions can write and what grants each (see `configuredSessionWritableGrants`), read at each use. */
+  sessionWritableGrants: () => readonly SessionWritableGrant[] = () => [],
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
   codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
-  const extraRoots = () => [
-    ...sessionWritablePaths(),
-    ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),
-  ];
+  const hostProviderHomes = () =>
+    [process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value));
+  const extraRoots = (grants = sessionWritableGrants()) => [...new Set(grants.map((grant) => grant.path)), ...hostProviderHomes()];
   return {
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
       encoding: "utf8", timeout: options.timeoutMs ?? 30_000, maxBuffer: 8_000_000,
@@ -131,8 +131,18 @@ export function defaultReviewSessionDependencies(
     },
     gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
-    verifyCommand: (command, pathEnv = process.env.PATH) =>
-      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid, undefined, codexProtection()),
+    verifyCommand: (command, pathEnv = process.env.PATH) => {
+      const grants = sessionWritableGrants();
+      try {
+        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection());
+      } catch (error) {
+        // Name the grant that makes the reviewer session-writable and how to withdraw it (#4122).
+        // Roots no configured grant names can only be avoided by moving the reviewer.
+        throw explainSessionWritableRefusal(error, grants,
+          "install the reviewer where no session can write and set its agent's command to that absolute path",
+          sessionWritableRoots(homedir(), dataDir, hostProviderHomes()));
+      }
+    },
     agents,
     agentPath,
     log,
@@ -391,7 +401,9 @@ export interface ReviewLaunch {
 /** Capability reasons travel through agents_updated, whose control-plane validator caps each
  * at 500 characters. Keep the useful prefix; callers log the complete diagnostic locally. */
 export function reviewSessionDiscoveryReason(error: unknown): string {
-  const reason = (error instanceof Error ? error.message : String(error)) || "review-session discovery failed";
+  // An explained trust refusal reports its bounded summary; the runner log keeps the full message.
+  const reason = (error instanceof SessionWritableRefusal ? error.summary : error instanceof Error ? error.message : String(error)) ||
+    "review-session discovery failed";
   if (reason.length > 500 && reason.startsWith("Codex packages are unprotected")) {
     const ids = [...new Set([...reason.matchAll(/\bsession (s_[A-Za-z0-9_-]+)/gu)].map((match) => match[1]!))];
     if (ids.length) {

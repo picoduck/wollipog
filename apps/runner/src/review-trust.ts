@@ -69,6 +69,13 @@ export interface CodexReviewerProtection {
   /** Launch-time sandbox rules, rather than live writer evidence, protect this installation. */
 }
 
+/** A path refused because it is inside `root`, a directory a session can write. */
+export class SessionWritableRootError extends Error {
+  constructor(readonly path: string, readonly root: string) {
+    super(`${path} is inside a directory a session can write (${root})`);
+  }
+}
+
 /** Check the write boundary and ownership of every component, retaining both for the exception. */
 function checkResolved(real: string, roots: readonly string[], uid: number, rootUid: number,
   codex: CodexReviewerProtection | undefined, privateGroup: (uid: number, gid: number) => boolean): void {
@@ -80,7 +87,7 @@ function checkResolved(real: string, roots: readonly string[], uid: number, root
     if (codex && codexHome === root && within(join(codexHome, "packages", "standalone"), real)) {
       continue;
     }
-    throw new Error(`${real} is inside a directory a session can write (${root})`);
+    throw new SessionWritableRootError(real, root);
   }
   const components: string[] = [];
   for (let current = real; ; current = join(current, "..")) {
@@ -145,46 +152,154 @@ const PROVIDER_HOME_VARIABLES = ["CODEX_HOME", "CLAUDE_CONFIG_DIR"] as const;
 
 /** Where the runner's configuration and its sessions say provider state lives. */
 export interface SessionWritableSources {
-  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">>;
-  providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "directory">>;
+  workspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "name" | "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">>;
+  providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "label" | "directory">>;
   agents?: ReadonlyArray<Pick<RunnerConfigAgent, "id" | "env">>;
-  sessions?: Iterable<Pick<SessionMeta, "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
-    "providerConversationHome" | "pendingProviderCredentialHome" | "adoptedProviderState">>;
+  sessions?: Iterable<Pick<SessionMeta, "sessionId" | "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
+    "providerConversationHome" | "pendingProviderCredentialHome" | "adoptedProviderState"> & { workspaceId?: string | null }>;
+  /** Workspaces removed in Wollipog (#4123), with the directory grants they had: a session that ran
+   * in one could have written them, so they stay that session's grants. */
+  removedWorkspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "id" | "additionalDirectoryGrants" | "sharedWritableDirectories">>;
   hostEnv?: NodeJS.ProcessEnv;
 }
 
+/** One configured reason a session can write `path`, so a trust refusal can name what to change. */
+export interface SessionWritableGrant {
+  path: string;
+  /** What grants the write, such as `workspace "home"`. */
+  grant: string;
+  /** The supported change that withdraws it, when there is one besides moving the program. */
+  recovery?: string;
+  /** Set for a session's own paths, which refusals group. */
+  sessionId?: string;
+}
+
 /**
- * The session-writable directories the runner's configuration and persisted sessions name:
- * project checkouts and their directory grants, every provider account's credential directory,
- * provider homes (and HOME-derived provider directories) set in an agent's or a session's
- * environment, each session's worktrees, and each session's current, transcript-source and
- * pending provider credential homes. Relative and unresolvable values are dropped.
+ * The session-writable directories the runner's configuration and persisted sessions name, each
+ * with its source: project checkouts and their directory grants, every provider account's
+ * credential directory, provider homes (and HOME-derived provider directories) set in an agent's
+ * or a session's environment, each session's worktrees, and each session's current,
+ * transcript-source and pending provider credential homes. Relative and unresolvable values are
+ * dropped. A session's paths stay grants after its workspace is removed: it can still resume there.
+ * So do the directory grants of a removed workspace it ran in, which no configuration names anymore.
  */
-export function configuredSessionWritablePaths(sources: SessionWritableSources): string[] {
-  const paths: Array<string | null | undefined> = [];
-  const fromEnvironment = (read: (name: string) => string | undefined) => {
-    for (const name of PROVIDER_HOME_VARIABLES) paths.push(read(name));
+export function configuredSessionWritableGrants(sources: SessionWritableSources): SessionWritableGrant[] {
+  const grants: SessionWritableGrant[] = [];
+  const add = (path: string | null | undefined, grant: Omit<SessionWritableGrant, "path">) => {
+    if (typeof path === "string" && isAbsolute(path)) grants.push({ path, ...grant });
+  };
+  const fromEnvironment = (read: (name: string) => string | undefined, owner: Omit<SessionWritableGrant, "path">,
+    change?: (name: string) => string) => {
+    for (const name of PROVIDER_HOME_VARIABLES) {
+      add(read(name), { ...owner, grant: `${name} in ${owner.grant}`, ...(change ? { recovery: change(name) } : {}) });
+    }
     const home = read("HOME");
-    if (home && isAbsolute(home)) paths.push(...homeWritableRoots(home));
+    if (home && isAbsolute(home)) {
+      for (const path of homeWritableRoots(home)) {
+        add(path, { ...owner, grant: `HOME in ${owner.grant}`, ...(change ? { recovery: change("HOME") } : {}) });
+      }
+    }
   };
   const hostEnv = sources.hostEnv ?? {};
-  fromEnvironment((name) => hostEnv[name]);
-  for (const workspace of sources.workspaces ?? []) paths.push(workspace.path, ...(workspace.additionalDirectoryGrants ?? []),
-    ...(workspace.sharedWritableDirectories ?? []));
-  for (const account of sources.providerAccounts ?? []) paths.push(account.directory);
+  fromEnvironment((name) => hostEnv[name], { grant: "the runner's environment" });
+  for (const workspace of sources.workspaces ?? []) {
+    const name = label(workspace.name);
+    add(workspace.path, { grant: `workspace ${name}`, recovery: `remove workspace ${name} from this machine` });
+    for (const path of workspace.additionalDirectoryGrants ?? []) {
+      add(path, { grant: `a directory grant of workspace ${name}`, recovery: `remove that directory grant from workspace ${name}` });
+    }
+    for (const path of workspace.sharedWritableDirectories ?? []) {
+      add(path, {
+        grant: `a shared writable directory of workspace ${name}`,
+        recovery: `remove that shared writable directory from workspace ${name}`,
+      });
+    }
+  }
+  for (const account of sources.providerAccounts ?? []) {
+    add(account.directory, { grant: `provider account ${label(account.label)}` });
+  }
   for (const agent of sources.agents ?? []) {
+    const id = label(agent.id);
     fromEnvironment((name) => {
       try { return resolveAgentEnvironmentValue(agent, name, hostEnv); } catch { return undefined; }
-    });
+    }, { grant: `agent ${id}'s environment` }, (name) => `change ${name} in agent ${id}'s environment`);
   }
+  const removed = new Map((sources.removedWorkspaces ?? []).map((workspace) => [workspace.id, workspace]));
   for (const meta of sources.sessions ?? []) {
-    paths.push(meta.providerCredentialHome, meta.providerConversationHome, meta.pendingProviderCredentialHome,
+    const session = { grant: `session ${meta.sessionId}`, recovery: `delete session ${meta.sessionId}`, sessionId: meta.sessionId };
+    const workspace = meta.workspaceId ? removed.get(meta.workspaceId) : undefined;
+    for (const path of [meta.providerCredentialHome, meta.providerConversationHome, meta.pendingProviderCredentialHome,
       meta.repoPath, meta.worktreePath, ...(meta.worktrees ?? []).map((worktree) => worktree.path),
-      meta.adoptedProviderState?.sessionDir);
+      meta.adoptedProviderState?.sessionDir, ...(workspace?.additionalDirectoryGrants ?? []),
+      ...(workspace?.sharedWritableDirectories ?? [])]) add(path, session);
     const env = meta.env ?? {};
-    fromEnvironment((name) => env[name]);
+    fromEnvironment((name) => env[name], session);
   }
-  return [...new Set(paths.filter((path): path is string => typeof path === "string" && isAbsolute(path)))];
+  return grants;
+}
+
+/** The distinct paths of `configuredSessionWritableGrants`. */
+export function configuredSessionWritablePaths(sources: SessionWritableSources): string[] {
+  return [...new Set(configuredSessionWritableGrants(sources).map((grant) => grant.path))];
+}
+
+/** "a", "a and b", "a, b and c". */
+function listed(items: readonly string[]): string {
+  return items.length < 2 ? items.join("") : `${items.slice(0, -1).join(", ")} and ${items.at(-1)}`;
+}
+
+/** A configured label, quoted and bounded. */
+function label(value: string): string {
+  return JSON.stringify(value.length > 64 ? `${value.slice(0, 63)}…` : value);
+}
+
+/**
+ * Turn a refusal of a program inside a session-writable root into one that names the configured
+ * grants containing it and the supported ways to withdraw them (#4122). Moving the program out
+ * of every such directory always works; nothing here relaxes the refusal itself. Other errors are
+ * returned unchanged.
+ */
+export function explainSessionWritableRefusal(error: unknown, grants: readonly SessionWritableGrant[],
+  relocation: string, builtInRoots: readonly string[]): unknown {
+  if (!(error instanceof SessionWritableRootError)) return error;
+  const canonical = (path: string) => { try { return realpathSync(path); } catch { return path; } };
+  // Every grant that would refuse the path, not only the first root found.
+  const matching = grants.filter((grant) => within(grant.path, error.path) || within(canonical(grant.path), error.path));
+  const sessions = [...new Set(matching.flatMap((grant) => grant.sessionId ? [grant.sessionId] : []))];
+  const others = matching.filter((grant) => !grant.sessionId);
+  const names = [...new Set(others.map((grant) => grant.grant))];
+  const recoveries = [...new Set(others.flatMap((grant) => grant.recovery ? [grant.recovery] : []))];
+  if (sessions.length) {
+    const named = `${sessions.length === 1 ? "session" : "sessions"} ${sessions.join(", ")}`;
+    names.push(named);
+    recoveries.push(`delete ${named}`);
+  }
+  // Withdrawing grants helps only when no built-in root (a default provider home, cache, runner
+  // state or temporary directory, whatever a configured grant also names) contains the path, and
+  // every grant has a withdrawal: a provider account or the runner's own environment has none.
+  const withdrawable = recoveries.length > 0 && others.every((grant) => grant.recovery) &&
+    !builtInRoots.some((root) => within(root, error.path) || within(canonical(root), error.path));
+  // Relocation always works and comes first, so a capability reason cut to its first 450
+  // characters still carries a complete recovery; the runner log keeps every grant.
+  const remedy = withdrawable ? `${relocation}, or ${listed(recoveries)}` : relocation;
+  const source = names.length ? `. Granted by ${listed(names)}` : "";
+  // No final period: the control plane ends the sentence it embeds this reason in.
+  const explain = (path: string, root: string) =>
+    `${path} is inside a directory a session can write (${root}). To use it, ${remedy}${source}`;
+  return new SessionWritableRefusal(explain(error.path, error.root), explain(elided(error.path), elided(error.root)));
+}
+
+/** An explained refusal: the full message for the runner log, and a summary whose paths are
+ * bounded so the recovery survives the capability reason's length limit. */
+export class SessionWritableRefusal extends Error {
+  constructor(message: string, readonly summary: string) {
+    super(message);
+  }
+}
+
+/** A path of at most 120 characters, keeping its end. */
+function elided(path: string): string {
+  return path.length > 120 ? `…${path.slice(-119)}` : path;
 }
 
 /**

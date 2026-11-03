@@ -8,9 +8,10 @@
  * different folder under the same id gets that Workspace back. Restoring the exact Workspace means
  * deleting its entry from this file.
  *
- * Each entry keeps the folder and directory grants sessions could write while the Workspace was
- * configured. Removal ends new use, not what earlier sessions may have left there, so reviewer
- * trust keeps treating those directories as session-writable for as long as the entry exists.
+ * Each entry keeps the directory grants the Workspace had. Removal withdraws the Workspace's own
+ * grant, but a stored session that ran there keeps its paths and those directory grants (review
+ * trust names them as that session's), since it could have written them; deleting the session
+ * withdraws them.
  */
 import { existsSync, readFileSync } from "node:fs";
 import { join } from "node:path";
@@ -80,8 +81,8 @@ export class WorkspaceRemovals {
     protectedWrite(this.file, `${JSON.stringify(contents, null, 2)}\n`, "workspace removal record");
   }
 
-  /** Removed Workspaces' session-writable directories, for reviewer trust and other boundaries
-   * that must keep treating them as written by earlier sessions. */
+  /** Removed Workspaces' folders and directory grants, for boundaries that stay conservative about
+   * them: credential-home sharing and the media reviewer's forbidden roots. */
   writableHistory(): Array<Pick<RunnerConfigWorkspace, "path" | "additionalDirectoryGrants" | "sharedWritableDirectories">> {
     return this.entries().map((entry) => ({
       path: entry.path,
