@@ -473,7 +473,11 @@ function initialModel(): FixtureModel {
           source: "created",
         }],
       }],
-      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
+      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {
+        // #4076: an Orchestrator's type mark leads the longest title. (A review lists only under its
+        // requester, so this flat scenario cannot carry one.)
+        role: "orchestrator",
+      }],
       ["session-plain", "Plain", {}],
       // #782: line three is unconditional, so the scenario has to carry every combination of branch
       // state and background work — that product is exactly what used to make cards two, three, or

@@ -28,7 +28,9 @@ const leaveSession = async (page: Page) => {
   else await page.getByRole("link", { name: "Sessions", exact: true }).click();
 };
 const expandFromList = async (page: Page, title: string) => {
-  const row = page.locator(".inbox-row-shell", { hasText: title }).locator(".inbox-row");
+  // The title, not the row's centre: on a phone a parent's family chip can sit under the centre, and
+  // a click there toggles the thread instead of opening the session.
+  const row = page.locator(".inbox-row-shell", { hasText: title }).locator(".inbox-row-title");
   await row.click();
   await expect(page.locator(".session-detail")).toBeVisible();
   if (!await page.locator(".session-detail.expanded").count()) {

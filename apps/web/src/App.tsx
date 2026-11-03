@@ -27,6 +27,7 @@ import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
 import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "./entity-title.js";
 import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
+import { SessionTypeIcon } from "./components/SessionTypeIcon.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
@@ -827,6 +828,7 @@ export function Shell() {
             sessionTitle={activeSession
               ? sessionDisplayTitle(activeSession.title) || "Session"
               : routedSessionPlaceholder(view.id, routedSessionLookup, conn, snapshotLoaded).title}
+            sessionType={activeSession ? <SessionTypeIcon session={activeSession} /> : null}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
@@ -1052,6 +1054,7 @@ export function Header({
   view,
   sessionActions,
   sessionTitle,
+  sessionType,
   onSessionBack,
 }: {
   view: View;
@@ -1059,6 +1062,8 @@ export function Header({
    * a row in the rail's More sheet, and the phone layout has no instance switcher (#1970). */
   sessionActions?: React.ReactNode;
   sessionTitle?: string;
+  /** The open session's `SessionTypeIcon`, before its title as on the desktop session bar (#4076). */
+  sessionType?: React.ReactNode;
   onSessionBack?: () => void;
 }) {
   const title = viewTitle(view);
@@ -1077,7 +1082,7 @@ export function Header({
           >
             <ChevronLeftIcon size={20} />
           </button>
-          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
+          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionType}{sessionTitle ?? title}</h1>
         </>
       ) : (
         <h1 id="page-title" tabIndex={-1}>{title}</h1>

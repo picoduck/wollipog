@@ -175,7 +175,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChildSessionRequestsIcon` | Lucide | `Network` | Who answers an Orchestrator's child session requests: the Pinned Summary's Child Session Requests row. |
 | `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row; the Request Card's Workflow Decision kind. |
 | `GuardrailsIcon` | Lucide | `Fence` | A session's limits: the + menu's Guardrails… row. `Gauge` already means the Fast service tier. |
-| `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row, and Settings › Orchestrator. `Workflow` already means workflow runs. |
+| `OrchestratorIcon` | Lucide | `Waypoints` | An Orchestrator: its parent control and workflow gates (the + menu's Orchestrator Controls… row, and Settings › Orchestrator), and an Orchestrator session's type before its title in the Sessions list, Board, session header and Archived Sessions (#4076). `Workflow` already means workflow runs. |
+| `ReviewSessionIcon` | Lucide | `ScanEye` | A review session's type, before its title wherever `OrchestratorIcon` marks an Orchestrator session (#4076). `Eye` already means show and hide. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion, and a machine's Repair Connection… (#2988). |
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
