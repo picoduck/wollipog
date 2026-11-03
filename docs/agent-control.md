@@ -2095,6 +2095,11 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   artifact-backed images can be delegated, and only one the Orchestrator could inspect directly
   right now. Delegation therefore never reaches evidence or a provider that direct review would
   not.
+- **Audience is rechecked on every call.** As direct review does on every delivery, each reviewer
+  call requires the reviewer's own credential to reach the root and the child. The reviewer's
+  audience must also sit inside both of theirs. An Orchestrator whose audience reaches beyond the
+  child's cannot delegate. A later scope change that breaks containment ends the review before
+  any bytes or receipt are produced, and blocks approval on its verdict.
 - **Created by the server.** The reviewer runs on the root's own runner, agent and model, as a
   child of the root. It gets a server-pinned review prompt and no campaign assignment. Its cost is
   bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
@@ -2137,8 +2142,9 @@ The reviewer follows the video reviewer's provenance pattern, but for images:
   a digest mismatch. A resolved decision ends any other live review. Receipts expire after an hour,
   as they do under direct review, so an old verdict has to be prepared again.
 - **One review at a time.** An occurrence has at most one live review, and preparing again returns
-  it. A reviewer that ended its turn or Session without a verdict ends its review, so a fresh one
-  can be prepared.
+  it. Some reviews can no longer back an approval: the reviewer ended its turn or Session without a
+  verdict, or one of its verdict's receipts expired. Such a review is retired, and preparing again
+  starts a fresh reviewer.
 
 The path adds no setting, form or confirmation. It uses the existing UI Evidence Approval
 authority, and decision ownership does not change. Direct `review_descendant_ui_evidence` keeps

@@ -25031,11 +25031,23 @@ function prepareImageReview(h: ReturnType<typeof uiEvidenceReviewHarness>, child
   return prepared;
 }
 
+/** One delivery to the reviewer, as its own credential with the given access. */
+function reviewerImage(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, evidenceId: string,
+  canAccess: (sessionId: string) => boolean = () => true) {
+  return h.svc.reviewDelegatedImageEvidence(reviewerId, evidenceId, canAccess);
+}
+
+function reviewerVerdict(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, report: unknown,
+  canAccess: (sessionId: string) => boolean = () => true) {
+  return h.svc.submitDelegatedImageVerdict(reviewerId, report, canAccess);
+}
+
 /** The reviewer's complete look at one image: delivery plus its runner's acknowledgement. */
 function reviewerLook(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, evidenceId: string) {
-  const delivered = h.svc.reviewDelegatedImageEvidence(reviewerId, evidenceId);
+  const delivered = reviewerImage(h, reviewerId, evidenceId);
   if (delivered.ok && delivered.data) {
-    assert.ok(h.svc.acknowledgeDelegatedImageEvidence(reviewerId, delivered.data.receipt.receiptId, delivered.data.receipt.sha256).ok);
+    assert.ok(h.svc.acknowledgeDelegatedImageEvidence(reviewerId, delivered.data.receipt.receiptId,
+      delivered.data.receipt.sha256, () => true).ok);
   }
   return delivered;
 }
@@ -25080,29 +25092,29 @@ test("a delegated image reviewer approves N images without any reaching the Orch
     // Preparing again while the review is live returns it rather than starting a second reviewer.
     assert.equal(prepareImageReview(h, child.id, occurrence).data?.reviewId, prepared.data.reviewId);
     // The child cannot act as a reviewer, and the Orchestrator has no reviewer routes of its own.
-    assert.equal(h.svc.reviewDelegatedImageEvidence(child.id, ids[0]!).status, 403);
-    assert.equal(h.svc.submitDelegatedImageVerdict(child.id, passingVerdict(ids)).status, 403);
-    assert.equal(h.svc.reviewDelegatedImageEvidence(h.parent.id, ids[0]!).status, 403);
+    assert.equal(reviewerImage(h,child.id, ids[0]!).status, 403);
+    assert.equal(reviewerVerdict(h,child.id, passingVerdict(ids)).status, 403);
+    assert.equal(reviewerImage(h,h.parent.id, ids[0]!).status, 403);
 
     // A verdict needs a current, acknowledged receipt for every image.
-    assert.equal(h.svc.submitDelegatedImageVerdict(reviewerId, passingVerdict(ids)).status, 409);
-    const unacknowledged = h.svc.reviewDelegatedImageEvidence(reviewerId, ids[0]!);
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409);
+    const unacknowledged = reviewerImage(h,reviewerId, ids[0]!);
     assert.ok(unacknowledged.ok && unacknowledged.data, unacknowledged.error);
     assert.equal(unacknowledged.data.receipt.reviewerSessionId, reviewerId, "the receipt is recorded against the reviewer");
-    assert.equal(h.svc.submitDelegatedImageVerdict(reviewerId, passingVerdict(ids)).status, 409,
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409,
       "a delivery the runner never acknowledged supports nothing");
     for (const id of ids) assert.ok(reviewerLook(h, reviewerId, id).ok);
-    assert.equal(h.svc.reviewDelegatedImageEvidence(reviewerId, "not-on-the-decision").status, 404);
-    assert.equal(h.svc.submitDelegatedImageVerdict(reviewerId, { ...passingVerdict(ids), items: passingVerdict(ids).items.slice(1) }).status, 400,
+    assert.equal(reviewerImage(h,reviewerId, "not-on-the-decision").status, 404);
+    assert.equal(reviewerVerdict(h,reviewerId, { ...passingVerdict(ids), items: passingVerdict(ids).items.slice(1) }).status, 400,
       "the verdict must cover every item");
-    assert.equal(h.svc.submitDelegatedImageVerdict(reviewerId, {
+    assert.equal(reviewerVerdict(h,reviewerId, {
       recommendation: "approve", summary: "Mixed.",
       items: ids.map((evidenceId, index) => ({ evidenceId, outcome: index ? "pass" : "fail", defects: index ? [] : ["Clipped label"] })),
     }).status, 400, "approve requires every item to pass");
-    const verdict = h.svc.submitDelegatedImageVerdict(reviewerId, passingVerdict([...ids].reverse()));
+    const verdict = reviewerVerdict(h,reviewerId, passingVerdict([...ids].reverse()));
     assert.ok(verdict.ok && verdict.data, verdict.error);
-    assert.equal(h.svc.submitDelegatedImageVerdict(reviewerId, passingVerdict(ids)).status, 409, "a reviewer submits one verdict");
-    assert.equal(h.svc.reviewDelegatedImageEvidence(reviewerId, ids[0]!).status, 409, "nothing is delivered after the verdict");
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409, "a reviewer submits one verdict");
+    assert.equal(reviewerImage(h,reviewerId, ids[0]!).status, 409, "nothing is delivered after the verdict");
 
     // Nothing was delivered to the Orchestrator, so it holds no receipts of its own.
     assert.deepEqual(h.db.validUiEvidenceReviewReceipts(occurrence, h.parent.id, Date.now()), []);
@@ -25146,7 +25158,7 @@ test("a delegated image reviewer approves N images without any reaching the Orch
     const second = prepareImageReview(h, child.id, again.data.occurrenceId);
     assert.ok(second.ok && second.data, second.error);
     for (const id of ids) assert.ok(reviewerLook(h, second.data.reviewerSessionId, id).ok);
-    assert.ok(h.svc.submitDelegatedImageVerdict(second.data.reviewerSessionId, {
+    assert.ok(reviewerVerdict(h,second.data.reviewerSessionId, {
       recommendation: "deny", summary: "The dark theme clips the label.",
       items: ids.map((evidenceId) => ({ evidenceId, outcome: evidenceId === "dark" ? "fail" : "pass",
         defects: evidenceId === "dark" ? ["The Review Model label is clipped."] : [] })),
@@ -25182,14 +25194,14 @@ test("delegated image review fails closed on supersession, tampering, policy cha
       resourceSnapshot: { category: "ui_evidence_approval", evidence: [first.item, second.item] },
     });
     assert.ok(replacement.ok && replacement.data);
-    assert.equal(h.svc.submitDelegatedImageVerdict(staleReview.data.reviewerSessionId, passingVerdict(ids)).status, 409);
+    assert.equal(reviewerVerdict(h,staleReview.data.reviewerSessionId, passingVerdict(ids)).status, 409);
     assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, staleReview.data.reviewId, () => true).data?.state, "ended");
 
     // The verdict expires with its receipts: an approval must look again.
     const fresh = prepareImageReview(h, child.id, replacement.data.occurrenceId);
     assert.ok(fresh.ok && fresh.data, fresh.error);
     for (const id of ids) assert.ok(reviewerLook(h, fresh.data.reviewerSessionId, id).ok);
-    const verdict = h.svc.submitDelegatedImageVerdict(fresh.data.reviewerSessionId, passingVerdict(ids));
+    const verdict = reviewerVerdict(h,fresh.data.reviewerSessionId, passingVerdict(ids));
     assert.ok(verdict.ok && verdict.data);
     assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, fresh.data.reviewerSessionId,
       Date.now() + 2 * 60 * 60 * 1000).length, 0);
@@ -25201,7 +25213,7 @@ test("delegated image review fails closed on supersession, tampering, policy cha
     const tamperedReview = prepareImageReview(h, child.id, tamperedDecision.data.occurrenceId);
     assert.ok(tamperedReview.ok && tamperedReview.data, tamperedReview.error);
     h.db.deleteWorkflowArtifact(tampered.item.artifactId);
-    assert.equal(h.svc.reviewDelegatedImageEvidence(tamperedReview.data.reviewerSessionId, "tampered").status, 409);
+    assert.equal(reviewerImage(h,tamperedReview.data.reviewerSessionId, "tampered").status, 409);
     assert.equal(h.db.workflowDecisionByOccurrence(tamperedDecision.data.occurrenceId)?.status, "revoked");
     assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, tamperedReview.data.reviewId, () => true).data?.state, "ended");
 
@@ -25216,6 +25228,100 @@ test("delegated image review fails closed on supersession, tampering, policy cha
       { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids,
         delegatedImageReview: { reviewId: fresh.data.reviewId, verdictId: verdict.data.verdictId,
           reviewerSessionId: fresh.data.reviewerSessionId } } as never, () => true).status, 409);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("a delegated image reviewer loses evidence access when its audience no longer fits the decision's (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const local = h.db.localIdentityContext();
+    const personal: ResourceScope = { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } };
+    const organization: ResourceScope = { organizationId: local.organizationId,
+      owner: { kind: "organization", organizationId: local.organizationId } };
+    const child = h.createChild("UI Child");
+    const ids = ["a", "b"];
+    const decision = h.request(child.id, "ui", ids.map((label) => h.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const reviewerId = prepared.data.reviewerSessionId;
+    assert.deepEqual(h.db.sessionScope(reviewerId), h.db.sessionScope(h.parent.id), "the reviewer inherits the root's audience");
+
+    // A reviewer credential that can no longer reach the producing child receives nothing.
+    const receipts = () => h.db.validUiEvidenceReviewReceipts(decision.data!.occurrenceId, reviewerId, Date.now()).length;
+    assert.equal(reviewerImage(h, reviewerId, "a", (sessionId) => sessionId !== child.id).status, 404);
+    assert.equal(receipts(), 0, "no receipt is recorded for a refused delivery");
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.endedReason,
+      "audience_changed");
+
+    // Nor does a reviewer whose audience reaches beyond the child's or the root's.
+    const scope = (id: string, value: ResourceScope) =>
+      assert.ok(h.db.setResourceScope({ resource: "session", resourceId: id, scope: value, now: Date.now() }));
+    for (const [label, initial, change] of [
+      // Root, child and reviewer share the organization; then the child narrows to its owner.
+      ["narrowed child", organization, () => scope(child.id, personal)],
+      // Everyone is personal; then the reviewer alone is widened to the organization.
+      ["broadened reviewer", personal, (reviewerId: string) => scope(reviewerId, organization)],
+    ] as const) {
+      scope(h.parent.id, initial);
+      scope(child.id, initial);
+      const fresh = prepareImageReview(h, child.id, decision.data.occurrenceId);
+      assert.ok(fresh.ok && fresh.data, `${label}: ${fresh.error}`);
+      assert.deepEqual(h.db.sessionScope(fresh.data.reviewerSessionId), initial, label);
+      assert.ok(reviewerLook(h, fresh.data.reviewerSessionId, "a").ok, label);
+      change(fresh.data.reviewerSessionId);
+      assert.equal(reviewerImage(h, fresh.data.reviewerSessionId, "b").status, 404, label);
+      assert.equal(h.db.validUiEvidenceReviewReceipts(decision.data.occurrenceId, fresh.data.reviewerSessionId, Date.now())
+        .filter((receipt) => receipt.evidenceId === "b").length, 0, `${label}: no receipt`);
+      assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, fresh.data.reviewId, () => true).data?.state, "ended", label);
+    }
+    // And an Orchestrator whose audience is wider than the child's cannot delegate at all.
+    assert.ok(h.db.setResourceScope({ resource: "session", resourceId: h.parent.id, scope: organization, now: Date.now() }));
+    assert.ok(h.db.setResourceScope({ resource: "session", resourceId: child.id, scope: personal, now: Date.now() }));
+    assert.match(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.data.occurrenceId, "brief", () => true).error ?? "",
+      /audience reaches beyond the child's/u);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("an expired verdict is retired so a fresh reviewer can back the approval (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const ids = ["a", "b"];
+    const decision = h.request(child.id, "ui", ids.map((label) => h.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    const occurrence = decision.data.occurrenceId;
+    const first = prepareImageReview(h, child.id, occurrence);
+    assert.ok(first.ok && first.data, first.error);
+    for (const id of ids) assert.ok(reviewerLook(h, first.data.reviewerSessionId, id).ok);
+    const verdict = reviewerVerdict(h, first.data.reviewerSessionId, passingVerdict(ids));
+    assert.ok(verdict.ok && verdict.data);
+    // The receipts expire (the one-hour TTL) before the Orchestrator resolves.
+    h.db.raw().prepare("UPDATE ui_evidence_review_receipts SET expires_at=? WHERE reviewer_session_id=?")
+      .run(Date.now() - 1, first.data.reviewerSessionId);
+    const expiredReference = { reviewId: first.data.reviewId, verdictId: verdict.data.verdictId,
+      reviewerSessionId: first.data.reviewerSessionId };
+    const approve = (delegatedImageReview: unknown) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, delegatedImageReview } as never, () => true);
+    assert.equal(approve(expiredReference).status, 409, "an expired verdict cannot back an approval");
+
+    const second = prepareImageReview(h, child.id, occurrence);
+    assert.ok(second.ok && second.data, second.error);
+    assert.notEqual(second.data.reviewId, first.data.reviewId, "preparing again replaces the expired review");
+    assert.notEqual(second.data.reviewerSessionId, first.data.reviewerSessionId);
+    const retired = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, first.data.reviewId, () => true).data;
+    assert.equal(retired?.state, "ended");
+    assert.equal(retired?.endedReason, "verdict_expired");
+    for (const id of ids) assert.ok(reviewerLook(h, second.data.reviewerSessionId, id).ok);
+    assert.ok(reviewerVerdict(h, second.data.reviewerSessionId, passingVerdict(ids)).ok);
+    const reference = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, second.data.reviewId, () => true).data?.delegatedImageReview;
+    assert.ok(reference);
+    assert.equal(approve(expiredReference).status, 409);
+    assert.ok(approve(reference).ok, "the fresh reviewer's receipts back the approval");
   } finally {
     h.db.close();
   }

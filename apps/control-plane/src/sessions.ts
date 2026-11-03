@@ -12844,13 +12844,19 @@ export class SessionsService {
       return fail(`The Orchestrator's runner is offline, so no image reviewer can start. ${direct}`, 409);
     }
     const now = Date.now();
+    // The reviewer sees exactly the audience its root has, which must not reach beyond the child's.
+    const rootScope = this.db.sessionScope(parent.id), childScope = this.db.sessionScope(childSessionId);
+    if (!rootScope || !childScope || !this.db.scopeAudienceContainedWithMembership(rootScope, childScope)) {
+      return fail(`This Orchestrator's audience reaches beyond the child's, so its evidence cannot go to a reviewer. ${direct}`, 409);
+    }
+    // A live review is returned as it is. One that can no longer back an approval (its reviewer ended
+    // without a verdict, or its verdict's receipts expired) is retired, and a fresh reviewer replaces it.
     const live = this.db.delegatedImageReviews.liveForOccurrence(occurrenceId);
     if (live) {
-      const reviewer = this.db.getSession(live.reviewerSessionId);
-      if (live.state === "verdict" || (reviewer && !isTerminal(reviewer.status))) {
-        return ok(this.delegatedImageReviewViewOf(live, decision));
+      const settled = this.settleDelegatedImageReview(live, now);
+      if (settled.state === "running" || settled.state === "verdict") {
+        return ok(this.delegatedImageReviewViewOf(settled, decision));
       }
-      this.db.delegatedImageReviews.end(live.reviewId, "reviewer_ended", now);
     }
     const evidence = snapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, artifactId: item.artifactId!, sha256: item.sha256 }));
     const review: NewDelegatedImageReview = {
@@ -12910,16 +12916,28 @@ export class SessionsService {
     return ok(this.delegatedImageReviewViewOf(review, this.db.workflowDecisionByOccurrence(review.occurrenceId)));
   }
 
-  private delegatedImageReviewViewOf(review: DelegatedImageReviewRecord, decision: WorkflowDecisionView | null): DelegatedImageReviewView {
-    let current = review;
-    if (current.state === "running") {
+  /** Ends a live review that can never back an approval, and returns its current record. */
+  private settleDelegatedImageReview(review: DelegatedImageReviewRecord, now: number): DelegatedImageReviewRecord {
+    let reason: string | null = null;
+    if (review.state === "running") {
       // A reviewer whose turn or Session ended without a verdict will never submit one.
-      const reviewer = this.db.getSession(current.reviewerSessionId);
-      if (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle") {
-        this.db.delegatedImageReviews.end(current.reviewId, "reviewer_finished_without_verdict", Date.now());
-        current = this.db.delegatedImageReviews.get(current.reviewId) ?? current;
+      const reviewer = this.db.getSession(review.reviewerSessionId);
+      if (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle") reason = "reviewer_finished_without_verdict";
+    } else if (review.state === "verdict" && review.verdict) {
+      // A verdict rests on its receipts. Once any of them expires the reviewer cannot look again
+      // (nothing is delivered after a verdict), so the review is retired for a fresh one (#4074).
+      const current = this.db.validUiEvidenceReviewReceipts(review.occurrenceId, review.reviewerSessionId, now);
+      if (review.verdict.receiptIds.some((receiptId) => !current.some((receipt) => receipt.receiptId === receiptId))) {
+        reason = "verdict_expired";
       }
     }
+    if (!reason) return review;
+    this.db.delegatedImageReviews.end(review.reviewId, reason, now);
+    return this.db.delegatedImageReviews.get(review.reviewId) ?? review;
+  }
+
+  private delegatedImageReviewViewOf(review: DelegatedImageReviewRecord, decision: WorkflowDecisionView | null): DelegatedImageReviewView {
+    const current = this.settleDelegatedImageReview(review, Date.now());
     const approvable = current.state === "verdict" && current.verdict?.recommendation === "approve" && decision !== null &&
       this.delegatedImageApprovalRefusal(decision, {
         reviewId: current.reviewId, verdictId: current.verdict.verdictId, reviewerSessionId: current.reviewerSessionId,
@@ -12956,6 +12974,9 @@ export class SessionsService {
         !reviewer || reviewer.parentSessionId !== decision.controllingSessionId) {
       return "the delegated image reviewer is not an independent reviewer of this decision";
     }
+    if (!this.delegatedImageReviewerAudienceCurrent(review)) {
+      return "the delegated image reviewer's audience no longer sits inside the decision's audience";
+    }
     if (review.policyRevision !== decision.policyRevision || review.resourceDigest !== decision.resourceDigest ||
         review.evidence.length !== snapshot.evidence.length || snapshot.evidence.some((item) => !review.evidence.some((bound) =>
           bound.evidenceId === item.evidenceId && bound.artifactId === item.artifactId && bound.sha256 === item.sha256))) {
@@ -12973,9 +12994,20 @@ export class SessionsService {
     return null;
   }
 
+  private delegatedImageReviewerAudienceCurrent(review: DelegatedImageReviewRecord,
+    canAccess: (sessionId: string) => boolean = () => true): boolean {
+    const reviewerScope = this.db.sessionScope(review.reviewerSessionId);
+    const rootScope = this.db.sessionScope(review.rootSessionId);
+    const childScope = this.db.sessionScope(review.childSessionId);
+    return canAccess(review.rootSessionId) && canAccess(review.childSessionId) &&
+      Boolean(reviewerScope && rootScope && childScope) &&
+      this.db.scopeAudienceContainedWithMembership(reviewerScope!, rootScope!) &&
+      this.db.scopeAudienceContainedWithMembership(reviewerScope!, childScope!);
+  }
+
   /** Every reviewer call re-runs the gates that guard direct review, against the decision exactly
    * as it was when the review was prepared. Anything stale ends the review or revokes the decision. */
-  private delegatedImageReviewerGate(reviewerSessionId: string): ServiceResult<{
+  private delegatedImageReviewerGate(reviewerSessionId: string, canAccess: (sessionId: string) => boolean): ServiceResult<{
     review: DelegatedImageReviewRecord;
     decision: WorkflowDecisionView & { resourceSnapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }> };
   }> {
@@ -13002,6 +13034,12 @@ export class SessionsService {
         reviewer?.parentSessionId !== review.rootSessionId) {
       return end("reviewer_identity", "this session cannot review this decision", 403);
     }
+    // Evidence is never readable more widely than it is now: as direct review does on every
+    // delivery, the reviewer's own credential must still reach the root and the child, and its
+    // audience must sit inside both, whatever changed since the review was prepared.
+    if (!this.delegatedImageReviewerAudienceCurrent(review, canAccess)) {
+      return end("audience_changed", "workflow decision not found", 404);
+    }
     const root = this.db.getSession(review.rootSessionId);
     const child = this.db.getSession(review.childSessionId);
     const policy = root?.parentControlPolicy;
@@ -13019,8 +13057,9 @@ export class SessionsService {
 
   /** Deliver one image of the review's decision to the reviewer, exactly as direct review delivers
    * it to an Orchestrator, and record the receipt against the reviewer. */
-  reviewDelegatedImageEvidence(reviewerSessionId: string, evidenceId: string): ServiceResult<UiEvidenceReviewDelivery> {
-    const gate = this.delegatedImageReviewerGate(reviewerSessionId);
+  reviewDelegatedImageEvidence(reviewerSessionId: string, evidenceId: string,
+    canAccess: (sessionId: string) => boolean): ServiceResult<UiEvidenceReviewDelivery> {
+    const gate = this.delegatedImageReviewerGate(reviewerSessionId, canAccess);
     if (!gate.ok || !gate.data) return failAs(gate);
     const { review, decision } = gate.data;
     const bound = review.evidence.find((candidate) => candidate.evidenceId === evidenceId);
@@ -13058,8 +13097,9 @@ export class SessionsService {
   }
 
   /** The reviewer's runner re-hashed the bytes and handed them to the reviewer's model. */
-  acknowledgeDelegatedImageEvidence(reviewerSessionId: string, receiptId: string, sha256: string): ServiceResult<{ acknowledged: true }> {
-    const gate = this.delegatedImageReviewerGate(reviewerSessionId);
+  acknowledgeDelegatedImageEvidence(reviewerSessionId: string, receiptId: string, sha256: string,
+    canAccess: (sessionId: string) => boolean): ServiceResult<{ acknowledged: true }> {
+    const gate = this.delegatedImageReviewerGate(reviewerSessionId, canAccess);
     if (!gate.ok) return failAs(gate);
     return this.db.acknowledgeUiEvidenceReviewReceipt(receiptId, reviewerSessionId, sha256, Date.now())
       ? ok({ acknowledged: true })
@@ -13067,8 +13107,9 @@ export class SessionsService {
   }
 
   /** Record the reviewer's one verdict, only once it holds a current receipt for every image. */
-  submitDelegatedImageVerdict(reviewerSessionId: string, report: unknown): ServiceResult<{ verdictId: string }> {
-    const gate = this.delegatedImageReviewerGate(reviewerSessionId);
+  submitDelegatedImageVerdict(reviewerSessionId: string, report: unknown,
+    canAccess: (sessionId: string) => boolean): ServiceResult<{ verdictId: string }> {
+    const gate = this.delegatedImageReviewerGate(reviewerSessionId, canAccess);
     if (!gate.ok || !gate.data) return failAs(gate);
     const { review, decision } = gate.data;
     const invalid = delegatedImageReviewReportError(report, review.evidence.map((item) => item.evidenceId));

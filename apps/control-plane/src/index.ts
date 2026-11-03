@@ -4895,7 +4895,7 @@ app.post("/api/sessions/:id/delegated-image-review/image", async (req, reply) =>
     return reply.code(400).send({ error: "evidenceId is required" });
   }
   reply.header("cache-control", "no-store");
-  return respond(reply, svc.reviewDelegatedImageEvidence(id, body.evidenceId));
+  return respond(reply, svc.reviewDelegatedImageEvidence(id, body.evidenceId, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.post("/api/sessions/:id/delegated-image-review/acknowledge", async (req, reply) => {
@@ -4909,7 +4909,8 @@ app.post("/api/sessions/:id/delegated-image-review/acknowledge", async (req, rep
       typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(body.sha256)) {
     return reply.code(400).send({ error: "receiptId and sha256 are required" });
   }
-  return respond(reply, svc.acknowledgeDelegatedImageEvidence(id, body.receiptId, body.sha256));
+  return respond(reply, svc.acknowledgeDelegatedImageEvidence(id, body.receiptId, body.sha256,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) => {
@@ -4919,7 +4920,7 @@ app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) 
     return reply.code(403).send({ error: "the reviewer's own session credential is required" });
   }
   const body = req.body as { report?: unknown };
-  return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report));
+  return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
