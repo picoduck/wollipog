@@ -61,6 +61,41 @@ export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestra
     controller.parentControlPolicy?.revision === control.boundary.revision);
 }
 
+/** Whether the campaign's current issue scope names this issue (#4062). Both copies of the scope
+ * must name it, so a scope the server is still synchronizing never admits more than either says. */
+export function campaignIssueInScope(policy: SessionView["orchestratorPolicy"], issue: { repository: string; number: number }): boolean {
+  const scope = policy?.issueScope;
+  return Boolean(scope && scope.repository.toLowerCase() === issue.repository.toLowerCase() &&
+    scope.issueNumbers.includes(issue.number) && policy?.issueNumbers?.includes(issue.number));
+}
+
+/** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is
+ * never dispatched on a work item whose issue is outside it. Recording that item stays allowed. */
+export function campaignDispatchScopeRefusal(policy: SessionView["orchestratorPolicy"],
+  issue: { repository: string; number: number } | null): string | null {
+  if (policy?.control?.mode !== "full_control" || !issue || campaignIssueInScope(policy, issue)) return null;
+  return `its issue ${issue.repository}#${issue.number} is outside this Full Control campaign's issue scope. ` +
+    "Add it with request_campaign_issue_scope_change first; if that is refused, only the campaign owner can add it, " +
+    "so leave the item undispatched and report it as blocked work.";
+}
+
+/** Under Full Control a merge may close only issues in the campaign's current issue scope (#4062).
+ * A GitHub merge's `intendedClosures` are exactly what GitHub would close: a v242 runner reads that
+ * before the merge is requested and again before it is armed, and a mismatch refuses it (#3713).
+ * Nothing reads a GitLab merge's closures, or a GitHub merge's from an older runner, so such a merge
+ * is never assumed to close nothing, and its declaration proves nothing either: it is the person's. */
+function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: number | null | undefined,
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): Pick<CampaignAuthorityEvaluation, "reason" | "unscopedClosures"> | null {
+  const declared = snapshot.intendedClosures ?? [];
+  const unscoped = declared.filter((reference) => {
+    const separator = reference.lastIndexOf("#");
+    return !campaignIssueInScope(policy, { repository: reference.slice(0, separator), number: Number(reference.slice(separator + 1)) });
+  });
+  if (unscoped.length) return { reason: "outside_issue_scope", unscopedClosures: unscoped };
+  const read = snapshot.mergeMethod === undefined && runnerSupportsProtocol(protocol, "githubMergeClosingReferences");
+  return read ? null : { reason: "unverified_closures" };
+}
+
 export function evaluateCampaignAuthority(
   controller: Pick<SessionView, "id" | "driver" | "orchestratorPolicy" | "parentControl" | "parentControlPolicy"> & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
   requester: Pick<SessionView, "id" | "driver"> & { repositoryRoot?: string } & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
@@ -99,5 +134,8 @@ export function evaluateCampaignAuthority(
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
     return { ...rest, owner: "human", basis: "human_required", reason: "outside_boundary" };
   }
+  const closures = full && evaluated.owner === "orchestrator" && snapshot?.category === "pr_merge"
+    ? mergeClosureScope(controller.orchestratorPolicy, protocol, snapshot) : null;
+  if (closures) return { ...evaluated, owner: "human", basis: "human_required", ...closures };
   return evaluated;
 }

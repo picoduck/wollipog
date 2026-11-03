@@ -351,6 +351,9 @@ export interface CampaignWorkLedgerHooks {
   observeCleanup(sessionId: string): CampaignObservedCleanup["worktrees"] | null;
   boundary(sessionId: string): CampaignAttemptBoundary;
   atomic<T>(work: () => T): T;
+  /** Why a child may not be dispatched on an item tracking this issue, or null when it may (#4062).
+   * Recording the item is unaffected; only opening an attempt on it is checked. */
+  admitDispatch?(campaignId: string, issue: CampaignIssueRef | null): string | null;
   /** Counts a new follow-up work item against the campaign allowance: null when accepted, else the
    * refusal, whose `details` name a follow-up that needs the Human's approval (#2940). */
   acceptFollowUp?(campaignId: string, workItemId: string, subject: CampaignFollowUpSubject, content: CampaignFollowUpContent):
@@ -676,6 +679,15 @@ export class CampaignWorkLedgerStore {
     return refused ? fail<never>(refused.error, 409, refused.details) : null;
   }
 
+  /** Retargeting dispatched work is a dispatch for its new issue, checked the same way (#4062). Linking
+   * an accepted follow-up's published issue is not routed here: it must precede that issue's scope. */
+  private retargetRefusal(campaignId: string, item: ItemRow, issueRepository: string | null,
+    issueNumber: number | null): LedgerResult<never> | null {
+    if (issueRepository === item.issue_repository && issueNumber === item.issue_number || !this.openAttemptForItem(item.id)) return null;
+    const outside = this.hooks.admitDispatch?.(campaignId, itemIssue(issueRepository, issueNumber));
+    return outside ? fail<never>(`work item ${item.item_key} has an open attempt, so it cannot be retargeted: ${outside}`, 409) : null;
+  }
+
   private itemByKey(campaignId: string, key: string): ItemRow | undefined {
     return this.stmt("SELECT * FROM campaign_work_items WHERE campaign_session_id=? AND item_key=?")
       .get(campaignId, key) as ItemRow | undefined;
@@ -930,7 +942,8 @@ export class CampaignWorkLedgerStore {
           dispatchState: input.dispatchState ?? existing.dispatch_state,
           queuePosition: input.queuePosition !== undefined ? input.queuePosition : existing.queue_position,
         };
-        const revised = this.followUpRevision(campaignId, existing, next.title, next.issueRepository, next.issueNumber);
+        const revised = this.followUpRevision(campaignId, existing, next.title, next.issueRepository, next.issueNumber) ??
+          this.retargetRefusal(campaignId, existing, next.issueRepository, next.issueNumber);
         if (revised) return revised;
         if (next.title !== existing.title || next.issueRepository !== existing.issue_repository ||
             next.issueNumber !== existing.issue_number || next.dispatchState !== existing.dispatch_state ||
@@ -1078,9 +1091,10 @@ export class CampaignWorkLedgerStore {
         sets.push(`${column}=?`);
         values.push(value);
       };
+      const issueRepository = request.issue !== undefined ? request.issue?.repository ?? null : item.issue_repository;
+      const issueNumber = request.issue !== undefined ? request.issue?.number ?? null : item.issue_number;
       const revised = this.followUpRevision(campaignId, item, request.title !== undefined ? request.title?.trim() ?? null : item.title,
-        request.issue !== undefined ? request.issue?.repository ?? null : item.issue_repository,
-        request.issue !== undefined ? request.issue?.number ?? null : item.issue_number);
+        issueRepository, issueNumber) ?? this.retargetRefusal(campaignId, item, issueRepository, issueNumber);
       if (revised) return revised;
       if (request.title !== undefined) set("title", request.title?.trim() ?? null, item.title);
       if (request.issue !== undefined) {
@@ -1160,6 +1174,8 @@ export class CampaignWorkLedgerStore {
     if (item.commitment !== "committed") {
       return fail(`a ${item.commitment === "cancelled" ? "cancelled" : "removed"} work item cannot be assigned; recommit it first`, 409);
     }
+    const refused = this.hooks.admitDispatch?.(campaignId, itemIssue(item.issue_repository, item.issue_number));
+    if (refused) return fail(refused, 409);
     return done(null);
   }
 

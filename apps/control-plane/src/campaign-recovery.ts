@@ -14,9 +14,9 @@ export function recoveryCoordinate(value: string): string {
 export function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
   if (evaluation.owner === "orchestrator") return "authorized_action";
   switch (evaluation.reason) {
-    case "outside_boundary": return "boundary_enlargement";
+    case "outside_boundary": case "outside_issue_scope": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
-    case "provider_delivery_unavailable": return "unsupported_capability";
+    case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
     case "protected_request": case "human_required_rule": case "custom_owner": return "human_required_rule";
     default: return "missing_human_information";
   }

@@ -46,7 +46,7 @@ import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type Ses
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
 import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
-import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, validClosingReferenceCheck } from "./pr-merge-closures.js";
+import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
 /**
@@ -11020,6 +11020,13 @@ export class SessionsService {
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
       this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id));
+    // A refused scope change cannot be routed around through a merge's closing references (#4062):
+    // the merge is refused with the issues named, rather than becoming a person's new decision.
+    if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
+      this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request_refused",
+        sessionId, controllingSessionId: controller.session.id, requestId: request.requestId, ...authorityEvaluation }));
+      return fail(unscopedClosureRefusal(authorityEvaluation.unscopedClosures), 409);
+    }
     // Full Control cannot supply credentials or sign-in, so it declines such a question once,
     // records it as blocked work, and creates no decision for anyone to answer (#2940).
     if (authorityEvaluation.disposition === "decline") {
@@ -11636,7 +11643,12 @@ export class SessionsService {
         this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(evidenceRefusal, 409);
       }
-      if (!this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+      // Read the controller again: the campaign's issue scope may have changed during the forge
+      // reads above, and a merge closing an issue it no longer names is not the Orchestrator's (#4062).
+      const armingParent = this.db.getSession(parent.id);
+      const armingPolicy = armingParent?.parentControlPolicy;
+      if (!armingParent || !armingPolicy || armingPolicy.revision !== decision.policyRevision ||
+          !this.workflowDecisionAuthorityCurrent(armingParent, armingPolicy, decision)) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
       }
