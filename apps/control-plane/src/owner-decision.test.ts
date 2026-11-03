@@ -243,6 +243,14 @@ test("a handed question recreated under a new key stays the owner's (#4064 revie
       assert.ok(again.ok && again.data, again.error ?? "created");
       assert.deepEqual([again.data.authority, again.data.authorityEvaluation?.reason], ["human", "owner_kept"], resourceKey);
       assert.equal(h.rootResolve("root", again.data, "split").ok, false, "the root cannot decide it");
+      // It waits for the owner without parking the root, like the occurrence it replaces.
+      const card = pendingRequests(h.db.getSession("root")!.pendingApproval).find((request) => request.occurrenceId === again.data!.occurrenceId);
+      assert.equal(card?.async, true, resourceKey);
+      for (const reported of ["running", "idle"] as const) {
+        h.svc.onSessionStatus("root", reported);
+        assert.notEqual(h.db.getSession("root")!.status, "input_required", `${resourceKey} after ${reported}`);
+      }
+      assert.equal(h.db.campaignContinuationLifecycle("root")?.hasPendingApproval, false);
     }
   } finally { h.db.close(); }
 });

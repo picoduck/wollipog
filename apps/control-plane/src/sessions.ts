@@ -13746,8 +13746,9 @@ export class SessionsService {
       kind: "workflow_decision",
       // A root's own decision its owner kept (#4064) waits for that person without parking the root:
       // the root keeps working, and campaign continuations keep reaching it.
-      ...(decision.sessionId === decision.controllingSessionId &&
-        (decision.category === "owner_decision" || decision.ownerHandoff) ? { async: true } : {}),
+      ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
+        (decision.category === "owner_decision" || decision.ownerHandoff ||
+          decision.authorityEvaluation?.reason === "owner_kept") ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
