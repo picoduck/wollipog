@@ -2,11 +2,13 @@ import type { ClaudeUsageCheckpoint, SessionEventPayload } from "@wollipog/proto
 
 type Usage = Extract<SessionEventPayload, { kind: "token_usage" }>;
 
-/** How many earlier usage records of the session are inspected for the turn's baseline. */
-export const CLAUDE_RUNNING_TOTAL_LOOKBACK = 500;
-
 /** A record the session ledger accrues: top-level (or independently billed) and not provisional. */
 const accrued = (event: Usage) => (!event.parentToolUseId || event.independentUsage === true) && event.liveUsage !== "provisional";
+
+/** The same predicate over a `session_events.payload` column, for queries that must not let
+ * display-only records crowd out the baseline. */
+export const ACCRUED_USAGE_SQL = `COALESCE(json_extract(payload, '$.liveUsage'), '')<>'provisional'
+  AND (json_extract(payload, '$.parentToolUseId') IS NULL OR json_extract(payload, '$.independentUsage')=1)`;
 
 const TOKENS = ["inputTokens", "outputTokens", "cacheReadInputTokens", "cacheCreationInputTokens"] as const;
 /** `later` reports at least everything `earlier` did, model by model. */
@@ -30,24 +32,26 @@ function covers(later: ClaudeUsageCheckpoint, earlier: ClaudeUsageCheckpoint): b
  * so a match is shown as uncertain, never corrected.
  */
 export function claudeRunningTotalBilled(current: Usage, earlier: Usage[]): number | null {
-  const checkpoint = current.claudeUsageCheckpoint;
-  if (!checkpoint || checkpoint.accountingScope !== "process" || !(checkpoint.totalCostUsd > 0) || !accrued(current)) return null;
-  let billed = current.costUsd ?? 0;
+  let billedBefore = 0;
   let index = 0;
   // The turn's other records follow the previous checkpoint.
   for (; index < earlier.length; index++) {
     const event = earlier[index]!;
     if (!accrued(event)) continue;
     if (event.claudeUsageCheckpoint) break;
-    billed += event.costUsd ?? 0;
+    billedBefore += event.costUsd ?? 0;
   }
+  const prior = earlier.slice(index).find((event) => accrued(event) && (event.claudeUsageCheckpoint?.totalCostUsd ?? 0) > 0);
+  return claudeTurnRunningTotal(current, billedBefore, prior?.claudeUsageCheckpoint ?? null);
+}
+
+/** The same decision from what the turn's other records billed since the previous checkpoint
+ * (`billedBefore`) and the latest earlier non-zero checkpoint of the session (`prior`). */
+export function claudeTurnRunningTotal(current: Usage, billedBefore: number, prior: ClaudeUsageCheckpoint | null): number | null {
+  const checkpoint = current.claudeUsageCheckpoint;
+  if (!checkpoint || checkpoint.accountingScope !== "process" || !(checkpoint.totalCostUsd > 0) || !accrued(current)) return null;
+  const billed = billedBefore + (current.costUsd ?? 0);
   // A difference from a baseline bills less than the total; only a whole total repeats earlier turns.
   if (Math.abs(billed - checkpoint.totalCostUsd) > 1e-6 * Math.max(1, checkpoint.totalCostUsd)) return null;
-  for (; index < earlier.length; index++) {
-    const event = earlier[index]!;
-    const prior = event.claudeUsageCheckpoint;
-    if (!prior || !accrued(event) || !(prior.totalCostUsd > 0)) continue;
-    return prior.sessionId === checkpoint.sessionId && covers(checkpoint, prior) ? billed : null;
-  }
-  return null;
+  return prior && prior.sessionId === checkpoint.sessionId && covers(checkpoint, prior) ? billed : null;
 }

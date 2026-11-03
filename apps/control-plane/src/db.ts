@@ -36,7 +36,7 @@ import { scopeSettlements } from "./campaign-issue-authority.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
-import { CLAUDE_RUNNING_TOTAL_LOOKBACK, claudeRunningTotalBilled } from "./claude-running-total.js";
+import { ACCRUED_USAGE_SQL, claudeTurnRunningTotal } from "./claude-running-total.js";
 import { lookupRate, priceUsage, resolveCostSource, sameRequestInputTier, type RateTable } from "./usage-pricing.js";
 import { collapseAgentSpawnObservations, type StructuredAgentSpawnObservation } from "./child-session-registry.js";
 import { WalCheckpointer, type WalCheckpointerOptions } from "./wal-checkpointer.js";
@@ -180,6 +180,7 @@ import {
   type UsageAmount,
   type SessionModelUsage,
   type SessionUsageResponse,
+  type ClaudeUsageCheckpoint,
   type UsageDailyBudgetPolicy,
   type UserCostWindows,
   type UsageRetentionPolicy,
@@ -15005,15 +15006,25 @@ export class ControlPlaneDb {
     dimensions: UsageDimensions,
   ): void {
     if (payload.claudeUsageCheckpoint?.accountingScope !== "process") return;
-    const earlier: Array<Extract<SessionEventPayload, { kind: "token_usage" }>> = [];
-    for (const row of this.stmt(
-      `SELECT payload FROM session_events
-        WHERE session_id=? AND kind='token_usage' AND seq<(SELECT seq FROM session_events WHERE id=?)
-        ORDER BY seq DESC LIMIT ?`,
-    ).all(sessionId, eventId, CLAUDE_RUNNING_TOTAL_LOOKBACK) as Array<{ payload: string }>) {
-      try { earlier.push(JSON.parse(row.payload)); } catch { /* unreadable records prove nothing */ }
-    }
-    const billed = claudeRunningTotalBilled(payload, earlier);
+    const current = this.stmt("SELECT seq FROM session_events WHERE id=?").get(eventId) as { seq: number } | undefined;
+    if (!current) return;
+    // Only accrued records count, so no number of display-only records can hide the baseline.
+    const accrued = `session_id=? AND kind='token_usage' AND json_valid(payload) AND ${ACCRUED_USAGE_SQL}`;
+    const checkpointed = "json_type(payload, '$.claudeUsageCheckpoint')='object'";
+    const previous = this.stmt(
+      `SELECT seq FROM session_events WHERE ${accrued} AND ${checkpointed} AND seq<? ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, current.seq) as { seq: number } | undefined;
+    const before = this.stmt(
+      `SELECT COALESCE(SUM(CASE WHEN json_type(payload, '$.costUsd') IN ('real', 'integer')
+                                THEN json_extract(payload, '$.costUsd') ELSE 0 END), 0) AS billed
+         FROM session_events WHERE ${accrued} AND seq>? AND seq<?`,
+    ).get(sessionId, previous?.seq ?? -1, current.seq) as { billed: number };
+    const prior = this.stmt(
+      `SELECT payload FROM session_events WHERE ${accrued} AND ${checkpointed}
+          AND json_extract(payload, '$.claudeUsageCheckpoint.totalCostUsd')>0 AND seq<? ORDER BY seq DESC LIMIT 1`,
+    ).get(sessionId, current.seq) as { payload: string } | undefined;
+    const billed = claudeTurnRunningTotal(payload, Number(before.billed),
+      prior ? (JSON.parse(prior.payload) as { claudeUsageCheckpoint: ClaudeUsageCheckpoint }).claudeUsageCheckpoint : null);
     if (billed === null) return;
     const owner = dimensions.scope.owner;
     this.stmt(

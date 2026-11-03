@@ -10264,6 +10264,10 @@ test("Claude turns that billed a running total are shown as uncertain in every c
     db.registerRunner(meta(), 500);
     db.createSession(newSession({ driver: "claude-code", config: { model: "claude-opus-5" } }));
     db.appendEvent("sess-1", turn(15, checkpoint(15, 7_000)), 3_600_100, { accrueUsage: true });
+    // A long turn's display-only records never hide its baseline.
+    for (let request = 0; request < 600; request++) {
+      db.appendEvent("sess-1", { kind: "token_usage", model: "claude-opus-5", inputTokens: 1, liveUsage: "provisional" }, 3_600_150, { accrueUsage: true });
+    }
     db.appendEvent("sess-1", turn(20, checkpoint(20, 7_400)), 3_600_200, { accrueUsage: true }); // the whole total again
     db.appendEvent("sess-1", turn(5, checkpoint(25, 7_500)), 3_600_300, { accrueUsage: true }); // a correct delta
     db.appendEvent("sess-1", turn(30, checkpoint(30, 7_600)), 3_600_400, { accrueUsage: true }); // the whole total again
