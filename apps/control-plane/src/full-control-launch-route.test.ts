@@ -70,7 +70,9 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   // the whole read. Synchronization echoes the revision it persisted.
   const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>(), holdSync: null as Promise<void> | null,
     // The fixture runner acknowledges each durable prompt it receives, as a live runner does.
-    ackDurable: true };
+    ackDurable: true,
+    // Each epic's sub-issues, read as the runner reads them; an epic not listed has none.
+    epics: new Map<number, number[]>() };
   let receipts: ((message: Extract<Parameters<SessionsService["onDurablePromptReceipt"]>[1], { type: "durable_session_command_result" }>) => void) | null = null;
   hub.sendToRunner = (_, message) => {
     sent.push(message);
@@ -86,10 +88,15 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     }
     if (message.type === "campaign_issue_scope" && (message.operation === "inspect" || message.operation === "synchronize")) {
       const requested = message.operation === "inspect" ? message.issues ?? [] : [];
+      const epic = message.operation === "inspect" ? message.epic : undefined;
+      const members = epic === undefined ? [] : issues.epics.get(epic) ?? [];
+      const candidate = (n: number, source: "umbrella" | "sub_issue" | "member_checklist") =>
+        ({ issue: { repository: issues.repository!, number: n }, title: `Issue ${n}`, source });
       const answer = message.operation === "synchronize" ? { ok: true, repository: "owner/repo", revision: message.scope.revision }
-        : issues.repository && !requested.some((n) => issues.notIssues.has(n))
-          ? { ok: true, repository: issues.repository, candidates: requested.map((n) => ({ issue: { repository: issues.repository!, number: n },
-            title: `Issue ${n}`, source: "member_checklist" as const })) }
+        : issues.repository && ![...requested, ...members, ...epic === undefined ? [] : [epic]].some((n) => issues.notIssues.has(n))
+          ? { ok: true, repository: issues.repository, candidates: [...epic === undefined ? [] : [candidate(epic, "umbrella")],
+            ...members.map((n) => candidate(n, "sub_issue")),
+            ...requested.filter((n) => n !== epic && !members.includes(n)).map((n) => candidate(n, "member_checklist"))] }
           : { ok: false };
       const respond = () => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
         sessionId: message.sessionId, ...answer }, "r");
@@ -1194,6 +1201,49 @@ test("a first message's background reference gets no scope or epic; Campaign Sta
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 90]);
     assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31]);
     assert.equal(campaignBoundaryCurrent(root), true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message's range scopes each verified issue, and a derived limit leaves room to add its target epic's members (#4061)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.issues.epics.set(40, [41, 42, 43, 44, 45, 46, 47, 48]);
+    const text = "Implement epic #40 in owner/repo: units #41–#42. Close #40 when all its units have merged.";
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42]);
+    // Three scoped issues, six verified members outside them and three derived follow-ups.
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 12);
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 3, "members never add follow-ups");
+    const members = [43, 44, 45, 46, 47, 48].map((number) => ({ repository: "owner/repo", number }));
+    const added = await f.sessions.proposeCampaignIssueScope(id, { requestId: "epic-members", expectedRevision: 2,
+      additions: members, removals: [], explanation: "Add the epic's remaining units", lineage: { kind: "epic", epic: 40 } });
+    assert.equal(added.ok, true, added.error ?? "");
+    assert.equal(added.data!.authority, "orchestrator");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, added.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42, 43, 44, 45, 46, 47, 48]);
+
+    // An explicit Maximum Issues never grows; the refusal names the limit and the owner's route to raise it.
+    const { id: capped } = await firstMessageLaunch(f, server, { issues: { maxIssues: 3 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, capped, text)).ok, true);
+    assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42]);
+    assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 3);
+    const refused = await f.sessions.proposeCampaignIssueScope(capped, { requestId: "epic-members-capped", expectedRevision: 2,
+      additions: members, removals: [], explanation: "Add the epic's remaining units", lineage: { kind: "epic", epic: 40 } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.status, 409);
+    assert.deepEqual(refused.errorDetails, { code: "capacity_exhausted", limit: 3, requested: 9 });
+    assert.match(refused.error ?? "", /Maximum Issues/u);
+    assert.match(refused.error ?? "", /Only the person who authorized Full Control can raise it: in Campaign Status, raise the Follow-Up Limit/u);
+
+    // An issue in a range that is not an issue of the repository drops out like any unverified reference.
+    f.issues.notIssues.add(52);
+    const { id: ranged } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, ranged, "Fix #51 through #54. See #55..#56.")).ok, true);
+    assert.deepEqual(f.db.getSession(ranged)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 53, 54]);
+    assert.deepEqual((await f.sessions.campaignIssueScope(ranged)).data!.contextIssueNumbers, [55, 56]);
   } finally { await server.close(); f.db.close(); }
 });
 

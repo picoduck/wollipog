@@ -1,12 +1,21 @@
 import { campaignRepositoryLocation } from "@wollipog/protocol";
 
-/** One issue reference in a message, at its exact place in the text. */
-export interface MessageIssueReference { number: number; start: number; end: number }
+/** One issue reference in a message, at its exact place in the text. Every issue a range names is
+ * its own `range` reference spanning the whole range. `context` marks the endpoints of a range that
+ * names nothing: they are recorded for the owner to see and can never become scope. */
+export interface MessageIssueReference { number: number; start: number; end: number; range?: true; context?: true }
+
+// A range between two short references (#4061): "#A–#B", "#A-#B", "#A—#B", "#A..#B", "#A to #B" or
+// "#A through #B", with or without spaces, on one line. A chain such as "#1–#2–#3" is no range.
+const RANGE = /(?<![\w./#\-–—])#([1-9][0-9]{0,15})(?:[^\S\r\n]*(?:[-–—]|\.\.)[^\S\r\n]*|[^\S\r\n]+(?:to|through)[^\S\r\n]+)#([1-9][0-9]{0,15})(?![\w\-–—]|\.\.)/giu;
 
 /** Every reference a message makes to the campaign's own repository's issues, in text order:
  * `#123`, `owner/repo#123` and `https://github.com/owner/repo/issues/123`, or for a GitLab project
  * (#3539) `http(s)://<host>/<project>/-/issues/123`. References to another repository and pull or
- * merge request URLs are ignored. */
+ * merge request URLs are ignored. A range names every issue from its first end to its last (#4061)
+ * only when it is ascending and at most 100 issues wide, and only while every range expanded keeps
+ * the message within 100 distinct issues; otherwise no range expands and each one's endpoints are
+ * context. The expansion never depends on anything but the text. */
 export function issueReferenceSpans(text: string, repository: string): MessageIssueReference[] {
   const own = repository.toLowerCase();
   const found: MessageIssueReference[] = [];
@@ -14,7 +23,16 @@ export function issueReferenceSpans(text: string, repository: string): MessageIs
     const n = Number(value);
     if (Number.isSafeInteger(n) && n > 0) found.push({ number: n, start, end });
   };
-  for (const match of text.matchAll(/(?<![\w./#-])#([1-9][0-9]{0,15})(?![\w-])/gu)) add(match[1]!, match.index, match.index + match[0].length);
+  const ranges: Array<{ from: number; to: number; start: number; end: number }> = [];
+  // The positions of both ends' `#`, so neither is also read as a reference of its own.
+  const ends = new Set<number>();
+  for (const match of text.matchAll(RANGE)) {
+    ranges.push({ from: Number(match[1]), to: Number(match[2]), start: match.index, end: match.index + match[0].length });
+    ends.add(match.index).add(match.index + match[0].lastIndexOf("#"));
+  }
+  for (const match of text.matchAll(/(?<![\w./#-])#([1-9][0-9]{0,15})(?![\w-])/gu)) {
+    if (!ends.has(match.index)) add(match[1]!, match.index, match.index + match[0].length);
+  }
   for (const match of text.matchAll(/(?<![\w./-])([\w.-]+\/[\w.-]+)#([1-9][0-9]{0,15})(?![\w-])/gu)) {
     if (match[1]!.toLowerCase() === own) add(match[2]!, match.index, match.index + match[0].length);
   }
@@ -26,7 +44,31 @@ export function issueReferenceSpans(text: string, repository: string): MessageIs
       if (match[1]!.toLowerCase() === own) add(match[2]!, match.index, match.index + match[0].length);
     }
   }
+  const bounded = (r: { from: number; to: number }) =>
+    Number.isSafeInteger(r.to) && r.from < r.to && r.to - r.from < MAX_MESSAGE_ISSUES;
+  // Sizes are summed before anything is expanded, so a message of many ranges stays linear.
+  let expand = ranges.reduce((sum, r) => sum + (bounded(r) ? r.to - r.from + 1 : 0), 0) <= MAX_CLASSIFIED_REFERENCES;
+  if (expand) {
+    const distinct = new Set(found.map((r) => r.number));
+    for (const r of ranges) if (bounded(r)) for (let n = r.from; n <= r.to; n++) distinct.add(n);
+    expand = distinct.size <= MAX_MESSAGE_ISSUES;
+  }
+  for (const { from, to, start, end } of ranges) {
+    if (expand && bounded({ from, to })) for (let n = from; n <= to; n++) found.push({ number: n, start, end, range: true });
+    else for (const n of new Set([from, to])) if (Number.isSafeInteger(n)) found.push({ number: n, start, end, range: true, context: true });
+  }
   return found.sort((a, b) => a.start - b.start);
+}
+
+/** Target epics a first message names (#4061): its own `#N` or issue URL references written right
+ * after the word "epic" ("implement epic #40"), whose issue the message scopes. More than
+ * `MAX_TARGET_EPICS` names none, so the members' inspection stays bounded. */
+export function firstMessageTargetEpics(text: string, repository: string, scope: readonly number[]): number[] {
+  const epics = new Set<number>();
+  for (const r of issueReferenceSpans(text, repository)) {
+    if (!r.range && scope.includes(r.number) && /\bepic[^\S\r\n]*:?[^\S\r\n]*$/iu.test(text.slice(Math.max(0, r.start - 16), r.start))) epics.add(r.number);
+  }
+  return epics.size > MAX_TARGET_EPICS ? [] : [...epics].sort((a, b) => a - b);
 }
 
 /** How one occurrence of a reference is used. Only `directive` can grant scope. */
@@ -107,7 +149,9 @@ function sentences(line: string, offset: number): Array<[number, number]> {
  * unclear. A negation reaches every later clause of its sentence. A line ending in a colon leads
  * what follows it: a request passes only to list items without a cue of their own, while a negated
  * or background lead withholds every following item and plain line up to a blank line. When in doubt a reference is context, never scope: the owner can promote it through the
- * existing scope review. The same 100-issue bound as before applies to the union. */
+ * existing scope review. The same 100-issue bound as before applies to the union. A range (#4061)
+ * is one reference: the clause holding its first end governs every issue it names, so "fix
+ * #1–#5" scopes all five and "not #1–#5" or "see #1–#5" withholds all five. */
 export function firstMessageIssueIntent(text: string, repository: string): FirstMessageIssueIntent {
   const references = issueReferenceSpans(text, repository);
   const distinct = [...new Set(references.map((r) => r.number))].sort((a, b) => a - b).slice(0, MAX_MESSAGE_ISSUES);
@@ -121,6 +165,8 @@ export function firstMessageIssueIntent(text: string, repository: string): First
     if (list) list.push(intent); else occurrences.set(n, [intent]);
   };
   const cited = new Set<MessageIssueReference>();
+  // The endpoints of a range that names nothing (#4061) are context wherever they stand.
+  for (const r of references) if (r.context) { record(r.number, "unclear"); cited.add(r); }
   // A same-length working copy: references become markers, and URLs, paths, file names and code
   // lose their words, so a word inside an address or file name ("fix-login/issues/1") is never a cue.
   const masked = text.split("");
@@ -254,3 +300,5 @@ export function firstMessageIssueIntent(text: string, repository: string): First
 export const MAX_CLASSIFIED_MESSAGE_LENGTH = 64 * 1024;
 export const MAX_CLASSIFIED_REFERENCES = 1000;
 export const MAX_MESSAGE_ISSUES = 100;
+/** At most this many target epics a first message names get room for their members (#4061). */
+export const MAX_TARGET_EPICS = 5;

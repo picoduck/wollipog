@@ -29,7 +29,7 @@ import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
-import { firstMessageIssueIntent } from "./first-message-issue-intent.js";
+import { firstMessageIssueIntent, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
@@ -5538,6 +5538,11 @@ export class SessionsService {
     const references = [...intent.scope, ...intent.context].sort((a, b) => a - b);
     const verified = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
     const issueNumbers = verified.filter((n) => intent.scope.includes(n));
+    // A derived Maximum Issues leaves room for the verified members of target epics the message
+    // names (#4061), so the Orchestrator can add them by epic lineage; an explicit one never grows.
+    const epics = policy.firstMessageScope?.state === "pending" && policy.firstMessageScope.derivedLimits?.maxIssues
+      ? firstMessageTargetEpics(text, repository, issueNumbers) : [];
+    const epicMembers = epics.length ? await this.verifiedEpicMembers(session, repository, epics) : [];
     const current = this.db.getSession(sessionId);
     const revision = current?.parentControlPolicy?.revision ?? 0;
     const scope = current?.orchestratorPolicy?.issueScope;
@@ -5558,7 +5563,7 @@ export class SessionsService {
       authorizedByUserId: principal.userId, authorizedAt: now };
     const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
       current.orchestratorPolicy!.behavior.followUps, scoped, firstMessageObjective(text), revision + 1, nextScope.revision, now,
-      pending.derivedLimits) };
+      pending.derivedLimits, epicMembers) };
     let established: boolean;
     try {
       established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, contextIssueNumbers,
@@ -5567,7 +5572,7 @@ export class SessionsService {
     if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
     this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
       scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length,
-      contextIssues: contextIssueNumbers.length, messageDigest }));
+      contextIssues: contextIssueNumbers.length, targetEpics: epics.length, epicMembers: epicMembers.length, messageDigest }));
     // A runner that misses this keeps its older revision, which authorizes no issue write; every
     // issue operation synchronizes again before it acts.
     await this.synchronizeCampaignIssueScope(sessionId);
@@ -5648,6 +5653,27 @@ export class SessionsService {
       results.forEach((result, index) => { if (Array.isArray(result) && result.length) kept.push(batch[index]!); });
     }
     return kept;
+  }
+
+  /** The issues the runner verifies as members of each epic (#4061): its sub-issues and member
+   * checklist issues in the campaign repository, as epic-lineage scope additions verify them. An
+   * epic the runner can't read in full, or an unreachable runner, adds none. */
+  private async verifiedEpicMembers(root: SessionView, repository: string, epics: number[]): Promise<number[]> {
+    const members = new Set<number>();
+    await Promise.all(epics.map(async (epic) => {
+      const requestId = `first_message_epic_${randomUUID()}`;
+      try {
+        const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+          { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, epic }, 30_000);
+        if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
+            response.repository?.toLowerCase() !== repository) return;
+        for (const c of response.candidates ?? []) {
+          if (c.issue.number !== epic && c.issue.repository.toLowerCase() === repository &&
+              (c.source === "sub_issue" || c.source === "member_checklist")) members.add(c.issue.number);
+        }
+      } catch { /* An unreadable epic leaves no room. */ }
+    }));
+    return [...members].sort((a, b) => a - b);
   }
 
   /** A campaign child's assignment carries its Orchestrator's server-derived policy preamble. It
@@ -10475,15 +10501,16 @@ export class SessionsService {
       const boundary = issueBoundary(latest);
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
-        const refuse = (code: CampaignScopeAdmissionFailure): ServiceResult<WorkflowDecisionView> => {
+        const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
             boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: snapshot.lineage?.kind ?? "none", outcome: "refused", reason: code }));
           const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
-          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code } };
+          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
-        if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) >
-            this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues)) return refuse("capacity_exhausted");
+        const requested = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation);
+        const limit = this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues);
+        if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
         let evidence: unknown = { removals: snapshot.removals };
         if (snapshot.additions.length) {
           if (!snapshot.lineage) return refuse("lineage_missing");
