@@ -827,8 +827,7 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      ui_evidence_approval decision's images to a managed reviewer Session whose receipts and
 //      verdict the server records, and resolves with delegatedImageReview. The reviewer launches
 //      on the root's runner with only its two review tools; older peers keep direct review.
-// 280: authorized project paths and sanitized Full Control inspection failures (#4090).
-export const PROTOCOL_VERSION = 280;
+export const PROTOCOL_VERSION = 276;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
