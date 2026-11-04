@@ -49,6 +49,8 @@ Object.defineProperty(elementPrototype, "offsetHeight", {
   get(this: HTMLElement) { return isRow(this) ? rowHeight(this) : READER_HEIGHT; },
 });
 Object.defineProperty(elementPrototype, "offsetWidth", { configurable: true, get: () => 800 });
+Object.defineProperty(elementPrototype, "clientHeight", { configurable: true, get: () => READER_HEIGHT });
+Object.defineProperty(elementPrototype, "clientWidth", { configurable: true, get: () => 800 });
 elementPrototype.getBoundingClientRect = function (this: HTMLElement) {
   const height = isRow(this) ? rowHeight(this) : READER_HEIGHT;
   return { top: 0, left: 0, right: 800, bottom: height, width: 800, height, x: 0, y: 0, toJSON() {} } as DOMRect;
@@ -105,6 +107,7 @@ test("a turn's artifacts past its View All take no room in the virtual list, mou
     assert.equal(list.dataset.virtualTotal, String(items.length), "every row is still an item of the list");
     assert.ok(container.querySelectorAll("[data-virtual-key^='item:artifact_attached']").length === 0,
       "the long turn is below the mounted range");
+    assert.ok(container.querySelectorAll("[data-virtual-row]").length > 0, "early replies mount and are measured");
     const height = Number.parseFloat(list.style.height);
     await act(async () => root.unmount());
     container.remove();
