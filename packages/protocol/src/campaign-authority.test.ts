@@ -4,6 +4,7 @@ import {
   campaignAuthorityPreflight, campaignCodeOperationTargets, campaignWorkflowOwner, completeParentControlDecisions,
   resolveCampaignAuthority, validCampaignControl, ownerDecisionProtected,
   fullControlStandingHumanRequired, humanRequiredRulesExist, FULL_CONTROL_DECLINED_CLASSES, type GovernancePolicy,
+  fullControlAutomaticResponse, fullControlAutomaticResponseText, parseFullControlAutomaticResponse, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE,
   HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type ParentControlDecisionPolicy, type PendingApproval, type WorkflowDecisionResourceSnapshot,
 } from "./index.js";
 
@@ -772,6 +773,41 @@ test("Full Control owns extra review rounds within the server-enforced cap of a 
   assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, false), "human");
   assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", false, true), "human");
   assert.equal(campaignWorkflowOwner({ mode: "custom" }, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, true), "human");
+});
+
+test("Full Control response attribution names only safe classes and never invents an automatic response (#4063)", () => {
+  // A credential, access or lasting-grant decline gets the generic policy sentence, never its class.
+  for (const requestClass of FULL_CONTROL_DECLINED_CLASSES) {
+    const response = fullControlAutomaticResponse({ reason: "declined_request", requestClass });
+    assert.deepEqual(response, { policy: "full_control" });
+    for (const kind of ["question", "tool"] as const) {
+      const text = fullControlAutomaticResponseText(kind, response);
+      assert.match(text, /^\[Wollipog Full Control\] Wollipog (dismissed this question|declined this tool call) automatically under the campaign's Full Control policy\. No person saw it/);
+      assert.doesNotMatch(text, /\buser\b|secret|sign-in|credential|access|grant/i);
+    }
+  }
+  assert.deepEqual(fullControlAutomaticResponse({ reason: "authorized_operation", requestClass: "root_questions" }),
+    { policy: "full_control", basis: "root_questions" });
+  // The unresolved-effect rule refines whichever tool class it was declined under.
+  assert.deepEqual(fullControlAutomaticResponse({ reason: "unresolved_effects", requestClass: "git_execution_without_bounded_effect_proof" }),
+    { policy: "full_control", basis: "unresolved_effects" });
+  assert.match(fullControlAutomaticResponseText("tool", { policy: "full_control", basis: "unresolved_effects" }),
+    /could not resolve every file it would touch to a real path inside this session's worktree\. Retry with explicit file paths/);
+  // A root's in-result text says Full Control dismissed it and names the owner-decision route (#4064):
+  // only a runner new enough for the owner-decision tools receives the attribution.
+  const rootText = fullControlAutomaticResponseText("question", { policy: "full_control", basis: "root_questions" });
+  assert.match(rootText, /\(Root Questions\)\. No person saw it, and none of its options was chosen\. You own every Orchestrator-owned decision/);
+  assert.match(rootText, /request_owner_decision/);
+  assert.match(rootText, /hand_workflow_decision_to_owner/);
+  assert.ok(rootText.endsWith(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE.slice(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE.indexOf("You own"))),
+    "the in-result guidance is exactly the owner-route notice's guidance");
+  // A runner claims an automatic response only as the server sent it.
+  assert.equal(parseFullControlAutomaticResponse(undefined), undefined);
+  assert.equal(parseFullControlAutomaticResponse({ policy: "person" }), undefined);
+  assert.equal(parseFullControlAutomaticResponse([{ policy: "full_control" }]), undefined);
+  assert.deepEqual(parseFullControlAutomaticResponse({ policy: "full_control", basis: "secrets_and_sign_in" }), { policy: "full_control" });
+  assert.deepEqual(parseFullControlAutomaticResponse({ policy: "full_control", basis: "root_questions", extra: 1 }),
+    { policy: "full_control", basis: "root_questions" });
 });
 
 test("an owner decision is the person's in every mode and to every requester (#4064)", () => {
