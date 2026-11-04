@@ -43,7 +43,7 @@ test("a Breakdown table grows with the page instead of scrolling inside it (#301
     assert.deepEqual(declarationsOf(css, prop).filter(({ selector }) => selector.includes(WRAP)).map(({ value }) => value), [],
       `${WRAP} declares ${prop}`);
   }
-  assert.equal(declarationsOf(css, "position").filter(({ selector }) => selector.includes(".usage-table")).length, 0,
+  assert.equal(declarationsOf(css, "position").filter(({ selector, value }) => selector.includes(".usage-table") && value === "sticky").length, 0,
     "no sticky header: there is no inner scroller for it to stick in");
   assert.doesNotMatch(view, /role="region"/, "a table that does not scroll is not a scroll region");
   // The tab names each table, so a caption would only repeat it.
