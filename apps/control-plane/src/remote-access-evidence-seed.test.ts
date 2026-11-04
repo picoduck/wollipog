@@ -58,7 +58,7 @@ test("evidence seed succeeds without a competing writer and closes on registrati
   assert.throws(() => opened!.raw().prepare("SELECT 1"), /not open|closed/i);
 });
 
-test("exhausted registration admission leaves no partial fixture or open connection", (t) => {
+test("exhausted registration admission closes its attached connection", (t) => {
   const root = mkdtempSync(join(tmpdir(), "remote-evidence-exhaustion-"));
   const database = join(root, "state.db");
   ControlPlaneDb.open(database).close();
@@ -77,9 +77,32 @@ test("exhausted registration admission leaves no partial fixture or open connect
     (error: unknown) => (error as { errcode?: number }).errcode === 5);
   assert.ok(attached);
   assert.throws(() => attached!.raw().prepare("SELECT 1"), /not open|closed/i);
-  assert.equal(writer.prepare("SELECT count(*) AS n FROM runners").get()?.n, 0);
-  assert.equal(writer.prepare("SELECT count(*) AS n FROM sessions").get()?.n, 0);
   writer.exec("ROLLBACK");
+});
+
+test("registration failure after writes rolls back partial fixture metadata before another seed", (t) => {
+  const root = mkdtempSync(join(tmpdir(), "remote-evidence-rollback-"));
+  const database = join(root, "state.db");
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const db = ControlPlaneDb.open(database);
+  try {
+    const workspace = { id: "duplicate", name: "Fixture", path: root };
+    // The runner row and first workspace are written before the second workspace violates
+    // uniqueness. Check rollback while this same connection remains open: closing it could
+    // otherwise conceal a missing ROLLBACK by discarding the unfinished transaction itself.
+    assert.throws(() => db.registerRunner({ runnerId: "partial", hostname: "fixture", os: "linux", version: "test",
+      workspaces: [workspace, workspace], agents: [] }, Date.now()), /UNIQUE constraint failed/);
+    assert.equal(db.raw().isTransaction, false);
+    assert.equal(db.raw().prepare("SELECT count(*) AS n FROM runners").get()?.n, 0);
+    assert.equal(db.raw().prepare("SELECT count(*) AS n FROM workspaces").get()?.n, 0);
+    assert.equal(db.raw().prepare("SELECT count(*) AS n FROM runner_ownership").get()?.n, 0);
+  } finally { db.close(); }
+  const seeded = seedDelegatedUiEvidence(database, root, "human", { live: true });
+  const verify = ControlPlaneDb.attach(database);
+  try {
+    assert.equal(verify.raw().prepare("SELECT count(*) AS n FROM runners").get()?.n, 1);
+    assert.equal(verify.getSession(seeded.childId)?.title, "Evidence Child");
+  } finally { verify.close(); }
 });
 
 test("registration inside an existing transaction leaves commit and rollback to its caller", () => {
