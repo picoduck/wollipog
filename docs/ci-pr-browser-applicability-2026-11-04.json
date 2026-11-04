@@ -2,8 +2,13 @@
   "version": 1,
   "repository": "picoduck/wollipog",
   "policy": "pr-browser-critical-v2",
-  "policySourceSha256": "1ae6239cf7065a87d56b7ae5e51d033a1f1af9752390a82609c0c8e2234b1108",
-  "sourceHead": "dc1230a350c768152e1c7b4b12bc738bd6348b2a",
+  "policySourceSha256": "39a64a652d11a41184888b3641b972974706a733279df4d6f5e019b1db12fea1",
+  "sourceHashes": {
+    "ci-pr-browser-policy.mjs": "39a64a652d11a41184888b3641b972974706a733279df4d6f5e019b1db12fea1",
+    "ci-pr-browser-applicability.mjs": "81e0d068297d41fc68dacde9038c2bb48efdd892eb215176270773223ca96b89"
+  },
+  "sourceHead": "583ca2a6411af511f4401a1fc0fb0243110373f6",
+  "sourceWorkingTreeDirty": false,
   "pinnedMainSha": "aaadff56faab892f6ab4f101e2e2485ce2bbe55a",
   "method": "Most recent unique standard squash PR suffixes (#N) on first-parent main history; keep newest commit per PR identity and replay parent-to-commit name-status diff against that commit's browser inventory",
   "certification": "none",
@@ -23,14 +28,14 @@
   "reduced": 32,
   "full": 68,
   "reasons": {
-    "browser-infrastructure-or-toolchain": 19,
-    "browser-harness-or-support": 25,
+    "browser-infrastructure-or-toolchain": 21,
+    "browser-harness-or-support": 23,
     "unknown-input": 23,
     "critical-and-changed-browser-files": 32,
     "diff-unavailable": 1
   },
   "overlappingFullTriggerReasons": {
-    "browser-infrastructure-or-toolchain": 20,
+    "browser-infrastructure-or-toolchain": 23,
     "unknown-input": 41,
     "browser-harness-or-support": 26
   },
@@ -301,7 +306,7 @@
       "committedAt": "2026-11-03T19:50:33.000Z",
       "changedPaths": 11,
       "mode": "full",
-      "reason": "browser-harness-or-support",
+      "reason": "browser-infrastructure-or-toolchain",
       "selectedBrowserFiles": 306,
       "inventoryBrowserFiles": 306
     },
@@ -1001,7 +1006,7 @@
       "committedAt": "2026-11-02T01:34:56.000Z",
       "changedPaths": 20,
       "mode": "full",
-      "reason": "browser-harness-or-support",
+      "reason": "browser-infrastructure-or-toolchain",
       "selectedBrowserFiles": 305,
       "inventoryBrowserFiles": 305
     },

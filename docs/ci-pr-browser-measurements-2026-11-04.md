@@ -18,7 +18,10 @@ synthetic lane alone would not demonstrate overall throughput improvement.
 Reproduce with `node scripts/ci-pr-browser-applicability.mjs --ref
 aaadff56faab892f6ab4f101e2e2485ce2bbe55a --count 100`. The
 [raw replay](ci-pr-browser-applicability-2026-11-04.json) records all source commit
-SHAs, PR suffix identities, selection outcomes and policy source hash. One repeated
+SHAs, PR suffix identities, selection outcomes and hashes of policy/replay sources.
+The source commit contains both exact tool versions; `sourceWorkingTreeDirty`
+compares executed source bytes with that commit and is false in this artifact.
+One repeated
 PR suffix was skipped, retaining the newest commit for that identity. No extra CI
 run was used. This is a Git-history convention, not 100 fresh forge lookups.
 
@@ -28,8 +31,8 @@ landing times**, so the window must not be used for queue or scheduling latency.
 
 | First Full-Fallback Reason | PRs / 100 |
 | --- | ---: |
-| Browser infrastructure or toolchain | 19 |
-| Browser harness or support | 25 |
+| Browser infrastructure or toolchain | 21 |
+| Browser harness or support | 23 |
 | Unknown input | 23 |
 | Empty diff (`diff-unavailable`) | 1 |
 
@@ -38,7 +41,7 @@ estimate the independent effect of relaxing any one category:
 
 | Category | PRs / 100 |
 | --- | ---: |
-| Browser infrastructure or toolchain | 20 |
+| Browser infrastructure or toolchain | 23 |
 | Browser harness or support | 26 |
 | Unknown input | 41 |
 
