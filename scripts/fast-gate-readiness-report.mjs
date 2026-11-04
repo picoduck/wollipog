@@ -144,7 +144,7 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
     `${PROPOSAL} embeds the ruleset body computed below from the live snapshot`, text(PROPOSAL).includes(JSON.stringify(ruleset, null, 2)));
   add("protected-context-kept", "AC1", `\`${REQUIRED_CONTEXT}\` keeps its name and issuer; nothing is renamed or removed`, "met",
     `ci.yml keeps the protected PR/queue/main context and isolates explicit dispatch benchmarks; proposed ruleset keeps ${JSON.stringify(liveRequired[0])} first`,
-    (workflow.includes(`    name: ${REQUIRED_CONTEXT}\n`) || workflow.includes("    name: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' || 'Typecheck, Test & Sidecar Bundle' }}\n")) && JSON.stringify(ruleset.rules.find((r) => r.type === "required_status_checks")
+    workflow.includes(`    name: ${REQUIRED_CONTEXT}\n`) && JSON.stringify(ruleset.rules.find((r) => r.type === "required_status_checks")
       .parameters.required_status_checks[0]) === JSON.stringify(liveRequired[0]));
   add("unknown-checks-block", "AC1", "An unfilled, unpinned or unknown admission issuer keeps full validation", "met",
     `Gate on the unfilled template: ${decided("Proposed ruleset, issuer placeholder unfilled").mode} (${decided("Proposed ruleset, issuer placeholder unfilled").enforcement.reason})`,

@@ -33,6 +33,7 @@ const events = [
   { name: "main-push", event_name: "push", expected: true },
   { name: "merge-group", event_name: "merge_group", expected: true },
   { name: "manual", event_name: "workflow_dispatch", expected: true },
+  { name: "isolated-benchmark", event_name: "workflow_dispatch", browser_benchmark: true, expected: false },
 ];
 
 // This is an inert expression model of GitHub's documented status functions, not its
@@ -44,6 +45,7 @@ function eligible(expression, event, outcomes, workflowCancelled) {
   };
   const context = {
     github,
+    inputs: { browser_benchmark: event.browser_benchmark ?? false },
     needs: Object.fromEntries(Object.entries(outcomes).map(([id, result]) => [id, { result }])),
     always: () => true,
     cancelled: () => workflowCancelled,

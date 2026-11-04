@@ -18,7 +18,7 @@ Workflow `CI` remains at `.github/workflows/ci.yml`. Protected result
 | Merge Group | Complete regression | Same; PR routing is never admitted |
 | Main Push or Reusable Rolling Validation | Complete regression | Same |
 | Ordinary Manual Dispatch | Complete regression | Same |
-| Explicit Branch Benchmark Dispatch | Isolated browser simulation | Same; never emits the protected context |
+| Explicit Branch Benchmark Dispatch | Isolated browser simulation | Same; skips protected aggregator execution |
 
 Every PR retains all three full Node shards, typecheck, engine boundaries,
 web/control-plane/runner bundles, delegated Linux containment/recovery, Platform
@@ -106,9 +106,11 @@ gh workflow run ci.yml --repo picoduck/wollipog --ref <branch> -f browser_benchm
 ```
 
 The flag exists only under workflow_dispatch, not rolling reusable inputs. The
-same event/input guard controls reduced matrix and a distinct **PR Browser
-Benchmark Result** name. PR/merge-group events cannot exploit the flag; reduced
-dispatch cannot emit the protected context. Default dispatch stays full. The
+same event/input guard controls reduced matrix and a separate job with literal
+name **PR Browser Benchmark Result**. The protected aggregator retains the literal
+**Typecheck, Test & Sidecar Bundle** name and skips execution only for this diagnostic.
+PR/merge-group events cannot exploit the flag; a skipped diagnostic protected job
+is not passing PR assurance evidence. Default dispatch stays full. The
 simulation runs critical files, full Node/check/platform work, WebKit, Windows
 and production smoke. It represents critical-only PR work, not arbitrary changed
 specs or live planning latency. At most four additional runs per PR are authorized.

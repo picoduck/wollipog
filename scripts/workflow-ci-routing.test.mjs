@@ -36,7 +36,8 @@ const states = ["success", "failure", "cancelled", "skipped", "", "unexpected"];
 const variables = ["", "false", "disabled", "Enabled", "ENABLED", "true", "enabled ", "enabled"];
 
 test("only the isolated dispatch benchmark can reduce manual coverage and it never emits the protected name", () => {
-  const name = expression(job("check"), "name");
+  assert.equal(expression(job("check"), "name"), "Typecheck, Test & Sidecar Bundle");
+  assert.equal(expression(job("benchmark_check"), "name"), "PR Browser Benchmark Result");
   const prepare = expression(job("browser").split("      - name: Prepare Benchmark Browser Selection\n")[1], "if");
   const benchmarkFlag = expression(job("browser"), "BROWSER_BENCHMARK");
   for (const event of ["pull_request", "merge_group", "push", "workflow_call", "workflow_dispatch"]) {
@@ -46,13 +47,29 @@ test("only the isolated dispatch benchmark can reduce manual coverage and it nev
       assert.deepEqual(Array.from(evaluate(matrix, ...args)), isolated ? [1] : [1, 2, 3, 4, 5]);
       assert.equal(Boolean(evaluate(prepare, ...args)), isolated);
       assert.equal(evaluate(benchmarkFlag, ...args), isolated ? "true" : "false");
-      assert.equal(evaluate(name, ...args), isolated ? "PR Browser Benchmark Result" : "Typecheck, Test & Sidecar Bundle");
+      assert.equal(Boolean(evaluate(expression(job("check"), "if"), ...args)), !isolated);
+      assert.equal(Boolean(evaluate(expression(job("benchmark_check"), "if"), ...args)), isolated);
+      assert.equal(Boolean(evaluate(expression(job("benchmark_check"), "if"), event, "", "", true,
+        false, "synchronize", "", "", "skipped", benchmark, caller)), false);
     }
   }
   const events = workflow.slice(workflow.indexOf("\non:\n"), workflow.indexOf("\npermissions:\n"));
   assert.match(events, /workflow_dispatch:\n    inputs:\n      browser_benchmark:/);
   assert.doesNotMatch(events.split("  workflow_dispatch:")[0], /browser_benchmark/);
   assert.doesNotMatch(job("unit"), /browser_benchmark|BROWSER_BENCHMARK|PR_FAST/);
+});
+
+test("the separate benchmark aggregate fails on every non-success dependency", () => {
+  const text = job("benchmark_check");
+  assert.equal(expression(text, "needs"), "[checks, unit, browser, win32, webkit, delegated_pipeline]");
+  const shell = shellOf(text, "Require Every Benchmark Job to Have Succeeded");
+  const keys = ["CHECKS_RESULT", "UNIT_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"];
+  const success = Object.fromEntries(keys.map((key) => [key, "success"]));
+  for (const key of keys) for (const result of states) {
+    const run = spawnSync("bash", ["-c", shell], { env: { ...success, [key]: result }, encoding: "utf8", timeout: 1000 });
+    assert.ifError(run.error);
+    assert.equal(run.status, result === "success" ? 0 : 1, `${key}/${result}`);
+  }
 });
 
 test("failed, cancelled and missing PR plans cannot reduce browser work using retained outputs", () => {

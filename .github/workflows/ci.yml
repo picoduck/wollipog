@@ -1077,13 +1077,47 @@ jobs:
           retention-days: 30
           if-no-files-found: warn
 
+  benchmark_check:
+    # A reduced branch diagnostic has its own literal result name. It never runs the
+    # protected aggregator, whose static name is also visible before it starts.
+    if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.browser_benchmark }}
+    name: PR Browser Benchmark Result
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    needs: [checks, unit, browser, win32, webkit, delegated_pipeline]
+    steps:
+      - name: Require Every Benchmark Job to Have Succeeded
+        env:
+          CHECKS_RESULT: ${{ needs.checks.result }}
+          UNIT_RESULT: ${{ needs.unit.result }}
+          BROWSER_RESULT: ${{ needs.browser.result }}
+          WIN32_RESULT: ${{ needs.win32.result }}
+          WEBKIT_RESULT: ${{ needs.webkit.result }}
+          DELEGATED_PIPELINE_RESULT: ${{ needs.delegated_pipeline.result }}
+        run: |
+          status=0
+          report() {
+            if [ "$2" = success ]; then
+              echo "$1: success"
+            else
+              echo "::error::$1 ended with result '$2'"; status=1
+            fi
+          }
+          report "Typecheck & Bundles" "$CHECKS_RESULT"
+          report "Unit Tests" "$UNIT_RESULT"
+          report "Browser End-to-End Tests" "$BROWSER_RESULT"
+          report "Settings-Rows win32 Baselines" "$WIN32_RESULT"
+          report "WebKit End-to-End Tests" "$WEBKIT_RESULT"
+          report "Delegated Pipeline Recovery" "$DELEGATED_PIPELINE_RESULT"
+          exit "$status"
+
   check:
     # Report failed, cancelled or skipped dependencies while PR CI is active. !cancelled()
     # lets superseded PR runs cancel this job (#2452), without changing non-PR aggregation.
     # It is a status function, so no implicit success() suppresses failure reporting.
     # Keep the draft/ready-for-review guard; see docs/ci-aggregation.md for the verification limits.
-    if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
-    name: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' || 'Typecheck, Test & Sidecar Bundle' }}
+    if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) && !(github.event_name == 'workflow_dispatch' && inputs.browser_benchmark) }}
+    name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]

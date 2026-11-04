@@ -67,6 +67,10 @@ function workflowContract(path) {
       assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
       return false;
     }
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "benchmark_check:") {
+      assert.equal(match[1].trim(), "${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.browser_benchmark }}");
+      return false;
+    }
     return true;
   });
   const guards = [...new Set(requiredGuards.map((match) => unwrapAggregatorGuard(match[1].trim())))];
@@ -80,6 +84,7 @@ function workflowContract(path) {
 }
 
 function unwrapAggregatorGuard(expression) {
+  expression = expression.replace(" && !(github.event_name == 'workflow_dispatch' && inputs.browser_benchmark) }}", " }}");
   const work = expression.match(/^\$\{\{ !cancelled\(\) && \((.+)\) \}\}$/);
   if (work) return work[1];
   const wrapped = expression.match(/^\$\{\{\s*\(github\.event_name != 'pull_request' \|\| !cancelled\(\)\)\s*&&\s*\((.+)\)\s*\}\}$/);
@@ -235,7 +240,7 @@ test("PR workflows keep least-privilege permissions and an always-present requir
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
   assert.match(
     ci,
-    /^    name: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' \|\| 'Typecheck, Test & Sidecar Bundle' \}\}$/m,
+    /^    name: Typecheck, Test & Sidecar Bundle$/m,
     `${WORKFLOWS[0]}: job name is a protected required status context`,
   );
   assert.doesNotMatch(
@@ -253,7 +258,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "unit", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "unit", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "benchmark_check", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
@@ -398,7 +403,8 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "          fi",
   ].join("\n")), "unit: the Unit Tests step must be the job's last step, exactly as reviewed, and its denominator must equal the shard list");
 
-  assert.match(byId.check, /^    name: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' \|\| 'Typecheck, Test & Sidecar Bundle' \}\}$/m, "only the isolated dispatch simulation changes the context");
+  assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the protected context must always be a static literal");
+  assert.match(byId.benchmark_check, /^    name: PR Browser Benchmark Result$/m, "benchmark result has its own static name");
   assert.match(byId.check, /^    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
