@@ -352,7 +352,7 @@ export function closureDeliveryGaps(db: ControlPlaneDb, root: SessionView, snaps
   return gaps;
 }
 
-type AddGap = (code: IssueClosureDeliveryGapCode, details?: { workItemId?: string; pullRequests?: number[]; members?: number[] }) => void;
+type AddGap = (code: IssueClosureDeliveryGapCode, details?: { verificationFailure?: GithubIssueClosureSnapshot["deliveryVerificationFailure"]; workItemId?: string; pullRequests?: number[]; members?: number[] }) => void;
 
 function deliveryGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, add: AddGap, count: () => number): void {
   // Open related PRs block every reason. A PR whose title and body no longer mention the issue still
@@ -441,5 +441,5 @@ function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIss
     if (unverified.length) unconfirmed.push({ workItemId: item.id, pullRequests: unverified });
     else if (!merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
   }
-  if (!count()) for (const gap of unconfirmed) add("delivery_merge_unconfirmed", gap);
+  if (!count()) for (const gap of unconfirmed) add("delivery_merge_unconfirmed", { ...gap, verificationFailure: snapshot.deliveryVerificationFailure });
 }

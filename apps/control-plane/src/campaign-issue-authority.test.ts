@@ -74,6 +74,103 @@ function harness(full = true, maximum = 5, issues = [100]) {
   return { db, svc, hub, metadata, principal, state, approve, proposal, item };
 }
 
+test("#4164 real runner inspection admits a merge-queue squash delivery and rejects invalid merges", async () => {
+  const { inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } = await import("../../runner/src/github-issue-closure.js");
+  for (const mode of ["merged", "not_merged", "wrong_head", "wrong_base"] as const) {
+    const { h, observe, close } = delivery({ stage: [{ number: 10 }] });
+    const connection = { nodes: [], pageInfo: { hasNextPage: false } };
+    const bounded = issueClosureRun({ kind: "native" }, process.cwd());
+    const run = async (command: string, args: string[]) => {
+      if (command === "git") return "git@github.com:team/repo.git";
+      if (args.includes("graphql")) return JSON.stringify({ data: { repository: { nameWithOwner: "team/repo",
+        issue: { id: "issue", number: 100, title: "Issue", body: "Delivered", url: "https://github.com/team/repo/issues/100",
+          state: "OPEN", updatedAt: "2026-11-04T22:03:00Z", labels: connection, assignees: connection, timelineItems: connection }, pullRequests: connection } } });
+      const path = args.find((arg) => arg.startsWith("repos/"));
+      if (path === "repos/team/repo") return JSON.stringify({ default_branch: "main" });
+      if (path === "repos/team/repo/pulls/10") return JSON.stringify({ number: 10, state: "closed", merged: mode !== "not_merged",
+        merge_commit_sha: "c".repeat(40), head: { sha: (mode === "wrong_head" ? "d" : "b").repeat(40) },
+        base: { ref: mode === "wrong_base" ? "feature" : "main", repo: { full_name: "team/repo" } } });
+      assert.ok(path?.includes("/compare/"));
+      return bounded(process.execPath, ["-e", args.includes("--jq") ? 'process.stdout.write(JSON.stringify({status:"ahead"}))'
+        : 'process.stdout.write(JSON.stringify({status:"ahead",files:[{patch:"x".repeat(3*1024*1024)}]}))']);
+    };
+    const runner = h.hub.requestFromRunner;
+    h.hub.requestFromRunner = async (r, id, message, timeout) => {
+      if (message.type !== "github_issue_closure" || message.operation !== "inspect") return runner(r, id, message, timeout);
+      const base = { type: "github_issue_closure_result" as const, requestId: id, sessionId: message.sessionId };
+      try { return { ...base, ok: true, inspection: await inspectGithubIssueClosure(message.issue, run, message.deliveryPullRequests) }; }
+      catch (error) {
+        assert.ok(error instanceof IssueClosureInspectionError);
+        return { ...base, ok: false, deliveryVerificationFailure: error.deliveryVerificationFailure };
+      }
+    };
+    try {
+      observe(10, "merged");
+      const result = await close(`real-inspection-${mode}`);
+      assert.ok(result.ok, result.error ?? "closure");
+      assert.equal(result.data!.decision!.authority, mode === "merged" ? "orchestrator" : "human");
+      if (mode === "merged") assert.deepEqual(closureSnapshot(result.data!.decision!).delivery,
+        [{ number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) }]);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4164 epic delivery records its own result instead of an ordinary-route failure", async () => {
+  for (const epicFails of [false, true]) {
+    const { h, observe, close } = delivery({ stage: [{ number: 10 }], epic: true });
+    try {
+      observe(10, "merged");
+      h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }] };
+      const runner = h.hub.requestFromRunner;
+      h.hub.requestFromRunner = async (r, id, message, timeout) => {
+        const result = await runner(r, id, message, timeout);
+        if (message.type === "github_issue_closure" && message.operation === "inspect" && message.deliveryPullRequests && (!message.epicMembers || epicFails)) {
+          return { type: "github_issue_closure_result", requestId: id, sessionId: message.sessionId, ok: false,
+            deliveryVerificationFailure: { check: message.epicMembers ? "base" : "head", pullRequest: 10 } };
+        }
+        return result;
+      };
+      const result = await close(`epic-result-${epicFails}`);
+      assert.ok(result.ok, result.error ?? "closure");
+      assert.equal(result.data!.decision!.authority, epicFails ? "human" : "orchestrator");
+      assert.equal(closureSnapshot(result.data!.decision!).deliveryVerificationFailure?.check, epicFails ? "base" : undefined);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4164 delivery diagnostics survive person routing without raw runner errors", async () => {
+  for (const mode of ["merged_state", "head", "base", "comparison_read", "throw", "digest", "missing", "legacy", "confirmed"] as const) {
+    const { h, observe, close } = delivery({ stage: [{ number: 10 }] });
+    const logs: string[] = [];
+    (h.svc as unknown as { log: { info: (s: string) => void } }).log.info = (s) => logs.push(s);
+    try {
+      observe(10, "merged");
+      const runner = h.hub.requestFromRunner;
+      h.hub.requestFromRunner = async (r, id, message, timeout) => {
+        const result = await runner(r, id, message, timeout);
+        if (message.type !== "github_issue_closure" || message.operation !== "inspect" || !message.deliveryPullRequests || mode === "confirmed") return result;
+        if (mode === "throw") throw new Error("private path and provider output");
+        if (result.type !== "github_issue_closure_result") return result;
+        if (mode === "digest") return { ...result, inspection: { ...result.inspection!, forgeDigest: "f".repeat(64) } };
+        if (mode === "missing") return { ...result, inspection: { ...result.inspection!, delivery: undefined } };
+        return { ...result, ok: false, inspection: undefined, error: "private path and provider output",
+          ...(mode === "legacy" ? {} : { deliveryVerificationFailure: { check: mode, pullRequest: 10 } }) };
+      };
+      const result = await close(`diagnostic-${mode}`);
+      assert.ok(result.ok, result.error ?? "closure");
+      const decision = result.data!.decision!;
+      assert.equal(decision.authority, mode === "confirmed" ? "orchestrator" : "human");
+      if (mode === "confirmed") { assert.ok(!logs.some((line) => line.includes("campaign_issue_delivery_verification_failed"))); continue; }
+      const check = mode === "throw" ? "runner_unavailable" : mode === "digest" ? "issue_changed" : mode === "missing" ? "delivery_missing" : mode === "legacy" ? "runner_response" : mode;
+      const snapshot = closureSnapshot(decision);
+      assert.equal(snapshot.deliveryVerificationFailure?.check, check);
+      assert.match(snapshot.deliveryGaps![0]!.summary, new RegExp(`failed at ${check}`));
+      assert.ok(logs.some((line) => line.includes('"event":"campaign_issue_delivery_verification_failed"') && line.includes(check) && line.includes('"pullRequests":[10]')));
+      assert.ok(!JSON.stringify({ logs, snapshot }).includes("private path"));
+    } finally { h.db.close(); }
+  }
+});
+
 test("fixed-by planning is scoped, root-only, atomic and immutable before dispatch (#3943)", () => {
   const h = harness();
   try {
@@ -1359,8 +1456,8 @@ test("campaign issue scope refuses each runner floor with the shared sentence an
  * named in a reported stage, then waited past the forge fact's freshness. These run the real ledger,
  * verification, `pr_merge` gate and closure route rather than a stubbed work-item detail. */
 type GateOption = "consumed" | "revoked" | "other_session" | "reassigned" | null;
-function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOption; verify?: boolean; intendedClosures?: string[] } = {}) {
-  const h = harness();
+function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOption; verify?: boolean; intendedClosures?: string[]; epic?: boolean } = {}) {
+  const h = options.epic ? harness(true, 5, [100, 101]) : harness();
   const head = "b".repeat(40), merge = "c".repeat(40);
   const ref = (number: number) => ({ repository: "team/repo", number });
   type State = "open" | "closed" | "merged";

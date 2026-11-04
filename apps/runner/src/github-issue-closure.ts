@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import type {
-  AgentContext, GithubIssueClosureInspection, GithubIssueClosureRefusal, GithubIssueClosureRefusalReason, GithubIssueClosureResult, GithubIssueClosureSnapshot,
+  DeliveryVerificationFailure, AgentContext, GithubIssueClosureInspection, GithubIssueClosureRefusal, GithubIssueClosureRefusalReason, GithubIssueClosureResult, GithubIssueClosureSnapshot,
 } from "@wollipog/protocol";
 import { campaignRepositoryLocation, githubIssueClosureRefusal } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
@@ -27,7 +27,7 @@ const INSPECTION_QUERY = `query($owner:String!,$repo:String!,$number:Int!){
 /** Fixed, safe refusal text; command/provider errors are never surfaced as raw output. `failure`
  * classifies it for a refused closure (#4059). */
 export class IssueClosureInspectionError extends Error {
-  constructor(message: string, readonly failure: GithubIssueClosureRefusalReason = "evidence_unavailable") {
+  constructor(message: string, readonly failure: GithubIssueClosureRefusalReason = "evidence_unavailable", readonly deliveryVerificationFailure?: DeliveryVerificationFailure) {
     super(message);
   }
 }
@@ -118,17 +118,34 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
   const delivery: NonNullable<GithubIssueClosureInspection["delivery"]> = [];
   if (deliveryPullRequests !== undefined) {
     if (!deliveryPullRequests.length || deliveryPullRequests.length > 100) throw new IssueClosureInspectionError("Completed closure requires bounded actual merged PR evidence");
-    const defaultBranch = text(object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}`]))).default_branch);
+    const fail = (check: DeliveryVerificationFailure["check"], pullRequest?: number): never => {
+      throw new IssueClosureInspectionError(`Delivery verification failed at ${check}${pullRequest === undefined ? "" : ` for #${pullRequest}`}`,
+        "evidence_unavailable", { check, ...(pullRequest === undefined ? {} : { pullRequest }) });
+    };
+    const read = async (path: string, check: DeliveryVerificationFailure["check"], pullRequest?: number, projection?: string) => {
+      try {
+        return object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", path, ...(projection ? ["--jq", projection] : [])])));
+      } catch { return fail(check, pullRequest); }
+    };
+    const repo = await read(`repos/${repository}`, "default_branch_read");
+    if (typeof repo.default_branch !== "string" || !repo.default_branch) fail("default_branch_read");
+    const defaultBranch = repo.default_branch as string;
     for (const ref of deliveryPullRequests) {
       if (!Number.isSafeInteger(ref.number) || ref.number < 1 || !/^[0-9a-f]{40}$/u.test(ref.headSha)) throw new IssueClosureInspectionError("Invalid delivered PR reference");
-      const pr = object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/pulls/${ref.number}`])));
-      const mergeCommitSha = text(pr.merge_commit_sha);
-      if (pr.merged !== true || pr.state !== "closed" || pr.number !== ref.number || object(pr.head).sha !== ref.headSha ||
-          object(pr.base).ref !== defaultBranch || object(object(pr.base).repo).full_name !== canonicalRepository ||
-          !/^[0-9a-f]{40}$/u.test(mergeCommitSha)) throw new IssueClosureInspectionError("Delivery PR has not actually merged at the verified head into the default branch");
-      const comparison = object(JSON.parse(await run("gh", ["api", "--hostname", "github.com", `repos/${repository}/compare/${mergeCommitSha}...${encodeURIComponent(defaultBranch)}`])));
-      if (!["ahead", "identical"].includes(text(comparison.status))) throw new IssueClosureInspectionError("Delivery merge is not contained in the default branch");
-      delivery.push({ number: ref.number, headSha: ref.headSha, mergeCommitSha });
+      const pr = await read(`repos/${repository}/pulls/${ref.number}`, "pull_request_read", ref.number);
+      if (pr.merged !== true || pr.state !== "closed" || pr.number !== ref.number) fail("merged_state", ref.number);
+      if (!pr.head || object(pr.head).sha !== ref.headSha) fail("head", ref.number);
+      if (!pr.base || object(pr.base).ref !== defaultBranch || !object(pr.base).repo ||
+          object(object(pr.base).repo).full_name !== canonicalRepository) fail("base", ref.number);
+      const mergeCommitSha = pr.merge_commit_sha;
+      if (typeof mergeCommitSha !== "string" || !/^[0-9a-f]{40}$/u.test(mergeCommitSha)) fail("merge_commit", ref.number);
+      // Compare responses include commit bodies and file patches, which can exceed the bounded
+      // command buffer even for a valid merge. gh projects the same authoritative status before
+      // writing stdout; keep the buffer bound and containment predicate unchanged.
+      const comparison = await read(`repos/${repository}/compare/${mergeCommitSha}...${encodeURIComponent(defaultBranch)}`,
+        "comparison_read", ref.number, "{status: .status}");
+      if (!["ahead", "identical"].includes(comparison.status as string)) fail("containment", ref.number);
+      delivery.push({ number: ref.number, headSha: ref.headSha, mergeCommitSha: mergeCommitSha as string });
     }
   }
   // Read only when asked (#4060), so the digest of every other closure is unchanged.

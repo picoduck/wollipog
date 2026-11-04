@@ -4,6 +4,36 @@ import type { GithubIssueClosureSnapshot } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, IssueClosureInspectionError, issueClosureRun } from "./github-issue-closure.js";
 
 const connection = (nodes: unknown[] = []) => ({ nodes, pageInfo: { hasNextPage: false } });
+test("#4164 merge-queue delivery survives a comparison larger than the command buffer", async () => {
+  const f = fixture();
+  const bounded = issueClosureRun({ kind: "native" }, process.cwd());
+  const run = async (command: string, args: string[]) => {
+    const path = args.find((arg) => arg.startsWith("repos/"));
+    if (path === "repos/team/repo") return JSON.stringify({ default_branch: "main" });
+    if (path === "repos/team/repo/pulls/10") return JSON.stringify({ number: 10, state: "closed", merged: true,
+      merge_commit_sha: "c".repeat(40), head: { sha: "b".repeat(40) }, base: { ref: "main", repo: { full_name: "team/repo" } } });
+    if (path?.includes("/compare/")) {
+      // Model gh's projection through the real bounded subprocess transport. Without it,
+      // main's accumulated file patches exceed the unchanged 2 MiB command output bound.
+      const projected = args.includes("--jq") && args.at(-1) === "{status: .status}";
+      return bounded(process.execPath, ["-e", projected ? 'process.stdout.write(JSON.stringify({status:"ahead"}))'
+        : 'process.stdout.write(JSON.stringify({status:"ahead",files:[{patch:"x".repeat(3*1024*1024)}]}))']);
+    }
+    return f.run(command, args);
+  };
+  const first = await inspectGithubIssueClosure(123, run);
+  await assert.rejects(inspectGithubIssueClosure(123, (command, args) => {
+    const jq = args.indexOf("--jq");
+    return run(command, jq < 0 ? args : args.slice(0, jq));
+  }, [{ number: 10, headSha: "b".repeat(40) }]), (error: unknown) => {
+    assert.ok(error instanceof IssueClosureInspectionError);
+    assert.deepEqual(error.deliveryVerificationFailure, { check: "comparison_read", pullRequest: 10 });
+    return true;
+  });
+  const verified = await inspectGithubIssueClosure(123, run, [{ number: 10, headSha: "b".repeat(40) }]);
+  assert.equal(verified.forgeDigest, first.forgeDigest);
+  assert.deepEqual(verified.delivery, [{ number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) }]);
+});
 function fixture() {
   const repository = { nameWithOwner: "team/repo", issue: {
     id: "issue-id", number: 123, title: "Obsolete task", body: "Original description",
@@ -138,7 +168,7 @@ test("an Orchestrator-owned closure names an open related PR and changed deliver
 
   const f = fixture();
   const run = async (command: string, args: string[]) => {
-    const path = args.at(-1)!;
+    const path = args.find((arg) => arg.startsWith("repos/")) ?? args.at(-1)!;
     if (path === "repos/team/repo") return JSON.stringify({ default_branch: "main" });
     if (path === "repos/team/repo/pulls/10") return JSON.stringify({ number: 10, state: "closed", merged: true, merge_commit_sha: "c".repeat(40),
       head: { sha: "b".repeat(40) }, base: { ref: "main", repo: { full_name: "team/repo" } } });
@@ -182,7 +212,7 @@ test("completed closure verifies the delivered head, actual default-branch merge
   for (const mode of ["merged","queued","changed-head","feature-base","not-contained"]) {
     const f=fixture();
     const run=async(command:string,args:string[])=> {
-      const path=args.at(-1)!;
+      const path=args.find((arg) => arg.startsWith("repos/")) ?? args.at(-1)!;
       if(path==="repos/team/repo") return JSON.stringify({default_branch:"main"});
       if(path==="repos/team/repo/pulls/10") return JSON.stringify({number:10,state:mode==="queued"?"open":"closed",merged:mode!=="queued",merge_commit_sha:"c".repeat(40),
         head:{sha:(mode==="changed-head"?"d":"b").repeat(40)},base:{ref:mode==="feature-base"?"feature":"main",repo:{full_name:"team/repo"}}});
@@ -191,7 +221,12 @@ test("completed closure verifies the delivered head, actual default-branch merge
     };
     const inspect=inspectGithubIssueClosure(123,run,[{number:10,headSha:"b".repeat(40)}]);
     if(mode==="merged") assert.deepEqual((await inspect).delivery,[{number:10,headSha:"b".repeat(40),mergeCommitSha:"c".repeat(40)}]);
-    else await assert.rejects(inspect);
+    else await assert.rejects(inspect, (error: unknown) => {
+      assert.ok(error instanceof IssueClosureInspectionError);
+      assert.deepEqual(error.deliveryVerificationFailure, { check: ({queued:"merged_state", "changed-head":"head", "feature-base":"base", "not-contained":"containment"} as Record<string,string>)[mode], pullRequest: 10 });
+      assert.match(error.message, new RegExp(`failed at ${error.deliveryVerificationFailure!.check} for #10`));
+      return true;
+    });
   }
 });
 

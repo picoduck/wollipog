@@ -1,3 +1,4 @@
+import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
@@ -11249,10 +11250,17 @@ export class SessionsService {
    * for an issue without members, or a runner whose forge has no member read (GitLab), whose
    * ordinary snapshot stands; null when the members could not be read. */
   private async inspectEpicClosure(sessionId: string, runnerId: string, base: GithubIssueClosureSnapshot): Promise<GithubIssueClosureSnapshot | false | null> {
+    let verificationFailure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
     const inspect = async (deliveryPullRequests?: Array<{ number: number; headSha: string }>) => {
       const requestId = `issue_closure_epic_${randomUUID()}`;
       const result = await this.hub.requestFromRunner(runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
         issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true, ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
+      if (deliveryPullRequests) {
+        verificationFailure = !result ? { check: "runner_unavailable" }
+          : result.type !== "github_issue_closure_result" || result.sessionId !== sessionId ? { check: "runner_response" }
+          : !result.ok ? normalizeDeliveryVerificationFailure(result.deliveryVerificationFailure) ?? { check: "runner_response" }
+          : undefined;
+      }
       return result?.type === "github_issue_closure_result" && result.ok && result.sessionId === sessionId && result.inspection?.state === "OPEN" &&
         result.inspection.repository === base.repository && result.inspection.issue === base.issue ? result.inspection : null;
     };
@@ -11262,12 +11270,18 @@ export class SessionsService {
     if (!read || !members?.readable) return null;
     if (!members.members.length) return false;
     const { state: _state, delivery: _delivery, ...inspection } = read;
-    const { delivery: _ordinary, ...rest } = base;
+    const { delivery: _ordinary, deliveryVerificationFailure: _ordinaryFailure, ...rest } = base;
     let snapshot: GithubIssueClosureSnapshot = { ...rest, ...inspection, epicMembers: members };
     const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, base.issue);
     if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
       const verified = await inspect(delivery.map(({ number, headSha }) => ({ number, headSha })));
       if (verified?.forgeDigest === snapshot.forgeDigest && verified.delivery) snapshot = { ...snapshot, delivery: verified.delivery };
+      if (!closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot)) {
+        const failure = verificationFailure ?? { check: verified?.forgeDigest !== snapshot.forgeDigest ? "issue_changed" as const : "delivery_missing" as const };
+        snapshot.deliveryVerificationFailure = failure;
+        this.log.info(JSON.stringify({ event: "campaign_issue_delivery_verification_failed", entryPoint: "epic_closure_proposal", sessionId,
+          issue: snapshot.issue, ...failure, pullRequests: delivery.map((pr) => pr.number).slice(0, 100) }));
+      }
     }
     return snapshot;
   }
@@ -11342,9 +11356,21 @@ export class SessionsService {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
               scopeRevision: snapshot.scopeRevision, deliveryPullRequests: delivery.map(({ number, headSha }) => ({ number, headSha })),
             }, 60_000).catch(() => null);
-            if (verified?.type === "github_issue_closure_result" && verified.ok && verified.sessionId === sessionId &&
-                verified.inspection?.repository === snapshot.repository && verified.inspection.issue === snapshot.issue &&
-                verified.inspection.state === "OPEN" && verified.inspection.forgeDigest === snapshot.forgeDigest) snapshot.delivery = verified.inspection.delivery;
+            let failure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
+            if (!verified) failure = { check: "runner_unavailable" };
+            else if (verified.type !== "github_issue_closure_result" || verified.sessionId !== sessionId) failure = { check: "runner_response" };
+            else if (!verified.ok) failure = normalizeDeliveryVerificationFailure(verified.deliveryVerificationFailure) ?? { check: "runner_response" };
+            else if (verified.inspection?.repository !== snapshot.repository || verified.inspection.issue !== snapshot.issue ||
+                verified.inspection.state !== "OPEN" || verified.inspection.forgeDigest !== snapshot.forgeDigest) failure = { check: "issue_changed" };
+            else {
+              snapshot.delivery = verified.inspection.delivery;
+              if (!closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot)) failure = { check: "delivery_missing" };
+            }
+            if (failure) {
+              snapshot.deliveryVerificationFailure = failure;
+              this.log.info(JSON.stringify({ event: "campaign_issue_delivery_verification_failed", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+                issue: snapshot.issue, ...failure, pullRequests: delivery.map((pr) => pr.number).slice(0, 100) }));
+            }
           }
         }
         let proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);

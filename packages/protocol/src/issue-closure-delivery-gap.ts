@@ -1,3 +1,17 @@
+/** Fixed diagnostics only: never retain forge output or subprocess errors. */
+export const DELIVERY_VERIFICATION_CHECKS = ["default_branch_read", "pull_request_read", "merged_state", "head", "base", "merge_commit", "comparison_read", "containment", "runner_unavailable", "runner_response", "issue_changed", "delivery_missing"] as const;
+export interface DeliveryVerificationFailure {
+  check: typeof DELIVERY_VERIFICATION_CHECKS[number];
+  pullRequest?: number;
+}
+export function normalizeDeliveryVerificationFailure(value: unknown): DeliveryVerificationFailure | null {
+  if (!value || typeof value !== "object") return null;
+  const v = value as Record<string, unknown>;
+  if (!DELIVERY_VERIFICATION_CHECKS.includes(v.check as DeliveryVerificationFailure["check"]) ||
+      v.pullRequest !== undefined && (!Number.isSafeInteger(v.pullRequest) || (v.pullRequest as number) < 1)) return null;
+  return { check: v.check as DeliveryVerificationFailure["check"], ...(v.pullRequest === undefined ? {} : { pullRequest: v.pullRequest as number }) };
+}
+
 /**
  * Why a Full Control root's closure of an in-scope issue failed delegated proof (#4058).
  *
@@ -112,6 +126,7 @@ export const ISSUE_CLOSURE_DELIVERY_GAPS_MAX = 32;
 
 export interface IssueClosureDeliveryGap {
   code: IssueClosureDeliveryGapCode;
+  verificationFailure?: DeliveryVerificationFailure;
   /** The work item the gap belongs to, when it belongs to one. */
   workItemId?: string;
   /** The pull or merge requests the gap names, ascending; omitted when it names none. */
@@ -217,14 +232,15 @@ function pullRequestNumbers(value: unknown): number[] | undefined {
 /** The one canonical gap for a code; its action and summary are always derived, never accepted. */
 export function issueClosureDeliveryGap(
   code: IssueClosureDeliveryGapCode,
-  details: { workItemId?: string; pullRequests?: readonly number[]; members?: readonly number[] } = {},
+  details: { workItemId?: string; pullRequests?: readonly number[]; members?: readonly number[]; verificationFailure?: DeliveryVerificationFailure } = {},
 ): IssueClosureDeliveryGap {
   const pullRequests = pullRequestNumbers(details.pullRequests);
   const members = pullRequestNumbers(details.members);
   const workItemId = typeof details.workItemId === "string" && details.workItemId ? details.workItemId.slice(0, 256) : undefined;
   const action = GAP_ACTION[code];
-  return { code, ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}), ...(members ? { members } : {}), action,
-    summary: `${gapText(code, workItemId ?? "", named(pullRequests), named(members))}. ${ACTION_TEXT[action]}` };
+  const failure = code === "delivery_merge_unconfirmed" ? normalizeDeliveryVerificationFailure(details.verificationFailure) : null;
+  return { code, ...(failure ? { verificationFailure: failure } : {}), ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}), ...(members ? { members } : {}), action,
+    summary: `${failure ? `Delivery verification failed at ${failure.check}${failure.pullRequest ? ` for #${failure.pullRequest}` : ""}. ` : ""}${gapText(code, workItemId ?? "", named(pullRequests), named(members))}. ${ACTION_TEXT[action]}` };
 }
 
 /** Stored gaps, rebuilt canonically; null when the value is not a bounded gap list. An unknown
@@ -239,6 +255,7 @@ export function normalizeIssueClosureDeliveryGaps(value: unknown): IssueClosureD
     if (record.pullRequests !== undefined && (!Array.isArray(record.pullRequests) || record.pullRequests.length > 100)) return null;
     if (record.members !== undefined && (!Array.isArray(record.members) || record.members.length > 100)) return null;
     gaps.push(issueClosureDeliveryGap(isIssueClosureDeliveryGapCode(record.code) ? record.code : "delivery_unverified", {
+      ...(record.verificationFailure === undefined ? {} : { verificationFailure: normalizeDeliveryVerificationFailure(record.verificationFailure) ?? undefined }),
       ...(record.workItemId === undefined ? {} : { workItemId: record.workItemId as string }),
       ...(record.pullRequests === undefined ? {} : { pullRequests: record.pullRequests as number[] }),
       ...(record.members === undefined ? {} : { members: record.members as number[] }),
