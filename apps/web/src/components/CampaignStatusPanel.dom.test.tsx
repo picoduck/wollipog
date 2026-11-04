@@ -969,6 +969,45 @@ test("a held child links to its session, and a blocker's request opens that requ
   }
 });
 
+test("a campaign complete with handoffs lists the owner's items, opens one, and shows no recovery warning (#4070)", async () => {
+  const handoff = { responsibleActor: "human" as const, reason: "Private vulnerability reporting refused the agent's account.",
+    nextAction: "File the advisory from a maintainer account.", recordedAt: NOW, recordedBySessionId: "s_root" };
+  const advisory = item("cwi_5", { title: "File the Advisory", primaryState: "planned", handoff });
+  const { client } = fakeClient(() => ({ revision: 1, items: [advisory], nextCursor: null }), { cwi_5: detailOf(advisory) });
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "complete_with_handoffs",
+      handoffs: { total: 1, items: [{ workItemId: "cwi_5", key: "original:advisory", title: "File the Advisory",
+        issue: { repository: "picoduck/wollipog", number: 4070 }, primaryState: "planned", handoff }] },
+      recovery: { unattendedReady: false, automation: { state: "lifecycle_held" }, automatic: 0, waitingHuman: 0, blocked: 0,
+        truncated: false, records: [{ id: "rec_1", action: "continue_without_request", reason: "request_declined", state: "resolved",
+          resource: { kind: "request", sessionId: "s_child", occurrenceId: "occ_9" }, effectiveOwner: "orchestrator", policyRevision: 1,
+          attempts: 0, maxAttempts: 4, attemptedRecovery: [], requiredInput: "none", explanation: "Declined.", createdAt: NOW, updatedAt: NOW }] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const text = panel.container.textContent ?? "";
+    assert.match(text, /Handed Off/u);
+    assert.match(text, /File the Advisory/u);
+    assert.match(text, /Private vulnerability reporting refused the agent's account\./u);
+    assert.match(text, /File the advisory from a maintainer account\./u);
+    assert.doesNotMatch(text, /Authorized Recovery Unavailable|Recovery Blocked/u, "a finished campaign raises no recovery warning");
+    assert.match(text, /Recovery Resolved/u);
+    assert.doesNotMatch(text, /stays blocked/u, "a resolved record does not describe blocked work");
+    assert.match(panel.container.querySelector(".campaign-work-row")?.textContent ?? "", /Handed Off/u);
+    const open = panel.container.querySelector<HTMLButtonElement>("button[aria-label='Open Details for File the Advisory']");
+    assert.ok(open);
+    await click(open);
+    assert.match(panel.container.textContent ?? "", /Handed to You: Private vulnerability reporting/u);
+    assert.match(panel.container.querySelector(".campaign-detail-head")?.textContent ?? "", /Handed Off/u);
+  } finally {
+    await panel.dispose();
+  }
+});
+
 function pendingRequest(sessionId: string, occurrenceId: string): DescendantRequestView {
   return {
     sessionId, sessionTitle: sessionId, runnerId: "runner-1", runnerOnline: true, eventEpoch: 1, createdAt: NOW,
@@ -1491,6 +1530,39 @@ test("a quiet row re-read never blocks Show More and never replaces rows a page 
     assertNoDomNode(more() ?? null, "every row is shown, so there is no Show More");
     assert.equal(panel.container.querySelectorAll(".campaign-work-row").length, 60, "the quiet re-read keeps every shown row");
     assert.deepEqual([...rowCosts()], ["$4.00"]);
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("decisions the owner kept are listed as waiting for them, and each opens its request (#4064)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_root", "occ_owner"), pendingRequest("s_child", "occ_merge")];
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 3, items: [
+        { occurrenceId: "occ_owner", sessionId: "s_root", category: "owner_decision",
+          summary: "Which credential design should the provider bridge use?", handedOff: false, createdAt: NOW },
+        { occurrenceId: "occ_merge", sessionId: "s_child", category: "pr_merge", summary: "Merge picoduck/wollipog#7", handedOff: true, createdAt: NOW },
+      ] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const text = panel.container.textContent ?? "";
+    assert.match(text, /Waiting for You/u);
+    assert.match(text, /Which credential design should the provider bridge use\?/u);
+    assert.match(text, /Asked by the Orchestrator/u);
+    assert.match(text, /Merge picoduck\/wollipog#7/u);
+    assert.match(text, /Handed over by the Orchestrator/u);
+    assert.match(text, /1 more decision waits for you under Requests\./u);
+    await click([...panel.container.querySelectorAll("button")]
+      .find((button) => button.getAttribute("aria-label") === "Open Request: Merge picoduck/wollipog#7")!);
+    assert.equal(harnessRequests.selected.at(-1), JSON.stringify(["s_child", "occ_merge"]));
+    assert.equal(panel.state.mode, "requests");
   } finally {
     await panel.dispose();
   }

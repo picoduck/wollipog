@@ -269,6 +269,39 @@ test("withdraw_workflow_decision posts to the caller's own path and refuses an o
   }
 });
 
+test("owner-decision tools are the root Orchestrator's, post to its own paths and refuse an older peer (#4064)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  const ask = { requestId: "kept-1", resourceKey: "credential-design", question: "Which credential design should the bridge use?",
+    options: [{ optionId: "lease", label: "Short-Lived Lease" }, { optionId: "broker", label: "Broker Process" }],
+    recommendedOptionId: "lease", material: "PR https://github.com/team/repo/pull/7 at head abc." };
+  const asked = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(asked.isError, undefined, resultText(asked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/owner-decisions`);
+  assert.deepEqual(calls.at(-1)?.body, ask);
+  const handed = await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "The owner kept it.", sessionId: "child" });
+  assert.equal(handed.isError, undefined, resultText(handed));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_2/hand-to-owner`);
+  assert.deepEqual(calls.at(-1)?.body, { reason: "The owner kept it.", sessionId: "child" });
+  const count = calls.length;
+  for (const args of [{ occurrenceId: "workflow_2" }, { occurrenceId: "workflow_2", reason: " " }, { reason: "Kept." },
+    { occurrenceId: "workflow_2", reason: "Kept.", sessionId: "" }]) {
+    assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", args)).isError, true, JSON.stringify(args));
+  }
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, sessionId: "child" })).isError, true);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions - 1;
+  const old = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(old.isError, true);
+  assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":281/u);
+  assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "request_owner_decision", ask)).isError, true, "a child never has the tool");
+  assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
+  assert.equal(calls.length, count, "nothing reaches the control plane");
+});
+
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
@@ -308,6 +341,15 @@ test("typed workflow decision tools preserve exact request, resolution, and cons
   });
   assert.deepEqual(calls.at(-1)?.body, { resourceSnapshot: snapshot });
   assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/reconcile`);
+
+  // #4067: Wollipog performs the approved action; the tool sends only the occurrence and its digest.
+  const before = calls.length;
+  assert.equal((await callTool(deps, "execute_workflow_decision", { occurrenceId: "workflow_1", resourceDigest: "short" })).isError, true);
+  assert.equal(calls.length, before, "a malformed digest sends nothing");
+  await callTool(deps, "execute_workflow_decision", { occurrenceId: "workflow_1", resourceDigest: "d".repeat(64) });
+  assert.deepEqual(calls.at(-1)?.body, { resourceDigest: "d".repeat(64) });
+  assert.equal(calls.at(-1)?.method, "POST");
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_1/execute`);
 
   deps.orchestrator = true;
   const resolution = await callTool(deps, "resolve_descendant_workflow_decision", {
@@ -408,6 +450,104 @@ test("review_descendant_ui_evidence returns the verified image and refuses bytes
   assert.equal(substituted.isError, true);
   assert.equal(substituted.content.length, 1, "mismatched bytes are never shown to the model");
   assert.equal(calls.length, before + 1, "refused bytes are never acknowledged");
+});
+
+test("a delegated image reviewer has exactly its two review tools, and nobody else has them (#4074)", async () => {
+  const reviewer = makeDeps();
+  reviewer.deps.uiEvidenceReviewer = true;
+  const listed = await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, reviewer.deps);
+  assert.deepEqual((listed!.result as { tools: { name: string }[] }).tools.map((tool) => tool.name).sort(),
+    ["review_evidence_image", "submit_evidence_verdict"]);
+  for (const name of ["create_session", "get_session", "request_workflow_decision", "review_descendant_ui_evidence",
+    "attach_session_artifact", "prompt_session"]) {
+    assert.equal((await callTool(reviewer.deps, name, {})).isError, true, name);
+    assert.equal((await executeManagerTool(name, {}, reviewer.deps)).isError, true, name);
+  }
+  assert.equal(reviewer.calls.length, 0);
+  for (const orchestrator of [false, true]) {
+    const other = makeDeps();
+    other.deps.orchestrator = orchestrator;
+    const names = ((await dispatch({ jsonrpc: "2.0", id: 1, method: "tools/list" }, other.deps))!.result as { tools: { name: string }[] })
+      .tools.map((tool) => tool.name);
+    assert.equal(names.includes("review_evidence_image"), false);
+    assert.equal(names.includes("submit_evidence_verdict"), false);
+    assert.equal(names.includes("prepare_descendant_ui_evidence_review"), orchestrator);
+    assert.equal(names.includes("get_descendant_ui_evidence_review"), orchestrator);
+    assert.equal((await callTool(other.deps, "review_evidence_image", { evidenceId: "light" })).isError, true);
+    assert.equal(other.calls.length, 0);
+  }
+});
+
+test("the reviewer's image tool hands over only digest-verified, acknowledged bytes (#4074)", async () => {
+  const bytes = Buffer.from("reviewer evidence bytes");
+  const receipt = {
+    receiptId: "uireceipt_r", occurrenceId: "workflow_1", reviewerSessionId: SELF_ID, childSessionId: "child",
+    policyRevision: 3, evidenceId: "light", artifactId: "art_1",
+    sha256: createHash("sha256").update(bytes).digest("hex"), deliveredAt: 10,
+  };
+  let data = bytes.toString("base64");
+  let acknowledgeStatus = 200;
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/acknowledge")
+    ? { status: acknowledgeStatus, body: acknowledgeStatus === 200 ? { acknowledged: true } : { error: "replaced" } }
+    : call.url.endsWith("/verdict") ? { status: 200, body: { verdictId: "uiimgverdict_1" } }
+      : { status: 200, body: { receipt, mimeType: "image/png", sizeBytes: bytes.byteLength, data } });
+  deps.uiEvidenceReviewer = true;
+  const shown = await callTool(deps, "review_evidence_image", { evidenceId: "light" });
+  assert.equal(calls.at(-2)?.url, `${CP_URL}/api/sessions/${SELF_ID}/delegated-image-review/image`);
+  assert.deepEqual(calls.at(-2)?.body, { evidenceId: "light" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/delegated-image-review/acknowledge`);
+  assert.deepEqual(calls.at(-1)?.body, { receiptId: "uireceipt_r", sha256: receipt.sha256 });
+  assert.deepEqual(shown.content[1], { type: "image", data, mimeType: "image/png" });
+  assert.deepEqual(resultJson(shown), { evidenceId: "light", mimeType: "image/png", sizeBytes: bytes.byteLength });
+
+  acknowledgeStatus = 409;
+  const unrecorded = await callTool(deps, "review_evidence_image", { evidenceId: "light" });
+  assert.equal(unrecorded.isError, true);
+  assert.equal(unrecorded.content.length, 1, "no image without a usable receipt");
+  acknowledgeStatus = 200;
+  data = Buffer.from("substituted").toString("base64");
+  const before = calls.length;
+  const substituted = await callTool(deps, "review_evidence_image", { evidenceId: "light" });
+  assert.equal(substituted.isError, true);
+  assert.equal(calls.length, before + 1, "mismatched bytes are never acknowledged");
+
+  const items = [{ evidenceId: "light", outcome: "pass", defects: [] }];
+  const submitted = await callTool(deps, "submit_evidence_verdict", { recommendation: "approve", summary: "Fine.", items });
+  assert.deepEqual(resultJson(submitted), { accepted: true, verdictId: "uiimgverdict_1" });
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/delegated-image-review/verdict`);
+  assert.deepEqual(calls.at(-1)?.body, { report: { recommendation: "approve", summary: "Fine.", items } });
+});
+
+test("delegated image review tools send nothing to an older control plane (#4074)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: { reviewId: "uiimgreview_1" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview - 1;
+  const reference = { reviewId: "uiimgreview_1", verdictId: "uiimgverdict_1", reviewerSessionId: "reviewer" };
+  for (const [name, args] of [
+    ["prepare_descendant_ui_evidence_review", { sessionId: "child", occurrenceId: "occ", brief: "Claims." }],
+    ["get_descendant_ui_evidence_review", { reviewId: "uiimgreview_1" }],
+    ["resolve_descendant_workflow_decision", { sessionId: "child", occurrenceId: "occ", outcome: "approve",
+      evidenceReviewed: ["light"], delegatedImageReview: reference }],
+  ] as const) {
+    const refused = await callTool(deps, name, args);
+    assert.equal(refused.isError, true, name);
+    assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview);
+    assert.match(resultJson(refused).error, /review_descendant_ui_evidence/u);
+  }
+  assert.equal(calls.length, 0);
+  assert.equal((await callTool(deps, "resolve_descendant_workflow_decision", { sessionId: "child", occurrenceId: "occ",
+    outcome: "deny", delegatedImageReview: reference })).isError, true, "a denial never carries reviewer provenance");
+
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview;
+  const prepared = await callTool(deps, "prepare_descendant_ui_evidence_review", { sessionId: "child", occurrenceId: "occ", brief: "Claims." });
+  assert.equal(prepared.isError, undefined);
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/descendant-requests/delegated-image-review`);
+  assert.deepEqual(calls.at(-1)?.body, { sessionId: "child", occurrenceId: "occ", brief: "Claims." });
+  await callTool(deps, "resolve_descendant_workflow_decision", { sessionId: "child", occurrenceId: "occ", outcome: "approve",
+    evidenceReviewed: ["light"], delegatedImageReview: reference });
+  assert.deepEqual((calls.at(-1)?.body as { resolution: unknown }).resolution, {
+    action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["light"], delegatedImageReview: reference,
+  });
 });
 
 test("ordered video-frame deliveries retain one image and exact source-manifest metadata per call", async () => {
@@ -631,11 +771,13 @@ test("tools/list returns the curated session and workflow tools with schemas", a
       "get_workflow_decision",
       "list_workflow_decisions",
       "consume_workflow_decision",
+      "execute_workflow_decision",
       "reconcile_workflow_decision",
       "withdraw_workflow_decision",
       "get_session_events",
       "wait_session",
       "wait_pull_request",
+      "park_on_pull_request",
       "request_review_session",
       "get_review_session",
       "list_review_sessions",
@@ -683,6 +825,48 @@ test("tools/list returns the curated session and workflow tools with schemas", a
     assert.ok(t.description.length > 10, `${t.name} has a description`);
     assert.ok(t.inputSchema, `${t.name} has an input schema`);
   }
+});
+
+test("park_on_pull_request registers this session's own watch and tells it to end its turn (#4071)", async () => {
+  const head = "e".repeat(40);
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: PROTOCOL_VERSION } }
+    : { status: 200, body: { watch: { watchId: "prw_1", repository: "picoduck/wollipog", number: 7, headSha: head, state: "watching",
+      since: 1, continuation: "none" } } });
+  const result = await callTool(deps, "park_on_pull_request", {
+    pullRequest: "https://github.com/picoduck/wollipog/pull/7", headSha: head.toUpperCase(),
+  });
+  assert.equal(result.isError, undefined);
+  const body = resultJson(result);
+  assert.equal(body.watch.watchId, "prw_1");
+  assert.match(body.nextStep, /^End your turn now/u);
+  const post = calls.find((call) => call.method === "POST")!;
+  assert.equal(post.url, `${CP_URL}/api/sessions/${SELF_ID}/pull-request-watch`);
+  assert.deepEqual(post.body, { repository: "picoduck/wollipog", number: 7, headSha: head });
+});
+
+test("get_session shows the merge-queue watch a session is parked on", async () => {
+  const watch = { watchId: "prw_1", repository: "picoduck/wollipog", number: 7, headSha: "e".repeat(40), state: "watching",
+    since: 1, continuation: "none" };
+  const { deps } = makeDeps(() => ({ status: 200, body: { session: { id: "s_child", status: "idle", runnerId: "r1", pullRequestWatch: watch } } }));
+  const body = resultJson(await callTool(deps, "get_session", { sessionId: "s_child" }));
+  assert.deepEqual(body.pullRequestWatch ?? body.session?.pullRequestWatch, watch);
+});
+
+test("park_on_pull_request refuses GitLab, a short head and an older control plane before registering", async () => {
+  const head = "e".repeat(40);
+  const { deps, calls } = makeDeps((call) => call.url.endsWith("/api/compatibility")
+    ? { status: 200, body: { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch - 1 } }
+    : { status: 200, body: {} });
+  const gitlab = await callTool(deps, "park_on_pull_request", { pullRequest: "gitlab.com/group/project!7", headSha: head });
+  assert.equal(gitlab.isError, true);
+  assert.match(gitlab.content[0].text, /GitHub pull requests only/u);
+  const short = await callTool(deps, "park_on_pull_request", { pullRequest: "picoduck/wollipog#7", headSha: "abc" });
+  assert.equal(short.isError, true);
+  const old = await callTool(deps, "park_on_pull_request", { pullRequest: "picoduck/wollipog#7", headSha: head });
+  assert.equal(old.isError, true);
+  assert.equal(JSON.parse(old.content[0].text).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.pullRequestWatch);
+  assert.equal(calls.filter((call) => call.method === "POST").length, 0);
 });
 
 test("wait-session polling backs off to the existing ten-second ceiling", () => {
@@ -746,7 +930,51 @@ test("wait_session timeout carries the last read's metadata", async () => {
   assert.equal(body.outcome, "timeout");
   assert.deepEqual(body.waitingFor, ["completed", "failed"]);
   assert.equal(body.session.status, "idle", "the newest read, not the first");
-  assert.equal(body.session.runnerId, "r1");
+  assert.equal(body.session.runnerId, undefined, "a timeout returns the compact status by default");
+});
+
+test("wait_session timeout returns a small fixed-size status however large the session is (#4071)", async () => {
+  const long = "x".repeat(20_000);
+  const request = (n: number) => ({ requestId: `req_${n}_${long}`, kind: "permission", title: long, options: [long] });
+  const session = {
+    id: `s_wait${long}`, status: `running${long}`, runnerId: long, title: long, workspaceId: long,
+    attention: { version: 1, revision: 4_294_967_295, humanActions: [], meaningfulAt: 1_793_680_214_379, result: null },
+    pendingApproval: { ...request(0), additionalRequests: [request(1), request(2)] },
+    holds: Array.from({ length: 50 }, () => ({ id: long, reason: long })),
+    orchestratorCampaign: { pendingRequests: Array.from({ length: 50 }, (_, n) => request(n)) },
+    campaignMembership: { note: long }, updatedAt: 1_793_680_214_000,
+  };
+  const { deps } = makeDeps(() => ({ status: 200, body: { session } }));
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+
+  const compact = await callTool(deps, "wait_session", { sessionId: "s_wait", states: ["completed"], timeoutMs: 1 });
+  const text = compact.content[0].text;
+  assert.ok(Buffer.byteLength(text) <= 512, `the timeout payload is ${Buffer.byteLength(text)} bytes`);
+  const body = JSON.parse(text);
+  assert.equal(body.outcome, "timeout");
+  assert.deepEqual(Object.keys(body.session).sort(),
+    ["attentionRevision", "id", "lastActivityAt", "pendingRequestCount", "status"]);
+  assert.equal(body.session.attentionRevision, 4_294_967_295);
+  assert.equal(body.session.pendingRequestCount, 3);
+  assert.equal(body.session.lastActivityAt, 1_793_680_214_379, "the CP's meaningful activity, not updatedAt");
+
+  const full = resultJson(await callTool(deps, "wait_session", {
+    sessionId: "s_wait", states: ["completed"], timeoutMs: 1, fullMetadata: true,
+  }));
+  assert.equal(full.outcome, "timeout");
+  assert.equal(full.session.runnerId, long, "fullMetadata keeps the mapped session");
+});
+
+test("wait_session compact status falls back to updatedAt and tolerates missing fields", async () => {
+  const { deps } = makeDeps(() => ({ status: 200, body: { session: { id: "s_wait", status: "idle", updatedAt: 42 } } }));
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+  const body = resultJson(await callTool(deps, "wait_session", { sessionId: "s_wait", states: ["completed"], timeoutMs: 1 }));
+  assert.deepEqual(body.session,
+    { id: "s_wait", status: "idle", attentionRevision: null, pendingRequestCount: 0, lastActivityAt: 42 });
 });
 
 test("wait_session reports the reached state with outcome reached", async () => {

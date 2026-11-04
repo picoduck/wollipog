@@ -31,6 +31,7 @@ import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
 import { PageHeader } from "./PageHeader.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StaleContent } from "./StaleContent.js";
@@ -733,7 +734,7 @@ export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: {
                   <a id={`archive-title-${session.id}`} href={viewPath(target)} title={title} tabIndex={-1} onClick={(event) => {
                     if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
                     event.preventDefault(); openSession();
-                  }}>{title}</a>
+                  }}><SessionTypeIcon session={session} />{title}</a>
                   {badge && <span className="archive-item-badge"><StatusBadge meta={badge} /></span>}
                 </div>
                 {snippet && <div className="archive-item-snippet">Transcript: <HighlightedSnippet snippet={snippet} /></div>}

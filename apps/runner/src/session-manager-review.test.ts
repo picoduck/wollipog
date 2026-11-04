@@ -6,6 +6,7 @@ import { test } from "node:test";
 import type {
   ReviewAttemptRound, ReviewAttemptVerdictView, ReviewSessionUpdate, RunnerToControlPlane, SessionLaunchSpec,
 } from "@wollipog/protocol";
+import { REVIEW_EQUIVALENCE_OUTPUT } from "@wollipog/protocol";
 import type { DriverOptions } from "./drivers/driver.js";
 import { ReviewScopeRefusal } from "./review-snapshot.js";
 import { reviewLaunchArgs, type ReviewSessionHooks } from "./review-sessions.js";
@@ -312,6 +313,26 @@ test("outcomes recorded before a session existed are re-sent at registration", (
     reason: "the review session ended when its runner restarted" };
   const h = harness(t, { outcomes: [lost] });
   assert.deepEqual(h.manager.reviewSessionUpdates(), [lost]);
+});
+
+test("a recorded equivalence completes before any reviewer launches, and keeps its outcome (#4075)", async (t) => {
+  const round = { ...ROUND, mode: "equivalent" as const, scopeFiles: [], baseMerge: true as const, equivalentTo: "c".repeat(40) };
+  const prepared = { equivalent: true as const, checkout: "", prompt: "", baseSha: "b".repeat(40), round };
+  for (const campaign of [false, true]) {
+    const h = harness(t, { prepare: async () => prepared });
+    const dispatch = { rootSessionId: "s_campaign", generation: "equivalent-generation" };
+    assert.equal(await h.manager.start(reviewSpec(campaign ? { campaignBudgetDispatch: dispatch } : {}), "brief"), false);
+    assert.equal(h.drivers.length, 0, "no reviewer ran");
+    const expected = { type: "review_session_update", sessionId: "s_review", state: "completed", round, output: REVIEW_EQUIVALENCE_OUTPUT };
+    assert.deepEqual(h.updates(), [expected]);
+    const status = h.sent.find((message) => message.type === "session_status" && message.status === "completed");
+    assert.ok(status, `campaign=${campaign}`);
+    if (campaign) {
+      assert.ok(status.type === "session_status");
+      assert.deepEqual(status.campaignBudgetCheckpoint, { generation: dispatch.generation, historyEpoch: 0, throughSeq: 0, costUsd: 0 },
+        "the reservation comes back unspent");
+    } else assert.deepEqual(h.manager.reviewSessionUpdates(), [expected], "a lost frame is re-sent at the next registration");
+  }
 });
 
 test("a review refused before its session exists keeps a durable outcome to re-send", async (t) => {

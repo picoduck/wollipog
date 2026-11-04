@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import fc from "fast-check";
@@ -10,11 +10,14 @@ import type {
   CreateSessionRequest,
   DurableSessionCommand,
   GitSummaryInfo,
+  ManagedBackgroundJobSnapshot,
   PodContextEntry,
   PodView,
   ProjectView,
   QueuedPromptView,
   ReconcileWorkflowActionMessage,
+  type ForgeDecisionActionMessage,
+  type ForgeDecisionActionResultMessage,
   ResourceScope,
   RunnerMetadata,
   RunView,
@@ -30,11 +33,13 @@ import type {
   SessionSnapshot,
   SessionView,
   SteerRequest,
+  SteerSessionMessage,
   SteerSessionResultMessage,
   WorkspaceReference,
   WorkflowDefinitionSpec,
 } from "@wollipog/protocol";
 import {
+  BACKGROUND_JOB_STALL_MS,
   EVENT_PAYLOAD_PREVIEW_BYTES,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   POLICY_HOOK_ABANDONMENT_MS,
@@ -49,11 +54,13 @@ import {
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   WORKSPACE_REFERENCE_MIME_TYPE,
+  githubIssueClosureRefusal,
   pendingRequests,
   projectSessionEventPayloadForProtocol,
 } from "@wollipog/protocol";
 import { dispatch as dispatchManagerTool } from "../../runner/src/session-management-mcp.js";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
+import { WITHHELD_RUNNER_ERROR } from "./github-issue-closure.js";
 import { CAMPAIGN_WORK_LEDGER_SCHEMA } from "./campaign-work-ledger-store.js";
 import { applyClaudeReconciliation, previewClaudeReconciliation, observeReconciliationRevision } from "./claude-cost-reconciliation.js";
 import { parseRateTable } from "./usage-pricing.js";
@@ -1425,6 +1432,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       "a stopped child with a retained worktree is not campaign-complete");
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
+    // #4067: the grandchild's merged pull request still owes its branch until the forge reports it gone.
+    assert.equal(db.campaignProjection(parent.id)?.status, "active");
+    assert.equal(db.campaignProjection(parent.id)?.mergedBranches?.pending, 1);
+    db.campaignForgeObservations.record(parent.id, RUNNER_ID, [{ ref: { repository: "picoduck/wollipog", number: 1091 }, observation: {
+      state: "merged", draft: false, headSha: "b".repeat(40), baseRef: "main", reviewDecision: "approved",
+      checks: { state: "passing", passing: 1, failing: 0, pending: 0 }, requiredChecks: { state: "passing", passing: 1, failing: 0, pending: 0 },
+      mergeQueue: null, mergeCommitSha: "c".repeat(40), defaultBranch: "main", headBranch: { name: "fix/nested", tipSha: null },
+    } }], Date.now());
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
       unique: 2, duplicates: 2,
@@ -2267,7 +2282,7 @@ test("a prompt event behind a full delivery slice still wakes the Orchestrator p
         kind: "request_actionable", subjectSessionId: child.id, occurrenceId: `request_backlog_${index}`, now: start });
     }
     db.recordCampaignContinuationEvent({ eventId: "ready", campaignSessionId: root.id, kind: "child_ready",
-      subjectSessionId: child.id, subjectStatus: "idle", now: start });
+      subjectSessionId: child.id, subjectStatus: "stopped", now: start });
     const first = deliver(start + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
     assert.ok(first, "the queue, not the 64-event slice, decides the deadline");
     assert.match(first, /durable event range 1-64\./u);
@@ -2285,7 +2300,7 @@ test("an unverified child report keeps asking for the sweep after its own event 
     db.appendEvent(child.id, { kind: "agent_message", text: "Final child report", final: true }, Date.now());
     svc.onSessionStatus(child.id, "idle");
     db.updateSessionStatus(root.id, "idle", Date.now());
-    assert.match(deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 1_000) ?? "", /"kind":"child_ready"/u,
+    assert.match(deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000) ?? "", /"kind":"child_ready"/u,
       "the report wakes the Orchestrator, whose turn then ends without verifying it");
     assert.equal(db.campaignContinuationEvents(root.id).length, 0);
     db.recordCampaignContinuationEvent({ eventId: "settled-later", campaignSessionId: root.id,
@@ -2720,9 +2735,14 @@ test("a human settling a human-owned gate wakes the Orchestrator promptly withou
 
 test("each campaign event kind wakes on its own schedule and names what the Orchestrator needs (#3083)", () => {
   const cases = [
-    { name: "child_ready", prompt: true, record: (root: string, child: string) => ({
-      kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "idle", occurrenceId: "event-seq:9" }),
-    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","status":"idle"/u, action: "yes" },
+    { name: "child_ready for a completed child", prompt: true, childStatus: "completed" as const,
+      record: (_root: string, child: string) => ({
+        kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "completed", occurrenceId: "event-seq:9" }),
+    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"completed","status":"completed"/u, action: "yes" },
+    { name: "child_ready for an idle child running again at delivery (#4073)", prompt: false,
+      record: (_root: string, child: string) => ({
+        kind: "child_ready" as const, subjectSessionId: child, subjectStatus: "idle", occurrenceId: "event-seq:9" }),
+    expected: /"kind":"child_ready","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","status":"idle"/u, action: "no" },
     { name: "child_blocked", prompt: true, record: (_root: string, child: string) => ({
       kind: "child_blocked" as const, subjectSessionId: child, subjectStatus: "worktree_recovery", occurrenceId: "hold_1" }),
     expected: /"kind":"child_blocked","createdAt":\d+,"sessionId":"s_\w+","childStatus":"running","hold":"worktree_recovery","holdId":"hold_1"/u, action: "yes" },
@@ -2745,6 +2765,7 @@ test("each campaign event kind wakes on its own schedule and names what the Orch
     const { db, root, child, deliver } = continuationCampaign("questions");
     try {
       const at = Date.now();
+      if ("childStatus" in scenario) db.updateSessionStatus(child.id, scenario.childStatus, at);
       if (scenario.resolver) {
         db.recordCampaignRequestResolution({
           campaignSessionId: root.id, requestToken: campaignRequestToken("generic", child.id, "request_kind"),
@@ -2778,7 +2799,7 @@ test("campaign events within the coalescing window arrive as one continuation, a
     const record = (eventId: string, now: number, kind: "request_actionable" | "child_ready" = "request_actionable") =>
       db.recordCampaignContinuationEvent({
         eventId, campaignSessionId: root.id, kind, subjectSessionId: child.id, now,
-        ...(kind === "child_ready" ? { subjectStatus: "idle" } : { occurrenceId: eventId }),
+        ...(kind === "child_ready" ? { subjectStatus: "stopped" } : { occurrenceId: eventId }),
       });
     const start = Date.now();
     db.updateSessionStatus(root.id, "idle", start);
@@ -2796,6 +2817,233 @@ test("campaign events within the coalescing window arrive as one continuation, a
     assert.ok(joined, "a prompt event does not wait for the earlier event's window");
     assert.match(joined, /durable event range 3-4\./u);
     assert.match(joined, /"occurrenceId":"request_c".*"kind":"child_ready"/u);
+  } finally {
+    db.close();
+  }
+});
+
+/** Runner snapshots for a continuationCampaign child (#4073). `turnEnd` runs one turn that ends
+ * with a final message and the given managed background jobs; `job` builds a live job, or an ended
+ * one when given its end time. */
+function campaignChildTurns(harness: ReturnType<typeof continuationCampaign>) {
+  const { db, svc, child } = harness;
+  const job = (id: string, registeredAt: number, endedAt?: number): ManagedBackgroundJobSnapshot => ({
+    id, parentTurnId: `turn-${id}`, runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, launchType: "shell", registeredAt,
+    ...(endedAt === undefined ? {} : { terminalStatus: "completed" as const, terminalObservedAt: endedAt }),
+  });
+  const update = (status: SessionStatus, backgroundJobs: ManagedBackgroundJobSnapshot[]) => {
+    const current = db.getSession(child.id)!;
+    svc.applySessionRuntimeUpdate(RUNNER_ID, snapshot({
+      id: child.id, workspaceId: current.workspaceId, agentId: current.agentId, status,
+      useWorktree: current.useWorktree, worktreePath: current.worktreePath ?? null,
+      seq: db.listEvents(child.id).at(-1)?.seq ?? 0, backgroundJobs,
+    }));
+  };
+  const turnEnd = (text: string, backgroundJobs: ManagedBackgroundJobSnapshot[] = []) => {
+    update("running", backgroundJobs);
+    const report = db.appendEvent(child.id, { kind: "agent_message", text, final: true }, Date.now());
+    update("idle", backgroundJobs);
+    return report.seq;
+  };
+  return { job, update, turnEnd };
+}
+
+test("a child that ends its turn behind a live background job wakes nobody until the wait ends (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, deliver } = harness;
+  const { job, update, turnEnd } = campaignChildTurns(harness);
+  try {
+    const start = Date.now();
+    db.updateSessionStatus(root.id, "idle", start);
+    turnEnd("PR opened; required CI runs in a background wait.", [job("ci", start)]);
+    assert.equal(db.getSession(child.id)?.status, "idle");
+    assert.equal(db.campaignChildWait(child.id, Date.now()), "background_job");
+    assert.deepEqual(db.campaignContinuationEvents(root.id), [], "a waiting turn end records no event");
+    assert.equal(deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000), null);
+
+    update("idle", [job("ci", start, Date.now())]);
+    assert.equal(db.campaignChildWait(child.id, Date.now()), null);
+    assert.equal(deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500), null,
+      "an idle child's turn end joins the coalescing window");
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text, "the ended wait wakes the Orchestrator for the child's report");
+    assert.match(text, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a queued turn end that the child has since moved past into a wait asks for nothing (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, deliver } = harness;
+  const { job, update, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Pushed the review fix.");
+    const ciStart = Date.now();
+    const report = turnEnd("CI restarted; waiting on it in the background.", [job("ci", ciStart)]);
+    assert.equal(db.campaignContinuationEvents(root.id).length, 1, "only the first turn end was recorded");
+    const queued = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(queued);
+    assert.match(queued, /"kind":"child_ready",.*"childStatus":"idle","waiting":"background_job","status":"idle"/u);
+    assert.match(queued, /Action needed: no\./u);
+
+    update("idle", [job("ci", ciStart, Date.now())]);
+    const ended = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(ended, "the ended wait wakes the Orchestrator for the later report");
+    assert.match(ended, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.doesNotMatch(ended, /"waiting"/u);
+    assert.match(ended, /Action needed: yes/u);
+    assert.deepEqual(db.campaignContinuationChildCandidates(root.id).map((candidate) => candidate.eventSeq), [report]);
+  } finally {
+    db.close();
+  }
+});
+
+test("a child idle behind a wait on the very report its event names still asks for the sweep (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, deliver } = harness;
+  const { turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Final report.");
+    // A job appearing with no later report is not a moved-past turn end: this event is the only
+    // one the report gets, so it stays actionable.
+    db.raw().prepare(`INSERT INTO managed_background_jobs
+      (session_id,job_id,parent_turn_id,runner_id,launch_type,registered_at,last_observed_at)
+      VALUES (?,?,?,?,?,?,?)`).run(child.id, "late", "turn-late", RUNNER_ID, "shell", Date.now(), Date.now());
+    assert.equal(db.campaignChildWait(child.id, Date.now()), "background_job");
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.doesNotMatch(text, /"waiting"/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a waiting child that asks or stops still wakes the Orchestrator (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, svc, root, child, deliver, ask } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Waiting on required CI.", [job("ci", Date.now())]);
+    ask("which", "Which base branch?");
+    const asked = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(asked, "a question is delivered on its usual schedule");
+    assert.match(asked, /"kind":"request_actionable",.*"occurrenceId":"request_which","category":"question".*"pending":true/u);
+    assert.match(asked, /Action needed: yes/u);
+
+    svc.onSessionStatus(child.id, "stopped");
+    const stopped = deliver(Date.now() + CAMPAIGN_CONTINUATION_FAN_IN_MS + 500);
+    assert.ok(stopped, "a stopped child wakes the Orchestrator within the prompt fan-in, live job or not");
+    assert.match(stopped, /"kind":"child_ready",.*"childStatus":"stopped","status":"stopped"/u);
+    assert.match(stopped, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a background job past the stall bound stops hiding a child's report (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, deliver } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    const start = Date.now();
+    db.updateSessionStatus(root.id, "idle", start);
+    turnEnd("Done; a monitor is still running.", [job("monitor", start - BACKGROUND_JOB_STALL_MS + 60_000)]);
+    assert.equal(deliver(start + 30_000), null);
+    assert.deepEqual(db.campaignContinuationEvents(root.id), []);
+    assert.equal(deliver(start + 61_000), null, "the expired wait records the report, which then coalesces");
+    assert.equal(db.campaignContinuationEvents(root.id).filter((event) => event.kind === "child_ready").length, 1);
+    const text = deliver(start + 61_000 + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"kind":"child_ready",.*"childStatus":"idle"/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("several turn ends of one child within the window arrive as one entry with the latest status (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, deliver } = harness;
+  const { turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Pushed the first review fix.");
+    turnEnd("Pushed the second review fix.");
+    assert.equal(db.campaignContinuationEvents(root.id).length, 2);
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /durable event range 1-2\./u, "the range still covers every turn end");
+    assert.equal(text.match(/"kind":"child_ready"/gu)?.length, 1);
+    assert.match(text, /"seq":2,"kind":"child_ready",.*"childStatus":"idle","status":"idle","turnEnds":2\}/u);
+    assert.match(text, /Action needed: yes/u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a child idle behind a background CI wait leaves an unrelated settled request at Action needed: no (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, deliver } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    turnEnd("Waiting on required CI.", [job("ci", Date.now())]);
+    db.recordCampaignContinuationEvent({ eventId: "settled", campaignSessionId: root.id,
+      kind: "request_actionable", subjectSessionId: child.id, occurrenceId: "request_gone", now: Date.now() });
+    const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+    assert.ok(text);
+    assert.match(text, /"occurrenceId":"request_gone","pending":false/u);
+    assert.match(text, /Action needed: no\./u);
+  } finally {
+    db.close();
+  }
+});
+
+test("a replayed campaign sequence wakes the Orchestrator once, for the report it must verify (#4073)", () => {
+  const harness = continuationCampaign("questions");
+  const { db, root, child, continuations, deliver } = harness;
+  const { job, turnEnd } = campaignChildTurns(harness);
+  try {
+    db.updateSessionStatus(root.id, "idle", Date.now());
+    const texts: string[] = [];
+    const settle = () => {
+      const text = deliver(Date.now() + CAMPAIGN_CONTINUATION_COALESCE_MS + 1_000);
+      if (text) texts.push(text);
+    };
+    // The issue's reproduction: a pull request with a background wait on required CI, an
+    // acknowledgement of the Orchestrator's note, a review fix that restarts CI, and the report the
+    // runner's continuation produces once CI ends. Each was a separate actionable wake before.
+    const ciStart = Date.now();
+    const turnEnds = [
+      turnEnd("PR opened; required CI runs in a background wait.", [job("ci", ciStart)]),
+    ];
+    settle();
+    db.appendEvent(child.id, { kind: "user_message", text: "Note from the Orchestrator.", final: true }, Date.now());
+    turnEnds.push(turnEnd("Understood.", [job("ci", ciStart)]));
+    settle();
+    const ciEnd = Date.now(), rerunStart = Date.now();
+    turnEnds.push(turnEnd("Pushed the review fix; CI restarted.", [job("ci", ciStart, ciEnd), job("ci-2", rerunStart)]));
+    settle();
+    const report = turnEnd("Final report: required CI passed.", [job("ci", ciStart, ciEnd), job("ci-2", rerunStart, Date.now())]);
+    turnEnds.push(report);
+    settle();
+    settle();
+
+    assert.equal(new Set(turnEnds).size, 4, "four turn ends, each a new report, each of which used to wake the root");
+    assert.equal(continuations().length, 1, "only the final report wakes it");
+    assert.equal(texts.length, 1);
+    assert.match(texts[0]!, /"kind":"child_ready",.*"childStatus":"idle","status":"idle"/u);
+    assert.match(texts[0]!, /Action needed: yes/u);
+    assert.deepEqual(db.campaignContinuationChildCandidates(root.id).map((candidate) => candidate.eventSeq), [report],
+      "the report that woke it is the one awaiting verification");
+    assert.ok(db.campaignContinuationEvents(root.id).length === 0);
   } finally {
     db.close();
   }
@@ -6485,7 +6733,8 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         eventSeq: runnerSeq,
       };
     };
-    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200, target: SessionView = child) => {
+    const arm = async (pullRequest = 1140, expectedStatus: 200 | 409 = 200, target: SessionView = child,
+      resourceKey = `picoduck/wollipog#${pullRequest}`) => {
       const headSha = String(pullRequest).padStart(40, "a").slice(-40);
       const snapshot = {
         category: "pr_merge" as const,
@@ -6500,7 +6749,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       };
       const decision = svc.createWorkflowDecision(target.id, {
         requestId: `guardian-${pullRequest}-${++sequence}`,
-        resourceKey: `picoduck/wollipog#${pullRequest}`,
+        resourceKey,
         resourceSnapshot: snapshot,
       });
       assert.ok(decision.ok && decision.data, decision.error);
@@ -6954,6 +7203,409 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  /** #4067: the child's runner answers a Wollipog-performed forge action with `outcome`. */
+  const forgeAction = (
+    child: SessionView,
+    answer: (message: ForgeDecisionActionMessage) => Pick<ForgeDecisionActionResultMessage, "outcome" | "refusal">,
+    seen: ForgeDecisionActionMessage[] = [],
+  ) => (message: ControlPlaneToRunner): RunnerRequestResult => {
+    if (message.type !== "forge_decision_action") throw new Error(`unexpected runner request ${message.type}`);
+    seen.push(message);
+    return { type: "forge_decision_action_result", requestId: message.requestId, sessionId: child.id,
+      occurrenceId: message.occurrenceId, ...answer(message) };
+  };
+
+  await t.test("an approved enqueue the provider refused is performed once by Wollipog itself (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      // Claude Code's auto classifier refused the armed command: no receipt, nothing ran.
+      const armed = await arm(4067);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), seen);
+
+      const stale = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId, { resourceDigest: "0".repeat(64) });
+      assert.equal(stale.status, 409, "a digest that is not the decision's is refused");
+      assert.equal(seen.length, 0);
+
+      const result = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(result.data?.forgeAction?.outcome, "enqueued");
+      assert.equal(result.data?.forgeAction?.attempts, 1);
+      assert.equal(seen.length, 1);
+      assert.deepEqual(seen[0]!.action, { kind: "pr_merge_enqueue", repository: "picoduck/wollipog", pullRequest: 4067,
+        headSha: armed.snapshot.headSha }, "exactly the approved head; the runner adds no --delete-branch");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === armed.decision.occurrenceId &&
+        entry.outcome === "consumed" && entry.actor.id === "workflow-decision-forge-action"));
+
+      const replay = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.equal(replay.status, 409, "one approval authorizes one action");
+      assert.equal(seen.length, 1, "nothing is dispatched again");
+
+      // An enqueue of the same head under a later, separately approved occurrence is its own action.
+      const reapproved = await arm(4067);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_queued" }), seen);
+      const again = await svc.executeWorkflowDecision(child.id, reapproved.decision.occurrenceId,
+        { resourceDigest: reapproved.decision.resourceDigest });
+      assert.equal(again.data?.status, "consumed", again.error);
+      assert.equal(again.data?.forgeAction?.outcome, "already_queued");
+    } finally { db.close(); }
+  });
+
+  await t.test("a refused enqueue that never ran stays approved for a retry, and a stale one is revoked (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4068);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "forge_refused", summary: "GitHub refused the enqueue; nothing was enqueued." } }));
+      const refused = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.ok(refused.ok, refused.error);
+      assert.equal(refused.data?.status, "approved", "an enqueue that never ran is not consumed");
+      assert.deepEqual(refused.data?.forgeAction?.refusal, { reason: "forge_refused",
+        summary: "GitHub refused the enqueue; nothing was enqueued." });
+      assert.ok(refused.data?.actionAdmission, "it stays armed, so it can be retried or reconciled");
+
+      // The runner could not even be asked for the action: also nothing ran.
+      hub.deliveryHandler = (_runnerId, message) => message.type !== "forge_decision_action";
+      const unsent = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      hub.deliveryHandler = undefined;
+      assert.equal(unsent.data?.status, "approved");
+      assert.equal(unsent.data?.forgeAction?.refusal?.reason, "runner_unavailable");
+
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }));
+      const retried = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.equal(retried.data?.status, "consumed", retried.error);
+      assert.equal(retried.data?.forgeAction?.attempts, 3);
+
+      const moved = await arm(4069);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "pull_request_mismatch", summary: "The pull request's head is no longer the approved head." } }));
+      const stale = await svc.executeWorkflowDecision(child.id, moved.decision.occurrenceId,
+        { resourceDigest: moved.decision.resourceDigest });
+      assert.equal(stale.data?.status, "revoked", "a stale snapshot revokes the approval");
+
+      // A closure GitHub would now make that the approval does not describe revokes it before dispatch.
+      const closing = await arm(4070);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      hub.githubMergePreflight = (message) => ({ type: "github_merge_preflight_result", requestId: message.requestId,
+        sessionId: message.sessionId, ok: true, check: { checkedAt: 2, closures: [{ issue: "picoduck/wollipog#1", sources: ["linked"] }] } });
+      const closures = await svc.executeWorkflowDecision(child.id, closing.decision.occurrenceId,
+        { resourceDigest: closing.decision.resourceDigest });
+      hub.githubMergePreflight = undefined;
+      assert.equal(closures.data?.status, "revoked");
+      assert.equal(closures.data?.forgeAction?.refusal?.reason, "closure_mismatch");
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+
+      // An uncertain enqueue is never replayed; the forge's merged head reconciles it.
+      const uncertain = await arm(4071);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      const unknown = await svc.executeWorkflowDecision(child.id, uncertain.decision.occurrenceId,
+        { resourceDigest: uncertain.decision.resourceDigest });
+      assert.equal(unknown.data?.status, "approved");
+      assert.equal(unknown.data?.forgeAction?.outcome, "uncertain");
+      const replay = await svc.executeWorkflowDecision(child.id, uncertain.decision.occurrenceId,
+        { resourceDigest: uncertain.decision.resourceDigest });
+      assert.equal(replay.status, 409);
+      assert.match(replay.error ?? "", /reconcile_workflow_decision/u);
+      hub.requestHandler = forgeProof(child, uncertain);
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, uncertain.decision.occurrenceId,
+        { resourceSnapshot: uncertain.snapshot }, () => true);
+      assert.equal(reconciled.data?.status, "consumed", reconciled.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("an occurrence superseded while GitHub is read again never dispatches its enqueue (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4073);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      let release!: () => void;
+      const reading = new Promise<void>((resolve) => { release = resolve; });
+      let asked!: () => void;
+      const preflightStarted = new Promise<void>((resolve) => { asked = resolve; });
+      hub.githubMergePreflight = async (message) => {
+        asked();
+        await reading;
+        return { type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId,
+          ok: true, check: { checkedAt: 3, closures: [] } };
+      };
+      const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      await preflightStarted;
+      // A new request for the same pull request supersedes the armed occurrence mid-read.
+      const replacement = svc.createWorkflowDecision(child.id, { requestId: "replacement-4073",
+        resourceKey: "picoduck/wollipog#4073", resourceSnapshot: armed.snapshot });
+      assert.ok(replacement.ok, replacement.error);
+      release();
+      const result = await executing;
+      hub.githubMergePreflight = undefined;
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "superseded");
+      assert.notEqual(result.data?.forgeAction?.outcome, "enqueued");
+    } finally { db.close(); }
+  });
+
+  await t.test("an enqueue superseded after Wollipog dispatched it keeps the record of what it performed (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      for (const [pullRequest, outcome] of [[4076, "enqueued"], [4077, "uncertain"]] as const) {
+        const armed = await arm(pullRequest);
+        let answer!: () => void;
+        const answered = new Promise<void>((resolve) => { answer = resolve; });
+        let asked!: () => void;
+        const dispatched = new Promise<void>((resolve) => { asked = resolve; });
+        hub.requestHandler = async (message) => {
+          asked();
+          await answered;
+          return forgeAction(child, () => ({ outcome }))(message);
+        };
+        const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+          { resourceDigest: armed.decision.resourceDigest });
+        await dispatched;
+        // The runner is already running the enqueue when a new request supersedes the occurrence.
+        const replacement = svc.createWorkflowDecision(child.id, { requestId: `replacement-${pullRequest}`,
+          resourceKey: `picoduck/wollipog#${pullRequest}`, resourceSnapshot: armed.snapshot });
+        assert.ok(replacement.ok, replacement.error);
+        answer();
+        const result = await executing;
+        assert.ok(result.ok, result.error);
+        assert.equal(result.data?.status, "superseded", "supersession only ends its authority");
+        assert.equal(result.data?.forgeAction?.outcome, outcome,
+          "what Wollipog performed stays on the occurrence, which keeps the merge tracked (campaign-merged-branches)");
+      }
+    } finally { db.close(); }
+  });
+
+  await t.test("a Codex child's uncertain Wollipog enqueue is reconciled by the forge alone, never replayed (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    const admit = hub.requestHandler;
+    try {
+      const armed = await arm(4078);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      const unknown = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.equal(unknown.data?.forgeAction?.outcome, "uncertain", unknown.error);
+      assert.equal(unknown.data?.status, "approved");
+
+      // Not merged yet: the read refuses and nothing is consumed or enqueued.
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "pull_request_mismatch", summary: "The pull request has not merged; nothing was enqueued." } }), seen);
+      const early = await svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+      assert.equal(early.status, 409);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+
+      // The forge reads the approved head MERGED. No provider receipt exists, and none is asked for:
+      // the runner only reads the pull request (forgeAction throws on any other request).
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_merged" }), seen);
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+      assert.equal(reconciled.data?.status, "consumed", reconciled.error);
+      assert.equal(seen.length, 2);
+      assert.ok(seen.every((message) => message.action.kind === "pr_merge_observe" &&
+        message.action.headSha === armed.snapshot.headSha), "a read-only check of exactly the approved head");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === armed.decision.occurrenceId &&
+        entry.outcome === "consumed" && entry.actor.id === "workflow-decision-forge-reconciliation"));
+
+      // Stopping a Codex child settles its uncertain Wollipog enqueue from the forge as well.
+      hub.requestHandler = admit;
+      const stopped = await arm(4079);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      await svc.executeWorkflowDecision(child.id, stopped.decision.occurrenceId, { resourceDigest: stopped.decision.resourceDigest });
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_merged" }));
+      assert.ok(svc.stop(child.id).ok);
+      assert.equal(await settled(db, stopped.decision.occurrenceId, "revoked"), "consumed");
+    } finally { db.close(); }
+  });
+
+  await t.test("a merged pull request alone never settles a Codex merge Wollipog did not enqueue (#4067)", async () => {
+    const { db, hub, svc, child, arm, receipt } = setup();
+    const admit = hub.requestHandler;
+    try {
+      // No forgeAction (the child ran the command itself), and only a refused attempt (nothing ran).
+      const own = await arm(4080);
+      hub.requestHandler = admit;
+      const refusedOnly = await arm(4081);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "forge_refused", summary: "GitHub refused the enqueue; nothing was enqueued." } }));
+      await svc.executeWorkflowDecision(child.id, refusedOnly.decision.occurrenceId,
+        { resourceDigest: refusedOnly.decision.resourceDigest });
+      assert.equal(db.workflowDecisionByOccurrence(refusedOnly.decision.occurrenceId)?.forgeAction?.outcome, "refused");
+      for (const armed of [own, refusedOnly]) {
+        // The forge reads the approved head MERGED, but no provider receipt exists.
+        const asked: string[] = [];
+        const proof = forgeProof(child, armed);
+        hub.requestHandler = (message) => {
+          asked.push(message.type);
+          if (message.type === "forge_decision_action") throw new Error("a forge-only read was attempted");
+          return proof(message);
+        };
+        const result = await svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot }, () => true);
+        assert.equal(result.status, 409, "the forge's merged head alone is not a Codex receipt");
+        assert.deepEqual(asked, ["reconcile_workflow_action"], "the provider-receipt path, exactly as before");
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      }
+      // The child's own receipt still consumes it, as today.
+      hub.requestHandler = admit;
+      svc.onSessionEvent(child.id, receipt(own.command));
+      assert.equal(db.workflowDecisionByOccurrence(own.decision.occurrenceId)?.status, "consumed");
+    } finally { db.close(); }
+  });
+
+  await t.test("an uncited merge whose review run moves during the closure read never dispatches (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      const armed = await arm(4074);
+      const dispatched: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), dispatched);
+      let release!: () => void;
+      const reading = new Promise<void>((resolve) => { release = resolve; });
+      let asked!: () => void;
+      const preflightStarted = new Promise<void>((resolve) => { asked = resolve; });
+      hub.githubMergePreflight = async (message) => {
+        asked();
+        await reading;
+        return { type: "github_merge_preflight_result", requestId: message.requestId, sessionId: message.sessionId,
+          ok: true, check: { checkedAt: 3, closures: [] } };
+      };
+      const history = db.reviewSessions.history.bind(db.reviewSessions);
+      const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      await preflightStarted;
+      // Mid-read, a valid review of another head completes for the same pull request.
+      db.reviewSessions.history = ((sessionId, pullRequest) => ({ ...history(sessionId, pullRequest), epoch: 1,
+        lastValid: { headSha: "c".repeat(40) } })) as unknown as typeof db.reviewSessions.history;
+      release();
+      const result = await executing;
+      hub.githubMergePreflight = undefined;
+      db.reviewSessions.history = history;
+      assert.equal(dispatched.length, 0, "nothing reached the forge");
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "revoked");
+      assert.equal(result.data?.forgeAction?.refusal?.reason, "pull_request_mismatch");
+    } finally { db.close(); }
+  });
+
+  await t.test("Wollipog performs only an armed enqueue, and only for a runner that supports it (#4067)", async () => {
+    const { db, hub, svc, child, parent } = setup(AGENT_ID);
+    try {
+      const headSha = "b".repeat(40);
+      const snapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4072, headSha,
+        reviewResult: "merge" as const, requiredChecks: { headSha, status: "passed" as const, checkedAt: 10,
+          checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
+      const decision = svc.createWorkflowDecision(child.id, { requestId: "unarmed", resourceKey: "picoduck/wollipog#4072", resourceSnapshot: snapshot });
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "enqueued" }), seen);
+      const unarmed = await svc.executeWorkflowDecision(child.id, decision.data.occurrenceId, { resourceDigest: decision.data.resourceDigest });
+      assert.equal(unarmed.status, 409);
+      assert.match(unarmed.error ?? "", /arm the merge first/u);
+
+      db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions - 1);
+      const old = await svc.executeWorkflowDecision(child.id, decision.data.occurrenceId, { resourceDigest: decision.data.resourceDigest });
+      assert.equal(old.status, 409, "an older runner keeps today's behavior");
+      assert.equal(seen.length, 0);
+      assert.equal(db.workflowDecisionByOccurrence(decision.data.occurrenceId)?.status, "approved");
+    } finally { db.close(); }
+  });
+
+  await t.test("Wollipog deletes an approved merged branch by compare-and-delete, even after the provider refused it (#4067)", async () => {
+    const { db, hub, svc, child, parent } = setup(AGENT_ID);
+    try {
+      assert.ok(svc.setParentControlPolicy(parent.id, { implementation_question: "human", pr_merge: "orchestrator",
+        merged_branch_deletion: "orchestrator", follow_up_issue_publication: "human", ui_evidence_approval: "human",
+        review_round_extension: "human" }, 1).ok);
+      let sequence = 0;
+      const approveDeletion = (extra: Record<string, unknown> = { pullRequest: 4067, headSha: "a".repeat(40) }) => {
+        const snapshot = { category: "merged_branch_deletion" as const, repository: "picoduck/wollipog", branch: `agent/${child.id}`,
+          merged: true as const, mergeCommitSha: "c".repeat(40), ...extra, dependentPullRequests: { checkedAt: 10, open: [] } };
+        const created = svc.createWorkflowDecision(child.id, { requestId: `delete-${++sequence}`, resourceKey: `branch:agent/${child.id}`,
+          resourceSnapshot: snapshot });
+        assert.ok(created.ok && created.data, created.error);
+        assert.ok(svc.resolveDescendantRequest(parent.id, child.id, created.data.occurrenceId,
+          { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+        return { decision: created.data, snapshot };
+      };
+      const half = svc.createWorkflowDecision(child.id, { requestId: "half", resourceKey: "branch:half", resourceSnapshot: {
+        category: "merged_branch_deletion", repository: "picoduck/wollipog", branch: "agent/x", merged: true,
+        mergeCommitSha: "c".repeat(40), pullRequest: 1, dependentPullRequests: { checkedAt: 10, open: [] } } });
+      assert.equal(half.status, 400, "pullRequest and headSha come together");
+
+      // The child consumed the approval and ran `git push --delete`; the provider refused it.
+      const refusedByProvider = approveDeletion();
+      const consumed = await svc.consumeWorkflowDecision(child.id, refusedByProvider.decision.occurrenceId,
+        { resourceSnapshot: refusedByProvider.snapshot });
+      assert.equal(consumed.data?.status, "consumed", consumed.error);
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "deleted" }), seen);
+      const deleted = await svc.executeWorkflowDecision(child.id, refusedByProvider.decision.occurrenceId,
+        { resourceDigest: refusedByProvider.decision.resourceDigest });
+      assert.ok(deleted.ok, deleted.error);
+      assert.equal(deleted.data?.forgeAction?.outcome, "deleted");
+      assert.deepEqual(seen[0]!.action, { kind: "branch_deletion", repository: "picoduck/wollipog", branch: `agent/${child.id}`,
+        pullRequest: 4067, headSha: "a".repeat(40), mergeCommitSha: "c".repeat(40) });
+      const twice = await svc.executeWorkflowDecision(child.id, refusedByProvider.decision.occurrenceId,
+        { resourceDigest: refusedByProvider.decision.resourceDigest });
+      assert.equal(twice.status, 409, "a performed deletion is not performed again");
+      assert.equal(seen.length, 1);
+
+      // Executed instead of consumed: the success consumes it.
+      const direct = approveDeletion();
+      const performed = await svc.executeWorkflowDecision(child.id, direct.decision.occurrenceId,
+        { resourceDigest: direct.decision.resourceDigest });
+      assert.equal(performed.data?.status, "consumed", performed.error);
+
+      // The remote tip moved after approval: refused, the branch is left alone, the approval revoked.
+      const moved = approveDeletion();
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "tip_moved", summary: "The branch tip is no longer the approved merged head, so it was left alone." } }), seen);
+      const tip = await svc.executeWorkflowDecision(child.id, moved.decision.occurrenceId, { resourceDigest: moved.decision.resourceDigest });
+      assert.equal(tip.data?.status, "revoked");
+      assert.equal(tip.data?.forgeAction?.refusal?.reason, "tip_moved");
+      assert.equal((await svc.executeWorkflowDecision(child.id, moved.decision.occurrenceId,
+        { resourceDigest: moved.decision.resourceDigest })).status, 409);
+
+      // A dependent pull request opened after approval: the same.
+      const dependent = approveDeletion();
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "dependent_pull_request_open", summary: "An open pull request targets this branch, so it was left alone." } }), seen);
+      const opened = await svc.executeWorkflowDecision(child.id, dependent.decision.occurrenceId,
+        { resourceDigest: dependent.decision.resourceDigest });
+      assert.equal(opened.data?.status, "revoked");
+
+      // An uncertain deletion may be repeated: compare-and-delete cannot do more than approved.
+      const unsure = approveDeletion();
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }), seen);
+      assert.equal((await svc.executeWorkflowDecision(child.id, unsure.decision.occurrenceId,
+        { resourceDigest: unsure.decision.resourceDigest })).data?.status, "approved");
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_deleted" }), seen);
+      const settledDeletion = await svc.executeWorkflowDecision(child.id, unsure.decision.occurrenceId,
+        { resourceDigest: unsure.decision.resourceDigest });
+      assert.equal(settledDeletion.data?.status, "consumed");
+      assert.equal(settledDeletion.data?.forgeAction?.outcome, "already_deleted");
+
+      // A decision without the merged head is not something Wollipog can pin a deletion to.
+      const unpinned = approveDeletion({});
+      const before = seen.length;
+      const refusal = await svc.executeWorkflowDecision(child.id, unpinned.decision.occurrenceId,
+        { resourceDigest: unpinned.decision.resourceDigest });
+      assert.equal(refusal.status, 409);
+      assert.match(refusal.error ?? "", /pullRequest and headSha/u);
+      assert.equal(seen.length, before);
+    } finally { db.close(); }
+  });
+
   await t.test("Claude Code forge reconciliation fails closed until the approved head merged", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
     try {
@@ -7169,6 +7821,109 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
         reportEventSeq: report.seq, followUpsAccounted: true });
       assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("a same-head re-enqueue reconciles the landed occurrence and supersedes the ejected one (#3991)", async () => {
+    const { CodexAppServerDriver } = await import("../../runner/src/drivers/codex-app-server.js");
+    const { SessionManager } = await import("../../runner/src/session-manager.js");
+    const { db, hub, svc, child, parent, arm } = setup();
+    try {
+      // The first enqueue is ejected; a fresh approval under another key re-enqueues the same head.
+      const ejected = await arm(3991, 200, child, "picoduck/wollipog#3991");
+      hub.setSessionQueue(child.id, [], false, "session-turn-2");
+      const landed = await arm(3991, 200, child, "picoduck/wollipog#3991:re-enqueue");
+      assert.equal(ejected.command, landed.command);
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.status, "approved");
+      assert.equal(db.workflowDecisionByOccurrence(landed.decision.occurrenceId)?.status, "approved");
+      const admission = (id: string, armed: typeof landed) => ({
+        id, type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+        arguments: { occurrenceId: armed.decision.occurrenceId,
+          action: { kind: "pr_merge_enqueue", command: armed.command } },
+        status: "completed", error: null,
+        result: { content: [{ type: "text", text: JSON.stringify({ decision: armed.armed.data }) }] },
+      });
+      const enqueue = (id: string) => ({ id, type: "commandExecution", command: landed.command, status: "completed", exitCode: 0 });
+      const secondTurn = { id: "provider-session-turn-2", status: "completed", itemsView: "full",
+        items: [admission("admission-2", landed), enqueue("command-2")] as Record<string, unknown>[] };
+      const turns = [
+        { id: "provider-session-turn-1", status: "completed", itemsView: "full",
+          items: [admission("admission-1", ejected), enqueue("command-1")] },
+        secondTurn,
+      ];
+      const driver = new CodexAppServerDriver({ command: "never-spawned", args: [], cwd: "/fixture",
+        env: {}, config: {}, context: { kind: "native" } },
+      { onEvent() {}, onStderr() {}, onExit() {} });
+      Object.assign(driver, { threadId: "thread-1", peer: {
+        request: async () => ({ thread: { id: "thread-1", turns } }),
+      }, readRolloutProof: async () => null });
+      const manager = Object.create(SessionManager.prototype);
+      Object.assign(manager, {
+        store: { readMeta: () => ({ driver: "codex-app-server", agentSessionId: "thread-1",
+          repoPath: "/fixture", logEpoch: 0 }), readEvents: () => [] },
+        active: new Map([[child.id, { client: driver }]]),
+      });
+      manager.resolveWorktreePullRequestState = async () => ({ state: "merged", headOid: landed.snapshot.headSha });
+      hub.requestHandler = async (message) => {
+        assert.equal(message.type, "reconcile_workflow_action");
+        const { type, requestId, sessionId, ...payload } = message;
+        return { type: "workflow_action_reconciliation_result", requestId, sessionId,
+          ...await manager.reconcileWorkflowAction(child.id, payload) };
+      };
+      const reconcile = (armed: typeof landed) => svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+
+      secondTurn.items = [admission("admission-2", landed), enqueue("command-2"), enqueue("command-3")];
+      assert.equal((await reconcile(landed)).status, 409, "two successful commands after one admission stay ambiguous");
+      secondTurn.items = [enqueue("command-2")];
+      assert.equal((await reconcile(landed)).status, 409, "a command without its admission proves nothing");
+      secondTurn.items = [admission("admission-2", landed), enqueue("command-2")];
+      assert.equal((await reconcile(ejected)).status, 409, "the ejected admission did not precede the landed enqueue");
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.status, "approved");
+
+      const result = await reconcile(landed);
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      const settled = db.workflowDecisionByOccurrence(ejected.decision.occurrenceId);
+      assert.equal(settled?.status, "superseded", "the ejected armed occurrence ends without replay or withdrawal");
+      assert.equal(settled?.supersededBy, landed.decision.occurrenceId);
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === ejected.decision.occurrenceId &&
+        entry.outcome === "superseded" && entry.actor.id === "workflow-decision-action-reconciliation"));
+      const again = await reconcile(ejected);
+      assert.equal(again.status, 409);
+      assert.equal(again.errorDetails?.code, "workflow_decision_superseded");
+      assert.equal(again.errorDetails?.supersededBy, landed.decision.occurrenceId);
+
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const verified = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.ok(verified.ok, verified.error);
+    } finally { db.close(); }
+  });
+
+  await t.test("a Claude Code child's forge reconciliation supersedes its other armed occurrence of the same enqueue (#3991)", async () => {
+    const { db, hub, svc, child, parent, arm } = setup(AGENT_ID);
+    try {
+      const ejected = await arm(3992, 200, child, "picoduck/wollipog#3992");
+      const landed = await arm(3992, 200, child, "picoduck/wollipog#3992:re-enqueue");
+      const unrelated = await arm(3993);
+      hub.requestHandler = forgeProof(child, landed);
+      const result = await svc.reconcileWorkflowDecision(child.id, landed.decision.occurrenceId,
+        { resourceSnapshot: landed.snapshot }, () => true);
+      assert.ok(result.ok, result.error);
+      assert.equal(result.data?.status, "consumed");
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.status, "superseded");
+      assert.equal(db.workflowDecisionByOccurrence(ejected.decision.occurrenceId)?.supersededBy, landed.decision.occurrenceId);
+      assert.equal(db.workflowDecisionByOccurrence(unrelated.decision.occurrenceId)?.status, "approved",
+        "an armed merge of another pull request keeps its grant");
+      svc.onSessionStatus(child.id, "idle");
+      const report = db.appendEvent(child.id, { kind: "agent_message", text: "Delivered.", final: true }, Date.now());
+      const blocked = svc.verifyCampaignChild(parent.id, { childSessionId: child.id,
+        reportEventSeq: report.seq, followUpsAccounted: true });
+      assert.equal(blocked.status, 409);
+      assert.match(blocked.error ?? "", new RegExp(unrelated.decision.occurrenceId, "u"));
+      assert.doesNotMatch(blocked.error ?? "", new RegExp(ejected.decision.occurrenceId, "u"));
     } finally { db.close(); }
   });
 
@@ -9259,6 +10014,36 @@ test("ACP context fails closed against a pre-v38 runner instead of being silentl
   assert.equal(hub.sentToRunner.length, 0);
 });
 
+test("implicit launches reject signed-out A, explicit B and B-bound restarts preserve their accounts", async () => {
+  const { db, hub, svc } = makeHarness();
+  const metadata = runnerMeta();
+  metadata.providerAccounts = [
+    { id: "a", label: "A", provider: "claude", authStatus: "unauthenticated" },
+    { id: "b", label: "B", provider: "claude", authStatus: "authenticated" },
+  ];
+  metadata.agents = metadata.agents.map((agent) => agent.id === AGENT_ID ? { ...agent,
+    defaultProviderAccountId: "a", providerAccountReadiness: {
+      defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+    } } : agent);
+  db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+  const implicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.equal(implicit.status, 409);
+  assert.match(implicit.error ?? "", /default provider account is not ready/u);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  const explicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "b" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "b");
+  svc.onSessionStatus(explicit.data.id, "stopped");
+  const restarted = await svc.restart(explicit.data.id);
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "b");
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "b", 0, Date.now());
+  const saved = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(saved.ok && saved.data, saved.error);
+  assert.equal(saved.data.providerAccountId, "b");
+  assert.equal(db.getRunner(RUNNER_ID)?.agents.find((agent) => agent.id === AGENT_ID)?.defaultProviderAccountId, "a");
+});
+
 test("provider account selection is capability-gated, persisted, and sent on restart", async () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();
@@ -9414,7 +10199,12 @@ test("a session without a chosen account never takes a profile only other contro
     { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
     { id: "ours", label: "Ours", provider: "claude", authStatus: "authenticated", profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "granted" } },
   ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent,
+    providerAccountReadiness: { defaultAccountId: "ours", defaultAuthStatus: "authenticated", readyAccountIds: ["ours"] },
+  } : agent);
   db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  assert.ok(db.getAgentLaunch(RUNNER_ID, AGENT_ID), "automatic admission agrees with direct creation's first granted account");
 
   const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
   assert.ok(created.ok && created.data, created.error);
@@ -24782,6 +25572,372 @@ test("delegated UI evidence review fails closed on tampering, policy change, sup
   }
 });
 
+/** #4074: hand a decision to a delegated image reviewer, approving the spawn the harness gates on. */
+function prepareImageReview(h: ReturnType<typeof uiEvidenceReviewHarness>, childId: string, occurrenceId: string,
+  brief = "The settings panel shows the new Review Model field under Reviews.") {
+  let prepared = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, childId, occurrenceId, brief, () => true);
+  if (prepared.status === 428) {
+    assert.ok(h.svc.approve(h.parent.id, h.db.getSession(h.parent.id)!.pendingApproval!.requestId, "allow").ok);
+    prepared = h.svc.prepareDescendantImageEvidenceReview(h.parent.id, childId, occurrenceId, brief, () => true);
+  }
+  return prepared;
+}
+
+/** One delivery to the reviewer, as its own credential with the given access. */
+function reviewerImage(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, evidenceId: string,
+  canAccess: (sessionId: string) => boolean = () => true) {
+  return h.svc.reviewDelegatedImageEvidence(reviewerId, evidenceId, canAccess);
+}
+
+function reviewerVerdict(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, report: unknown,
+  canAccess: (sessionId: string) => boolean = () => true) {
+  return h.svc.submitDelegatedImageVerdict(reviewerId, report, canAccess);
+}
+
+/** The reviewer's complete look at one image: delivery plus its runner's acknowledgement. */
+function reviewerLook(h: ReturnType<typeof uiEvidenceReviewHarness>, reviewerId: string, evidenceId: string) {
+  const delivered = reviewerImage(h, reviewerId, evidenceId);
+  if (delivered.ok && delivered.data) {
+    assert.ok(h.svc.acknowledgeDelegatedImageEvidence(reviewerId, delivered.data.receipt.receiptId,
+      delivered.data.receipt.sha256, () => true).ok);
+  }
+  return delivered;
+}
+
+const passingVerdict = (ids: string[]) => ({
+  recommendation: "approve", summary: "Every image matches the claims.",
+  items: ids.map((evidenceId) => ({ evidenceId, outcome: "pass", defects: [] })),
+});
+
+test("a delegated image reviewer approves N images without any reaching the Orchestrator (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shots = ["light", "dark", "mobile"].map((label) => h.screenshot(child.id, label));
+    const ids = shots.map((shot) => shot.item.evidenceId);
+    const decision = h.request(child.id, "ui", shots.map((shot) => shot.item));
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.equal(decision.data.authority, "orchestrator");
+    const occurrence = decision.data.occurrenceId;
+
+    const prepared = prepareImageReview(h, child.id, occurrence);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    assert.equal(prepared.status, 201);
+    const reviewerId = prepared.data.reviewerSessionId;
+    assert.notEqual(reviewerId, child.id, "the child that produced the evidence is never its reviewer");
+    assert.notEqual(reviewerId, h.parent.id);
+    assert.deepEqual(prepared.data.evidenceIds, ids);
+    assert.equal(prepared.data.state, "running");
+    const reviewer = h.db.getSession(reviewerId)!;
+    assert.equal(reviewer.parentSessionId, h.parent.id, "the reviewer is an accounted child of the root");
+    assert.equal(reviewer.agentId, h.parent.agentId, "it runs on the Orchestrator's own agent");
+    assert.equal(reviewer.costBudgetUsd, 10);
+    assert.equal(reviewer.maxToolCalls, ids.length * 2 + 8);
+    const start = h.hub.sentOfType("start_session").find((message) => message.spec.sessionId === reviewerId)!;
+    assert.deepEqual(start.spec.uiEvidenceReviewer, { reviewId: prepared.data.reviewId });
+    assert.equal(start.spec.useWorktree, false);
+    assert.match(start.initialPrompt ?? "", /The settings panel shows the new Review Model field/u);
+    for (const id of ids) assert.ok(start.initialPrompt?.includes(JSON.stringify(id)));
+    assert.equal(start.initialImages, undefined, "the reviewer gets images only through receipted delivery");
+    assert.doesNotMatch(start.initialPrompt ?? "", /Wollipog Campaign Policy/u, "no campaign assignment reaches the reviewer");
+
+    // Preparing again while the review is live returns it rather than starting a second reviewer.
+    assert.equal(prepareImageReview(h, child.id, occurrence).data?.reviewId, prepared.data.reviewId);
+    // The child cannot act as a reviewer, and the Orchestrator has no reviewer routes of its own.
+    assert.equal(reviewerImage(h,child.id, ids[0]!).status, 403);
+    assert.equal(reviewerVerdict(h,child.id, passingVerdict(ids)).status, 403);
+    assert.equal(reviewerImage(h,h.parent.id, ids[0]!).status, 403);
+
+    // A verdict needs a current, acknowledged receipt for every image.
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409);
+    const unacknowledged = reviewerImage(h,reviewerId, ids[0]!);
+    assert.ok(unacknowledged.ok && unacknowledged.data, unacknowledged.error);
+    assert.equal(unacknowledged.data.receipt.reviewerSessionId, reviewerId, "the receipt is recorded against the reviewer");
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409,
+      "a delivery the runner never acknowledged supports nothing");
+    for (const id of ids) assert.ok(reviewerLook(h, reviewerId, id).ok);
+    assert.equal(reviewerImage(h,reviewerId, "not-on-the-decision").status, 404);
+    assert.equal(reviewerVerdict(h,reviewerId, { ...passingVerdict(ids), items: passingVerdict(ids).items.slice(1) }).status, 400,
+      "the verdict must cover every item");
+    assert.equal(reviewerVerdict(h,reviewerId, {
+      recommendation: "approve", summary: "Mixed.",
+      items: ids.map((evidenceId, index) => ({ evidenceId, outcome: index ? "pass" : "fail", defects: index ? [] : ["Clipped label"] })),
+    }).status, 400, "approve requires every item to pass");
+    const verdict = reviewerVerdict(h,reviewerId, passingVerdict([...ids].reverse()));
+    assert.ok(verdict.ok && verdict.data, verdict.error);
+    assert.equal(reviewerVerdict(h,reviewerId, passingVerdict(ids)).status, 409, "a reviewer submits one verdict");
+    assert.equal(reviewerImage(h,reviewerId, ids[0]!).status, 409, "nothing is delivered after the verdict");
+
+    // Nothing was delivered to the Orchestrator, so it holds no receipts of its own.
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(occurrence, h.parent.id, Date.now()), []);
+    const read = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true);
+    assert.ok(read.ok && read.data, read.error);
+    assert.equal(read.data.state, "verdict");
+    assert.deepEqual(read.data.verdict?.items.map((item) => item.evidenceId), ids, "items read in the decision's order");
+    assert.equal(read.data.verdict?.receiptIds.length, ids.length);
+    const reference = read.data.delegatedImageReview!;
+    assert.deepEqual(reference, { reviewId: prepared.data.reviewId, verdictId: verdict.data.verdictId, reviewerSessionId: reviewerId });
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(child.id, prepared.data.reviewId, () => true).status, 404);
+
+    const resolve = (resolution: Record<string, unknown>) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, ...resolution } as never, () => true);
+    assert.equal(resolve({}).status, 409, "repeating identifiers without the reviewer's provenance is refused");
+    assert.equal(resolve({ delegatedImageReview: { ...reference, verdictId: "uiimgverdict_forged" } }).status, 409);
+    assert.equal(resolve({ delegatedImageReview: { ...reference, reviewerSessionId: child.id } }).status, 409);
+    assert.equal(resolve({ delegatedImageReview: { ...reference, note: "forwarded message" } }).status, 400);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "deny", delegatedImageReview: reference } as never, () => true).status, 400);
+    const approved = resolve({ delegatedImageReview: reference });
+    assert.ok(approved.ok, approved.error);
+    const resolved = h.db.workflowDecisionByOccurrence(occurrence)!;
+    assert.equal(resolved.status, "approved");
+    assert.deepEqual(resolved.delegatedImageReview, reference);
+    const audit = h.db.listGovernanceAudit(child.id).find((record) => record.requestId === occurrence && record.outcome === "allowed");
+    assert.deepEqual(audit?.workflowDecision?.reviewReceiptIds?.sort(), [...read.data.verdict!.receiptIds].sort());
+    assert.equal(audit?.workflowDecision?.delegatedImageReview?.reviewerSessionId, reviewerId);
+    assert.equal(audit?.workflowDecision?.delegatedImageReview?.recommendation, "approve");
+    assert.match(audit?.workflowDecision?.delegatedImageReview?.verdictSha256 ?? "", /^[0-9a-f]{64}$/u);
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.state, "consumed");
+    assert.deepEqual(h.db.validUiEvidenceReviewReceipts(occurrence, reviewerId, Date.now()), [], "approval spends the receipts");
+
+    // A spent verdict cannot back another occurrence of the same evidence.
+    const again = h.request(child.id, "ui-again", shots.map((shot) => shot.item));
+    assert.ok(again.ok && again.data);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, again.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, delegatedImageReview: reference } as never,
+      () => true).status, 409);
+    // A deny recommendation is evidence for denying, never an approval.
+    const second = prepareImageReview(h, child.id, again.data.occurrenceId);
+    assert.ok(second.ok && second.data, second.error);
+    for (const id of ids) assert.ok(reviewerLook(h, second.data.reviewerSessionId, id).ok);
+    assert.ok(reviewerVerdict(h,second.data.reviewerSessionId, {
+      recommendation: "deny", summary: "The dark theme clips the label.",
+      items: ids.map((evidenceId) => ({ evidenceId, outcome: evidenceId === "dark" ? "fail" : "pass",
+        defects: evidenceId === "dark" ? ["The Review Model label is clipped."] : [] })),
+    }).ok);
+    const denied = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, second.data.reviewId, () => true);
+    assert.equal(denied.data?.delegatedImageReview, undefined);
+    assert.deepEqual(denied.data?.verdict?.items.find((item) => item.evidenceId === "dark")?.defects, ["The Review Model label is clipped."]);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, again.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids,
+        delegatedImageReview: { reviewId: second.data.reviewId, verdictId: denied.data!.verdict!.verdictId,
+          reviewerSessionId: second.data.reviewerSessionId } } as never, () => true).status, 409);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("delegated image review fails closed on supersession, tampering, policy change and expiry (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const first = h.screenshot(child.id, "first");
+    const second = h.screenshot(child.id, "second");
+    const ids = ["first", "second"];
+
+    // A replacement occurrence supersedes the reviewed one: its review ends and nothing carries over.
+    const stale = h.request(child.id, "stale", [first.item, second.item]);
+    assert.ok(stale.ok && stale.data);
+    const staleReview = prepareImageReview(h, child.id, stale.data.occurrenceId);
+    assert.ok(staleReview.ok && staleReview.data, staleReview.error);
+    for (const id of ids) assert.ok(reviewerLook(h, staleReview.data.reviewerSessionId, id).ok);
+    const replacement = h.svc.createWorkflowDecision(child.id, {
+      requestId: "replacement", resourceKey: "stale-ui",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [first.item, second.item] },
+    });
+    assert.ok(replacement.ok && replacement.data);
+    assert.equal(reviewerVerdict(h,staleReview.data.reviewerSessionId, passingVerdict(ids)).status, 409);
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, staleReview.data.reviewId, () => true).data?.state, "ended");
+
+    // The verdict expires with its receipts: an approval must look again.
+    const fresh = prepareImageReview(h, child.id, replacement.data.occurrenceId);
+    assert.ok(fresh.ok && fresh.data, fresh.error);
+    for (const id of ids) assert.ok(reviewerLook(h, fresh.data.reviewerSessionId, id).ok);
+    const verdict = reviewerVerdict(h,fresh.data.reviewerSessionId, passingVerdict(ids));
+    assert.ok(verdict.ok && verdict.data);
+    assert.equal(h.db.validUiEvidenceReviewReceipts(replacement.data.occurrenceId, fresh.data.reviewerSessionId,
+      Date.now() + 2 * 60 * 60 * 1000).length, 0);
+
+    // Stored bytes that no longer match revoke the decision, ending its review.
+    const tampered = h.screenshot(child.id, "tampered");
+    const tamperedDecision = h.request(child.id, "tampered", [tampered.item, first.item]);
+    assert.ok(tamperedDecision.ok && tamperedDecision.data);
+    const tamperedReview = prepareImageReview(h, child.id, tamperedDecision.data.occurrenceId);
+    assert.ok(tamperedReview.ok && tamperedReview.data, tamperedReview.error);
+    h.db.deleteWorkflowArtifact(tampered.item.artifactId);
+    assert.equal(reviewerImage(h,tamperedReview.data.reviewerSessionId, "tampered").status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(tamperedDecision.data.occurrenceId)?.status, "revoked");
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, tamperedReview.data.reviewId, () => true).data?.state, "ended");
+
+    // A human policy change revokes the decision and the reviewer's verdict with it.
+    assert.ok(h.svc.setParentControlPolicy(h.parent.id, { ...h.decisions, ui_evidence_approval: "human" }, 1,
+      { kind: "human", id: "owner" }).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(replacement.data.occurrenceId)?.status, "revoked");
+    const ended = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, fresh.data.reviewId, () => true);
+    assert.equal(ended.data?.state, "ended");
+    assert.equal(ended.data?.delegatedImageReview, undefined);
+    assert.equal(h.svc.resolveDescendantRequest(h.parent.id, child.id, replacement.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids,
+        delegatedImageReview: { reviewId: fresh.data.reviewId, verdictId: verdict.data.verdictId,
+          reviewerSessionId: fresh.data.reviewerSessionId } } as never, () => true).status, 409);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("a delegated image reviewer loses evidence access when its audience no longer fits the decision's (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const local = h.db.localIdentityContext();
+    const personal: ResourceScope = { organizationId: local.organizationId, owner: { kind: "user", userId: local.userId } };
+    const organization: ResourceScope = { organizationId: local.organizationId,
+      owner: { kind: "organization", organizationId: local.organizationId } };
+    const child = h.createChild("UI Child");
+    const ids = ["a", "b"];
+    const decision = h.request(child.id, "ui", ids.map((label) => h.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const reviewerId = prepared.data.reviewerSessionId;
+    assert.deepEqual(h.db.sessionScope(reviewerId), h.db.sessionScope(h.parent.id), "the reviewer inherits the root's audience");
+
+    // A reviewer credential that can no longer reach the producing child receives nothing.
+    const receipts = () => h.db.validUiEvidenceReviewReceipts(decision.data!.occurrenceId, reviewerId, Date.now()).length;
+    assert.equal(reviewerImage(h, reviewerId, "a", (sessionId) => sessionId !== child.id).status, 404);
+    assert.equal(receipts(), 0, "no receipt is recorded for a refused delivery");
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.endedReason,
+      "audience_changed");
+
+    // Nor does a reviewer whose audience reaches beyond the child's or the root's.
+    const scope = (id: string, value: ResourceScope) =>
+      assert.ok(h.db.setResourceScope({ resource: "session", resourceId: id, scope: value, now: Date.now() }));
+    for (const [label, initial, change] of [
+      // Root, child and reviewer share the organization; then the child narrows to its owner.
+      ["narrowed child", organization, () => scope(child.id, personal)],
+      // Everyone is personal; then the reviewer alone is widened to the organization.
+      ["broadened reviewer", personal, (reviewerId: string) => scope(reviewerId, organization)],
+    ] as const) {
+      scope(h.parent.id, initial);
+      scope(child.id, initial);
+      const fresh = prepareImageReview(h, child.id, decision.data.occurrenceId);
+      assert.ok(fresh.ok && fresh.data, `${label}: ${fresh.error}`);
+      assert.deepEqual(h.db.sessionScope(fresh.data.reviewerSessionId), initial, label);
+      assert.ok(reviewerLook(h, fresh.data.reviewerSessionId, "a").ok, label);
+      change(fresh.data.reviewerSessionId);
+      assert.equal(reviewerImage(h, fresh.data.reviewerSessionId, "b").status, 404, label);
+      assert.equal(h.db.validUiEvidenceReviewReceipts(decision.data.occurrenceId, fresh.data.reviewerSessionId, Date.now())
+        .filter((receipt) => receipt.evidenceId === "b").length, 0, `${label}: no receipt`);
+      assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, fresh.data.reviewId, () => true).data?.state, "ended", label);
+    }
+    // And an Orchestrator whose audience is wider than the child's cannot delegate at all.
+    assert.ok(h.db.setResourceScope({ resource: "session", resourceId: h.parent.id, scope: organization, now: Date.now() }));
+    assert.ok(h.db.setResourceScope({ resource: "session", resourceId: child.id, scope: personal, now: Date.now() }));
+    assert.match(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.data.occurrenceId, "brief", () => true).error ?? "",
+      /audience reaches beyond the child's/u);
+  } finally {
+    h.db.close();
+  }
+});
+
+test("an expired verdict is retired so a fresh reviewer can back the approval (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const ids = ["a", "b"];
+    const decision = h.request(child.id, "ui", ids.map((label) => h.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    const occurrence = decision.data.occurrenceId;
+    const first = prepareImageReview(h, child.id, occurrence);
+    assert.ok(first.ok && first.data, first.error);
+    for (const id of ids) assert.ok(reviewerLook(h, first.data.reviewerSessionId, id).ok);
+    const verdict = reviewerVerdict(h, first.data.reviewerSessionId, passingVerdict(ids));
+    assert.ok(verdict.ok && verdict.data);
+    // The receipts expire (the one-hour TTL) before the Orchestrator resolves.
+    h.db.raw().prepare("UPDATE ui_evidence_review_receipts SET expires_at=? WHERE reviewer_session_id=?")
+      .run(Date.now() - 1, first.data.reviewerSessionId);
+    const expiredReference = { reviewId: first.data.reviewId, verdictId: verdict.data.verdictId,
+      reviewerSessionId: first.data.reviewerSessionId };
+    const approve = (delegatedImageReview: unknown) => h.svc.resolveDescendantRequest(h.parent.id, child.id, occurrence,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ids, delegatedImageReview } as never, () => true);
+    assert.equal(approve(expiredReference).status, 409, "an expired verdict cannot back an approval");
+
+    const second = prepareImageReview(h, child.id, occurrence);
+    assert.ok(second.ok && second.data, second.error);
+    assert.notEqual(second.data.reviewId, first.data.reviewId, "preparing again replaces the expired review");
+    assert.notEqual(second.data.reviewerSessionId, first.data.reviewerSessionId);
+    const retired = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, first.data.reviewId, () => true).data;
+    assert.equal(retired?.state, "ended");
+    assert.equal(retired?.endedReason, "verdict_expired");
+    for (const id of ids) assert.ok(reviewerLook(h, second.data.reviewerSessionId, id).ok);
+    assert.ok(reviewerVerdict(h, second.data.reviewerSessionId, passingVerdict(ids)).ok);
+    const reference = h.svc.delegatedImageReviewForOrchestrator(h.parent.id, second.data.reviewId, () => true).data?.delegatedImageReview;
+    assert.ok(reference);
+    assert.equal(approve(expiredReference).status, 409);
+    assert.ok(approve(reference).ok, "the fresh reviewer's receipts back the approval");
+  } finally {
+    h.db.close();
+  }
+});
+
+test("delegated image reviewers take no other work, and older runners or video keep direct review (#4074)", () => {
+  const h = uiEvidenceReviewHarness();
+  try {
+    const child = h.createChild("UI Child");
+    const shot = h.screenshot(child.id, "only");
+    const decision = h.request(child.id, "ui", [shot.item]);
+    assert.ok(decision.ok && decision.data);
+    assert.equal(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, decision.data.occurrenceId, " ", () => true).status, 400,
+      "the reviewer needs the claims and criteria");
+    assert.equal(h.svc.prepareDescendantImageEvidenceReview(child.id, child.id, decision.data.occurrenceId, "brief", () => true).ok, false,
+      "only the owning Orchestrator can delegate");
+    const prepared = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(prepared.ok && prepared.data, prepared.error);
+    const reviewerId = prepared.data.reviewerSessionId;
+    h.db.updateSessionStatus(reviewerId, "running", Date.now());
+    const prompted = h.svc.prompt(reviewerId, "Also review this pull request.");
+    assert.equal(prompted.status, 409);
+    assert.match(prompted.error ?? "", /delegated image reviewer/u);
+    assert.equal(h.svc.restart(reviewerId).status, 409);
+    // A reviewer whose turn ended without a verdict will never submit one; preparing again replaces it.
+    h.db.updateSessionStatus(reviewerId, "idle", Date.now());
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, prepared.data.reviewId, () => true).data?.endedReason,
+      "reviewer_finished_without_verdict");
+    const replacement = prepareImageReview(h, child.id, decision.data.occurrenceId);
+    assert.ok(replacement.ok && replacement.data, replacement.error);
+    assert.notEqual(replacement.data.reviewerSessionId, reviewerId);
+    // Direct review keeps working for a targeted single-image check.
+    assert.ok(h.review(child.id, decision.data.occurrenceId, "only").ok);
+    assert.ok(h.svc.resolveDescendantRequest(h.parent.id, child.id, decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", evidenceReviewed: ["only"] }, () => true).ok);
+    assert.equal(h.svc.delegatedImageReviewForOrchestrator(h.parent.id, replacement.data.reviewId, () => true).data?.state, "ended",
+      "a resolved decision ends its live review");
+
+    // Video evidence is never handed to an image reviewer.
+    const clip = h.video(child.id, "clip");
+    const mixed = h.request(child.id, "mixed", [h.screenshot(child.id, "still").item, clip.item]);
+    assert.ok(mixed.ok && mixed.data);
+    if (mixed.data.authority === "orchestrator") {
+      assert.equal(h.svc.prepareDescendantImageEvidenceReview(h.parent.id, child.id, mixed.data.occurrenceId, "brief", () => true).status, 409);
+    }
+  } finally {
+    h.db.close();
+  }
+  const old = uiEvidenceReviewHarness(RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview - 1);
+  try {
+    const child = old.createChild("UI Child");
+    const decision = old.request(child.id, "ui", ["a", "b"].map((label) => old.screenshot(child.id, label).item));
+    assert.ok(decision.ok && decision.data);
+    assert.equal(decision.data.authority, "orchestrator");
+    const refused = old.svc.prepareDescendantImageEvidenceReview(old.parent.id, child.id, decision.data.occurrenceId, "brief", () => true);
+    assert.equal(refused.status, 409);
+    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview);
+    assert.equal(old.db.campaignDescendantIds(old.parent.id).length, 1, "no reviewer was started");
+    for (const id of ["a", "b"]) assert.ok(old.review(child.id, decision.data.occurrenceId, id).ok, "direct review still works");
+  } finally {
+    old.db.close();
+  }
+});
+
 test("older runners, unattested installations, and text-only models keep UI evidence human-owned with an explanation", () => {
   for (const [protocol, imageModel, code] of [
     [RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorUiEvidenceReview - 1, true, "runner_unsupported"],
@@ -25179,6 +26335,217 @@ test("a mid-turn prompt to a Pi session is steered only on a runner whose driver
     assert.equal(hub.sentOfType("prompt_session").length, expectedLane === "steered" ? 0 : 1,
       "exactly one lane owns the message");
   }
+});
+
+// --- Issue #4022: the controlling Orchestrator steers its child's prompt-outbox turn ----------------
+// The runner refuses steering into any turn a durable command started. The control plane names the
+// one exception, a prompt-outbox turn of the sender's own child, from server-owned records only.
+
+/** Codex App Server children of a policy-bearing Orchestrator. `startOutboxTurn` puts a session in a
+ * turn its control plane started from the durable prompt outbox. Like a runner without #4022 for
+ * every other turn, the fake runner refuses each steer as policy_blocked unless it names the started
+ * command, so a refused authority falls back to the queue. */
+function orchestratorSteeringCampaign() {
+  const fixture = withdrawalCampaign();
+  const { db, hub, svc, root } = fixture;
+  const steerableChild = (parentSessionId: string) => {
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parentSessionId, db.getSession(parentSessionId)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    return created.data;
+  };
+  const worker = steerableChild(root.id);
+  const sibling = steerableChild(root.id);
+  // A grandchild is reparented directly: it only needs server-owned ancestry beneath the worker.
+  const grandchild = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID }).data!;
+  db.db.prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run(worker.id, grandchild.id);
+  const started = new Map<string, string>();
+  let receiptRevision = 0;
+  const stageOutbox = (sessionId: string, command: DurableSessionCommand) => {
+    const commandId = `prompt_${randomUUID()}`;
+    db.stageSessionPromptCommand({ commandId, sessionId, runnerId: RUNNER_ID, payloadJson: JSON.stringify(command),
+      payloadSha256: "0".repeat(64), expiresAt: Date.now() + 60_000, now: Date.now() });
+    return commandId;
+  };
+  const receipt = (sessionId: string, commandId: string, state: "started" | "completed") =>
+    assert.ok(svc.onDurablePromptReceipt(RUNNER_ID, { type: "durable_session_command_update", commandId, sessionId,
+      state, revision: ++receiptRevision }), `${state} receipt`);
+  const startOutboxTurn = (sessionId: string, command: DurableSessionCommand = {
+    type: "prompt_session", sessionId, text: "Assignment", config: {},
+  }) => {
+    const commandId = stageOutbox(sessionId, command);
+    receipt(sessionId, commandId, "started");
+    assert.equal(db.getSessionPromptCommand(commandId)?.state, "started");
+    db.updateSessionStatus(sessionId, "running", Date.now());
+    hub.activeTurnIds.set(sessionId, `turn-${sessionId}`);
+    started.set(sessionId, commandId);
+    return commandId;
+  };
+  const steers: SteerSessionMessage[] = [];
+  hub.requestHandler = (message) => {
+    assert.equal(message.type, "steer_session");
+    steers.push(message);
+    const admitted = Boolean(message.controllingOrchestratorCommandId) &&
+      message.controllingOrchestratorCommandId === started.get(message.sessionId);
+    return {
+      type: "steer_session_result", requestId: message.requestId, submissionId: message.submissionId,
+      sessionId: message.sessionId, turnId: message.turnId,
+      ...(admitted
+        ? { disposition: "accepted" as const, reason: "accepted" as const, providerTurnId: "provider-turn" }
+        : { disposition: "rejected" as const, reason: "policy_blocked" as const }),
+    };
+  };
+  const local = db.localIdentityContext();
+  const agent = (sessionId: string, orchestrator = true): AgentPrincipal => ({
+    kind: "agent", actorId: sessionId, credentialSessionId: sessionId, organizationId: local.organizationId,
+    delegatedScope: db.sessionScope(sessionId)!, ...(orchestrator ? { orchestrator: true } : {}),
+  });
+  const send = (sessionId: string, text: string, sender?: AgentPrincipal) =>
+    svc.promptOrSteer(sessionId, text, [], undefined, undefined, undefined, sender);
+  return { ...fixture, worker, sibling, grandchild, stageOutbox, receipt, startOutboxTurn, steers, agent, send };
+}
+
+test("#4022 the controlling Orchestrator steers its child's prompt-outbox turn with campaign-wrapped text, and the command keeps its own receipt", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const commandId = f.startOutboxTurn(f.worker.id);
+    const before = f.db.getSessionPromptCommand(commandId);
+    f.hub.sentToRunner.length = 0;
+    const sent = await f.send(f.worker.id, "Stop polling and end your turn.", f.agent(f.root.id));
+    assert.ok(sent.ok, sent.error);
+    assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    assert.equal(f.steers.length, 1);
+    const steer = f.steers[0]!;
+    assert.equal(steer.controllingOrchestratorCommandId, commandId, "the steer names the server's started command");
+    assert.match(steer.text ?? "", /^\[Wollipog Campaign Policy — server-derived/u, "it carries the campaign policy");
+    assert.match(steer.text ?? "", /Stop polling and end your turn\.$/u);
+    assert.equal(f.hub.sentOfType("prompt_session").length, 0, "a steered message is not also queued");
+    assert.equal(f.hub.sentOfType("durable_session_command").length, 0, "nor staged as another command");
+    assert.deepEqual(f.db.getSessionPromptCommand(commandId), before, "the starting command's receipt is untouched");
+    const attempts = f.db.listSteeringAttempts(f.worker.id);
+    assert.equal(attempts.length, 1);
+    assert.equal(attempts[0]!.state, "accepted");
+    assert.equal(attempts[0]!.submissionId, steer.submissionId, "the steering attempt has its own receipt");
+  } finally { f.db.close(); }
+});
+
+test("#4022 only the child's controlling Orchestrator gains durable-turn steering; everyone else falls back to the queue", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const workerCommand = f.startOutboxTurn(f.worker.id);
+    f.startOutboxTurn(f.grandchild.id);
+    const cases: Array<[string, string, AgentPrincipal | undefined]> = [
+      ["no agent sender", f.worker.id, undefined],
+      ["the parent without an Orchestrator credential", f.worker.id, f.agent(f.root.id, false)],
+      ["a sibling", f.worker.id, f.agent(f.sibling.id)],
+      ["the child itself", f.worker.id, f.agent(f.worker.id)],
+      ["a descendant", f.worker.id, f.agent(f.grandchild.id)],
+      ["an unrelated session", f.worker.id, f.agent(f.svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID,
+        agentId: CODEX_APP_AGENT_ID }).data!.id)],
+      ["a grandparent", f.grandchild.id, f.agent(f.root.id)],
+      // An Orchestrator credential on the immediate parent is not enough when that parent is nested
+      // beneath the campaign's outermost controller.
+      ["a nested Orchestrator", f.grandchild.id, f.agent(f.worker.id)],
+    ];
+    for (const [label, target, sender] of cases) {
+      const steersBefore = f.steers.length;
+      f.hub.sentToRunner.length = 0;
+      const sent = await f.send(target, `Redirect from ${label}`, sender);
+      assert.ok(sent.ok, `${label}: ${sent.error}`);
+      assert.equal(f.steers.length, steersBefore + 1, `${label}: a steer is still attempted`);
+      assert.equal(f.steers.at(-1)!.controllingOrchestratorCommandId, undefined, `${label}: but names no command`);
+      assert.equal(sent.data?.promptDelivery?.lane, "queued", `${label}: the refusal falls back to the queue`);
+      assert.equal(f.hub.sentOfType("prompt_session").length, 1, `${label}: and the message is still delivered`);
+    }
+    assert.equal(f.db.getSessionPromptCommand(workerCommand)?.state, "started");
+  } finally { f.db.close(); }
+});
+
+test("#4022 durable-turn authority needs one started outbox prompt and sound ancestry", async () => {
+  const scenarios: Array<[string, (f: ReturnType<typeof orchestratorSteeringCampaign>) => void]> = [
+    ["the command already completed", (f) => {
+      f.receipt(f.worker.id, f.startOutboxTurn(f.worker.id), "completed");
+      f.db.updateSessionStatus(f.worker.id, "running", Date.now());
+    }],
+    ["a recovered answer started the turn", (f) => {
+      f.startOutboxTurn(f.worker.id, { type: "answer_recovered_question", sessionId: f.worker.id, requestId: "question",
+        recoveryId: "recovery", answers: { q: "Continue" } });
+    }],
+    ["the command names another session", (f) => {
+      f.startOutboxTurn(f.worker.id, { type: "prompt_session", sessionId: f.sibling.id, text: "Elsewhere", config: {} });
+    }],
+    ["two commands claim the turn", (f) => {
+      f.startOutboxTurn(f.worker.id);
+      f.startOutboxTurn(f.worker.id);
+    }],
+    ["the ancestry is cyclic", (f) => {
+      f.startOutboxTurn(f.worker.id);
+      f.db.db.prepare("UPDATE sessions SET parent_session_id=? WHERE id=?").run(f.worker.id, f.root.id);
+    }],
+  ];
+  for (const [label, arrange] of scenarios) {
+    const f = orchestratorSteeringCampaign();
+    try {
+      arrange(f);
+      f.hub.sentToRunner.length = 0;
+      const sent = await f.send(f.worker.id, "Redirect", f.agent(f.root.id));
+      assert.equal(f.steers.at(-1)?.controllingOrchestratorCommandId, undefined, `${label}: no command is named`);
+      if (sent.ok) {
+        assert.equal(sent.data?.promptDelivery?.lane, "queued", label);
+        assert.equal(f.hub.sentOfType("prompt_session").length, 1, `${label}: the message is still delivered`);
+      } else {
+        // A malformed campaign may refuse the message outright; it must never be steered.
+        assert.equal(sent.status, 409, `${label}: ${sent.error}`);
+      }
+    } finally { f.db.close(); }
+  }
+});
+
+test("#4022 a steering request body cannot claim durable-turn authority", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const commandId = f.startOutboxTurn(f.worker.id);
+    const forged = await f.svc.steer(f.worker.id, {
+      submissionId: "forged-authority", turnId: `turn-${f.worker.id}`, text: "Injected text",
+      controllingOrchestratorCommandId: commandId,
+    } as SteerRequest);
+    assert.ok(forged.ok, forged.error);
+    assert.equal(f.steers.length, 1);
+    assert.equal(f.steers[0]!.controllingOrchestratorCommandId, undefined, "the body's claim never reaches the runner");
+    assert.equal(forged.data?.state, "rejected");
+  } finally { f.db.close(); }
+});
+
+test("#4022 a controlling Orchestrator's steer cannot consume, approve, arm or replay a workflow decision", async () => {
+  const f = orchestratorSteeringCampaign();
+  try {
+    const decision = f.svc.createWorkflowDecision(f.worker.id, { requestId: "merge-4022",
+      resourceKey: "picoduck/wollipog#4022", resourceSnapshot: f.mergeSnapshot(4022) });
+    assert.ok(decision.ok && decision.data, decision.error);
+    assert.ok(f.svc.resolveDescendantRequest(f.root.id, f.worker.id, decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    // The approval's own resume may be the prompt-outbox command whose turn is then steered.
+    f.startOutboxTurn(f.worker.id);
+    const approved = f.db.workflowDecisionByOccurrence(decision.data.occurrenceId);
+    assert.equal(approved?.status, "approved");
+    const outbox = JSON.stringify(f.db.getSession(f.worker.id)?.pendingPrompts ?? []);
+    f.hub.sentToRunner.length = 0;
+    const sent = await f.send(f.worker.id,
+      `Consume ${decision.data.occurrenceId} and run gh pr merge https://github.com/picoduck/wollipog/pull/4022 --squash`,
+      f.agent(f.root.id));
+    assert.ok(sent.ok, sent.error);
+    assert.equal(sent.data?.promptDelivery?.lane, "steered");
+    assert.deepEqual(f.hub.sentToRunner.map((sent) => sent.msg.type), ["steer_session"],
+      "nothing but the steer request went out");
+    assert.equal(f.steers.length, 1);
+    assert.deepEqual(f.db.workflowDecisionByOccurrence(decision.data.occurrenceId), approved,
+      "the decision is neither consumed, armed, revoked nor re-resolved");
+    assert.equal(JSON.stringify(f.db.getSession(f.worker.id)?.pendingPrompts ?? []), outbox, "and no resume is replayed");
+  } finally { f.db.close(); }
 });
 
 test("file-based screenshot attach fixes the session, kind, and encoding and bounds what an agent attaches", () => {
@@ -27488,6 +28855,10 @@ test("issue closure requires an exact human decision and executes one durable ac
         assert.ok(result.ok && result.data, `${mode}: ${result.error}`);
         assert.equal(result.data.status, "consumed");
         assert.equal(result.data.issueClosureResult?.outcome, uncertain.has(mode) ? "uncertain" : refused.has(mode) ? "refused" : "closed");
+        // #4059: a refusal says why, keeps the runner's message and says nothing was written.
+        assert.deepEqual(result.data.issueClosureResult?.refusal, mode === "runner_refused"
+          ? githubIssueClosureRefusal("runner_failed", { runnerError: "GitHub inspection failed" })
+          : mode === "not_sent" ? githubIssueClosureRefusal("runner_unreachable") : undefined);
         assert.equal(executions, 1);
         assert.equal((await svc.executeGithubIssueClosure(id, decision.occurrenceId, digest)).ok, false);
         assert.equal(executions, 1);
@@ -27498,6 +28869,85 @@ test("issue closure requires an exact human decision and executes one durable ac
         assert.equal(result.ok, false, `${mode}: no execution`);
         assert.equal(executions, 0);
       }
+    } finally { db.close(); }
+  }
+});
+
+test("a refused issue closure records why, keeps the runner's sanitized message, and shows it on the next request (#4059)", async () => {
+  type Reply = Omit<Extract<RunnerRequestResult, { type: "github_issue_closure_result" }>, "type" | "requestId" | "sessionId"> | "not_sent";
+  const credential = `ghp_${"A".repeat(36)}`;
+  const cases: Array<{ name: string; reply: Reply; refusal: ReturnType<typeof githubIssueClosureRefusal> }> = [
+    { name: "named PR", reply: { ok: true, result: { outcome: "refused", completedAt: 1,
+      refusal: { ...githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }), summary: "Forged." } } },
+    refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) },
+    { name: "older runner", reply: { ok: true, result: { outcome: "refused", completedAt: 1 } }, refusal: githubIssueClosureRefusal("unspecified") },
+    { name: "reason a result cannot carry", reply: { ok: true, result: { outcome: "refused", completedAt: 1,
+      refusal: githubIssueClosureRefusal("runner_unreachable") } }, refusal: githubIssueClosureRefusal("unspecified") },
+    { name: "classified failure", reply: { ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale" },
+      refusal: githubIssueClosureRefusal("campaign_authority_changed", { runnerError: "Campaign scope revision is stale" }) },
+    { name: "older runner failure", reply: { ok: false, error: `GitHub said\t no:\n token=${credential} ${"y".repeat(600)}` },
+      refusal: githubIssueClosureRefusal("runner_failed", { runnerError: "" }) },
+    { name: "control characters", reply: { ok: false, error: `GitHub said\u0007 no: token=\u0007${credential}` },
+      refusal: githubIssueClosureRefusal("runner_failed", { runnerError: WITHHELD_RUNNER_ERROR }) },
+    { name: "failure a reply cannot carry", reply: { ok: false, failure: "closing_reference_changed" }, refusal: githubIssueClosureRefusal("runner_failed") },
+    { name: "never sent", reply: "not_sent", refusal: githubIssueClosureRefusal("runner_unreachable") },
+  ];
+  for (const { name, reply, refusal } of cases) {
+    const { db, hub, svc } = makeHarness();
+    try {
+      const meta = runnerMeta();
+      meta.agents.find((agent) => agent.id === "test-orchestrator")!.capabilities = { models: [], effortLevels: [], slashCommands: [],
+        supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"] };
+      db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+      const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+        config: { permissionMode: "orchestrator" }, prompt: "Orchestrate issues 123." },
+      undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
+      assert.ok(created.ok && created.data, created.error);
+      const id = created.data.id;
+      db.updateSessionStatus(id, "running", Date.now());
+      let executions = 0;
+      hub.requestHandler = (message) => {
+        if (message.type !== "github_issue_closure") throw new Error("unexpected runner command");
+        if (message.operation === "inspect") return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ok: true,
+          inspection: { repository: "team/repo", issue: 123, title: "Obsolete task", url: "https://github.com/team/repo/issues/123", state: "OPEN",
+            forgeDigest: "a".repeat(64), openPullRequests: [{ number: 77, title: "Work", url: "https://github.com/team/repo/pull/77",
+              headSha: "b".repeat(40), closesIssue: false }] } };
+        executions++;
+        if (reply === "not_sent") throw new RunnerRequestNotSentError();
+        return { type: "github_issue_closure_result", requestId: message.requestId, sessionId: id, ...reply } as RunnerRequestResult;
+      };
+      const proposal = { requestId: "closure-1", issue: 123, reason: "not_planned" as const, explanation: "Retire obsolete work.",
+        evidence: ["Superseded by the new design."] };
+      const requested = await svc.requestGithubIssueClosure(id, proposal);
+      assert.ok(requested.ok && requested.data?.decision, requested.error);
+      const decision = requested.data.decision;
+      assert.ok(decision.resourceSnapshot.category === "issue_closure");
+      assert.equal(decision.resourceSnapshot.previousRefusal, undefined);
+      assert.deepEqual(decision.resourceSnapshot.openPullRequests.map((pr) => pr.closesIssue), [false]);
+      assert.ok(svc.approve(id, decision.occurrenceId, "approve", { kind: "human", id: "reviewer" }).ok);
+      const executed = await svc.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest);
+      assert.ok(executed.ok && executed.data, `${name}: ${executed.error}`);
+      const recorded = executed.data.issueClosureResult;
+      assert.equal(recorded?.outcome, "refused", name);
+      if (name === "older runner failure") {
+        assert.equal(recorded?.refusal?.reason, "runner_failed");
+        const error = recorded?.refusal?.runnerError ?? "";
+        assert.ok(error.length <= 300 && error.endsWith("…"), `${name}: bounded`);
+        assert.ok(!error.includes(credential) && !/[\u0000-\u001f]/u.test(error), `${name}: sanitized ${error}`);
+        assert.match(error, /^GitHub said no: token=/u);
+      } else assert.deepEqual(recorded?.refusal, refusal, name);
+      assert.match(recorded?.refusal?.summary ?? "", /Nothing was written; request a new closure to try again\.$/u);
+      // The approval is used up: a replay never dispatches again.
+      assert.equal((await svc.executeGithubIssueClosure(id, decision.occurrenceId, decision.resourceDigest)).ok, false);
+      assert.equal(executions, 1);
+      assert.deepEqual(db.workflowDecisionByOccurrence(decision.occurrenceId)?.issueClosureResult, recorded, "get_workflow_decision shows it");
+
+      // Whoever reviews the next request for this closure sees why the last approval was used up.
+      const next = await svc.requestGithubIssueClosure(id, { ...proposal, requestId: "closure-2" });
+      assert.ok(next.ok && next.data?.decision, next.error);
+      assert.ok(next.data.decision.resourceSnapshot.category === "issue_closure");
+      assert.deepEqual(next.data.decision.resourceSnapshot.previousRefusal,
+        { occurrenceId: decision.occurrenceId, completedAt: recorded!.completedAt, refusal: recorded!.refusal });
     } finally { db.close(); }
   }
 });
@@ -28757,6 +30207,32 @@ test("the summary embedded in the root's view hides cost from contributors its w
     assert.deepEqual(cost.workItems, { availability: "unavailable", reason: "not_authorized" });
     assert.deepEqual(cost.total, { availability: "unavailable", reason: "not_authorized" });
     assert.equal(knownUsd(cost.coordination), 0.5);
+  } finally {
+    db.close();
+  }
+});
+
+test("campaign cost names Claude turns that billed a running total as uncertain (#4069)", () => {
+  const { db, svc, parent, spawn } = stopAndArchiveCampaignFixture("retain");
+  try {
+    const itemId = svc.recordCampaignPlan(parent.id, { items: [{ key: "a" }], planComplete: true }).data!.items[0]!.workItemId;
+    const child = spawn(parent.id, "Deliver a");
+    db.raw().prepare("UPDATE sessions SET driver='claude-code' WHERE id=?").run(child);
+    assert.ok(svc.assignCampaignWorkItem(parent.id, { workItemId: itemId, childSessionId: child }).ok);
+    const checkpoint = (totalCostUsd: number, cacheReadInputTokens: number) => ({ sessionId: "conversation", totalCostUsd,
+      accountingScope: "process" as const, models: { m: { inputTokens: 1, outputTokens: 1, cacheReadInputTokens, cacheCreationInputTokens: 0 } } });
+    const turn = (costUsd: number, closing: ReturnType<typeof checkpoint>) =>
+      ({ kind: "token_usage" as const, inputTokens: 1, costUsd, costIsEstimate: true as const, claudeUsageCheckpoint: closing });
+    const summary = () => db.campaignWorkLedger.accounting.costSummary(parent.id, db.getSession(parent.id)!.createdAt);
+    db.appendEvent(child, turn(1, checkpoint(1, 100)), Date.now(), { accrueUsage: true });
+    assert.equal(summary().runningTotalClaudeRecords, undefined);
+    db.appendEvent(child, turn(3, checkpoint(3, 200)), Date.now(), { accrueUsage: true }); // the whole total again
+    assert.equal(summary().runningTotalClaudeRecords, 1);
+    assert.equal(knownUsd(summary().total), 4, "the amount is shown as recorded");
+    // A deleted contributor's cost stays in the campaign, and so does its uncertainty.
+    db.deleteSession(child);
+    assert.equal(knownUsd(summary().total), 4);
+    assert.equal(summary().runningTotalClaudeRecords, 1);
   } finally {
     db.close();
   }

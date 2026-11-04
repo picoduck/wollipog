@@ -584,7 +584,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   N cannot settle turn N+1.
 - Claude `modelUsage` and `total_cost_usd` include the whole query tree. In CLI 2.1.277+ they
   restore cumulative conversation totals on resume and fork; older CLIs scope them to the process.
-  The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
+  Each process's `system/init` `claude_code_version` decides that scope, overriding the version
+  recorded at launch; a total whose baseline cannot be proven is marked incomplete rather than
+  billed as a delta (#4069). The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
   will restore with a zero-inference local `/context` probe. Against a v216+ control plane each
   completed top-level request is also published live as an unaccrued `provisional` record, closed by
   the next checkpoint or republished when none can cover it, so a running or interrupted turn is not

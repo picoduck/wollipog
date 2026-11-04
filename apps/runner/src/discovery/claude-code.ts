@@ -350,7 +350,7 @@ export async function probeClaudeCode(
 export async function probeNativeClaudeCode(
   launch: ResolvedLaunch,
   via: ResolvedBinary["via"],
-  observer: CodexProbeObserver = {},
+  observer: CodexProbeObserver & { env?: Record<string, string> } = {},
 ): Promise<ClaudeCodeCapabilities> {
   return probeClaudeCode(
     (args, timeoutMs) => run(launch.command, [...launch.args, ...args], { timeoutMs, trackDescendants: true, ...observer }),

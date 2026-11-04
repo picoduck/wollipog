@@ -167,6 +167,22 @@ if (threads) {
         options: [{ optionId: "allow", name: "Allow", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "deny" }] } as never,
     }),
   );
+  if (new URLSearchParams(location.search).has("nested")) {
+    // Depth 2 (#4077): a review of a middle child and of the last child, and a grandchild with a
+    // child of its own, which indents no deeper than its parent.
+    const review = (id: string, parentSessionId: string, title: string, overrides: Partial<SessionView> = {}) =>
+      session(id, title, "running", { parentSessionId, kind: "review", agentName: "Codex", driver: "codex-app-server",
+        status: "running", lastEventAt: now - 150_000, updatedAt: now - 150_000, ...overrides });
+    sessions.push(
+      review("s-review-601", "s-child-601", "Review #601: Link the cost source"),
+      review("s-review-602", "s-child-602", "Review #602: Roll the daily budget over", {
+        status: "completed", lastEventAt: now - 250_000, updatedAt: now - 250_000 }),
+      session("s-sub-600", "#600a: Split the usage migration", "running", { parentSessionId: "s-child-600",
+        agentName: "Claude Code", driver: "claude-code", status: "running", lastEventAt: now - 130_000, updatedAt: now - 130_000 }),
+      session("s-sub-600-x", "#600b: Backfill the usage rows", "running", { parentSessionId: "s-sub-600",
+        agentName: "Claude Code", driver: "claude-code", status: "running", lastEventAt: now - 140_000, updatedAt: now - 140_000 }),
+    );
+  }
   const approval = sessions.find((candidate) => candidate.id === "s-approval")!;
   approval.pendingApproval = {
     ...approval.pendingApproval!,

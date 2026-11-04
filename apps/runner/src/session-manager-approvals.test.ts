@@ -606,6 +606,32 @@ test("a submitted answer records the control plane's summary and its member on i
   }
 });
 
+test("a Full Control attribution reaches the driver only as the server sent it, and never beside a person (#4063)", () => {
+  const { sm, cleanup } = makeHarness(true);
+  try {
+    const seen: unknown[][] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = (sm as any).active.get("s_perm").client;
+    client.resolvePermission = (...args: unknown[]) => { seen.push(["permission", ...args]); return true; };
+    client.answerQuestion = (...args: unknown[]) => { seen.push(["question", ...args]); return true; };
+    const automatic = { policy: "full_control", basis: "root_questions" };
+    sm.resolvePermission("s_perm", "p-policy", "deny", "root", undefined, { policy: "full_control", basis: "secrets_and_sign_in" });
+    sm.resolvePermission("s_perm", "p-person", "deny", undefined, { kind: "user", userId: "usr_grace" }, automatic);
+    sm.resolvePermission("s_perm", "p-malformed", "deny", "root", undefined, { policy: "person" });
+    sm.answerQuestion("s_perm", "q-policy", {}, "dismiss", "root", undefined, undefined, undefined, automatic);
+    sm.answerQuestion("s_perm", "q-submit", { a: "b" }, "submit", "root", undefined, undefined, undefined, automatic);
+    assert.deepEqual(seen, [
+      ["permission", "p-policy", "deny", { policy: "full_control" }],
+      ["permission", "p-person", "deny", undefined],
+      ["permission", "p-malformed", "deny", undefined],
+      ["question", "q-policy", {}, "dismiss", automatic],
+      ["question", "q-submit", { a: "b" }, "submit", undefined],
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("an async answer records the control plane's summary on its resolution (#2188)", () => {
   const { sm, sent, cleanup } = makeHarness(true);
   try {
@@ -2351,10 +2377,6 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
         sm.reconcileStore();
         assert.equal(store.readMeta("s_perm")?.pendingApproval, null);
 
-        const newerBytes = readFileSync(resetFile, "utf8");
-        assert.throws(() => handle.failed("stale failure"), /changed concurrently/u);
-        assert.throws(() => handle.completed(), /changed concurrently/u);
-        assert.equal(readFileSync(resetFile, "utf8"), newerBytes, "stale terminal calls cannot overwrite the newer reset receipt");
         const retry = journal.claim(message);
         assert.equal(retry.kind, "reclaimed", "failed persistence must release the old local handle");
         if (retry.kind !== "reclaimed") return assert.fail("answer was not reclaimable");
@@ -2369,6 +2391,13 @@ for (const published of [false, true]) for (const resetFlushFails of [false, tru
           failed: (error, code) => { retry.handle.failed(error, code); },
           uncertain: (error) => { retry.handle.uncertain(error); },
         });
+        const newerBytes = readFileSync(resetFile, "utf8");
+        for (const stale of [() => handle.failed("stale failure"), () => handle.completed(),
+          () => handle.uncertain("stale uncertainty"), () => handle.queued(), () => handle.started()]) {
+          assert.throws(stale, /changed concurrently/u);
+          assert.equal(readFileSync(resetFile, "utf8"), newerBytes, "stale callbacks cannot overwrite the newer receipt");
+          assert.equal(journal.claim(message).kind, "duplicate", "queued retry retains local ownership");
+        }
         assert.equal(entry.queue.length, 1);
         assert.match(entry.queue[0].text, /Question: Which path\?\nAnswer: Patch/u);
         entry.running = false;

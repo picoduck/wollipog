@@ -13,13 +13,13 @@
   },
   "dependencies": {
     "@fastify/cors": "^11.3.1",
-    "@fastify/static": "^10.1.6",
+    "@fastify/static": "^10.1.8",
     "@fastify/websocket": "^11.3.4",
     "@wollipog/protocol": "workspace:*",
     "fastify": "^5.12.7"
   },
   "devDependencies": {
-    "@types/node": "^26.6.2",
+    "@types/node": "^26.6.6",
     "@wollipog/test-support": "workspace:*",
     "tsx": "^4.23.13",
     "typescript": "^5.7.3"

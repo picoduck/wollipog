@@ -1447,12 +1447,12 @@ export class BoxOrchestrator {
     const runner = this.deps.db.getRunner(runnerId);
     if (!boxId || !rt || !pending?.registered || !runner?.agentsRefreshed) return;
     const current = runnerHarnessReadiness(runner);
-    const readyBefore = pending.baseline?.agents.filter(agent => agent.available) ?? [];
+    const readyBefore = pending.baseline?.agents.filter(agent => agent.installationAvailable ?? agent.available) ?? [];
     const authenticatedBefore = pending.baseline?.accounts?.filter(account => account.authStatus === "authenticated") ?? [];
     const previouslyBlocked = new Set(pending.baseline?.agents.filter(agent => agent.ownershipBlocked).map(agent => agent.id));
     const problem = current.agents.some(agent => agent.ownershipBlocked && !previouslyBlocked.has(agent.id))
       ? "Provider HOME ownership blocks harness discovery. Preserve ownership evidence and inspect recovery details; historical leases may need operator recovery."
-      : readyBefore.some(agent => !current.agents.some(next => next.id === agent.id && next.available))
+      : readyBefore.some(agent => !current.agents.some(next => next.id === agent.id && (next.installationAvailable ?? next.available)))
         ? "A previously available harness became unavailable after reconnect. Inspect Agent Details before retrying."
         : authenticatedBefore.some(account => !current.accounts?.some(next => next.id === account.id && next.authStatus === "authenticated"))
           ? "A previously signed-in provider account became unavailable after reconnect. Inspect account recovery details."

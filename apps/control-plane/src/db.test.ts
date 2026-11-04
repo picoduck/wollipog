@@ -1638,8 +1638,8 @@ test("registerRunner + getRunner round-trips driver/context/capabilities via JSO
   assert.deepEqual(
     view!.workspaces,
     [
-      { id: "ws-1", name: "Repo One", path: "C:/code/one", additionalDirectoryGrants: ["C:/code/shared"] },
-      { id: "ws-2", name: "Repo Two", path: "C:/code/two" },
+      { id: "ws-1", name: "Repo One", path: "C:/code/one", additionalDirectoryGrants: ["C:/code/shared"], source: "configured" },
+      { id: "ws-2", name: "Repo Two", path: "C:/code/two", source: "configured" },
     ],
   );
 
@@ -2025,7 +2025,7 @@ test("registerRunner is idempotent: re-register replaces workspaces/agents and u
   assert.equal(view.connectedAt, 900);
   assert.equal(view.agents.length, 1);
   assert.equal(view.agents[0].id, "claude-agent");
-  assert.deepEqual(view.workspaces, [{ id: "ws-9", name: "Only", path: "/only" }]);
+  assert.deepEqual(view.workspaces, [{ id: "ws-9", name: "Only", path: "/only", source: "configured" }]);
 });
 
 test("createWorkspace: CP-owned project is listed, path-resolvable, and survives re-register", () => {
@@ -2076,7 +2076,7 @@ test("Machine names and Machine-scoped Workspaces survive re-register without cr
   db.registerRunner(meta({ hostname: "same-host", workspaces: [] }), 1_000);
   const next = db.getRunner("runner-1")!;
   assert.equal(next.displayName, "Primary Development Machine");
-  assert.deepEqual(next.workspaces, [workspace]);
+  assert.deepEqual(next.workspaces, [{ ...workspace, source: "managed" }]);
 
   db.deleteRunner("runner-1");
   db.registerRunner(meta(), 1_100);
@@ -2347,6 +2347,23 @@ test("agentsRefreshed: register resets the marker, a discovery push sets it (gap
   // A re-register (reconnect / runner restart) resets it until the next agents_updated.
   db.registerRunner(meta(), 900);
   assert.equal(db.getRunner("runner-1")!.agentsRefreshed, false);
+});
+
+test("implicit launch admission uses effective default readiness and retains explicit selection", () => {
+  const db = withRunner();
+  const agent: AgentDefinition = { ...claudeAgent(), context: { kind: "native" }, defaultProviderAccountId: "a",
+    providerAccountReadiness: { defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"] } };
+  db.updateRunnerAgents("runner-1", [agent], 901);
+  assert.deepEqual(db.getRunner("runner-1")?.agents[0]?.providerAccountReadiness, agent.providerAccountReadiness);
+  assert.equal(db.getAgentLaunch("runner-1", agent.id), null, "automatic launch must not choose signed-out A");
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, false, { allowAccountSelection: true }), "manual selection can still offer B");
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, false, { providerAccountId: "b" }));
+  assert.equal(db.getAgentLaunch("runner-1", agent.id, false, { providerAccountId: "a" }), null);
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, true), "target-local credentials do not use the host default");
+  db.setMachineProviderAccountDefault("runner-1", "claude", "b", 0, 902);
+  assert.ok(db.getAgentLaunch("runner-1", agent.id), "a saved Machine default B takes precedence");
+  assert.equal(db.getRunner("runner-1")?.agents[0]?.defaultProviderAccountId, "a");
+  db.close();
 });
 
 test("getAgentLaunch returns command/args/env/driver/context/version", () => {
@@ -9856,6 +9873,38 @@ test("per-user cost windows and the daily budget read the owner-scoped buckets i
   assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).dailyBudgetUsd, 20);
   assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd]), [["usr_local_owner", 1.5]]);
   assert.deepEqual(db.sessionOwnerUser("sess-1"), { organizationId: "org_personal", userId: "usr_local_owner" });
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).todayEstimateUsd, undefined, "no turn is running");
+
+  // A running turn's open estimate is what the daily-budget gate adds to today's settled spend
+  // (#3196), so the windows carry it beside the settled figure while a budget is set.
+  db.raw().prepare("UPDATE sessions SET status='running', live_cost_usd=2.25, live_settling=0, live_observed_at=? WHERE id='sess-1'").run(now - 60_000);
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).todayEstimateUsd, 2.25);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.todayUsd, row.todayEstimateUsd]), [[1.5, 2.25]],
+    "the settled figure stays settled; the estimate is its own field");
+  db.setUsageDailyBudget("org_personal", null, now);
+  assert.equal(db.listUserCostWindows("org_personal", now)[0]!.todayEstimateUsd, undefined, "without a budget there is nothing to gate");
+  db.setUsageDailyBudget("org_personal", 20, now);
+
+  // Someone with no settled usage at all, whose first turn is running: the gate already counts its
+  // estimate, so the table lists them, ahead of a person whose settled spend today is lower.
+  db.createSession(newSession({ id: "sess-2", driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_first_turn' WHERE session_id='sess-2'").run();
+  db.raw().prepare("UPDATE sessions SET status='running', live_cost_usd=21, live_settling=0, live_observed_at=? WHERE id='sess-2'").run(now - 60_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd, row.todayEstimateUsd ?? 0, row.last30DaysUsd]), [
+    ["usr_first_turn", 0, 21, 0],
+    ["usr_local_owner", 1.5, 2.25, 13.5],
+  ]);
+  // A turn the day before is not today's spend, and a settling window is already in the ledger.
+  db.raw().prepare("UPDATE sessions SET live_observed_at=? WHERE id='sess-2'").run(now - 86_400_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"]);
+  db.raw().prepare("UPDATE sessions SET live_observed_at=?, live_settling=1 WHERE id='sess-2'").run(now - 60_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"]);
+  db.setUsageDailyBudget("org_personal", null, now);
+  db.raw().prepare("UPDATE sessions SET live_settling=0 WHERE id='sess-2'").run();
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"],
+    "without a budget the table lists settled usage only");
+  db.setUsageDailyBudget("org_personal", 20, now);
+  db.raw().prepare("UPDATE sessions SET status='idle', live_cost_usd=0, live_observed_at=NULL WHERE id IN ('sess-1','sess-2')").run();
 
   // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
   // windows must read them from usage_daily rather than lose them.
@@ -10216,6 +10265,57 @@ test("zeroed provider accounting is unpriced and historical Claude estimates rem
   usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10000000, granularity: "hour" });
   assert.equal(usage.legacyClaudeCostRecords, 1);
   assert.equal(usage.totals.costUsd, 1.1);
+});
+
+test("Claude turns that billed a running total are shown as uncertain in every cost view (#4069)", () => {
+  const root = mkdtempSync(join(tmpdir(), "claude-running-totals-"));
+  const file = join(root, "control-plane.sqlite");
+  const checkpoint = (totalCostUsd: number, cacheReadInputTokens: number, accountingScope: "process" | "conversation" = "process") => ({
+    sessionId: "conversation", totalCostUsd, accountingScope,
+    models: { "claude-opus-5": { inputTokens: 100, outputTokens: 50, cacheReadInputTokens, cacheCreationInputTokens: 10, costUSD: totalCostUsd } } });
+  const turn = (costUsd: number, closing: ReturnType<typeof checkpoint>) => ({ kind: "token_usage" as const, model: "claude-opus-5",
+    inputTokens: 1, costUsd, costIsEstimate: true as const, claudeUsageCheckpoint: closing });
+  const range = { since: 0, through: 10_000_000, granularity: "hour" as const };
+  let db = ControlPlaneDb.open(file);
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.appendEvent("sess-1", turn(15, checkpoint(15, 7_000)), 3_600_100, { accrueUsage: true });
+    // A long turn's display-only records never hide its baseline.
+    for (let request = 0; request < 600; request++) {
+      db.appendEvent("sess-1", { kind: "token_usage", model: "claude-opus-5", inputTokens: 1, liveUsage: "provisional" }, 3_600_150, { accrueUsage: true });
+    }
+    db.appendEvent("sess-1", turn(20, checkpoint(20, 7_400)), 3_600_200, { accrueUsage: true }); // the whole total again
+    db.appendEvent("sess-1", turn(5, checkpoint(25, 7_500)), 3_600_300, { accrueUsage: true }); // a correct delta
+    db.appendEvent("sess-1", turn(30, checkpoint(30, 7_600)), 3_600_400, { accrueUsage: true }); // the whole total again
+    const expected = { records: 2, costUsd: 50 };
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the session's cost view");
+    assert.equal(db.queryUsageAggregation(localOwner(), range).runningTotalClaudeRecords, 2, "the Usage view");
+    assert.equal(db.queryUsageAggregation(localOwner(), { ...range, driver: "codex" }).runningTotalClaudeRecords, undefined,
+      "with the same filters as its buckets");
+    assert.equal(db.queryUsageAggregation(localOwner(), range).totals.costUsd, 70, "the amount itself is unchanged");
+
+    // History recorded before the flag existed is found once, at startup.
+    db.raw().exec("DELETE FROM usage_claude_running_totals; DELETE FROM control_plane_metadata WHERE key='claude_running_totals_v1_backfilled'");
+    assert.equal(db.sessionUsageByModel("sess-1").runningTotalRecords, undefined);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the backfill runs once");
+
+    // A reconnect's snapshot accrues the cost first; history hydrated afterwards is still flagged.
+    db.createSession(newSession({ id: "snapshot-first", driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.updateSessionFromSnapshot("snapshot-first", snapshot({ id: "snapshot-first", driver: "claude-code", tokensIn: 2,
+      costUsd: 35, costIsEstimate: true, seq: 2 }), 3_600_500);
+    db.appendEvent("snapshot-first", turn(15, checkpoint(15, 7_000)), 3_600_600, { accrueUsage: true, runnerSeq: 1 });
+    db.appendEvent("snapshot-first", turn(20, checkpoint(20, 7_400)), 3_600_700, { accrueUsage: true, runnerSeq: 2 });
+    assert.deepEqual(db.sessionUsageByModel("snapshot-first").runningTotalRecords, { records: 1, costUsd: 20 });
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("new Claude snapshot catch-up preserves estimate provenance without a legacy warning", () => {

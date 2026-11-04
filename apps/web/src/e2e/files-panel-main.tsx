@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  fuzzyPathNeedle,
+  fuzzyPathScore,
   type ControlPlaneToUi,
   type GitStatusInfo,
   type SessionFileEntry,
@@ -73,7 +75,7 @@ const searchable = [
   "apps/web", "apps/runner", "docs/design-system.md", "docs/logo.png", "packages/protocol",
   "apps/web/src", "apps/runner/src/session-checks.ts", "apps/runner/src/checkout.ts",
   "apps/web/src/checklist.tsx", "apps/web/src/components", "apps/web/src/components/CheckBadge.tsx",
-  "packages/protocol/src/health-check.ts",
+  "packages/protocol/src/health-check.ts", "apps/web/src/components/SessionDetail.tsx",
 ];
 const directories = new Set(["apps", "docs", "packages", "apps/web", "apps/runner", "packages/protocol", "apps/web/src", "apps/web/src/components"]);
 
@@ -145,7 +147,25 @@ const client: ApiClient = {
     if (params.get("reading") === "hold") return new Promise(() => undefined);
     return readFixture(path);
   },
-  searchWorkspaceReferences: async (_sessionId, query) => {
+  searchWorkspaceReferences: async (_sessionId, query, match) => {
+    // A current runner matches fuzzily and answers best first (#1263); `?runner=old` predates that.
+    if (match === "fuzzy" && params.get("runner") !== "old") {
+      const fuzzy = fuzzyPathNeedle(query);
+      const limit = params.get("truncated") === "entries" ? "entries" : params.get("truncated") === "1" ? "results" : undefined;
+      return {
+        results: searchable
+          .filter((path) => !directories.has(path))
+          .flatMap((path) => {
+            const score = fuzzyPathScore(path, fuzzy);
+            return score === null ? [] : [{ path, score }];
+          })
+          .sort((a, b) => b.score - a.score)
+          .map(({ path }) => ({ path, isDirectory: false })),
+        truncated: limit !== undefined,
+        match,
+        ...(limit ? { limit } : {}),
+      };
+    }
     const needle = query.toLocaleLowerCase();
     return {
       results: searchable

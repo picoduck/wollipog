@@ -539,11 +539,13 @@ test("the phone topbar cannot push its controls off-screen", () => {
 });
 
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
-  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
-    "the mobile app bar must replace its generic Session heading with Back and the live title");
+  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionType\}\{sessionTitle \?\? title\}<\/h1>/,
+    "the mobile app bar must replace its generic Session heading with Back and the live title, after its type mark");
   // Only the phone Session route mounts the app-level bar now; destinations draw a page header (#1801).
   assert.match(app, /\{view\.name === "session" && isMobile && !\(rightPanel\.open && activeSession\) && \(\s*<Header[\s\S]*?sessionTitle=\{activeSession\s*\? sessionDisplayTitle\(activeSession\.title\) \|\| "Session"\s*: routedSessionPlaceholder\(view\.id, routedSessionLookup, conn, snapshotLoaded\)\.title\}/,
     "the shell must pass the routed Session's one-line title, or its placeholder's title (#2202), into the app bar");
+  assert.match(app, /<Header[\s\S]*?sessionType=\{activeSession \? <SessionTypeIcon session=\{activeSession\} \/> : null\}/,
+    "the phone bar marks an Orchestrator or review session's title as the desktop session bar does (#4076)");
   assert.match(app, /\{!isMobile && \(\s*<>\s*<EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>/,
     "Open destinations must not be mounted on the mobile Session route");
 });
@@ -590,13 +592,11 @@ test("the Multi-Agent Run and Pod create actions are page header primaries", () 
   assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
     /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
-  // One `.btn.primary` with a `+` icon; on a phone it is the 44px `+` alone, and its label stays
-  // in the accessibility tree (clipped, never display: none) so the name still matches.
-  assert.match(pageHeader, /className="btn primary page-primary"[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
+  // One `.btn.primary` with a `+` icon; on a phone it is the quiet `+` icon button alone, and its
+  // label stays in the accessibility tree (clipped, never display: none) so the name still matches.
+  assert.match(pageHeader, /className=\{phone \? "icon-btn page-primary" : "btn primary page-primary"\}[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.page-primary-label \{[^}]*clip-path: inset\(50%\)/);
   assert.doesNotMatch(css, /\.page-primary-label \{[^}]*display: none/);
-  assert.match(css, /\.page-primary \{[^}]*width: var\(--control-h\);/,
-    "the phone primary is one square control height, 44px on touch");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

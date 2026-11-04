@@ -17,7 +17,7 @@ import { workspaceNameFromPath } from "./AddWorkspaceDialog.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { capacityBlockerSentence, capacityMetaItems, CAPACITY_WAITING } from "./MachineCapacitySection.js";
 import { connectionFacts } from "./MachineDetail.js";
-import { ADD_WORKSPACE_NO_BROWSING, ADD_WORKSPACE_OFFLINE } from "./MachineWorkspacesSection.js";
+import { ADD_WORKSPACE_NO_BROWSING, ADD_WORKSPACE_OFFLINE, REMOVE_WORKSPACE_UNSUPPORTED } from "./MachineWorkspacesSection.js";
 import { RunnersView } from "./RunnersView.js";
 
 /**
@@ -366,6 +366,116 @@ test("Add Workspace fills the name from the folder, checks it on submit, registe
     await view.push(runner("studio", { workspaces: [{ id: "new", name: "Storefront", path: "/home/ada/acme-storefront" }] }));
     const rows = [...sectionNamed(view.detail(), "Workspaces")!.querySelectorAll(".surface > .row .row-title")];
     assert.deepEqual(rows.map((row) => row.textContent), ["Storefront"], "the row comes with the snapshot");
+  } finally {
+    await view.unmount();
+  }
+});
+
+const removable = (overrides: Partial<RunnerView> = {}) => runner("studio", {
+  workspaces: [
+    { id: "home", name: "Home", path: "/home/ada", source: "configured" },
+    { id: "ws_notes", name: "Storefront", path: "/home/ada/acme-storefront", source: "managed" },
+  ],
+  ...overrides,
+});
+const removeButtons = (detail: HTMLElement) => [...sectionNamed(detail, "Workspaces")!
+  .querySelectorAll<HTMLButtonElement>(".machine-workspaces > .row > button")];
+
+test("Remove… is for owners and admins, and an offline machine or an older runner says why it waits", async () => {
+  const member = await mount(removable(), { role: "member" });
+  try {
+    assert.deepEqual(removeButtons(member.detail()), [], "members do not remove workspaces");
+  } finally {
+    await member.unmount();
+  }
+  const away = await mount(removable({ status: "offline" }));
+  try {
+    const section = sectionNamed(away.detail(), "Workspaces")!;
+    const note = section.querySelector<HTMLElement>(".section-note")!;
+    assert.equal(note.textContent, ADD_WORKSPACE_OFFLINE);
+    for (const remove of removeButtons(away.detail())) {
+      assert.ok(remove.disabled);
+      assert.ok(remove.getAttribute("aria-describedby")?.split(" ").includes(note.id), "the offline reason describes it");
+    }
+  } finally {
+    await away.unmount();
+  }
+  const old = await mount(removable({ protocolVersion: 278 }));
+  try {
+    const section = sectionNamed(old.detail(), "Workspaces")!;
+    const note = [...section.querySelectorAll<HTMLElement>(".section-note")]
+      .find((candidate) => candidate.textContent === REMOVE_WORKSPACE_UNSUPPORTED)!;
+    assert.ok(note, "the update hint is visible");
+    const [configured, managed] = removeButtons(old.detail());
+    assert.equal(configured!.textContent, "Remove…");
+    assert.ok(configured!.disabled, "a configured workspace needs a runner that records removals");
+    assert.ok(configured!.getAttribute("aria-describedby")?.split(" ").includes(note.id));
+    assert.equal(managed!.disabled, false, "a workspace added in Wollipog can be removed on any runner");
+  } finally {
+    await old.unmount();
+  }
+});
+
+test("Remove Workspace names what it removes, Cancel changes nothing, a refusal stays open, and success removes the row", async () => {
+  const removed: Array<{ runnerId: string; workspaceId: string }> = [];
+  let refusal: string | null = "This workspace is still in use. Remove it from the project “Storefront” first.";
+  const view = await mount(removable(), {
+    client: {
+      removeMachineWorkspace: async (runnerId: string, workspaceId: string) => {
+        removed.push({ runnerId, workspaceId });
+        if (refusal) throw new Error(refusal);
+        return { removed: true as const };
+      },
+    } as Partial<ApiClient>,
+  });
+  try {
+    const open = async () => {
+      await act(async () => removeButtons(view.detail())[1]!.click());
+      await settle();
+      return dialogNamed(view.body, "Remove Workspace")!;
+    };
+    let dialog = await open();
+    assert.ok(dialog, "the dialog opens");
+    assert.deepEqual([...dialog.querySelectorAll(".facts > div")].map((row) =>
+      `${row.querySelector("dt")?.textContent}: ${row.querySelector("dd")?.textContent}`), [
+      "Workspace: Storefront",
+      "Folder: /home/ada/acme-storefront",
+      "Machine: Studio Mac",
+    ]);
+    assert.match(dialog.textContent ?? "", /only unregisters it: the folder and its files stay where they are/u);
+    assert.doesNotMatch(dialog.textContent ?? "", /runner configuration/u, "a workspace added in Wollipog has no configuration note");
+
+    await act(async () => buttonNamed(dialog, "Cancel")!.click());
+    await settle();
+    assertNoDomNode(dialogNamed(view.body, "Remove Workspace") ?? null, "Cancel closes the dialog");
+    assert.equal(removed.length, 0, "Cancel sends nothing");
+    assert.equal(removeButtons(view.detail()).length, 2, "Cancel leaves every row");
+
+    dialog = await open();
+    await act(async () => buttonNamed(dialog, "Remove Workspace")!.click());
+    await settle();
+    const failure = dialog.querySelector<HTMLElement>('.notice.t-danger[role="alert"]')!;
+    assert.match(failure.textContent ?? "", /Couldn't Remove the Workspace.*Remove it from the project “Storefront” first\./u);
+    assert.ok(dialogNamed(view.body, "Remove Workspace"), "a refusal keeps the dialog open");
+
+    refusal = null;
+    await act(async () => buttonNamed(dialog, "Remove Workspace")!.click());
+    await settle();
+    assert.deepEqual(removed, [
+      { runnerId: "studio", workspaceId: "ws_notes" },
+      { runnerId: "studio", workspaceId: "ws_notes" },
+    ]);
+    assertNoDomNode(dialogNamed(view.body, "Remove Workspace") ?? null, "success closes the dialog");
+    assert.match(view.body.textContent ?? "", /Workspace removed\./u);
+
+    await view.push(removable({ workspaces: [{ id: "home", name: "Home", path: "/home/ada", source: "configured" }] }));
+    const rows = [...sectionNamed(view.detail(), "Workspaces")!.querySelectorAll(".surface > .row .row-title")];
+    assert.deepEqual(rows.map((row) => row.textContent), ["Home"], "the row leaves with the snapshot");
+
+    // A configured workspace says how its removal persists.
+    await act(async () => removeButtons(view.detail())[0]!.click());
+    await settle();
+    assert.match(dialogNamed(view.body, "Remove Workspace")?.textContent ?? "", /set in the machine’s runner configuration/u);
   } finally {
     await view.unmount();
   }

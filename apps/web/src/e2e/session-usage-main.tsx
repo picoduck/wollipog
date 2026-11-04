@@ -874,6 +874,8 @@ const client = {
         fetchedAt: 1,
         knownModels: 1200,
       },
+      // Claude turns that billed their conversation's running total (#4069).
+      ...(params.get("runningTotals") === "1" ? { runningTotalRecords: { records: 4, costUsd: 1.2 } } : {}),
     };
   },
   // Only the conflict and transport fixtures reload the session; elsewhere the lookup never answers.

@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, realpathSync, symlinkSync, unlinkSync, rmSync, chmodSync, existsSync, linkSync, renameSync } from "node:fs";
 import { createServer } from "node:net";
 import { execFileSync, spawnSync } from "@wollipog/test-support/bounded-child-process";
@@ -99,50 +99,67 @@ test("mount points inside a root are read from the mount table, so a same-device
   } finally { rmSync(target, { force: true }); }
 });
 
-test("canonical operation evidence rejects dangling links and catches a replaced target without reading contents", () => {
-  const directory = mkdtempSync(join(tmpdir(), "campaign-operation-"));
-  try {
-    mkdirSync(join(directory, "src"));
-    writeFileSync(join(directory, "src/auth.ts"), "fixture\n");
-    const link = join(directory, "src/link.ts");
-    symlinkSync(join(directory, "src/auth.ts"), link);
-    const evidence = campaignOperationEvidence("Read", { kind: "file", path: link });
-    assert.equal(evidence.filesystem?.targets[0]?.resolvedPath, join(directory, "src/auth.ts"));
-    assert.equal(campaignOperationEvidenceCurrent("Read", evidence), true);
-    unlinkSync(link); symlinkSync(join(directory, "absent.ts"), link);
-    assert.equal(campaignOperationEvidence("Read", { kind: "file", path: link }).filesystem, undefined);
-    assert.equal(campaignOperationEvidenceCurrent("Read", evidence), false);
-    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: "cat src/auth.ts", cwd: join(directory, "missing") }).filesystem, undefined);
-    assert.equal(campaignOperationEvidence("Write", { kind: "file", path: join(directory, "src/new.ts") }).filesystem?.targets[0]?.resolvedPath, join(directory, "src/new.ts"));
-    assert.equal(campaignOperationEvidence("Unknown", { kind: "file", path: link, filesystem: { targets: [{ path: link, resolvedPath: link }] } }).filesystem, undefined);
-  } finally { rmSync(directory, { recursive: true, force: true }); }
-});
+// Keep the requested spelling for link/missing-target/recheck coverage, and derive only
+// positive resolvedPath expectations from the canonical root. The alias case makes the
+// distinction observable even on Linux, where tmpdir() is usually already canonical.
+function operationFixture(t: TestContext, rootKind: "direct" | "aliased") {
+  const parent = realpathSync.native(mkdtempSync(join(tmpdir(), "campaign-operation-")));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const root = join(parent, "root"); mkdirSync(root);
+  const requestedRoot = rootKind === "aliased" ? join(parent, "alias") : root;
+  if (rootKind === "aliased") symlinkSync(root, requestedRoot, "junction");
+  const requestedDirectory = mkdtempSync(join(requestedRoot, "fixture-"));
+  const directory = realpathSync.native(requestedDirectory);
+  if (rootKind === "aliased") assert.notEqual(requestedDirectory, directory);
+  return { directory, requestedDirectory };
+}
 
-test("read evidence requires existing regular files while native writes retain missing-target support", () => {
-  const directory = mkdtempSync(join(tmpdir(), "campaign-read-target-"));
-  try {
-    const missing = join(directory, "missing.ts"), folder = join(directory, "folder.ts");
-    mkdirSync(folder);
-    for (const path of [missing, folder]) {
-      assert.equal(campaignOperationEvidence("Read", { kind: "file", path }).filesystem, undefined);
-      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(path)}`, cwd: directory }).filesystem, undefined);
-    }
-    assert.equal(campaignOperationEvidence("Write", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, missing);
-    writeFileSync(missing, "regular fixture\n");
-    assert.equal(campaignOperationEvidence("Read", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, missing);
-    assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(missing)}`, cwd: directory }).filesystem?.targets[0]?.resolvedPath, missing);
-    if (process.platform === "linux") {
-      const fifo = join(directory, "pipe.ts"); execFileSync("mkfifo", [fifo], { timeout: 10_000 });
-      assert.equal(campaignOperationEvidence("Read", { kind: "file", path: fifo }).filesystem, undefined);
-      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(fifo)}`, cwd: directory }).filesystem, undefined);
-    }
-  } finally { rmSync(directory, { recursive: true, force: true }); }
-});
+for (const rootKind of ["direct", "aliased"] as const) {
+  test(`canonical operation evidence rejects dangling links and catches a replaced target without reading contents (${rootKind} root)`, (t) => {
+    const { directory, requestedDirectory } = operationFixture(t, rootKind);
+    try {
+      mkdirSync(join(requestedDirectory, "src"));
+      writeFileSync(join(requestedDirectory, "src/auth.ts"), "fixture\n");
+      const link = join(requestedDirectory, "src/link.ts");
+      symlinkSync(join(requestedDirectory, "src/auth.ts"), link);
+      const evidence = campaignOperationEvidence("Read", { kind: "file", path: link });
+      assert.equal(evidence.filesystem?.targets[0]?.resolvedPath, join(directory, "src/auth.ts"));
+      assert.equal(campaignOperationEvidenceCurrent("Read", evidence), true);
+      unlinkSync(link); symlinkSync(join(requestedDirectory, "absent.ts"), link);
+      assert.equal(campaignOperationEvidence("Read", { kind: "file", path: link }).filesystem, undefined);
+      assert.equal(campaignOperationEvidenceCurrent("Read", evidence), false);
+      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: "cat src/auth.ts", cwd: join(requestedDirectory, "missing") }).filesystem, undefined);
+      assert.equal(campaignOperationEvidence("Write", { kind: "file", path: join(requestedDirectory, "src/new.ts") }).filesystem?.targets[0]?.resolvedPath, join(directory, "src/new.ts"));
+      assert.equal(campaignOperationEvidence("Unknown", { kind: "file", path: link, filesystem: { targets: [{ path: link, resolvedPath: link }] } }).filesystem, undefined);
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+
+  test(`read evidence requires existing regular files while native writes retain missing-target support (${rootKind} root)`, (t) => {
+    const { directory, requestedDirectory } = operationFixture(t, rootKind);
+    try {
+      const missing = join(requestedDirectory, "missing.ts"), folder = join(requestedDirectory, "folder.ts");
+      mkdirSync(folder);
+      for (const path of [missing, folder]) {
+        assert.equal(campaignOperationEvidence("Read", { kind: "file", path }).filesystem, undefined);
+        assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(path)}`, cwd: requestedDirectory }).filesystem, undefined);
+      }
+      assert.equal(campaignOperationEvidence("Write", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, join(directory, "missing.ts"));
+      writeFileSync(missing, "regular fixture\n");
+      assert.equal(campaignOperationEvidence("Read", { kind: "file", path: missing }).filesystem?.targets[0]?.resolvedPath, join(directory, "missing.ts"));
+      assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(missing)}`, cwd: requestedDirectory }).filesystem?.targets[0]?.resolvedPath, join(directory, "missing.ts"));
+      if (process.platform === "linux") {
+        const fifo = join(requestedDirectory, "pipe.ts"); execFileSync("mkfifo", [fifo], { timeout: 10_000 });
+        assert.equal(campaignOperationEvidence("Read", { kind: "file", path: fifo }).filesystem, undefined);
+        assert.equal(campaignOperationEvidence("Bash", { kind: "command", input: `cat ${basename(fifo)}`, cwd: requestedDirectory }).filesystem, undefined);
+      }
+    } finally { rmSync(directory, { recursive: true, force: true }); }
+  });
+}
 
 test("Git helper fixtures demonstrate why canonical inspection targets cannot authorize execution", {
   skip: process.platform !== "linux" ? "POSIX Git helper and util-linux PTY fixtures" : false,
 }, (t) => {
-  const directory = mkdtempSync(join(tmpdir(), "campaign-git-effects-"));
+  const directory = realpathSync.native(mkdtempSync(join(tmpdir(), "campaign-git-effects-")));
   const { GIT_PAGER: _inheritedPager, ...fixtureEnvironment } = process.env;
   const env = { ...fixtureEnvironment, TERM: "xterm", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(directory, "empty-config"),
     WOLLIPOG_TEST_GIT_HELPER_MARKER: join(directory, "helper-ran") };

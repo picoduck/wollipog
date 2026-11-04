@@ -98,12 +98,12 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
   const machine = machineNames.get(runnerId) ?? machineLabels.get(runnerId) ?? "this machine";
   const agentChoices = useMemo(
     () => runAgentChoices(runner?.agents ?? [], machine,
-      runnerSupportsProtocol(runner?.protocolVersion, "verifiedAgentAvailability")),
-    [machine, runner?.agents, runner?.protocolVersion],
+      runnerSupportsProtocol(runner?.protocolVersion, "verifiedAgentAvailability"), runner?.providerAccountDefaults),
+    [machine, runner?.agents, runner?.protocolVersion, runner?.providerAccountDefaults],
   );
-  const selectableIds = useMemo(() => selectableRunAgentIds(runner?.agents ?? []), [runner?.agents]);
+  const selectableIds = useMemo(() => selectableRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults), [runner?.agents, runner?.providerAccountDefaults]);
   const [workspaceId, setWorkspaceId] = useState(runner?.workspaces[0]?.id ?? "");
-  const [agentIds, setAgentIds] = useState<string[]>(() => defaultRunAgentIds(runner?.agents ?? []));
+  const [agentIds, setAgentIds] = useState<string[]>(() => defaultRunAgentIds(runner?.agents ?? [], runner?.providerAccountDefaults));
   const [mode, setMode] = useState<RunWorkMode>("parallel");
   const [workflows, setWorkflows] = useState<Awaited<ReturnType<typeof api.workflowDefinitions>> | null>(null);
   const [workflowsFailure, setWorkflowsFailure] = useState<string | null>(null);
@@ -127,7 +127,7 @@ export function NewRunDialog({ onClose }: { onClose: () => void }) {
     setRunnerId(id);
     const r = runners.get(id);
     setWorkspaceId(r?.workspaces[0]?.id ?? "");
-    setAgentIds(defaultRunAgentIds(r?.agents ?? []));
+    setAgentIds(defaultRunAgentIds(r?.agents ?? [], r?.providerAccountDefaults));
   };
 
   const pickProjectLocation = (locationId: string) => {

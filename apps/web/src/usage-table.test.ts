@@ -2,119 +2,57 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { allDeclarations, declarationsOf, rulesWith } from "./css-rules.js";
-import { alphaOf, contrast, everyPalette, paint, parseFill, SCHEMES, THEMES } from "./palettes.js";
+import { declarationsOf, rulesWith } from "./css-rules.js";
+import { alphaOf, everyPalette, paint, parseFill } from "./palettes.js";
 
 /**
- * Phase 8's Usage table — §F8's "add zebra/hover/sticky-header".
+ * Usage and Cost's Breakdown tables — §F8's "add zebra/hover", and since #3013 no inner scroll.
  *
- * The table is the one place in the app where a reader tracks a value ACROSS a wide row, and it had
- * none of the three. What makes this more than styling is that all three are colour, and this app
- * now has ten palettes: a fixed grey zebra is a colour, and a colour that is not from the palette
- * stops being right the moment someone picks another scheme.
+ * What makes the hover more than styling is that it is colour, and this app has ten palettes: a
+ * fixed grey zebra is a colour, and a colour that is not from the palette stops being right the
+ * moment someone picks another scheme.
  */
 
 const css = readFileSync(fileURLToPath(new URL("./styles.css", import.meta.url)), "utf8");
+const view = readFileSync(fileURLToPath(new URL("./components/UsageView.tsx", import.meta.url)), "utf8");
 
 const ruleFor = (selector: string) =>
   rulesWith(css, ["background"], []).find(({ selector: found }) => found.replace(/\s+/g, " ").trim() === selector);
 
-/** The declared value of `prop` on `selector`, last-wins — which is the one the cascade applies. */
-const valueOf = (prop: string, selector: string) =>
-  declarationsOf(css, prop)
-    .filter(({ selector: found }) => found.replace(/\s+/g, " ").trim() === selector)
-    .at(-1)?.value.trim();
-
-/**
- * The EFFECTIVE background of `selector`, read as the fill it paints.
- *
- * `background` is a shorthand and `background-color` a longhand that overrides its colour, so a
- * later `background-color: color-mix(…, transparent)` beside an opaque `background: var(--accent)`
- * is what the browser paints. Reading only the shorthand let that pair recreate the translucent bar
- * this file exists to reject, with every assertion green.
- */
-const fillOf = (selector: string) => {
-  // Whichever of the two comes LAST in the stylesheet, by line, is the one that wins.
-  const declared = allDeclarations(css)
-    .filter(({ prop }) => prop === "background" || prop === "background-color")
-    .filter(({ selector: found }) => found.replace(/\s+/g, " ").trim() === selector)
-    .sort((a, b) => a.line - b.line)
-    .at(-1)?.value.trim();
-  assert.ok(declared, `${selector} declares no background`);
-  return parseFill(declared!);
-};
-
 const WRAP = ".usage-table-wrap";
 const HOVER = ".table tbody tr:hover";
-const HEADER = ".usage-table thead th";
 const BAR = ".usage-cost-bar";
 
-test("the table highlights the row under the pointer and keeps its header in view", () => {
+test("the table highlights the row under the pointer and draws no stripes", () => {
   // The §14 table recipe divides rows with hairlines and draws no zebra: a stripe is a second
   // meaning for a surface tint, and the hover row already carries the one a reader follows.
   assert.equal(rulesWith(css, ["background"], []).filter(({ selector }) => /tr:nth-child\((even|odd)\)/.test(selector)).length, 0,
     "no table stripes its rows (§14)");
   const hover = ruleFor(HOVER);
   assert.ok(hover, "the row under the pointer needs to be the one that stands out");
-
-  // Every part of what makes a header stick, not just the word. `position: sticky` with no `top` is
-  // inert; so is a `top` with no bounded, overflowing ancestor to stick inside. Each of the four is
-  // read last-wins, because a later declaration is the one the cascade applies and a first-match
-  // read reports a value the page never uses.
-  assert.equal(valueOf("position", HEADER), "sticky", "a header that scrolls away is a header you lose");
-  assert.equal(valueOf("top", HEADER), "0", "sticky with no offset never leaves the flow");
-  assert.match(valueOf("overflow", WRAP) ?? "", /^(auto|scroll)$/,
-    "sticky needs an ancestor that actually scrolls");
-  assert.ok(valueOf("max-height", WRAP), "and one that is bounded, or it never overflows to scroll");
-});
-
-test("every added colour comes from the palette", () => {
   // Ten palettes: a literal here is right for one of them and wrong for nine, and would pass every
   // contrast check because those measure declared TOKENS.
-  for (const selector of [HOVER, HEADER]) {
-    const rule = ruleFor(selector);
-    assert.ok(rule, `${selector} must declare a background`);
-    assert.match(rule!.declarations.background!, /var\(--/,
-      `${selector} paints a literal colour, which is right for one palette and wrong for nine`);
+  assert.match(hover!.declarations.background!, /var\(--/,
+    `${HOVER} paints a literal colour, which is right for one palette and wrong for nine`);
+});
+
+test("a Breakdown table grows with the page instead of scrolling inside it (#3013)", () => {
+  // A long table ends in Show All. A bounded wrapper gave the page a second scrollbar, which needed
+  // its own tab stop, focus ring and sticky header to be usable at all.
+  for (const prop of ["max-height", "height", "overflow", "overflow-y"]) {
+    assert.deepEqual(declarationsOf(css, prop).filter(({ selector }) => selector.includes(WRAP)).map(({ value }) => value), [],
+      `${WRAP} declares ${prop}`);
   }
-});
-
-test("the sticky header is opaque", () => {
-  // A translucent header over scrolling rows is unreadable in exactly the moment it exists for.
-  // Asserting the word `transparent` is absent is not the same claim: an alpha in the token, a
-  // `color-mix` against another colour, or a separate `opacity` on the same rule all read as opaque
-  // to that test and render see-through. The fill's own alpha is the property that matters.
-  const header = fillOf(HEADER);
-  assert.equal(header.alpha, 1, "rows scrolling under a translucent header show through it");
-  assert.equal(valueOf("opacity", HEADER), undefined, "and `opacity` makes it translucent just the same");
-  // The token itself can carry the alpha. `--diff-add-bg` is `rgba(63, 185, 80, .14)` in Wollipog
-  // dark, so `background: var(--diff-add-bg)` reads as an opaque `var()` and renders see-through.
-  // `paint` accepts only a six-digit hex, so resolving the fill in every palette is the check.
-  for (const palette of everyPalette(css)) paint(palette, header, "#000000");
-});
-
-test("the scroll region is reachable and shows focus", () => {
-  const view = readFileSync(fileURLToPath(new URL("./components/UsageView.tsx", import.meta.url)), "utf8");
-  // The max-height that makes the sticky header work also gives this its own scrollbar, and a plain
-  // overflow div is not in the sequential focus order in WebKit — so the rows inside it were
-  // unreachable by keyboard.
-  // Scoped to the wrapper's own attributes. Reading these off the whole file matches whichever
-  // element declares them first — `aria-labelledby` appears three times in this view, and the first
-  // belongs to the page heading, so a file-wide read would have checked the wrong element.
-  const region = /className="table-wrap usage-table-wrap"[\s\S]{0,800}?\n\s*>/.exec(view)?.[0];
-  assert.ok(region, "the wrapper's opening tag has to be findable to be checked");
-  assert.match(region!, /tabIndex=\{0\}/);
-  assert.match(region!, /role="region"/, "a scroll region needs a name as well as a tab stop");
-  // The name has to BE the caption, not a second copy of it that can drift. The first version said
-  // "Usage by Day" while the caption said "Hourly Usage in UTC" — and hourly is what the default
-  // range returns, so a screen reader announced the wrong interval on the screen as it first loads.
-  const labelledBy = /aria-labelledby="([\w-]+)"/.exec(region!)?.[1];
-  assert.ok(labelledBy, "a fixed aria-label is a copy of the caption, and copies drift");
-  assert.ok(view.includes(`<caption id="${labelledBy}">`),
-    `aria-labelledby points at "${labelledBy}", which is not the caption's id`);
-  assert.doesNotMatch(region!, /aria-label="/, "a stray aria-label would override the caption it points at");
-  assert.ok(declarationsOf(css, "outline").some(({ selector }) => selector.includes(".usage-table-wrap")),
-    "a focusable region that shows no focus is a trap for the person using it");
+  assert.equal(declarationsOf(css, "position").filter(({ selector }) => selector.includes(".usage-table")).length, 0,
+    "no sticky header: there is no inner scroller for it to stick in");
+  assert.doesNotMatch(view, /role="region"/, "a table that does not scroll is not a scroll region");
+  // The tab names each table, so a caption would only repeat it.
+  assert.doesNotMatch(view, /<caption/);
+  assert.match(view, /<table className="table usage-table" aria-labelledby=\{labelledBy\}>/,
+    "By Model, By Agent and By Machine share one table, named by the tab its caller passes");
+  for (const tab of ["time", "model", "agent", "machine", "person"]) {
+    assert.match(view, new RegExp(`(aria-labelledby|labelledBy)="usage-breakdown-${tab}-tab"`), `the ${tab} table is named by its tab`);
+  }
 });
 
 test("the fill and opacity readers fail closed on CSS they cannot resolve", () => {

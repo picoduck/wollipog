@@ -1,3 +1,4 @@
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 /**
  * Review sessions (#561, #3368): the runner side of a typed, read-only reviewer session.
  *
@@ -30,14 +31,16 @@ import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_BUDGET, REVIEW_ROUND_REFUSALS, reviewerHarnessFor,
   type AgentDefinition, type ReviewAttemptEvidence, type ReviewAttemptRound, type ReviewAttemptVerdictView,
   type ReviewLaunchPolicy, type ReviewReportFinding, type ReviewRunHistory, type ReviewSessionCapability,
-  type ReviewSessionUpdate, type SessionReviewHarness,
+  type ReviewSessionUpdate, type SessionReviewHarness, type ReviewBaseMerge,
 } from "@wollipog/protocol";
+import { classifyBaseMerge } from "./review-base-merge.js";
 import {
   bindPullRequestScope, PUSHED_HEAD, refuseReview, reviewRepository, ReviewScopeRefusal, SAFE_GIT, SESSION_IDENTITY,
   type PullRequestFacts, type ReviewExec, type ReviewSnapshotter,
 } from "./review-snapshot.js";
 import {
-  discoverReviewTools, reviewerInterpreter, sessionWritableRoots, trustedPath, type ReviewTools, type CodexReviewerProtection,
+  discoverReviewTools, explainSessionWritableRefusal, reviewerInterpreter, SessionWritableRefusal, sessionWritableRoots, trustedPath, type ReviewTools,
+  type CodexReviewerProtection, type SessionWritableGrant,
 } from "./review-trust.js";
 import type { SessionStore } from "./session-store.js";
 
@@ -85,17 +88,16 @@ export interface ReviewSessionDependencies {
 export function defaultReviewSessionDependencies(
   dataDir: string,
   log: (message: string) => void,
-  /** Directories sessions can write (see `configuredSessionWritablePaths`), read at each use. */
-  sessionWritablePaths: () => readonly string[] = () => [],
+  /** Directories sessions can write and what grants each (see `configuredSessionWritableGrants`), read at each use. */
+  sessionWritableGrants: () => readonly SessionWritableGrant[] = () => [],
   agents: () => readonly AgentDefinition[] = () => [],
   agentPath: ReviewSessionDependencies["agentPath"] = () => process.env.PATH,
   codexProtection: () => CodexReviewerProtection | undefined = () => undefined,
 ): ReviewSessionDependencies {
   const uid = process.getuid?.() ?? -1;
-  const extraRoots = () => [
-    ...sessionWritablePaths(),
-    ...[process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value)),
-  ];
+  const hostProviderHomes = () =>
+    [process.env.CODEX_HOME, process.env.CLAUDE_CONFIG_DIR].filter((value): value is string => Boolean(value));
+  const extraRoots = (grants = sessionWritableGrants()) => [...new Set(grants.map((grant) => grant.path)), ...hostProviderHomes()];
   return {
     exec: async (command, args, options = {}) => (await execFileAsync(command, args, {
       encoding: "utf8", timeout: options.timeoutMs ?? 30_000, maxBuffer: 8_000_000,
@@ -130,8 +132,18 @@ export function defaultReviewSessionDependencies(
     },
     gitlabHostConfigured: (glab, host, env) => gitlabHostConfigured(glab, host, env),
     tools: () => discoverReviewTools({ home: homedir(), dataDir, uid, pathEnv: process.env.PATH, extraRoots: extraRoots() }),
-    verifyCommand: (command, pathEnv = process.env.PATH) =>
-      void verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots()), uid, undefined, codexProtection()),
+    verifyCommand: (command, pathEnv = process.env.PATH) => {
+      const grants = sessionWritableGrants();
+      try {
+        verifySpawnedCommand(command, pathEnv, sessionWritableRoots(homedir(), dataDir, extraRoots(grants)), uid, undefined, codexProtection());
+      } catch (error) {
+        // Name the grant that makes the reviewer session-writable and how to withdraw it (#4122).
+        // Roots no configured grant names can only be avoided by moving the reviewer.
+        throw explainSessionWritableRefusal(error, grants,
+          "install the reviewer where no session can write and set its agent's command to that absolute path",
+          sessionWritableRoots(homedir(), dataDir, hostProviderHomes()));
+      }
+    },
     agents,
     agentPath,
     log,
@@ -370,6 +382,9 @@ export interface PreparedReview {
   baseSha: string;
   /** The attempt's place in its review run. */
   round: ReviewAttemptRound;
+  /** v277 (#4075): the head was proven equivalent to an upvoted head, so no reviewer launches and
+   * `checkout` and `prompt` are empty. */
+  equivalent?: true;
 }
 
 /** What the session manager observed of a reviewer's one turn. */
@@ -387,7 +402,9 @@ export interface ReviewLaunch {
 /** Capability reasons travel through agents_updated, whose control-plane validator caps each
  * at 500 characters. Keep the useful prefix; callers log the complete diagnostic locally. */
 export function reviewSessionDiscoveryReason(error: unknown): string {
-  const reason = (error instanceof Error ? error.message : String(error)) || "review-session discovery failed";
+  // An explained trust refusal reports its bounded summary; the runner log keeps the full message.
+  const reason = (error instanceof SessionWritableRefusal ? error.summary : error instanceof Error ? error.message : String(error)) ||
+    "review-session discovery failed";
   if (reason.length > 500 && reason.startsWith("Codex packages are unprotected")) {
     const ids = [...new Set([...reason.matchAll(/\bsession (s_[A-Za-z0-9_-]+)/gu)].map((match) => match[1]!))];
     if (ids.length) {
@@ -403,7 +420,7 @@ export function reviewSessionDiscoveryReason(error: unknown): string {
 /** The agent a harness's reviews launch through: the first available native agent using its driver. */
 function reviewerAgent(agents: readonly AgentDefinition[], harness: SessionReviewHarness): AgentDefinition | undefined {
   return agents.find((candidate) => candidate.driver === REVIEWER_DRIVERS[harness] &&
-    (candidate.context ?? { kind: "native" }).kind === "native" && candidate.available === true &&
+    (candidate.context ?? { kind: "native" }).kind === "native" && agentAvailableForImplicitLaunch(candidate) &&
     candidate.installation?.selection !== "other" && candidate.harnessSelectionBlocked !== true);
 }
 
@@ -576,10 +593,26 @@ export class ReviewSessionLauncher {
         descends = await git(["merge-base", "--is-ancestor", "--end-of-options", reference.headSha, policy.headSha], 30_000)
           .then(() => true, () => false);
       }
-      const plan = planReviewRound(history, { headSha: policy.headSha, ...(policy.fullReason ? { fullReason: policy.fullReason } : {}) }, descends);
+      // #4075: only a control plane that counts base-merge rounds asks; the proof runs without the
+      // user's global or system Git configuration, so no configured merge driver can run.
+      let baseMerge: ReviewBaseMerge | null = null;
+      if (history.baseMergeRounds && history.lastValid && descends === true && !policy.fullReason) {
+        const isolated = { ...env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" };
+        baseMerge = await classifyBaseMerge((args) => this.deps.exec(verified.git, [...SAFE_GIT, "--git-dir", mirror, ...args],
+          { timeoutMs: 30_000, env: isolated }), history.lastValid.headSha, policy.headSha, baseSha);
+      }
+      const plan = planReviewRound(history, { headSha: policy.headSha, ...(policy.fullReason ? { fullReason: policy.fullReason } : {}) }, descends, baseMerge);
       if ("refusal" in plan) refuseReview(plan.refusal);
       let { mode } = plan as Exclude<typeof plan, { refusal: string }>;
       const planned = plan as Exclude<typeof plan, { refusal: string }>;
+      if (mode === "equivalent") {
+        // Nothing to review: the control plane records the equivalence from its own check.
+        this.removeCheckout(sessionId);
+        return { equivalent: true, checkout: "", prompt: "", baseSha, round: {
+          epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles: [],
+          baseMerge: true, equivalentTo: planned.equivalentTo!,
+        } };
+      }
       // A rebase round needs the earlier history; without it the new epoch reviews in full.
       if (mode === "rebase" && !(planned.rebasedFrom && await has(planned.rebasedFrom.baseSha) && await has(planned.rebasedFrom.headSha))) {
         mode = "full";
@@ -632,6 +665,8 @@ export class ReviewSessionLauncher {
         epoch: planned.epoch, round: planned.round, attempt: planned.attempt, mode, baseSha, scopeFiles,
         ...(mode === "delta" ? { since: planned.since! } : {}),
         ...(mode === "rebase" ? { rebasedFrom: planned.rebasedFrom! } : {}),
+        // A base-merge round reviews only the merge's effect on the pull request's own diff.
+        ...(planned.baseMerge && mergedBase ? { baseMerge: true as const } : {}),
       };
       const inScope = new Set(scopeFiles);
       const contextFiles = mode === "full" ? [] : prFiles.filter((path) => !inScope.has(path));

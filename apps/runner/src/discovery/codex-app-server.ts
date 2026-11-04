@@ -179,7 +179,7 @@ export function applyCodexCommandSandboxProbe(
 export async function probeNativeCodexAppServer(
   launch: ResolvedLaunch,
   version: string | undefined,
-  observer: CodexProbeObserver = {},
+  observer: CodexProbeObserver & { env?: Record<string, string> } = {},
   platform: NodeJS.Platform = process.platform,
 ): Promise<CodexAppServerCapabilities> {
   const probe = nativeCodexAppServerProbeArgs(launch);

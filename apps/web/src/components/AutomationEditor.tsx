@@ -147,7 +147,7 @@ function editDraft(spec: AutomationSpec, runners: ReadonlyMap<string, RunnerView
 /** A Machine's first Folder and first runnable Agent, as switching to it starts with. */
 function withMachine(form: FormState, runner: Runner): FormState {
   return {
-    ...withAgent(form, defaultAgentId(runner?.agents)),
+    ...withAgent(form, defaultAgentId(runner?.agents, runner?.providerAccountDefaults)),
     runnerId: runner?.runnerId ?? "",
     workspaceId: runner?.workspaces[0]?.id ?? "",
   };
@@ -669,7 +669,7 @@ function AutomationEditorForm({
       } else {
         const runner = runners.get(next.runnerId);
         if (!next.workspaceId) next = { ...next, workspaceId: runner?.workspaces[0]?.id ?? "" };
-        if (kind === "create_session" && !next.agentId) next = withAgent(next, defaultAgentId(runner?.agents));
+        if (kind === "create_session" && !next.agentId) next = withAgent(next, defaultAgentId(runner?.agents, runner?.providerAccountDefaults));
       }
     }
     return { ...rebound, form: next };
@@ -1110,7 +1110,7 @@ function AutomationEditorForm({
                           alternateWorkflowBindingEdits: {},
                           form: { ...current.form, fallbackRunnerId,
                             fallbackWorkspaceId: runner?.workspaces[0]?.id ?? "",
-                            fallbackAgentId: defaultAgentId(runner?.agents) },
+                            fallbackAgentId: defaultAgentId(runner?.agents, runner?.providerAccountDefaults) },
                         };
                       })}
                       options={otherMachineOptions}

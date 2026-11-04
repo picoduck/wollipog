@@ -2771,6 +2771,26 @@ export interface GitActionSessionMeta {
   worktreePending?: boolean;
   context?: AgentContext;
   lastTurnBaseTree?: string | null;
+  /** Every worktree the session links, selected or not. */
+  worktrees?: ReadonlyArray<{ path: string; source: string }>;
+}
+
+/**
+ * A `status` read that names a worktree other than the selected one (v275): a campaign inspects
+ * every worktree it is about to retire, not only the selected one (#4070). A worktree the session
+ * still links is read in place; one it no longer links has nothing of the session's left to
+ * inspect, which `GIT_WORKTREE_UNLINKED` says. Null for any other action, which keeps refusing.
+ */
+function unselectedWorktreeStatus(
+  requestedWorktreePath: string,
+  action: GitAction,
+  meta: GitActionSessionMeta,
+): { cwd: string; context: GitActionContext } | null {
+  if (action.kind !== "status") return null;
+  const linked = meta.worktrees?.find((worktree) => cleanGitPath(worktree.path) === cleanGitPath(requestedWorktreePath));
+  if (!linked) throw new GitOpError("the session no longer links this worktree", "GIT_WORKTREE_UNLINKED");
+  if (linked.source === "attached") return null;
+  return { cwd: linked.path, context: { useWorktree: true, lastTurnBaseTree: null, context: meta.context } };
 }
 
 /** Resolve a Git request against runner-owned session metadata before executing anything. The wire
@@ -2787,6 +2807,8 @@ export function resolveGitActionExecution(
   if (meta.worktreePath) {
     if (requestedWorktreePath !== undefined &&
         cleanGitPath(requestedWorktreePath) !== cleanGitPath(meta.worktreePath)) {
+      const unselected = unselectedWorktreeStatus(requestedWorktreePath, action, meta);
+      if (unselected) return unselected;
       throw new Error("git action path does not match runner-owned session metadata");
     }
     return {
@@ -2799,6 +2821,8 @@ export function resolveGitActionExecution(
     };
   }
   if (requestedWorktreePath !== undefined) {
+    const unselected = unselectedWorktreeStatus(requestedWorktreePath, action, meta);
+    if (unselected) return unselected;
     throw new Error("a primary-checkout git read cannot supply a caller-selected path");
   }
   if (action.kind !== "status" && action.kind !== "summary") {

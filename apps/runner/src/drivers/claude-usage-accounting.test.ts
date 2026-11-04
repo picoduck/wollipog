@@ -7,6 +7,11 @@ const model = (inputTokens: number, outputTokens: number, costUSD: number) => ({
 const result = (a: number, b: number) => ({ total_cost_usd: a + b,
   usage: { input_tokens: 999, output_tokens: 999 }, // main-loop counters must not also be added
   modelUsage: { "model-a": model(10, 5, a), "model-b": model(3, 2, b) } });
+/** A resumed process starts and reports its CLI version (none: the recorded one stands). */
+const start = (accounting: ClaudeUsageAccounting, version?: string, sessionId = "s") => {
+  accounting.beginProcess();
+  return accounting.confirmProcess(sessionId, version).events;
+};
 
 test("whole-tree per-model totals survive driver reconstruction without rebilling ancestors", () => {
   const first = new ClaudeUsageAccounting(true);
@@ -14,7 +19,7 @@ test("whole-tree per-model totals survive driver reconstruction without rebillin
   assert.equal(events.reduce((sum, e) => sum + (e.inputTokens ?? 0), 0), 13);
   assert.equal(events.reduce((sum, e) => sum + (e.costUsd ?? 0), 0), 0.03);
   const resumed = new ClaudeUsageAccounting(true, JSON.parse(JSON.stringify(first.checkpoint)));
-  resumed.beginProcess();
+  start(resumed, undefined, "session");
   const delta = resumed.result("session", result(0.03, 0.01));
   assert.equal(delta.length, 1);
   assert.equal(delta[0]!.model, "model-a");
@@ -27,9 +32,10 @@ test("whole-tree per-model totals survive driver reconstruction without rebillin
 test("old CLI process totals reset while a crash never resets a valid conversation baseline", () => {
   assert.equal(claudeRestoresUsage("2.1.276"), false);
   assert.equal(claudeRestoresUsage("2.1.277"), true);
+  assert.equal(claudeRestoresUsage(undefined), undefined, "a missing version is unknown, not process scope");
   const old = new ClaudeUsageAccounting(false);
   old.result("s", result(0.02, 0.01));
-  old.beginProcess();
+  start(old);
   assert.equal(old.result("s", result(0.02, 0.01))[0]!.costUsd, 0.02);
   const modern = new ClaudeUsageAccounting(true, claudeUsageCheckpoint("s", result(0.02, 0.01))!);
   assert.deepEqual(modern.result("s", { subtype: "error_during_execution", total_cost_usd: 0, modelUsage: {} }), [{ kind: "token_usage", accountingIncomplete: true }]);
@@ -77,10 +83,10 @@ test("a baseline that cannot cover live requests republishes each as an ordinary
   const old = new ClaudeUsageAccounting(false);
   const published = old.request(request)!;
   const { liveUsage: _live, ...ordinary } = published;
-  assert.deepEqual(old.beginProcess(), [{ ...ordinary, liveUsage: "settled" }], "an old CLI's next process restarts its totals");
-  assert.deepEqual(old.beginProcess(), []);
+  assert.deepEqual(start(old), [{ ...ordinary, liveUsage: "settled" }], "an old CLI's next process restarts its totals");
+  assert.deepEqual(start(old), []);
   const modern = new ClaudeUsageAccounting(true, undefined, [published]);
-  assert.deepEqual(modern.beginProcess(), [], "a conversation-scoped total may still cover them");
+  assert.deepEqual(start(modern), [], "a conversation-scoped total may still cover them");
   assert.deepEqual(modern.adoptBaseline(claudeUsageCheckpoint("s", result(0, 0))), [{ ...ordinary, liveUsage: "settled" }]);
   assert.deepEqual(modern.adoptBaseline(null), [], "nothing is left to account");
 });
@@ -100,4 +106,99 @@ test("a crash or a lower total leaves live requests open for the next checkpoint
   lost.request(request);
   lost.result("s", { subtype: "error_during_execution", total_cost_usd: 0, modelUsage: {} });
   assert.deepEqual(lost.adoptBaseline(claudeUsageCheckpoint("s", result(0.02, 0.01))).map((event) => [event.inputTokens, event.liveUsage]), [[10, "settled"]]);
+});
+
+const grown = (inputTokens: number, costUSD: number) => ({ total_cost_usd: costUSD + 0.01,
+  modelUsage: { "model-a": model(inputTokens, 5, costUSD), "model-b": model(3, 2, 0.01) } });
+
+test("the running CLI's version outranks a missing or stale recorded one (#4069)", () => {
+  const request = { model: "model-a", inputTokens: 4, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  for (const recorded of [undefined, false]) {
+    const persisted = claudeUsageCheckpoint("s", result(0.02, 0.01))!;
+    const live = new ClaudeUsageAccounting(true).request(request)!;
+    const accounting = new ClaudeUsageAccounting(recorded, persisted, [live]);
+    assert.deepEqual(start(accounting, "2.1.296"), [], "conversation totals may cover the open requests");
+    assert.equal(accounting.restoresUsage, true);
+    const settled = accounting.result("s", grown(15, 0.03));
+    assert.deepEqual(settled.map((event) => [event.inputTokens, event.liveUsage]), [[5, "settled"]], "only the difference");
+    assert.ok(Math.abs(settled[0]!.costUsd! - 0.01) < 1e-10);
+    assert.equal(accounting.checkpoint!.accountingScope, "conversation");
+  }
+  const downgraded = new ClaudeUsageAccounting(true, claudeUsageCheckpoint("s", result(0.02, 0.01))!);
+  start(downgraded, "2.1.270");
+  assert.equal(downgraded.restoresUsage, false);
+  assert.equal(downgraded.result("s", result(0.02, 0.01))[0]!.costUsd, 0.02, "an old CLI's process total is its own");
+});
+
+test("a persisted baseline that no probe confirmed settles only totals that cover the open requests", () => {
+  const request = { model: "model-a", inputTokens: 50, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 };
+  const live = new ClaudeUsageAccounting(true).request(request)!;
+  const accounting = new ClaudeUsageAccounting(undefined, claudeUsageCheckpoint("s", result(0.02, 0.01))!, [live]);
+  start(accounting, "2.1.296");
+  // The restored prefix lost the interrupted request: the total grew by 5 input tokens, not 50.
+  const events = accounting.result("s", grown(15, 0.03));
+  const { liveUsage: _live, ...ordinary } = live;
+  assert.deepEqual(events, [{ ...ordinary, liveUsage: "republished" }, { kind: "token_usage", accountingIncomplete: true, liveUsage: "settled" }],
+    "the marker closes the window, where the caller journals the new baseline");
+  assert.equal(accounting.checkpoint!.totalCostUsd, 0.04, "later turns are differences from this total");
+  assert.ok(Math.abs(accounting.result("s", grown(16, 0.04))[0]!.costUsd! - 0.01) < 1e-10);
+});
+
+test("a restart part-way through an uncertain result never counts a republished request again", () => {
+  const total = (n: number) => ({ total_cost_usd: n / 100, modelUsage: { m: { inputTokens: n, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUSD: n / 100 } } });
+  const req = (n: number) => ({ model: "m", inputTokens: n, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 });
+  const persisted = claudeUsageCheckpoint("s", total(100))!;
+  const accounting = new ClaudeUsageAccounting(undefined, persisted);
+  start(accounting, "2.1.296");
+  // Claude lost the interrupted 50-token request from its totals; the next 10-token request counts.
+  const live = [accounting.request(req(50))!, accounting.request(req(10))!];
+  // As the driver emits it: the record that closes the window journals the new baseline.
+  const batch = accounting.result("s", total(110)).map((event, index, all) =>
+    index === all.length - 1 ? { ...event, claudeUsageCheckpoint: accounting.checkpoint! } : event);
+  assert.deepEqual(batch.map((event) => [event.liveUsage, event.accountingIncomplete]), [["republished", undefined], ["republished", undefined], ["settled", true]]);
+  for (let durable = 0; durable <= batch.length; durable++) {
+    // Rebuild the relaunch as the session manager does: the last journaled checkpoint, then only
+    // the durable events after it (the old checkpoint was journaled before the live requests).
+    const log = [{ checkpoint: persisted }, ...live.map((event) => ({ event })), ...batch.slice(0, durable).map((event) => ({ event }))];
+    let checkpoint = persisted, open: typeof live = [], interrupted = false;
+    for (const entry of log) {
+      const event = "event" in entry ? entry.event : null;
+      if (!event || event.claudeUsageCheckpoint) { checkpoint = event?.claudeUsageCheckpoint ?? persisted; open = []; interrupted = false; continue; }
+      if (event.liveUsage === "settled") { open = []; interrupted = false; }
+      else if (event.liveUsage === "provisional") open.push(event);
+      else if (event.liveUsage === "republished") { open.shift(); interrupted = true; }
+    }
+    const relaunched = new ClaudeUsageAccounting(undefined, checkpoint, open, interrupted);
+    start(relaunched, "2.1.296");
+    relaunched.request(req(10));
+    const after = relaunched.result("s", total(120));
+    const accrued = [...batch.slice(0, durable), ...after].filter((event) => event.liveUsage !== "provisional");
+    assert.equal(accrued.reduce((sum, event) => sum + (event.inputTokens ?? 0), 0), 70,
+      `a restart after ${durable} durable records accounts every observed request exactly once`);
+  }
+});
+
+test("an unknown scope never bills a resumed process's first total as a delta", () => {
+  const fresh = new ClaudeUsageAccounting(undefined);
+  fresh.beginProcess(true);
+  assert.deepEqual(fresh.confirmProcess("s"), { events: [], baseline: null });
+  assert.equal(fresh.result("s", result(0.02, 0.01)).reduce((sum, event) => sum + (event.costUsd ?? 0), 0), 0.03,
+    "a new conversation starts at zero in either scope");
+
+  const resumed = new ClaudeUsageAccounting(undefined, claudeUsageCheckpoint("s", result(0.02, 0.01))!);
+  start(resumed);
+  assert.deepEqual(resumed.result("s", grown(15, 0.03)), [{ kind: "token_usage", accountingIncomplete: true }]);
+  assert.equal(resumed.checkpoint!.accountingScope, "process");
+  assert.ok(Math.abs(resumed.result("s", grown(16, 0.04))[0]!.costUsd! - 0.01) < 1e-10, "later totals of the same process are differences");
+  start(resumed);
+  assert.deepEqual(resumed.result("s", grown(17, 0.05)).map((event) => event.accountingIncomplete), [true], "a new process is unproven again");
+
+  const learned = new ClaudeUsageAccounting(false);
+  learned.beginProcess(true);
+  assert.deepEqual(learned.confirmProcess("s", "2.1.296").baseline, { sessionId: "s", totalCostUsd: 0, models: {}, accountingScope: "conversation" },
+    "a conversation learned at its first report records its zero baseline");
+  const unbased = new ClaudeUsageAccounting(false);
+  start(unbased, "2.1.296");
+  assert.deepEqual(unbased.result("s", result(0.02, 0.01)).map((event) => event.accountingIncomplete), [true],
+    "restored totals without any baseline are uncertain");
 });

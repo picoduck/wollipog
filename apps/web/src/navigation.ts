@@ -101,6 +101,9 @@ export interface SettingsSectionEntry {
  */
 export const EXPERIMENT_OFF_EFFECT = "Turning one off hides it from navigation and search.";
 
+/** The Settings page header's one line (§4.2), hidden on phones as every page description is. */
+export const SETTINGS_DESCRIPTION = "Preferences for this device and your account.";
+
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
   {
@@ -321,25 +324,86 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
 }
 
 /**
- * The width of the page container a route draws (§4.5): `.page.wide`, `.page.full`, or null for the
- * default `.page`. A crashed route's notice is drawn in the same container, so the header's hairline
- * does not jump when the route fails.
+ * The one-line description under a route's page title (§4.2), or undefined for a route that draws
+ * none. A destination's list page reads it from the registry, and Settings, which is not in it,
+ * from its own line; an entity page and the Automations editor draw a bar instead. The turned-off
+ * and crashed states redraw the header with it, so the header keeps its height and nothing moves
+ * when the route recovers (docs/design-system.md §12.4).
  */
-export function viewPageWidth(view: View): "wide" | "full" | null {
+export function viewDescription(view: View): string | undefined {
+  switch (view.name) {
+    case "automations":
+      return view.editor ? undefined : destination(view.name).description;
+    case "board":
+      return destination("inbox").description;
+    case "inbox":
+    case "projects":
+    case "runs":
+    case "pods":
+    case "usage":
+    case "runners":
+    case "archived":
+    case "skills":
+      return destination(view.name).description;
+    case "settings":
+      return SETTINGS_DESCRIPTION;
+    case "session":
+    case "run":
+    case "pod":
+    case "automation":
+      return undefined;
+  }
+  // No default branch: this line stops compiling when a view is added without a decision here.
+  const unhandled: never = view;
+  return unhandled;
+}
+
+/**
+ * The width of the page container a route draws (§4.5): `.page.wide`, `.page.full`, `fill` for a
+ * full page whose content fills the column edge to edge (`.page.full.fill`), or null for the default
+ * `.page`. A crashed route's notice is drawn in the same container, so the header's hairline does
+ * not jump when the route fails.
+ */
+export function viewPageWidth(view: View): "wide" | "full" | "fill" | null {
   switch (view.name) {
     case "usage":
       return "wide";
     case "inbox":
     case "board":
+      return "fill";
     case "projects":
     case "skills":
     case "settings":
       return "full";
     // Machines is a master-detail; the other Connections tabs are list pages.
     case "runners":
-      return (view.section ?? "machines") === "machines" ? "full" : null;
+      return (view.section ?? "machines") === "machines" ? "fill" : null;
     default:
       return null;
+  }
+}
+
+/**
+ * Whether a route's page header ends in a tab row (§4.2, §10.1) at the current width. The crashed
+ * state reserves that row, so the header keeps its height and its hairline stays put. Sessions has
+ * no page header on a phone, Settings shows its section tabs only in the compact tier, and an open
+ * machine on a phone replaces the Connections header with its detail bar.
+ */
+export function viewHasHeaderTabs(view: View, layout: { phone: boolean; compact: boolean }): boolean {
+  switch (view.name) {
+    case "automations":
+      return !view.editor;
+    case "usage":
+      return true;
+    case "inbox":
+    case "board":
+      return !layout.phone;
+    case "runners":
+      return !(layout.phone && (view.section ?? "machines") === "machines" && view.machineId !== undefined);
+    case "settings":
+      return layout.compact;
+    default:
+      return false;
   }
 }
 

@@ -16,6 +16,9 @@ import {
   useRightPanelState,
   type RightPanelState,
 } from "./RightPanel.js";
+import { handleSidePanelChord } from "./right-panel-state.js";
+import { SESSION_TOOLS } from "../session-tools.js";
+import { shortcutDisplay, shortcutLayerActive } from "../shortcuts.js";
 import type { GovernanceDecision } from "../governance.js";
 import { saveBrowserStorageValue } from "../instance-storage.js";
 import { clearPanelScratch } from "../right-panel-scratch.js";
@@ -1486,5 +1489,157 @@ test("a worker page's Activity opts the panel body out of native scroll anchorin
     assert.equal(state.mode, "subagents");
   } finally {
     await panel.dispose();
+  }
+});
+
+/* --- The side panel's chords, as App.tsx wires them (#1260) --- */
+
+/** The panel beside a stand-in for the main composer, with the real chord handler on the window behind
+ * the same layer check App.tsx makes. */
+async function mountWithChords() {
+  let state!: RightPanelState;
+  const panel = await mountPanel(
+    <>
+      <textarea aria-label="Message" />
+      <PanelHarness decisionHistory={[governanceDecision]} onState={(next) => { state = next; }} />
+    </>,
+  );
+  const onKey = (event: KeyboardEvent) => {
+    if (event.defaultPrevented || shortcutLayerActive(document, false, event)) return;
+    handleSidePanelChord(event, state);
+  };
+  domWindow.addEventListener("keydown", onKey as unknown as Parameters<typeof domWindow.addEventListener>[1]);
+  return {
+    container: panel.container,
+    get state() { return state; },
+    composer: panel.container.querySelector<HTMLTextAreaElement>('textarea[aria-label="Message"]')!,
+    switcher: () => panel.container.querySelector<HTMLButtonElement>("#right-panel .rpanel-switcher"),
+    async dispose() {
+      domWindow.removeEventListener("keydown", onKey as unknown as Parameters<typeof domWindow.removeEventListener>[1]);
+      await panel.dispose();
+    },
+  };
+}
+
+/** A chord pressed on whatever has focus, then the frame on which the switcher takes focus. */
+async function chord(key: string, init: { ctrlKey?: boolean; shiftKey?: boolean } = {}) {
+  const target = (domWindow.document.activeElement ?? domWindow.document.body) as unknown as Element;
+  await act(async () => {
+    target.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, bubbles: true, cancelable: true, ...init }) as unknown as Event);
+  });
+  await act(async () => { await new Promise((resolve) => domWindow.requestAnimationFrame(() => resolve(undefined))); });
+}
+
+const focusedOn = (element: Element | null) =>
+  element !== null && (domWindow.document.activeElement as unknown as Element | null) === element;
+
+test("Ctrl+\\ toggles the panel from the composer and reopens it on the last tool with focus on its switcher (#1260)", async () => {
+  const mounted = await mountWithChords();
+  try {
+    assertNoDomNode(mounted.switcher(), "the panel starts closed");
+    mounted.composer.focus();
+    await chord("\\", { ctrlKey: true });
+    assert.equal(mounted.state.open, true, "a text field does not block the chord");
+    assert.equal(mounted.state.mode, "launcher");
+    assert.ok(focusedOn(mounted.switcher()), "focus lands on the tool switcher");
+
+    await chord("X", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.mode, "browser");
+    await chord("\\", { ctrlKey: true });
+    assert.equal(mounted.state.open, false, "the chord closes the open panel");
+
+    mounted.composer.focus();
+    await chord("\\", { ctrlKey: true });
+    assert.equal(mounted.state.open, true);
+    assert.equal(mounted.state.mode, "browser", "it reopens on the last tool");
+    assert.equal(mounted.switcher()?.textContent, "Browser");
+    assert.ok(focusedOn(mounted.switcher()));
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("a tool's chord opens the panel on it, switches from another tool, closes it when showing, and Escape closes it from there (#1260)", async () => {
+  const mounted = await mountWithChords();
+  try {
+    mounted.composer.focus();
+    await chord("X", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.open, true);
+    assert.equal(mounted.state.mode, "browser");
+    assert.ok(focusedOn(mounted.switcher()), "focus moves to the switcher, inside the panel");
+    // Escape in a tool other than Requests, which takes it only with focus inside the panel.
+    await keydown(mounted.switcher()!, "Escape");
+    assert.equal(mounted.state.open, false, "Escape closes the panel opened on Browser");
+
+    mounted.composer.focus();
+    await chord("M", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.mode, "subagents");
+    await chord("H", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.open, true, "another tool's chord switches rather than closes");
+    assert.equal(mounted.state.mode, "decisions");
+    assert.equal(mounted.switcher()?.textContent, "Decision History");
+    await chord("H", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.open, false, "the showing tool's chord closes the panel");
+
+    mounted.composer.focus();
+    await chord("'", { ctrlKey: true });
+    assert.equal(mounted.state.mode, "requests");
+    assert.equal(mounted.state.open, true);
+    await chord("G", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.mode, "review", "Review's chord still opens Review");
+
+    // An open menu owns the keyboard: the chord waits until it closes.
+    await act(async () => mounted.switcher()!.click());
+    assert.ok(domWindow.document.querySelector('[aria-label="Switch Tool"]'));
+    await chord("X", { ctrlKey: true, shiftKey: true });
+    assert.equal(mounted.state.mode, "review");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("Session Tools rows and the tool switcher show each tool's chord, and an unavailable row stays focusable with its reason (#1260)", async () => {
+  const mounted = await mountWithChords();
+  try {
+    await act(async () => mounted.state.show("launcher"));
+    let shown = 0;
+    for (const tool of SESSION_TOOLS) {
+      const row = mounted.container.querySelector<HTMLButtonElement>(`.session-tool[data-tool="${tool.id}"]`);
+      if (!row || !tool.shortcut) continue;
+      if (row.getAttribute("aria-disabled") === "true") {
+        // The chord would do nothing here, so the row says why instead, and stays in the tab order.
+        assert.equal(row.disabled, false, `${tool.name} stays focusable`);
+        assertNoDomNode(row.querySelector("kbd"), `${tool.name} shows no dead keycap`);
+        const reasonIds = row.getAttribute("aria-describedby")!.split(" ");
+        assert.ok(reasonIds.some((id) => (domWindow.document.getElementById(id)?.textContent ?? "").trim() !== ""),
+          `${tool.name}'s reason is in its description`);
+        continue;
+      }
+      assert.equal(row.querySelector("kbd")?.textContent, shortcutDisplay(tool.shortcut), `${tool.name}'s keycap`);
+      shown += 1;
+    }
+    for (const id of ["browser", "subagents", "requests", "decisions"]) {
+      assert.ok(mounted.container.querySelector(`.session-tool[data-tool="${id}"] kbd`), `${id} shows its keycap`);
+    }
+    assert.ok(shown >= 5);
+
+    await act(async () => mounted.switcher()!.click());
+    const menu = domWindow.document.querySelector('[role="menu"][aria-label="Switch Tool"]')!;
+    const keycaps = Object.fromEntries([...menu.querySelectorAll(".menu-item")]
+      .map((item) => [item.querySelector(".menu-text")?.textContent, item.querySelector("kbd")?.textContent ?? null]));
+    assert.deepEqual(keycaps, {
+      "Session Tools": null,
+      Review: shortcutDisplay("open-review"),
+      Files: shortcutDisplay("open-files"),
+      Browser: shortcutDisplay("open-browser"),
+      Terminal: shortcutDisplay("toggle-terminal"),
+      Agents: shortcutDisplay("open-agents"),
+      "Side Chat": shortcutDisplay("open-side-chat"),
+      "Background Work": shortcutDisplay("open-background-work"),
+      Requests: shortcutDisplay("open-requests"),
+      "Decision History": shortcutDisplay("open-decision-history"),
+    });
+  } finally {
+    await mounted.dispose();
   }
 });

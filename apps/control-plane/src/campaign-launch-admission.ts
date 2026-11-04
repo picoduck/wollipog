@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import {
-  campaignAuthorityPreflight, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignControl,
+  CAMPAIGN_LAUNCH_INSPECTION_ERRORS, campaignAuthorityPreflight, campaignRepositoryLocation, runnerSupportsProtocol, validCampaignControl,
   FULL_CONTROL_EVIDENCE_EXCEPTIONS, FULL_CONTROL_HUMAN_REQUIRED_LABELS, FULL_CONTROL_STANDING_HUMAN_REQUIRED_REASON,
   FULL_CONTROL_DECLINED_NOTE, fullControlStandingHumanRequired,
   CAMPAIGN_EVIDENCE_PROVIDER_DISCLOSURE_REVISION, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE,
@@ -144,18 +144,21 @@ export function firstMessageIssues(boundary: CampaignAuthorityBoundary, issueNum
  * operations, policy asks, evidence and ceilings, with the message as objective and its verified
  * issues as scope. Only a limit the launch derived (no Human override) grows to what a launch
  * naming those issues derives, never below what was authorized; an explicit ceiling never
- * changes, and a missing record counts as explicit. */
+ * changes, and a missing record counts as explicit. A derived Maximum Issues also leaves room for
+ * `epicMembers`, the runner-verified members of target epics the message names (#4061), so the
+ * Orchestrator's epic-lineage addition of them fits; it never counts toward follow-ups. */
 export function firstMessageBoundary(boundary: CampaignAuthorityBoundary, followUps: "recommend_only" | "execute_approved",
   issueNumbers: number[], objective: string, revision: number, issueScopeRevision: number, now: number,
-  derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }): CampaignAuthorityBoundary {
+  derived: FullControlDerivedLimits = { acceptedFollowUps: false, maxIssues: false }, epicMembers: readonly number[] = []): CampaignAuthorityBoundary {
   const derivedFollowUps = followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0;
   const budget = boundary.budgetAuthority;
   // An explicit limit, including No Limit (omitted), is kept as the Human set it (#2940).
   const acceptedFollowUps = derived.acceptedFollowUps ? Math.max(budget?.acceptedFollowUps ?? 0, derivedFollowUps) : budget?.acceptedFollowUps;
   const issues = boundary.issueAuthority;
   // With no follow-up limit, a derived issue limit leaves room up to its ceiling.
+  const room = new Set(epicMembers.filter((n) => !issueNumbers.includes(n))).size;
   const maxIssues = issues && (derived.maxIssues
-    ? Math.min(100, Math.max(issues.maxIssues, acceptedFollowUps === undefined ? 100 : issueNumbers.length + acceptedFollowUps)) : issues.maxIssues);
+    ? Math.min(100, Math.max(issues.maxIssues, acceptedFollowUps === undefined ? 100 : issueNumbers.length + room + acceptedFollowUps)) : issues.maxIssues);
   const { acceptedFollowUps: _previous, ...rest } = budget ?? {};
   return structuredClone({ ...boundary, objective, revision, issueScopeRevision, authorizedAt: now,
     ...(budget ? { budgetAuthority: { ...rest, ...(acceptedFollowUps === undefined ? {} : { acceptedFollowUps }) } as CampaignBudgetAuthority } : {}),
@@ -280,7 +283,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const behavior = plan.policy.behavior;
   const inspectionVersion = runner.runtime?.campaignLaunchInspection?.version ?? 0;
   const verified = campaignScope ? campaignScope.authorizedByCaller && campaignRepositoryLocation(campaignScope.repository) !== null
-    : inspection?.ok === true && inspection.workspaceId === plan.workspaceId &&
+    : inspectionVersion >= 3 && inspection?.ok === true && inspection.workspaceId === plan.workspaceId &&
       typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
       canonical(inspection.issueNumbers) === canonical(issueNumbers);
   const repository = verified ? (campaignScope?.repository ?? inspection!.repository!).toLowerCase() : null;
@@ -340,10 +343,10 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
     : verified
     ? `The registered workspace's origin is ${repository}${issueNumbers.length ? ` and issues ${issueNumbers.map((n) => `#${n}`).join(", ")} were read from it` : "; no issues were selected, so the campaign starts with an empty issue scope"}.`
     : inspection?.cancelled ? "The workspace inspection was cancelled before it finished; refresh the preflight."
-    : !inspectionVersion ? "This runner cannot inspect the workspace origin and issues; update the runner."
-    : !issueNumbers.length && inspectionVersion < 2 ? "This runner can inspect only selected issues; select issue numbers or update the runner."
-    : inspection && !issueNumbers.length ? "The registered workspace's origin could not be verified; check that it is a github.com repository."
-    : inspection ? "The workspace origin or the selected issues could not be verified; check that the origin is github.com and each issue exists."
+    : inspectionVersion < 3 ? "This runner cannot inspect the authorized project location; update the runner."
+    : inspection?.failure && Object.hasOwn(CAMPAIGN_LAUNCH_INSPECTION_ERRORS, inspection.failure)
+      ? CAMPAIGN_LAUNCH_INSPECTION_ERRORS[inspection.failure]
+    : inspection ? "The project location inspection failed; refresh the preflight."
     : "The runner did not answer the workspace inspection in time; refresh the preflight.");
 
   const authority = campaignAuthorityPreflight(proposal ? schemaControl(proposal) : schemaControl({

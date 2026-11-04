@@ -7,11 +7,12 @@ import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, campaignRepositoryLocation, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
+import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
+import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -128,9 +129,9 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { ReviewWriterRegistry } from "./review-writers.js";
-import { join, resolve } from "node:path";
+import { join, parse as parsePath, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
@@ -174,7 +175,7 @@ import {
 } from "./discovery/claude-slash-catalog.js";
 import { BoxAdmission, type AdmissionObservation, type AdmissionRequest } from "./box-admission.js";
 import {
-  REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, type ReviewSessionUpdate,
+  REVIEW_EQUIVALENCE_OUTPUT, REVIEW_SESSION_OUTPUT_LIMIT_BYTES, sanitizedReviewSessionReason, type ReviewSessionUpdate,
 } from "@wollipog/protocol";
 import { ReviewScopeRefusal } from "./review-snapshot.js";
 import type { ReviewObservation, ReviewSessionHooks } from "./review-sessions.js";
@@ -233,6 +234,7 @@ import { AsyncProviderHomeLeaseRegistry, type LeaseCancellation, type LeaseProfi
 import { providerHomeRunnerMarker } from "./provider-home-lease-evidence.js";
 import type { AgentTuiProviderHome } from "./shell-manager.js";
 import { providerHomeLeaseEnv, providerHomeLeaseTarget, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
+import { isolatedDiscoveryEnvironment } from "./discovery/provider-home.js";
 import { LEASE_WORKER_ERRORS, type LeaseWorkerInspection } from "./provider-home-lease-worker-protocol.js";
 import { cleanupPiExternalSession } from "./external/sources.js";
 import {
@@ -304,6 +306,7 @@ import {
   worktreeBranch,
   worktreeHead,
   mergedWorktreePullRequestForBranch,
+  mergedPullRequestContainingHead,
   worktreePullRequestState,
   changeRequestProvider,
   worktreeDiff,
@@ -311,6 +314,7 @@ import {
   type WorktreeCleanupRecord,
   type WorktreeHandle,
   type DiscoveredMergedPullRequest,
+  type MergedPullRequestContainment,
   type MissingUpstreamPullRequestIdentity,
   type RetainedWorktreeRefCandidate,
   type RetainedWorktreeRefRecord,
@@ -826,6 +830,10 @@ interface ActiveSession {
   historyIntegrityFailure?: string;
   /** Durable owner of the currently dequeued turn, used when a driver callback trips the latch. */
   currentDurable?: DurableCommandLifecycle;
+  /** #4022: the dequeued durable turn is an ordinary prompt, not a recovered answer, a recovery or
+   * background continuation, or a provider command. Only such a turn may take its controlling
+   * Orchestrator's steering, and only when the control plane names `currentDurable`'s exact id. */
+  currentDurablePromptSteerable?: boolean;
   /** Manual provider commands are also non-steerable, but never alias automation ownership. */
   currentSessionCommand?: SessionCommandInvocationLifecycle;
   /** The current manual command crossed its durable started boundary and may have reached the
@@ -1089,6 +1097,18 @@ export function forgeProofOptions(
     provider,
     ...(provider === "gitlab" && agentEnv ? { env: agentEnv(meta) } : {}),
   };
+}
+
+/** Name what a refusal of a tree without an upstream actually failed (#4068). Every variant keeps
+ * the original prefix, which control planes already classify as a terminal retention. */
+function noUpstreamRefusal(containment: MergedPullRequestContainment["state"] | undefined): string {
+  if (containment === "not_contained") {
+    return "the branch has no upstream, and the worktree tip is not the head of, or contained in, a merged pull request";
+  }
+  if (containment === "unavailable") {
+    return "the branch has no upstream, and the forge could not prove whether a merged pull request contains the worktree tip";
+  }
+  return "the branch has no upstream";
 }
 
 /** The only linkage shape that may stand in for a vanished upstream during safe cleanup: a
@@ -1698,6 +1718,9 @@ export class SessionManager {
    * discovery so an unmergeable branch is not asked about every pass. Entries are dropped when the
    * proof arrives and when the record leaves the journal, so the map tracks pending records only. */
   private readonly deferredMergedHeadRetryAt = new Map<string, number>();
+  /** The same backoff for replay's merged-pull-request containment probe (#4068), kept separate so
+   * a negative exact-head answer earlier in the same replay does not suppress it. */
+  private readonly deferredContainmentRetryAt = new Map<string, number>();
   /** Test seam for deterministic expiry without changing production time. */
   private worktreePullRequestDiscoveryNow: () => number = Date.now;
   private admissionRetryTimer: ReturnType<typeof setTimeout> | null = null;
@@ -1732,6 +1755,7 @@ export class SessionManager {
   /** Test seams keep forge availability and destructive Git behavior deterministic. */
   private readWorktreeBranch: typeof worktreeBranch = worktreeBranch;
   private discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch = mergedWorktreePullRequestForBranch;
+  private probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead = mergedPullRequestContainingHead;
   private resolveWorktreePullRequestState: typeof worktreePullRequestState = worktreePullRequestState;
   private discardSessionWorktreeIfSafe: typeof discardWorktreeIfSafe = discardWorktreeIfSafe;
   /** The runner's ref-deleting Git runs only in its own confined mount view (#3316), because the
@@ -1808,7 +1832,13 @@ export class SessionManager {
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
   private sharedDirectoryForbiddenRoots: readonly string[] = [];
 
-  /** Called only by the host bootstrap, never from a session/control-plane request. */
+  /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123). */
+  setConfiguredProjectPaths(paths: readonly string[]): void {
+    this.configuredProjectPaths = [...paths];
+  }
+
+  /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123);
+   * never from a session request. */
   configureSharedDirectories(workspaces: readonly RunnerConfigWorkspace[], forbiddenRoots: readonly string[] = []): void {
     this.sharedDirectoryWorkspaces = workspaces.map((workspace) => ({ ...workspace,
       sharedWritableDirectories: workspace.sharedWritableDirectories ? [...workspace.sharedWritableDirectories] : undefined }));
@@ -1857,7 +1887,7 @@ export class SessionManager {
       providerAccountId?: string,
     ) => SubscriptionUsageSnapshot | null,
     /** Exact operator-configured Project Location roots eligible for existing-worktree attach. */
-    private readonly configuredProjectPaths: string[] = [],
+    private configuredProjectPaths: string[] = [],
     /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
     private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
     private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
@@ -2194,11 +2224,11 @@ export class SessionManager {
     spec: SessionLaunchSpec,
     brief: string,
     authorizationError: string | undefined,
-  ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string }> {
+  ): Promise<{ spec: SessionLaunchSpec; prompt: string } | { error: string } | { settled: true }> {
     // Accounted reviews have a durable zero-usage preparation record. A refusal/cancellation
     // returns that reservation through the ordinary final checkpoint; no provider has run yet.
     // Other reviews retain their existing outcome-only record. Outcome always precedes status.
-    const endBeforeLaunch = (update: ReviewSessionUpdate, status: "failed" | "stopped") => {
+    const endBeforeLaunch = (update: ReviewSessionUpdate, status: "failed" | "stopped" | "completed") => {
       const meta = this.store.readMeta(spec.sessionId);
       const checkpoint = spec.campaignBudgetDispatch && meta?.campaignBudgetCheckpoint;
       if (checkpoint && meta?.review) {
@@ -2260,6 +2290,13 @@ export class SessionManager {
       const update: ReviewSessionUpdate = { type: "review_session_update", sessionId: spec.sessionId, state: "cancelled", reason };
       endBeforeLaunch(update, "stopped");
       return { error: reason };
+    }
+    if (prepared.equivalent) {
+      // #4075: a recorded equivalence needs no reviewer. It ends here, before any provider runs, and
+      // the control plane checks it against the review run before it carries the upvote.
+      endBeforeLaunch({ type: "review_session_update", sessionId: spec.sessionId, state: "completed",
+        round: prepared.round, output: REVIEW_EQUIVALENCE_OUTPUT }, "completed");
+      return { settled: true };
     }
     this.preparedReviewRounds.set(spec.sessionId, prepared.round);
     // The planned round goes up now, so the requester can see which round is under review.
@@ -3941,6 +3978,27 @@ export class SessionManager {
     return { probed: true, forgeUnavailable };
   }
 
+  /** When no merged pull request's head is exactly the tip, ask whether one contains it (#4068):
+   * a child pushed an earlier head of a pull request that later moved on and was squash-merged.
+   * The worktree's own forge-verified merged link is checked first, then the merged pull requests
+   * the forge lists for the tip. Like the successor proof, the result serves only the retirement
+   * that asked for it and never becomes the worktree's link. A tree checked out on another branch,
+   * or attached by its operator, is not probed. */
+  private async proveMergedPullRequestContainment(
+    meta: SessionMeta,
+    worktree: SessionWorktreeView,
+  ): Promise<MergedPullRequestContainment> {
+    if (worktree.source === "attached") return { state: "ineligible" };
+    const checkedOutBranch = await this.readWorktreeBranch(worktree.path, { context: meta.context });
+    if (!checkedOutBranch || checkedOutBranch !== worktree.branch) return { state: "ineligible" };
+    const linked = worktree.pullRequest;
+    const linkedHead = verifiedMergedHeadOid(linked);
+    return this.probeMergedPullRequestContainment(worktree.path, checkedOutBranch, {
+      context: meta.context,
+      ...(linked && linkedHead ? { linkedPullRequest: { url: linked.url, headOid: linkedHead } } : {}),
+    });
+  }
+
   /** Probe a rotating, bounded candidate slice outside the session mutation lanes. Only the short
    * proof-persistence step enters a lane, where current linkage and branch identity are rechecked.
    * A negative result is memoized against the full Git identity, so a changed head/upstream bypasses
@@ -4299,6 +4357,7 @@ export class SessionManager {
           identityProof: candidate.identityProof,
           reasons: candidate.reasons,
           ...(candidate.verifiedMergedHead ? { verifiedMergedHead: candidate.verifiedMergedHead } : {}),
+          ...(candidate.containingMergedHead ? { containingMergedHead: candidate.containingMergedHead } : {}),
           state: "pending",
           createdAt: now,
           updatedAt: now,
@@ -4337,6 +4396,7 @@ export class SessionManager {
           dataDir: this.dataDir,
           ownerHash: this.runnerOwnerHash,
           ...(record.verifiedMergedHead ? { verifiedMergedHead: record.verifiedMergedHead } : {}),
+          ...(record.containingMergedHead ? { containingMergedHead: record.containingMergedHead } : {}),
           requireDelivered: record.trigger === "archive_retirement",
           retainRefs,
           beforeRemove,
@@ -4384,6 +4444,7 @@ export class SessionManager {
       record.completedAt = Date.now();
       this.cleanupJournal.complete(record);
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
+      this.deferredContainmentRetryAt.delete(this.deferredMergedHeadKey(record));
       this.scheduleRetainedRefReclaims(record.sessionId, record.worktreeId, record.cleanupId);
       return true;
     } catch (error) {
@@ -4695,6 +4756,22 @@ export class SessionManager {
       meta = latest;
       worktree = current;
     }
+    let containment: MergedPullRequestContainment | undefined;
+    if (options.refreshMergedHead !== false && !deliveredHead && !successorHead) {
+      containment = await this.proveMergedPullRequestContainment(meta, worktree);
+      const latest = this.store.readMeta(sessionId);
+      if (!latest) return { removed: false, reason: "session became unavailable while checking forge state" };
+      const current = this.attributedWorktrees(latest)
+        .find((item) => sameWorktreePath(latest.context, item.path, path));
+      if (!current) {
+        return { removed: false, reason: "the worktree record was removed while checking forge state" };
+      }
+      if (current.id !== worktree.id || current.branch !== worktree.branch || current.source === "attached") {
+        return { removed: false, reason: "worktree linkage changed while checking forge state" };
+      }
+      meta = latest;
+      worktree = current;
+    }
     const selectedIsLaunching = this.launchingSelection(meta, worktree.path);
     if (selectedIsLaunching) {
       return this.deferWorktreeRetirement(meta, worktree, "provider_launching", options.trigger ?? "explicit_discard");
@@ -4756,6 +4833,8 @@ export class SessionManager {
       if (deliveredHead && !cleanup.verifiedMergedHead) cleanup.verifiedMergedHead = deliveredHead;
       // A later merged pull request from the same branch delivered this exact tip (#3981).
       if (successorHead) cleanup.verifiedMergedHead = successorHead;
+      // A merged pull request's history contains this tip (#4068); removal re-proves it.
+      if (containment?.state === "contained") cleanup.containingMergedHead = containment.headOid;
       if (teardownIdentityError) {
         const now = Date.now();
         cleanup.teardown = {
@@ -4793,6 +4872,10 @@ export class SessionManager {
             (result.reason === "unpushed" || result.reason === "not_delivered")) {
           return { removed: false, reason: "forge state is temporarily unavailable" };
         }
+        if (options.trigger === "archive_retirement" && containment?.state === "unavailable" &&
+            (result.reason === "no_upstream" || result.reason === "unpushed" || result.reason === "not_delivered")) {
+          return { removed: false, reason: "forge state is temporarily unavailable" };
+        }
         if (result.reason === "branch_changed") {
           return {
             removed: false,
@@ -4805,7 +4888,7 @@ export class SessionManager {
           detached_head: `the worktree has a detached HEAD instead of its registered branch ${JSON.stringify(worktree.branch)}`,
           not_runner_owned: "runner ownership could not be proven",
           dirty: "the worktree has uncommitted changes",
-          no_upstream: "the branch has no upstream",
+          no_upstream: noUpstreamRefusal(containment?.state),
           unpushed: "the branch has unpushed commits",
           not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
           unavailable: "Git state is unavailable or changed during cleanup",
@@ -5041,7 +5124,7 @@ export class SessionManager {
 
   /** Conservative startup/periodic reconciliation. Forge failures retain state, while a durable
    * terminal state is remembered so dirty or active trees can be retried after they become safe. */
-  async reconcileWorktreePullRequests(): Promise<void> {
+  async reconcileWorktreePullRequests(options: { replayDeferredRetirements?: boolean } = {}): Promise<void> {
     if (this.worktreePullRequestReconciling || this.shuttingDown) return;
     this.worktreePullRequestReconciling = true;
     try {
@@ -5125,7 +5208,7 @@ export class SessionManager {
           this.log(`pull request worktree reconciliation failed for ${boundedSessionIdForLog(candidate.sessionId)}: ${errText(error)}`);
         }
       }
-      await this.replayDeferredWorktreeRetirements();
+      if (options.replayDeferredRetirements !== false) await this.replayDeferredWorktreeRetirements();
     } catch (error) {
       this.log(`pull request worktree reconciliation could not enumerate sessions: ${errText(error)}`);
     } finally {
@@ -5546,16 +5629,22 @@ export class SessionManager {
 
   /** Account probes are no-turn provider launches, but the provider may still mutate its effective
    * HOME while initializing. Bind them to the same attested owner lease as sessions and TUIs. */
-  async prepareDiscoveryProbe(agent: AgentDefinition, env: Record<string, string>): Promise<{ settle(proofs: Promise<boolean>[]): Promise<void> }> {
+  async prepareDiscoveryProbe(agent: AgentDefinition, env: Record<string, string>, options: { useLaunchHome?: boolean } = {}): Promise<{ env?: Record<string, string>; settle(proofs: Promise<boolean>[]): Promise<void> }> {
     if (this.shuttingDown) throw new Error("provider-HOME ownership is unavailable");
     const context = agent.context ?? { kind: "native" as const };
     // WSL discovery already runs in its distro, outside the host credential HOME. Native lease
     // admission cannot own an in-distro HOME; session isolation handles that context separately.
     if (context.kind === "wsl") return { settle: async () => {} };
     if (!this.providerHomeLeases) throw new Error("provider-HOME ownership is unavailable");
-    // Discovery inherits the runner's environment, including HOME and provider-specific HOME
-    // overrides. Lease that actual effective environment, not just the configured overlay.
-    const effectiveEnv = Object.fromEntries(Object.entries({ ...this.runnerEnvironment, ...env }).filter((entry): entry is [string, string] => entry[1] !== undefined));
+    // Native installation probes use runner-private state. Explicit configured launches keep
+    // their environment. Return the exact effective environment so every probe (including
+    // filesystem model fallbacks) uses the HOME that admission leased.
+    const explicitHome = Object.keys(env).some((key) => ["HOME", "USERPROFILE", "CLAUDE_CONFIG_DIR", "CODEX_HOME", "PI_CODING_AGENT_DIR"].includes(
+      process.platform === "win32" ? key.toUpperCase() : key));
+    const nativeProvider = ["claude-code", "codex", "codex-app-server", "pi"].includes(agent.driver ?? "acp");
+    const isolate = !options.useLaunchHome && (agent.source === "discovered" || (agent.source === "config" && nativeProvider && !explicitHome));
+    const probeEnv = isolate ? { ...env, ...isolatedDiscoveryEnvironment(this.stateDir, { ...this.runnerEnvironment, ...env }) } : env;
+    const effectiveEnv = Object.fromEntries(Object.entries({ ...this.runnerEnvironment, ...probeEnv }).filter((entry): entry is [string, string] => entry[1] !== undefined));
     const reference = await this.providerHomeLeases.acquireReference({ driver: agent.driver ?? "acp", command: agent.command, context, env: effectiveEnv },
       { isCurrent: () => !this.shuttingDown });
     if (this.shuttingDown) {
@@ -5563,7 +5652,7 @@ export class SessionManager {
       throw new Error("configured ACP probe was cancelled by shutdown");
     }
     let settled = false;
-    return { settle: async (proofs) => {
+    return { env: effectiveEnv, settle: async (proofs) => {
       if (settled) return;
       settled = true;
       await this.settleProviderProcessReference(reference, proofs);
@@ -6362,7 +6451,10 @@ export class SessionManager {
     }
     this.reconcileReviewSessions();
     this.store.reapDeletedMarkers();
-    void this.reconcileWorktreePullRequests();
+    // Startup already scheduled every pending record above, including records without a session
+    // row and force cleanups. Only later periodic passes should sweep them again. Keep this at
+    // the scheduling boundary: awaiting rollback/deletion callers must run their own reaper.
+    void this.reconcileWorktreePullRequests({ replayDeferredRetirements: false });
     this.resumeProviderAuthDismissals();
     // Keep archive/index work out of synchronous startup and provider command paths. One bounded
     // pass shortly after startup plus the periodic timer gradually drains legacy oversized logs.
@@ -6810,10 +6902,23 @@ export class SessionManager {
       reportMaterialized(false);
       return false;
     }
+    // A delegated image reviewer (#4074) is never relaunched, least of all as an ordinary session.
+    const priorImageReviewer = this.store.readMeta(spec.sessionId)?.uiEvidenceReviewer;
+    if (priorImageReviewer || (spec.uiEvidenceReviewer && this.store.has(spec.sessionId))) {
+      durable?.failed("a delegated image reviewer runs once and cannot be relaunched", "INVALID_COMMAND");
+      reportMaterialized(false);
+      return false;
+    }
     if (spec.review) {
       const review = await this.prepareReviewLaunch(spec, initialPrompt ?? "", authorization.error);
       if ("error" in review) {
         durable?.failed(review.error, "INVALID_COMMAND");
+        reportMaterialized(false);
+        return false;
+      }
+      if ("settled" in review) {
+        // A recorded equivalence (#4075) completes without a provider.
+        durable?.completed();
         reportMaterialized(false);
         return false;
       }
@@ -7152,6 +7257,7 @@ export class SessionManager {
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
+      ...(spec.uiEvidenceReviewer ? { uiEvidenceReviewer: { reviewId: spec.uiEvidenceReviewer.reviewId } } : {}),
       ...(spec.review ? { review: {
         ...spec.review, checkout: repoPath, launchOwner: this.lockOwner,
         ...(this.preparedReviewRounds.has(spec.sessionId) ? { round: this.preparedReviewRounds.get(spec.sessionId)! } : {}),
@@ -9368,6 +9474,8 @@ export class SessionManager {
             // Live requests published after the checkpoint are still open: a later baseline that
             // cannot cover them must account them as observed (#3086).
             let live: ClaudeLiveUsage = [];
+            // A republication that no settled record closed was cut short: its checkpoint is stale.
+            let interrupted = false;
             let frozen: { logEpoch: number; throughSeq: number } | undefined;
             while (true) {
               const page = this.store.readEventPage(sessionId, { afterSeq: cursor, limit: HISTORY_PAGE_MAX_EVENTS, ...frozen });
@@ -9377,16 +9485,17 @@ export class SessionManager {
                 if (event.payload.claudeUsageCheckpoint?.sessionId === resumeId) {
                   checkpoint = event.payload.claudeUsageCheckpoint;
                 }
-                if (event.payload.liveUsage === "settled") live = [];
+                if (event.payload.liveUsage === "settled") { live = []; interrupted = false; }
                 else if (event.payload.liveUsage === "provisional") live.push(event.payload);
                 // Republished in order: a restart between two resumes after the last one written.
-                else if (event.payload.liveUsage === "republished") live.shift();
+                else if (event.payload.liveUsage === "republished") { live.shift(); interrupted = true; }
               }
               if (!page.page.hasMore) break;
               cursor = page.page.nextAfterSeq;
               frozen = { logEpoch: page.page.logEpoch, throughSeq: page.page.throughSeq };
             }
-            return { ...resumed(), ...(live.length > 0 ? { claudeLiveUsage: live } : {}) };
+            return { ...resumed(), ...(live.length > 0 ? { claudeLiveUsage: live } : {}),
+              ...(interrupted ? { claudeRepublicationInterrupted: true } : {}) };
           })(),
           acpSessionContext: meta.acpSessionContext,
           isolation,
@@ -10972,7 +11081,7 @@ export class SessionManager {
     const promoted = request.promotePromptId
       ? entry.queue.find((prompt) => prompt.id === request.promotePromptId)
       : undefined;
-    const activeEligibility = this.steeringEligibility(entry, promoted);
+    const activeEligibility = this.steeringEligibility(entry, promoted, request);
     if (!activeEligibility.eligible) {
       return hasDirect && activeEligibility.reason === "no_active_provider_turn"
         ? this.handleDefiniteSteeringFailure(operation, activeEligibility.reason, activeEligibility.message)
@@ -11020,16 +11129,37 @@ export class SessionManager {
       prompt.durable?.beginSteering && prompt.durable.steeringRejected);
   }
 
+  /** #4022: direct text from the child's controlling Orchestrator into a turn its control plane
+   * started from the durable prompt outbox. The control plane proves the ancestry and names the
+   * exact command; an automation's command id never matches, and the steering attempt keeps its
+   * own receipt without touching the command's lifecycle. */
+  private isControllingOrchestratorSteer(entry: ActiveSession, request: SteeringRequest | undefined): boolean {
+    const commandId = request?.controllingOrchestratorCommandId;
+    return typeof commandId === "string" && commandId.length > 0 && !request?.promotePromptId &&
+      entry.currentDurablePromptSteerable === true && entry.currentDurable?.commandId === commandId;
+  }
+
+  /** Durable turns refuse ordinary steering. An async answer continues the work without taking
+   * ownership of the command's receipt, and the controlling Orchestrator may steer its own prompts. */
+  private durableTurnRefusesSteering(
+    entry: ActiveSession,
+    source: QueuedPrompt | undefined,
+    request: SteeringRequest | undefined,
+  ): boolean {
+    return Boolean(entry.currentDurable) && !this.isSteerableAsyncAnswer(source) &&
+      !this.isControllingOrchestratorSteer(entry, request);
+  }
+
   /** Authoritative runner-known steering admission gates. Protocol negotiation is owned by the
    * control plane, so callers must additionally require the steering protocol before presenting
    * this projection as actionable. */
-  private steeringEligibility(entry: ActiveSession, prompt?: QueuedPrompt): SteeringEligibility {
+  private steeringEligibility(entry: ActiveSession, prompt?: QueuedPrompt, request?: SteeringRequest): SteeringEligibility {
     if (entry.historyIntegrityFailure) {
       return { eligible: false, reason: "history_integrity_failure", message: entry.historyIntegrityFailure };
     }
     // An answer continues work requested by the automation without taking ownership of its
     // command receipt. Ordinary steering still cannot alter an automation-owned turn.
-    if ((entry.currentDurable && !this.isSteerableAsyncAnswer(prompt)) || entry.currentSessionCommand) {
+    if (this.durableTurnRefusesSteering(entry, prompt, request) || entry.currentSessionCommand) {
       return {
         eligible: false,
         reason: "policy_blocked",
@@ -11151,7 +11281,7 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+    if (this.durableTurnRefusesSteering(entry, operation.source, request)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
     }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
@@ -11198,7 +11328,7 @@ export class SessionManager {
         "Resolve the pending agent input before steering the active turn.",
       );
     }
-    if (entry.currentDurable && !this.isSteerableAsyncAnswer(operation.source)) {
+    if (this.durableTurnRefusesSteering(entry, operation.source, request)) {
       return this.handleDefiniteSteeringFailure(operation, "policy_blocked", "automation-owned turns cannot be steered");
     }
     if (entry.cancelRequested || entry.interruptRequested || this.queueHeld(entry)) {
@@ -13012,6 +13142,8 @@ export class SessionManager {
         }
         entry.activeTurnConfig = normalizedConfig(next.config ?? this.store.readMeta(sessionId)?.config);
         entry.currentDurable = next.durable;
+        entry.currentDurablePromptSteerable = Boolean(next.durable && !next.sessionCommand &&
+          !next.recoveredQuestion && !next.syntheticRecovery && !next.providerRecovery && !next.backgroundJobIds?.length);
         entry.currentSessionCommand = next.sessionCommand?.lifecycle;
         entry.sessionCommandProviderStarted = false;
         try {
@@ -13028,6 +13160,7 @@ export class SessionManager {
           // fence attached to a drain generation that no longer owns a turn.
           if (entry.interruptRequested) this.settleTurnInterruption(sessionId, entry);
           entry.currentDurable = undefined;
+          entry.currentDurablePromptSteerable = undefined;
           entry.currentSessionCommand = undefined;
           entry.sessionCommandProviderStarted = false;
           entry.providerPromptSubmitted = false;
@@ -17307,6 +17440,52 @@ export class SessionManager {
     return "proven";
   }
 
+  /** Replay's counterpart of the containment probe an explicit discard runs (#4068). A deferred
+   * record is journaled before that probe, so without this a tree whose tip is an earlier head of
+   * a merged pull request would be refused on every replay. A tip the record already proves exactly
+   * needs no probe. Negative and unavailable answers back off like the merged-head refresh. A newly
+   * proven head replaces the journaled one; any other answer leaves it, because safe removal
+   * re-proves containment of the current tip before deleting anything. Callers hold the session's
+   * worktree lane. */
+  private async refreshDeferredContainment(
+    record: WorktreeCleanupRecord,
+  ): Promise<MergedPullRequestContainment["state"] | "not_needed"> {
+    if (record.trigger === "pull_request_reconciliation") return "not_needed";
+    const locate = (meta: SessionMeta | null | undefined) => meta
+      ? this.attributedWorktrees(meta).find((item) =>
+        item.id === record.worktreeId && sameWorktreePath(meta.context, item.path, record.worktreePath) &&
+        (!record.branch || item.branch === record.branch))
+      : undefined;
+    const meta = this.store.readMeta(record.sessionId);
+    const worktree = locate(meta);
+    if (!meta || !worktree || worktree.source === "attached") return "not_needed";
+    let head: string;
+    try {
+      head = await worktreeHead(worktree.path, { context: meta.context });
+    } catch {
+      return "not_needed";
+    }
+    if (head === record.verifiedMergedHead) return "not_needed";
+    const backoffKey = this.deferredMergedHeadKey(record);
+    const retryAt = this.deferredContainmentRetryAt.get(backoffKey);
+    if (retryAt !== undefined && retryAt > this.worktreePullRequestDiscoveryNow()) return "unavailable";
+    const proof = await this.proveMergedPullRequestContainment(meta, worktree);
+    if (proof.state === "ineligible") return proof.state;
+    if (proof.state !== "contained") {
+      this.deferredContainmentRetryAt.set(
+        backoffKey,
+        this.worktreePullRequestDiscoveryNow() + WORKTREE_PR_DISCOVERY_NEGATIVE_RETRY_MS,
+      );
+      return proof.state;
+    }
+    const current = locate(this.store.readMeta(record.sessionId));
+    if (!current || current.source === "attached" || current.branch !== worktree.branch) return "unavailable";
+    this.deferredContainmentRetryAt.delete(backoffKey);
+    record.containingMergedHead = proof.headOid;
+    this.cleanupJournal.add(record);
+    return "contained";
+  }
+
   /** Exactly the cleanup journal's own record identity, so the backoff entry is dropped by the
    * same calls that retire the record it belongs to. */
   private deferredMergedHeadKey(record: Pick<WorktreeCleanupRecord, "sessionId" | "worktreeId">): string {
@@ -17353,6 +17532,7 @@ export class SessionManager {
       if (worktreeFenced()) return logFenced();
       let forgeState: "merged" | "unmerged" | "unavailable" = "unavailable";
       let successorState: Awaited<ReturnType<SessionManager["refreshDeferredSuccessorHead"]>> = "not_needed";
+      let containmentState: Awaited<ReturnType<SessionManager["refreshDeferredContainment"]>> = "not_needed";
       if (!record.worktreeRemovedAt) {
         forgeState = await this.refreshDeferredMergedHead(record);
         if (worktreeFenced()) return logFenced();
@@ -17372,6 +17552,8 @@ export class SessionManager {
           }
           return;
         }
+        containmentState = await this.refreshDeferredContainment(record);
+        if (worktreeFenced()) return logFenced();
       }
 
       const cleanupLeaseOwner = `${this.lockOwner}:cleanup-replay:${randomUUID()}`;
@@ -17397,6 +17579,9 @@ export class SessionManager {
                 (removal.reason === "no_upstream" || removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && successorState === "unavailable" &&
                 (removal.reason === "unpushed" || removal.reason === "not_delivered")) return;
+            if (record.trigger === "archive_retirement" && containmentState === "unavailable" &&
+                (removal.reason === "no_upstream" || removal.reason === "unpushed" ||
+                  removal.reason === "not_delivered")) return;
             if (record.trigger === "archive_retirement" && removal.reason !== "unavailable") {
               const reason = removal.reason === "branch_changed"
                 ? `the worktree is checked out on branch ${JSON.stringify(removal.checkedOutBranch)}, not its registered branch`
@@ -17404,7 +17589,7 @@ export class SessionManager {
                     detached_head: "the worktree has a detached HEAD",
                     not_runner_owned: "runner ownership could not be proven",
                     dirty: removal.dirtyPathsReason ?? "the worktree has uncommitted changes",
-                    no_upstream: "the branch has no upstream",
+                    no_upstream: noUpstreamRefusal(containmentState === "not_needed" ? undefined : containmentState),
                     unpushed: "the branch has unpushed commits",
                     not_delivered: "the worktree head is not on the default branch or a verified merged pull request",
                   }[removal.reason];
@@ -17449,6 +17634,7 @@ export class SessionManager {
       }
       this.cleanupJournal.remove(record.sessionId, record.worktreeId ?? "legacy");
       this.deferredMergedHeadRetryAt.delete(this.deferredMergedHeadKey(record));
+      this.deferredContainmentRetryAt.delete(this.deferredMergedHeadKey(record));
       return true;
     } catch {
       // Journal persistence can fail after the external resources were successfully reclaimed.
@@ -17554,10 +17740,13 @@ export class SessionManager {
     optionId: string | null,
     resolvedByParentSessionId?: string,
     resolvedBy?: unknown,
+    automaticResponse?: unknown,
   ): void {
     // Who decided (#2628), recorded on this exact resolution. A Parent Control decision names its
     // parent session instead, and a malformed value is dropped rather than recorded.
     const decidedBy = resolvedByParentSessionId ? undefined : permissionResolver(resolvedBy);
+    // Full Control policy attribution (#4063): only as the server sent it, never beside a person.
+    const automatic = decidedBy?.kind === "user" ? undefined : parseFullControlAutomaticResponse(automaticResponse);
     const setupApproval = this.worktreeSetupApprovals.get(`${sessionId}:${requestId}`);
     if (setupApproval) {
       this.worktreeSetupApprovals.delete(`${sessionId}:${requestId}`);
@@ -17585,7 +17774,7 @@ export class SessionManager {
       optionId = null;
       this.log(JSON.stringify({ event: "campaign_operation_evidence_stale", sessionId, requestId }));
     }
-    const delivered = entry ? entry.client.resolvePermission(requestId, optionId) : false;
+    const delivered = entry ? entry.client.resolvePermission(requestId, optionId, automatic) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -17644,8 +17833,11 @@ export class SessionManager {
     occurrenceId?: string,
     answerSummary?: QuestionAnswerSummaryEntry[],
     answeredByUserId?: string,
+    automaticResponse?: unknown,
   ): void {
     const entry = this.active.get(sessionId);
+    // Full Control policy attribution (#4063) applies only to a dismissal, as the server sent it.
+    const automatic = action === "dismiss" && !answeredByUserId ? parseFullControlAutomaticResponse(automaticResponse) : undefined;
     const asyncQuestion = pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
       .find((request) => request.requestId === requestId && request.kind === "question" && request.async);
     if (asyncQuestion) {
@@ -17666,7 +17858,7 @@ export class SessionManager {
       });
       return;
     }
-    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action) : false;
+    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action, automatic) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -18918,6 +19110,41 @@ export class SessionManager {
     }
   }
 
+  /** v284 (#4067): perform one approved forge action the control plane checked, through the
+   * requesting session's own `gh` login and context. A fixed outcome, never tool output. `gh` runs
+   * from the filesystem root, never from the session's worktree, so no repository configuration the
+   * agent can write is read or executed on its behalf. */
+  async forgeDecisionAction(
+    message: ForgeDecisionActionMessage,
+    options: { gh?: GhRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<ForgeDecisionActionResultMessage> {
+    const base = { type: "forge_decision_action_result" as const, requestId: message.requestId,
+      sessionId: message.sessionId, occurrenceId: message.occurrenceId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta) {
+      return { ...base, outcome: "refused", refusal: { reason: "runner_unavailable",
+        summary: "The session is not known to this runner." } };
+    }
+    try {
+      const agentEnv = options.agentEnv?.(meta) ?? {};
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      const result = message.action?.kind === "branch_deletion"
+        ? await executeBranchDeletion(message.action, gh)
+        : message.action?.kind === "pr_merge_enqueue"
+          ? await executePullRequestEnqueue(message.action, gh)
+          : message.action?.kind === "pr_merge_observe"
+            ? await observePullRequestMerge(message.action, gh)
+            : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };
+      this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, kind: message.action?.kind, outcome: result.outcome,
+        ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+      return { ...base, ...result };
+    } catch {
+      return { ...base, outcome: "uncertain" };
+    }
+  }
+
   /** Read-only GitHub status of the pull requests a campaign's work items name (#2417 slice 8),
    * through this runner's `gh` login in the root Orchestrator's repository context, and GitLab
    * merge requests through its `glab` login when the control plane asks for them (#3600). Only
@@ -19013,17 +19240,17 @@ export class SessionManager {
     const base = { type: "github_issue_closure_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
     if (!meta?.orchestrator || !meta.repoPath) {
-      return { ...base, ok: false, error: "Issue closure requires a runner-local Orchestrator repository" };
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a runner-local Orchestrator repository" };
     }
     if (this.campaignHostTargetRefusal(meta)) {
-      return { ...base, ok: false, error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
+      return { ...base, ok: false, failure: "runner_failed", error: "Issue closure requires a valid local or SSH host execution target belonging to its runner" };
     }
     const issue = message.operation === "inspect" ? message.issue : message.snapshot.issue;
     if (!meta.orchestrator.issueNumbers?.includes(issue)) {
-      return { ...base, ok: false, error: "Issue is outside the human-authorized campaign scope" };
+      return { ...base, ok: false, failure: "campaign_authority_changed", error: "Issue is outside the human-authorized campaign scope" };
     }
     const revision = message.operation === "inspect" ? message.scopeRevision : message.snapshot.scopeRevision;
-    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, error: "Campaign scope revision is stale; synchronize and request renewed review" };
+    if (meta.orchestrator.issueScope && revision !== meta.orchestrator.issueScope.revision) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Campaign scope revision is stale; synchronize and request renewed review" };
     const boundedAuthorityCurrent = (current: SessionMeta): boolean => {
       if (message.operation !== "execute" || !message.snapshot.issueAdmission) return true;
       const control = current.orchestrator?.control;
@@ -19034,15 +19261,15 @@ export class SessionManager {
         control.boundary.operations.includes("issue_closure") &&
         Boolean(control.boundary.issueAuthority?.closureReasons.includes(message.snapshot.reason));
     };
-    if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, error: "Bounded closure authority is unsynchronized" };
+    if (!boundedAuthorityCurrent(meta)) return { ...base, ok: false, failure: "campaign_authority_changed", error: "Bounded closure authority is unsynchronized" };
     const run = issueClosureRun(meta.context, meta.repoPath, options.agentEnv?.(meta) ?? {});
     try {
       if (message.operation === "inspect") {
-        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests);
-        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Repository differs from the authorized scope" };
+        const inspection = await inspectGithubIssueClosure(issue, run, message.deliveryPullRequests, message.epicMembers === true);
+        if (meta.orchestrator.issueScope && inspection.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Repository differs from the authorized scope" };
         return { ...base, ok: true, inspection };
       }
-      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, error: "Closure repository differs from the authorized scope" };
+      if (meta.orchestrator.issueScope && message.snapshot.repository.toLowerCase() !== meta.orchestrator.issueScope.repository) return { ...base, ok: false, failure: "repository_changed", error: "Closure repository differs from the authorized scope" };
       const digest = createHash("sha256").update(JSON.stringify(message.snapshot)).digest("hex");
       const result = await executeGithubIssueClosure(message.snapshot, run, () => {
         const fresh = this.store.readMeta(message.sessionId);
@@ -19063,11 +19290,14 @@ export class SessionManager {
         }) !== null;
       });
       this.log(JSON.stringify({ event: "github_issue_closure_result", sessionId: message.sessionId,
-        occurrenceId: message.occurrenceId, outcome: result.outcome }));
+        occurrenceId: message.occurrenceId, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
       return { ...base, ok: true, result };
     } catch (error) {
-      return { ...base, ok: false, error: error instanceof IssueClosureInspectionError ? error.message
-        : "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
+      // Execution throws only before its mutation fence: a mutation failure is an `uncertain` result.
+      return error instanceof IssueClosureInspectionError
+        ? { ...base, ok: false, failure: error.failure, error: error.message }
+        : { ...base, ok: false, failure: "evidence_unavailable",
+          error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
     }
   }
 

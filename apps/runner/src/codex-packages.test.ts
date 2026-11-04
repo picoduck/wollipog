@@ -59,7 +59,7 @@ test("all configured HOME, CODEX_HOME and account homes are inventoried across h
   const homes = configuredCodexHomes("/host", {
     hostEnv: { HOME: "/host-home", CODEX_HOME: "/host-codex", AGENT_CODEX: "/agent-codex" },
     agents: [{ id: "claude", env: { HOME: "/agent-home", CODEX_HOME: { fromEnv: "AGENT_CODEX" } } }],
-    providerAccounts: [{ directory: "/account" }],
+    providerAccounts: [{ label: "Account", directory: "/account" }],
     sessions: [{ env: { HOME: "/session-home", CODEX_HOME: "/session-codex" },
       providerCredentialHome: "/credential", providerConversationHome: "/conversation",
       pendingProviderCredentialHome: "/pending" } as unknown as SessionMeta],

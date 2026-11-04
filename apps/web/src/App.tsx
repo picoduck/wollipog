@@ -22,16 +22,18 @@ import { InstanceProvider, desktopMultiInstanceAvailable } from "./InstanceProvi
 import { ActiveInstanceConnectionProvider, activeInstanceConnection, useInstances } from "./instances-context.js";
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
-import { useIsMobile } from "./components/useIsMobile.js";
+import { useIsCompact, useIsMobile } from "./components/useIsMobile.js";
 import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
 import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "./entity-title.js";
 import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
+import { SessionTypeIcon } from "./components/SessionTypeIcon.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import {
+  handleSidePanelChord,
   openGoToFile,
   openSideChat,
   terminalToolShowing,
@@ -80,7 +82,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { backLabel, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";
 import { useRoutedSessionLookup } from "./routed-session-lookup.js";
@@ -466,6 +468,7 @@ export function Shell() {
   // props — so a session upsert anywhere re-renders every visible row despite the memo. Making the
   // callbacks stable in InboxList and InboxView was necessary and not sufficient.
   const isMobile = useIsMobile();
+  const isCompact = useIsCompact();
   const rightPanelOpen = rightPanel.open;
   const setRightPanelExpanded = rightPanel.setExpanded;
   const expandSession = useCallback((sessionId: string, focusComposer = false) => {
@@ -716,10 +719,6 @@ export function Shell() {
         if (filesSupported) openGoToFile(rightPanel);
         else rightPanel.show("launcher");
       }
-      if (matchesShortcut(e, "open-review")) {
-        e.preventDefault();
-        rightPanel.openMode("review");
-      }
       // Side Chat: opens the panel on it with focus in its message field, never closes it (#2862).
       if (matchesShortcut(e, "open-side-chat")) {
         e.preventDefault();
@@ -729,18 +728,9 @@ export function Shell() {
         e.preventDefault();
         toggleTerminal();
       }
-      // The Side Panel toggle's chord: closing keeps the tool, so it reopens on the last one (#1260).
-      // Opening lands on the tool switcher, so the arrow keys reach every other tool (#2843).
-      if (matchesShortcut(e, "toggle-side-panel") && activeSession) {
-        e.preventDefault();
-        const opening = !rightPanel.open;
-        rightPanel.toggle();
-        if (opening) {
-          window.requestAnimationFrame(() => {
-            document.querySelector<HTMLElement>("#right-panel .rpanel-switcher")?.focus();
-          });
-        }
-      }
+      // The Side Panel toggle, Review and the other tools' chords (#1260). Only a loaded session has
+      // a panel: a missing one's page is a placeholder (#2202).
+      if (activeSession) handleSidePanelChord(e, rightPanel);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -838,6 +828,7 @@ export function Shell() {
             sessionTitle={activeSession
               ? sessionDisplayTitle(activeSession.title) || "Session"
               : routedSessionPlaceholder(view.id, routedSessionLookup, conn, snapshotLoaded).title}
+            sessionType={activeSession ? <SessionTypeIcon session={activeSession} /> : null}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
@@ -872,6 +863,8 @@ export function Shell() {
             resetKey={viewPath(view)}
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
+            pageDescription={viewDescription(view)}
+            pageTabs={viewHasHeaderTabs(view, { phone: isMobile, compact: isCompact })}
             pageWidth={viewPageWidth(view)}
           >
           <Suspense fallback={<LazyRouteLoading title={viewTitle(view, entityTitle)} pending={pendingRouteTitleFocus} />}>
@@ -907,12 +900,12 @@ export function Shell() {
           {/* A route into a feature this device has switched off keeps its page and says so:
               removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
           {(view.name === "runs" || view.name === "run") && (
-            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
+            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} pageDescription={viewDescription(view)} onOpenSettings={openExperimentalSettings}>
               {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} member={view.member} />}
             </ExperimentGate>
           )}
           {(view.name === "pods" || view.name === "pod") && (
-            <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
+            <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} pageDescription={viewDescription(view)} onOpenSettings={openExperimentalSettings}>
               {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} member={view.member} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />}
             </ExperimentGate>
           )}
@@ -920,7 +913,11 @@ export function Shell() {
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
           {view.name === "usage" && (
-            <UsageView tab={view.tab} onSelectTab={(tab) => navigate(tab ? { name: "usage", tab } : { name: "usage" })} />
+            <UsageView
+              tab={view.tab}
+              onSelectTab={(tab) => navigate(tab ? { name: "usage", tab } : { name: "usage" })}
+              onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
+            />
           )}
           {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
           {view.name === "settings" && (
@@ -1057,6 +1054,7 @@ export function Header({
   view,
   sessionActions,
   sessionTitle,
+  sessionType,
   onSessionBack,
 }: {
   view: View;
@@ -1064,6 +1062,8 @@ export function Header({
    * a row in the rail's More sheet, and the phone layout has no instance switcher (#1970). */
   sessionActions?: React.ReactNode;
   sessionTitle?: string;
+  /** The open session's `SessionTypeIcon`, before its title as on the desktop session bar (#4076). */
+  sessionType?: React.ReactNode;
   onSessionBack?: () => void;
 }) {
   const title = viewTitle(view);
@@ -1082,7 +1082,7 @@ export function Header({
           >
             <ChevronLeftIcon size={20} />
           </button>
-          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
+          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionType}{sessionTitle ?? title}</h1>
         </>
       ) : (
         <h1 id="page-title" tabIndex={-1}>{title}</h1>

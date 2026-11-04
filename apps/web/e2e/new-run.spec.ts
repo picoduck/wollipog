@@ -1,4 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
+import { mkdirSync } from "node:fs";
+import { join } from "node:path";
 
 /**
  * New Multi-Agent Run (#2978; docs/design-system.md §7.1–§7.3, §7.5, §8.4–§8.5, §13.2), measured in
@@ -34,6 +36,32 @@ async function verticalScrollers(page: Page): Promise<string[]> {
 for (const width of [1440, 390]) {
   test.describe(`at ${width}px`, () => {
     test.use({ viewport: { width, height: width === 1440 ? 900 : 844 } });
+
+    test("an automatic run checks default A rather than selecting ready account B implicitly", async ({ page }) => {
+      await open(page, "account-default-a");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Verify the isolated account setup");
+      await chooseProject(page, "Wollipog");
+      const choice = dialog(page).getByRole("checkbox", { name: /^Claude/ });
+      await expect(choice).toBeDisabled();
+      await expect(choice).not.toBeChecked();
+      await expect(dialog(page).getByText("The default provider account is not ready on Build Server.")).toBeVisible();
+      await expect(dialog(page).getByRole("button", { name: "Run Agents", exact: true })).toBeDisabled();
+      const evidenceDir = process.env.WOLLIPOG_EVIDENCE_DIR;
+      if (evidenceDir) {
+        mkdirSync(evidenceDir, { recursive: true });
+        await page.waitForTimeout(600); // Evidence only: let the button's settled state finish painting.
+        await page.screenshot({ path: join(evidenceDir, `default-account-required-${width}.png`), fullPage: true });
+      }
+      await open(page, "account-default-b");
+      await dialog(page).getByRole("textbox", { name: "Task" }).fill("Verify the isolated account setup");
+      await chooseProject(page, "Wollipog");
+      await expect(dialog(page).getByRole("checkbox", { name: /^Claude/ })).toBeChecked();
+      await expect(dialog(page).getByRole("button", { name: "Run 1 Agent", exact: true })).toBeEnabled();
+      if (evidenceDir) {
+        await page.waitForTimeout(600);
+        await page.screenshot({ path: join(evidenceDir, `saved-account-ready-${width}.png`), fullPage: true });
+      }
+    });
 
     test("the primary's reason is in the footer, in view, and follows the fields", async ({ page }) => {
       await open(page);

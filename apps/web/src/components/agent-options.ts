@@ -191,13 +191,6 @@ export function currentAgentSelectionIssue(
   return savedAgentSelection(options, choice, agents).issue;
 }
 
-/** Multi-agent runs must never preselect or render a discovery row known to be unavailable. */
-export function runnableAgentIds(agents: AgentDefinition[]): string[] {
-  return agentOptions(agents)
-    .filter((option) => !option.disabled)
-    .map((option) => option.agent.id);
-}
-
 /** One-line context shown under the dropdown: where it runs, version, and auth state. */
 export function agentMeta(a: AgentDefinition): string {
   const where = a.context?.kind === "wsl" ? `WSL · ${a.context.distro}` : "native host";

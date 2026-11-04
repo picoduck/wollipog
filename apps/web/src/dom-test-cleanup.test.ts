@@ -240,8 +240,8 @@ test("the self-rescheduling detector reads each timer shape, and nothing else", 
  */
 test("the timer-owning derivation still finds the files it was built for", () => {
   const files = sourceFiles(SRC);
-  assert.ok(timerOwningModules(files).includes("UsageView.tsx"),
-    "UsageView owns a setInterval; a derivation that misses it is protecting nothing");
+  assert.ok(timerOwningModules(files).includes("SubscriptionsTab.tsx"),
+    "SubscriptionsTab (Usage and Cost) owns a setInterval; a derivation that misses it is protecting nothing");
   assert.ok(timerOwningModules(files).includes("AgentsPanel.tsx"),
     "AgentsPanel hands a setTimeout its own function, the bare-identifier shape");
   assert.ok(timerOwningModules(files).includes("store.tsx"),

@@ -1,17 +1,24 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import test from "node:test";
-import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
-  type CampaignControl, type RunnerMetadata, type WorkflowDecisionView, type CampaignWorkItemDetail } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignControl, type CampaignPublicationAdmissionFailure, type RunnerMetadata, type WorkflowDecisionView,
+  type CampaignWorkItemDetail, type IssueClosureDeliveryGap, type IssueClosureEpicMembers, ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, issueClosureDeliveryFailure,
+  issueClosureDeliveryGap, normalizeIssueClosureDeliveryGaps, normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { ControlPlaneDb, campaignRequestToken } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { campaignBoundaryCurrent } from "./campaign-authority.js";
-import { closureEvidence, closureDeliveryFailure, issueEvidenceDigest } from "./campaign-issue-authority.js";
+import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest } from "./campaign-issue-authority.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
+
+/** A related open pull request as the runner reports it, without a closing reference. */
+const openPullRequest = (number: number) => ({ number, title: "Work", url: `https://github.com/team/repo/pull/${number}`, headSha: "b".repeat(40) });
+/** Each gap's code and work item, without its derived action and summary. */
+const gapNames = (gaps: IssueClosureDeliveryGap[] | null | undefined) => gaps?.map((gap) => ({ code: gap.code, workItemId: gap.workItemId }));
 
 function harness(full = true, maximum = 5, issues = [100]) {
   const db = ControlPlaneDb.open(":memory:");
@@ -30,7 +37,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
   }
   const hub = new Hub(db);
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
-  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string> };
+  const state = { publicationOk: true, subjectSearch: true, executes: 0, openPR: false as boolean | number, delivery: [] as Array<{number:number;headSha:string;mergeCommitSha:string}>, publicationTitles: {} as Record<number,string>,
+    epicMembers: undefined as IssueClosureEpicMembers | undefined, closureMessages: [] as unknown[] };
   hub.requestFromRunner = async (_runner, requestId, message) => {
     if (message.type === "campaign_issue_scope") {
       if (message.operation === "publication_inspect") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId,
@@ -41,12 +49,15 @@ function harness(full = true, maximum = 5, issues = [100]) {
           ({ issue: { repository: "team/repo", number }, title: message.publication?.sanitizedTitle ?? state.publicationTitles[number] ?? `Issue ${number}`, source: "sub_issue" as const })) }) };
     }
     if (message.type === "github_issue_closure") {
+      state.closureMessages.push(message);
       if (message.operation === "execute") { state.executes++; return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true,
         result: { outcome: "uncertain", completedAt: Date.now() } }; }
       return { type: "github_issue_closure_result", requestId, sessionId: message.sessionId, ok: true, inspection: { repository: "team/repo", issue: message.issue,
         title: "Issue", url: `https://github.com/team/repo/issues/${message.issue}`, state: "OPEN", forgeDigest: "a".repeat(64),
-        openPullRequests: state.openPR ? [{ number: 10, title: "Work", url: "https://github.com/team/repo/pull/10", headSha: "b".repeat(40) }] : [],
-        ...(message.deliveryPullRequests === undefined ? {} : { delivery: state.delivery }) } };
+        openPullRequests: state.openPR === false ? [] : [openPullRequest(state.openPR === true ? 10 : state.openPR)],
+        ...(message.deliveryPullRequests === undefined ? {} : { delivery: state.delivery }),
+        // A member read is bound into the digest, as the runner binds it.
+        ...(message.epicMembers && state.epicMembers ? { epicMembers: state.epicMembers, forgeDigest: "b".repeat(64) } : {}) } };
     }
     throw new Error("Unexpected runner command");
   };
@@ -141,6 +152,8 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
     second.verifications = [];
     assert.equal((await h.svc.executeGithubIssueClosure("root", closure.data!.decision!.occurrenceId, closure.data!.decision!.resourceDigest)).ok, false);
     second.verifications = verified;
+    const codes = { unverified: "no_delivered_verification", undelivered: "work_item_not_delivered", unmerged: "no_merged_delivery_pull_request",
+      missing: "missing_work_item" } as const;
     for (const gap of ["unverified", "undelivered", "unmerged", "missing"] as const) {
       const saved = structuredClone(second);
       if (gap === "unverified") second.verifications = [];
@@ -148,12 +161,17 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
       if (gap === "unmerged") second.observed.pullRequests = [];
       if (gap === "missing") h.db.campaignWorkLedger.detail = (_c, id) => id === second.id ? null : details.get(id) ?? null;
       assert.equal(closureEvidence(h.db, h.db.getSession("root")!, snapshot), null, gap);
-      assert.match(closureDeliveryFailure(h.db, h.db.getSession("root")!, snapshot), new RegExp(`${gap}_work_item:`));
+      const named = { code: codes[gap], workItemId: second.id };
+      assert.deepEqual(gapNames(closureDeliveryGaps(h.db, h.db.getSession("root")!, snapshot, { proven: false, commentSafe: true })), [named], gap);
       const fallback = await h.svc.requestGithubIssueClosure("root", { ...request, requestId: `gap-${gap}` });
       assert.ok(fallback.ok, fallback.error ?? "human fallback");
       assert.equal(fallback.data!.decision!.authority, "human");
-      assert.equal(fallback.data!.decision!.resourceSnapshot.category === "issue_closure" &&
-        fallback.data!.decision!.resourceSnapshot.deliveryFailure, closureDeliveryFailure(h.db, h.db.getSession("root")!, snapshot));
+      assert.equal(fallback.data!.decision!.authorityEvaluation?.reason, "closure_proof_incomplete", gap);
+      const fallbackSnapshot = fallback.data!.decision!.resourceSnapshot;
+      assert.ok(fallbackSnapshot.category === "issue_closure");
+      assert.deepEqual(gapNames(fallbackSnapshot.deliveryGaps), [named], gap);
+      assert.equal(fallbackSnapshot.deliveryFailure, `${codes[gap]}:${second.id}`);
+      assert.deepEqual(fallback.data!.proofGaps?.gaps, fallbackSnapshot.deliveryGaps);
       Object.assign(second, saved);
       h.db.campaignWorkLedger.detail = (campaign, id, now) => details.get(id) ?? original(campaign, id, now);
     }
@@ -167,6 +185,110 @@ test("every fixed-by unit needs delivery, verification and exact merged proof (#
     assert.ok(final.ok); assert.equal(final.data!.decision!.authority, "orchestrator");
     assert.ok(h.approve(final.data!.decision!).ok);
     assert.ok((await h.svc.executeGithubIssueClosure("root", final.data!.decision!.occurrenceId, final.data!.decision!.resourceDigest)).ok);
+  } finally { h.db.close(); }
+});
+
+test("#4060 an in-scope epic's completed closure is Orchestrator-owned from its closed members, and names any member that is not", async () => {
+  const h = harness(true, 5, [100, 101, 102]);
+  try {
+    const request = { issue: 100, reason: "completed" as const, explanation: "Every member delivered", evidence: ["Members closed"] };
+    const ask = (requestId: string, reason: "completed" | "not_planned" = "completed") =>
+      h.svc.requestGithubIssueClosure("root", { ...request, reason, requestId });
+    const closureSnapshot = (decision: WorkflowDecisionView) => {
+      assert.equal(decision.resourceSnapshot.category, "issue_closure");
+      return decision.resourceSnapshot as Extract<WorkflowDecisionView["resourceSnapshot"], { category: "issue_closure" }>;
+    };
+    const member = (number: number, state: IssueClosureEpicMembers["members"][number]["state"]) => ({ number, state });
+    // The epic's own work item is a placeholder: it was never dispatched, so it is never a gap here.
+    for (const [name, members, code, named] of [
+      ["open", [member(101, "completed"), member(102, "open")], "epic_member_open", [102]],
+      ["closed otherwise", [member(101, "completed"), member(102, "closed_not_completed")], "epic_member_not_completed", [102]],
+      // A member added to the epic after launch counts, and is outside scope until admitted.
+      ["added after launch", [member(101, "completed"), member(102, "completed"), member(103, "completed")], "epic_member_outside_scope", [103]],
+      ["unreadable member", [member(101, "completed"), member(102, "unreadable")], "epic_member_unreadable", [102]],
+    ] as const) {
+      h.state.epicMembers = { readable: true, members: [...members] };
+      const result = await ask(`epic-${name}`);
+      assert.ok(result.ok, result.error ?? name);
+      const decision = result.data!.decision!;
+      assert.equal(decision.authority, "human", name);
+      assert.equal(decision.authorityEvaluation?.reason, "closure_proof_incomplete", name);
+      const snapshot = closureSnapshot(decision);
+      assert.deepEqual(snapshot.epicMembers, h.state.epicMembers, name);
+      assert.deepEqual(snapshot.deliveryGaps?.map((gap) => [gap.code, gap.members, gap.workItemId]), [[code, named, undefined]], name);
+      assert.equal(snapshot.deliveryFailure, `${code}:#${named[0]}`, name);
+      assert.match(snapshot.deliveryGaps![0]!.summary, new RegExp(`#${named[0]}\\b`), name);
+      assert.deepEqual(result.data!.proofGaps?.gaps, snapshot.deliveryGaps, name);
+    }
+    // A member list the runner could not read is named, and the ordinary snapshot and gaps stand.
+    h.state.epicMembers = { readable: false, members: [] };
+    const unreadable = await ask("epic-unreadable-list");
+    assert.ok(unreadable.ok); assert.equal(unreadable.data!.decision!.authority, "human");
+    const ordinary = closureSnapshot(unreadable.data!.decision!);
+    assert.equal(ordinary.epicMembers, undefined);
+    assert.deepEqual(gapNames(ordinary.deliveryGaps), [{ code: "no_delivered_verification", workItemId: h.item.id },
+      { code: "epic_members_unreadable", workItemId: undefined }]);
+    // An issue without members behaves as before.
+    h.state.epicMembers = { readable: true, members: [] };
+    const plain = await ask("no-members");
+    assert.ok(plain.ok); assert.equal(plain.data!.decision!.authority, "human");
+    assert.equal(closureSnapshot(plain.data!.decision!).epicMembers, undefined);
+    assert.deepEqual(gapNames(closureSnapshot(plain.data!.decision!).deliveryGaps), [{ code: "no_delivered_verification", workItemId: h.item.id }]);
+
+    h.state.epicMembers = { readable: true, members: [member(101, "completed"), member(102, "completed")] };
+    // An epic item that was dispatched is no placeholder: it still needs its own delivery.
+    const original = h.db.campaignWorkLedger.detail.bind(h.db.campaignWorkLedger);
+    h.db.campaignWorkLedger.detail = (campaign, id, now) => {
+      const item = original(campaign, id, now);
+      return item && id === h.item.id ? { ...item, attemptCount: 1 } : item;
+    };
+    const dispatched = await ask("epic-dispatched-item");
+    assert.ok(dispatched.ok); assert.equal(dispatched.data!.decision!.authority, "human");
+    assert.deepEqual(gapNames(closureSnapshot(dispatched.data!.decision!).deliveryGaps), [{ code: "no_delivered_verification", workItemId: h.item.id }]);
+    h.db.campaignWorkLedger.detail = original;
+
+    // Every member closed as completed and in scope: Orchestrator-owned, with no fixed-by plan.
+    const proven = await ask("epic-proven");
+    assert.ok(proven.ok, proven.error ?? "epic closure requested");
+    const decision = proven.data!.decision!;
+    assert.equal(decision.authority, "orchestrator");
+    const snapshot = closureSnapshot(decision);
+    assert.deepEqual(snapshot.epicMembers, h.state.epicMembers);
+    assert.equal(snapshot.forgeDigest, "b".repeat(64), "the snapshot is the member read's inspection");
+    assert.ok(snapshot.issueAdmission);
+    assert.equal(snapshot.deliveryGaps, undefined);
+    const proof = closureEvidence(h.db, h.db.getSession("root")!, snapshot);
+    assert.deepEqual(proof && "placeholders" in proof ? proof.placeholders : null, [h.item.id]);
+    // A member's state recorded in the snapshot is the proof: an open one never proves it.
+    assert.equal(closureEvidence(h.db, h.db.getSession("root")!, { ...snapshot, epicMembers: { readable: true,
+      members: [member(101, "completed"), member(102, "open")] } }), null);
+    // Not-planned closures never read members.
+    const asked = h.state.closureMessages.length;
+    const notPlanned = await ask("epic-not-planned", "not_planned");
+    assert.ok(notPlanned.ok);
+    assert.equal(closureSnapshot(notPlanned.data!.decision!).epicMembers, undefined);
+    assert.ok(h.state.closureMessages.slice(asked).every((message) => !(message as { epicMembers?: true }).epicMembers));
+    // The proven request superseded every earlier one; approve and execute it, and the runner gets the member read.
+    const current = (await ask("epic-proven-again")).data!.decision!;
+    assert.equal(current.authority, "orchestrator");
+    assert.ok(h.approve(current).ok);
+    assert.ok((await h.svc.executeGithubIssueClosure("root", current.occurrenceId, current.resourceDigest)).ok);
+    const executed = h.state.closureMessages.at(-1) as { operation: string; snapshot: { epicMembers?: IssueClosureEpicMembers } };
+    assert.equal(executed.operation, "execute");
+    assert.deepEqual(executed.snapshot.epicMembers, h.state.epicMembers);
+  } finally { h.db.close(); }
+});
+
+test("#4060 an epic's closure keeps the ordinary proof on a runner without the member read", async () => {
+  const h = harness(true, 5, [100, 101, 102]);
+  try {
+    h.db.registerRunner(h.metadata, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.epicClosureMembers - 1);
+    h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }, { number: 102, state: "completed" }] };
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "old-runner", issue: 100, reason: "completed",
+      explanation: "Every member delivered", evidence: ["Members closed"] });
+    assert.ok(result.ok, result.error ?? "closure requested");
+    assert.equal(result.data!.decision!.authority, "human");
+    assert.ok(h.state.closureMessages.every((message) => !(message as { epicMembers?: true }).epicMembers));
   } finally { h.db.close(); }
 });
 
@@ -608,7 +730,8 @@ test("publication requires an accepted unique related recommendation, exact sani
     h.state.publicationOk=true;
     assert.ok((await h.svc.consumeWorkflowDecision("root",p.data!.occurrenceId,{resourceSnapshot:p.data!.resourceSnapshot})).ok);
     const replay=await h.svc.createWorkflowDecisionWithVideo("root",{requestId:"replay-pub",resourceKey:"pub",resourceSnapshot:snapshot});
-    assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","spent recommendations never mint another standing grant");
+    assert.deepEqual([replay.ok,replay.status,replay.errorDetails?.code],[false,409,"recommendation_spent"],"spent recommendations never mint another standing grant");
+    assert.equal(h.db.workflowDecisionByRequestId("root","replay-pub"),null);
   } finally { h.db.close(); }
 });
 
@@ -647,8 +770,9 @@ test("a child's accepted, in-scope publication with an issue-form title prefix i
     }
     const replay = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:"replay",resourceKey:"replay",
       resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",sanitizedTitle:"Related repair",sanitizedBody:body,labels:[],recommendationId}});
-    assert.ok(replay.ok); assert.equal(replay.data!.authority,"human","a consumed recommendation never mints a second standing grant");
-    assert.equal(replay.data!.authorityEvaluation?.admissionFailure,"recommendation_spent");
+    assert.deepEqual([replay.ok,replay.status,replay.errorDetails?.code],[false,409,"recommendation_spent"],
+      "a consumed recommendation never mints a second standing grant, nor asks a person to approve it (#4065)");
+    assert.equal(h.db.workflowDecisionByRequestId("child","replay"),null);
   } finally { h.db.close(); }
 });
 
@@ -679,18 +803,18 @@ test("every bounded publication needs a runner whose duplicate search and compar
   }
 });
 
-test("a child's publication outside the proof routes to the person with a visible admission failure (#2940)", async () => {
-  const cases: Array<{ name: string; expected: string; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
+test("a child's publication outside the proof is refused when it can correct it, and otherwise routes to the person with a visible admission failure (#2940, #4065)", async () => {
+  const cases: Array<{ name: string; expected: string; refused: boolean; maximum?: number; setup?: (h: ReturnType<typeof harness>) => string;
     change?: (snapshot: { sanitizedTitle: string; sanitizedBody: string; labels: string[]; recommendationId: string }) => void }> = [
-    { name: "forged", expected: "recommendation_not_found", setup: () => "followup_forged" },
-    { name: "unaccepted", expected: "recommendation_not_accepted", setup: (h) => {
+    { name: "forged", expected: "recommendation_not_found", refused: true, setup: () => "followup_forged" },
+    { name: "unaccepted", expected: "recommendation_not_accepted", refused: true, setup: (h) => {
       const record = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title:"Related repair",originWorkItemIds:[h.item.id]});
       assert.ok(record.ok); return record.data!.id;
     } },
-    { name: "other title", expected: "title_mismatch", change: (s) => { s.sanitizedTitle = "[Bug]: A different repair"; } },
-    { name: "unsafe", expected: "unsafe_payload", change: (s) => { s.sanitizedBody += "\napi_key=secret-value"; } },
-    { name: "duplicate labels", expected: "unsafe_payload", change: (s) => { s.labels = ["bug", "bug"]; } },
-    { name: "over cap", expected: "capacity_exhausted", maximum: 1 },
+    { name: "other title", expected: "title_mismatch", refused: true, change: (s) => { s.sanitizedTitle = "[Bug]: A different repair"; } },
+    { name: "unsafe", expected: "unsafe_payload", refused: false, change: (s) => { s.sanitizedBody += "\napi_key=secret-value"; } },
+    { name: "duplicate labels", expected: "unsafe_payload", refused: false, change: (s) => { s.labels = ["bug", "bug"]; } },
+    { name: "over cap", expected: "capacity_exhausted", refused: false, maximum: 1 },
   ];
   for (const c of cases) {
     const h = harness(true, c.maximum ?? 5);
@@ -700,11 +824,24 @@ test("a child's publication outside the proof routes to the person with a visibl
       c.change?.(snapshot);
       const p = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:c.name,resourceKey:c.name,
         resourceSnapshot:{category:"follow_up_issue_publication",repository:"team/repo",...snapshot}});
+      if (c.refused) {
+        assert.deepEqual([p.ok,p.status,p.errorDetails?.code],[false,409,c.expected],c.name);
+        assert.equal(p.error,CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[c.expected as CampaignPublicationAdmissionFailure],c.name);
+        assert.ok(p.error!.startsWith(`${c.expected}: `) && p.error!.includes("Nothing was created"),c.name);
+        assert.equal(h.db.workflowDecisionByRequestId("child",c.name),null,`${c.name}: a refusal creates no decision`);
+        assert.equal(h.db.getSession("child")!.pendingApproval ?? null,null,`${c.name}: nobody is asked`);
+        assert.equal(h.db.campaignPublicationReservations("root").length,0,`${c.name}: nothing is reserved`);
+        continue;
+      }
       assert.ok(p.ok,`${c.name}: ${p.error}`);
       assert.equal(p.data!.authority,"human",c.name);
       assert.equal(p.data!.authorityEvaluation?.admissionFailure,c.expected,c.name);
+      assert.equal(p.data!.authorityEvaluation?.admissionMessage,CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[c.expected as CampaignPublicationAdmissionFailure],c.name);
       assert.ok(p.data!.resourceSnapshot.category === "follow_up_issue_publication" && p.data!.resourceSnapshot.recommendationId === recommendationId &&
         !p.data!.resourceSnapshot.issueAdmission, `${c.name}: an unproven claim is kept as sent (#3918) and carries no admission`);
+      if (c.expected === "capacity_exhausted") assert.match(p.data!.authorityEvaluation!.admissionMessage!,
+        /Maximum Issues.*Only the person who authorized Full Control can raise it: in Campaign Status.*An Orchestrator can't raise it\./u,
+        "the recorded text names the limit and the owner's route, as the scope refusal does");
     } finally { h.db.close(); }
   }
   const failedInspection = harness();
@@ -716,6 +853,138 @@ test("a child's publication outside the proof routes to the person with a visibl
     assert.ok(p.ok); assert.equal(p.data!.authority,"human");
     assert.equal(p.data!.authorityEvaluation?.admissionFailure,"inspection_failed");
   } finally { failedInspection.db.close(); }
+});
+
+const publicationRefusalRecord = (h: ReturnType<typeof harness>, sessionId = "child") =>
+  h.db.campaignProjection("root")!.recovery?.records.find(item => item.resource.sessionId === sessionId && item.action === "reformulate_request");
+
+// #4065, observed live: a child's title differed from the accepted recommendation's, so a person
+// was asked to approve a payload the Orchestrator could have reviewed after a one-line correction.
+test("#4065 a child's title mismatch creates nothing, reaches the root as recovery, and the corrected request is the Orchestrator's", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    const request = (title: string) => h.svc.createWorkflowDecisionWithVideo("child", { requestId: "publish", resourceKey: "publish",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: title, sanitizedBody: body,
+        labels: ["enhancement"], recommendationId } });
+    const eventsBefore = h.db.campaignContinuationEvents("root").length;
+    const refused = await request("[Feature]: Related repairs");
+    assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code], [false, 409, "title_mismatch"]);
+    assert.match(refused.error!, /^title_mismatch: .*Use that title exactly.*Nothing was created\.$/u);
+    assert.equal(h.db.workflowDecisionByRequestId("child", "publish"), null, "no decision is created");
+    assert.equal(h.db.getSession("child")!.pendingApproval ?? null, null, "nobody is notified with a request");
+    assert.equal(h.db.campaignProjection("root")!.pendingRequests?.human ?? 0, 0);
+    // The root learns of it the way it learns of other child requests that need it: a recovery
+    // record whose wake is a request_actionable continuation event.
+    const record = publicationRefusalRecord(h)!;
+    assert.ok(record, "the refusal is recorded for the root");
+    assert.deepEqual([record.reason, record.effectiveOwner, record.admissionFailure, record.requiredInput],
+      ["correctable_refusal", "orchestrator", "title_mismatch", "none"]);
+    assert.equal(record.state, "dispatched");
+    assert.ok(record.explanation.includes(CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.title_mismatch));
+    assert.deepEqual(h.db.campaignContinuationEvents("root").slice(eventsBefore).map((event) => [event.kind, event.subjectSessionId, event.occurrenceId]),
+      [["request_actionable", "child", record.id]]);
+    // The same requestId, corrected, is admitted and owned by the Orchestrator; the refusal settles.
+    const corrected = await request("[Feature]: Related repair");
+    assert.ok(corrected.ok, corrected.error ?? "corrected");
+    assert.equal(corrected.data!.authority, "orchestrator");
+    assert.equal(corrected.data!.authorityEvaluation?.admissionFailure, undefined);
+    const settled = publicationRefusalRecord(h);
+    assert.ok(!settled || settled.state === "resolved", "the corrected request settles the refusal");
+    assert.equal(h.db.campaignRecovery.publicationRefusals("root", h.db.getSession("root")!.parentControlPolicy?.revision ?? 0).length, 0);
+  } finally { h.db.close(); }
+});
+
+test("#4065 each correctable failure is refused with its own condition, and the root's own refusal is not recorded as a child's", async () => {
+  const h = harness();
+  try {
+    const publish = (sessionId: string, requestId: string, recommendationId: string) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId,
+      resourceKey: requestId, resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair",
+        sanitizedBody: body, labels: [], recommendationId } });
+    const unknown = await publish("child", "unknown", "followup_unknown");
+    assert.deepEqual([unknown.status, unknown.errorDetails?.code], [409, "recommendation_not_found"]);
+    assert.equal(publicationRefusalRecord(h)!.admissionFailure, "recommendation_not_found");
+    const recorded = h.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Related repair", originWorkItemIds: [h.item.id] });
+    assert.ok(recorded.ok);
+    const unaccepted = await publish("child", "unaccepted", recorded.data!.id);
+    assert.deepEqual([unaccepted.status, unaccepted.errorDetails?.code], [409, "recommendation_not_accepted"]);
+    assert.ok(h.svc.adjudicateCampaignRecommendation("root", { recommendationId: recorded.data!.id, disposition: "accepted", reason: "Observed related work",
+      publicationRequired: true }).ok);
+    const admitted = await publish("child", "admitted", recorded.data!.id);
+    assert.equal(admitted.data?.authority, "orchestrator");
+    assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot })).ok);
+    const spent = await publish("child", "spent", recorded.data!.id);
+    assert.deepEqual([spent.status, spent.errorDetails?.code], [409, "recommendation_spent"]);
+    for (const result of [unknown, unaccepted, spent]) {
+      const code = result.errorDetails!.code as CampaignPublicationAdmissionFailure;
+      assert.equal(result.error, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[code]);
+    }
+    for (const requestId of ["unknown", "unaccepted", "spent"]) assert.equal(h.db.workflowDecisionByRequestId("child", requestId), null, requestId);
+    // The root's own refusal reaches it in the response; no recovery wake repeats it.
+    const own = await publish("root", "root-unknown", "followup_root_unknown");
+    assert.deepEqual([own.status, own.errorDetails?.code], [409, "recommendation_not_found"]);
+    assert.equal(publicationRefusalRecord(h, "root"), undefined);
+  } finally { h.db.close(); }
+});
+
+test("#4065 a publication naming no recommendation goes to the person with recommendation_missing, and recovery shows it instead of a boundary enlargement", async () => {
+  const h = harness();
+  try {
+    const p = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "unnamed", resourceKey: "unnamed", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [] } });
+    assert.ok(p.ok, p.error ?? "unnamed");
+    assert.equal(p.data!.authority, "human");
+    assert.equal(p.data!.authorityEvaluation?.admissionFailure, "recommendation_missing");
+    assert.match(p.data!.authorityEvaluation!.admissionMessage!, /Naming the accepted recommendation's recommendationId would let the Orchestrator review it/u,
+      "the response tells the requester how the Orchestrator could review it");
+    new CampaignRecoveryService(h.db, () => {}, { info() {} }).maintain(Date.now());
+    const record = h.db.campaignProjection("root")!.recovery!.records.find(item => item.resource.occurrenceId === recoveryCoordinate(p.data!.occurrenceId))!;
+    assert.deepEqual([record.reason, record.effectiveOwner, record.state, record.admissionFailure, record.requiredInput],
+      ["publication_not_admitted", "human", "waiting_human", "recommendation_missing", "perform_human_required_action"]);
+    assert.ok(record.explanation.includes(CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.recommendation_missing));
+  } finally { h.db.close(); }
+  // A boundary that does not authorize related follow-ups still records why the person is asked.
+  const unrelated = harness();
+  try {
+    assert.ok(unrelated.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "follow_up_issue_publication"],
+      delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: false, maxIssues: 5, closureReasons: [] } }, 2, unrelated.principal).ok);
+    const p = await unrelated.svc.createWorkflowDecisionWithVideo("child", { requestId: "unrelated", resourceKey: "unrelated", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [] } });
+    assert.ok(p.ok, p.error ?? "unrelated");
+    assert.deepEqual([p.data!.authority, p.data!.authorityEvaluation?.admissionFailure], ["human", "no_issue_boundary"]);
+  } finally { unrelated.db.close(); }
+});
+
+test("#4065 an origin outside scope keeps the person fallback with its condition, and Custom campaigns are unchanged", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    // The owner replaces the origin's issue; the recommendation stays accepted.
+    const swap = await h.svc.proposeCampaignIssueScope("root", { requestId: "swap-origin", expectedRevision: 1, additions: [{ repository: "team/repo", number: 150 }],
+      removals: [{ repository: "team/repo", number: 100 }], explanation: "Owner replaces the origin" }, () => true, h.principal);
+    assert.ok(swap.ok, swap.error ?? "swap"); assert.ok(h.approve(swap.data!).ok);
+    const p = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "origin", resourceKey: "origin", resourceSnapshot: {
+      category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody: body, labels: [], recommendationId } });
+    assert.ok(p.ok, p.error ?? "origin");
+    assert.deepEqual([p.data!.authority, p.data!.authorityEvaluation?.admissionFailure], ["human", "origin_outside_scope"]);
+    assert.equal(p.data!.authorityEvaluation?.admissionMessage, CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES.origin_outside_scope);
+  } finally { h.db.close(); }
+  const custom = harness(false);
+  try {
+    const rec = custom.svc.recordCampaignFollowUp("root", { originSessionId: "child", repository: "team/repo", title: "Custom repair", originWorkItemIds: [custom.item.id] });
+    assert.ok(rec.ok);
+    for (const [requestId, snapshot] of [["named-other-title", { recommendationId: rec.data!.id, sanitizedTitle: "Another repair" }],
+      ["unnamed", { sanitizedTitle: "Custom repair" }]] as const) {
+      const p = await custom.svc.createWorkflowDecisionWithVideo("child", { requestId, resourceKey: requestId, resourceSnapshot: {
+        category: "follow_up_issue_publication", repository: "team/repo", sanitizedBody: body, labels: [], ...snapshot } });
+      assert.ok(p.ok, `${requestId}: ${p.error}`);
+      assert.equal(p.data!.authority, "human", requestId);
+      assert.equal(p.data!.authorityEvaluation?.admissionFailure, "recommendationId" in snapshot ? "no_issue_boundary" : undefined, requestId);
+      assert.equal(p.data!.authorityEvaluation?.admissionMessage, undefined, requestId);
+    }
+  } finally { custom.db.close(); }
 });
 
 test("a follow-up past the approval limit cannot be published until the person admits it, and its slot then holds the issue (#2940)", async () => {
@@ -744,11 +1013,11 @@ test("a follow-up past the approval limit cannot be published until the person a
     const occurrenceId = /decision (workflow_[a-f0-9]+)/u.exec(over.error ?? "")?.[1];
     assert.ok(occurrenceId, over.error ?? "refusal");
 
-    // Publication is no way around the follow-up approval: the recommendation is not accepted yet.
+    // Publication is no way around the follow-up approval: the recommendation is not accepted yet,
+    // so the request is refused and creates nothing (#4065).
     const early = await publish("early");
-    assert.ok(early.ok, early.error ?? "publication");
-    assert.equal(early.data!.authority, "human");
-    assert.equal(early.data!.authorityEvaluation?.admissionFailure, "recommendation_not_accepted");
+    assert.deepEqual([early.ok, early.status, early.errorDetails?.code], [false, 409, "recommendation_not_accepted"]);
+    assert.equal(h.db.workflowDecisionByRequestId("child", "early"), null);
 
     const admission = h.db.workflowDecisionByOccurrence(occurrenceId)!;
     assert.equal(admission.category, "campaign_follow_up_admission");
@@ -1774,14 +2043,16 @@ async function humanApprovedPublication(h: ScopeHarness, options: { approver?: s
   const { approver = h.principal.userId, title = "Human approved repair", issue = 101, accept = true } = options;
   const rec = h.svc.recordCampaignFollowUp("root",{originSessionId:"child",repository:"team/repo",title,originWorkItemIds:[h.item.id]}); assert.ok(rec.ok,rec.error ?? "record");
   if (accept) assert.ok(h.svc.adjudicateCampaignRecommendation("root",{recommendationId:rec.data!.id,disposition:"accepted",reason:"Observed related work",publicationRequired:true}).ok);
-  // A failed inspection routes the child's request to the person, as #3814 and #3815 were.
+  // A failed inspection routes the child's request to the person, as #3814 and #3815 were. Naming
+  // an unaccepted recommendation is refused instead (#4065), so that request names none.
   h.state.publicationOk = false;
   const created = await h.svc.createWorkflowDecisionWithVideo("child",{requestId:`human-${title}`,resourceKey:`human-${title}`,resourceSnapshot:{category:"follow_up_issue_publication",
-    repository:"team/repo",sanitizedTitle:`[Feature]: ${title}`,sanitizedBody:body,labels:[],recommendationId:rec.data!.id}});
+    repository:"team/repo",sanitizedTitle:`[Feature]: ${title}`,sanitizedBody:body,labels:[],...(accept ? { recommendationId:rec.data!.id } : {})}});
   h.state.publicationOk = true;
   assert.ok(created.ok,created.error ?? "publication"); const decision = created.data!;
   assert.equal(decision.authority,"human");
-  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission && decision.resourceSnapshot.recommendationId === rec.data!.id);
+  assert.ok(decision.resourceSnapshot.category === "follow_up_issue_publication" && !decision.resourceSnapshot.issueAdmission &&
+    decision.resourceSnapshot.recommendationId === (accept ? rec.data!.id : undefined));
   const approved = h.svc.resolveWorkflowDecision("root","child",decision.occurrenceId,
     { outcome: "approve", ...options.resolution } as import("@wollipog/protocol").ResolveWorkflowDecisionRequest,"human",{kind:"human",id:approver},()=>true);
   assert.ok(approved.ok,approved.error ?? "human approval");
@@ -2134,13 +2405,17 @@ test("#3918 a person-approved publication's named recommendation never replaces 
   try {
     const alpha = acceptedRecommendation(h, "Alpha repair");
     h.state.publicationOk = true;
-    // The name claims Alpha for a Beta payload: bounded admission refuses, and the person decides.
+    // The name claims Alpha for a Beta payload: the requester is refused and can correct it (#4065).
     const requested = { category: "follow_up_issue_publication" as const, repository: "team/repo", sanitizedTitle: "[Feature]: Beta repair",
       sanitizedBody: body, labels: [], recommendationId: alpha };
-    const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
+    const refused = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
+    assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code], [false, 409, "title_mismatch"]);
+    // A person-owned decision recorded before that refusal existed still names Alpha; its name must
+    // never bind scope. The generic create stands in for that earlier route.
+    const created = h.svc.createWorkflowDecision("child", { requestId: "beta", resourceKey: "beta", resourceSnapshot: requested });
     assert.ok(created.ok, created.error ?? "request");
     assert.equal(created.data!.authority, "human");
-    assert.equal(created.data!.authorityEvaluation?.admissionFailure, "title_mismatch");
+    assert.equal(created.data!.authorityEvaluation?.admissionFailure, "authority_unavailable");
     assert.deepEqual(created.data!.resourceSnapshot, requested);
     assert.equal(h.db.campaignPublicationReservations("root").length, 0);
     assert.ok(humanApprove(h, "child", created.data!).ok);
@@ -2595,5 +2870,602 @@ test("#3915 a merge revoked by a policy change outside a scope approval, or one 
     assert.equal((await h.svc.reconcileWorkflowDecision(merger, scoped.occurrenceId, { resourceSnapshot: scoped.snapshot })).status, 409,
       "only the exact revision bump of the revoking scope approval is accepted");
     assert.equal(f.status(scoped.occurrenceId), "revoked");
+  } finally { h.db.close(); }
+});
+
+/** A closure decision's resource snapshot, narrowed to an issue closure. */
+function closureSnapshot(decision: WorkflowDecisionView) {
+  const snapshot = decision.resourceSnapshot;
+  assert.equal(snapshot.category, "issue_closure");
+  if (snapshot.category !== "issue_closure") throw new Error("not an issue closure");
+  return snapshot;
+}
+
+test("#4058 a closure awaiting the child's verification names the item and the verify step; verifying then supersedes it", async () => {
+  const { h, observe, close } = delivery({ stage: [{ number: 10 }], verify: false });
+  try {
+    observe(10, "merged");
+    h.svc.onSessionStatus("child", "idle");
+    const report = h.db.appendEvent("child", { kind: "agent_message", text: "Delivered.", final: true }, Date.now()).seq;
+    const first = await close("before-verification");
+    assert.ok(first.ok, first.error ?? "closure");
+    const pending = first.data!.decision!;
+    assert.equal(pending.authority, "human", "the person-owned fallback stays");
+    assert.deepEqual([pending.authorityEvaluation?.basis, pending.authorityEvaluation?.reason], ["human_required", "closure_proof_incomplete"]);
+    const snapshot = closureSnapshot(pending);
+    assert.deepEqual(gapNames(snapshot.deliveryGaps), [{ code: "attempt_awaiting_verification", workItemId: h.item.id }]);
+    assert.equal(snapshot.deliveryFailure, `attempt_awaiting_verification:${h.item.id}`);
+    const notice = first.data!.proofGaps!;
+    assert.equal(notice.reason, "closure_proof_incomplete");
+    assert.equal(notice.gaps[0]!.action, "verify_child");
+    assert.match(notice.gaps[0]!.summary, new RegExp(`Work item ${h.item.id} has a completed report awaiting verification\\. Verify .*verify_campaign_child`, "u"));
+    assert.match(notice.summary, /a person decides this request.*supersedes this one/u);
+    assert.ok(h.svc.verifyCampaignChild("root", { childSessionId: "child", reportEventSeq: report, followUpsAccounted: true,
+      workItem: { id: h.item.id, outcome: "delivered" } }).ok);
+    const again = await close("after-verification");
+    assert.ok(again.ok, again.error ?? "closure");
+    assert.equal(again.data!.decision!.authority, "orchestrator", JSON.stringify(again.data!.decision!.authorityEvaluation));
+    assert.equal(again.data!.proofGaps, undefined);
+    assert.equal(closureSnapshot(again.data!.decision!).deliveryGaps, undefined);
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.occurrenceId)!.status, "superseded");
+  } finally { h.db.close(); }
+});
+
+test("#4058 a delivered item that lists no merged delivery pull request names that gap; recording it then supersedes the person's request", async () => {
+  const { h, observe, close } = delivery();
+  try {
+    observe(10, "merged");
+    const first = await close("unlisted-pr");
+    assert.ok(first.ok, first.error ?? "closure");
+    const pending = first.data!.decision!;
+    assert.equal(pending.authority, "human");
+    assert.equal(pending.authorityEvaluation?.reason, "closure_proof_incomplete");
+    assert.deepEqual(gapNames(closureSnapshot(pending).deliveryGaps), [{ code: "no_merged_delivery_pull_request", workItemId: h.item.id }]);
+    assert.equal(first.data!.proofGaps!.gaps[0]!.action, "record_delivery_pull_requests");
+    assert.match(first.data!.proofGaps!.gaps[0]!.summary, /update_campaign_work_item \(stage\.pullRequests\)/u);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id,
+      stage: { stage: "merged", pullRequests: [{ repository: "team/repo", number: 10 }] } }).ok);
+    const again = await close("listed-pr");
+    assert.ok(again.ok, again.error ?? "closure");
+    assert.equal(again.data!.decision!.authority, "orchestrator", JSON.stringify(again.data!.decision!.authorityEvaluation));
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.occurrenceId)!.status, "superseded");
+  } finally { h.db.close(); }
+});
+
+test("#4058 an open related pull request names its number and blocks until it merges or closes, even with only a timeline reference", async () => {
+  const { h, observe, close } = delivery({ stage: [{ number: 10 }] });
+  try {
+    observe(10, "merged");
+    // A sibling campaign PR mentioned the issue. The runner relates an open PR by closing reference,
+    // title, body or GitHub's timeline cross-reference; with the mention edited out, the timeline
+    // event remains, so the runner still reports it, and it keeps blocking delegated closure.
+    h.state.openPR = 11;
+    for (const requestId of ["sibling-mentions", "sibling-edited"]) {
+      const blocked = await close(requestId);
+      assert.ok(blocked.ok, blocked.error ?? "closure");
+      const decision = blocked.data!.decision!;
+      assert.equal(decision.authority, "human");
+      assert.equal(decision.authorityEvaluation?.reason, "closure_proof_incomplete");
+      const snapshot = closureSnapshot(decision);
+      assert.deepEqual(snapshot.deliveryGaps?.map(({ code, pullRequests }) => ({ code, pullRequests })),
+        [{ code: "open_related_pull_requests", pullRequests: [11] }], "only the open PR is named: the runner was not asked to confirm the merge");
+      assert.equal(snapshot.deliveryFailure, "open_related_pull_requests:#11");
+      const gap = blocked.data!.proofGaps!.gaps[0]!;
+      assert.equal(gap.action, "wait_for_pull_requests");
+      assert.match(gap.summary, /Related pull requests are open: #11\. .*timeline cross-references it\. It blocks delegated closure until each named pull request merges or closes/u);
+    }
+    h.state.openPR = false;
+    const again = await close("sibling-merged");
+    assert.ok(again.ok, again.error ?? "closure");
+    assert.equal(again.data!.decision!.authority, "orchestrator", JSON.stringify(again.data!.decision!.authorityEvaluation));
+  } finally { h.db.close(); }
+});
+
+test("#4058 an unsafe closing comment on a proven closure is its only gap", async () => {
+  const { h, observe } = delivery({ stage: [{ number: 10 }] });
+  try {
+    observe(10, "merged");
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "unsafe-comment", issue: 100, reason: "completed",
+      explanation: "Delivered by the merged pull request", evidence: ["Verified report"], comment: "Contact support@example.invalid" });
+    assert.ok(result.ok, result.error ?? "closure");
+    assert.equal(result.data!.decision!.authority, "human");
+    assert.equal(result.data!.decision!.authorityEvaluation?.reason, "closure_proof_incomplete");
+    assert.deepEqual(gapNames(closureSnapshot(result.data!.decision!).deliveryGaps), [{ code: "comment_unsafe", workItemId: undefined }]);
+    assert.equal(result.data!.proofGaps!.gaps[0]!.action, "revise_comment");
+  } finally { h.db.close(); }
+});
+
+test("#4058 a closure the boundary does not delegate stays outside_boundary, with no gaps", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure"],
+      delegatablePolicyIds: [], issueAuthority: { epics: [100], relatedFollowUps: false, maxIssues: 5, closureReasons: ["not_planned"] } }, 2, h.principal).ok);
+    const result = await h.svc.requestGithubIssueClosure("root", { requestId: "undelegated-reason", issue: 100, reason: "completed",
+      explanation: "Delivered", evidence: ["Verified report"] });
+    assert.ok(result.ok, result.error ?? "closure");
+    const decision = result.data!.decision!;
+    assert.equal(decision.authority, "human");
+    assert.equal(decision.authorityEvaluation?.reason, "outside_boundary");
+    assert.equal(closureSnapshot(decision).deliveryGaps, undefined);
+    assert.equal(closureSnapshot(decision).deliveryFailure, "outside_boundary");
+    assert.equal(result.data!.proofGaps, undefined);
+  } finally { h.db.close(); }
+});
+
+test("#4058 only a current boundary's in-scope, unadmitted closure with gaps is closure_proof_incomplete", async () => {
+  const { h, close } = delivery();
+  try {
+    const pending = (await close("evaluated")).data!.decision!;
+    assert.equal(pending.authorityEvaluation?.reason, "closure_proof_incomplete");
+    const root = h.db.getSession("root")!;
+    const policy = root.parentControlPolicy!;
+    const protocol = PROTOCOL_VERSION;
+    const snapshot = closureSnapshot(pending);
+    const reason = (controller: typeof root, resource: typeof snapshot, decisions = policy) =>
+      evaluateCampaignAuthority(controller, root, protocol, resource, decisions, protocol).reason;
+    assert.equal(reason(root, snapshot), "closure_proof_incomplete", "positive control");
+    assert.equal(reason(root, snapshot, { ...policy, revision: policy.revision + 1 }), "outside_boundary", "a stale boundary");
+    const unscoped = structuredClone(root);
+    unscoped.orchestratorPolicy!.issueNumbers = [];
+    assert.equal(reason(unscoped, snapshot), "outside_boundary", "an issue outside the scope");
+    const { deliveryGaps: _gaps, ...withoutGaps } = snapshot;
+    assert.equal(reason(root, withoutGaps), "outside_boundary", "no server-named gap");
+    assert.equal(reason(root, { ...snapshot, issueAdmission: { boundaryRevision: 999, evidenceDigest: "e".repeat(64) } }), "outside_boundary",
+      "an admission bound to another boundary revision");
+    assert.equal(reason(root, { ...snapshot, repository: "team/other" }), "outside_boundary", "another repository");
+  } finally { h.db.close(); }
+});
+
+test("#4058 gaps are canonical: action and summary derive from the code, and the compact line stays bounded", () => {
+  const gap = issueClosureDeliveryGap("unmerged_pull_request", { workItemId: "item-1", pullRequests: [12, 3, 12] });
+  assert.deepEqual([gap.pullRequests, gap.action], [[3, 12], "wait_for_pull_requests"]);
+  assert.deepEqual(normalizeIssueClosureDeliveryGaps([{ ...gap, action: "person_decides", summary: "forged" }]), [gap]);
+  assert.equal(normalizeIssueClosureDeliveryGaps([{ code: "from_a_newer_peer" }])![0]!.code, "delivery_unverified");
+  assert.equal(normalizeIssueClosureDeliveryGaps([]), null);
+  assert.equal(normalizeIssueClosureDeliveryGaps([{ code: "no_work_item", workItemId: "" }]), null);
+  const many = Array.from({ length: 32 }, (_, index) => issueClosureDeliveryGap("unmerged_pull_request",
+    { workItemId: `item-${"x".repeat(200)}-${index}`, pullRequests: Array.from({ length: 30 }, (_, n) => n + 1) }));
+  const line = issueClosureDeliveryFailure(many);
+  assert.ok(line.length <= ISSUE_CLOSURE_DELIVERY_FAILURE_MAX, `${line.length}`);
+  assert.match(line, /^unmerged_pull_request:item-x+-0:#1,#2,#3,#4,#5,#6,#7,#8,#9,#10,\+20; \+31 more$/u, "a gap that would pass the bound is counted, never cut");
+  const short = issueClosureDeliveryFailure([issueClosureDeliveryGap("attempt_open", { workItemId: "a" }), issueClosureDeliveryGap("stale_pull_request", { workItemId: "b", pullRequests: [4] })]);
+  assert.equal(short, "attempt_open:a; stale_pull_request:b:#4");
+  assert.equal(issueClosureDeliveryFailure([issueClosureDeliveryGap("no_work_item")]), "no_work_item");
+});
+
+test("#4060 epic member gaps name their members, and stored member reads normalize canonically", () => {
+  const open = issueClosureDeliveryGap("epic_member_open", { members: [7, 3, 7] });
+  assert.deepEqual([open.members, open.action], [[3, 7], "close_members"]);
+  assert.match(open.summary, /^Members of this epic are open: #3, #7\. Close each named member as completed through its own closure request/u);
+  assert.equal(issueClosureDeliveryGap("epic_member_outside_scope", { members: [9] }).action, "person_decides");
+  assert.equal(issueClosureDeliveryGap("epic_member_not_completed", { members: [9] }).action, "person_decides");
+  assert.equal(issueClosureDeliveryGap("epic_members_unreadable").action, "request_again");
+  assert.deepEqual(normalizeIssueClosureDeliveryGaps([{ ...open, summary: "forged" }]), [open]);
+  assert.equal(normalizeIssueClosureDeliveryGaps([{ code: "epic_member_open", members: "3" }]), null);
+  assert.equal(issueClosureDeliveryFailure([open, issueClosureDeliveryGap("epic_members_unreadable")]), "epic_member_open:#3,#7; epic_members_unreadable");
+  const read = { readable: true, members: [{ number: 3, state: "completed" }, { number: 7, state: "open" }] };
+  assert.deepEqual(normalizeIssueClosureEpicMembers(read), read);
+  for (const invalid of [null, [], { readable: true }, { readable: false, members: [{ number: 3, state: "open" }] },
+    { readable: true, members: [{ number: 7, state: "open" }, { number: 3, state: "open" }] },
+    { readable: true, members: [{ number: 3, state: "open" }, { number: 3, state: "open" }] },
+    { readable: true, members: [{ number: 3, state: "merged" }] }, { readable: true, members: [{ number: 0, state: "open" }] },
+    { readable: true, members: Array.from({ length: 101 }, (_, n) => ({ number: n + 1, state: "open" })) }]) {
+    assert.equal(normalizeIssueClosureEpicMembers(invalid), null, JSON.stringify(invalid).slice(0, 80));
+  }
+});
+
+test("#4058 every named gap appears with and without a fixed-by plan, and naming it never admits the proof", () => {
+  for (const fixedBy of [false, true]) {
+    const h = harness();
+    try {
+      const merge = { number: 10, headSha: "b".repeat(40), mergeCommitSha: "c".repeat(40) };
+      const base = { category: "issue_closure" as const, repository: "team/repo", issue: 100, title: "Issue", url: "https://github.com/team/repo/issues/100",
+        forgeDigest: "a".repeat(64), reason: "completed" as const, explanation: "Delivered", evidence: ["Verified report"], openPullRequests: [],
+        activeChildren: [], delivery: [merge] };
+      const delivered = () => ({ id: h.item.id, issue: { repository: "team/repo", number: 100 }, primaryState: "delivered", stateCauses: [], currentAttempt: null,
+        verifications: [{ outcome: "delivered", report: { digest: "d".repeat(64) } }],
+        observed: { pullRequests: [{ ref: { repository: "team/repo", number: 10 }, fact: { availability: "fresh", value: { state: "merged", ...merge } } }] },
+      }) as unknown as CampaignWorkItemDetail;
+      let detail = delivered();
+      h.db.campaignWorkLedger.detail = () => detail;
+      if (fixedBy) h.db.campaignWorkLedger.fixedBy = () => [h.item.id];
+      const root = () => h.db.getSession("root")!;
+      assert.ok(closureEvidence(h.db, root(), base), "positive control");
+      const fact = (value: object) => ({ ...detail.observed.pullRequests![0]!, fact: { availability: "fresh", value: { state: "merged", ...merge, ...value } } }) as never;
+      const cases: Array<[string, () => void, typeof base | (Omit<typeof base, "openPullRequests" | "delivery"> & Record<string, unknown>), object]> = [
+        ["awaiting verification", () => { detail.currentAttempt = { id: "a", sessionId: "child", sessionTitle: null }; detail.stateCauses = ["attempt_awaiting_verification"]; detail.primaryState = "waiting"; },
+          base, { code: "attempt_awaiting_verification", workItemId: h.item.id }],
+        ["attempt open", () => { detail.currentAttempt = { id: "a", sessionId: "child", sessionTitle: null }; detail.primaryState = "running"; },
+          base, { code: "attempt_open", workItemId: h.item.id }],
+        ["no verification", () => { detail.verifications = []; }, base, { code: "no_delivered_verification", workItemId: h.item.id }],
+        ["no pull request", () => { detail.observed.pullRequests = []; }, base, { code: "no_merged_delivery_pull_request", workItemId: h.item.id }],
+        ["unmerged", () => { detail.observed.pullRequests = [fact({ state: "open", mergeCommitSha: null })]; }, base,
+          { code: "unmerged_pull_request", workItemId: h.item.id, pullRequests: [10] }],
+        ["stale", () => { detail.observed.pullRequests![0]!.fact.availability = "stale" as "fresh"; }, base,
+          { code: "stale_pull_request", workItemId: h.item.id, pullRequests: [10] }],
+        ["open related", () => {}, { ...base, openPullRequests: [openPullRequest(11)], delivery: undefined } as never,
+          { code: "open_related_pull_requests", pullRequests: [11] }],
+        ["merge unconfirmed", () => {}, { ...base, delivery: undefined } as never, { code: "delivery_merge_unconfirmed", workItemId: h.item.id, pullRequests: [10] }],
+      ];
+      for (const [name, change, snapshot, expected] of cases) {
+        detail = delivered();
+        change();
+        const label = `${name}${fixedBy ? " (fixed-by)" : ""}`;
+        assert.equal(closureEvidence(h.db, root(), snapshot as typeof base), null, label);
+        const gaps = closureDeliveryGaps(h.db, root(), snapshot as typeof base, { proven: false, commentSafe: true })!;
+        assert.deepEqual(gaps.map(({ code, workItemId, pullRequests }) => ({ code, ...(workItemId ? { workItemId } : {}), ...(pullRequests ? { pullRequests } : {}) })),
+          [expected], label);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+/* ---------- #4062: the issue scope bounds dispatch and merges, not only typed closures ---------- */
+
+/** A Full Control campaign that delegates merges, whose runner reports what each pull request
+ * would close from `closes` (GitHub's read, #3713). */
+function scopeGuardHarness(maxIssues = 5, issues = [100]) {
+  const h = harness(false, maxIssues, issues);
+  const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+  assert.ok(h.svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100",
+    operations: ["campaign_issue_scope", "issue_closure", "pr_merge", "implementation_question"], delegatablePolicyIds: [],
+    issueAuthority: { epics: [100], relatedFollowUps: true, maxIssues, closureReasons: ["completed"] } }, revision, h.principal).ok);
+  const sql = (h.db as unknown as { db: import("node:sqlite").DatabaseSync }).db;
+  const closes = new Map<number, string[]>();
+  /** Runs once inside the next GitHub read, as a concurrent change would. */
+  const during = { preflight: null as (() => void) | null };
+  const runner = h.hub.requestFromRunner;
+  h.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => {
+    if (message.type !== "github_merge_preflight") return runner(runnerId, requestId, message, timeout);
+    const change = during.preflight; during.preflight = null; change?.();
+    return { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1,
+      closures: (closes.get(message.pullRequest) ?? []).map((issue) => ({ issue, sources: ["description" as const], excerpt: `Closes #${issue.split("#")[1]}` })) } };
+  };
+  /** The campaign's scope as the server would store it, naming only `numbers`. */
+  const narrowScope = (numbers: number[]) => {
+    const policy = structuredClone(h.db.getSession("root")!.orchestratorPolicy!);
+    policy.issueNumbers = numbers; policy.issueScope = { ...policy.issueScope!, issueNumbers: numbers };
+    sql.prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+  };
+  const itemFor = (key: string, number: number) => {
+    const page = h.db.campaignWorkLedger.page("root", { state: "all", limit: 100 }, Date.now()); assert.ok(page.ok);
+    const existing = page.data.items.find((item) => item.key === key);
+    if (existing) return existing.id;
+    const plan = h.svc.recordCampaignPlan("root", { items: [...page.data.items.map((item) => ({ key: item.key, ...(item.issue ? { issue: item.issue } : {}) })),
+      { key, issue: { repository: "team/repo", number } }], planComplete: true });
+    assert.ok(plan.ok, plan.error ?? "a work item for an unscoped issue may still be recorded");
+    return plan.data!.items.find((item) => item.key === key)!.workItemId;
+  };
+  const launch = (campaignWorkItemId: string) => {
+    const request = { runnerId: "r", workspaceId: "w", agentId: "codex", prompt: "Deliver the item", campaignWorkItemId };
+    const context = { parentSessionId: "root" };
+    let result = h.svc.createSession(request, undefined, undefined, false, false, false, context);
+    if (result.status === 428) {
+      assert.ok(h.svc.approve("root", h.db.getSession("root")!.pendingApproval!.requestId, "allow").ok);
+      result = h.svc.createSession(request, undefined, undefined, false, false, false, context);
+    }
+    return result;
+  };
+  const merge = (sessionId: string, pullRequest: number, closing: string[]) => {
+    closes.set(pullRequest, closing);
+    const headSha = String(pullRequest).padStart(40, "a");
+    const snapshot = { category: "pr_merge" as const, repository: "team/repo", pullRequest, headSha, reviewResult: "merge" as const,
+      requiredChecks: { headSha, status: "passed" as const, checkedAt: 10, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] },
+      ...(closing.length ? { intendedClosures: closing } : {}) };
+    return { snapshot, request: () => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId: `merge-${pullRequest}`,
+      resourceKey: `team/repo#${pullRequest}`, resourceSnapshot: snapshot }) };
+  };
+  const children = () => (sql.prepare("SELECT COUNT(*) AS n FROM sessions WHERE parent_session_id='root'").get() as { n: number }).n;
+  const decisions = (sessionId: string) => h.svc.workflowDecisions(sessionId, undefined, 50).data!.decisions;
+  return { ...h, closes, during, narrowScope, itemFor, launch, merge, children, decisions };
+}
+
+const SCOPE_ROUTE = /outside this Full Control campaign's issue scope.*request_campaign_issue_scope_change/;
+
+test("#4062 a refused epic-member addition cannot be delivered through a dispatch and a merge that closes it", async () => {
+  const h = scopeGuardHarness(1);
+  try {
+    // The root's request to add the epic's member is refused: the scope is at its limit.
+    const refused = await h.proposal("add-101", 101);
+    assert.equal(refusalCode(refused), "capacity_exhausted");
+    // Recording the work stays allowed; the ledger is not authority.
+    const member = h.itemFor("issue:101", 101);
+    const children = h.children();
+    const launched = h.launch(member);
+    assert.equal(launched.ok, false); assert.equal(launched.status, 409);
+    assert.match(launched.error!, /team\/repo#101/); assert.match(launched.error!, SCOPE_ROUTE);
+    assert.equal(h.children(), children, "no child was created for the unscoped issue");
+    const assigned = h.svc.assignCampaignWorkItem("root", { workItemId: member, childSessionId: "child" });
+    assert.equal(assigned.ok, false); assert.equal(assigned.status, 409); assert.match(assigned.error!, SCOPE_ROUTE);
+    assert.equal(h.db.campaignWorkLedger.currentAssignment("child"), null);
+
+    // A merge that would close it is refused with the issue named, and nobody gets a decision.
+    const closing = await h.merge("child", 11, ["team/repo#101"]).request();
+    assert.equal(closing.ok, false); assert.equal(closing.status, 409);
+    assert.match(closing.error!, /outside this Full Control campaign's issue scope: team\/repo#101\./);
+    assert.match(closing.error!, /Refs #N.*request_campaign_issue_scope_change/);
+    assert.deepEqual(h.decisions("child"), []);
+
+    // Work on the scoped epic is dispatched and merged as before.
+    const scoped = h.launch(h.item.id);
+    assert.ok(scoped.ok, scoped.error ?? "refused");
+    // Retargeting that dispatched item at the unscoped issue is a dispatch for it, refused the same way.
+    const retarget = h.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 101 } },
+      { key: "issue:101", issue: { repository: "team/repo", number: 101 } }], planComplete: true });
+    assert.equal(retarget.ok, false); assert.equal(retarget.status, 409);
+    assert.match(retarget.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(retarget.error!, SCOPE_ROUTE);
+    const launchedChild = scoped.data!.id;
+    const updated = h.svc.updateCampaignWorkItem("root", { workItemId: h.item.id, issue: { repository: "team/repo", number: 101 } });
+    assert.equal(updated.ok, false); assert.equal(updated.status, 409);
+    assert.match(updated.error!, /issue:100 has an open attempt, so it cannot be retargeted/); assert.match(updated.error!, SCOPE_ROUTE);
+    assert.deepEqual(h.db.campaignWorkLedger.detail("root", h.item.id, Date.now())!.issue, { repository: "team/repo", number: 100 });
+    assert.equal(h.db.campaignWorkLedger.currentAssignment(launchedChild)?.workItemId, h.item.id);
+    const delivered = await h.merge("child", 12, ["team/repo#100"]).request();
+    assert.ok(delivered.ok, delivered.error ?? "refused");
+    assert.equal(delivered.data!.authority, "orchestrator");
+    assert.equal(delivered.data!.authorityEvaluation?.reason, "authorized_operation");
+  } finally { h.db.close(); }
+});
+
+test("#4062 a refused follow-up addition cannot be delivered through a recommit, a dispatch and a merge that closes it", async () => {
+  const h = scopeGuardHarness();
+  try {
+    const refused = await h.svc.proposeCampaignIssueScope("root", { requestId: "add-follow-up", expectedRevision: 1,
+      additions: [{ repository: "team/repo", number: 103 }], removals: [], explanation: "Verified follow-up" });
+    assert.equal(refusalCode(refused), "lineage_missing");
+    const followUp = h.itemFor("follow-up:103", 103);
+    assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: followUp, commitment: { state: "scope_removed", reason: "Not in scope." } }).ok);
+    // Recommitting the item is recording, which stays allowed; dispatching it is not.
+    const recommitted = h.svc.updateCampaignWorkItem("root", { workItemId: followUp, commitment: { state: "committed" } });
+    assert.ok(recommitted.ok, recommitted.error ?? "refused");
+    const launched = h.launch(followUp);
+    assert.equal(launched.ok, false); assert.equal(launched.status, 409);
+    assert.match(launched.error!, /team\/repo#103/); assert.match(launched.error!, SCOPE_ROUTE);
+
+    const closing = await h.merge("child", 13, ["team/repo#103"]).request();
+    assert.equal(closing.ok, false); assert.equal(closing.status, 409);
+    assert.match(closing.error!, /team\/repo#103/);
+    // Mixed closures name only the unscoped issues, each of them.
+    const mixed = await h.merge("child", 14, ["other/repo#100", "team/repo#100", "team/repo#103"]).request();
+    assert.equal(mixed.ok, false);
+    assert.match(mixed.error!, /issue scope: other\/repo#100, team\/repo#103\./);
+    assert.deepEqual(h.decisions("child"), []);
+  } finally { h.db.close(); }
+});
+
+test("#4062 a merge that says Refs and closes nothing stays the Orchestrator's, and Custom campaigns are unchanged", async () => {
+  const h = scopeGuardHarness();
+  try {
+    // This campaign's own pull requests reference their issue without closing it.
+    const refs = await h.merge("child", 15, []).request();
+    assert.ok(refs.ok, refs.error ?? "refused");
+    assert.equal(refs.data!.authority, "orchestrator");
+    assert.equal(refs.data!.resourceSnapshot.category === "pr_merge" && refs.data!.resourceSnapshot.intendedClosures, undefined);
+  } finally { h.db.close(); }
+  const custom = harness(false);
+  try {
+    const closes = ["team/repo#101"];
+    const runner = custom.hub.requestFromRunner;
+    custom.hub.requestFromRunner = async (runnerId, requestId, message, timeout) => message.type === "github_merge_preflight"
+      ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1,
+        closures: closes.map((issue) => ({ issue, sources: ["description" as const], excerpt: "Closes #101" })) } }
+      : runner(runnerId, requestId, message, timeout);
+    const policy = custom.db.getSession("root")!.parentControlPolicy!;
+    assert.ok(custom.svc.setParentControlPolicy("root", { ...policy.decisions, pr_merge: "orchestrator" }, policy.revision).ok);
+    const headSha = "f".repeat(40);
+    const created = await custom.svc.createWorkflowDecisionWithVideo("child", { requestId: "custom-merge", resourceKey: "team/repo#16", resourceSnapshot: {
+      category: "pr_merge", repository: "team/repo", pullRequest: 16, headSha, reviewResult: "merge", intendedClosures: closes,
+      requiredChecks: { headSha, status: "passed", checkedAt: 10, checks: [{ name: "CI", state: "passed" }] } } });
+    assert.ok(created.ok, created.error ?? "refused");
+    assert.equal(created.data!.authority, "orchestrator", "a Custom campaign's saved merge owner still applies to an unscoped closure");
+    assert.equal(created.data!.authorityEvaluation?.reason, "custom_owner");
+    // Dispatch on an unscoped issue's item is unchanged under Custom, too.
+    const plan = custom.svc.recordCampaignPlan("root", { items: [{ key: "issue:100", issue: { repository: "team/repo", number: 100 } },
+      { key: "issue:101", issue: { repository: "team/repo", number: 101 } }], planComplete: true });
+    assert.ok(plan.ok, plan.error ?? "plan");
+    const unscoped = plan.data!.items.find((item) => item.key === "issue:101")!.workItemId;
+    const assigned = custom.svc.assignCampaignWorkItem("root", { workItemId: unscoped, childSessionId: "child" });
+    assert.ok(assigned.ok, assigned.error ?? "refused");
+  } finally { custom.db.close(); }
+});
+
+test("#4062 a merge from a runner that cannot read closing references is the person's, whatever it declares", async () => {
+  const h = scopeGuardHarness();
+  try {
+    h.db.registerRunner(h.metadata, 1, 241);
+    // The pull request may also close an unscoped issue; a v241 runner is never asked.
+    h.closes.set(21, ["team/repo#100", "team/repo#101"]);
+    for (const [pullRequest, closing] of [[21, ["team/repo#100"]], [22, []]] as const) {
+      const created = await h.merge("child", pullRequest, [...closing]).request();
+      assert.ok(created.ok, created.error ?? "refused");
+      assert.equal(created.data!.authority, "human");
+      assert.equal(created.data!.authorityEvaluation?.reason, "unverified_closures");
+      const approved = h.svc.resolveDescendantRequest("root", "child", created.data!.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.equal(approved.ok, false, "the Orchestrator cannot approve it");
+      assert.equal(h.db.workflowDecisionByOccurrence(created.data!.occurrenceId)!.status, "pending");
+    }
+    const unscoped = await h.merge("child", 23, ["team/repo#101"]).request();
+    assert.equal(unscoped.ok, false); assert.match(unscoped.error!, /team\/repo#101/);
+  } finally { h.db.close(); }
+});
+
+test("#4062 a scope that drops a merge's closing issue after it was requested is evaluated again before approval and arming", async () => {
+  const h = scopeGuardHarness(5, [100, 101]);
+  try {
+    h.db.createSession({ id: "merger", runnerId: "r", workspaceId: "w", agentId: "codex", title: "merger", parentSessionId: "root",
+      driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+    h.db.updateSessionStatus("merger", "running", Date.now());
+    const approvedFirst = h.merge("merger", 17, ["team/repo#101"]);
+    const pendingFirst = h.merge("merger", 18, ["team/repo#101"]);
+    const approved = await approvedFirst.request(), pending = await pendingFirst.request();
+    assert.ok(approved.ok && pending.ok, approved.error ?? pending.error ?? "refused");
+    assert.equal(approved.data!.authority, "orchestrator"); assert.equal(pending.data!.authority, "orchestrator");
+    assert.ok(h.svc.resolveDescendantRequest("root", "merger", approved.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+
+    // The campaign's scope no longer names the issue both merges would close.
+    h.narrowScope([100]);
+
+    const armed = await h.svc.consumeWorkflowDecision("merger", approved.data!.occurrenceId, { resourceSnapshot: approvedFirst.snapshot,
+      action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(approvedFirst.snapshot) } });
+    assert.equal(armed.ok, false); assert.equal(armed.status, 409);
+    assert.equal(h.db.workflowDecisionByOccurrence(approved.data!.occurrenceId)!.status, "revoked");
+    const late = h.svc.resolveDescendantRequest("root", "merger", pending.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+    assert.equal(late.ok, false);
+    assert.equal(h.db.workflowDecisionByOccurrence(pending.data!.occurrenceId)!.status, "revoked");
+    const again = await h.merge("merger", 19, ["team/repo#101"]).request();
+    assert.equal(again.ok, false); assert.match(again.error!, /team\/repo#101/);
+  } finally { h.db.close(); }
+});
+
+test("#4062 a scope that drops a merge's closing issue while GitHub is read for arming leaves the merge unarmed", async () => {
+  const h = scopeGuardHarness(5, [100, 101]);
+  try {
+    h.db.createSession({ id: "merger", runnerId: "r", workspaceId: "w", agentId: "codex", title: "merger", parentSessionId: "root",
+      driver: "claude-code", config: {}, useWorktree: false, now: Date.now() });
+    h.db.updateSessionStatus("merger", "running", Date.now());
+    const merge = h.merge("merger", 20, ["team/repo#101"]);
+    const created = await merge.request();
+    assert.ok(created.ok, created.error ?? "refused");
+    assert.ok(h.svc.resolveDescendantRequest("root", "merger", created.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+    h.during.preflight = () => h.narrowScope([100]);
+    const armed = await h.svc.consumeWorkflowDecision("merger", created.data!.occurrenceId, { resourceSnapshot: merge.snapshot,
+      action: { kind: "pr_merge_enqueue", command: canonicalPrMergeEnqueueCommand(merge.snapshot) } });
+    assert.equal(armed.ok, false); assert.equal(armed.status, 409);
+    assert.match(armed.error!, /authority changed while arming/);
+    const decision = h.db.workflowDecisionByOccurrence(created.data!.occurrenceId)!;
+    assert.equal(decision.status, "revoked"); assert.equal(decision.actionAdmission, undefined);
+  } finally { h.db.close(); }
+});
+
+// #4066, observed live: children re-requested publications that had gone to the person, and each
+// re-request superseded the person's occurrence, so the person's approval landed on a dead one.
+const publicationRequest = (h: ReturnType<typeof harness>, sessionId: string, requestId: string, resourceKey: string,
+  recommendationId: string, sanitizedBody = body) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey,
+  resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Related repair", sanitizedBody, labels: [], recommendationId } });
+const personResolves = (h: ReturnType<typeof harness>, sessionId: string, occurrenceId: string, outcome: "approve" | "deny" = "approve") =>
+  h.svc.resolveWorkflowDecision("root", sessionId, occurrenceId, { outcome }, "human", { kind: "human", id: h.principal.userId }, () => true);
+const cardIds = (h: ReturnType<typeof harness>, sessionId: string) =>
+  JSON.stringify(h.db.getSession(sessionId)!.pendingApproval ?? null);
+
+test("#4066 case A: a re-request never supersedes the person's pending or approved publication, and names it with the withdrawal route", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const unsafe = `${body}\napi_key=secret-value`;
+    const first = await publicationRequest(h, "child", "publish-1", "publish", recommendationId, unsafe);
+    assert.ok(first.ok, first.error ?? "first");
+    assert.deepEqual([first.data!.authority, first.data!.authorityEvaluation?.admissionFailure], ["human", "unsafe_payload"]);
+    const personal = first.data!.occurrenceId;
+
+    // While the person is deciding, the same key is refused, and nothing is created or retired.
+    const again = await publicationRequest(h, "child", "publish-2", "publish", recommendationId, unsafe);
+    assert.deepEqual([again.ok, again.status, again.errorDetails?.code, again.errorDetails?.occurrenceId],
+      [false, 409, "person_owned_publication_open", personal]);
+    assert.match(again.error!, new RegExp(`decision ${personal} \\(pending\\).*Nothing was created\\. Wait for the person's decision, or withdraw it first with withdraw_workflow_decision \\(wollipog decision withdraw ${personal} `, "u"));
+    assert.equal(h.db.workflowDecisionByRequestId("child", "publish-2"), null);
+    assert.equal(h.db.workflowDecisionByOccurrence(personal)!.status, "pending");
+    assert.ok(cardIds(h, "child").includes(personal), "the person's card stays");
+
+    // The person's approval lands on the live occurrence.
+    const approved = personResolves(h, "child", personal);
+    assert.ok(approved.ok, approved.error ?? "approve");
+    assert.equal(h.db.workflowDecisionByOccurrence(personal)!.status, "approved");
+
+    // A re-request after the person approved is refused too, and tells the requester to consume it.
+    const afterApproval = await publicationRequest(h, "child", "publish-3", "publish", recommendationId, unsafe);
+    assert.deepEqual([afterApproval.status, afterApproval.errorDetails?.occurrenceId], [409, personal]);
+    assert.match(afterApproval.error!, /\(approved\).*It is approved: consume it to publish, or withdraw it first/u);
+    assert.equal(h.db.workflowDecisionByRequestId("child", "publish-3"), null);
+    assert.equal(h.db.workflowDecisionByOccurrence(personal)!.status, "approved", "the person's approval still stands");
+
+    // A replayed requestId still answers with its own occurrence.
+    const replay = await publicationRequest(h, "child", "publish-1", "publish", recommendationId, unsafe);
+    assert.equal(replay.data?.occurrenceId, personal);
+  } finally { h.db.close(); }
+});
+
+test("#4066 case A: after the requester withdraws the person's pending publication, it can request again", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const unsafe = `${body}\napi_key=secret-value`;
+    const first = await publicationRequest(h, "child", "publish-1", "publish", recommendationId, unsafe);
+    assert.ok(first.ok);
+    assert.equal((await publicationRequest(h, "child", "publish-2", "publish", recommendationId, unsafe)).status, 409);
+    assert.ok(h.svc.withdrawWorkflowDecision("child", first.data!.occurrenceId, { reason: "Payload needs another redaction" }).ok);
+    const next = await publicationRequest(h, "child", "publish-3", "publish", recommendationId, unsafe);
+    assert.ok(next.ok, next.error ?? "after withdrawal");
+    assert.equal(next.data!.authority, "human");
+    assert.equal(h.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!.status, "revoked", "the withdrawal, not a supersession");
+  } finally { h.db.close(); }
+});
+
+test("#4066 case B: an admitted re-request retires the requester's person-owned publication for its recommendation, naming itself as the cause", async () => {
+  for (const personApprovedFirst of [false, true]) {
+    const label = personApprovedFirst ? "approved" : "pending";
+    const h = harness();
+    try {
+      const recommendationId = acceptedRecommendation(h);
+      const otherRecommendation = acceptedRecommendation(h, "Second repair");
+      h.state.publicationOk = false;
+      const personal = await publicationRequest(h, "child", "publish-1", "publish", recommendationId);
+      assert.ok(personal.ok, personal.error ?? label);
+      assert.deepEqual([personal.data!.authority, personal.data!.authorityEvaluation?.admissionFailure], ["human", "inspection_failed"], label);
+      // Neither another recommendation's person-owned publication nor another requester's is retired.
+      const other = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "other-1", resourceKey: "other", resourceSnapshot: {
+        category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "Second repair", sanitizedBody: body, labels: [], recommendationId: otherRecommendation } });
+      assert.equal(other.data?.authority, "human", label);
+      const rootOwn = await publicationRequest(h, "root", "root-1", "publish", recommendationId);
+      assert.equal(rootOwn.data?.authority, "human", label);
+      if (personApprovedFirst) assert.ok(personResolves(h, "child", personal.data!.occurrenceId).ok, label);
+
+      h.state.publicationOk = true;
+      const admitted = await publicationRequest(h, "child", "publish-2", "publish", recommendationId);
+      assert.ok(admitted.ok, `${label}: ${admitted.error}`);
+      assert.equal(admitted.data!.authority, "orchestrator", label);
+      assert.equal(admitted.data!.resourceKey, `publication:${recommendationId}`, label);
+
+      const retired = h.db.workflowDecisionByOccurrence(personal.data!.occurrenceId)!;
+      assert.deepEqual([retired.status, retired.supersededBy], ["superseded", admitted.data!.occurrenceId], label);
+      assert.ok(!cardIds(h, "child").includes(personal.data!.occurrenceId), `${label}: the person's card is withdrawn`);
+      assert.ok(cardIds(h, "child").includes(admitted.data!.occurrenceId), label);
+      assert.ok(!h.db.unconsumedWorkflowDecisionsForSession("child").some((d) => d.occurrenceId === personal.data!.occurrenceId),
+        `${label}: verification no longer finds it unresolved`);
+      assert.equal(h.db.workflowDecisionByOccurrence(other.data!.occurrenceId)!.status, "pending", `${label}: another recommendation's stays`);
+      assert.equal(h.db.workflowDecisionByOccurrence(rootOwn.data!.occurrenceId)!.status, "pending", `${label}: another requester's stays`);
+
+      // The person cannot approve it, and is told what replaced it, on either route.
+      for (const refused of [personResolves(h, "child", personal.data!.occurrenceId),
+        h.svc.approve("child", personal.data!.occurrenceId, "approve", { kind: "human", id: h.principal.userId })]) {
+        assert.deepEqual([refused.ok, refused.status, refused.errorDetails?.code, refused.errorDetails?.supersededBy],
+          [false, 409, "workflow_decision_superseded", admitted.data!.occurrenceId], label);
+        assert.equal(refused.error, `workflow decision ${personal.data!.occurrenceId} was superseded by workflow decision ${admitted.data!.occurrenceId} and can no longer be approved or denied`, label);
+      }
+      assert.equal(h.db.workflowDecisionByOccurrence(personal.data!.occurrenceId)!.status, "superseded", label);
+
+      // The admitted one is the Orchestrator's to approve and the requester's to consume.
+      assert.ok(h.svc.resolveWorkflowDecision("root", "child", admitted.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true).ok, label);
+      const consumed = await h.svc.consumeWorkflowDecision("child", admitted.data!.occurrenceId, { resourceSnapshot: admitted.data!.resourceSnapshot });
+      assert.ok(consumed.ok, `${label}: ${consumed.error}`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("#4066 supersession between Orchestrator-owned occurrences is unchanged, and now names its cause", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    const first = await publicationRequest(h, "child", "admitted-1", "publish", recommendationId);
+    const second = await publicationRequest(h, "child", "admitted-2", "publish", recommendationId);
+    assert.deepEqual([first.data?.authority, second.data?.authority], ["orchestrator", "orchestrator"]);
+    const replaced = h.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!;
+    assert.deepEqual([replaced.status, replaced.supersededBy], ["superseded", second.data!.occurrenceId]);
+    const refused = h.svc.resolveWorkflowDecision("root", "child", first.data!.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "root" }, () => true);
+    assert.equal(refused.status, 409);
+    assert.match(refused.error!, new RegExp(`superseded by workflow decision ${second.data!.occurrenceId}`, "u"));
   } finally { h.db.close(); }
 });
