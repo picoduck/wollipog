@@ -28,7 +28,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, ownerDecisionProtected, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
 import { firstMessageIssueIntent, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
@@ -102,6 +102,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   completeParentControlDecisions,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  OWNER_DECISION_LIMITS,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type AgentContext,
   type AgentDriverKind,
@@ -256,6 +257,9 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type ConsumeWorkflowDecisionRequest,
   type ResolveWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
+  type CreateOwnerDecisionRequest,
+  type HandWorkflowDecisionToOwnerRequest,
+  type WorkflowDecisionOption,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
@@ -801,7 +805,10 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
-  const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  // A decision the owner kept (#4064) is answered by that owner, never by an agent or a reviewer.
+  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined;
+  const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
+    : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
   // that approval chose no longer applies.
   const message = decision.withdrawal ? decision.withdrawal.reason : decision.childMessage;
@@ -817,10 +824,53 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
     ...(decision.category === "campaign_follow_up_admission" ? [decision.status === "approved"
       ? "Repeat the same request for that follow-up; the campaign applies it once and consumes this approval. Do not call consume_workflow_decision."
       : "Do not repeat that request for that follow-up: it stays refused."] : []),
+    ...(decision.category === "owner_decision" && !decision.withdrawal ? [decision.status === "approved"
+      ? "Act on the option your owner chose; it needs no consumption."
+      : decision.status === "denied" ? "Your owner chose not to proceed with any option: do not act on this decision."
+      : "Nobody answered it: ask again with request_owner_decision if you still need the owner's choice."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
   ].join("\n");
+}
+
+/** What one occurrence decides about, for matching a later request against an occurrence handed to
+ * the campaign's owner (#4064). Its category and resourceKey always count, from any requester; so
+ * do its exact content and what the snapshot names (a pull request, a branch, an issue, a
+ * recommendation, a question, a publication title, evidence, a scope change), so neither a new key
+ * nor a recreated copy can route around the handoff. Matching too much only keeps a request with a
+ * person. A question genuinely reworded is a different question. */
+function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
+  const text = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${auditDigest(snapshot)}`];
+  switch (snapshot.category) {
+    case "implementation_question":
+    case "owner_decision":
+      targets.push(`${snapshot.category}:question:${text(snapshot.question)}`);
+      break;
+    case "ui_evidence_approval":
+      for (const item of snapshot.evidence) targets.push(`${snapshot.category}:evidence:${item.sha256}`);
+      break;
+    case "campaign_issue_scope":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:+${[...snapshot.additions].sort((a, b) => a - b).join(",")}` +
+        `:-${[...snapshot.removals].sort((a, b) => a - b).join(",")}`);
+      break;
+    case "pr_merge":
+    case "review_round_extension":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`);
+      break;
+    case "merged_branch_deletion":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:${snapshot.branch}`);
+      break;
+    case "issue_closure":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}#${snapshot.issue}`);
+      break;
+    case "follow_up_issue_publication":
+      if (snapshot.recommendationId) targets.push(`${snapshot.category}:recommendation:${snapshot.recommendationId}`);
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:title:${text(snapshot.sanitizedTitle)}`);
+      break;
+  }
+  return targets;
 }
 
 /** Why an issue closure cannot execute yet, naming the next step (#2940). A pending closure the
@@ -971,6 +1021,36 @@ function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: s
 }
 
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
+/** A question with 2 to 12 uniquely identified options, one of which may be recommended. `noun`
+ * names the decision kind in refusals ("implementation questions"). */
+function normalizeDecisionQuestion(value: Record<string, unknown>, noun: string, maxQuestion: number): ServiceResult<{
+  question: string; options: WorkflowDecisionOption[]; recommendedOptionId?: string;
+}> {
+  if (!boundedDecisionString(value.question, maxQuestion) || !Array.isArray(value.options) ||
+      value.options.length < 2 || value.options.length > 12) {
+    return fail(`${noun} require text and 2 to 12 options`);
+  }
+  const options = value.options.flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const option = raw as Record<string, unknown>;
+    return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
+      (option.description === undefined || boundedDecisionString(option.description, 1000))
+      ? [{ optionId: option.optionId, label: option.label,
+          ...(typeof option.description === "string" ? { description: option.description } : {}) }]
+      : [];
+  });
+  if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
+      new Set(options.map((option) => option.optionId)).size !== options.length) {
+    return fail(`${noun.replace(/s$/u, "")} options must have unique valid ids and labels`);
+  }
+  const recommended = value.recommendedOptionId;
+  if (recommended !== undefined &&
+      (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
+    return fail("recommendedOptionId must identify an offered option");
+  }
+  return ok({ question: value.question, options, ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+}
+
 export function normalizeWorkflowDecisionSnapshot(
   input: unknown,
   /** Only the server's bounded decoder may add this lineage; callers cannot assert it. */
@@ -1027,6 +1107,19 @@ export function normalizeWorkflowDecisionSnapshot(
     const normalized = normalizeIssueClosureSnapshot(value);
     return normalized ? ok(normalized) : fail("issue closure requires exact bounded issue, action, and conflict evidence");
   }
+  if (category === "owner_decision") {
+    // A question its campaign's owner kept (#4064): the same option rules as an implementation
+    // question, plus the material the owner needs. Only request_owner_decision creates one.
+    const question = normalizeDecisionQuestion(value, "owner decisions", OWNER_DECISION_LIMITS.question);
+    if (!question.ok || !question.data) return failAs(question);
+    if (value.material !== undefined && !boundedDecisionString(value.material, OWNER_DECISION_LIMITS.material)) {
+      return fail(`material must be nonempty text of at most ${OWNER_DECISION_LIMITS.material} characters`);
+    }
+    if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material"].includes(key))) {
+      return fail("an owner decision has only a question, options, a recommended option and material");
+    }
+    return ok({ category, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}) });
+  }
   if (!WORKFLOW_DECISION_CATEGORIES.includes(category as typeof WORKFLOW_DECISION_CATEGORIES[number])) {
     return fail("unknown workflow decision category");
   }
@@ -1047,30 +1140,8 @@ export function normalizeWorkflowDecisionSnapshot(
     }
   };
   if (category === "implementation_question") {
-    if (!boundedDecisionString(value.question, 4000) || !Array.isArray(value.options) ||
-        value.options.length < 2 || value.options.length > 12) {
-      return fail("implementation questions require text and 2 to 12 options");
-    }
-    const options = value.options.flatMap((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-      const option = raw as Record<string, unknown>;
-      return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
-        (option.description === undefined || boundedDecisionString(option.description, 1000))
-        ? [{ optionId: option.optionId, label: option.label,
-            ...(typeof option.description === "string" ? { description: option.description } : {}) }]
-        : [];
-    });
-    if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
-        new Set(options.map((option) => option.optionId)).size !== options.length) {
-      return fail("implementation question options must have unique valid ids and labels");
-    }
-    const recommended = value.recommendedOptionId;
-    if (recommended !== undefined &&
-        (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
-      return fail("recommendedOptionId must identify an offered option");
-    }
-    return ok({ category, question: value.question, options,
-      ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+    const question = normalizeDecisionQuestion(value, "implementation questions", 4000);
+    return question.ok && question.data ? ok({ category, ...question.data }) : failAs(question);
   }
   if (category === "pr_merge") {
     if (value.reviewSessionId !== undefined && (!boundedDecisionString(value.reviewSessionId, 128) ||
@@ -5979,7 +6050,7 @@ export class SessionsService {
     }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
-    const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
+    const pendingInputBarrier = session.status === "input_required" || awaitsPendingInput(session.pendingApproval);
     const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
@@ -6717,7 +6788,7 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
 
-    const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
+    const pendingInputBarrier = session.status === "input_required" || awaitsPendingInput(session.pendingApproval);
     const result = this.promptOutbox.retryKnownUndeliveredFailure(sessionId, commandId, now, false);
     if (result === "not_found") return fail("pending prompt not found", 404);
     if (result === "not_retryable") {
@@ -9607,7 +9678,9 @@ export class SessionsService {
       // cannot ride on the dismissal itself without a runner protocol change.
       if (first) setImmediate(() => {
         try {
-          const delivered = this.prompt(session.id, FULL_CONTROL_ROOT_QUESTION_MESSAGE);
+          // A root whose runner has the owner-decision tools (#4064) is told how to reach its owner.
+          const delivered = this.prompt(session.id, runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion,
+            "ownerDecisions") ? FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE : FULL_CONTROL_ROOT_QUESTION_MESSAGE);
           if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
           this.log.warn(`root question guidance failed for ${session.id}: ${(error as Error).message}`);
@@ -10320,7 +10393,7 @@ export class SessionsService {
     if (!this.hub.isRunnerOnline(session.runnerId)) return "runner is offline";
     if (session.worktreeRecovery) return "worktree recovery is required";
     if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
-    if (pendingRequests(session.pendingApproval).some((request) => request.async)) return "a question is waiting for an answer";
+    if (pendingRequests(session.pendingApproval).some((request) => request.async && request.kind === "question")) return "a question is waiting for an answer";
     const daily = this.dailyBudgetFor(sessionId);
     if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
     const ids = held.map((watch) => watch.watchId);
@@ -10432,7 +10505,7 @@ export class SessionsService {
     const supportsQuestionRetention = runnerSupportsReviewQuestionPreservation(this.db.getRunner(session.runnerId));
     // Older runners mistake this automatic prompt for human input and dismiss the async card.
     // Keep the review owed until the person answers or the runner upgrades.
-    if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async)) {
+    if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async && request.kind === "question")) {
       return "runner upgrade is required to preserve a pending async question";
     }
     const ids = held.map((review) => review.reviewSessionId);
@@ -11456,7 +11529,9 @@ export class SessionsService {
       /** The server's own request when a follow-up passes the campaign's approval limit (#2940). */
       trustedFollowUpAdmission?: boolean;
       /** #3713: the child runner's GitHub read, taken just before this request. */
-      closingReferenceCheck?: PullRequestClosingReferenceCheck },
+      closingReferenceCheck?: PullRequestClosingReferenceCheck;
+      /** A Full Control root's owner decision, checked by createOwnerDecision (#4064). */
+      trustedOwnerDecision?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -11490,6 +11565,9 @@ export class SessionsService {
     }
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
+    }
+    if (normalized.data.category === "owner_decision" && !internal?.trustedOwnerDecision) {
+      return fail("use request_owner_decision: only a Full Control root asks its campaign's owner a decision the owner kept", 403);
     }
     if (normalized.data.category === "review_round_extension") {
       const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
@@ -11530,7 +11608,7 @@ export class SessionsService {
         code: "media_video_unsupported", reason: internal.videoFallbackReason,
       } };
     }
-    const authority = evaluated.effectiveOwner;
+    let authority = evaluated.effectiveOwner;
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
       this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id),
@@ -11560,6 +11638,12 @@ export class SessionsService {
       authorityEvaluation.owner = authority;
       authorityEvaluation.basis = "human_required";
       authorityEvaluation.reason = "evidence_review_unavailable";
+    }
+    // A resource its owner kept stays theirs (#4064): a later request for it, under any key and from
+    // any campaign member, is the person's too, so withdrawing and asking again cannot move it back.
+    if (authority === "orchestrator" && this.ownerKept(controller.session.id, category, request.resourceKey, normalized.data)) {
+      authority = "human";
+      Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
     }
     if (category === "follow_up_issue_publication" && normalized.data.category === category && authority === "human") {
       // Under an issue boundary no person-owned publication is recorded without its reason (#4065):
@@ -11622,14 +11706,16 @@ export class SessionsService {
         publicationRefusalCoordinate(sessionId, decision.resourceSnapshot.recommendationId));
     }
     const approval = this.workflowDecisionApproval(decision);
-    if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    // A root's owner decision does not park it (#4064): its card waits for the owner while the root
+    // keeps working and campaign continuations keep reaching it.
+    if (!approval.async && child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // Project the replacement before settling older occurrences. Otherwise a supersession after
     // swallowed Idle briefly restores Ready, clears the resume proof, and strands the new card.
     this.db.setPendingApproval(
       sessionId,
       appendPendingApproval(this.db.getSession(sessionId)?.pendingApproval, approval),
     );
-    this.db.updateSessionStatus(sessionId, "input_required", now);
+    if (!approval.async) this.db.updateSessionStatus(sessionId, "input_required", now);
     for (const occurrenceId of created.supersededOccurrenceIds) {
       const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (!superseded) continue;
@@ -11646,6 +11732,117 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controller.session);
     this.hub.sessionChangedById(sessionId);
     return ok(this.withMergeReviewEvidence(decision), 201);
+  }
+
+  /** The Full Control root the owner-decision routes serve (#4064), or why `session` is not one. */
+  private ownerDecisionRoot(session: SessionView | null): ServiceResult<SessionView> {
+    if (!session) return fail("session not found", 404);
+    const unsupported = this.capabilityFailure(session.runnerId, "ownerDecisions", "owner decisions");
+    if (unsupported) return unsupported;
+    const root = this.orchestratorCampaignController(session);
+    if (isTerminal(session.status) || session.orchestratorPolicy?.control?.mode !== "full_control" || !root ||
+        root === "refused" || root.id !== session.id || !session.parentControlPolicy || !campaignBoundaryCurrent(session)) {
+      return fail("Only a Full Control campaign's root Orchestrator can ask its owner or hand a decision to its owner. " +
+        "Elsewhere a person already sees the campaign's requests.", 409);
+    }
+    return ok(session);
+  }
+
+  /** A Full Control root asks its campaign's owner a decision the owner kept (#4064). The decision
+   * is always the person's: no agent can answer, approve or resolve it. Its card waits on the root
+   * without parking it, and the owner's choice comes back as the decision's resume prompt. */
+  createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+    const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
+    if (!root.ok) return failAs(root);
+    if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
+      !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material"].includes(key))) {
+      return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId and material", 400);
+    }
+    const snapshot = { category: "owner_decision" as const, question: request.question, options: request.options,
+      ...(request.recommendedOptionId !== undefined ? { recommendedOptionId: request.recommendedOptionId } : {}),
+      ...(request.material !== undefined ? { material: request.material } : {}) };
+    const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
+    if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
+    // Full Control never asks anyone for credentials or sign-in, the owner included.
+    if (ownerDecisionProtected(normalized.data)) {
+      return fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
+        "created. Ask about the design without requesting a value, or continue without it.", 403);
+    }
+    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
+      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true });
+  }
+
+  /** A Full Control root hands one pending Orchestrator-owned occurrence (#4064), its own or a
+   * campaign member's, to the campaign's owner. One way: the occurrence becomes the person's, the
+   * root and every child are refused if they try to resolve it, and every later request for the
+   * same resource in the campaign is the person's too. Nothing about it can grant authority. */
+  handWorkflowDecisionToOwner(callerSessionId: string, occurrenceId: string, request: HandWorkflowDecisionToOwnerRequest,
+    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+    const rooted = this.ownerDecisionRoot(this.db.getSession(callerSessionId));
+    if (!rooted.ok || !rooted.data) return failAs(rooted);
+    const root = rooted.data;
+    if (!boundedDecisionString(request?.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+      return fail("a bounded nonempty reason is required", 400);
+    }
+    const requesterId = request.sessionId ?? callerSessionId;
+    if (!boundedDecisionString(requesterId, 256)) return fail("sessionId must be a nonempty session id", 400);
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    const requester = this.db.getSession(requesterId);
+    if (!decision || !requester || decision.sessionId !== requesterId || decision.controllingSessionId !== root.id ||
+        !canAccess(root.id) || !canAccess(requesterId) || !this.workflowDecisionRelationship(root.id, requesterId)) {
+      return fail("workflow decision not found", 404);
+    }
+    if (decision.ownerHandoff || decision.category === "owner_decision") {
+      return fail("this decision is already your campaign owner's", 409);
+    }
+    if (decision.status !== "pending") {
+      return this.supersededWorkflowDecisionRefusal(decision) ??
+        fail(`only a pending decision can be handed to the owner, and this one is ${decision.status}`, 409);
+    }
+    if (decision.authority !== "orchestrator") return fail("this decision already waits for a person", 409);
+    const policy = root.parentControlPolicy!;
+    if (policy.revision !== decision.policyRevision || !this.workflowDecisionAuthorityCurrent(root, policy, decision)) {
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: root.id } });
+      return fail("workflow decision authority was revoked or superseded", 409);
+    }
+    const now = Date.now();
+    const reason = request.reason.trim();
+    const control = root.orchestratorPolicy?.control;
+    const handed = this.db.handWorkflowDecisionToOwner(occurrenceId, { bySessionId: root.id, at: now, reason }, {
+      owner: "human", basis: "human_required", reason: "owner_kept", operation: decision.category,
+      ...(control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {}),
+    });
+    if (!handed) return fail("workflow decision changed concurrently; read it again", 409);
+    const card = this.workflowDecisionApproval(handed);
+    if (card.async) {
+      // The root's own card stops holding it: settle the pause it held, then keep the owner's card.
+      this.settleWorkflowDecisionPause(requesterId, occurrenceId, now);
+      this.db.setPendingApproval(requesterId, appendPendingApproval(this.db.getSession(requesterId)?.pendingApproval, card));
+    } else {
+      // A child still waits on the same occurrence; its card now names the person as its owner.
+      this.db.setPendingApproval(requesterId, appendPendingApproval(
+        removePendingRequest(this.db.getSession(requesterId)?.pendingApproval, occurrenceId), card));
+    }
+    this.recordWorkflowDecisionAudit(handed, "pending", { kind: "agent", id: root.id }, now, reason);
+    this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_owner_handoff",
+      sessionId: requesterId, controllingSessionId: root.id, occurrenceId, policyRevision: handed.policyRevision,
+      ...handed.authorityEvaluation }));
+    if (requesterId !== root.id) this.hub.sessionChangedById(requesterId);
+    this.publishCampaignAttentionTransition(root);
+    this.hub.sessionChangedById(root.id);
+    return ok(this.withMergeReviewEvidence(handed));
+  }
+
+  /** Whether the campaign's owner kept this resource (#4064): its root handed an occurrence for it
+   * to the owner. See ownerKeptTargets for what counts as the same resource. */
+  private ownerKept(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
+    snapshot: WorkflowDecisionResourceSnapshot): boolean {
+    const handed = this.db.ownerHandedWorkflowDecisions(controllerId);
+    if (!handed.length) return false;
+    const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
+    return handed.some((decision) =>
+      ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
   }
 
   /** A requester's new publication never silently replaces one a person owns (#4066). A request
@@ -11793,6 +11990,13 @@ export class SessionsService {
     }
     if (decision.authority !== authority) {
       return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
+    // other person's who can open the session.
+    if ((decision.category === "owner_decision" || decision.ownerHandoff ||
+        this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot)) &&
+        (authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(decision.controllingSessionId, actor.id))) {
+      return fail("Only the campaign's owner can decide a decision the owner kept", 403);
     }
     if (authority === "orchestrator" && parentSessionId === childSessionId &&
         evaluateCampaignAuthority(currentParent, currentChild, this.db.getRunner(currentChild.runnerId)?.protocolVersion,
@@ -12972,9 +13176,15 @@ export class SessionsService {
   ): boolean {
     if (decision.category === "automation_creation") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
+    // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
+    // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
+    // handoff) is never current: nobody acting for the campaign can approve or consume it.
+    const ownerKept = decision.category === "owner_decision" ||
+      this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot);
+    if (ownerKept && decision.authority !== "human") return false;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
-    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
+    if (!ownerKept && decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
     const requester = this.db.getSession(decision.sessionId);
@@ -12985,6 +13195,7 @@ export class SessionsService {
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
+    if (ownerKept) return true;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
     // Likewise a person's review round extension stays theirs when Full Control could now own it
     // within the cap (#4075): a human decision never broadens authority.
@@ -13511,8 +13722,9 @@ export class SessionsService {
       campaign_follow_up_admission: "Follow-Up Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
       review_round_extension: "Review Round Extension Approval Required",
+      owner_decision: "Owner Decision Required",
     };
-    const options = snapshot.category === "implementation_question"
+    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision"
       ? [
           ...snapshot.options.map((option) => ({
             optionId: option.optionId,
@@ -13532,6 +13744,11 @@ export class SessionsService {
       title: categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
+      // A root's own decision its owner kept (#4064) waits for that person without parking the root:
+      // the root keeps working, and campaign continuations keep reaching it.
+      ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
+        (decision.category === "owner_decision" || decision.ownerHandoff ||
+          decision.authorityEvaluation?.reason === "owner_kept") ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
@@ -13559,11 +13776,11 @@ export class SessionsService {
       );
     }
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category === "implementation_question") {
+    if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
       if (resolution.outcome === "approve" &&
           (typeof resolution.selectedOptionId !== "string" ||
             !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
-        return fail("implementation approval must select one offered option", 400);
+        return fail(`${snapshot.category === "owner_decision" ? "an owner" : "implementation"} approval must select one offered option`, 400);
       }
       if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) {
         return fail("a denied implementation decision cannot select an option", 400);
@@ -13713,10 +13930,13 @@ export class SessionsService {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
+    // A root's owner-kept cards (#4064) wait for a person without parking it, so the session leaves
+    // the pause once nothing else remains, exactly as if no card remained.
+    const parked = awaitsPendingInput(remaining);
     // A child parked for worktree recovery is input_required because the runner said so, not because
     // of this card, so settling the card neither idles nor runs it; a resume waits for recovery.
     const recovering = current.worktreeRecovery != null;
-    const restoreIdle = !recovering && !remaining && current.status === "input_required" &&
+    const restoreIdle = !recovering && !parked && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
     if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!) &&
@@ -13735,7 +13955,7 @@ export class SessionsService {
       this.replayRestoredPolicyIdle(current, sessionId, now);
       return;
     }
-    if (!remaining && current.status === "input_required" && !recovering) {
+    if (!parked && current.status === "input_required" && !recovering) {
       this.db.updateSessionStatus(
         sessionId,
         restoreIdle ? "idle" : "running",
@@ -13752,7 +13972,7 @@ export class SessionsService {
       // the card is present, so the last settlement must immediately surface any deferred gate.
       if (deferLifecycle) deferLifecycle("active", current);
       else {
-        if (!remaining) this.gateOnPolicy(sessionId, now);
+        if (!parked) this.gateOnPolicy(sessionId, now);
         this.clearSettledPolicyResumeStatus(sessionId);
         resume?.(false);
       }
@@ -14087,6 +14307,7 @@ export class SessionsService {
     if (!child || isTerminal(child.status)) return;
     let pending = child.pendingApproval;
     let restored = false;
+    let blocking = false;
     for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
       const controller = this.workflowDecisionController(child, decision.category);
       if (!controller || decision.controllingSessionId !== controller.session.id ||
@@ -14108,10 +14329,17 @@ export class SessionsService {
         continue;
       }
       if (pendingRequests(pending).some((request) => request.requestId === decision.occurrenceId)) continue;
-      pending = appendPendingApproval(pending, this.workflowDecisionApproval(decision));
+      const card = this.workflowDecisionApproval(decision);
+      pending = appendPendingApproval(pending, card);
       restored = true;
+      // A root's owner-kept card (#4064) waits for its owner without parking the root.
+      if (!card.async) blocking = true;
     }
     if (!restored) return;
+    if (!blocking) {
+      this.db.setPendingApproval(sessionId, pending);
+      return;
+    }
     if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     this.db.setPendingApproval(sessionId, pending);
     this.db.updateSessionStatus(sessionId, "input_required", Date.now());
@@ -14561,7 +14789,7 @@ export class SessionsService {
         return fail("workflow decision not found", 404);
       }
       if (decision.status !== "pending") return fail("only pending workflow requests can be withdrawn", 409);
-      if (decision.authority !== "human" || decision.category !== "review_round_extension") {
+      if (decision.authority !== "human" || decision.category !== "review_round_extension" || decision.ownerHandoff) {
         return fail("this category is not designated for Orchestrator withdrawal", 403);
       }
       if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
@@ -14886,12 +15114,12 @@ export class SessionsService {
         return (decision && this.supersededWorkflowDecisionRefusal(decision)) ?? fail("workflow decision is stale or no longer pending", 409);
       }
       const snapshot = decision.resourceSnapshot;
-      const implementation = snapshot.category === "implementation_question";
+      const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision";
       let deny: boolean;
-      if (snapshot.category === "implementation_question") {
+      if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
         if (optionId !== null && optionId !== "__workflow_deny__" &&
             !snapshot.options.some((option) => option.optionId === optionId)) {
-          return fail("implementation decision option is not offered", 409);
+          return fail(`${snapshot.category === "owner_decision" ? "owner" : "implementation"} decision option is not offered`, 409);
         }
         deny = optionId === "__workflow_deny__" || optionId === null;
       } else {
@@ -17467,7 +17695,7 @@ export class SessionsService {
     }
     if (status === "idle") this.db.noteSpawnApprovalsSettled(sessionId);
     const childAttention = !isTerminal(status) && pendingRequests(session.pendingApproval).some(
-      (request) => request.ownerToolUseId || request.kind === "workflow_decision",
+      (request) => request.ownerToolUseId || request.kind === "workflow_decision" && !request.async,
     );
     if (isTerminal(status)) {
       this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-ended");
@@ -20270,6 +20498,12 @@ function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean
 
 function hasBlockingPendingRequest(pending: PendingApproval | null | undefined): boolean {
   return pendingRequests(pending).some((request) => !request.async);
+}
+
+/** Whether a prompt waits behind pending input. A root's owner-kept card (#4064) waits for a
+ * person without being input the root's provider waits on, so it never holds a prompt back. */
+function awaitsPendingInput(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => !(request.kind === "workflow_decision" && request.async));
 }
 
 /** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a

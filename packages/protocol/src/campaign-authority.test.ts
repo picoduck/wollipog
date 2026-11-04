@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   campaignAuthorityPreflight, campaignCodeOperationTargets, campaignWorkflowOwner, completeParentControlDecisions,
-  resolveCampaignAuthority, validCampaignControl,
+  resolveCampaignAuthority, validCampaignControl, ownerDecisionProtected,
   fullControlStandingHumanRequired, humanRequiredRulesExist, FULL_CONTROL_DECLINED_CLASSES, type GovernancePolicy,
   HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type ParentControlDecisionPolicy, type PendingApproval, type WorkflowDecisionResourceSnapshot,
 } from "./index.js";
@@ -772,4 +772,26 @@ test("Full Control owns extra review rounds within the server-enforced cap of a 
   assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, false), "human");
   assert.equal(campaignWorkflowOwner(control, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", false, true), "human");
   assert.equal(campaignWorkflowOwner({ mode: "custom" }, HUMAN_ONLY_PARENT_CONTROL_POLICY, "review_round_extension", true, true), "human");
+});
+
+test("an owner decision is the person's in every mode and to every requester (#4064)", () => {
+  const snapshot: WorkflowDecisionResourceSnapshot = { category: "owner_decision", question: "Which merge order?",
+    options: [{ optionId: "a", label: "A First" }, { optionId: "b", label: "B First" }] };
+  for (const mode of [control, { mode: "custom" as const }, undefined]) for (const root of [true, false]) {
+    for (const decisions of [HUMAN_ONLY_PARENT_CONTROL_POLICY, { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, implementation_question: "orchestrator" as const }]) {
+      const result = resolveCampaignAuthority({ ...base, control: mode, decisions, root, snapshot, trustedSource: "workflow_route" });
+      assert.deepEqual([result.owner, result.basis, result.reason], ["human", "human_required", "owner_kept"]);
+      assert.equal(campaignWorkflowOwner(mode, decisions, "owner_decision", true), "human");
+    }
+  }
+});
+
+test("an owner decision may ask about a credential design but never for a value (#4064)", () => {
+  const options = [{ optionId: "lease", label: "Short-Lived Lease" }, { optionId: "broker", label: "Broker Process" }];
+  assert.equal(ownerDecisionProtected({ question: "Which credential design should the provider bridge use?", options,
+    material: "PR https://github.com/picoduck/wollipog/pull/7 at head abc1234; both designs pass CI." }), false);
+  assert.equal(ownerDecisionProtected({ question: "Merge picoduck/wollipog#7 with its acknowledged risk?", options }), false);
+  assert.equal(ownerDecisionProtected({ question: "Please paste your API key here", options }), true);
+  assert.equal(ownerDecisionProtected({ question: "Which credential design should the provider bridge use?", options,
+    material: "Please paste your API key here before choosing." }), true, "the material is screened too");
 });

@@ -240,6 +240,7 @@ export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workf
       case "campaign_follow_up_admission": return "a follow-up past the limit";
       case "follow_up_issue_publication": return "an issue publication";
       case "implementation_question": return "an implementation decision";
+      case "owner_decision": return "a decision you kept";
       case "review_round_extension": return "more review rounds";
       default: return "a workflow decision";
     }
