@@ -78,6 +78,12 @@ updates:
       # Pinned with a recorded rationale in pnpm-workspace.yaml: the runner loads the exact 1.1
       # signed-package prebuild as an SEA asset, which is why its install scripts stay disabled.
       - dependency-name: "node-pty"
+      # Held below 2.12.3 (#4154). From 2.12.3 the bundler's `rpm` crate 0.30 rejects `-` in the
+      # package version, so a prerelease such as 0.36.0-rc.2 fails to bundle its `.rpm` and every
+      # Linux release-candidate build breaks. Linux Release Compatibility catches it but is not a
+      # required check. Remove this entry once a CLI release includes tauri-apps/tauri#16336.
+      - dependency-name: "@tauri-apps/cli"
+        versions: [">= 2.12.3"]
 
   - package-ecosystem: "cargo"
     directory: "/apps/desktop/src-tauri"

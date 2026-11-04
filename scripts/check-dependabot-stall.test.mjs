@@ -35,12 +35,17 @@ groups:
     dependency-name: "not-an-ignore"
 ignore:
   - dependency-name: "@agentclientprotocol/sdk"
+  - dependency-name: "@tauri-apps/cli"
+    versions: [">= 2.12.3"]
   - dependency-name: '@types/*'
 labels:
   - dependencies
 `;
 
-  assert.deepEqual(parseIgnoredDependencies(config), ["@agentclientprotocol/sdk", "@types/*"]);
+  assert.deepEqual(
+    parseIgnoredDependencies(config),
+    ["@agentclientprotocol/sdk", "@tauri-apps/cli", "@types/*"],
+  );
 });
 
 test("parses explicit deferral markers from issue bodies", () => {
