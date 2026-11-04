@@ -193,6 +193,7 @@ should accept or reject the pre-init event is a reviewed decision outside this s
 | Command / Behaviour | Reason |
 | --- | --- |
 | `probe:claude-mcp-image` | Needs a signed-in account and a real model to read pixels back. This suite instead checks at the stub that the image block reaches the model request. Whether a model can read it stays manual. |
+| `probe:claude-mcp-wait` | Its acceptance run blocks one real 45-minute and one 60-minute wait behind the runner's `wollipog` entry, so it is a manual measurement, not a suite probe. `--idle-ms` with `--without-limit` re-checks the per-server limit against a scaled idle limit in minutes. |
 | `probe:claude-media-reviewer --live` | A paid run with the dedicated reviewer key inside the reviewer namespace, so it is human-only. This suite measures the reviewer's flags, event order, init shape and usage fields against the stub. |
 | Auto-mode classifier decisions | Only a real model makes them. The stub's "allow" answer keeps allow-controls running and claims nothing about the classifier. Auto-mode `can_use_tool` frames, which need the classifier to escalate, stay covered by the recorded fixture replay in `claude-code-managed-worktree.test.ts`. |
 | The production guard hook process | The probes measure Claude's hook semantics with a probe hook. The runner's own hook is covered by its unit and integration tests. |

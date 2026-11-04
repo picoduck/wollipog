@@ -128,6 +128,9 @@ sources that expose a protected installation are refused. Other session-writable
 world-writable paths and other-user-owned components remain untrusted.
 Installations containing requested writable roots are refused with both paths rather than
 silently masking worktree or cache writes. Installation directories must be dedicated to code.
+A configured grant that contains a reviewer's resolution path, such as a workspace registered at
+HOME above `~/.local/bin/claude`, refuses that reviewer for every project rather than gaining an
+exception; the refusal names each configured grant containing the path and how to withdraw it.
 
 A group-write bit is safe only for a proven user-private group: system passwd/group lookups must
 show the owner's primary gid, no other supplementary member and no other primary-group user.

@@ -261,6 +261,13 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       assert.equal(h.db.getSession("root")!.pendingApproval, null);
       const settled = h.sent.filter((m) => m.type === "resolve_permission") as Array<{ requestId: string; optionId: string | null }>;
       assert.deepEqual(settled.filter((m) => m.requestId === "git-inspection").map((m) => m.optionId), [null]);
+      // The decline, and the root's dismissed question, say Full Control policy did it (#4063);
+      // the one-time allows for bounded inspections (the root's standing one and the Orchestrator's
+      // for its child) carry no such attribution.
+      assert.deepEqual((settled as Array<{ requestId: string; automaticResponse?: unknown }>).map((m) => [m.requestId, m.automaticResponse]),
+        [["root-inspection", undefined], ["worker-inspection", undefined], ["git-inspection", { policy: "full_control", basis: "unresolved_effects" }]]);
+      assert.deepEqual(h.sent.filter((m) => m.type === "answer_question").map((m) => (m as { automaticResponse?: unknown }).automaticResponse),
+        [{ policy: "full_control", basis: "root_questions" }]);
       assert.equal(h.svc.resolveDescendantRequest("root", "root", "git-inspection",
         { action: "approve", optionId: "once" }, () => true).ok, false);
     } finally { h.close(); }
@@ -330,6 +337,8 @@ for (const driver of ["codex-app-server", "claude-code"] as const) {
       assert.equal(humanRequests.data!.requests.filter((r) => r.responseOwner === "human").length, 0, "Full Control asks nobody (#2940)");
       assert.ok(!h.sent.some((m) => m.type === "answer_question" && (m as { action?: string }).action !== "dismiss"),
         "the credential question is only ever dismissed, never answered");
+      assert.deepEqual(h.sent.filter((m) => m.type === "answer_question").map((m) => (m as { automaticResponse?: unknown }).automaticResponse),
+        [{ policy: "full_control" }], "a credential-classified dismissal names the policy, never its class (#4063)");
       const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
       assert.equal(blocked.length, 1, "redelivery retains one blocked record, not repeated requests");
       assert.equal(blocked[0]!.state, "blocked");

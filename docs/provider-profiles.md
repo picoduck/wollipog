@@ -95,6 +95,40 @@ start; see [Managed Profiles](#managed-profiles).
 
 ## Managed Profiles
 
+Native Claude Code, Codex and Pi installation discovery uses a private probe HOME beneath each
+runner's owner-namespaced data directory. Executable resolution still searches the OS account's
+installed binaries. Version, compatibility and update-help probes use leased private state;
+authentication and models are inspected separately under the intended launch account's lease
+(or the legacy default HOME when no accounts are configured). A busy or ungranted launch HOME
+does not hide the installation: authentication stays unknown and no authenticated model catalog
+is invented. When the launch HOME can be inspected, existing sign-in state, Pi models and Claude
+user commands remain visible. Model-cache fallback reads its admitted HOME. npm release checks
+retain the operator's userconfig source while their writable state stays isolated. Discovery
+never copies credentials or replaces an account or saved session binding.
+
+Each granted account is checked independently with a compatible installed harness, even when the
+default account is signed out. A ready account keeps the harness selectable for that account;
+the account rows retain their own authentication states. This aggregate readiness never changes
+the saved default, the account chosen by an implicit launch, or a session's recorded binding.
+An explicit or saved ungranted default is refused rather than silently replaced. When no default
+is configured, discovery and new implicit launches choose the first granted compatible account,
+matching control-plane session creation. With no granted account, neither falls back to HOME.
+Protocol v283 carries separate readiness for the unchanged default and ready explicit accounts.
+Automatic reviews use their runner default; automations, orchestration and implicit session creation
+check their effective Machine default. They skip or refuse a signed-out default even when another
+account is ready. Explicit account choices and existing session bindings remain unchanged. Older
+control planes receive conservative default-account availability instead of aggregate readiness.
+WSL without an explicit default keeps its discovered legacy HOME, and configured API/cloud auth
+retains its authentication and billing precedence.
+
+An installed harness can report **Sign-In Required** while the Machine's SSH connection remains
+online. Use **Add Account** to complete supported sign-in into a persistent managed profile, then
+select that account for new sessions. Existing accounts and saved sessions keep their recorded
+HOMEs across reconnects and upgrades; explicitly selecting a shared HOME still enforces its lease
+and grants. Configured launch environments retain their explicit HOME selection and ownership
+checks. The content-free `provider_discovery_completed` log reports installation availability and
+sign-in counts without credential paths or account labels.
+
 An account created through Add Account on a v225 runner connected to a v225 control plane is a
 managed profile. Its HOME is `~/.agent-manager/profiles/<profileId>`: one root per SSH account,
 outside every runner's owner-namespaced data directory, named by a fresh random profile id. Existing

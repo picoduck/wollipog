@@ -42,6 +42,41 @@ Sessions List) never show the same keys on either platform, and a registry test 
 Reading's Previous and Next Session are therefore `Alt+↑` and `Alt+↓` (`⌥↑` and `⌥↓` on Apple
 platforms), which leaves `Ctrl/Cmd+K` to Search while someone is reading a session.
 
+### Side panel chords
+
+On a session page `Ctrl/Cmd+\` toggles the side panel and reopens it on its last tool, and every tool
+except the Session Tools list has one chord of its own (#1260). The tool switcher's items and the
+Session Tools rows show each one as a keycap on fine pointers, and the reference lists them all in
+its Session group.
+
+| Tool | Chord |
+| --- | --- |
+| Review | `Ctrl/Cmd+Shift+G` |
+| Files (Go to File) | `Ctrl/Cmd+P` |
+| Browser | `Ctrl/Cmd+Shift+X` |
+| Terminal | ``Ctrl/Cmd+` `` |
+| Agents | `Ctrl/Cmd+Shift+M` |
+| Side Chat | `Ctrl/Cmd+;` |
+| Background Work | `Ctrl/Cmd+Shift+Y` |
+| Campaign Status | `Ctrl/Cmd+Shift+K` |
+| Requests | `Ctrl/Cmd+'` |
+| Decision History | `Ctrl/Cmd+Shift+H` |
+
+Go to File and Side Chat only ever open their tool and put focus in its field. Terminal follows its
+placement. Every other chord opens the panel on its tool, or closes the panel already showing it.
+The toggle and these chords put focus on the tool switcher when they open or switch the panel, so
+Escape closes it again. Escape closes the panel from any tool while focus is inside it, once no
+dialog, menu, popover or tool layer takes the press first. A terminal keeps Escape for its shell.
+
+Nearly every `Ctrl/Cmd+Shift` letter is already a browser chord, and `Ctrl+Shift+U` and
+`Ctrl+Shift+F` belong to Linux and Windows input methods. `Ctrl/Cmd+Alt` is AltGr on Windows
+layouts. The letters above therefore shadow, only inside the app, minor chords a page may override:
+Firefox's text direction (X), responsive design mode (M), Linux downloads (Y), web console (K) and
+history library (H); Edge's Collections (Y) and duplicate tab (K); and the Home page on Apple
+platforms (`Cmd+Shift+H`). `Ctrl/Cmd+'` collides with nothing. The registry test keeps every panel
+chord off its browser and input-method lists. Bindings are not user-configurable; only the rail's
+digits follow its order.
+
 ## Verification contract
 
 - Pure tests cover preference parsing/resolution, DOM/meta application, terminal palettes, unique

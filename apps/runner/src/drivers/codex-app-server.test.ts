@@ -3956,6 +3956,88 @@ test("same-turn reconciliation trusts only terminal provider items with an exact
   assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
 });
 
+test("a same-head re-enqueue ties the landed command to one admission by provider order (#3991)", async () => {
+  const h = makeHarness({ resumeId: "thread-reenqueue" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/3991 --squash --match-head-commit ${"a".repeat(40)}`;
+  const admission = (id: string, occurrenceId: string, overrides: Record<string, unknown> = {}) => ({
+    id, type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+    arguments: { occurrenceId, action: { kind: "pr_merge_enqueue", command } },
+    status: "completed", error: null,
+    result: { content: [{ type: "text", text: JSON.stringify({ decision: {
+      occurrenceId, status: "approved", actionAdmission: { kind: "pr_merge_enqueue", command },
+    } }) }] },
+    ...overrides,
+  });
+  const enqueue = (id: string) => ({ id, type: "commandExecution", command, status: "completed", exitCode: 0 });
+  const ejectedTurn = { id: "turn-ejected", status: "completed", itemsView: "full",
+    items: [admission("admission-1", "workflow-ejected"), enqueue("command-1")] as Record<string, unknown>[] };
+  const landedTurn = { id: "turn-landed", status: "completed", itemsView: "full",
+    items: [admission("admission-2", "workflow-landed"), enqueue("command-2")] as Record<string, unknown>[] };
+  const thread = { id: "thread-reenqueue", turns: [ejectedTurn, landedTurn] as Record<string, unknown>[] };
+  Object.assign(h.driver, { threadId: thread.id, peer: { request: async () => ({ thread }) },
+    readRolloutProof: async () => null });
+  const reconcile = (occurrenceId: string, fence?: { providerThreadId: string; providerTurnId: string; providerItemId: string }) =>
+    h.driver.reconcileCompletedCommand(occurrenceId, command, fence);
+  const landed = {
+    commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+    providerThreadId: "thread-reenqueue",
+    providerTurnId: "turn-landed",
+    providerAdmissionItemId: "admission-2",
+    providerItemId: "command-2",
+  };
+
+  assert.deepEqual(await reconcile("workflow-landed"), landed,
+    "the earlier successful enqueue sits behind its own admission, so it does not make the later one ambiguous");
+  assert.equal(await reconcile("workflow-ejected"), null, "a later successful enqueue followed the ejected admission");
+  assert.deepEqual(await reconcile("workflow-landed",
+    { providerThreadId: "thread-reenqueue", providerTurnId: "turn-landed", providerItemId: "command-2" }), landed);
+  assert.equal(await reconcile("workflow-landed",
+    { providerThreadId: "thread-reenqueue", providerTurnId: "turn-ejected", providerItemId: "command-1" }), null,
+  "a durable receipt naming another command contradicts the ordered proof");
+
+  landedTurn.items = [admission("admission-2", "workflow-landed"),
+    admission("retry-2", "workflow-landed", { status: "failed", error: { message: "already armed" }, result: null }),
+    enqueue("command-2")];
+  assert.deepEqual(await reconcile("workflow-landed"), landed, "a refused retry of the same occurrence arms nothing");
+
+  for (const [label, items] of [
+    ["another occurrence's admission between them",
+      [admission("admission-2", "workflow-landed"), admission("admission-3", "workflow-other"), enqueue("command-2")]],
+    ["an unfinished admission of another occurrence between them",
+      [admission("admission-2", "workflow-landed"), admission("admission-3", "workflow-other", { status: "inProgress", result: null }),
+        enqueue("command-2")]],
+    ["an unreadable consume call between them",
+      [admission("admission-2", "workflow-landed"), admission("admission-3", "workflow-other", { arguments: "unreadable" }),
+        enqueue("command-2")]],
+    ["two successful commands after one admission",
+      [admission("admission-2", "workflow-landed"), enqueue("command-2"), enqueue("command-3")]],
+    ["a second completed admission of the same occurrence",
+      [admission("admission-2", "workflow-landed"), admission("admission-2b", "workflow-landed"), enqueue("command-2")]],
+    ["a missing admission", [enqueue("command-2")]],
+    ["an unfinished duplicate",
+      [admission("admission-2", "workflow-landed"), enqueue("command-2"),
+        { ...enqueue("command-3"), status: "inProgress", exitCode: null }]],
+  ] as const) {
+    landedTurn.items = [...items] as Record<string, unknown>[];
+    assert.equal(await reconcile("workflow-landed"), null, label);
+  }
+
+  landedTurn.items = [admission("admission-2", "workflow-landed"), enqueue("command-2")];
+  thread.turns = [ejectedTurn, landedTurn, { id: "turn-later", status: "completed", itemsView: "full",
+    items: [enqueue("command-later")] }];
+  assert.equal(await reconcile("workflow-landed"), null, "a later successful enqueue without an admission is ambiguous");
+  thread.turns = [ejectedTurn, landedTurn, { id: "turn-interrupted", status: "interrupted", itemsView: "full",
+    items: [enqueue("command-interrupted")] }];
+  assert.equal(await reconcile("workflow-landed"), null,
+    "a later enqueue that exited 0 still counts, although its interrupted turn could prove nothing itself");
+  thread.turns = [{ ...ejectedTurn, status: "interrupted" }, landedTurn];
+  assert.deepEqual(await reconcile("workflow-landed"), landed,
+    "an earlier enqueue behind its own admission stays tied to it, whatever its turn's status");
+  thread.turns = [ejectedTurn, { id: "turn-admitted", status: "completed", itemsView: "full",
+    items: [admission("admission-2", "workflow-landed")] }, { ...landedTurn, items: [enqueue("command-2")] }];
+  assert.equal(await reconcile("workflow-landed"), null, "an admission in another turn still cannot authorize the command");
+});
+
 test("historical reconciliation falls back to the durable rollout after App Server restart", async () => {
   const previousCodexHome = process.env.CODEX_HOME;
   delete process.env.CODEX_HOME;

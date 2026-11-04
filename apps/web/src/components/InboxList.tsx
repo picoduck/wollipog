@@ -230,6 +230,7 @@ export const InboxList = forwardRef<HTMLDivElement, {
             stalled: stalledSessionIds.has(session.id),
             threadDepth: thread?.depth ?? 0,
             threadLast: thread?.last ?? false,
+            threadOuterSpine: thread?.outerSpine ?? false,
             // A string, so a parent whose children have not changed keeps its memoised row.
             threadChildren: thread?.children ? JSON.stringify(thread.children) : null,
             threadCollapsed: thread?.collapsed ?? false,

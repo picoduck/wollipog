@@ -290,6 +290,16 @@ if (fixtureParams.get("workspaces") === "long" && runner) {
     { id: "notes", name: "Research Notes With a Long Name for a Narrow Row", path: "D:\\archive\\2026\\research\\notes" },
   );
 }
+// `workspaces=removable` is Remove Workspace (#4123): one configured workspace and two added in
+// Wollipog, the first of which a project still uses, so removing it is refused.
+if (fixtureParams.get("workspaces") === "removable" && runner) {
+  runner.workspaces = [
+    { id: "home", name: "Home", path: "C:\\Users\\misko", source: "configured" },
+    { id: "storefront", name: "Acme Storefront", path: "C:\\Users\\misko\\src\\clients\\acme\\acme-storefront", source: "managed" },
+    { id: "scratch", name: "Scratch", path: "D:\\scratch", source: "managed" },
+  ];
+}
+const removedWorkspaces: string[] = [];
 /**
  * `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989).
  * `skills=long` adds a name that fits a phone row once the agent gives way, and one that never fits (#3526).
@@ -599,6 +609,16 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { workspace };
   },
+  removeMachineWorkspace: async (_runnerId: string, workspaceId: string) => {
+    if (!runner) throw new Error("runner not found");
+    if (workspaceId === "storefront") {
+      throw new ApiError("This workspace is still in use. Remove it from the project “Acme Storefront” first.", 409);
+    }
+    removedWorkspaces.push(workspaceId);
+    runner.workspaces = runner.workspaces.filter((workspace) => workspace.id !== workspaceId);
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { removed: true as const };
+  },
   startProviderLogin: async (
     _runnerId: string,
     body: { provider: "claude" | "codex"; label: string } | { accountId: string },
@@ -754,6 +774,8 @@ declare global {
   interface Window {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
+      /** The workspaces Remove Workspace removed, in order (#4123). */
+      removedWorkspaces(): string[];
       lastAddBoxRequest(): AddBoxRequest | null;
       /** How many Reconnect requests reached the fixture's API (#3525). */
       reconnectRequests(): number;
@@ -778,6 +800,7 @@ declare global {
 
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
+  removedWorkspaces: () => [...removedWorkspaces],
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
   reconnectRequests: () => reconnectRequests,
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },

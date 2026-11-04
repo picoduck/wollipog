@@ -285,10 +285,13 @@ export function parseClaudeModels(initialization: unknown): AgentModel[] {
 /* --------------------------------- I/O ------------------------------------ */
 
 /** Read $HOME/<rel> in the given context (native fs / WSL cat); null if absent/unreadable. */
-async function readHomeFile(context: AgentContext, rel: string): Promise<string | null> {
+async function readHomeFile(context: AgentContext, rel: string, env: Record<string, string> = {}): Promise<string | null> {
   if (context.kind === "native") {
     try {
-      return readFileSync(join(homedir(), rel), "utf8");
+      const path = rel.startsWith(".codex/") && env.CODEX_HOME
+        ? join(env.CODEX_HOME, rel.slice(".codex/".length))
+        : join(env.HOME ?? homedir(), rel);
+      return readFileSync(path, "utf8");
     } catch {
       return null;
     }
@@ -301,11 +304,11 @@ async function readHomeFile(context: AgentContext, rel: string): Promise<string 
 }
 
 /** Discover a driver's model options from the agent's own sources. Empty ⇒ caller keeps the catalog. */
-export async function discoverModels(driver: AgentDriverKind, context: AgentContext): Promise<AgentModel[]> {
+export async function discoverModels(driver: AgentDriverKind, context: AgentContext, env: Record<string, string> = {}): Promise<AgentModel[]> {
   if (driver === "codex" || driver === "codex-app-server") {
     const [cache, config] = await Promise.all([
-      readHomeFile(context, ".codex/models_cache.json"),
-      readHomeFile(context, ".codex/config.toml"),
+      readHomeFile(context, ".codex/models_cache.json", env),
+      readHomeFile(context, ".codex/config.toml", env),
     ]);
     return cache ? parseCodexModels(cache, config ? parseCodexConfigModel(config) : null) : [];
   }
@@ -521,7 +524,7 @@ export interface AgentModelDiscovery {
 interface AgentModelDiscovererDeps {
   queryAppServer: (agent: AgentDefinition, observer?: CodexProbeObserver) => Promise<AgentModel[]>;
   queryClaude?: (agent: AgentDefinition, observer?: CodexProbeObserver) => Promise<AgentModel[]>;
-  fallback: (driver: AgentDriverKind, context: AgentContext) => Promise<AgentModel[]>;
+  fallback: (driver: AgentDriverKind, context: AgentContext, env?: Record<string, string>) => Promise<AgentModel[]>;
 }
 
 function modelDiscoveryKey(agent: AgentDefinition): string {
@@ -532,6 +535,7 @@ function modelDiscoveryKey(agent: AgentDefinition): string {
     contextKey,
     agent.version ?? "unknown-version",
     agent.command,
+    agent.env.HOME, agent.env.CODEX_HOME, agent.env.CLAUDE_CONFIG_DIR,
     ...(agent.args ?? []),
   ]);
 }
@@ -550,7 +554,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
     const context = agent.context ?? { kind: "native" as const };
     if (agent.available !== true) return { models: [] };
     if (driver !== "codex-app-server" && driver !== "claude-code") {
-      return { models: await deps.fallback(driver, context), ...(driver === "codex" ? { source: "cached" as const } : {}) };
+      return { models: await deps.fallback(driver, context, agent.env), ...(driver === "codex" ? { source: "cached" as const } : {}) };
     }
 
     const key = modelDiscoveryKey(agent);
@@ -562,13 +566,13 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
     let result: AgentModelDiscovery;
     if (driver === "claude-code") {
       if (!claudeModelProbeSupported(agent)) {
-        result = { models: await deps.fallback(driver, context) };
+        result = { models: await deps.fallback(driver, context, agent.env) };
         cache.set(key, result);
         return result;
       }
       try {
         const models = deps.queryClaude ? await deps.queryClaude(agent, options) : [];
-        result = models.length ? { models, source: "live" } : { models: await deps.fallback(driver, context) };
+        result = models.length ? { models, source: "live" } : { models: await deps.fallback(driver, context, agent.env) };
         claudeFailures.delete(key);
       } catch {
         // A transient first failure must not poison the periodic discovery cache. Keep a prior live
@@ -577,7 +581,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
         const failures = (claudeFailures.get(key) ?? 0) + 1;
         claudeFailures.set(key, failures);
         if (previous?.source === "live") return previous;
-        const fallback = previous ?? { models: await deps.fallback(driver, context) };
+        const fallback = previous ?? { models: await deps.fallback(driver, context, agent.env) };
         if (failures >= 3) cache.set(key, fallback);
         return fallback;
       }
@@ -591,7 +595,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
       // A working method that timed out or returned bad data must retain catalog metadata. Only an
       // older server that truly lacks model/list may use models_cache.json as a labeled fallback.
       if (!modelListUnavailable(error)) return previous ?? { models: [] };
-      result = { models: await deps.fallback("codex", context), source: "cached" };
+      result = { models: await deps.fallback("codex", context, agent.env), source: "cached" };
     }
     cache.set(key, result);
     return result;

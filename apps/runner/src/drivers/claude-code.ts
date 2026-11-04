@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto";
 import { claudeFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BACKGROUND_HANDOFF_WAIT_MAX_MS, type AgentQuestion, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -702,7 +702,8 @@ export class ClaudeCodeDriver implements Driver {
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
     this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
-    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint, opts.claudeLiveUsage);
+    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint,
+      opts.claudeLiveUsage, opts.claudeRepublicationInterrupted === true);
     this.cwd = opts.cwd;
     this.config = opts.config;
     this.preparedHookArgs = [...opts.args];
@@ -886,7 +887,15 @@ export class ClaudeCodeDriver implements Driver {
       this.usageAccounting.checkpoint = { sessionId: this.sessionId, totalCostUsd: 0, models: {}, accountingScope: "conversation" };
       this.cb.onClaudeUsageCheckpoint?.(this.usageAccounting.checkpoint);
     }
-    this.emitUsageEvents(this.usageAccounting.beginProcess());
+    this.usageAccounting.beginProcess(this.firstTurn);
+  }
+
+  /** The running process's own version decides how its totals are accounted: the recorded one can
+   * be missing or stale after a runner restart (#4069). Usage before any report confirms it too. */
+  private confirmUsageProcess(version?: unknown): void {
+    const { events, baseline } = this.usageAccounting.confirmProcess(this.sessionId, typeof version === "string" ? version : undefined);
+    this.emitUsageEvents(events);
+    if (baseline) this.cb.onClaudeUsageCheckpoint?.(baseline);
   }
 
   private emitUsageEvents(events: ReturnType<ClaudeUsageAccounting["result"]>): void {
@@ -902,6 +911,7 @@ export class ClaudeCodeDriver implements Driver {
     // The control plane may have changed since `message_start`; only a v216+ peer shows, rather
     // than accrues, a provisional record.
     if (!request || this.cb.supportsLiveClaudeUsage?.() !== true) return;
+    this.confirmUsageProcess();
     const u = request.usage;
     const n = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
     const details = u.output_tokens_details && typeof u.output_tokens_details === "object"
@@ -924,8 +934,8 @@ export class ClaudeCodeDriver implements Driver {
     const checkpoint = this.usageAccounting.checkpoint !== before ? this.usageAccounting.checkpoint : null;
     events.forEach((event, index) => this.cb.onEvent({ ...event,
       ...(index === events.length - 1 && typeof result.duration_ms === "number" ? { durationMs: result.duration_ms } : {}),
-      ...(index === events.length - 1 && checkpoint && !event.accountingIncomplete
-        ? { claudeUsageCheckpoint: checkpoint } : {}),
+      // An incomplete record moves the baseline only when it closes an unproven total.
+      ...(index === events.length - 1 && checkpoint ? { claudeUsageCheckpoint: checkpoint } : {}),
     }));
     if (checkpoint) this.cb.onClaudeUsageCheckpoint?.(checkpoint);
   }
@@ -2830,8 +2840,9 @@ export class ClaudeCodeDriver implements Driver {
   /** Answer a pending interactive approval by writing a control_response on the CLI's
    * stdin (the stdio permission-prompt-tool protocol). Returns true iff a live ask was
    * answered — false means nothing was waiting (unknown id / process gone) and the caller
-   * must surface that instead of pretending the decision landed. */
-  resolvePermission(requestId: string, optionId: string | null): boolean {
+   * must surface that instead of pretending the decision landed. A Full Control policy decline
+   * says that Wollipog declined it and no person saw it, never "the user" (#4063). */
+  resolvePermission(requestId: string, optionId: string | null, automaticResponse?: FullControlAutomaticResponse): boolean {
     const input = this.pendingApprovals.get(requestId);
     if (input === undefined) return false;
     this.pendingApprovals.delete(requestId);
@@ -2839,7 +2850,7 @@ export class ClaudeCodeDriver implements Driver {
     const allow = optionId === "allow";
     const response = allow
       ? { behavior: "allow", updatedInput: input }
-      : { behavior: "deny", message: "The user declined this tool call." };
+      : { behavior: "deny", message: automaticResponse ? fullControlAutomaticResponseText("tool", automaticResponse) : "The user declined this tool call." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
     if (!this.child) return false;
     try {
@@ -2853,14 +2864,15 @@ export class ClaudeCodeDriver implements Driver {
   /** Answer a pending AskUserQuestion: allow with `updatedInput = {questions, answers}` (the
    * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). An
    * explicit dismiss, or a legacy empty answer map, denies the ask so the agent does not hang. */
-  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss",
+    automaticResponse?: FullControlAutomaticResponse): boolean {
     const original = this.pendingApprovals.get(requestId);
     if (original === undefined) return false;
     this.pendingApprovals.delete(requestId);
     this.pendingAttentionOwners.delete(requestId);
     const response = action === "submit" || (action == null && Object.keys(answers).length > 0)
       ? { behavior: "allow", updatedInput: { ...(original as Json), answers } }
-      : { behavior: "deny", message: "The user dismissed the question." };
+      : { behavior: "deny", message: automaticResponse ? fullControlAutomaticResponseText("question", automaticResponse) : "The user dismissed the question." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
     if (!this.child) return false;
     try {
@@ -2980,6 +2992,7 @@ export class ClaudeCodeDriver implements Driver {
           this.cb.onModelResolved?.(msg.model);
         }
         if (msg.subtype === "init" && !parentId) {
+          this.confirmUsageProcess(msg.claude_code_version);
           // Null when this Claude Code release sends no list, so a remembered one is dropped.
           this.cb.onClaudeInitCatalog?.(parseClaudeInitCatalog(msg as Record<string, unknown>));
         }
@@ -3455,6 +3468,7 @@ export class ClaudeCodeDriver implements Driver {
             ...(typeof usage.cache_creation_input_tokens === "number" ? { cacheCreationInputTokens: usage.cache_creation_input_tokens } : {}),
             ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}), ...pp });
         } else {
+          this.confirmUsageProcess();
           this.emitUsageResult(msg);
         }
         // Token usage on a top-level result is proof the provider actually answered over the API,

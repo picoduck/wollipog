@@ -22,9 +22,9 @@ export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
  * drops the pending request (so a late result is discarded, never admitted) and, on a version-2
  * runner, stops that one inspection. Older runners stay bounded by their per-command timeouts. */
 export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, workspaceId: string, issueNumbers: number[],
-  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS): Promise<CampaignLaunchInspectionResult | undefined> {
+  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string): Promise<CampaignLaunchInspectionResult | undefined> {
   const version = runner.runtime?.campaignLaunchInspection?.version ?? 0;
-  if (!version || (version < 2 && !issueNumbers.length) || signal.aborted) return undefined;
+  if (version < 3 || !workspacePath || signal.aborted) return undefined;
   const requestId = `campaign_launch_${randomUUID()}`;
   const stopRunner = () => {
     if (version >= 2) hub.sendToRunner(runner.runnerId, { type: "campaign_launch_inspect_cancel", requestId });
@@ -35,7 +35,7 @@ export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, wor
   signal.addEventListener("abort", onAbort, { once: true });
   try {
     const result = await hub.requestFromRunner(runner.runnerId, requestId, {
-      type: "campaign_launch_inspect", requestId, workspaceId, issueNumbers,
+      type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers,
     }, timeoutMs);
     if (signal.aborted || result.type !== "campaign_launch_inspection_result" || result.requestId !== requestId) return undefined;
     return result;
@@ -119,6 +119,10 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const initial = prepare();
     if (!initial.plan) return reply.code(initial.status).send({ error: initial.error ?? "launch preparation failed" });
 
+    // Same source as ordinary session creation, after its authorization and assignment checks.
+    const workspacePath = db.getWorkspacePath(initial.plan.runnerId, initial.plan.workspaceId);
+    if (!workspacePath) return reply.code(404).send({ error: "project location path is unavailable" });
+
     // The inspection lives only as long as this request: a closed connection cancels it.
     const lifetime = new AbortController();
     const onClose = () => { if (!reply.raw.writableFinished) lifetime.abort(); };
@@ -126,7 +130,7 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     let inspection: CampaignLaunchInspectionResult | undefined;
     try {
       inspection = await inspectCampaignWorkspace(hub, runner, initial.plan.workspaceId, [...(body.issueNumbers ?? [])].sort((a, b) => a - b),
-        lifetime.signal, dependencies.inspectionTimeoutMs);
+        lifetime.signal, dependencies.inspectionTimeoutMs, workspacePath);
     } finally { reply.raw.off("close", onClose); }
     if (lifetime.signal.aborted) {
       request.log.info({ event: "full_control_launch_preflight_cancelled", requestId: request.id,
@@ -145,6 +149,9 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const current = prepare();
     if (!current.plan) return reply.code(current.status).send({ error: current.error ?? "launch preparation failed" });
     const plan = current.plan;
+    if (db.getWorkspacePath(plan.runnerId, plan.workspaceId) !== workspacePath) {
+      return reply.code(409).send({ error: "project location changed during inspection; refresh the preflight" });
+    }
     const agent = runnerNow.agents.find((candidate) => candidate.id === plan.agentId);
     const policyIds = body.overrides?.delegatablePolicyIds ?? [];
     const { preflight, proposal } = campaignLaunchPreflight({

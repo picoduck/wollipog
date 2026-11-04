@@ -26,6 +26,13 @@ export function runnerHarnessReadiness(runner: Pick<RunnerView, "connectedAt" | 
     agents: runner.agents.map(agent => ({
       id: agent.id,
       available: agent.available === true,
+      // SSH readiness concerns installed capability, not whether the selected account is signed
+      // in or currently held elsewhere. Preserve launch availability as its separate observation.
+      installationAvailable: agent.driver === "codex-app-server" && agent.codexAppServer
+        ? agent.codexAppServer.status === "supported"
+        : agent.driver === "claude-code" && agent.claudeCode
+          ? agent.claudeCode.status === "ready" || agent.claudeCode.status === "unauthenticated"
+          : agent.driver === "pi" && agent.capabilities?.modelSource === "live" ? true : agent.available === true,
       ownershipBlocked: agent.unavailableReason?.startsWith("Provider HOME ownership ") === true,
     })),
     accounts: (runner.providerAccounts ?? []).map(account => ({ id: account.id, authStatus: account.authStatus })),

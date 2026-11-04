@@ -1,6 +1,6 @@
 {
   "name": "wollipog",
-  "version": "0.36.0",
+  "version": "0.36.0-rc.2",
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -65,6 +65,7 @@
     "benchmark:inbox": "node --import tsx apps/web/scripts/inbox-cold-load-benchmark.ts",
     "probe:claude-assumptions": "node --import tsx scripts/claude-assumptions.mjs",
     "probe:claude-mcp-image": "node --import tsx apps/runner/scripts/claude-mcp-image-probe.ts",
+    "probe:claude-mcp-wait": "node --import tsx apps/runner/scripts/claude-mcp-wait-probe.ts",
     "probe:claude-media-reviewer": "node --import tsx apps/runner/scripts/claude-media-reviewer-probe.ts",
     "probe:codex-escalation": "node --import tsx apps/runner/scripts/codex-escalation-probe.ts",
     "probe:codex-assumptions": "node --import tsx scripts/codex-assumptions.mjs",

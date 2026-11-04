@@ -158,6 +158,21 @@ test("a priced session shows only the cost, and opens Session Cost with the toke
   await view.cleanup();
 });
 
+test("a Claude session whose turns billed a running total names its cost as uncertain (#4069)", async () => {
+  const view = await mount(session(), {
+    sessionId: "s1",
+    totals: amount({ inputTokens: 40_000, uncachedInputTokens: 40_000, processedTokens: 40_000, costUsd: 125.88, costSource: "modelPriced" }),
+    byModel: [],
+    runningTotalRecords: { records: 4, costUsd: 109.14 },
+  });
+  await view.open();
+  const popover = view.popover()!;
+  assert.equal(popover.querySelector(".usage-popover-figure")!.textContent, "$125.88", "the amount is shown as recorded");
+  assert.ok(notes(popover).includes(
+    "4 Claude Code turns may also include the cost of earlier turns in the same conversation, so this cost may be overstated."));
+  await view.cleanup();
+});
+
 test("Escape dismisses the popover and the control keeps its own accessible name", async () => {
   const view = await mount(session(), { sessionId: "s1", totals: amount(), byModel: [] });
   await view.open();

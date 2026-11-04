@@ -89,6 +89,22 @@ function defaults(overrides: Partial<OrchestratorDefaults["behavior"]> = {}): Or
   };
 }
 
+test("child model selection checks the effective default instead of aggregate account readiness", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const metadata = runner("runner-a", "sol", ["high"]);
+    metadata.agents[0]!.providerAccountReadiness = {
+      defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+    };
+    db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    const policy = resolveOrchestratorCampaignPolicy(defaults({ childModel: "sol" }), "user_default");
+    assert.equal(childModelMachines(policy, db.listRunners())?.[0]?.supported, false);
+    db.setMachineProviderAccountDefault("runner-a", "codex", "b", 0, Date.now());
+    assert.equal(childModelMachines(policy, db.listRunners())?.[0]?.supported, true);
+    assert.equal(db.getRunner("runner-a")?.agents[0]?.providerAccountReadiness?.defaultAccountId, "a");
+  } finally { db.close(); }
+});
+
 test("Orchestrator defaults persist per authenticated user and preserve capability drift", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {

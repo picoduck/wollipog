@@ -244,6 +244,35 @@ test("a ledger write reloads the shown list without an error", async ({ page }) 
   await expect(page.locator('.campaign-status [role="alert"]')).toHaveCount(0);
 });
 
+test("a campaign complete with handoffs lists the owner's items without a recovery warning (#4070)", async ({ page }) => {
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=before");
+  await expect(page.locator(".campaign-status-summary")).toContainText("Blocked");
+  await expect(page.getByText("Authorized Recovery Unavailable")).toBeVisible();
+  await expect(page.locator(".campaign-status-handoffs")).toHaveCount(0);
+
+  await expect(page.locator(".campaign-status-summary")).toContainText("6 of 8 Delivered");
+  await expect(workRows(page)).toHaveCount(2);
+
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&handoffs=after");
+  await expect(page.locator(".campaign-status-summary")).toContainText("Complete with Handoffs");
+  await expect(page.locator(".campaign-status-summary")).toContainText("6 of 8 Delivered");
+  await expect(workRows(page)).toHaveCount(2);
+  await expect(workRows(page).first()).toContainText("Handed Off");
+  await expect(page.getByText("stays blocked")).toHaveCount(0);
+  const handoffs = page.locator(".campaign-status-handoffs");
+  await expect(handoffs.getByRole("heading", { name: "Handed Off" })).toBeVisible();
+  await expect(handoffs).toContainText("File the security advisory from a maintainer account.");
+  await expect(handoffs).toContainText("External");
+  await expect(page.getByText("Authorized Recovery Unavailable")).toHaveCount(0);
+  await expect(page.getByText("Recovery Blocked")).toHaveCount(0);
+  await expect(page.getByText("Recovery Resolved")).toBeVisible();
+  await handoffs.getByRole("button", { name: "Open Details for Ledger Read API" }).click();
+  await expect(page.locator("h3.campaign-detail-title")).toContainText("Ledger Read API");
+  await expect(page.locator(".campaign-detail-head")).toContainText("Handed Off");
+  await expect(page.locator(".campaign-detail-head")).not.toContainText("Blocked");
+  await assertNoHorizontalOverflow(page, ".campaign-status");
+});
+
 test("a campaign without a recorded plan says so", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=planless");
   const notice = page.locator(".campaign-status-summary .notice");
@@ -271,3 +300,30 @@ for (const theme of ["dark", "light"] as const) {
     });
   }
 }
+
+test("decisions the owner kept wait for them in Campaign Status, and each opens its card (#4064)", async ({ page }) => {
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=before");
+  await expect(page.locator(".campaign-status-summary")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Waiting for You" })).toHaveCount(0);
+
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after");
+  const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+  await expect(waiting).toContainText("Which credential design should the provider bridge use?");
+  await expect(waiting).toContainText("Merge picoduck/wollipog#4141");
+  await expect(waiting).toContainText("Handed over by the Orchestrator");
+  // A child's handed-off merge opens in Requests, where the owner now decides it.
+  await waiting.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
+  await expect(page.locator(".rpanel-switcher-name")).toHaveText("Requests");
+  const detail = page.locator(".request-panel-detail");
+  await expect(detail).toContainText("PR Merge Approval Required");
+  await expect(detail.getByRole("button", { name: "Approve" })).toBeVisible();
+  // The root's own owner decision is a card for the owner too. (In the app, Open Request takes the
+  // root's own request to its dock card above the composer, which this harness does not render.)
+  await page.getByRole("button", { name: "All Requests" }).click();
+  await page.getByText("Owner Decision Required", { exact: true }).click();
+  await expect(detail).toContainText("Owner Decision Required");
+  await expect(detail).toContainText("Short-Lived Lease (Recommended)");
+  await expect(detail).toContainText("You kept this decision, so only you can make it.");
+  await expect(detail.getByRole("button", { name: "Do Not Proceed" })).toBeVisible();
+  await assertNoHorizontalOverflow(page, ".request-panel-detail");
+});

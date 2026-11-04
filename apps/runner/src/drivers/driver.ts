@@ -14,6 +14,7 @@ import type {
   SessionConfig,
   SessionEventPayload,
   AcpSessionContextConfig,
+  FullControlAutomaticResponse,
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
 import type { ManagedWorktreeProtection } from "../managed-worktree-protection.js";
@@ -240,6 +241,9 @@ export interface DriverOptions {
   claudeUsageCheckpoint?: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Live request usage already published after `claudeUsageCheckpoint`, awaiting settlement. */
   claudeLiveUsage?: import("./claude-usage-accounting.js").ClaudeLiveUsage;
+  /** A restart cut a republication of that window short: part of it is accounted, and the
+   * checkpoint that would have closed it was never journaled (#4069). */
+  claudeRepublicationInterrupted?: boolean;
   /** Runner-owned session directory used for bounded hold sentinels and lifecycle reconciliation. */
   sessionStateDir?: string;
   /** Durable Claude task ids that a resumed transport must reconcile before declaring quiescence. */
@@ -358,8 +362,9 @@ export interface Driver {
   /** Answer a pending permission/approval request surfaced via onEvent. Returns true iff a
    * live ask was answered (the response reached the agent); false = nothing was waiting
    * (unknown id / process gone) — the caller must surface that instead of pretending the
-   * decision landed. */
-  resolvePermission(requestId: string, optionId: string | null): boolean;
+   * decision landed. `automaticResponse` is present only on a Full Control policy decline (#4063);
+   * a driver whose provider result carries text says so instead of naming a person. */
+  resolvePermission(requestId: string, optionId: string | null, automaticResponse?: FullControlAutomaticResponse): boolean;
 
   /** Answer a structured agent question (question_request event). Answers are keyed by
    * AgentQuestion.id verbatim. Explicit action distinguishes an accepted all-optional form from
@@ -369,6 +374,7 @@ export interface Driver {
     requestId: string,
     answers: Record<string, string | string[]>,
     action?: "submit" | "dismiss",
+    automaticResponse?: FullControlAutomaticResponse,
   ): boolean;
 
   /** Sign out through a negotiated provider capability. Unsupported drivers omit this method. */

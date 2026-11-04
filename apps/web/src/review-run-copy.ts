@@ -53,14 +53,15 @@ const MODE: Readonly<Record<NonNullable<ReviewSessionView["round"]>["mode"], str
   full: "Full Review",
   delta: "Changes Since Last Round",
   rebase: "Range-Diff After Rewrite",
+  equivalent: "Equivalent to Upvoted Head",
 };
 
 /** "Round 2 · Epoch 1 · Changes Since Last Round", with the attempt once a round is retried; null
- * until the runner has planned it. */
+ * until the runner has planned it. A base-merge round (#4075) says so, since it uses no budget. */
 export function reviewRunRound(round: ReviewSessionView["round"]): string | null {
   if (!round) return null;
-  return [`Round ${round.round}`, `Epoch ${round.epoch}`, ...(round.attempt > 1 ? [`Attempt ${round.attempt}`] : []), MODE[round.mode]]
-    .join(" · ");
+  return [`Round ${round.round}`, `Epoch ${round.epoch}`, ...(round.attempt > 1 ? [`Attempt ${round.attempt}`] : []), MODE[round.mode],
+    ...(round.baseMerge && round.mode !== "equivalent" ? ["Base-Branch Merge"] : [])].join(" · ");
 }
 
 /**

@@ -260,6 +260,94 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await page.screenshot({ path: `${EVIDENCE}/phone-expanded.png`, fullPage: true });
 });
 
+/** Each row's place and the x of every spine segment it draws, from the rendered pseudo-elements. */
+const measureSpines = (shells: Element[]) => shells.map((shell) => {
+  const box = shell.getBoundingClientRect();
+  const segment = (pseudo: "::after" | "::before", element: Element = shell) => {
+    const style = getComputedStyle(element, pseudo);
+    if (style.content === "none" || style.content === "normal") return null;
+    const host = element.getBoundingClientRect();
+    return { x: Math.round(host.left + parseFloat(style.left)), bottom: style.bottom, background: style.backgroundColor };
+  };
+  return {
+    title: shell.querySelector(".inbox-row-title")?.textContent ?? "",
+    left: Math.round(shell.querySelector(".inbox-row")!.getBoundingClientRect().left),
+    height: Math.round(box.height),
+    classes: ["thread-child", "thread-depth-2", "thread-last", "thread-outer"].filter((name) => shell.classList.contains(name)),
+    spine: segment("::after"),
+    outer: segment("::before"),
+    tick: segment("::before", shell.querySelector(".inbox-row-primary-cell")!),
+  };
+});
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 1700, step: 26 }, { name: "phone", width: 390, height: 1500, step: 14 }]) {
+  test(`a child's review and a grandchild indent one step deeper under their own spine on a ${viewport.name} (#4077)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto(`${PAGE}&nested=1&path=${encodeURIComponent("/")}`);
+    await expect(page.locator(".page-tabs .tabs-bar, .sessions-app-bar")).toBeVisible();
+    await expect(page.locator(".inbox-row-shell.thread-depth-2")).toHaveCount(4);
+    const rows = await page.locator(".inbox-row-shell").evaluateAll(measureSpines);
+    const family = rows.slice(rows.findIndex((row) => row.title === "Ship the usage and cost overhaul"));
+    const familyEnd = family.findIndex((row, index) => index > 0 && row.classes.length === 0);
+    const thread = family.slice(0, familyEnd === -1 ? undefined : familyEnd);
+    const at = (title: string) => thread.findIndex((row) => row.title.startsWith(title));
+    // Each depth-2 row follows its own parent, before that parent's next sibling.
+    expect(at("Review #601")).toBe(at("#601:") + 1);
+    expect(at("#600a:")).toBe(at("#600:") + 1);
+    expect(at("#600b:"), "a third-level descendant follows its nearest ancestor").toBe(at("#600a:") + 1);
+    expect(at("Review #602")).toBe(at("#602:") + 1);
+    expect(at("#602:"), "the fixture's last child is #602").toBe(thread.length - 2);
+    const parentLeft = thread[0]!.left;
+    expect(new Set(rows.map((row) => row.height)).size, JSON.stringify(rows)).toBe(1);
+    const spineX = thread[1]!.spine!.x;
+    for (const row of thread.slice(1)) {
+      const depth = row.classes.includes("thread-depth-2") ? 2 : 1;
+      // The same indent step as depth 1, at both widths, and the spine and tick of each depth sit
+      // the same distance in from their own parent's card.
+      expect(row.left - parentLeft, row.title).toBe(depth * viewport.step);
+      expect(row.spine!.x, row.title).toBe(spineX + (depth - 1) * viewport.step);
+      expect(row.tick!.x, row.title).toBe(row.spine!.x);
+    }
+    const row = (title: string) => thread[at(title)]!;
+    // A middle child's review carries the Orchestrator's spine on to the next sibling; the last
+    // child ends that spine, and only its own spine reaches its review.
+    expect(row("Review #601").classes).toEqual(["thread-child", "thread-depth-2", "thread-last", "thread-outer"]);
+    expect(row("Review #601").outer!.x).toBe(spineX);
+    expect(row("#600a:").classes).toEqual(["thread-child", "thread-depth-2", "thread-outer"]);
+    expect(row("#600b:").classes).toEqual(["thread-child", "thread-depth-2", "thread-last", "thread-outer"]);
+    expect(row("#602:").classes).toEqual(["thread-child", "thread-last"]);
+    expect(row("#602:").spine!.bottom).not.toBe("0px");
+    expect(row("Review #602").classes).toEqual(["thread-child", "thread-depth-2", "thread-last"]);
+    expect(row("Review #602").outer).toBeNull();
+    const reviewed = page.locator(".inbox-row-shell", { hasText: "#601: Link the cost source" }).first();
+    await expect(reviewed.locator(".inbox-thread-family")).toHaveAttribute("aria-label", /^1 Review/);
+    await expect(page.locator(".inbox-row-shell", { hasText: "#600: Add the usage table" }).locator(".inbox-thread-family"))
+      .toHaveAttribute("aria-label", /^1 Child/);
+    await expect(parentRow(page).locator(".inbox-thread-family")).toHaveAttribute("aria-label", /^4 Children/);
+    await page.screenshot({ path: `${EVIDENCE}/nested-${viewport.name}-expanded.png`, fullPage: true, animations: "disabled" });
+
+    // Collapsing a child hides only its descendants; its sibling and the Orchestrator's spine stay.
+    await page.locator(".inbox-row-shell", { hasText: "#600: Add the usage table" }).locator(".inbox-thread-toggle").click();
+    await expect(page.locator(".inbox-row-title", { hasText: "#600a:" })).toHaveCount(0);
+    await expect(page.locator(".inbox-row-title", { hasText: "#600b:" })).toHaveCount(0);
+    await expect(page.locator(".inbox-row-shell.thread-depth-2")).toHaveCount(2);
+    await page.screenshot({ path: `${EVIDENCE}/nested-${viewport.name}-child-collapsed.png`, fullPage: true, animations: "disabled" });
+    await parentRow(page).locator(".inbox-thread-toggle").click();
+    await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
+    await page.screenshot({ path: `${EVIDENCE}/nested-${viewport.name}-parent-collapsed.png`, fullPage: true, animations: "disabled" });
+    await parentRow(page).locator(".inbox-thread-toggle").click();
+    await expect(page.locator(".inbox-row-shell.thread-depth-2")).toHaveCount(2, { timeout: 5_000 });
+
+    // Forced colours drops author fills, so every segment is painted in a system colour.
+    await page.emulateMedia({ forcedColors: "active" });
+    const forced = await page.locator(".inbox-row-shell.thread-child").evaluateAll(measureSpines);
+    for (const segment of forced.flatMap((item) => [item.spine, item.outer, item.tick]).filter(Boolean)) {
+      expect(segment!.background).not.toBe("rgba(0, 0, 0, 0)");
+    }
+    await page.screenshot({ path: `${EVIDENCE}/nested-${viewport.name}-forced-colors.png`, fullPage: true, animations: "disabled" });
+  });
+}
+
 test("phone parents visibly identify review work and suppress controller-owned requests and results", async ({ page }) => {
   await page.setViewportSize({ width: 390, height: 844 });
   await page.goto(`${PAGE}&family-follow-up=review`);

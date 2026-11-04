@@ -141,7 +141,6 @@ test("the rhythm is driven by tokens, not by literals", () => {
     [".row {", "--row-h"],
     [".table :is(td, tbody th) {", "--row-h"],
     [".card {", "--card-pad-y"],
-    [".runner-card {", "--runner-card-pad-y"],
   ] as const) {
     const rule = css.slice(css.indexOf(selector), css.indexOf("}", css.indexOf(selector)));
     assert.ok(rule.includes(`var(${token})`), `${selector.trim()} must scale with the density axis`);

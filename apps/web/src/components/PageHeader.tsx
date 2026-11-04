@@ -24,8 +24,8 @@ export interface PageAction {
 
 /**
  * The page header's one primary. With `items` it is a menu button: its label and a 14px caret open
- * the shared menu, one two-line item per way to create (§9.1); on phones its `+`, still named by the
- * label, opens the same items as a menu sheet (§15.1).
+ * the shared menu, one two-line item per way to create (§9.1); on phones its quiet `+`, still named
+ * by the label, opens the same items as a menu sheet (§15.1).
  */
 export type PagePrimaryAction =
   | (PageAction & {
@@ -136,7 +136,10 @@ export interface PageHeaderActions {
    * it takes one of the secondaries' visible slots, so one fewer secondary shows beside it.
    */
   controls?: ReactNode;
-  /** The one create or import action the destination exists for. A 44px `+` icon on phones. */
+  /**
+   * The one create or import action the destination exists for. On phones it is the app bar's quiet
+   * `+`, an `.icon-btn` just before ⋯ (§15.1).
+   */
   primary?: PagePrimaryAction;
   /**
    * Secondaries in display order. The two nearest the primary are buttons on the widest header;
@@ -173,6 +176,53 @@ export function PageHeader({
   const lastSlot = secondary.length + (controls ? 1 : 0);
   const slots = secondary.map((action, index) => ({ action, slot: lastSlot - index }));
   const overflow = lastSlot > PAGE_HEADER_VISIBLE_SECONDARIES || menu.length > 0;
+  const more = (slots.length > 0 || menu.length > 0) && (
+    <ActionsMenu
+      key="more"
+      className="page-more"
+      overflow={overflow ? "always" : String(lastSlot)}
+      items={[
+        // A menu button folds into ⋯ as its own items, in order: ⋯ never nests a menu.
+        ...slots.flatMap(({ action, slot }): ActionsMenuItem[] => action.items
+          ? action.items.map((item) => ({ ...item, disabled: action.disabled || item.disabled, slot }))
+          : action.pressed !== undefined
+          ? [{
+            label: action.menuLabel ?? action.label,
+            onClick: action.onClick,
+            disabled: action.disabled,
+            title: action.title,
+            checked: action.pressed,
+            count: action.count,
+            slot,
+          }]
+          : [{ label: action.label, onClick: action.onClick, disabled: action.disabled, title: action.title, slot }]),
+        ...menu,
+      ]}
+    />
+  );
+  // On phones the primary is the app bar's `+`, drawn like Search and placed just before ⋯, so the
+  // bar reads Search, `+`, ⋯ to the eye and to Tab. Wider, it is the labelled primary after ⋯
+  // (§3.3, §15.1). The order lives in the markup, not the stylesheet, so Tab follows what is drawn.
+  // The two are one keyed pair, so crossing 760px reorders them and keeps an open menu open.
+  const phone = useIsMobile();
+  const primaryButton = primary?.items ? (
+    <PageMenuButton key="primary" action={primary} items={primary.items} variant="primary" />
+  ) : primary && (
+    <button
+      key="primary"
+      ref={primary.buttonRef}
+      type="button"
+      className={phone ? "icon-btn page-primary" : "btn primary page-primary"}
+      disabled={primary.disabled}
+      title={primary.title ?? (phone ? primary.label : undefined)}
+      aria-keyshortcuts={primary.shortcut}
+      onClick={primary.onClick}
+    >
+      <PlusIcon />
+      <span className="page-primary-label">{primary.label}</span>
+      {primary.shortcut && <kbd className="page-primary-key" aria-hidden="true">{primary.shortcut}</kbd>}
+    </button>
+  );
   return (
     <header className="page-header" {...windowDragRegion()}>
       <div className="page-header-row">
@@ -203,46 +253,7 @@ export function PageHeader({
                 {action.pressed !== undefined && (action.count ?? 0) > 0 && <span className="count">{action.count}</span>}
               </button>
             ))}
-            {(slots.length > 0 || menu.length > 0) && (
-              <ActionsMenu
-                className="page-more"
-                overflow={overflow ? "always" : String(lastSlot)}
-                items={[
-                  // A menu button folds into ⋯ as its own items, in order: ⋯ never nests a menu.
-                  ...slots.flatMap(({ action, slot }): ActionsMenuItem[] => action.items
-                    ? action.items.map((item) => ({ ...item, disabled: action.disabled || item.disabled, slot }))
-                    : action.pressed !== undefined
-                    ? [{
-                      label: action.menuLabel ?? action.label,
-                      onClick: action.onClick,
-                      disabled: action.disabled,
-                      title: action.title,
-                      checked: action.pressed,
-                      count: action.count,
-                      slot,
-                    }]
-                    : [{ label: action.label, onClick: action.onClick, disabled: action.disabled, title: action.title, slot }]),
-                  ...menu,
-                ]}
-              />
-            )}
-            {primary?.items ? (
-              <PageMenuButton action={primary} items={primary.items} variant="primary" />
-            ) : primary && (
-              <button
-                ref={primary.buttonRef}
-                type="button"
-                className="btn primary page-primary"
-                disabled={primary.disabled}
-                title={primary.title}
-                aria-keyshortcuts={primary.shortcut}
-                onClick={primary.onClick}
-              >
-                <PlusIcon />
-                <span className="page-primary-label">{primary.label}</span>
-                {primary.shortcut && <kbd className="page-primary-key" aria-hidden="true">{primary.shortcut}</kbd>}
-              </button>
-            )}
+            {phone ? [primaryButton, more] : [more, primaryButton]}
           </div>
         )}
       </div>
@@ -377,7 +388,8 @@ interface ActionsMenuItem extends PageMenuAction {
  * A menu button (§3.2, §9.1): its label and a caret open the shared MenuSurface with one item per
  * choice. A secondary is a direct child of `.page-actions` with a slot, so the priority+ rules hide
  * it like any other secondary; while hidden, ⋯ lists its items instead. The primary never folds: on
- * phones it is the `+`, its label clipped but still its name, and the menu is a sheet (§15.1).
+ * phones it is the quiet `+` icon button, its label clipped but still its name and its tooltip, and
+ * the menu is a sheet (§15.1).
  */
 function PageMenuButton({ action, items, slot, variant }: {
   action: Pick<PageAction, "label" | "disabled" | "title">;
@@ -386,6 +398,7 @@ function PageMenuButton({ action, items, slot, variant }: {
   variant?: "ghost" | "primary";
 }) {
   const [open, setOpen] = useState(false);
+  const phone = useIsMobile();
   const menu = useAccessibleMenu(open, setOpen, "page-action-menu");
   const { close, triggerRef } = menu;
   // A width change that hides this button (it folded into ⋯) takes its menu with it. Focus that
@@ -412,10 +425,11 @@ function PageMenuButton({ action, items, slot, variant }: {
       <button
         ref={menu.triggerRef}
         type="button"
-        className={variant === "primary" ? "btn primary page-primary" : `btn${variant === "ghost" ? " ghost" : ""} page-action`}
+        className={variant === "primary" ? (phone ? "icon-btn page-primary" : "btn primary page-primary")
+          : `btn${variant === "ghost" ? " ghost" : ""} page-action`}
         data-slot={slot}
         disabled={action.disabled}
-        title={action.title}
+        title={action.title ?? (variant === "primary" && phone ? action.label : undefined)}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
         aria-haspopup="menu"

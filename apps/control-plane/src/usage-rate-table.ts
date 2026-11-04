@@ -17,6 +17,8 @@ export const DEFAULT_USAGE_PRICING_URL =
 export const USAGE_PRICING_TTL_MS = 24 * 60 * 60 * 1000;
 /** An explicit refresh ignores the TTL but not a table fetched this recently. */
 export const USAGE_PRICING_REFRESH_FLOOR_MS = 60 * 1000;
+/** The longest refresh failure the status carries; longer text is cut with an ellipsis. */
+export const USAGE_PRICING_ERROR_MAX_LENGTH = 200;
 const FETCH_TIMEOUT_MS = 30_000;
 const CACHE_FILE_VERSION = 1;
 
@@ -33,6 +35,8 @@ export interface UsageRateTableOptions {
   /** Disk cache path, or `null` for an in-memory-only table (tests, `:memory:` databases). */
   cachePath: string | null;
   fetchDocument?: (url: string, signal: AbortSignal) => Promise<unknown>;
+  /** How long one fetch may take before it is abandoned (30 seconds unless a test shortens it). */
+  fetchTimeoutMs?: number;
   now?: () => number;
   log?: (message: string) => void;
 }
@@ -55,7 +59,49 @@ export function resolveUsagePricingUrl(raw: string | undefined): string | null {
 async function defaultFetchDocument(url: string, signal: AbortSignal): Promise<unknown> {
   const response = await fetch(url, { signal, headers: { accept: "application/json" } });
   if (!response.ok) throw new Error(`rate table returned HTTP ${response.status}`);
-  return response.json();
+  try {
+    return await response.json();
+  } catch {
+    // The parser's message quotes the start of the body; the reason is enough.
+    throw new Error("rate table document isn't valid JSON");
+  }
+}
+
+const HEADER_LINE = /\b(authorization|proxy-authorization|cookie|set-cookie|x-api-key|api-key)\s*[:=][^\r\n]*/gi;
+
+/** The source URL without credentials, query or fragment; one that doesn't parse isn't repeated. */
+function displaySourceUrl(sourceUrl: string): string {
+  try {
+    const url = new URL(sourceUrl);
+    return `${url.protocol}//${url.host}${url.pathname}`;
+  } catch {
+    return "the configured rate source";
+  }
+}
+
+/**
+ * One line, at most USAGE_PRICING_ERROR_MAX_LENGTH characters, saying why a refresh failed (#4056).
+ * Members who can press Refresh Rates read it, so header values, URL credentials and query strings
+ * are removed before it is kept. The configured source is replaced whole, whatever it contains;
+ * any other URL loses everything up to the last `@` of its authority.
+ */
+export function describeRefreshFailure(error: unknown, timeoutMs: number | null, sourceUrl?: string): string {
+  if (timeoutMs !== null) return `the rate source didn't answer within ${Math.round(timeoutMs / 1000)} seconds`;
+  let text = error instanceof Error ? error.message : String(error);
+  // fetch reports a network failure as "fetch failed" and keeps the reason, such as ENOTFOUND, on `cause`.
+  const cause = error instanceof Error ? (error as { cause?: unknown }).cause : undefined;
+  const code = typeof cause === "object" && cause !== null ? (cause as { code?: unknown }).code : undefined;
+  if (typeof code === "string" && !text.includes(code)) text = `${text} (${code})`;
+  if (sourceUrl) text = text.split(sourceUrl).join(displaySourceUrl(sourceUrl));
+  const line = text
+    .replace(HEADER_LINE, "$1: [redacted]")
+    .replace(/\bbearer\s+\S+/gi, "Bearer [redacted]")
+    .replace(/\b([a-z][a-z0-9+.-]*:\/\/)[^\s/?#]*@/gi, "$1")
+    .replace(/(\b[a-z][a-z0-9+.-]*:\/\/[^\s?#]*)[?#]\S*/gi, "$1")
+    .replace(/\s+/g, " ")
+    .trim();
+  if (line.length === 0) return "the refresh failed without saying why";
+  return line.length > USAGE_PRICING_ERROR_MAX_LENGTH ? `${line.slice(0, USAGE_PRICING_ERROR_MAX_LENGTH - 1).trimEnd()}…` : line;
 }
 
 export class UsageRateTableService {
@@ -64,6 +110,7 @@ export class UsageRateTableService {
   private state: UsagePricingStatus["status"] = "unavailable";
   private inflight: Promise<UsagePricingStatus> | null = null;
   private lastAttemptAt: number | null = null;
+  private lastError: { message: string; at: number } | null = null;
   private readonly fetchDocument: (url: string, signal: AbortSignal) => Promise<unknown>;
   private readonly now: () => number;
   private readonly log: (message: string) => void;
@@ -89,6 +136,7 @@ export class UsageRateTableService {
       source: this.options.sourceUrl ?? "disabled",
       fetchedAt: this.fetchedAt,
       knownModels: this.table?.size ?? 0,
+      ...(this.lastError ? { lastRefreshError: { ...this.lastError } } : {}),
     };
   }
 
@@ -96,7 +144,8 @@ export class UsageRateTableService {
    * merely cached (a failed refresh, or a cache written for another source) is refreshed on the
    * next call. Attempts, successful or not, are spaced by the refresh floor so a burst of
    * dashboard refreshes or a down upstream cannot hammer the source. One fetch runs at a time;
-   * concurrent callers share it. */
+   * concurrent callers share it. An answer the floor absorbed says so, and when the next attempt
+   * may run, so it doesn't read as a new failure. */
   async ensure(force = false): Promise<UsagePricingStatus> {
     if (this.options.sourceUrl === null) return this.status();
     const now = this.now();
@@ -104,7 +153,10 @@ export class UsageRateTableService {
       return this.status();
     }
     if (this.inflight) return this.inflight;
-    if (this.lastAttemptAt !== null && now - this.lastAttemptAt < USAGE_PRICING_REFRESH_FLOOR_MS) return this.status();
+    if (this.lastAttemptAt !== null && now - this.lastAttemptAt < USAGE_PRICING_REFRESH_FLOOR_MS) {
+      const nextAttemptAt = this.lastAttemptAt + USAGE_PRICING_REFRESH_FLOOR_MS;
+      return { ...this.status(), refreshSkipped: { nextAttemptAt, retryAfterMs: nextAttemptAt - now } };
+    }
     this.lastAttemptAt = now;
     this.inflight = this.refresh().finally(() => {
       this.inflight = null;
@@ -115,7 +167,8 @@ export class UsageRateTableService {
   private async refresh(): Promise<UsagePricingStatus> {
     const url = this.options.sourceUrl!;
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), FETCH_TIMEOUT_MS);
+    const timeoutMs = this.options.fetchTimeoutMs ?? FETCH_TIMEOUT_MS;
+    const timer = setTimeout(() => controller.abort(), timeoutMs);
     try {
       const document = await this.fetchDocument(url, controller.signal);
       const table = parseRateTable(document);
@@ -123,10 +176,12 @@ export class UsageRateTableService {
       this.table = table;
       this.fetchedAt = this.now();
       this.state = "fresh";
+      this.lastError = null;
       this.writeDiskCache({ version: CACHE_FILE_VERSION, source: url, fetchedAt: this.fetchedAt, document });
     } catch (error) {
       // Whatever is being served is now past its TTL and must not keep claiming to be fresh.
       if (this.table) this.state = "cached";
+      this.lastError = { message: describeRefreshFailure(error, controller.signal.aborted ? timeoutMs : null, url), at: this.now() };
       this.log(`usage pricing refresh failed; ${this.table ? "serving the cached rate table" : "cost estimates are unavailable"}: ${
         error instanceof Error ? error.message : String(error)
       }`);

@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
@@ -10,8 +12,9 @@ import {
 import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
   defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
-  type ReviewSessionDependencies,
+  reviewSessionDiscoveryReason, type ReviewSessionDependencies,
 } from "./review-sessions.js";
+import { configuredSessionWritableGrants, explainSessionWritableRefusal, SessionWritableRootError } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
 
 const rootUid = statSync("/").uid;
@@ -270,6 +273,22 @@ test("capability names one available native agent per reviewer harness and repor
   assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "git is not installed" } });
 });
 
+test("review admission skips a signed-out implicit default even when explicit B is ready", (t) => {
+  const f = fixture(t);
+  const agents: AgentDefinition[] = [{ ...AGENTS[0]!, providerAccountReadiness: {
+    defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+  } }];
+  const result = f.launcher.capability(agents, "linux");
+  assert.deepEqual(result?.reviewers, []);
+  assert.ok(result?.unavailable?.codex);
+  assert.equal(agents[0]?.providerAccountReadiness?.defaultAccountId, "a");
+  agents[0]!.providerAccountReadiness = {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated", readyAccountIds: ["b"],
+  };
+  assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, [{ harness: "codex", agentId: "codex" }],
+    "an implicit granted default remains reviewable when an earlier account is not granted");
+});
+
 test("long writer refusals stay within the control plane capability limit", () => {
   const reason = "Codex packages are unprotected from the following writers: " + Array.from({ length: 10 }, (_, index) =>
     `session s_writer_${index} (complete exit unproven; ${"retained writer detail ".repeat(7)}).`).join("\n");
@@ -355,6 +374,52 @@ test("a spawned reviewer command must be trusted as the first PATH match, with i
     assert.throws(() => verifySpawnedCommand("claude", path, [writable], uid, rootUid), /relative entry/u, path);
   }
   assert.throws(() => verifySpawnedCommand("../claude", trusted, [], uid, rootUid), /is not installed/u);
+});
+
+test("the runner's reviewer check names the configured grant that makes the reviewer session-writable (#4122)", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-grant-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const claude = join(realpathSync(root), "claude");
+  // A workspace registered at the temporary directory is named, but removing it cannot help:
+  // the temporary directory is session-writable regardless. review-trust.test.ts covers HOME.
+  const deps = defaultReviewSessionDependencies("/state", () => {}, () => [
+    { path: tmpdir(), grant: `workspace "scratch"`, recovery: `remove workspace "scratch" from this machine` },
+  ]);
+  assert.throws(() => deps.verifyCommand(claude), {
+    message: `${claude} is inside a directory a session can write (${realpathSync(tmpdir())}). To use it, install the reviewer ` +
+      `where no session can write and set its agent's command to that absolute path. Granted by workspace "scratch"`,
+  });
+});
+
+test("a bounded capability reason keeps a recovery however many grants contain the reviewer", () => {
+  const home = "/home/operator";
+  const names = Array.from({ length: 8 }, (_, index) => `${index}-${"a-long-project-name-".repeat(5)}`);
+  const grants = configuredSessionWritableGrants({
+    workspaces: names.map((name, index) => ({ name, path: `/srv/project-${index}`, additionalDirectoryGrants: [home] })),
+    sessions: Array.from({ length: 12 }, (_, index) => ({ sessionId: `s_${"0".repeat(11)}${index}`, repoPath: home, worktreePath: null, env: {} })),
+  });
+  const relocation = "install the reviewer where no session can write and set its agent's command to that absolute path";
+  const full = explainSessionWritableRefusal(new SessionWritableRootError(`${home}/.local/bin`, home), grants, relocation, []) as Error;
+  const reason = reviewSessionDiscoveryReason(full);
+  assert.ok(reason.length <= 500, reason);
+  assert.ok(reason.startsWith(`${home}/.local/bin is inside a directory a session can write (${home}). To use it, ${relocation}, or `), reason);
+  // Labels are bounded, and the runner log (the whole message) keeps every grant.
+  for (const name of names) assert.ok(full.message.includes(`workspace "${name.slice(0, 63)}…"`), full.message);
+  assert.ok(full.message.endsWith(` and sessions ${Array.from({ length: 12 }, (_, index) => `s_${"0".repeat(11)}${index}`).join(", ")}`));
+
+  // Long paths are elided in the reason, never in the logged message.
+  const longRoot = `/srv/${"a".repeat(400)}`;
+  const longGrants = configuredSessionWritableGrants({
+    workspaces: names.map((name, index) => ({ name, path: `/srv/project-${index}`, additionalDirectoryGrants: [longRoot] })),
+  });
+  const long = explainSessionWritableRefusal(new SessionWritableRootError(`${longRoot}/.local/bin`, longRoot), longGrants, relocation, []) as Error;
+  const longReason = reviewSessionDiscoveryReason(long);
+  assert.ok(longReason.length <= 500, longReason);
+  assert.match(longReason, new RegExp(`^…a{108}/\\.local/bin is inside a directory a session can write \\(…a{119}\\)\\. To use it, ${relocation}, or `, "u"));
+  assert.ok(long.message.startsWith(`${longRoot}/.local/bin is inside a directory a session can write (${longRoot}). To use it, `));
 });
 
 test("prepare checks out the exact pushed head privately and pins the patch in the prompt", async (t) => {
@@ -714,6 +779,53 @@ test("a follow-up round over a merge keeps a conflict resolution in a file both 
   assert.deepEqual(kept.round.scopeFiles, ["app.ts"]);
   assert.match(kept.prompt, /-export const answer = 40;\n\+export const answer = 42;/u);
   g.launcher.release("s_review");
+});
+
+/** A run whose epoch used all four rounds, its last one at the fixture's head. v277 control plane. */
+function exhausted(f: Fixture, vote: "UPVOTE" | "DOWNVOTE"): ReviewRunHistory {
+  const run = reviewed(f, vote);
+  return { ...run, lastValid: { ...run.lastValid!, round: 4 }, lastAttempt: { ...run.lastAttempt!, round: 4 }, validRounds: 4, baseMergeRounds: true };
+}
+
+test("a base merge with a conflict resolution gets a free round scoped to the merge's effect (#4075)", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 42; // was 40 on main\n");
+  git(f.worktree, "add", "app.ts");
+  push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 5, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["app.ts"], since: f.head, baseMerge: true,
+  }, "beyond the epoch's four rounds, without an extension");
+  assert.doesNotMatch(prepared.prompt, /lib\/module-/u);
+  f.launcher.release("s_review");
+  // A control plane that does not count base merges still refuses it at the round limit.
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: { ...exhausted(f, "DOWNVOTE"), baseMergeRounds: undefined } }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
+test("a pure base merge onto an upvoted head is recorded as an equivalence without a reviewer (#4075)", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared, { equivalent: true, checkout: "", prompt: "", baseSha: base, round: {
+    epoch: 1, round: 5, attempt: 1, mode: "equivalent", baseSha: base, scopeFiles: [], baseMerge: true, equivalentTo: f.head,
+  } });
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false, "no checkout is left behind");
+});
+
+test("a non-merge fix after the budget is used still needs an extension (#4075)", async (t) => {
+  const f = fixture(t);
+  moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "notes.md"), "Uses no fences.\n");
+  git(f.worktree, "add", "notes.md");
+  push(f, "-m", "a fix after the merge");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
 });
 
 test("a head that no longer descends from the reviewed one starts an epoch that reviews the range-diff", async (t) => {

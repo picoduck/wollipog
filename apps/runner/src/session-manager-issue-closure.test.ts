@@ -141,6 +141,7 @@ for (const change of ["unchanged", "custom", "revision", "operation", "reason", 
     const result = await f.execute(snapshot);
     assert.equal(result.ok, true, result.error ?? "Expected an inspected refusal");
     assert.equal(result.result?.outcome, change === "unchanged" ? "closed" : "refused");
+    assert.equal(result.result?.refusal?.reason, change === "unchanged" ? undefined : "mutation_fence_unavailable");
     assert.equal(f.mutations().length, change === "unchanged" ? 1 : 0);
     assert.deepEqual(f.diskMeta().githubIssueClosureAttempts,
       change === "unchanged" ? { "approved-once": digest(snapshot) } : undefined);
@@ -183,6 +184,7 @@ for (const moved of [false, true]) {
     assert.equal((await f.scope({ operation: "synchronize", scope: added, control: control(2) })).ok, true);
     const stale = await f.execute(approved, "stale-revision");
     assert.equal(stale.ok, false, "the runner still refuses a snapshot at an older revision");
+    assert.equal(stale.failure, "campaign_authority_changed");
     assert.equal(f.mutations().length, 0);
 
     // The control plane proves the revisions in between left the issue alone and dispatches the
@@ -197,6 +199,7 @@ for (const moved of [false, true]) {
     const result = await f.execute(dispatched);
     assert.equal(result.ok, true, result.error ?? "Expected an inspected result");
     assert.equal(result.result?.outcome, moved ? "refused" : "closed");
+    assert.equal(result.result?.refusal?.reason, moved ? "mutation_fence_unavailable" : undefined);
     assert.equal(f.mutations().length, moved ? 0 : 1);
   });
 }
@@ -305,6 +308,8 @@ for (const { name, patch, error, reason } of refusedSessions) {
       const result = operation === "inspect" ? await f.inspect() : await f.execute(snapshot);
       assert.equal(result.ok, false);
       assert.match(result.error ?? "", new RegExp(error));
+      // #4059: every refusal is classified for the decision's recorded reason.
+      assert.equal(result.failure, error.includes("outside") ? "campaign_authority_changed" : "runner_failed");
       assert.equal(f.commands.length, 0, `${operation} must refuse before external inspection or mutation`);
       assert.equal(f.diskMeta().githubIssueClosureAttempts, undefined);
     }

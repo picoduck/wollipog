@@ -1261,8 +1261,6 @@ test("comfortable density gives every row more room than compact", async ({ page
         inbox: box(".inbox-row"),
         card: box(".column .card"),
         finding: box(".review-finding-row"),
-        // Usage keeps the runner card (#2988 retired it for machines).
-        usageCard: box(".runner-card"),
         // The §5.2 rows and §14 table cells take their height from the row tokens (§19.1), so
         // density moves their height and leaves their padding alone.
         rowOne: box(".surface > .row:not(.row-2, .dense)"),
@@ -1276,9 +1274,9 @@ test("comfortable density gives every row more room than compact", async ({ page
   const compact = await heights("compact");
   const comfortable = await heights("comfortable");
 
-  // Each of the three, not the total: a scale that grew one dimension and shrank another could
+  // Each of the two, not the total: a scale that grew one dimension and shrank another could
   // still add up, and "more room" has to mean more room everywhere it is claimed.
-  for (const family of ["card", "finding", "usageCard"] as const) {
+  for (const family of ["card", "finding"] as const) {
     // A MEANINGFUL step, not "greater than": a subpixel increase satisfied the first version, and
     // a density setting nobody can see is a setting that does not work.
     expect(comfortable[family].height, `a ${family} row must be meaningfully taller`)
@@ -1314,11 +1312,9 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
 
   const computed = await page.evaluate(() => {
     const inbox = getComputedStyle(document.querySelector(".inbox-row")!);
-    const usageCard = getComputedStyle(document.querySelector(".runner-card")!);
     return {
       inboxPadding: `${inbox.paddingTop} ${inbox.paddingRight}`,
       inboxMinHeight: inbox.minHeight,
-      usageCardPadding: `${usageCard.paddingTop} ${usageCard.paddingRight}`,
     };
   });
   expect(computed).toEqual({
@@ -1327,6 +1323,5 @@ test("compact renders exactly what the merge base rendered", async ({ page }) =>
     // guessed and failed. Its height is --row-h-2 since #2209, so it pads only its sides.
     inboxPadding: "0px 11px",
     inboxMinHeight: "0px",
-    usageCardPadding: "16px 18px",
   });
 });

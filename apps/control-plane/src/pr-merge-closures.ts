@@ -53,6 +53,15 @@ function named(issues: string[], describe: (issue: string) => string): string {
   return issues.length > SHOWN ? `${shown}; and ${issues.length - SHOWN} more` : shown;
 }
 
+/** Why a Full Control merge closing issues outside the campaign's issue scope is refused (#4062).
+ * Names every such issue, so the requester knows exactly which references to change. */
+export function unscopedClosureRefusal(issues: readonly string[]): string {
+  return `Merging this pull request would close ${issues.length === 1 ? "an issue" : "issues"} outside this Full Control campaign's ` +
+    `issue scope: ${issues.join(", ")}. The Orchestrator cannot approve a merge that closes an unscoped issue, so no decision was ` +
+    "created. Write “Refs #N” for each such issue and remove it from intendedClosures, or have the Orchestrator add it with " +
+    "request_campaign_issue_scope_change first; if that is refused, only the campaign owner can add it.";
+}
+
 /** Why the closures GitHub would make differ from the declared ones, or null when they match. */
 export function prMergeClosureMismatch(declared: readonly string[], closures: readonly PullRequestClosure[]): string | null {
   const actual = new Map(closures.map((closure) => [closure.issue, closure]));

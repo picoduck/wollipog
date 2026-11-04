@@ -304,3 +304,59 @@ test("periodic recovery and expiry use the startup metadata index instead of res
     rmSync(root, { recursive: true, force: true });
   }
 });
+
+for (const staleCallback of ["completed", "failed", "uncertain", "queued", "started"] as const) {
+  for (const activeState of ["accepted", "queued", "started"] as const) {
+    for (const check of ["retry", "recovery sweep"] as const) {
+      test(`stale ${staleCallback} cleanup preserves ${activeState} ownership during ${check}`, (t) => {
+        const root = mkdtempSync(join(tmpdir(), "wollipog-session-command-stale-handle-"));
+        try {
+          const store = new SessionCommandReceiptStore(root, { ownerId: "runner-a", now: () => 1 });
+          const envelope = message();
+          const first = store.claim(envelope);
+          if (first.kind !== "new") return assert.fail("invocation was not claimed");
+          first.handle.queued();
+          const callback = () => {
+            if (staleCallback === "failed") return first.handle.failed("stale failure");
+            if (staleCallback === "uncertain") return first.handle.uncertain("stale uncertainty");
+            return first.handle[staleCallback]();
+          };
+          // Fail before publication: the handle must release its own marker so queued work can recover.
+          const fault = t.mock.method(store as any, "writeAtomic", () => { throw new Error("synthetic write failure"); });
+          assert.throws(callback, /synthetic write failure/u);
+          fault.mock.restore();
+          assert.deepEqual(store.staleRecoveries(), [{ message: envelope, state: "queued" }]);
+          const retry = store.claim(envelope);
+          if (retry.kind !== "reclaimed") return assert.fail("failed persistence did not release ownership");
+          if (activeState === "queued") retry.handle.queued();
+          if (activeState === "started") retry.handle.started(42);
+          const digest = createHash("sha256").update(envelope.invocationId, "utf8").digest("hex");
+          const file = join(root, digest.slice(0, 2), `${digest}.json`);
+          const before = readFileSync(file, "utf8");
+          const receiptBefore = retry.handle.current;
+          assert.throws(callback, /changed concurrently/u);
+          assert.equal(readFileSync(file, "utf8"), before, "stale callbacks leave the exact receipt intact");
+          if (check === "retry") {
+            const duplicate = store.claim(envelope);
+            assert.equal(duplicate.kind, "duplicate", "the newer handle must retain its marker");
+            if (duplicate.kind !== "duplicate") return assert.fail("active work was reclaimed");
+            assert.deepEqual(duplicate.receipt, { ...receiptBefore, duplicate: true });
+          } else {
+            assert.deepEqual(store.staleRecoveries(), [], "locally active work cannot enter recovery");
+          }
+          assert.equal(readFileSync(file, "utf8"), before, "retry and recovery leave the receipt intact");
+          retry.handle.completed();
+          assert.equal(store.claim(envelope).kind, "duplicate");
+          assert.deepEqual(store.staleRecoveries(), []);
+          assert.equal(
+            (store as unknown as { activeHandles: { has(id: string): boolean } }).activeHandles.has(envelope.invocationId),
+            false,
+            "successful terminal cleanup releases its own marker",
+          );
+        } finally {
+          rmSync(root, { recursive: true, force: true });
+        }
+      });
+    }
+  }
+}

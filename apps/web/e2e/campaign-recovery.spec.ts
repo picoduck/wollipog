@@ -89,6 +89,30 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+for (const [reason, label, text] of [
+  ["intentional_stop", "Intentional Stop", "stopped on purpose by a recorded Stop or archive request; nothing was denied"],
+  ["unverified_stop", "Unverified Stop", "so the cause is unverified"],
+  ["hard_denial", "Hard Denial", "The operation was denied."],
+] as const) {
+  test(`a stopped worker reads as ${label} and stays blocked without an override (#3362)`, async ({ page }) => {
+    await page.setViewportSize({ width: 1440, height: 900 });
+    await page.goto(`/campaign-status-e2e.html?scenario=campaign&recovery=${reason}&subject=worker`);
+    const notice = page.locator(".campaign-status .notice", { hasText: "Recovery Blocked" });
+    await expect(notice).toContainText(text);
+    await notice.getByRole("button", { name: "Show Details" }).click();
+    await expect(notice.locator("dt", { hasText: /^Reason$/ }).locator("..")).toContainText(label);
+    await expect(notice.locator("dt", { hasText: /^Action$/ }).locator("..")).toContainText("Replace Stopped Worker");
+    await expect(notice).toContainText("No override is requested.");
+    await expect(notice.getByRole("button", { name: /approve|override|retry/i })).toHaveCount(0);
+    const directory = process.env.CAMPAIGN_RECOVERY_EVIDENCE_DIR;
+    if (directory) {
+      mkdirSync(directory, { recursive: true });
+      await notice.evaluate(element => element.scrollIntoView({ block: "start" }));
+      await page.screenshot({ path: join(directory, `stopped-worker-${reason}.png`) });
+    }
+  });
+}
+
 test("denials and exhausted ceilings explain why no override is requested", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign&recovery=attempts_exhausted");
   const notice = page.locator(".campaign-status .notice", { hasText: "Recovery Blocked" });

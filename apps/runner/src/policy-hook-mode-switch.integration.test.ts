@@ -116,7 +116,14 @@ async function stopChild(child: ChildProcess): Promise<void> {
 }
 
 function launches(dir: string): string[] {
-  return readdirSync(dir).filter((name) => name.endsWith(".json")).sort();
+  return readdirSync(dir).filter((name) => {
+    if (!name.endsWith(".json")) return false;
+    const recorded = JSON.parse(readFileSync(join(dir, name), "utf8")) as { args: string[] };
+    // Model discovery and /context are nonpersistent helper processes, not session relaunches.
+    // Match the credential-reregistration fixture's fence: configured discovery now correctly
+    // receives HOOK_LAUNCH_DIR too, so its launch is observable here.
+    return !recorded.args.includes("--no-session-persistence");
+  }).sort();
 }
 
 interface LaunchRecord {

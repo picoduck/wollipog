@@ -123,10 +123,31 @@ test("GitLab conflict evidence unites related, closing and mentioning open merge
   f.lists.closedBy = [f.mergeRequest(82)];
   const inspection = await inspectGithubIssueClosure(123, f.run);
   assert.deepEqual(inspection.openPullRequests.map((mr) => mr.number), [77, 78, 81, 82]);
-  assert.deepEqual(inspection.openPullRequests[0], { number: 77, title: "Fix #123", url: `${f.web}/-/merge_requests/77`, headSha: "a".repeat(40) });
+  assert.deepEqual(inspection.openPullRequests[0], { number: 77, title: "Fix #123", url: `${f.web}/-/merge_requests/77`, headSha: "a".repeat(40), closesIssue: false });
+  assert.deepEqual(inspection.openPullRequests.map((mr) => mr.closesIssue), [false, false, false, true]);
   const digest = inspection.forgeDigest;
-  f.lists.open[0] = f.mergeRequest(77, { title: "Fix #123", sha: "d".repeat(40) });
-  assert.notEqual((await inspectGithubIssueClosure(123, f.run)).forgeDigest, digest, "a moved merge-request head changes the digest");
+  // #4059: routine activity on a related merge request keeps the digest an approval was bound to.
+  f.lists.open[0] = f.mergeRequest(77, { title: "Fix #123 (rebased)", sha: "d".repeat(40), updated_at: "2026-11-01T17:28:30Z",
+    description: "Merged main." });
+  const routine = await inspectGithubIssueClosure(123, f.run);
+  assert.equal(routine.forgeDigest, digest, "a moved head, edited description or newer update keeps the digest");
+  assert.equal(routine.openPullRequests[0]!.headSha, "d".repeat(40), "the displayed head is still current");
+  f.lists.closedBy = [f.mergeRequest(82), f.mergeRequest(77)];
+  assert.notEqual((await inspectGithubIssueClosure(123, f.run)).forgeDigest, digest, "a new closing reference changes the digest");
+  f.lists.closedBy = [f.mergeRequest(82)];
+  f.lists.open[0] = f.mergeRequest(77, { title: "Unrelated work" });
+  assert.notEqual((await inspectGithubIssueClosure(123, f.run)).forgeDigest, digest, "a merge request that stops naming the issue changes the digest");
+});
+
+test("a GitLab closure names the merge request whose closing reference changed (#4059)", async () => {
+  const f = gitlab();
+  f.lists.open = [f.mergeRequest(77, { title: "Refs #123" })];
+  const approved = await snapshot(f);
+  f.lists.open = [f.mergeRequest(77, { title: "Refs #123", sha: "d".repeat(40), updated_at: "2026-11-01T17:28:30Z" })];
+  f.lists.closedBy = [f.mergeRequest(77, { title: "Refs #123" })];
+  const result = await executeGithubIssueClosure(approved, f.run, () => assert.fail("no mutation fence should begin"));
+  assert.deepEqual([result.outcome, result.refusal?.reason, result.refusal?.pullRequests], ["refused", "closing_reference_changed", [77]]);
+  assert.equal(mutations(f).length, 0);
 });
 
 test("a locked merge request is mid-merge, so it stays unresolved conflict evidence", async () => {

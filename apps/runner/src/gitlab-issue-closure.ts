@@ -10,7 +10,7 @@ import type { GithubIssueClosureInspection, GithubIssueClosureSnapshot } from "@
 import { campaignIssueForgeUrl, campaignRepositoryLocation } from "@wollipog/protocol";
 import { classifyGlabFailure } from "./campaign-gitlab-status.js";
 import { parseForgeRemote } from "./git-ops.js";
-import { IssueClosureInspectionError } from "./github-issue-closure.js";
+import { closureDigestPullRequest, IssueClosureInspectionError } from "./github-issue-closure.js";
 
 type Run = (command: string, args: string[]) => Promise<string>;
 
@@ -183,7 +183,10 @@ export async function inspectGitlabIssueClosure(
     // The project list's row is preferred, so one merge request has one digest input.
     if (mr && !relevant.has(mr.number)) relevant.set(mr.number, listed.get(mr.number) ?? mr);
   }
-  const sorted = [...relevant.values()].sort((a, b) => a.number - b.number);
+  // GitLab's `closed_by` lists the merge requests that close the issue when merged.
+  const closesIssue = new Set(closing.flatMap((raw) => evidence(raw)?.number ?? []));
+  const sorted = [...relevant.values()].sort((a, b) => a.number - b.number)
+    .map(({ number, title, url, headSha }) => ({ number, title, url, headSha, closesIssue: closesIssue.has(number) }));
   const delivery: NonNullable<GithubIssueClosureInspection["delivery"]> = [];
   if (deliveryPullRequests !== undefined) {
     if (!deliveryPullRequests.length || deliveryPullRequests.length > 100) throw closureError("Completed closure requires bounded actual merged merge-request evidence");
@@ -204,11 +207,11 @@ export async function inspectGitlabIssueClosure(
   }
   const forgeDigest = createHash("sha256").update(JSON.stringify({
     repository: project.repository, issue, id: String(target.id), title: target.title, body: target.description,
-    state: target.state, updatedAt: target.updatedAt, assignees: target.assignees, labels: target.labels, relevant: sorted,
+    state: target.state, updatedAt: target.updatedAt, assignees: target.assignees, labels: target.labels,
+    relevant: sorted.map(closureDigestPullRequest),
   })).digest("hex");
   return { repository: project.repository, issue, title: target.title, url: target.url, state: target.state, forgeDigest,
-    openPullRequests: sorted.map(({ number, title, url, headSha }) => ({ number, title, url, headSha })),
-    ...(deliveryPullRequests === undefined ? {} : { delivery }) };
+    openPullRequests: sorted, ...(deliveryPullRequests === undefined ? {} : { delivery }) };
 }
 
 /** The text a closure posts as a note before closing, or undefined for none. A not-planned closure

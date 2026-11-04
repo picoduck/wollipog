@@ -386,10 +386,10 @@ describe("an open artifact in the Browser is a page (#2855, #2914)", () => {
         await act(async () => { rows()[1]!.click(); });
         await waitForPreviewToSettle(container);
         assert.deepEqual(exported, ["second"]);
-        const bar = container.querySelector(".rpanel-toolbar > .toolbar.art-bar");
-        assert.ok(bar, "the bar sits in the toolbar slot, above the one scroller");
-        assert.deepEqual([...bar.querySelectorAll(":scope > button")].map((button) => button.textContent?.trim()), ["Download"]);
-        assertNoDomNode(bar.querySelector("h2"), "the title is the panel header's");
+        // Its actions are the panel header's (#3036; covered with the real header in
+        // BrowserPanel.panel-back.dom.test.tsx), so nothing sits above the one scroller.
+        assertNoDomNode(container.querySelector(".rpanel-toolbar"), "the page has no bar of its own");
+        assertNoDomNode(container.querySelector(".rpanel-body h2"), "the title is the panel header's");
         const backs = [...container.querySelectorAll("button")].filter((button) =>
           /^Back/u.test(button.getAttribute("aria-label") ?? button.textContent ?? ""));
         assert.equal(backs.length, 0, "the panel header's Back is the only back control");
@@ -425,13 +425,13 @@ describe("an open artifact in the Browser is a page (#2855, #2914)", () => {
       await act(async () => root.render(<BrowserPanel session={{ id: "session_2" } as SessionView} />));
       await settle();
       await settle();
-      assertNoDomNode(container.querySelector(".art-bar"), "no preview of another session's artifact");
+      assertNoDomNode(container.querySelector(".art-meta"), "no preview of another session's artifact");
       const rows = [...container.querySelectorAll<HTMLButtonElement>(".browser-artifact-list .row")];
       assert.deepEqual(rows.map((row) => row.dataset.panelPageKey), ["other"]);
       assert.ok(!rows[0]!.closest("[hidden]"), "the list shows");
       // Opening the new session's artifact still works: the stale page is gone, not stacked under it.
       await act(async () => rows[0]!.click());
-      assert.ok(container.querySelector(".art-bar"));
+      assert.ok(container.querySelector(".art-meta"));
     } finally {
       await act(async () => root.unmount());
       container.remove();

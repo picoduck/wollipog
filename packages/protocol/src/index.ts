@@ -4,6 +4,7 @@ import { DEFAULT_ORCHESTRATOR_REVIEW_POLICY, type OrchestratorReviewPolicy } fro
 export * from "./orchestrator-review-policy.js";
 export * from "./provider-home-recovery.js";
 export * from "./worktree-dirty-paths.js";
+export * from "./fuzzy-path-match.js";
 export * from "./review-settings.js";
 import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference } from "./paced-video-review.js";
 /**
@@ -810,16 +811,77 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw. Older control planes have
 //      no route, so current clients refuse by name rather than sending it.
 // 270: FIFO processing barriers pace runner replay independently of WebSocket liveness.
-export const PROTOCOL_VERSION = 270;
+// 272: merge-queue watches (#4071). A session parks on its own enqueued pull request through
+//      POST /api/sessions/:id/pull-request-watch; the control plane sends
+//      pull_request_watch_start/cancel, the runner polls GitHub and answers with
+//      pull_request_watch_update, and the session is prompted once with the outcome. Sessions and
+//      campaigns show the watch. Older runners and control planes keep blocking waits.
+// 275: campaign handoffs (#4070). Campaign status gains terminal `complete_with_handoffs`, the
+//      projection lists `handoffs`, `update_campaign_work_item` records an item's `handoff`, and
+//      POST /api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery records delivery
+//      from forge-verified merged pull requests or a child's exact report. Dashboards below 275
+//      receive the status as `waiting_human`. GitHub forge observations carry `defaultBranch`, and
+//      a `status` git action may name a non-selected worktree the session still links; one it no
+//      longer links fails with `GIT_WORKTREE_UNLINKED`.
+// 276: delegated image evidence review (#4074). An Orchestrator hands a pending
+//      ui_evidence_approval decision's images to a managed reviewer Session whose receipts and
+//      verdict the server records, and resolves with delegatedImageReview. The reviewer launches
+//      on the root's runner with only its two review tools; older peers keep direct review.
+// 277: base-branch merges and capped Full Control review extensions (#4075). A runner proves a
+//      head is one strict merge of the moved base onto the last valid head; the control plane
+//      sends `history.baseMergeRounds` only to such a runner and then counts that round outside
+//      the epoch's budget, or records a reviewed-head equivalence (round mode `equivalent`) that
+//      the merge gate accepts. Under Full Control, the controlling Orchestrator owns
+//      review_round_extension up to a per-pull-request cap when both the requester's and the
+//      controller's runners are v277; older peers keep it with the person.
+// 278: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
+//      a Full Control completed closure of an in-scope epic can be proven from its closed members.
+// 279: workspace removal (#4123). DELETE /api/runners/:id/workspaces/:workspaceId unregisters a
+//      Workspace. A managed one is removed in the control plane; a configured one is sent as
+//      remove_workspace, and the runner records the removal in its data directory, stops
+//      advertising it and answers remove_workspace_result. Runner views tag each Workspace's
+//      `source`. Older runners keep their configured Workspaces and the control plane refuses.
+// 281: Owner decisions (#4064). A Full Control root asks its campaign's owner a typed question that
+//      only that person can answer (`owner_decision`), and hands a pending Orchestrator-owned
+//      occurrence to the owner, one way. Both need a v281 root runner and control plane; an older
+//      root keeps today's behavior.
+// 282: Full Control response attribution (#4063). When the server's Full Control policy dismisses a
+//      question or declines a tool call, `answer_question` and `resolve_permission` carry
+//      `automaticResponse`: the policy and, only when it is safe to name, the request class. A v282
+//      runner whose provider result carries text (Claude Code) tells the agent that Wollipog
+//      declined it under Full Control, that no person saw it and what to do instead (for a root's
+//      question, including the v281 owner-decision route). The field is sent only to a v282 runner;
+//      older runners keep the fixed person-worded text and the separate notices. A person's
+//      dismissal or decline never carries it.
+// 283: distinguish explicit-account availability from effective-default readiness (#4078).
+// 284: Wollipog-performed forge actions (#4067). The requester of an approved
+//      `merged_branch_deletion` (which may now name `pullRequest` and `headSha`) or of an approved,
+//      armed GitHub `pr_merge` calls POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute;
+//      the control plane sends `forge_decision_action` to the child's runner, which deletes the
+//      branch by compare-and-delete or runs the canonical enqueue through the session's own forge
+//      login and answers `forge_decision_action_result`. The decision records `forgeAction`.
+//      GitHub forge observations carry `headBranch` and `crossRepository`, and the campaign
+//      projection lists `mergedBranches`; a pending merged branch keeps a campaign from
+//      `verified_complete`. Older runners never receive the action, and their campaigns keep
+//      today's completion.
+export const PROTOCOL_VERSION = 284;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
+export * from "./issue-closure-refusal.js";
+import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
+export * from "./issue-closure-delivery-gap.js";
+import type { IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
+export * from "./delegated-image-review.js";
 export * from "./campaign-budget.js";
 export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
+export * from "./pull-request-watch.js";
+export * from "./workspace-removal.js";
+export * from "./forge-decision-action.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -827,6 +889,8 @@ export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
+export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
+export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.js";
 export type {
   CampaignLaunchProposal, FullControlLaunchRequest, FullControlLaunchOverrides, FullControlEnableRequest, PreparedCampaignLaunch,
   CampaignLaunchInspectionMessage, CampaignLaunchInspectionCancelMessage, CampaignLaunchInspectionResult,
@@ -1018,6 +1082,29 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  /** v279 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
+   * Workspaces added in Wollipog are removed by the control plane on any runner. */
+  workspaceRemoval: 279,
+  /** v284 Wollipog performs an approved branch deletion or armed enqueue itself (#4067), and GitHub
+   * forge observations report the head branch that merged-branch cleanup tracks. Checked against
+   * the child's runner, and against the control plane by the runner's tools. */
+  forgeDecisionActions: 284,
+  /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
+   * status for dashboards and the delivery and handoff ledger writes for runner tools. */
+  campaignHandoffs: 275,
+  /** v272 runner watches a parked session's merge-queue entry and the control plane wakes it (#4071).
+   * Checked against the runner by the control plane and against the control plane by the runner. */
+  pullRequestWatch: 272,
+  /** v276 runner launches a delegated image evidence reviewer with only its two review tools and
+   * serves those tools to it (#4074). Checked against the root Orchestrator's runner, which hosts
+   * the reviewer; the runner checks the control plane's version before offering the path. */
+  delegatedImageEvidenceReview: 276,
+  /** v277 runner proves strict base-branch merges for review runs; the control plane then counts
+   * them outside the round budget and records equivalences (#4075). */
+  reviewBaseMergeRounds: 277,
+  /** v277 requester and controller runners: a Full Control Orchestrator owns review_round_extension
+   * within the server-enforced per-pull-request cap (#4075). Older peers keep it with the person. */
+  fullControlReviewExtensions: 277,
   targetHarnessInstallations: 176,
   harnessInstallations: 175,
   harnessSelectionBackgroundConsumers: 177,
@@ -1062,6 +1149,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerProfiles: 225,
   /** v270 runner paces regenerable reconnect snapshots with FIFO processing acknowledgements. */
   runnerProcessingBarriers: 270,
+  /** Account-aware implicit launches; older peers receive conservative availability. */
+  providerAccountReadiness: 283,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
   reviewSession: 226,
@@ -1158,6 +1247,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
+  /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
+   * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
+   * root's runner by the control plane and against the control plane by the runner. */
+  ownerDecisions: 281,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -1176,6 +1269,12 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   orchestratorIssueScope: 158,
   campaignIssueScopeChanges: 208,
   orchestratorIssueClosure: 194,
+  /** v278 issue-closure inspection reads an epic's sub-issues and member checklist with each member's
+   * state (#4060). Without it an epic's completed closure has only the work-item proof. */
+  epicClosureMembers: 278,
+  /** v282 runner delivers a Full Control standing dismissal or decline with text naming the policy
+   * rather than a person (#4063). Older runners keep the fixed text and the separate notices. */
+  fullControlResponseAttribution: 282,
   /** v196 control plane records the campaign work ledger. Checked by the runner's ledger MCP tools
    * and CLI commands against the connected control plane, not against a runner. */
   campaignWorkLedger: 196,
@@ -2693,8 +2792,10 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
 /** `campaign_follow_up_admission` (#2940): one follow-up past the campaign's approval limit. The server
  * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
+/** `owner_decision` (#4064): a Full Control root's question for its campaign's owner, created only
+ * through request_owner_decision. Always the person's: no agent can answer, approve or resolve it. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission";
+  "campaign_follow_up_admission" | "owner_decision";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -2896,12 +2997,52 @@ export type FullControlFirstMessageScope =
 /** `blocked` means nothing is progressing without intervention: every unverified child failed,
  * stopped, or is held, or the campaign's own continuation is stalled (see
  * `OrchestratorCampaignProjection.stalled`). `waiting_human` and `verified_complete` take
- * precedence over a stalled continuation. */
+ * precedence over a stalled continuation.
+ *
+ * v275 `complete_with_handoffs` (#4070) is terminal like `verified_complete`: every child is
+ * verified and cleaned up, nothing is pending, and every unfinished committed work item is handed to
+ * `human` or `external` (`OrchestratorCampaignProjection.handoffs`). Dashboards older than
+ * `campaignHandoffs` receive it as `waiting_human`, never as active work. */
 export type OrchestratorCampaignStatus =
   | "waiting_human"
   | "active"
   | "blocked"
-  | "verified_complete";
+  | "verified_complete"
+  | "complete_with_handoffs";
+
+/** Statuses after which the campaign takes no more automatic turns and Campaign Elapsed ends. */
+export function campaignStatusTerminal(status: OrchestratorCampaignStatus | null | undefined): boolean {
+  return status === "verified_complete" || status === "complete_with_handoffs";
+}
+
+/** One unfinished work item the campaign handed to a person or an outside party (#4070). */
+export interface OrchestratorCampaignHandoff {
+  workItemId: string;
+  key: string;
+  title: string | null;
+  issue: import("./campaign-work-ledger.js").CampaignIssueRef | null;
+  primaryState: import("./campaign-work-ledger.js").CampaignWorkItemPrimaryState;
+  handoff: import("./campaign-work-ledger.js").CampaignWorkItemHandoff;
+}
+
+/** Handed-off items the projection lists at most; `total` keeps the full count. */
+export const CAMPAIGN_HANDOFFS_LIMIT = 50;
+
+/** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
+export interface CampaignOwnerDecision {
+  occurrenceId: string;
+  /** The session whose request it is: the root for an owner decision, else the requester. */
+  sessionId: string;
+  category: WorkflowDecisionCategory;
+  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). */
+  summary: string;
+  /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
+  handedOff: boolean;
+  createdAt: number;
+}
+
+/** Owner decisions the projection lists at most; `total` keeps the full count. */
+export const CAMPAIGN_OWNER_DECISIONS_LIMIT = 20;
 
 /** Why an Orchestrator assigned UI Evidence Approval cannot exercise it. Client-scoped codes
  * describe the campaign; evidence-scoped codes describe one exact decision. */
@@ -2958,6 +3099,10 @@ export interface OrchestratorCampaignProjection {
   recovery?: import("./campaign-recovery.js").CampaignRecoveryProjection;
   policyRevision: number;
   decisionOwners: ParentControlDecisionPolicy;
+  /** v277 (#4075): present when Full Control, not a Parent Control grant, makes review_round_extension
+   * the Orchestrator's. It may grant each pull request at most its run's configured round budget of
+   * extra rounds in total; past that a request is the person's. */
+  reviewRoundExtensionCap?: { scope: "pull_request"; extraRounds: "configured_round_budget" };
   /** The root campaign's child behavior as the next child creation enforces it (#3580), with where
    * each value came from: `active_campaign` once a person changed it after launch. */
   behavior?: OrchestratorCampaignBehavior & {
@@ -2981,6 +3126,14 @@ export interface OrchestratorCampaignProjection {
   /** Full Control only: the request classes that still come to the Human for this campaign
    * (#2940), today at most `human_required_rules` while such a rule exists. */
   fullControlHumanRequired?: import("./campaign-authority.js").FullControlRequestClass[];
+  /** v275: unfinished committed work items handed to `human` or `external`, oldest handoff first
+   * (#4070). The owner's to-do list; omitted when there are none. Bounded by
+   * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */
+  handoffs?: { total: number; items: OrchestratorCampaignHandoff[] };
+  /** v281 (#4064): pending decisions the campaign's owner kept, oldest first: the root's owner
+   * decisions and the occurrences it handed to the owner. Root view only; omitted when there are
+   * none. Bounded by CAMPAIGN_OWNER_DECISIONS_LIMIT; `total` is the full count. */
+  ownerDecisions?: { total: number; items: CampaignOwnerDecision[] };
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -3005,9 +3158,23 @@ export interface OrchestratorCampaignProjection {
     status: "pending" | "deferred" | "refused";
     reason: string;
   }>;
+  /** v284 (#4067): the head branches of the campaign's merged pull requests (those its children
+   * merged through approved `pr_merge` decisions) and whether each is deleted, retained with a
+   * reason, or pending on the remote. A pending branch keeps the campaign from `verified_complete`.
+   * Pending first, bounded by CAMPAIGN_MERGED_BRANCHES_LIMIT; the counts are complete. Omitted
+   * when there are none. */
+  mergedBranches?: {
+    total: number;
+    pending: number;
+    retained: number;
+    items: import("./forge-decision-action.js").CampaignMergedBranch[];
+  };
   /** Unverified children held from starting their next turn, with how to clear each (#1650).
    * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
   heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
+  /** v272: children parked on a merge-queue watch, and watches that ended but whose wake has not
+   * been delivered yet, newest first (#4071). Bounded; omitted when there are none. */
+  parkedChildren?: import("./pull-request-watch.js").CampaignParkedChild[];
   pendingDecisions: { human: number; orchestrator: number };
   /** All unresolved descendant requests, including provider questions/approvals and typed gates. */
   pendingRequests?: {
@@ -3370,6 +3537,13 @@ export interface AgentDefinition {
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
   /** Opaque runner-local account selected when a client omits an explicit account. */
   defaultProviderAccountId?: string;
+  /** Secret-free observations; aggregate availability may offer a ready explicit account while
+   * the unchanged implicit default is signed out. Never contains credential paths or values. */
+  providerAccountReadiness?: {
+    defaultAccountId?: string;
+    defaultAuthStatus: "authenticated" | "unauthenticated" | "unknown";
+    readyAccountIds: string[];
+  };
   /** Secret-free Codex billing boundary derived locally from configured auth or CLI account state. */
   codexBillingSource?: "api" | "provider_account";
   /** Runtime-negotiated ACP capabilities safe for presentation; absent for native/legacy agents. */
@@ -3651,6 +3825,8 @@ export interface WorkspaceInfo {
   scope?: ResourceScope;
   /** Principal-specific authority to manage this Location's access. Older control planes omit it. */
   canManage?: boolean;
+  /** Where the Workspace came from (#4123). Older control planes omit it. */
+  source?: import("./workspace-removal.js").WorkspaceSource;
 }
 
 /** How a durable Project Location entered the control-plane catalog. */
@@ -3851,8 +4027,9 @@ export interface RunnerRuntimeInfo {
   /** Guarded capability, independent of numeric protocol support. Missing is unsupported. */
   campaignReview?: import("./campaign-review-job.js").ControlledReviewCapability;
   /** Exact read-only workspace inspection path only; never Full Control readiness. Version 2
-   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection. */
-  campaignLaunchInspection?: { version: 1 | 2 };
+   * accepts `campaign_launch_inspect_cancel` and repository-only (zero-issue) inspection.
+   * Version 3 accepts authorized project location paths and returns closed failure codes. */
+  campaignLaunchInspection?: { version: 1 | 2 | 3 };
   /** Runner-mediated cross-model review for sessions (#3306). Missing is unsupported. */
   sessionReview?: import("./session-review-job.js").SessionReviewCapability;
   /** Review sessions (#3368): the reviewer harnesses this runner can launch. Missing is unsupported. */
@@ -4158,7 +4335,7 @@ export interface HostAdminStatusView {
     harnessReadiness?: {
       connectedAt: number | null;
       refreshed: boolean;
-      agents: Array<{ id: string; available: boolean; ownershipBlocked: boolean }>;
+      agents: Array<{ id: string; available: boolean; installationAvailable?: boolean; ownershipBlocked: boolean }>;
       accounts?: Array<{ id: string; authStatus: ProviderAccountDefinition["authStatus"] }>;
     };
   }> };
@@ -5095,10 +5272,19 @@ export interface GithubIssueClosureInspection {
   title: string;
   url: string;
   state: "OPEN" | "CLOSED";
-  /** Digest of issue identity, contents, updatedAt, labels, assignees, and relevant open PRs. */
+  /** Digest of what a closure depends on: the issue's identity, contents, updatedAt, labels and
+   * assignees, and each related open PR's identity and closing reference (#4059). A related PR's
+   * title, body, head and updatedAt are left out, so routine activity on it keeps an approval;
+   * a body edit that changes whether it is related or closes the issue still changes the digest. */
   forgeDigest: string;
-  openPullRequests: Array<{ number: number; title: string; url: string; headSha: string }>;
+  /** `closesIssue` (#4059): the forge reports the PR closes this issue when merged. Older runners
+   * omit it; a refusal of their snapshot cannot then name the PR that changed. */
+  openPullRequests: Array<{ number: number; title: string; url: string; headSha: string; closesIssue?: boolean }>;
   delivery?: Array<{ number: number; headSha: string; mergeCommitSha: string }>;
+  /** v278 (#4060): present only when the inspection asked for them, and then part of `forgeDigest`:
+   * the epic's members from its sub-issues and member checklist, with each member's state. A GitLab
+   * runner omits it, so a GitLab epic keeps only the work-item proof. */
+  epicMembers?: IssueClosureEpicMembers;
 }
 
 export interface GithubIssueClosureRequest {
@@ -5112,8 +5298,12 @@ export interface GithubIssueClosureRequest {
 }
 
 export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspection, "state"> {
-  /** Server-derived reason delegated delivery could not be proven. */
+  /** Server-derived reason delegated delivery could not be proven: the compact line of
+   * `deliveryGaps` (#4058), or `outside_boundary` for a request the boundary does not delegate. */
   deliveryFailure?: string;
+  /** Server-derived (#4058): every gap that kept an in-scope closure from delegated proof, each
+   * with the action that would let a new request become Orchestrator-owned. */
+  deliveryGaps?: IssueClosureDeliveryGap[];
   scopeRevision?: number;
   category: "issue_closure";
   reason: GithubIssueClosureRequest["reason"];
@@ -5123,11 +5313,17 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   activeChildren: Array<{ sessionId: string; title: string; assignmentDigest: string }>;
   issueAdmission?: CampaignIssueAdmission;
   dispositionRecommendationId?: string;
+  /** Server-derived (#4059): the latest earlier closure of this issue by this Orchestrator that was
+   * refused, so whoever reviews the new request can see why the last approval was used up. */
+  previousRefusal?: { occurrenceId: string; completedAt: number; refusal: GithubIssueClosureRefusal };
 }
 
 export interface GithubIssueClosureResult {
   outcome: "closed" | "already_closed" | "refused" | "uncertain";
   completedAt: number;
+  /** Why a `refused` outcome was refused (#4059). The control plane records one for every refusal;
+   * a result stored by an older control plane omits it. */
+  refusal?: GithubIssueClosureRefusal;
 }
 
 export interface AutomationCreationRequest {
@@ -5157,6 +5353,19 @@ export interface AutomationCreationResult {
   createdAt: number;
 }
 
+/** A decision the campaign's owner kept for themselves (#4064), as a Full Control root asks it. */
+export interface OwnerDecisionSnapshot {
+  category: "owner_decision";
+  question: string;
+  options: WorkflowDecisionOption[];
+  recommendedOptionId?: string;
+  /** What the owner needs to decide: links, head SHAs, check state, what each option does. */
+  material?: string;
+}
+
+/** Bounds of an owner decision, shared by the runner tool and the control plane. */
+export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, maxOptions: 12 } as const;
+
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
@@ -5168,6 +5377,7 @@ export type WorkflowDecisionResourceSnapshot =
       options: WorkflowDecisionOption[];
       recommendedOptionId?: string;
     }
+  | OwnerDecisionSnapshot
   | {
       category: "pr_merge";
       /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
@@ -5223,6 +5433,10 @@ export type WorkflowDecisionResourceSnapshot =
       branch: string;
       merged: true;
       mergeCommitSha: string;
+      /** v284 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
+       * itself only when both are present; omitted, the snapshot and its digest are unchanged. */
+      pullRequest?: number;
+      headSha?: string;
       dependentPullRequests: {
         checkedAt: number;
         open: number[];
@@ -5336,10 +5550,15 @@ export interface WorkflowDecisionView {
   evidenceReviewed?: string[];
   /** Exact non-self media proof; never an assertion that the owner inspected video frames. */
   delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
+  /** v276 (#4074): the managed reviewer whose server-recorded receipts and verdict backed this
+   * approval. Never an assertion that the Orchestrator looked at the images itself. */
+  delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   createdAt: number;
   resolvedAt?: number;
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
+  /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
+  forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
   /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
@@ -5350,12 +5569,40 @@ export interface WorkflowDecisionView {
   /** Explicit withdrawal by the controlling Orchestrator (#3941) or, from v269, by the requester
    * itself (#3917). The status reads `revoked`, which is terminal and never grants authority. */
   withdrawal?: { bySessionId: string; reason: string };
+  /** The occurrence that replaced this one, when the status reads `superseded` (#4066). Absent for
+   * an occurrence superseded before this was recorded. */
+  supersededBy?: string;
+  /** v281 (#4064): the Full Control root handed this Orchestrator-owned occurrence to the campaign's
+   * owner. One way: it stays the person's, and so does every later request for the same resource
+   * in the campaign. Only a person resolves it. */
+  ownerHandoff?: { bySessionId: string; at: number; reason: string };
+}
+
+/** v281 (#4064): a Full Control root's question for its campaign's owner. */
+export interface CreateOwnerDecisionRequest {
+  /** Caller-owned idempotency key. Reuse with different content fails. */
+  requestId: string;
+  /** Stable identity; a newer owner decision under the same key replaces an unanswered older one. */
+  resourceKey: string;
+  question: string;
+  options: WorkflowDecisionOption[];
+  recommendedOptionId?: string;
+  material?: string;
+}
+
+/** v281 (#4064): hand one pending Orchestrator-owned occurrence to the campaign's owner. */
+export interface HandWorkflowDecisionToOwnerRequest {
+  /** Why the owner decides it. Stored on the decision; audit records only its digest. */
+  reason: string;
+  /** The requesting session, when it is not the root itself. */
+  sessionId?: string;
 }
 
 export interface CreateWorkflowDecisionRequest {
   /** Caller-owned idempotency key. Reuse with different content fails. */
   requestId: string;
-  /** Stable target identity; a newer occurrence supersedes older unconsumed occurrences. */
+  /** Stable target identity; a newer occurrence supersedes older unconsumed occurrences. A request
+   * that would supersede a person-owned follow-up publication is refused instead (#4066). */
   resourceKey: string;
   resourceSnapshot: WorkflowDecisionResourceSnapshot;
 }
@@ -5369,6 +5616,9 @@ export interface ResolveWorkflowDecisionRequest {
   /** Production managed-media provenance for original video IDs. Server verifies every reference.
    * Only an admitted Orchestrator UI approval may supply it; human and legacy paths omit it. */
   delegatedVideoEvidence?: DelegatedVideoEvidenceReference[];
+  /** v276 (#4074): approve on a delegated image reviewer's verdict instead of the Orchestrator's
+   * own receipts. The server requires that reviewer's current receipt for every evidence item. */
+  delegatedImageReview?: import("./delegated-image-review.js").DelegatedImageReviewReference;
   /** Audit-only: never retained, never shown to the child; only its digest reaches audit. */
   rationale?: string;
   /** v166: retained on the decision for the child to read and delivered as the prompt that resumes
@@ -5721,6 +5971,9 @@ export interface GovernanceAuditEntry {
       frameCount: number;
     };
     reviewReceiptIds?: string[];
+    /** v276 (#4074): the delegated image reviewer and the digest of the verdict an approval rests on. */
+    delegatedImageReview?: { reviewId: string; verdictId: string; reviewerSessionId: string;
+      recommendation: "approve" | "deny"; verdictSha256: string };
     rationaleDigest?: string;
     /** v166: digest of the child-facing message; its text lives only on the decision. */
     childMessageDigest?: string;
@@ -6563,6 +6816,10 @@ export interface SessionUsageResponse {
   totals: UsageAmount;
   byModel: SessionModelUsage[];
   pricing?: UsagePricingStatus;
+  /** Claude turns whose records billed the conversation's running total instead of their own share
+   * (#4069), and what they billed. Their cost is in `totals`, which may therefore overstate the
+   * session; it cannot be corrected automatically. Absent when there are none, or from older planes. */
+  runningTotalRecords?: { records: number; costUsd: number };
 }
 
 /** The organization's per-user daily cost allowance (v105). `perUserUsd: null` ⇒ no daily budget. */
@@ -6580,6 +6837,9 @@ export interface UserCostWindows {
   last30DaysUsd: number;
   /** The organization's per-user daily budget, repeated for convenience; null ⇒ none. */
   dailyBudgetUsd: number | null;
+  /** While a daily budget is set, the open live estimate of the user's running turns, which the
+   * daily-budget gate adds to `todayUsd` (#3196). Absent when there is none, or from older planes. */
+  todayEstimateUsd?: number;
 }
 
 /** Provenance for the rate table so the UI can be honest about how good the estimates are. */
@@ -6590,6 +6850,14 @@ export interface UsagePricingStatus {
   source: string;
   fetchedAt: number | null;
   knownModels: number;
+  /** Why the last refresh failed (#4056): one line of at most 200 characters, with no request
+   * headers or credentials, and when it failed. A successful refresh clears it. Older control
+   * planes never send it. */
+  lastRefreshError?: { message: string; at: number };
+  /** Only on a refresh answer that made no new attempt because one ran within the refresh floor
+   * (#4056): when the next attempt may run, by the plane's clock and as a delay from the answer.
+   * Older control planes never send it. */
+  refreshSkipped?: { nextAttemptAt: number; retryAfterMs: number };
 }
 
 export interface UsageRetentionPolicy {
@@ -6679,6 +6947,9 @@ export interface UsageAggregationResponse {
   hourlyDataAvailable?: boolean;
   /** Native Claude records from the older accounting path, still requiring reconciliation. */
   legacyClaudeCostRecords?: number;
+  /** Claude turns in this range that billed their conversation's running total (#4069), so the
+   * cost may be overstated. Absent from older planes. */
+  runningTotalClaudeRecords?: number;
   since: number;
   through: number;
   retention: UsageRetentionPolicy;
@@ -8074,6 +8345,9 @@ export interface SessionView {
   review?: import("./review-session.js").ReviewSessionLink;
   /** #3369: the review sessions this session requested, summarized. Omitted when it has none. */
   reviewRuns?: import("./review-session.js").ReviewRunsSummary;
+  /** v272: the merge-queue watch this session is parked on, or the latest one whose wake is still
+   * owed or was lost (#4071). Omitted otherwise and by older control planes. */
+  pullRequestWatch?: import("./pull-request-watch.js").PullRequestWatchView;
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions
@@ -9604,7 +9878,9 @@ export type GithubIssueClosureMessage = {
   requestId: string;
   sessionId: string;
 } & (
-  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }> }
+  | { operation: "inspect"; issue: number; scopeRevision?: number; deliveryPullRequests?: Array<{ number: number; headSha: string }>;
+      /** v278 (#4060): also read the issue's epic members into the inspection and its digest. */
+      epicMembers?: true }
   | { operation: "execute"; occurrenceId: string; snapshot: GithubIssueClosureSnapshot }
 );
 
@@ -9616,6 +9892,9 @@ export interface GithubIssueClosureResultMessage {
   inspection?: GithubIssueClosureInspection;
   result?: GithubIssueClosureResult;
   error?: string;
+  /** Classification of an `ok: false` reply (#4059), one of `GITHUB_ISSUE_CLOSURE_FAILURE_REASONS`.
+   * Older runners omit it, and the control plane then records `runner_failed`. */
+  failure?: GithubIssueClosureRefusalReason;
 }
 
 /** Slice 8 of #2417: read the GitHub pull requests a campaign's work items name, on the runner
@@ -10171,6 +10450,7 @@ export type RunnerToControlPlane =
   | import("./campaign-review-job.js").CampaignReviewJobUpdate
   | import("./session-review-job.js").SessionReviewJobUpdate
   | import("./review-session.js").ReviewSessionUpdate
+  | import("./pull-request-watch.js").PullRequestWatchUpdate
   | RegisterMessage
   | HeartbeatMessage
   | SessionStatusMessage
@@ -10180,6 +10460,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
   | GithubMergePreflightResultMessage
+  | import("./forge-decision-action.js").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
   | CampaignIssueScopeResultMessage
@@ -10210,6 +10491,7 @@ export type RunnerToControlPlane =
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | import("./workspace-removal.js").RemoveWorkspaceResultMessage
   | AdoptProviderProfileResultMessage
   | ImportProviderCredentialResultMessage
   | RevokeProviderProfileGrantResultMessage
@@ -10303,6 +10585,9 @@ export interface RegisterRejectedMessage {
 
 /** Everything the runner needs to launch an agent session locally. */
 export interface SessionLaunchSpec {
+  /** v276 (#4074): this Session is a delegated image evidence reviewer. The runner launches it with
+   * only its two review tools, and refuses the marker for a harness it cannot restrict that way. */
+  uiEvidenceReviewer?: { reviewId: string };
   /** Private prepared media marker. Generic start/restart must refuse it, even on mixed peers.
    * The dedicated dispatcher additionally needs the complete immutable grant and namespace. */
   mediaReviewPurpose?: { rootSessionId: string; childSessionId: string; admissionId: string;
@@ -10415,6 +10700,11 @@ export interface SteerSessionMessage {
   images?: PromptImageInput[];
   /** Stable queue identity only. Every promotion action still receives a fresh submissionId. */
   promotePromptId?: string;
+  /** #4022: the control plane's own prompt-outbox command whose running turn the child's
+   * controlling Orchestrator may steer with direct text. Server-derived, never taken from an API
+   * body; the runner admits it only when it names the exact durable command that started the active
+   * turn. A runner that predates this field ignores it and keeps refusing durable turns. */
+  controllingOrchestratorCommandId?: string;
 }
 
 /** Explicit user resolution for an uncertain delivery, or durable acknowledgement of rejection. */
@@ -10729,6 +11019,8 @@ export interface ResolvePermissionMessage {
   resolvedByParentSessionId?: string;
   /** v211: who settled it, recorded on its `permission_resolved`. */
   resolvedBy?: PermissionResolver;
+  /** v282: present only when the server's Full Control policy declined this request (#4063). */
+  automaticResponse?: import("./campaign-authority.js").FullControlAutomaticResponse;
 }
 
 /** Answer a structured agent question (question_request). Answers are keyed by AgentQuestion.id
@@ -10749,6 +11041,8 @@ export interface AnswerQuestionMessage {
   answerSummary?: QuestionAnswerSummaryEntry[];
   /** v205: the organization user who submitted the answer, recorded on its `question_resolved`. */
   answeredByUserId?: string;
+  /** v282: present only on a dismissal by the server's Full Control policy (#4063). */
+  automaticResponse?: import("./campaign-authority.js").FullControlAutomaticResponse;
 }
 
 /** Restore a worktree session's FILES to the checkpoint taken before `turn` (T3-style rewind).
@@ -11693,7 +11987,16 @@ export interface SearchWorkspaceReferencesRequestMessage {
   requestId: string;
   sessionId: string;
   query: string;
+  /** Go to File (#1263): files only, matched by `fuzzyPathScore`, best first. Absent: paths that
+   * contain the query, files and folders, in traversal order. A runner that predates the field
+   * ignores it and answers without echoing it. */
+  match?: WorkspaceReferenceSearchMatch;
 }
+
+export type WorkspaceReferenceSearchMatch = "fuzzy";
+
+/** Which cap cut a truncated search: the entries the runner visits, or the results it returns. */
+export type WorkspaceReferenceSearchLimit = "entries" | "results";
 
 export interface SearchWorkspaceReferencesResultMessage {
   type: "search_workspace_references_result";
@@ -11702,6 +12005,10 @@ export interface SearchWorkspaceReferencesResultMessage {
   error?: string;
   results?: WorkspaceReferenceCandidate[];
   truncated?: boolean;
+  /** Echoes the request's `match` when the runner applied it. */
+  match?: WorkspaceReferenceSearchMatch;
+  /** Set on a truncated fuzzy search. */
+  limit?: WorkspaceReferenceSearchLimit;
 }
 
 /** Mint an immutable metadata-only attachment after runner-side path and diff validation. */
@@ -12200,7 +12507,9 @@ export interface GitActionData {
 }
 
 /** Machine-readable failure classes handled across the runner/control-plane/UI boundary. */
-export type GitErrorCode = "GIT_STALE" | "GIT_APPLY_FAILED" | "GIT_NO_REPOSITORY";
+/** v275 `GIT_WORKTREE_UNLINKED`: the request named a worktree the session no longer links on the
+ * runner, so there is nothing of the session's left there to inspect. */
+export type GitErrorCode = "GIT_STALE" | "GIT_APPLY_FAILED" | "GIT_NO_REPOSITORY" | "GIT_WORKTREE_UNLINKED";
 
 export interface GitActionResultMessage {
   type: "git_result";
@@ -12222,6 +12531,8 @@ export type ControlPlaneToRunner =
   | import("./campaign-review-job.js").CampaignReviewJobCommand
   | { type: "cancel_campaign_review_job"; jobId: string; nonce: string }
   | import("./session-review-job.js").SessionReviewJobCommand
+  | import("./pull-request-watch.js").PullRequestWatchStartCommand
+  | import("./pull-request-watch.js").PullRequestWatchCancelCommand
   | import("./session-review-job.js").CancelSessionReviewJobCommand
   | RegisteredMessage
   | ConfigureHarnessInstallationChoicesMessage
@@ -12231,6 +12542,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | GitLabMergePreflightMessage
   | GithubMergePreflightMessage
+  | import("./forge-decision-action.js").ForgeDecisionActionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | CampaignIssueScopeMessage
@@ -12278,6 +12590,7 @@ export type ControlPlaneToRunner =
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
   | RemoveProviderAccountMessage
+  | import("./workspace-removal.js").RemoveWorkspaceMessage
   | AdoptProviderProfileMessage
   | ImportProviderCredentialMessage
   | RevokeProviderProfileGrantMessage

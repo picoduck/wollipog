@@ -18,6 +18,7 @@ import {
   type McpFetch,
   type ToolResult,
 } from "./session-management-mcp.js";
+import { UI_EVIDENCE_REVIEWER_PRESET } from "./orchestrator-preset.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
 import type { GlabRunner } from "./campaign-gitlab-status.js";
@@ -391,6 +392,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const body = input();
       return "error" in body ? body : { tool: "update_campaign_work_item", input: { ...body.value, workItemId: operand(2) } };
     }
+    if (verb === "deliver" && operand(2)) {
+      const body = input();
+      return "error" in body ? body : { tool: "record_campaign_work_item_delivery", input: { ...body.value, workItemId: operand(2) } };
+    }
     if (verb === "assign" && operand(2) && operand(3)) {
       return { tool: "assign_campaign_work_item", input: { workItemId: operand(2), childSessionId: operand(3) } };
     }
@@ -417,7 +422,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (flag(args, "--recommendations")) query.includeRecommendations = true;
       return { tool: "get_campaign_work_items", input: query };
     }
-    return { error: "use campaign plan, update-item, assign, adjudicate, or work-items; see wollipog help campaign" };
+    return { error: "use campaign plan, update-item, deliver, assign, adjudicate, or work-items; see wollipog help campaign" };
   }
   // Like artifact, this group reads only its fixed leading words. Keeping its JSON value options
   // out of the shared positional-option set ensures an unrelated command cannot become valid just
@@ -427,8 +432,43 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       ["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(arg));
     const verb = args[groupIndex + 1];
     const occurrenceId = args[groupIndex + 2];
-    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw") {
+    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw" && verb !== "hand-to-owner") {
       return { error: "decision commands act only on the injected session and do not accept --session" };
+    }
+    if (verb === "ask-owner") {
+      const input: Record<string, unknown> = {};
+      for (const [optionName, key] of [["--request-id", "requestId"], ["--resource-key", "resourceKey"], ["--question", "question"]] as const) {
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `decision ask-owner requires ${optionName}` };
+        input[key] = value;
+      }
+      const raw = option(args, "--options");
+      if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
+      try {
+        input.options = JSON.parse(raw) as unknown;
+      } catch {
+        return { error: "--options must be valid JSON" };
+      }
+      if (!Array.isArray(input.options)) return { error: "--options requires a JSON array of {optionId, label, description?}" };
+      for (const [optionName, key] of [["--recommended", "recommendedOptionId"], ["--material", "material"]] as const) {
+        if (!optionPresent(args, optionName)) continue;
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `${optionName} requires a value` };
+        input[key] = value;
+      }
+      return { tool: "request_owner_decision", input };
+    }
+    if (verb === "hand-to-owner") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision hand-to-owner requires an occurrence id" };
+      }
+      const reason = option(args, "--reason");
+      if (!reason || reason.startsWith("--") || !reason.trim()) return { error: "decision hand-to-owner requires --reason" };
+      const sessionId = option(args, "--session");
+      if (optionPresent(args, "--session") && (!sessionId || sessionId.startsWith("--"))) {
+        return { error: "--session requires a session id" };
+      }
+      return { tool: "hand_workflow_decision_to_owner", input: { occurrenceId, reason, ...(sessionId ? { sessionId } : {}) } };
     }
     if (verb === "request") {
       const requestId = option(args, "--request-id");
@@ -499,6 +539,16 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         tool: "reconcile_workflow_decision",
         input: { occurrenceId, resourceSnapshot: snapshot.value },
       };
+    }
+    if (verb === "execute") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision execute requires an occurrence id" };
+      }
+      const resourceDigest = option(args, "--resource-digest");
+      if (!resourceDigest || !/^[0-9a-f]{64}$/u.test(resourceDigest)) {
+        return { error: "decision execute requires --resource-digest <64 hex characters>" };
+      }
+      return { tool: "execute_workflow_decision", input: { occurrenceId, resourceDigest } };
     }
     if (verb === "withdraw") {
       if (!occurrenceId || occurrenceId.startsWith("--")) {
@@ -736,6 +786,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
               states: (option(args, "--for") ?? "input_required,completed,failed,stopped").split(",").filter(Boolean),
               timeoutMs: numeric(option(args, "--timeout")),
               intervalMs: numeric(option(args, "--interval")),
+              ...(flag(args, "--full") ? { fullMetadata: true } : {}),
             },
           }
         : { error: "session wait requires an id" };
@@ -956,6 +1007,10 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
     : parsed.tool === "withdraw_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
+    : parsed.tool === "execute_workflow_decision"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
@@ -964,6 +1019,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
     : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
+    : parsed.tool === "record_campaign_work_item_delivery"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignHandoffs
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
       "adjudicate_campaign_recommendation", "get_campaign_work_items"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger
@@ -984,6 +1041,7 @@ export async function runWollipogCli(
     token,
     actorHeader: sessionId ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : null,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    uiEvidenceReviewer: env.WOLLIPOG_PERMISSION_PRESET === UI_EVIDENCE_REVIEWER_PRESET,
     controlPlaneProtocolVersion: compatibility.protocolVersion,
   });
   const data = payload(result);
@@ -1051,6 +1109,7 @@ export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> 
     token,
     actorHeader: WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    uiEvidenceReviewer: env.WOLLIPOG_PERMISSION_PRESET === UI_EVIDENCE_REVIEWER_PRESET,
   };
   serveSessionManagementMcp(process.stdin, process.stdout, deps);
   process.stdin.on("end", () => process.exit(0));

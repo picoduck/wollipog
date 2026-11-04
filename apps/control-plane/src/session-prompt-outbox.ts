@@ -3,6 +3,7 @@ import { randomUUID } from "node:crypto";
 import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
   CODEX_EXEC_RETIRED_REASON,
+  campaignStatusTerminal,
   isDurableSessionCommandErrorCode,
   isRetiredCodexExec,
   runnerSupportsProtocol,
@@ -138,6 +139,29 @@ export class SessionPromptOutbox {
     });
   }
 
+  /** Stage the command that carries a parked session's watch wake (#4071), bound to each watch it
+   * names in the same transaction. Throws, staging nothing, unless each is still held. */
+  stagePullRequestWatchWake(
+    watchIds: readonly string[],
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stagePullRequestWatchWake({
+      watchIds,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
+    });
+  }
+
   stageCampaignContinuation(input: {
     continuationId: string;
     campaignSessionId: string;
@@ -240,7 +264,7 @@ export class SessionPromptOutbox {
             this.db.campaignContinuationAdmission(row.sessionId).state !== "available") ||
             (projection.status === "waiting_human" &&
             !this.db.campaignMayContinueWhileHumanWaiting(command.campaignContinuation.campaignSessionId)) ||
-            projection.status === "verified_complete") {
+            campaignStatusTerminal(projection.status)) {
           this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
           continue;
         }

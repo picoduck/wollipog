@@ -583,7 +583,8 @@ Rules
 
 - Order in any horizontal action group: **[destructive tertiary] … spacer … [ghost] [secondary] [⋯]
   [primary]**. Primary is last (rightmost on desktop). The overflow ⋯ sits immediately before the
-  primary because it holds more secondaries.
+  primary because it holds more secondaries. The phone app bar is the exception: its trailing icons
+  are Search, the primary `+`, then ⋯ (§15.1).
 - Gap 8px between buttons. Groups never mix heights: every control in one row uses the same
   control-height token.
 - Segmented and split buttons count as one control.
@@ -601,7 +602,7 @@ Rules
 
 | Region | Holds | Visible limit before ⋯ |
 | --- | --- | --- |
-| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a 44px `+` icon button (label in `aria-label`), everything else in ⋯. |
+| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a quiet `+` icon button before ⋯ (`.icon-btn`; the label is its accessible name and tooltip), everything else in ⋯. |
 | Detail bar (§4.3) | Actions on the open entity. | Desktop: 1 primary + 1 secondary + ⋯. Destructive actions live **only** in ⋯, last, after a separator, in `--danger-text`. |
 | List row | Open (row click) plus one inline action and ⋯. | Inline actions show on hover or focus on fine pointers, always on coarse. |
 | Dialog footer (§7.3) | Cancel and the dialog's one primary, optional destructive tertiary on the left. | 3 on desktop; 2 on phone. |
@@ -744,7 +745,10 @@ Replaces both the 54px `.topbar` and every in-page `h2` (`.view-heading`, `.skil
 | Height | 64px title only, 88px with the description, 124px with description and tabs (20 + 28 + 4 + 20 + 12 + 40). This replaces a 54px bar plus 130–180px of in-page heading. |
 
 Phones: the page header becomes the **app bar** (§15.1): 48px, title `--type-title` (16/600), a
-search icon, the primary as a 44px `+` icon button, and ⋯.
+search icon, the primary as a quiet `+` icon button, and ⋯, in that order to the eye and to Tab.
+The `+` is the `.icon-btn` recipe Search uses (§3.1): transparent at rest, its icon `--text-dim`,
+a 44px target on touch, named and titled by the primary's label (#2229). From 761px up the
+labelled primary stays last, after ⋯.
 
 A secondary may be a **menu button** (`PageHeader`'s `items`): its label and a 14px caret open the
 shared menu, one item per choice with a one-line description (Agent Skills' Import). A secondary
@@ -754,7 +758,7 @@ appear there individually and in order, never as a nested menu (#1947).
 
 The primary may be a menu button too, when the one thing a destination creates has several ways in
 (Connections' **Add Machine**, #2984): its `+`, its label and a 14px caret open the same two-line
-menu. It never folds, so on phones the app bar's 44px `+`, still named by the label, opens the items
+menu. It never folds, so on phones the app bar's quiet `+`, still named by the label, opens the items
 as a menu sheet with the grabber (§9.2). A destination with tabs supplies its header actions per
 tab (`PageHeaderActions`), so each tab brings its own primary to the one header.
 
@@ -995,8 +999,10 @@ A row of tools above the content they act on: search, filters, view switches and
 - Usage and Cost's API Usage tab (#3010) has one toolbar: Metric (Cost | Tokens), a Range menu
   button reading "Last 30 Days", Group By (Hour | Day | Week, Hour omitted for a range longer than
   hourly retention), then About These Numbers at the trailing end, the `InfoPopover` with a visible
-  label (the icon alone on phones). On phones Range and Group By are one button, "30 Days, Daily",
-  that opens a sheet with a Range and a Group By section.
+  label. The toolbar follows the main column (§2.10), not the viewport (#4029): in a column no wider
+  than a phone (760px), on a phone or beside a docked panel, About is the icon alone and Range and
+  Group By are one button, "30 Days, Daily", that opens a Range and a Group By section (a sheet on
+  phones).
 
 ### 4.8 Breadcrumbs
 
@@ -1035,8 +1041,9 @@ Requests, Decision History, and Terminal in Right Panel placement, #2868) opens 
   `SESSION_TOOLS`, top-aligned under the header and scrolling on its own: the Code, Work and
   Decisions groups under `.group-label` headers (§5.2), each tool a `.row.row-2` with a 32px icon
   tile (`--bg-elev-2`, `--radius-sm`), its name, and a live sentence-case fact on line two (Review's
-  uncommitted changes and required findings, Agents' one status badge, Requests' count badge of what
-  waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
+  uncommitted changes and required findings, or, with nothing uncommitted in a worktree whose branch
+  is ahead, the "3 commits ahead of main" Review opens on Branch to show, in its summary's words;
+  Agents' one status badge, Requests' count badge of what waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
   stays focusable (`aria-disabled`), its reason the second line in `--text-faint` and its
   description, its tile hollow (an inset 1px `--border`), never an opacity. On an older runner one
   neutral compact Notice above the list names the machine to update, and Files and Terminal say
@@ -1359,7 +1366,10 @@ Rules
   Working**, or **Child Work Pending** without a pulse when no descendant is progressing. Human
   questions and approvals keep priority. Filtered children still contribute to status; an expand
   control appears only when child rows are available to show.
-  Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
+  Children indent under a 2px `--border-strong` spine with a tick into each row. A child's review or
+  child indents one more step under its own spine (#4077); anything deeper indents no further. A
+  spine ends at its last sibling, a child with descendants collapses like a top-level parent, and the
+  family chip names direct reviews as reviews ("2 Children · 1 Review"). A stalled parent or
   child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
   the leading edge is the selection bar.
 
@@ -1427,7 +1437,10 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
 - `.facts.strip` is the summary strip above a table or chart (Usage totals, later Archive): the
   pairs side by side between two hairlines, separated by vertical hairlines, the value in
   `--type-title` with tabular figures. Under 760px the strip becomes rows, label left and value
-  right. It is a modifier, not a second class.
+  right. It is a modifier, not a second class. In a compact main column Usage and Cost's strip
+  (`.usage-facts`) keeps five facts on one row and wraps six to three columns by two rows, so it
+  never squeezes its labels or leaves an empty cell; a main column under 640px (a docked panel
+  beside it) gets the phone's rows.
 - A region may set the list's spacing or size but not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
   `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Ten more `<dl>` recipes
@@ -2092,7 +2105,7 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". Built by `Switch` (`.ui-switch-control`, `SettingsRows.tsx`): `SwitchRow` renders it with the row's title and description inside, so the whole row is the target, named by its title and described by its description; standalone, beside other controls in a row, it is the bare track, named by its `label` or `aria-labelledby`, with the 44px coarse-pointer hit area. |
 | ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. Built by `ChoiceRows` (`.choice-rows`; `multiple` for checkboxes) over `ChoiceRow` (`.choice-row`, a `<label>` around a native radio or checkbox): the marker sits on the title's first line, the description is one ellipsized line on desktop and at most two on phones (full text in the tooltip and the accessible description), and rows are `--row-h` tall at least (40px, 48px coarse). A refused choice passes `error`: a §8.5 field error (`.field-error`) in the second line's place, the input `aria-invalid` and described by it. A row with one control of its own (Choose Another Account's Sign In) passes `action`: the row becomes a `div` holding its `<label>` (`.choice-row-main`) and the control (`.choice-row-action`) beside it, because a label may hold no second control, so pressing it never checks the row. An unavailable row keeps its size, reads faint, shows its reason in place of the description, and is `aria-disabled` rather than `disabled`, so arrows still reach it and announce the reason while selection is refused. `ChoiceList` (`.choice-list`) is the compact form: radio rows with a trailing value and no description, for pickers inside sheets. A list beside a detail (Import from Git's skills beside their files) passes `show`: the marker becomes a target of its own, the rest of the row is a button that shows the row without changing its marker, the fill follows the row shown (`aria-current`), and the meta moves onto the title's line so the description has the row's width. |
 | ChoiceTiles | Equal tiles for a few short presets whose second line is the reason to pick one: Snooze's presets, each with the time it resolves to (#2181). A `radiogroup` of `radio` buttons, three across and two on a phone, each at least `--row-h` (48px on a phone); the label (`--type-body-strong`) is the tile's name and its detail (`--type-small`, `--text-dim`) its description. Selected is the choice row's `--surface-selected` with a trailing 16px accent check; arrows move and select. An unavailable tile stays reachable, reads faint and says why in its detail. `onChange` reports whether a pointer chose the tile, so a tile that reveals a field (Custom…) moves focus there only for a pointer. In a form, `onEnter` makes Enter on a tile answer as on a native radio, and `onType` takes a typed character to the free-text choice: Snooze submits a preset on Enter, and typing on any tile chooses Custom… with the character in its field. Built by `ChoiceTiles` (`.choice-tiles`, `.choice-tile`). |
-| Search field | An `.input-affix` text field with a 14px `Search` prefix, always open and one width: focusing or typing never resizes it or moves what sits beside it. Its placeholder names what it searches and its tooltip what it matches. Sessions' (#2200, `SessionsSearchField`) ends the tab row's tools: 240px, 200px in the compact tier, and on a phone the app bar's Search mode, the bar's whole width beside Cancel (#2211); placeholder "Search sessions", tooltip "Searches titles, agents, projects and the latest message.", a `/` keycap suffix on fine pointers (§11.5, §16.2). Escape clears it; Enter moves focus to the first result. While it holds a query the tab counts follow the results (§10.1), the preview follows the first result when the selected session leaves them, and a query with none shows No Matches (§12.2). Files' Go to File (#2852, `FilesPanel.tsx`) is the Files tool's toolbar (§4.9): placeholder "Go to file", the Ctrl/⌘+P keycap suffix on fine pointers and a Clear button once it has text. It is a `combobox` over a `listbox` of the runner's bounded search, files only: dense rows (§5.2) with the name, its folder in `--type-small` `--text-dim` and the matched text underlined, git-changed and recently opened files first, then name matches before path matches, under a count line ("4 matches in wollipog", or "Showing the first matches only. Type more to narrow them." when the runner truncated). Up and Down move the active row, Enter opens it, Escape clears the field and then follows the panel's ladder. Ctrl/⌘+P opens the panel on Files when needed, never closes it, and focuses the field. An open file adds one more `.toolbar` row under it that never wraps (#2853): Go to Symbol, an `.input-affix` with a 14px `Locate` prefix that takes the row's remaining width (source only, never on rendered Markdown, whose Preview and Source `.seg.sm` leads the row; in a panel narrower than its 400px default those options show only their `Eye` and `Code` icons, keeping their names, and the placeholder shortens to "Symbol", so the field still shows it whole, #2913), then Attach to Prompt, Copy Link and the ⋯ File Actions menu as `.icon-btn.sm`. Enter submits; once a target is set, Clear Target is an `.icon-btn.sm` inside the field, so nothing moves. A symbol the file lacks is the field's `FieldError` under the row ("No symbol named “calculateTax” in this file."). File Actions lists Open in each editor found (or Open in Editor…, unavailable with its reason, "No editor found on Studio Mac."), Copy Path and, for a changed file, Show Changes in Review. Under the path a §11.3 meta line gives the language, line count, size and git state, and source renders as lines through the diff's highlighter in `.codeview`, which scrolls sideways only, with sticky line numbers. |
+| Search field | An `.input-affix` text field with a 14px `Search` prefix, always open and one width: focusing or typing never resizes it or moves what sits beside it. Its placeholder names what it searches and its tooltip what it matches. Sessions' (#2200, `SessionsSearchField`) ends the tab row's tools: 240px, 200px in the compact tier, and on a phone the app bar's Search mode, the bar's whole width beside Cancel (#2211); placeholder "Search sessions", tooltip "Searches titles, agents, projects and the latest message.", a `/` keycap suffix on fine pointers (§11.5, §16.2). Escape clears it; Enter moves focus to the first result. While it holds a query the tab counts follow the results (§10.1), the preview follows the first result when the selected session leaves them, and a query with none shows No Matches (§12.2). Files' Go to File (#2852, `FilesPanel.tsx`) is the Files tool's toolbar (§4.9): placeholder "Go to file", the Ctrl/⌘+P keycap suffix on fine pointers and a Clear button once it has text. It is a `combobox` over a `listbox` of the runner's bounded search, files only, matched fuzzily (#1263: the query's letters in order, so "sdtsx" finds `SessionDetail.tsx`): dense rows (§5.2) with the name, its folder in `--type-small` `--text-dim` and each matched run underlined, git-changed and recently opened files first when their match is clean (each matched run starts a word or is three or more letters of the name, so a scattered coincidence never tops a stronger match), then the best match (word starts, runs and the file name count most), under a count line ("4 matches in wollipog"; when the runner truncated, "Showing the best matches only. Type more to narrow them.", or "The workspace is too large to search in full, so some files may be missing." when its traversal cap cut the walk, or an older runner's "Showing the first matches only. Type more to narrow them."). Up and Down move the active row, Enter opens it, Escape clears the field and then follows the panel's ladder. Ctrl/⌘+P opens the panel on Files when needed, never closes it, and focuses the field. An open file adds one more `.toolbar` row under it that never wraps (#2853): Go to Symbol, an `.input-affix` with a 14px `Locate` prefix that takes the row's remaining width (source only, never on rendered Markdown, whose Preview and Source `.seg.sm` leads the row; in a panel narrower than its 400px default those options show only their `Eye` and `Code` icons, keeping their names, and the placeholder shortens to "Symbol", so the field still shows it whole, #2913), then Attach to Prompt, Copy Link and the ⋯ File Actions menu as `.icon-btn.sm`. Enter submits; once a target is set, Clear Target is an `.icon-btn.sm` inside the field, so nothing moves. A symbol the file lacks is the field's `FieldError` under the row ("No symbol named “calculateTax” in this file."). File Actions lists Open in each editor found (or Open in Editor…, unavailable with its reason, "No editor found on Studio Mac."), Copy Path and, for a changed file, Show Changes in Review. Under the path a §11.3 meta line gives the language, line count, size and git state, and source renders as lines through the diff's highlighter in `.codeview`, which scrolls sideways only, with sticky line numbers. |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). The field's end padding is the 12px inset, the unit as drawn and a 4px gap: `affixSuffixRef` on the unit measures it into `--affix-suffix-w` (2em until measured, #3185), because the unit is set in the row's type and the system face, not the field's. A number input with a unit has no spin buttons, whose room would cost a digit; the arrow keys still step it. |
 
@@ -2441,6 +2454,7 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
 | Provider account | Signed In: success (inline) · Sign-In Required: warning · Signing In: info (pulse) · Signed Out, Status Unknown: neutral · Not Added: neutral (hollow dot; a new account's sign-in ended because the account is already on the machine, #2996) |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Usage daily budget (`usageBudget`, Usage and Cost's By Person, #3013) | Budget Reached: warning, once a person's spend today (settled plus the estimate for their running turns, as the daily-budget gate counts it) is at or over the per-person daily budget. Below it there is no badge; the Today cell's meter shows the level. |
 | Agent on a machine (`agent`, `agentStatus()`, #2990: the machine's agent rows, Agent Details and Set Up This Machine) | Ready: success (inline) · Not Installed: neutral (hollow dot) · Sign-In Required, Update Required, Approval Required: warning · Unavailable: danger · Ready When Last Seen: neutral (hollow dot; a ready agent on a machine that is not online). One per agent, the most limiting first; the machine's Update Required, Approval Required and Sign-In Required roll up from it. |
 | Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
@@ -2697,7 +2711,10 @@ pointers only; its tooltip names the chord.
 - `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention. The
   context window is warning from 75% and danger from 90%, and its ring takes the same tone classes
   on `.context-control`; below 75% the ring's fill is the neutral `--text-dim` on a `--bg-elev-3`
-  track.
+  track. A subscription window fills by what is left (`usageLeftPercent()`, "N% left"): warning
+  (Approaching Limit) under 25% left or when the provider warns, danger (Exhausted) when nothing is
+  left. Switch Account and Usage's Subscriptions tab read it through one `usageWindowAttention()`,
+  so a window never reads differently in the two (#3014).
 - The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
   and a Title Case `aria-label`. A meter that compares a level across rows, such as All Machines'
   Capacity (§6.1, #2986), is instead `role="img"` named by its level in sentence case ("29 of 40
@@ -2772,10 +2789,14 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
   (`PanelPageTitle`) take the switcher's place, and that Back is the one back control at every width,
   a 400px panel and a 390px phone alike. The Artifacts and Web Preview tabs give way to the page, and
   the list waits mounted and hidden under it. Escape pops the page as Back does; focus returns to the
-  artifact's row (`data-panel-page-key`) with the list scrolled where it was. Under the header, the
-  panel's toolbar slot holds `.art-bar`, a 48px `.toolbar` (§4.4) of **Enlarge** (`Maximize2`, for an
-  image or HTML preview once shown) and **Download** at its trailing edge, with no back and no title
-  of its own, so it stays put while the meta line and the body scroll. Being a page, an open artifact
+  artifact's row (`data-panel-page-key`) with the list scrolled where it was. The page's actions
+  render in the header's action slot through `PanelHeaderActions` (§4.9, #3036), after the title and
+  before Expand Panel and Close Panel: **Enlarge** (`Maximize2`, for an image or HTML preview once
+  shown), then **Download** as an `.icon-btn` named "Download" that opens the menu below, then the
+  tool's own **About Browser**, which keeps the slot's trailing end as it does over the list. The
+  title truncates first; on a phone the actions follow it in the sheet's one bar, each a 44px target,
+  and Download's menu opens as a sheet. The page has no bar of its own: the meta line follows the
+  header directly and scrolls with the body. Being a page, an open artifact
   clears on a tool switch or when the panel closes, and the Browser reopens on its list; the tab, the
   address and the open page stay in panel scratch (#1202). Run detail opens the same preview in a
   `Modal` of size `lg` (a sheet on phones, §7.5), whose title is the artifact's name, with Enlarge
@@ -2783,7 +2804,8 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
 - **Meta line.** `.art-meta` (§11.3): the kind (`labelFor`), the size (`formatBytes`), who saved it
   by name ("Claude", "You", a member's name or Wollipog; never a session or user id) and, once the
   bytes match their checksum, `ShieldCheck` **Verified**. The MIME type and the hash are not shown.
-- **Download.** A `.btn` menu (§9.1): **Download Original File**, whose description is the one
+- **Download.** A menu (§9.1), opened from the Browser header's icon button and elsewhere from a `.btn`
+  labelled Download (Run detail's footer, a transcript row): **Download Original File**, whose description is the one
   warning ("Not redacted. It may contain secrets or personal data."), and **Copy Checksum**, which
   copies the full SHA-256. No paragraph under the meta line repeats the warning.
 - **Bodies.** Markdown with the shared renderer, without a leading H1 that repeats the title; text
@@ -2892,12 +2914,18 @@ the same notice with Reload and Copy Error Details; a page-level error is center
   (`viewPageWidth`), so the header's hairline does not move: `.page.wide` for Usage and Cost,
   `.page.full` for Sessions, Projects, Agent Skills, Connections › Machines and Settings, and `.page`
   elsewhere. Archived Sessions keeps its `.page` list container, matching its normal 960px rows.
+  On a destination route the redrawn header keeps the destination's one-line description from the
+  registry (`viewDescription`), so it is as tall as the working page's and nothing moves on reload;
+  like every description it is hidden on phones (§4.2). Entity pages, the Automations editor,
+  Settings and the Session keep their own headers.
 - **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
   Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
-- **A turned-off experiment's route** is not an error: it keeps its page header, and below it an
-  empty-style `State` with a flask icon, "{Name} Are Turned Off", a sentence on why it is hidden and
-  what turning it on adds, **Turn On** (primary, the same switch as Settings › Experimental; the
-  feature mounts in place) and Open Experimental Settings.
+- **A turned-off experiment's route** is not an error: it keeps its page header, with the
+  destination's description on a destination route as for a crashed view, so the feature mounts
+  without the header moving. Below it is an empty-style `State` with a flask icon, "{Name} Are Turned
+  Off", a sentence on why it is hidden and what turning it on adds, **Turn On {Name}** ("Turn On
+  Multi-Agent Runs", "Turn On Pods"; primary, the same switch as Settings › Experimental; the feature
+  mounts in place) and Open Experimental Settings.
 - Below 760px the actions of all three stack at full width and are 44px tall.
 
 ### 12.5 Offline
@@ -3514,7 +3542,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | --- | --- |
 | Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
 | More | A real bottom sheet with a scrim and a 48px "More" title row over a 1px `--border` hairline; rows 48px with icons; the title and the rows' content start at the 16px gutter, as in every menu sheet; Settings last after a full-width separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
-| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
+| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯), in that order to the eye and to Tab. The `+` is an `.icon-btn` like Search, never a filled primary: transparent at rest, `--text-dim`, named and titled by the primary's label. Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
 | Master-detail | Two routes (§6.2). |
 | Dialogs, menus, popovers | Bottom sheets (§7.5, §9.2), each with the 36px grabber. |
@@ -3522,7 +3550,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Tables | Rows (§14). |
 | Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
 | Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
-| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. In Board mode, Filters follows Search (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then the quiet `+` New Session, the app bar's `.icon-btn` named and titled "New Session"; and ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name. In Board mode, Filters follows Search, before the `+` (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
 | Board | One column at a time (#2216). Under the app bar, the column tabs (§10.1) in the order Needs Input, Running, Review, Done, Queued, each with its plain count, Needs Input's a warning count badge while above zero; each tab is named "Running, 13" and is at least 44px wide. The row scrolls with the edge fade when the tabs do not fit. Below it, the chosen column's cards run the width inside the gutter and scroll on their own; an empty column says "No sessions are in Done." The Board opens on the first column with a card in that order and keeps its column, the opening one or the one chosen, while it stays open: a live update never moves it. Each tab is also a drop target for a card dragged with a mouse. The app bar's **Filters** (`FilterIcon`, `.icon-btn`) follows Search: named "Filters" or "Filters, 1 Active", `aria-pressed` and showing the plain number applied while any filter is set. It opens the Filters sheet: the result count ("Showing 10 of 29", which also describes the sheet), the Machine group and the Agent group of §10.1's rows (44px on touch), then Clear Filters after a separator while any is set. A choice applies at once and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes it. While a filter is set, a strip under the Snoozed strip says what is filtered and how many remain ("Machine: Studio Mac. Agent: Codex. Showing 3 of 29.", a long name ending in an ellipsis, the count never) with **Clear Filters**, which hands focus to Filters. |
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
 | Request dock | Mobile session questions start as a 44px strip. Expand Request opens full reading mode directly; Collapse Question returns to the strip (#3308). Other compact cards cap at 50% of the chat column (60% in a landscape column under 480px, #2828), 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). An explicitly expanded question or workflow decision takes the whole column instead, keyboard or not, with Collapse Question or Collapse Decision in its head line (#2786, #2874). A press on a docked card's button, row or label while a text field has focus (the card's own, or the composer) keeps that field focused until the click lands (`holdFieldFocus`, #2205, #2675), so the cap never changes between press and click and the tap lands where it was aimed. |

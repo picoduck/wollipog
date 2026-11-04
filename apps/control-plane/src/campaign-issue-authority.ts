@@ -1,6 +1,8 @@
 import { createHash } from "node:crypto";
 import { campaignPublicationSafe, campaignPublicationTitle, type CampaignPublicationAdmissionFailure, type SessionView, type GithubIssueClosureSnapshot,
-  type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation } from "@wollipog/protocol";
+  type WorkflowDecisionResourceSnapshot, type CampaignWorkItemDetail, type CampaignPullRequestRef, type CampaignRecommendation,
+  ISSUE_CLOSURE_DELIVERY_GAPS_MAX, issueClosureDeliveryGap, type IssueClosureDeliveryGap, type IssueClosureDeliveryGapCode,
+  type IssueClosureEpicMembers } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { campaignBoundaryCurrent } from "./campaign-authority.js";
 import { forgeRefKey, type ForgeFactEntry } from "./campaign-forge-observations.js";
@@ -43,10 +45,19 @@ export function issueWork(db: ControlPlaneDb, root: SessionView, issue: number):
         !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number))) return [];
     items.push(...cited as CampaignWorkItemDetail[]);
   }
+  const tracked = trackedIssueWork(db, root, issue);
+  if (!tracked) return [];
+  for (const detail of tracked) if (!items.some((existing) => existing.id === detail.id)) items.push(detail);
+  return items;
+}
+
+/** The ledger's own work items for this issue, without its fixed-by plan; null when the ledger cannot be read. */
+function trackedIssueWork(db: ControlPlaneDb, root: SessionView, issue: number): CampaignWorkItemDetail[] | null {
+  const items: CampaignWorkItemDetail[] = [];
   let cursor: string | undefined;
   do {
     const page = db.campaignWorkLedger.page(root.id, { state: "all", limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
-    if (!page.ok) return [];
+    if (!page.ok) return null;
     for (const item of page.data.items) if (item.issue?.number === issue &&
         item.issue.repository.toLowerCase() === root.orchestratorPolicy?.issueScope?.repository.toLowerCase()) {
       const detail = db.campaignWorkLedger.detail(root.id, item.id, Date.now());
@@ -102,7 +113,10 @@ export type CampaignScopeAdmissionFailure =
 const HUMAN_SCOPE_ROUTE = "ask the campaign owner to propose this change from Campaign Status";
 
 export const CAMPAIGN_SCOPE_ADMISSION_REFUSALS: Readonly<Record<CampaignScopeAdmissionFailure, { status: number; message: string }>> = {
-  capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed the human-established issue limit" },
+  // Names the limit and the owner's route to raise it (#4061); no agent can raise it.
+  capacity_exhausted: { status: 409, message: "Scope and publication reservations exceed this campaign's Maximum Issues, the issue limit " +
+    "its Full Control authorization set. Only the person who authorized Full Control can raise it: in Campaign Status, raise the " +
+    "Follow-Up Limit, which raises Maximum Issues by as much, or choose No Limit. Ask that person; an Orchestrator can't raise it." },
   lineage_missing: { status: 403, message: "Scope additions require authorized epic or exact related-publication lineage; incidental references cannot grant scope. " +
     `Name a human-authorized epic or the consumed publication of an accepted follow-up, or ${HUMAN_SCOPE_ROUTE}.` },
   epic_not_authorized: { status: 403, message: `The named epic is not one this campaign's Full Control boundary authorizes; ${HUMAN_SCOPE_ROUTE}.` },
@@ -235,12 +249,14 @@ export function closureDeliveryPullRequests(db: ControlPlaneDb, root: SessionVie
 /** Delivery is an independently verified report plus observed forge merges. Stage prose alone,
  * an enqueued PR, a stale observation, or a ledger insertion is never delivery evidence. A
  * candidate freshly observed closed without merging is excluded rather than disqualifying, but
- * every item still needs one fresh, runner-verified merge, at an approved head when gated. */
+ * every item still needs one fresh, runner-verified merge, at an approved head when gated. A
+ * snapshot carrying the runner's member read is proven from the epic's members instead (#4060). */
 export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot) {
   const boundary = issueBoundary(root);
   if (!boundary?.issueAuthority?.closureReasons.includes(snapshot.reason) || !boundary.operations.includes("issue_closure") ||
       snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase() || snapshot.openPullRequests.length ||
       !root.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue)) return null;
+  if (snapshot.epicMembers) return epicMemberEvidence(db, root, snapshot);
   const items = issueWork(db, root, snapshot.issue);
   // Fixed-by evidence is completion-only; it cannot cancel another issue's units.
   if (snapshot.reason !== "completed" && db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue)) return null;
@@ -252,45 +268,178 @@ export function closureEvidence(db: ControlPlaneDb, root: SessionView, snapshot:
         !item.commitmentRecord.reason || !item.commitmentRecord.changedBySessionId)) return null;
     return { disposition: disposition || null, items: items.map((item) => ({ id: item.id, commitmentRecord: item.commitmentRecord })) };
   }
-  if (!items.length || items.some((item) => item.primaryState !== "delivered" || item.currentAttempt ||
-      !item.verifications.some((v) => v.outcome === "delivered" && v.report.digest))) return null;
   const excluded = new Set<string>();
-  for (const item of items) {
-    let merged = 0;
-    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
-      if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase() || fact.availability !== "fresh") return null;
-      if (fact.value.state === "closed") { excluded.add(forgeRefKey(ref)); continue; }
-      const value = fact.value;
-      if (value.state !== "merged" || !value.mergeCommitSha || approvedHeads.length && !approvedHeads.includes(value.headSha) ||
-          !snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === value.headSha &&
-            delivered.mergeCommitSha === value.mergeCommitSha)) return null;
-      merged++;
-    }
-    if (!merged) return null;
-  }
+  if (!items.length || items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
   return { items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
     ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
 }
 
-/** Stable server-derived gap information; never infer authority from explanation/evidence prose. */
-export function closureDeliveryFailure(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot): string {
-  const relationship = db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
-  const ids = relationship ? [...new Set([...relationship, ...issueWork(db, root, snapshot.issue).map((item) => item.id)])] : null;
-  if (ids) for (const id of ids) {
-    const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
-    if (!item) return `missing_work_item:${id}`;
-    if (!item.issue || item.issue.repository.toLowerCase() !== snapshot.repository.toLowerCase() ||
-        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) return `outside_scope:${id}`;
-    if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return `unverified_work_item:${id}`;
-    if (item.primaryState !== "delivered" || item.currentAttempt) return `undelivered_work_item:${id}`;
-    const candidates = deliveryCandidates(db, root, item, snapshot.issue);
-    if (!candidates.some(({ fact }) => fact.availability === "fresh" && fact.value.state === "merged" && fact.value.mergeCommitSha)) return `unmerged_work_item:${id}`;
-    if (candidates.some(({ fact }) => fact.availability !== "fresh")) return `stale_delivery:${id}`;
-    for (const { fact, approvedHeads } of candidates) {
-      if (fact.availability !== "fresh" || fact.value.state === "closed") continue;
-      if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) return `unmerged_work_item:${id}`;
-      if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) return `delivery_not_verified_at_exact_head:${id}`;
-    }
+/** One item's delivery proof: a delivered verification with an exact report digest, no open
+ * attempt, and at least one fresh merge the runner verified, at an approved head when gated. */
+function itemDelivered(db: ControlPlaneDb, root: SessionView, item: CampaignWorkItemDetail, snapshot: GithubIssueClosureSnapshot,
+  excluded: Set<string>): boolean {
+  if (item.primaryState !== "delivered" || item.currentAttempt || !item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) return false;
+  let merged = 0;
+  for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
+    if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase() || fact.availability !== "fresh") return false;
+    if (fact.value.state === "closed") { excluded.add(forgeRefKey(ref)); continue; }
+    const value = fact.value;
+    if (value.state !== "merged" || !value.mergeCommitSha || approvedHeads.length && !approvedHeads.includes(value.headSha) ||
+        !snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === value.headSha &&
+          delivered.mergeCommitSha === value.mergeCommitSha)) return false;
+    merged++;
   }
-  return ids ? "delivery_not_verified_at_exact_head" : "delivery_or_disposition_unverified";
+  return merged > 0;
+}
+
+/** A work item that was never dispatched: no attempt, past or open. Under the epic source (#4060)
+ * such an item of the epic itself, a placeholder, neither proves nor blocks the epic's closure. */
+export const epicPlaceholderItem = (item: Pick<CampaignWorkItemDetail, "attemptCount" | "currentAttempt">) =>
+  item.attemptCount === 0 && !item.currentAttempt;
+
+/** Whether the epic source may prove this closure (#4060): a completed closure of an issue with no
+ * fixed-by plan. A recorded plan stays the issue's proof, and a not-planned closure keeps its own. */
+export function epicSourceApplies(db: ControlPlaneDb, root: SessionView, snapshot: Pick<GithubIssueClosureSnapshot, "reason" | "repository" | "issue">): boolean {
+  return snapshot.reason === "completed" && !db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
+}
+
+/** The epic source (#4060): an in-scope epic proven from its members, which the runner read on the
+ * forge at request time from the sources scope admission accepts and bound into the forge digest;
+ * agent text never names one. Every member must be in the campaign's scope and closed as completed.
+ * An open member is not proven here even when its own closure would be, so an epic never closes
+ * ahead of a member: closing the member first is the route. The epic's own work items still count,
+ * each delivered under the ordinary proof, except a placeholder that was never dispatched. An
+ * issue without members keeps the ordinary proof. */
+function epicMemberEvidence(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot) {
+  const read = snapshot.epicMembers;
+  if (!read?.readable || !read.members.length || !epicSourceApplies(db, root, snapshot) ||
+      read.members.some((member) => member.state !== "completed" || !root.orchestratorPolicy?.issueNumbers?.includes(member.number))) return null;
+  const own = trackedIssueWork(db, root, snapshot.issue);
+  if (!own) return null;
+  const excluded = new Set<string>();
+  const placeholders = own.filter(epicPlaceholderItem).map((item) => item.id);
+  const items = own.filter((item) => !placeholders.includes(item.id));
+  if (items.some((item) => !itemDelivered(db, root, item, snapshot, excluded))) return null;
+  return { source: "epic_members" as const, members: read.members.map((member) => ({ ...member })), placeholders,
+    items: items.map((item) => ({ id: item.id, verifications: item.verifications })), delivery: snapshot.delivery,
+    ...(excluded.size ? { excluded: [...excluded].sort() } : {}) };
+}
+
+/** Every gap between a closure and delegated proof (#4058), or null when the boundary does not
+ * delegate this closure at all, which stays `outside_boundary`. It reads the same ledger, gates and
+ * forge facts as `closureEvidence`, but only to name what failed: `closureEvidence` never consults
+ * it, so a gap list can neither prove a closure nor loosen any condition of the proof. A request
+ * that fails the proof always gets at least one gap (`delivery_unverified` when no other applies).
+ * A snapshot proven from an epic's members gets that source's gaps (#4060); `membersUnreadable`
+ * says the runner was asked for the members of a snapshot without them and could not read them. */
+export function closureDeliveryGaps(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot,
+  checked: { proven: boolean; commentSafe: boolean; membersUnreadable?: boolean }): IssueClosureDeliveryGap[] | null {
+  const boundary = issueBoundary(root);
+  if (!boundary?.issueAuthority?.closureReasons.includes(snapshot.reason) || !boundary.operations.includes("issue_closure") ||
+      snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase() ||
+      !root.orchestratorPolicy?.issueNumbers?.includes(snapshot.issue)) return null;
+  const gaps: IssueClosureDeliveryGap[] = [];
+  const add: AddGap = (code, details = {}) => {
+    if (gaps.length < ISSUE_CLOSURE_DELIVERY_GAPS_MAX) gaps.push(issueClosureDeliveryGap(code, details));
+  };
+  if (!checked.proven && snapshot.epicMembers) epicGapsInto(db, root, snapshot, add, () => gaps.length);
+  else if (!checked.proven) {
+    deliveryGapsInto(db, root, snapshot, add, () => gaps.length);
+    if (checked.membersUnreadable) add("epic_members_unreadable");
+  }
+  if (!checked.commentSafe) add("comment_unsafe");
+  if (!gaps.length) add("delivery_unverified");
+  return gaps;
+}
+
+type AddGap = (code: IssueClosureDeliveryGapCode, details?: { workItemId?: string; pullRequests?: number[]; members?: number[] }) => void;
+
+function deliveryGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, add: AddGap, count: () => number): void {
+  // Open related PRs block every reason. A PR whose title and body no longer mention the issue still
+  // counts while GitHub's timeline cross-references it: only its merge or closure ends that (#4058).
+  if (snapshot.openPullRequests.length) add("open_related_pull_requests", { pullRequests: snapshot.openPullRequests.map((pr) => pr.number) });
+  const relationship = db.campaignWorkLedger.fixedBy(root.id, snapshot.repository, snapshot.issue);
+  if (relationship && snapshot.reason !== "completed") add("fixed_by_completion_only");
+  const items: CampaignWorkItemDetail[] = [];
+  for (const id of relationship ?? []) {
+    const item = db.campaignWorkLedger.detail(root.id, id, Date.now());
+    if (!item) { add("missing_work_item", { workItemId: id }); continue; }
+    if (!item.issue || item.issue.repository.toLowerCase() !== snapshot.repository.toLowerCase() ||
+        !root.orchestratorPolicy?.issueNumbers?.includes(item.issue.number)) { add("work_item_outside_scope", { workItemId: id }); continue; }
+    items.push(item);
+  }
+  const tracked = trackedIssueWork(db, root, snapshot.issue);
+  if (!tracked) return add("delivery_unverified");
+  for (const item of tracked) if (!items.some((existing) => existing.id === item.id)) items.push(item);
+  if (!items.length) {
+    // A not-planned closure needs a recorded disposition, which needs a cancelled or removed item.
+    if (!relationship?.length) add(snapshot.reason === "not_planned" ? "disposition_unverified" : "no_work_item");
+    return;
+  }
+  if (snapshot.reason === "not_planned") {
+    const disposition = snapshot.dispositionRecommendationId && db.campaignWorkLedger.recommendation(root.id, snapshot.dispositionRecommendationId);
+    if (snapshot.dispositionRecommendationId && (!disposition || !["rejected", "duplicate"].includes(disposition.disposition) || !disposition.dispositionReason ||
+        !items.some((item) => disposition.originWorkItemIds.includes(item.id)))) add("disposition_unverified");
+    for (const item of items) if (!["cancelled", "scope_removed"].includes(item.commitment) || item.currentAttempt ||
+        !item.commitmentRecord.reason || !item.commitmentRecord.changedBySessionId) add("disposition_unverified", { workItemId: item.id });
+    return;
+  }
+  itemGapsInto(db, root, snapshot, items, add, count);
+}
+
+/** The epic source's gaps (#4060), each naming its members or work item: members outside scope,
+ * then open, closed-otherwise and unreadable members, then the epic's own dispatched items under
+ * the ordinary per-item conditions. A placeholder item is never a gap here. */
+function epicGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, add: AddGap, count: () => number): void {
+  if (snapshot.openPullRequests.length) add("open_related_pull_requests", { pullRequests: snapshot.openPullRequests.map((pr) => pr.number) });
+  const read = snapshot.epicMembers!;
+  if (!read.readable) return add("epic_members_unreadable");
+  if (!epicSourceApplies(db, root, snapshot)) return add("delivery_unverified");
+  const inScope = (number: number) => Boolean(root.orchestratorPolicy?.issueNumbers?.includes(number));
+  const named = (keep: (member: IssueClosureEpicMembers["members"][number]) => boolean) => read.members.filter(keep).map((member) => member.number);
+  const outside = named((member) => !inScope(member.number));
+  if (outside.length) add("epic_member_outside_scope", { members: outside });
+  for (const [state, code] of [["open", "epic_member_open"], ["closed_not_completed", "epic_member_not_completed"],
+    ["unreadable", "epic_member_unreadable"]] as const) {
+    const members = named((member) => inScope(member.number) && member.state === state);
+    if (members.length) add(code, { members });
+  }
+  const own = trackedIssueWork(db, root, snapshot.issue);
+  if (!own) return add("delivery_unverified");
+  itemGapsInto(db, root, snapshot, own.filter((item) => !epicPlaceholderItem(item)), add, count);
+}
+
+function itemGapsInto(db: ControlPlaneDb, root: SessionView, snapshot: GithubIssueClosureSnapshot, items: CampaignWorkItemDetail[],
+  add: AddGap, count: () => number): void {
+  // The runner confirms merges only once everything else holds, so an unconfirmed merge is a gap of
+  // its own only when nothing else is: otherwise the runner was never asked.
+  const unconfirmed: Array<{ workItemId: string; pullRequests: number[] }> = [];
+  for (const item of items) {
+    if (item.currentAttempt) {
+      add(item.stateCauses.includes("attempt_awaiting_verification") ? "attempt_awaiting_verification" : "attempt_open", { workItemId: item.id });
+      continue;
+    }
+    if (!item.verifications.some((v) => v.outcome === "delivered" && v.report.digest)) { add("no_delivered_verification", { workItemId: item.id }); continue; }
+    if (item.primaryState !== "delivered") { add("work_item_not_delivered", { workItemId: item.id }); continue; }
+    const before = count();
+    const outside: number[] = [], stale: number[] = [], open: number[] = [], wrongHead: number[] = [], unverified: number[] = [];
+    let merged = 0;
+    for (const { ref, fact, approvedHeads } of deliveryCandidates(db, root, item, snapshot.issue)) {
+      if (ref.repository.toLowerCase() !== snapshot.repository.toLowerCase()) outside.push(ref.number);
+      else if (fact.availability !== "fresh") stale.push(ref.number);
+      else if (fact.value.state === "closed") continue;
+      else if (fact.value.state !== "merged" || !fact.value.mergeCommitSha) open.push(ref.number);
+      else if (approvedHeads.length && !approvedHeads.includes(fact.value.headSha)) wrongHead.push(ref.number);
+      else if (!snapshot.delivery?.some((delivered) => delivered.number === ref.number && delivered.headSha === fact.value.headSha &&
+          delivered.mergeCommitSha === fact.value.mergeCommitSha)) unverified.push(ref.number);
+      else merged++;
+    }
+    if (outside.length) add("pull_request_outside_repository", { workItemId: item.id, pullRequests: outside });
+    if (stale.length) add("stale_pull_request", { workItemId: item.id, pullRequests: stale });
+    if (open.length) add("unmerged_pull_request", { workItemId: item.id, pullRequests: open });
+    if (wrongHead.length) add("delivery_not_verified_at_exact_head", { workItemId: item.id, pullRequests: wrongHead });
+    if (unverified.length) unconfirmed.push({ workItemId: item.id, pullRequests: unverified });
+    else if (!merged && count() === before) add("no_merged_delivery_pull_request", { workItemId: item.id });
+  }
+  if (!count()) for (const gap of unconfirmed) add("delivery_merge_unconfirmed", gap);
 }

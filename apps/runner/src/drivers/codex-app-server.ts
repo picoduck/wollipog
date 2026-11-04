@@ -790,6 +790,7 @@ export class CodexAppServerDriver implements Driver {
         if (read?.thread?.id === this.threadId && Array.isArray(read?.thread?.turns)) {
           const matches: CompletedCommandReconciliationProof[] = [];
           const successfulExactCommands: { turnId: string; itemId: string }[] = [];
+          const timeline: ProviderEnqueueEvent[] = [];
           let liveSawExactCommand = false;
           let liveSawUnfinishedExactCommand = false;
           let liveSawAdmissionCandidate = false;
@@ -800,6 +801,14 @@ export class CodexAppServerDriver implements Driver {
               candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
               candidate?.tool === "consume_workflow_decision");
             for (const [index, item] of items.entries()) {
+              if (workflowActionAdmissionBoundary(item, command)) {
+                if (completedWorkflowActionAdmission(item, occurrenceId, command)) {
+                  timeline.push({ kind: "admission", own: true, turnId: turn?.id, itemId: item?.id });
+                } else if (item?.arguments?.occurrenceId !== occurrenceId) {
+                  timeline.push({ kind: "admission", own: false, turnId: turn?.id, itemId: item?.id });
+                }
+                continue;
+              }
               if (item?.type !== "commandExecution" || typeof item?.command !== "string") continue;
               const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
               if (logicalCommand !== command) continue;
@@ -808,10 +817,15 @@ export class CodexAppServerDriver implements Driver {
               // The provider owns this item and its terminal exit status. The surrounding turn
               // may still be waiting for reconciliation; requiring it to finish creates a cycle.
               // Failed/interrupted/unknown turns remain ineligible, as do nonterminal items.
-              if (!boundedProviderCorrelationId(turn?.id) ||
-                  (turn?.status !== "completed" && turn?.status !== "inProgress") ||
-                  (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
-                  item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
+              const eligible = boundedProviderCorrelationId(turn?.id) &&
+                (turn?.status === "completed" || turn?.status === "inProgress") &&
+                (turn?.itemsView == null || turn.itemsView === "full") && item?.status === "completed" &&
+                item?.exitCode === 0 && boundedProviderCorrelationId(item?.id);
+              // An ineligible command that still exited 0 may have enqueued, so ordering counts it.
+              if (item?.status === "completed" && item?.exitCode === 0) {
+                timeline.push({ kind: "command", eligible, turnId: turn?.id, itemId: item?.id });
+              }
+              if (!eligible) continue;
               successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
               const admissionCandidates = items.slice(0, index).filter((candidate) =>
                 candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
@@ -833,7 +847,16 @@ export class CodexAppServerDriver implements Driver {
           // completed proof while that duplicate is unfinished, including via a receipt fence.
           if (liveSawUnfinishedExactCommand) return null;
           if (matches.length !== 0) {
-            return matches.length === 1 && successfulExactCommands.length === 1 ? matches[0]! : null;
+            // A same-head re-enqueue leaves an earlier successful command behind its own admission
+            // (#3991), so a count cannot decide; provider order ties the landed command to this one.
+            const landed = landedCommandForAdmission(timeline);
+            const match = landed && matches.find((candidate) =>
+              candidate.providerTurnId === landed.turnId && candidate.providerItemId === landed.itemId);
+            if (!match || (fence && (fence.providerThreadId !== this.threadId ||
+                fence.providerTurnId !== match.providerTurnId || fence.providerItemId !== match.providerItemId))) {
+              return null;
+            }
+            return match;
           }
           if (fence && fence.providerThreadId === this.threadId &&
               boundedProviderCorrelationId(fence.providerTurnId) &&
@@ -2945,6 +2968,43 @@ function codexProviderShellScript(command: string): string | null {
 function boundedProviderCorrelationId(value: unknown): value is string {
   return typeof value === "string" && value.length > 0 && value.length <= 512 &&
     !/[\x00-\x1f\x7f]/u.test(value);
+}
+
+type ProviderEnqueueEvent =
+  | { kind: "admission"; own: boolean; turnId: unknown; itemId: unknown }
+  | { kind: "command"; eligible: boolean; turnId: unknown; itemId: unknown };
+
+/** A consume call that may have armed this exact enqueue: one naming the command, or one whose
+ * arguments cannot be read. Its occurrence and outcome do not matter; an unreadable call is
+ * counted rather than assumed harmless. */
+function workflowActionAdmissionBoundary(item: Json, command: string): boolean {
+  if (item?.type !== "mcpToolCall" || item?.server !== "wollipog" || item?.tool !== "consume_workflow_decision") return false;
+  const args = item?.arguments;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return true;
+  return (args as Json)?.action?.command === command;
+}
+
+/** The successful command this occurrence's admission landed, by provider order (#3991): its one
+ * completed admission, then exactly one exact command that exited 0 before any other occurrence's
+ * admission of that command, eligible and in the admission's turn, and no exact command that
+ * exited 0 after it, even in a turn that cannot prove anything itself. Another call for this same
+ * occurrence never arms a second grant, so it neither ends the window nor counts. Anything else,
+ * including interleaved admissions, two commands after one admission, or a later command, is
+ * ambiguous and yields null. */
+function landedCommandForAdmission(timeline: ProviderEnqueueEvent[]): { turnId: string; itemId: string } | null {
+  const own = timeline.flatMap((event, index) => event.kind === "admission" && event.own ? [index] : []);
+  if (own.length !== 1) return null;
+  const admission = timeline[own[0]!]!;
+  if (!boundedProviderCorrelationId(admission.turnId) || !boundedProviderCorrelationId(admission.itemId)) return null;
+  const after = timeline.slice(own[0]! + 1);
+  const end = after.findIndex((event) => event.kind === "admission" && !event.own);
+  const window = (end === -1 ? after : after.slice(0, end)).filter((event) => event.kind === "command");
+  const commands = timeline.filter((event) => event.kind === "command");
+  const landed = window.length === 1 ? window[0]! : null;
+  return landed?.kind === "command" && landed.eligible && commands.at(-1) === landed &&
+      boundedProviderCorrelationId(landed.turnId) && boundedProviderCorrelationId(landed.itemId) &&
+      landed.turnId === admission.turnId
+    ? { turnId: landed.turnId, itemId: landed.itemId } : null;
 }
 
 /** The historical provider transcript is the durable causal fence when the bounded runner event

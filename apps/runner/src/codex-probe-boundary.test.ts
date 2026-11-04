@@ -35,7 +35,10 @@ test("ordinary Agent Control provisioning reports both native MCP inventory tree
     onProcess: proof => proofs.push(proof),
   }, () => {}, { isSea: true, execPath: process.execPath, execArgv: [], configDir: h.dir,
     readCodexMcpInventory });
-  assert.deepEqual(await Promise.all(proofs), [true, true], "both the original and candidate inventories are covered");
+  // The fixture never loads the entry, so the candidate with the code-mode setting (#4023) is
+  // followed by the candidate without it: every read's tree is proven.
+  assert.deepEqual(await Promise.all(proofs), [true, true, true],
+    "the original inventory and both candidate inventories are covered");
 });
 
 for (const silent of [true, false]) {

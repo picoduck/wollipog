@@ -257,6 +257,8 @@ test("a solid danger button is only ever the confirm of a destructive confirmati
   // a checkbox- or name-gated dialog, or the shared confirmation dialog.
   assert.deepEqual(solidDangerButtons(), [
     'FeedbackProvider.tsx: {`btn ${danger ? "danger" : "primary"}`}',
+    // Remove Workspace's confirm: a refusal stays in the dialog, so it is not the shared one (#4123).
+    'RemoveWorkspaceDialog.tsx: "btn danger"',
     'SkillMachineImportDialog.tsx: "btn danger"',
   ]);
 });

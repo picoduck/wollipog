@@ -843,6 +843,198 @@ test("automation-owned active turns reject direct and promoted steering", async 
   }
 });
 
+/** #4022: launch through the manager, end the launch turn, then dequeue one durable prompt through
+ * the real drain so the steering gates see the turn exactly as a prompt-outbox command starts it.
+ * Every provider turn waits on its own gate; `receipts` records the command's lifecycle calls. */
+async function durableTurnHarness(options: { providerRecovery?: boolean } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-steering-durable-"));
+  const sent: RunnerToControlPlane[] = [];
+  const store = new SessionStore(root);
+  const turns: Array<ReturnType<typeof deferred<"end_turn">>> = [];
+  const steered: string[] = [];
+  const receipts: string[] = [];
+  let callbacks!: DriverCallbacks;
+  let coordinate: string | null = null;
+  const driver: Driver = {
+    pid: undefined,
+    initialize: async () => { callbacks.onSteeringAvailability?.(true); },
+    newSession: async () => "thread-1",
+    agentSessionId: () => "thread-1",
+    agentTurnId: () => coordinate,
+    activeSteeringTurnId: () => coordinate,
+    prompt: async () => { const turn = deferred<"end_turn">(); turns.push(turn); return turn.promise; },
+    steer: async (input) => { steered.push(input.text); return { outcome: "accepted", providerTurnId: coordinate! }; },
+    setConfig: () => {},
+    cancel: () => { turns.at(-1)?.resolve("end_turn"); },
+    resolvePermission: () => false,
+    dispose: () => { for (const turn of turns) turn.resolve("end_turn"); },
+  };
+  const manager = new SessionManager((message) => sent.push(message), () => {}, store, "runner-1", undefined,
+    (_kind, _options, registered) => { callbacks = registered; return driver; });
+  const command: DurableCommandLifecycle = {
+    commandId: "prompt_outbox_command",
+    queued: () => { receipts.push("queued"); },
+    started: () => { receipts.push("started"); },
+    completed: () => { receipts.push("completed"); },
+    failed: (error) => { receipts.push(`failed: ${error}`); },
+    uncertain: (error) => { receipts.push(`uncertain: ${error}`); },
+  };
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  const active = () => (manager as any).active.get("s_steer");
+  const cleanup = () => {
+    manager.shutdownAll();
+    for (const turn of turns) turn.resolve("end_turn");
+    rmSync(root, { recursive: true, force: true });
+  };
+  try {
+    assert.equal(await manager.start({
+      sessionId: "s_steer", agentId: "codex-app-server", workspaceId: "repo", workspacePath: root,
+      driver: "codex-app-server", command: "codex", args: [], env: {}, context: { kind: "native" },
+      useWorktree: false,
+    }, "launch prompt"), true);
+    await waitFor(() => turns.length === 1, "the launch starts a provider turn");
+    store.patchMeta("s_steer", {
+      capabilities: {
+        models: [], effortLevels: [], slashCommands: [], supportsImages: true,
+        supportsApprovals: true, supportsSteering: true,
+      },
+    });
+    turns[0]!.resolve("end_turn");
+    await waitFor(() => !active()?.running, "the launch turn ends");
+    manager.prompt("s_steer", "durable assignment", [], undefined, undefined, command, false, undefined, false,
+      undefined, undefined, undefined, false, false, options.providerRecovery ?? false);
+    await waitFor(() => turns.length === 2, "the durable prompt dequeues into its own turn");
+    coordinate = "provider-turn-durable";
+    callbacks.onSteeringTurnChanged?.();
+    const turnId = active().activeTurnId as string;
+    assert.ok(turnId);
+    assert.equal(active().currentDurable?.commandId, command.commandId);
+    return {
+      manager, store, sent, steered, receipts, turnId, active, cleanup,
+      endTurn: async () => {
+        turns[1]!.resolve("end_turn");
+        await waitFor(() => !active()?.running, "the durable turn ends");
+      },
+      queues: () => sent.filter((message): message is SessionQueueMessage => message.type === "session_queue"),
+    };
+  } catch (error) { cleanup(); throw error; }
+}
+
+test("#4022 the controlling Orchestrator's named command steers its prompt-outbox turn and leaves that command's receipt alone", async () => {
+  const h = await durableTurnHarness();
+  try {
+    assert.equal(h.active().currentDurablePromptSteerable, true);
+    const receiptsBefore = [...h.receipts];
+    const result = await h.manager.steerSession({
+      submissionId: "orchestrator-steer", sessionId: "s_steer", turnId: h.turnId,
+      text: "Stop polling and end your turn.", controllingOrchestratorCommandId: "prompt_outbox_command",
+    });
+    assert.equal(result.disposition, "accepted", JSON.stringify(result));
+    assert.equal(result.submissionId, "orchestrator-steer", "the steering attempt has its own receipt");
+    assert.deepEqual(h.steered, ["Stop polling and end your turn."]);
+    assert.deepEqual(h.receipts, receiptsBefore, "steering neither completes, fails nor restarts the command");
+    const steeredEvent = h.store.readEvents("s_steer").find((event) =>
+      event.payload.kind === "user_message" && event.payload.deliveryIntent === "steer");
+    assert.ok(steeredEvent && steeredEvent.payload.kind === "user_message");
+    assert.equal(steeredEvent.payload.submissionId, "orchestrator-steer");
+    assert.equal(steeredEvent.payload.commandId, undefined, "the steered message is not attributed to the command");
+    await h.endTurn();
+    assert.deepEqual(h.receipts.slice(receiptsBefore.length), ["completed"],
+      "the command settles once, at its own turn boundary");
+  } finally { h.cleanup(); }
+});
+
+test("#4022 a durable turn refuses steering that does not name its exact command", async () => {
+  const h = await durableTurnHarness();
+  try {
+    h.manager.prompt("s_steer", "ordinary queued source");
+    const sourceId = h.queues().at(-1)!.queue[0]!.id;
+    const receiptsBefore = [...h.receipts];
+    const attempts = [
+      ["no authority", { text: "ordinary steer" }],
+      ["an automation's command", { text: "automation steer", controllingOrchestratorCommandId: "automation_command" }],
+      ["an empty id", { text: "empty steer", controllingOrchestratorCommandId: "" }],
+      ["a promotion", { promotePromptId: sourceId, controllingOrchestratorCommandId: "prompt_outbox_command" }],
+    ] as const;
+    for (const [label, content] of attempts) {
+      const result = await h.manager.steerSession({
+        submissionId: `refused-${label}`, sessionId: "s_steer", turnId: h.turnId, ...content,
+      });
+      assert.equal(result.disposition, "rejected", label);
+      assert.equal(result.reason, "policy_blocked", label);
+      assert.match(result.message ?? "", /automation-owned turns cannot be steered/i, label);
+    }
+    assert.deepEqual(h.steered, []);
+    assert.deepEqual(h.receipts, receiptsBefore);
+    assert.deepEqual(h.queues().at(-1)!.queue.map((prompt) => prompt.text), ["ordinary queued source"],
+      "the refused promotion keeps its queue item");
+  } finally { h.cleanup(); }
+});
+
+test("#4022 a recovery continuation's durable turn refuses even its own command id", async () => {
+  const h = await durableTurnHarness({ providerRecovery: true });
+  try {
+    assert.equal(h.active().currentDurablePromptSteerable, false);
+    const result = await h.manager.steerSession({
+      submissionId: "recovery-steer", sessionId: "s_steer", turnId: h.turnId,
+      text: "steer the recovery", controllingOrchestratorCommandId: "prompt_outbox_command",
+    });
+    assert.equal(result.disposition, "rejected");
+    assert.equal(result.reason, "policy_blocked");
+    assert.deepEqual(h.steered, []);
+  } finally { h.cleanup(); }
+});
+
+test("#4022 every existing steering guard still refuses the controlling Orchestrator's steer", async () => {
+  const guards: Array<[string, (h: ReturnType<typeof harness>, active: any) => void, string]> = [
+    ["no guard", () => {}, "accepted"],
+    ["pending agent input", (h) => { h.store.patchMeta("s_steer", { status: "input_required" }); }, "policy_blocked"],
+    ["a pending approval", (h) => {
+      h.store.patchMeta("s_steer", { pendingApproval: { requestId: "approval", title: "Run a command?", options: [] } });
+    }, "policy_blocked"],
+    ["a stop request", (_h, active) => { active.cancelRequested = true; }, "policy_blocked"],
+    ["an interrupt", (_h, active) => { active.interruptRequested = true; }, "policy_blocked"],
+    ["a queue hold", (_h, active) => { active.controlPlaneHold = true; }, "policy_blocked"],
+    ["governance", (_h, active) => { active.governanceTripped = true; }, "governance_blocked"],
+    ["an unsupported driver", (_h, active) => { active.steeringAvailable = false; }, "unsupported_driver"],
+    ["a provider command", (_h, active) => { active.currentSessionCommand = { invocationId: "command" }; }, "policy_blocked"],
+    ["a history failure", (_h, active) => { active.historyIntegrityFailure = "history rejected"; }, "history_integrity_failure"],
+  ];
+  for (const [label, arrange, reason] of guards) {
+    let calls = 0;
+    const h = harness({ steer: async () => { calls++; return { outcome: "accepted" }; } });
+    try {
+      // eslint-disable-next-line @typescript-eslint/no-explicit-any
+      const active = (h.manager as any).active.get("s_steer");
+      active.currentDurable = durable("prompt_outbox_command");
+      active.currentDurablePromptSteerable = true;
+      arrange(h, active);
+      const result = await h.manager.steerSession({
+        submissionId: `guard-${label}`, sessionId: "s_steer", turnId: "turn-a",
+        text: "orchestrator steer", controllingOrchestratorCommandId: "prompt_outbox_command",
+      });
+      assert.equal(result.reason, reason, `${label}: ${JSON.stringify(result)}`);
+      assert.equal(calls, reason === "accepted" ? 1 : 0, label);
+    } finally { h.cleanup(); }
+  }
+
+  // A stale turn coordinate refuses before anything reaches the provider.
+  let calls = 0;
+  const stale = harness({ steer: async () => { calls++; return { outcome: "accepted" }; } });
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const active = (stale.manager as any).active.get("s_steer");
+    active.currentDurable = durable("prompt_outbox_command");
+    active.currentDurablePromptSteerable = true;
+    const result = await stale.manager.steerSession({
+      submissionId: "guard-stale", sessionId: "s_steer", turnId: "turn-earlier",
+      text: "orchestrator steer", controllingOrchestratorCommandId: "prompt_outbox_command",
+    });
+    assert.equal(result.reason, "stale_turn");
+    assert.equal(calls, 0);
+  } finally { stale.cleanup(); }
+});
+
 test("omitted and empty queue configs snapshot the same inherited effective config", async () => {
   const seen: string[] = [];
   const h = harness({

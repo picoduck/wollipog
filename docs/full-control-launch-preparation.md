@@ -25,7 +25,8 @@ campaign budget. Neither grants authority, and older settings APIs refuse saving
 no saved campaign budget, the campaign has no limit.
 
 The Full Control boundary owns every operation it lists, so the Custom per-decision owners never
-apply under it, whatever their toggles say (Review Round Extensions follow Parent Control, #3369).
+apply under it, whatever their toggles say. Review Round Extensions follow a Parent Control grant,
+and otherwise Full Control owns them only within its per-pull-request cap (#4075 changed #3369).
 When Full Control is chosen or in effect, Orchestrator Controls shows only the mode, its line, any
 inline blocker, and Enable Full Control or Revoke. Child Session Requests, Workflow Decisions, the
 evidence and retention notes, and Campaign Behavior return when Custom is chosen. On the
@@ -80,6 +81,18 @@ only) establishes the boundary before the Orchestrator's first turn:
   scope. Classification runs in linear time and is bounded: a message longer than 64 KiB, or with
   more than 1000 reference occurrences, scopes nothing and keeps every reference as context, since
   truncating it could drop a negation.
+- A range of short references names every issue from its first end to its last (#4061): `#A–#B`,
+  `#A-#B`, `#A—#B`, `#A..#B`, `#A to #B` and `#A through #B`, with or without spaces, on one line.
+  It is one reference, so the clause holding its first end governs every issue in it: "Implement
+  epic #40: units #41–#48" scopes #40 through #48, while "not #41–#48" or "see #41–#48" withholds
+  all eight. A range is bounded. One that is wider than 100 issues, or whose first end is not below
+  its last (`#9–#5`, `#5–#5`), names nothing: only its two endpoints are recorded, as context. If
+  the expanded ranges would take the message past 100 distinct issues (or past 1000 expanded
+  occurrences), no range in it expands, and each one's endpoints are context. A chain such as
+  `#1–#3–#5` or `#1 – #3 to #5`, spaced or not and whatever its separators, is no range: each
+  reference stands alone, so no issue between them is ever scoped. Expansion depends only on the text, and the
+  runner still verifies every issue a range names, so a pull request or missing issue inside one
+  drops out like any other unverified reference.
 - The runner then reads every reference, requested or context, and only verified issues are kept:
   a pull request, a missing issue, or an unreadable origin leaves that reference out. With no
   verified requested issue, the scope stays task-only. Verified context references, and requested
@@ -102,6 +115,17 @@ only) establishes the boundary before the Orchestrator's first turn:
   follow-up limit: past it, each follow-up waits for the person's approval) or Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
   explicit ceiling never changes, and an explicit Maximum Issues bounds how many referenced issues
   enter the scope. Operations, policy asks, evidence and cost or tool ceilings are unchanged.
+- A derived Maximum Issues also leaves room for target epics' members (#4061). A target epic is a
+  scoped `#N` or issue URL written right after the word "epic" ("Implement epic #40"); a message
+  naming more than five names none. The runner reads each one's sub-issues and member checklist,
+  as an epic-lineage scope addition does, and every verified member outside the scope adds one
+  slot, up to the 100-issue ceiling, so the Orchestrator's later epic-lineage addition of them is
+  admitted. Members add no follow-ups, an epic the runner can't read in full adds no room, and an
+  explicit Maximum Issues never grows.
+- When an Orchestrator's own scope change would exceed the limit, the refusal (`capacity_exhausted`,
+  with the effective `limit` and the `requested` count) names Maximum Issues and the owner's route:
+  only the person who authorized Full Control can raise it, by raising the Follow-Up Limit in
+  Campaign Status (which raises Maximum Issues by as much) or choosing No Limit.
 - The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
   before the message is delivered. A runner that misses the update keeps its older revision, which
   authorizes no issue write, and every issue operation synchronizes again before it acts.
