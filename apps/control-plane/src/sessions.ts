@@ -29,7 +29,7 @@ import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, ownerDecisionProtected, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, ownerDecisionProtected, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
 import { firstMessageIssueIntent, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
@@ -9642,9 +9642,14 @@ export class SessionsService {
     // reconnect restores the card. An Orchestrator's explicit decline is its own single action.
     const fence = explicit ? { claimed: true, release: () => {} } : this.standingResponseFence(controller, session, request);
     if (!fence.claimed) return true;
+    // The agent is told, in the same tool result, that Full Control policy declined it and no person
+    // saw it (#4063). Only a runner that can carry that text receives it; an older one keeps its
+    // fixed text and the notices below. A person's response never carries this attribution.
+    const automaticResponse = runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlResponseAttribution")
+      ? fullControlAutomaticResponse(evaluation) : undefined;
     const result = request.kind === "question"
-      ? this.answerQuestion(session.id, request.requestId, {}, actor, "dismiss", controller.id, request.occurrenceId)
-      : this.approve(session.id, request.requestId, reject, actor, controller.id);
+      ? this.answerQuestion(session.id, request.requestId, {}, actor, "dismiss", controller.id, request.occurrenceId, automaticResponse)
+      : this.approve(session.id, request.requestId, reject, actor, controller.id, undefined, undefined, undefined, automaticResponse);
     if (!result.ok) { fence.release(); return false; }
     if (request.kind === "authentication" &&
         !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durableAuthDismissal")) {
@@ -9682,9 +9687,9 @@ export class SessionsService {
       // that nobody sees its questions and how to decide them itself, after this event settles; a
       // root that ended its turn on the dismissal is woken by this message rather than left idle.
       // Later questions are still dismissed but wake nothing: one notice per question could loop a
-      // root that answers each notice with another question. Neither provider's dismissal carries
-      // text (Claude Code sends a fixed deny message; Codex an empty answer set), so the guidance
-      // cannot ride on the dismissal itself without a runner protocol change.
+      // root that answers each notice with another question. A v282 Claude Code runner also carries
+      // the guidance in every dismissal itself (#4063); this notice stays for older runners and for
+      // providers whose dismissal has no text (Codex answers with an empty answer set).
       if (first) setImmediate(() => {
         try {
           // A root whose runner has the owner-decision tools (#4064) is told how to reach its owner.
@@ -14905,6 +14910,8 @@ export class SessionsService {
     action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
+    /** Only the server's own Full Control dismissal passes this (#4063). */
+    automaticResponse?: FullControlAutomaticResponse,
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -15027,6 +15034,7 @@ export class SessionsService {
       ...(answerSummary ? { answerSummary } : {}),
       ...(answeredByUserId ? { answeredByUserId } : {}),
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+      ...(automaticResponse && action === "dismiss" && actor.kind === "system" ? { automaticResponse } : {}),
     });
     if (!sent) {
       this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, Date.now(), {
@@ -15094,6 +15102,8 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
     evidenceReviewed?: string[],
     evidenceReviewDigest?: string,
+    /** Only the server's own Full Control decline passes this (#4063). */
+    automaticResponse?: FullControlAutomaticResponse,
   ): ServiceResult<SessionView> {
     const now = Date.now();
     this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -15389,6 +15399,11 @@ export class SessionsService {
     const resolvedBy: PermissionResolver | undefined = actor.kind === "human" && actor.id && !resolvedByParentSessionId
       ? { kind: "user", userId: actor.id }
       : undefined;
+    // A Full Control attribution rides only on the server's own decline: never on an allow, and
+    // never beside a person's name (#4063).
+    const attributed = automaticResponse && actor.kind === "system" && !resolvedBy && (pending.kind === "question" ||
+      optionId === null || pending.options.find((option) => option.optionId === optionId)?.kind?.startsWith("reject"))
+      ? { automaticResponse } : {};
     const sent = this.hub.sendToRunner(
       session.runnerId,
       pending.kind === "question"
@@ -15396,11 +15411,13 @@ export class SessionsService {
             type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss",
             ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+            ...attributed,
           }
         : {
             type: "resolve_permission", sessionId, requestId, optionId,
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
             ...(resolvedBy ? { resolvedBy } : {}),
+            ...attributed,
           },
     );
     if (!sent) {

@@ -606,6 +606,32 @@ test("a submitted answer records the control plane's summary and its member on i
   }
 });
 
+test("a Full Control attribution reaches the driver only as the server sent it, and never beside a person (#4063)", () => {
+  const { sm, cleanup } = makeHarness(true);
+  try {
+    const seen: unknown[][] = [];
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    const client = (sm as any).active.get("s_perm").client;
+    client.resolvePermission = (...args: unknown[]) => { seen.push(["permission", ...args]); return true; };
+    client.answerQuestion = (...args: unknown[]) => { seen.push(["question", ...args]); return true; };
+    const automatic = { policy: "full_control", basis: "root_questions" };
+    sm.resolvePermission("s_perm", "p-policy", "deny", "root", undefined, { policy: "full_control", basis: "secrets_and_sign_in" });
+    sm.resolvePermission("s_perm", "p-person", "deny", undefined, { kind: "user", userId: "usr_grace" }, automatic);
+    sm.resolvePermission("s_perm", "p-malformed", "deny", "root", undefined, { policy: "person" });
+    sm.answerQuestion("s_perm", "q-policy", {}, "dismiss", "root", undefined, undefined, undefined, automatic);
+    sm.answerQuestion("s_perm", "q-submit", { a: "b" }, "submit", "root", undefined, undefined, undefined, automatic);
+    assert.deepEqual(seen, [
+      ["permission", "p-policy", "deny", { policy: "full_control" }],
+      ["permission", "p-person", "deny", undefined],
+      ["permission", "p-malformed", "deny", undefined],
+      ["question", "q-policy", {}, "dismiss", automatic],
+      ["question", "q-submit", { a: "b" }, "submit", undefined],
+    ]);
+  } finally {
+    cleanup();
+  }
+});
+
 test("an async answer records the control plane's summary on its resolution (#2188)", () => {
   const { sm, sent, cleanup } = makeHarness(true);
   try {

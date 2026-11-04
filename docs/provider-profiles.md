@@ -113,7 +113,7 @@ the saved default, the account chosen by an implicit launch, or a session's reco
 An explicit or saved ungranted default is refused rather than silently replaced. When no default
 is configured, discovery and new implicit launches choose the first granted compatible account,
 matching control-plane session creation. With no granted account, neither falls back to HOME.
-Protocol v282 carries separate readiness for the unchanged default and ready explicit accounts.
+Protocol v283 carries separate readiness for the unchanged default and ready explicit accounts.
 Automatic reviews use their runner default; automations, orchestration and implicit session creation
 check their effective Machine default. They skip or refuse a signed-out default even when another
 account is ready. Explicit account choices and existing session bindings remain unchanged. Older
