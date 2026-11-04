@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { githubApi } from "./merge-group-cleanup.mjs";
-import { AGGREGATOR, collect, collectEvents, criticalPath, DEPENDENCY_SLACK_MS, dependencyCandidates, listJobs, markdown as queueWaitMarkdown, MAX_PAGES, quantile, ReportError, summarize } from "./merge-queue-wait-report.mjs";
+import { ADVISORY_JOBS, AGGREGATOR, collect, collectEvents, criticalPath, DEPENDENCY_SLACK_MS, dependencyCandidates, listJobs, markdown as queueWaitMarkdown, MAX_PAGES, quantile, ReportError, summarize } from "./merge-queue-wait-report.mjs";
 
 // Measures how every workflow in the repository shares the hosted-runner pool (#2674): runner
 // occupancy over time, queued demand, and runner-minutes and runner waits per workflow and event.
@@ -368,7 +368,7 @@ export function mergeGroupCriticalWaits(jobs, runs) {
   const perJob = new Map();
   let measured = 0;
   for (const [runId, list] of byRun) {
-    if (list.some(timingConflict)) continue;
+    if (list.some((job) => !ADVISORY_JOBS.has(job.name) && timingConflict(job))) continue;
     const raw = list.filter((job) => job.allocated && job.conclusion !== "skipped").map((job) => ({ name: job.name,
       conclusion: job.conclusion, created_at: job.createdAt, started_at: job.apiStartedAt, completed_at: job.completedAt }));
     const aggregator = raw.find((job) => job.name === AGGREGATOR);
@@ -480,6 +480,7 @@ export function replay(jobs, { capacity, priority = null, drop = null, limit = n
  * acyclic when the creation slack would let two short jobs each look like the other's dependency.
  */
 export function modeledRequiredMinutes(runCreatedAt, list, waits) {
+  list = list.filter((job) => !ADVISORY_JOBS.has(job.name));
   if (list.some(timingConflict)) return null;
   const runStart = Date.parse(runCreatedAt);
   const raw = list.map((job) => ({ id: job.jobId, name: job.name, conclusion: job.conclusion,
@@ -568,7 +569,7 @@ export function analyze(report, { ceiling = 20, longWaitMinutes = 5, scenarios: 
       timingQuality: timingQualitySummary(own),
       jobs: own.length, allocatedJobs: held.length,
       cancelledBeforeRunner: own.filter((job) => !job.allocated && job.conclusion === "cancelled").length,
-      runnerMinutes, share: totalMinutes > 0 ? runnerMinutes / totalMinutes : null,
+      runnerMinutes, share: runnerMinutes !== null && totalMinutes > 0 ? runnerMinutes / totalMinutes : null,
       // Minutes of jobs that held a runner and ended cancelled, for example superseded PR CI.
       cancelledRunnerMinutes: held.filter((job) => job.conclusion === "cancelled")
         .reduce((sum, job) => sum + (span(job.apiStartedAt, job.completedAt) ?? 0), 0),

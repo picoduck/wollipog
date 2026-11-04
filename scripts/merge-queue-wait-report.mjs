@@ -11,7 +11,7 @@ import { githubApi } from "./merge-group-cleanup.mjs";
 // merge-queue removals, and never changes anything.
 
 export const AGGREGATOR = "Typecheck, Test & Sidecar Bundle";
-const ADVISORY_JOBS = new Set(["Suite Selection Shadow (Advisory)", "Regression Admission Shadow (Advisory)"]);
+export const ADVISORY_JOBS = new Set(["Suite Selection Shadow (Advisory)", "Regression Admission Shadow (Advisory)"]);
 const QUEUE_BRANCH = /^gh-readonly-queue\/main\/pr-([1-9][0-9]*)-[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export const MAX_PAGES = 10;
@@ -77,7 +77,7 @@ export function dependencyCandidates(job, work, aggregator) {
  * dependency finished: the latest of its possible dependencies to complete by then.
  */
 export function criticalPath(run, job, work, aggregator = job) {
-  if ([job, ...work].some(timingConflict)) return null;
+  if ([job, ...work].some((item) => !ADVISORY_JOBS.has(item.name) && timingConflict(item))) return null;
   if (![run.created_at, job.created_at, ...work.map((item) => item.created_at)].every((time) => Number.isFinite(Date.parse(time)))) return null;
   const path = [job];
   const started = Date.parse(run.created_at);
@@ -273,7 +273,7 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const first = attempt === 1;
   const projected = jobs.map((job) => ({
     id: job.id ?? null, name: job.name, timingQuality: timingQuality(job),
-    state: timingConflict(job) ? "unmeasured" : outcome(job), conclusion: job.conclusion ?? null,
+    state: outcome(job), conclusion: job.conclusion ?? null,
     createdAt: job.created_at ?? null, startedAt: jobHasStarted(job) ? job.started_at ?? null : null,
     apiStartedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
     // Reruns may contain copied jobs with reset creation times; never interpret those as waits.
@@ -523,7 +523,7 @@ export function applyTimingContext(record, summary) {
 
 /** Recompute historical timing from observations, preserving extra source context. */
 export function reprojectAttempt(row) {
-  const raw = (job) => ({ ...job, status: job.state === "unfinished" ? "in_progress"
+  const raw = (job) => ({ ...job, status: job.state === "unfinished" ? job.startedAt != null ? "in_progress" : "queued"
     : job.startedAt != null ? undefined : "completed",
     conclusion: job.conclusion ?? ({ passing: "success", skipped: "skipped", failing: "failure" }[job.state]),
     created_at: job.createdAt, started_at: job.apiStartedAt ?? job.startedAt, completed_at: job.completedAt,

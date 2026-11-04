@@ -77,8 +77,8 @@ skipped steps and skipped jobs do not. Missing endpoints do not invent a gap.
 
 Conflicts have `state: "unmeasured-allocation"`; other jobs have
 `state: "no-conflict-detected"`, which is not a passing or complete-timing verdict.
-API conclusions remain observations of the forge outcome. Event job `state` is
-`unmeasured` for conflicts, even when the forge conclusion is success. Raw job
+API conclusions and job `state` remain observations of the forge outcome, separate
+from the unmeasured allocation's `timingQuality.state`. Raw job
 `apiStartedAt`/`completedAt` and step `startedAt`/`completedAt` remain unchanged.
 No guessed clock correction is applied. The occupancy collector now retains
 number, conclusion and timestamps for steps, without step names or log content.
