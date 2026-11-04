@@ -22,6 +22,17 @@ directory. A pending run or unavailable log is a coverage limit, not proof that 
 healthy. Recheck all listed package versions, publish dates, PR states, and checks: the workflow
 log is a lead, not a replacement for the ground-truth commands below.
 
+A package in a `groups:` entry of `.github/dependabot.yml` whose group already has an open pull
+request is not evaluated by the weekly version-update run (`npm_and_yarn in /. - Update #…`). That
+log says only `Marking group '<name>' as handled`. The group's refresh job evaluates it: same batch,
+titled after a member the open PR already bumps (`npm_and_yarn in / for <member> - Update #…`),
+with `"command":"recreate"` and `dependency-group-to-refresh` in its job definition. It checks
+every member, including ones the PR does not mention yet, under the same release-age cooldown.
+Read that log before calling a group member an updater gap. On 2026-11-04 the weekly run
+(41442871357) skipped `fastify` and `vite` because #3692 and #3690 were open, and the fastify refresh
+(41442886365) had checked `@fastify/cors` and filtered 11.4.0 by cooldown. Once the group pull
+request merges, the next weekly run opens a fresh one covering every member.
+
 - `pnpm outdated -r` for the version gap across every workspace package. For any package carrying
   an advisory, cross-check its reported Latest version with `npm view <pkg> version` and
   `npm view <pkg> time --json`, and compare the proposed target with the upstream patched range.
