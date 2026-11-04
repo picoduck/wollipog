@@ -527,6 +527,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
         const snapshot = current.get(id);
         return snapshot ? JSON.stringify({ type: "session_runtime_updated", snapshot }) : null;
       }, (wire) => socket.send(wire), () => socket.terminate(), (details) => t.diagnostic(JSON.stringify(details)));
+      lastProcessingAckAt = performance.now();
     } else {
       for (const snapshot of current.values()) socket.send(JSON.stringify({ type: "session_runtime_updated", snapshot }));
     }
@@ -582,17 +583,25 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     // processing window still advances. Bound the whole replay and stalled credit separately;
     // HTTP and pong probes retain their independent two-second responsiveness deadlines.
     const deadline = performance.now() + 120_000;
+    let convergenceOutcome = "deadline";
     while (performance.now() < deadline) {
-      if ((!window || window.complete) && read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint === fingerprint) break;
-      if (window && !window.complete && performance.now() - lastProcessingAckAt > 15_000) break;
+      if ((!window || window.complete) && read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint === fingerprint) {
+        convergenceOutcome = "converged";
+        break;
+      }
+      if (window && !window.complete && performance.now() - lastProcessingAckAt > 15_000) {
+        convergenceOutcome = "stalled";
+        break;
+      }
       await probe();
       await delay(50);
     }
+    const convergenceContext = `${convergenceOutcome}; ${processingAcknowledgements} acknowledgements\n${failureContext(pass, convergenceStarted)}`;
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-1499'").get()?.runner_snapshot_fingerprint,
-      fingerprint, `newer snapshot did not converge\n${failureContext(pass, convergenceStarted)}\n${output}`);
+      fingerprint, `newer snapshot did not converge\n${convergenceContext}\n${output}`);
     maxConvergenceMs = Math.max(maxConvergenceMs, performance.now() - convergenceStarted);
     assert.equal(window?.complete, true,
-      `all windows must be processed before checking newer live state (${processingAcknowledgements} acknowledgements)\n${failureContext(pass, convergenceStarted)}`);
+      `all windows must be processed before checking newer live state\n${convergenceContext}`);
     assert.equal(read.prepare("SELECT runner_snapshot_fingerprint FROM sessions WHERE id='child-0'").get()?.runner_snapshot_fingerprint,
       earlyFingerprint, "the live update following an in-flight republish must win");
     assert.equal(downstreamScopeCount, 60);
