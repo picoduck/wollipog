@@ -256,3 +256,31 @@ shadow-only candidate, `fast-required-v3`, relaxes only low-risk fallbacks; see 
 individual miss/flake/infrastructure review, actual shadow overhead/selected
 runtime evidence, and the reviewed fast/full comparison. Full queue validation
 continues throughout. Do not hold a ready slot waiting for future traffic.
+
+### Corrected v1.1 Prose Contract (#3812)
+
+`scripts/ci-suite-policy-v1-1.mjs` and `scripts/ci-suite-selection-v1-1.mjs` define
+`fast-required-v1.1` (record schema/policy generation 1). The original v1 modules
+remain historical contracts; v2/v3 experiments continue to use their original v1
+baseline. Never relabel those records as v1.1. Suite version and policy hash keep
+new policy cohorts separate. The advisory shadow and its report retain the legacy
+v1 identity pending coordinated collector support; its original records never
+certify the corrected policy.
+
+PR routing now uses v1.1. Its prose allowlist is empty:
+`docs/ci-suite-evidence-2026-10-23.md` has a readiness-report test consumer and
+therefore requires full coverage. No nonempty diff currently qualifies as prose
+fast. App changes retain the existing conservative dependency closure.
+
+Before admitting prose, the v1.1 selector checks immutable tested blobs for full
+path and basename mentions in code, configuration and selector/document inputs.
+Missing documents, unreadable inputs and references force full coverage. Broad
+mentions deliberately count as consumers. The guard and its regression fixtures
+must remain part of any future allowlist review; constructed runtime paths still
+require human dependency review. `pnpm ci:selection-v1.1 --base SHA --head SHA`
+computes this policy locally without executing tested code.
+
+This correction does not activate routing or change repository settings. Rollback
+of routed PR testing remains `gh variable set CI_PR_SUITE_ROUTING --repo
+picoduck/wollipog --body disabled` (owner only); a new ready PR event must then
+show all browser shards and Node shards with a successful required aggregator.

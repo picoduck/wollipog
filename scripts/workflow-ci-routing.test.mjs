@@ -284,7 +284,7 @@ test("Git-object routing uses trusted policy and rejects hostile workflow/policy
       TESTED_SHA: head, CHANGE_HEAD_SHA: head, ...override } });
     assert.equal(result.mode, expected);
   };
-  await route(() => put(FAST_PROSE_FILES[0], "reviewed prose\n"), "fast");
+  await route(() => put(FAST_PROSE_FILES[0], "reviewed prose\n"), "full");
   await route(() => put("apps/web/src/ordinary.ts", "ordinary source\n"), "full");
   await route(() => { put(FAST_PROSE_FILES[0], "prose\n"); put(".github/workflows/ci.yml", "hostile workflow\n"); }, "full");
   await route(() => put("scripts/ci-suite-policy.mjs", 'throw new Error("head policy must never execute");\n'), "full");
