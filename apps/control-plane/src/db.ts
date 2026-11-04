@@ -301,7 +301,25 @@ import {
   SPAWN_APPROVAL_REQUEST_ID_PREFIX,
   TERMINAL_STATUSES,
   campaignRepositoryLocation,
+  type WorkspaceRemovalBlocker,
+  type WorkspaceSource,
 } from "@wollipog/protocol";
+
+/** What beginWorkspaceRemoval hid for a configured Workspace, to restore on refusal (#4123). */
+interface PendingWorkspaceRemovalSnapshot {
+  workspace?: { name: string; path: string; additional_directory_grants: string | null };
+  ownership: { organization_id: string; owner_kind: string; owner_id: string; created_at: number; updated_at: number } | null;
+  override: string | null;
+}
+
+/** True when an automation's stored action or runner policy names this exact Workspace. */
+function targetsWorkspace(value: unknown, runnerId: string, workspaceId: string): boolean {
+  if (Array.isArray(value)) return value.some((item) => targetsWorkspace(item, runnerId, workspaceId));
+  if (!value || typeof value !== "object") return false;
+  const record = value as Record<string, unknown>;
+  if (record.runnerId === runnerId && record.workspaceId === workspaceId) return true;
+  return Object.values(record).some((item) => targetsWorkspace(item, runnerId, workspaceId));
+}
 
 function harnessInstallationFamily(driver: AgentDriverKind | undefined): HarnessInstallationSelection["family"] | null {
   if (driver === "codex" || driver === "codex-app-server") return "codex";
@@ -2252,6 +2270,18 @@ CREATE TABLE IF NOT EXISTS workspace_overrides (
   runner_id    TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
   display_name TEXT,
+  PRIMARY KEY (runner_id, workspace_id)
+);
+
+-- A configured Workspace whose removal the runner has not confirmed yet (#4123). Its records are
+-- hidden while this row exists, so nothing new can come to depend on it; the snapshot restores
+-- them if the runner refuses, and the runner's next registration settles an unconfirmed one.
+CREATE TABLE IF NOT EXISTS workspace_removals_pending (
+  runner_id    TEXT NOT NULL,
+  workspace_id TEXT NOT NULL,
+  path         TEXT NOT NULL,
+  snapshot     TEXT NOT NULL,
+  started_at   INTEGER NOT NULL,
   PRIMARY KEY (runner_id, workspace_id)
 );
 
@@ -8197,6 +8227,7 @@ export class ControlPlaneDb {
         }
       }
       this.stmt("DELETE FROM workspaces WHERE runner_id = ?").run(meta.runnerId);
+      this.settleWorkspaceRemovals(meta.runnerId, meta.workspaces);
 
       const insWs = this.stmt(
         "INSERT INTO workspaces (runner_id, id, name, path, additional_directory_grants) VALUES (?, ?, ?, ?, ?)",
@@ -8710,6 +8741,141 @@ export class ControlPlaneDb {
         id: string;
       }[]
     ).map((r) => r.id);
+  }
+
+  /** Where a Machine's Workspace came from (#4123); a reported id wins over a managed one. */
+  workspaceSource(runnerId: string, workspaceId: string): WorkspaceSource | null {
+    if (this.stmt("SELECT 1 FROM workspaces WHERE runner_id=? AND id=?").get(runnerId, workspaceId)) return "configured";
+    return this.stmt("SELECT 1 FROM workspace_extras WHERE runner_id=? AND id=?").get(runnerId, workspaceId)
+      ? "managed"
+      : null;
+  }
+
+  /** What still uses a Workspace (#4123): Project Locations, sessions that are not archived, and
+   * automations that start work in it. Archived sessions keep their history and are not counted. */
+  workspaceRemovalBlockers(runnerId: string, workspaceId: string): WorkspaceRemovalBlocker[] {
+    const projects = this.stmt(
+      `SELECT DISTINCT p.id AS project_id, p.name AS project_name
+         FROM project_locations l JOIN projects p ON p.id = l.project_id
+        WHERE l.runner_id=? AND l.workspace_id=? AND l.removed_at IS NULL AND l.detached_at IS NULL
+        ORDER BY p.name, p.id`,
+    ).all(runnerId, workspaceId) as unknown as Array<{ project_id: string; project_name: string }>;
+    const sessions = (this.stmt(
+      "SELECT COUNT(*) AS count FROM sessions WHERE runner_id=? AND workspace_id=? AND archived=0",
+    ).get(runnerId, workspaceId) as { count: number }).count;
+    const automations = (this.stmt(
+      `SELECT automation_id, name, action_json, runner_policy FROM automations
+        WHERE deleted_at IS NULL ORDER BY name, automation_id`,
+    ).all() as unknown as Array<{ automation_id: string; name: string; action_json: string; runner_policy: string }>)
+      .filter((row) => [row.action_json, row.runner_policy]
+        .some((json) => targetsWorkspace(parseJson<unknown>(json), runnerId, workspaceId)));
+    return [
+      ...projects.map((row): WorkspaceRemovalBlocker => ({
+        kind: "project_location", projectId: row.project_id, projectName: row.project_name,
+      })),
+      ...(sessions > 0 ? [{ kind: "session" as const, count: sessions }] : []),
+      ...automations.map((row): WorkspaceRemovalBlocker => ({
+        kind: "automation", automationId: row.automation_id, automationName: row.name,
+      })),
+    ];
+  }
+
+  /**
+   * Start removing a Workspace (#4123). In one transaction: refuse while anything uses it, then
+   * forget its record, name override and ownership, so no session, project location or automation
+   * can come to depend on it meanwhile. A managed Workspace is then gone. A configured one stays
+   * pending until its runner confirms (finishWorkspaceRemoval), refuses (cancelWorkspaceRemoval) or
+   * registers again (settled there). Projects, sessions, worktrees and files are untouched.
+   */
+  beginWorkspaceRemoval(
+    runnerId: string,
+    workspaceId: string,
+    now = Date.now(),
+  ): { ok: true; source: WorkspaceSource; path: string } | { ok: false; blockers: WorkspaceRemovalBlocker[] } | null {
+    return this.atomic(() => {
+      const source = this.workspaceSource(runnerId, workspaceId);
+      if (!source) return null;
+      const blockers = this.workspaceRemovalBlockers(runnerId, workspaceId);
+      if (blockers.length) return { ok: false as const, blockers };
+      const reported = this.stmt("SELECT name, path, additional_directory_grants FROM workspaces WHERE runner_id=? AND id=?")
+        .get(runnerId, workspaceId) as { name: string; path: string; additional_directory_grants: string | null } | undefined;
+      const managed = this.stmt("SELECT name, path FROM workspace_extras WHERE runner_id=? AND id=?")
+        .get(runnerId, workspaceId) as { name: string; path: string } | undefined;
+      const path = (reported ?? managed)!.path;
+      if (source === "configured") {
+        const ownership = this.stmt(
+          `SELECT organization_id, owner_kind, owner_id, created_at, updated_at FROM workspace_ownership
+            WHERE runner_id=? AND workspace_id=?`,
+        ).get(runnerId, workspaceId) ?? null;
+        const override = (this.stmt("SELECT display_name FROM workspace_overrides WHERE runner_id=? AND workspace_id=?")
+          .get(runnerId, workspaceId) as { display_name: string | null } | undefined)?.display_name ?? null;
+        this.stmt(
+          `INSERT OR REPLACE INTO workspace_removals_pending (runner_id, workspace_id, path, snapshot, started_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(runnerId, workspaceId, path, JSON.stringify({ workspace: reported, ownership, override }), now);
+      }
+      this.forgetWorkspace(runnerId, workspaceId);
+      return { ok: true as const, source, path };
+    });
+  }
+
+  /** The runner recorded the removal: the hidden Workspace is gone for good. */
+  finishWorkspaceRemoval(runnerId: string, workspaceId: string): void {
+    this.stmt("DELETE FROM workspace_removals_pending WHERE runner_id=? AND workspace_id=?").run(runnerId, workspaceId);
+  }
+
+  /** The runner refused, or never received the request: restore what beginWorkspaceRemoval hid. */
+  cancelWorkspaceRemoval(runnerId: string, workspaceId: string): void {
+    this.atomic(() => {
+      const pending = this.stmt("SELECT snapshot FROM workspace_removals_pending WHERE runner_id=? AND workspace_id=?")
+        .get(runnerId, workspaceId) as { snapshot: string } | undefined;
+      if (!pending) return;
+      const snapshot = parseJson<PendingWorkspaceRemovalSnapshot>(pending.snapshot);
+      if (snapshot?.workspace) {
+        this.stmt(
+          "INSERT OR IGNORE INTO workspaces (runner_id, id, name, path, additional_directory_grants) VALUES (?, ?, ?, ?, ?)",
+        ).run(runnerId, workspaceId, snapshot.workspace.name, snapshot.workspace.path, snapshot.workspace.additional_directory_grants);
+      }
+      this.restoreWorkspaceSnapshot(runnerId, workspaceId, snapshot);
+      this.finishWorkspaceRemoval(runnerId, workspaceId);
+    });
+  }
+
+  /** On registration, a pending removal the runner still reports did not happen: restore its
+   * ownership and name. One it no longer reports did. Either way the fence ends. */
+  private settleWorkspaceRemovals(runnerId: string, reported: readonly WorkspaceInfo[]): void {
+    const pending = this.stmt("SELECT workspace_id, path, snapshot FROM workspace_removals_pending WHERE runner_id=?")
+      .all(runnerId) as unknown as Array<{ workspace_id: string; path: string; snapshot: string }>;
+    for (const row of pending) {
+      if (reported.some((workspace) => workspace.id === row.workspace_id)) {
+        this.restoreWorkspaceSnapshot(runnerId, row.workspace_id, parseJson<PendingWorkspaceRemovalSnapshot>(row.snapshot));
+      }
+      this.finishWorkspaceRemoval(runnerId, row.workspace_id);
+    }
+  }
+
+  private restoreWorkspaceSnapshot(runnerId: string, workspaceId: string, snapshot: PendingWorkspaceRemovalSnapshot | null): void {
+    if (snapshot?.ownership) {
+      const owner = snapshot.ownership;
+      this.stmt(
+        `INSERT OR REPLACE INTO workspace_ownership
+         (runner_id, workspace_id, organization_id, owner_kind, owner_id, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)`,
+      ).run(runnerId, workspaceId, owner.organization_id, owner.owner_kind, owner.owner_id, owner.created_at, owner.updated_at);
+    }
+    if (snapshot?.override) {
+      this.stmt(
+        `INSERT INTO workspace_overrides (runner_id, workspace_id, display_name) VALUES (?, ?, ?)
+         ON CONFLICT(runner_id, workspace_id) DO UPDATE SET display_name=excluded.display_name`,
+      ).run(runnerId, workspaceId, snapshot.override);
+    }
+  }
+
+  private forgetWorkspace(runnerId: string, workspaceId: string): void {
+    this.stmt("DELETE FROM workspaces WHERE runner_id=? AND id=?").run(runnerId, workspaceId);
+    this.stmt("DELETE FROM workspace_extras WHERE runner_id=? AND id=?").run(runnerId, workspaceId);
+    this.stmt("DELETE FROM workspace_overrides WHERE runner_id=? AND workspace_id=?").run(runnerId, workspaceId);
+    this.stmt("DELETE FROM workspace_ownership WHERE runner_id=? AND workspace_id=?").run(runnerId, workspaceId);
   }
 
   /* ----------------------------- Projects -------------------------------- */
@@ -14044,6 +14210,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM machine_overrides WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM workspace_overrides WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM workspace_extras WHERE runner_id=?").run(row.runner_id);
+      this.stmt("DELETE FROM workspace_removals_pending WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM workspace_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(row.runner_id);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(row.runner_id);
@@ -14102,6 +14269,7 @@ export class ControlPlaneDb {
       this.stmt("DELETE FROM machine_overrides WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM workspace_overrides WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM workspace_extras WHERE runner_id=?").run(runnerId);
+      this.stmt("DELETE FROM workspace_removals_pending WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM workspace_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_ownership WHERE runner_id=?").run(runnerId);
       this.stmt("DELETE FROM runner_credentials WHERE runner_id=?").run(runnerId);
@@ -14232,6 +14400,7 @@ export class ControlPlaneDb {
         name: overrides.get(w.id) ?? w.name,
         path: w.path,
         ...(grants?.length ? { additionalDirectoryGrants: grants } : {}),
+        source: "configured",
       };
     });
     // CP-created projects (workspace_extras) are appended after the runner-reported ones; a
@@ -14239,7 +14408,7 @@ export class ControlPlaneDb {
     const reportedIds = new Set(reported.map((w) => w.id));
     const extras = this.workspaceExtras(row.runner_id)
       .filter((w) => !reportedIds.has(w.id))
-      .map<WorkspaceInfo>((w) => ({ id: w.id, name: overrides.get(w.id) ?? w.name, path: w.path }));
+      .map<WorkspaceInfo>((w) => ({ id: w.id, name: overrides.get(w.id) ?? w.name, path: w.path, source: "managed" }));
     const workspaces = [...reported, ...extras];
 
     const agents = (

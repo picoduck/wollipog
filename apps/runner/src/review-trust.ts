@@ -156,7 +156,10 @@ export interface SessionWritableSources {
   providerAccounts?: ReadonlyArray<Pick<RunnerProviderAccount, "label" | "directory">>;
   agents?: ReadonlyArray<Pick<RunnerConfigAgent, "id" | "env">>;
   sessions?: Iterable<Pick<SessionMeta, "sessionId" | "repoPath" | "worktreePath" | "worktrees" | "env" | "providerCredentialHome" |
-    "providerConversationHome" | "pendingProviderCredentialHome" | "adoptedProviderState">>;
+    "providerConversationHome" | "pendingProviderCredentialHome" | "adoptedProviderState"> & { workspaceId?: string | null }>;
+  /** Workspaces removed in Wollipog (#4123), with the directory grants they had: a session that ran
+   * in one could have written them, so they stay that session's grants. */
+  removedWorkspaces?: ReadonlyArray<Pick<RunnerConfigWorkspace, "id" | "additionalDirectoryGrants" | "sharedWritableDirectories">>;
   hostEnv?: NodeJS.ProcessEnv;
 }
 
@@ -178,6 +181,7 @@ export interface SessionWritableGrant {
  * or a session's environment, each session's worktrees, and each session's current,
  * transcript-source and pending provider credential homes. Relative and unresolvable values are
  * dropped. A session's paths stay grants after its workspace is removed: it can still resume there.
+ * So do the directory grants of a removed workspace it ran in, which no configuration names anymore.
  */
 export function configuredSessionWritableGrants(sources: SessionWritableSources): SessionWritableGrant[] {
   const grants: SessionWritableGrant[] = [];
@@ -220,11 +224,20 @@ export function configuredSessionWritableGrants(sources: SessionWritableSources)
       try { return resolveAgentEnvironmentValue(agent, name, hostEnv); } catch { return undefined; }
     }, { grant: `agent ${id}'s environment` }, (name) => `change ${name} in agent ${id}'s environment`);
   }
+  // An id can be removed more than once (each time for a different folder); a session keeps the
+  // directory grants of every removal under its workspace id, since it may predate any of them.
+  const removedGrants = new Map<string, string[]>();
+  for (const workspace of sources.removedWorkspaces ?? []) {
+    removedGrants.set(workspace.id, [...removedGrants.get(workspace.id) ?? [],
+      ...workspace.additionalDirectoryGrants ?? [], ...workspace.sharedWritableDirectories ?? []]);
+  }
   for (const meta of sources.sessions ?? []) {
     const session = { grant: `session ${meta.sessionId}`, recovery: `delete session ${meta.sessionId}`, sessionId: meta.sessionId };
     for (const path of [meta.providerCredentialHome, meta.providerConversationHome, meta.pendingProviderCredentialHome,
       meta.repoPath, meta.worktreePath, ...(meta.worktrees ?? []).map((worktree) => worktree.path),
-      meta.adoptedProviderState?.sessionDir]) add(path, session);
+      meta.adoptedProviderState?.sessionDir, ...(meta.workspaceId ? removedGrants.get(meta.workspaceId) ?? [] : [])]) {
+      add(path, session);
+    }
     const env = meta.env ?? {};
     fromEnvironment((name) => env[name], session);
   }

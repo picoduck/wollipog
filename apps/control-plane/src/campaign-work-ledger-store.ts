@@ -1327,7 +1327,16 @@ export class CampaignWorkLedgerStore {
       const item = this.item(campaignId, workItemId)!;
       const sessionOpen = this.openAttemptForSession(childSessionId);
       if (sessionOpen?.work_item_id === item.id) {
-        return done({ revision: this.revision(campaignId), attempt: this.attemptView(sessionOpen), closedAttempts: [], created: false });
+        // Reassigning the child that already holds the item keeps its attempt, but the agent still
+        // takes the item back, so a handoff recorded meanwhile no longer describes who acts next.
+        const cleared = this.stmt("DELETE FROM campaign_work_handoffs WHERE work_item_id=?").run(item.id).changes > 0;
+        if (cleared) this.stmt("UPDATE campaign_work_items SET updated_at=? WHERE id=?").run(now, item.id);
+        return done({
+          revision: cleared ? this.bump(campaignId, now) : this.revision(campaignId),
+          attempt: this.attemptView(sessionOpen),
+          closedAttempts: [],
+          created: false,
+        });
       }
       if (sessionOpen && sessionOpen.campaign_session_id !== campaignId) {
         return fail("the session has an open attempt in another campaign", 409);

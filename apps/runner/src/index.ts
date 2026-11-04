@@ -8,6 +8,7 @@ import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
 import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
 import { PullRequestWatcher } from "./pull-request-watches.js";
+import { removeConfiguredWorkspace, WorkspaceRemovals } from "./workspace-removals.js";
 import { contextGhRunner } from "./campaign-forge-status.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
@@ -562,6 +563,11 @@ const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHost
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
 // Refuse unfinished legacy work before constructing any provider/session managers.
 assertLegacyReviewsDrained(config.dataDir);
+// Configured Workspaces removed in Wollipog stay removed (#4123); nothing below sees them.
+const workspaceRemovals = new WorkspaceRemovals(config.dataDir, log);
+for (const workspace of workspaceRemovals.apply(config.workspaces)) {
+  log(`workspace ${workspace.id} (${workspace.path}) is configured but was removed in Wollipog; delete its entry from ${workspaceRemovals.file} to restore it`);
+}
 
 const configuredAgentDefinitions = config.agents.map((a) => {
   const driver = a.driver ?? "acp";
@@ -1006,7 +1012,8 @@ setCampaignCredentialRoots(() => {
     providerAccountDirectories: config.providerAccounts.map((account) => account.directory),
     agentEnvs: [process.env, ...config.agents.map(agentEnv), ...sessions.map((meta) => meta.env)],
     credentialHomes: sessions.flatMap((meta) => [meta.providerCredentialHome, meta.pendingProviderCredentialHome]),
-    workspacePaths: config.workspaces.map((workspace) => workspace.path), userHome: homedir(),
+    workspacePaths: [...config.workspaces, ...workspaceRemovals.writableHistory()].map((workspace) => workspace.path),
+    userHome: homedir(),
   });
 });
 store.scrubLegacyAgentEnv();
@@ -1308,8 +1315,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   () => subscriptionUsage.inventory(),
   attestation.instanceId,
 );
-sessions.configureSharedDirectories(config.workspaces, [parsed.configPath,
-  ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)]);
+const sharedDirectoryForbiddenRoots = [parsed.configPath,
+  ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
+sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
@@ -1689,9 +1697,11 @@ function recoverStaleSessionCommands(): void {
 }
 
 sessions.setSend(sendUp);
-// Shared trusted-tool roots for review sessions, with the configuration that grants each.
+// Shared trusted-tool roots for review sessions, with the configuration that grants each. A removed
+// Workspace's directory grants stay with the sessions that ran there (#4123).
 const sessionWritableGrants = () => configuredSessionWritableGrants({
   workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
+  removedWorkspaces: workspaceRemovals.entries(),
   sessions: store.listSessions(), hostEnv: process.env,
 });
 sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
@@ -1729,7 +1739,8 @@ const mediaReviewRoot = resolve(config.dataDir, "media-review");
 mkdirSync(join(mediaReviewRoot, "sessions"), { recursive: true, mode: 0o700 });
 /** Operator state the reviewer namespace must never expose (it mounts none of it in any case). */
 function mediaReviewerForbiddenRoots(): string[] {
-  const roots = [...config.workspaces.map((workspace) => workspace.path), resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
+  const roots = [...[...config.workspaces, ...workspaceRemovals.writableHistory()].map((workspace) => workspace.path),
+    resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
   return [...new Set(roots.filter((path) => {
     try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; }
   }).map((path) => realpathSync(path)))].slice(0, 32);
@@ -3347,6 +3358,33 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           error: errText(error),
         })));
       break;
+    case "remove_workspace": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "workspaceRemoval")) break;
+      const result = msg.runnerId !== config.runnerId
+        ? { ok: false as const, error: "Workspace removal targeted a different machine." }
+        : removeConfiguredWorkspace({
+          workspaces: config.workspaces,
+          removals: workspaceRemovals,
+          workspaceId: msg.workspaceId,
+          path: msg.path,
+          sessionRunningIn: (workspaceId) => sessions.liveSessionIds()
+            .some((sessionId) => store.readMeta(sessionId)?.workspaceId === workspaceId),
+        });
+      if (result.ok && result.removed) {
+        // Every reader of the live configuration stops using it now; these two copied it at startup.
+        metadata.workspaces = metadata.workspaces.filter((workspace) => workspace.id !== msg.workspaceId);
+        sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
+        sessions.setConfiguredProjectPaths(config.workspaces.map((workspace) => workspace.path));
+        log(`workspace ${msg.workspaceId} (${msg.path}) removed; recorded in ${workspaceRemovals.file}`);
+      }
+      sendUp({
+        type: "remove_workspace_result",
+        requestId: msg.requestId,
+        ok: result.ok,
+        ...(result.ok ? {} : { error: result.error }),
+      });
+      break;
+    }
     case "adopt_provider_profile":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) break;
       runCommandTask("adopt_provider_profile", adoptProviderProfileCommand(providerProfileCommands, msg).then(sendUp));

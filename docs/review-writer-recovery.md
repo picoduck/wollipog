@@ -52,10 +52,15 @@ elides paths longer than 120 characters and is cut to its first 450 characters w
 
 Admission reads the configured grants again for every review. Recover with either route:
 
-- **Withdraw the grants.** Remove the named workspace from the runner's `workspaces`
-  configuration (an operator change, applied when the runner next starts), then delete the named
-  sessions. A session keeps its project directory as a grant after its workspace is removed,
-  because it can still be resumed there. Register the projects you need as their own workspaces.
+- **Withdraw the grants.** Remove the named workspace in the app: in the machine's detail,
+  choose Remove… on its row under Workspaces and confirm Remove Workspace. The runner records the
+  removal and keeps it across restarts. Removal is refused, with what to resolve, while a project
+  location, an unarchived session or an automation still uses the workspace. A runner too old to
+  remove a configured workspace says so; then remove it from the runner's `workspaces`
+  configuration instead (an operator change, applied when the runner next starts). Then delete
+  the named sessions. A session keeps its project directory, and the directory grants of the
+  workspace it ran in, as grants after its workspace is removed, because it can still be resumed
+  there. Register the projects you need as their own workspaces.
 - **Move the reviewer.** Install the reviewer in a directory no session can write, such as a
   dedicated directory outside every workspace, provider home and cache, and set the Claude Code
   agent's `command` to its absolute path. A reviewer found through `PATH` is checked at the first

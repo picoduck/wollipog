@@ -119,7 +119,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 279);
+  assert.equal(PROTOCOL_VERSION, 280);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -357,8 +357,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 279", () => {
-  assert.equal(PROTOCOL_VERSION, 279);
+test("PROTOCOL_VERSION is 280", () => {
+  assert.equal(PROTOCOL_VERSION, 280);
+  assert.equal(runnerSupportsProtocol(278, "workspaceRemoval"), false);
+  assert.equal(runnerSupportsProtocol(279, "workspaceRemoval"), true);
   // An epic's closure reads its members only from a runner that returns them (#4060).
   assert.equal(runnerSupportsProtocol(277, "epicClosureMembers"), false);
   assert.equal(runnerSupportsProtocol(278, "epicClosureMembers"), true);
@@ -377,8 +379,8 @@ test("PROTOCOL_VERSION is 279", () => {
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);
   assert.equal(runnerSupportsProtocol(270, "runnerProcessingBarriers"), true);
-  assert.equal(runnerSupportsProtocol(278, "providerAccountReadiness"), false);
-  assert.equal(runnerSupportsProtocol(279, "providerAccountReadiness"), true);
+  assert.equal(runnerSupportsProtocol(279, "providerAccountReadiness"), false);
+  assert.equal(runnerSupportsProtocol(280, "providerAccountReadiness"), true);
   assert.equal(runnerSupportsProtocol(268, "workflowDecisionWithdrawal"), false);
   assert.equal(runnerSupportsProtocol(269, "workflowDecisionWithdrawal"), true);
   assert.equal(runnerSupportsProtocol(267, "campaignFixedBy"), false);

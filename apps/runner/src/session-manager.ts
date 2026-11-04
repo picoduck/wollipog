@@ -1831,7 +1831,13 @@ export class SessionManager {
   private sharedDirectoryWorkspaces: readonly RunnerConfigWorkspace[] = [];
   private sharedDirectoryForbiddenRoots: readonly string[] = [];
 
-  /** Called only by the host bootstrap, never from a session/control-plane request. */
+  /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123). */
+  setConfiguredProjectPaths(paths: readonly string[]): void {
+    this.configuredProjectPaths = [...paths];
+  }
+
+  /** Called by the host bootstrap, and again after a configured Workspace is removed (#4123);
+   * never from a session request. */
   configureSharedDirectories(workspaces: readonly RunnerConfigWorkspace[], forbiddenRoots: readonly string[] = []): void {
     this.sharedDirectoryWorkspaces = workspaces.map((workspace) => ({ ...workspace,
       sharedWritableDirectories: workspace.sharedWritableDirectories ? [...workspace.sharedWritableDirectories] : undefined }));
@@ -1880,7 +1886,7 @@ export class SessionManager {
       providerAccountId?: string,
     ) => SubscriptionUsageSnapshot | null,
     /** Exact operator-configured Project Location roots eligible for existing-worktree attach. */
-    private readonly configuredProjectPaths: string[] = [],
+    private configuredProjectPaths: string[] = [],
     /** Fresh runner-local catalog authorization for the one target-local WSL launcher path. */
     private readonly authorizeSafeWslLaunch?: SafeWslLaunchAuthorizer,
     private readonly worktreePorts: RunnerWorktreePorts = DEFAULT_WORKTREE_PORTS,
