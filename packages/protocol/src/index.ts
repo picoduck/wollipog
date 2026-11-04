@@ -871,7 +871,7 @@ export * from "./closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
-import type { IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
+import type { DeliveryVerificationFailure, IssueClosureDeliveryGap, IssueClosureEpicMembers } from "./issue-closure-delivery-gap.js";
 export * from "./campaign-issue-publication.js";
 export * from "./campaign-evidence-authority.js";
 export * from "./delegated-image-review.js";
@@ -5301,6 +5301,7 @@ export interface GithubIssueClosureSnapshot extends Omit<GithubIssueClosureInspe
   /** Server-derived reason delegated delivery could not be proven: the compact line of
    * `deliveryGaps` (#4058), or `outside_boundary` for a request the boundary does not delegate. */
   deliveryFailure?: string;
+  deliveryVerificationFailure?: DeliveryVerificationFailure;
   /** Server-derived (#4058): every gap that kept an in-scope closure from delegated proof, each
    * with the action that would let a new request become Orchestrator-owned. */
   deliveryGaps?: IssueClosureDeliveryGap[];
@@ -9885,6 +9886,7 @@ export type GithubIssueClosureMessage = {
 );
 
 export interface GithubIssueClosureResultMessage {
+  deliveryVerificationFailure?: DeliveryVerificationFailure;
   type: "github_issue_closure_result";
   requestId: string;
   sessionId: string;

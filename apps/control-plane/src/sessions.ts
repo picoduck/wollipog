@@ -1,3 +1,4 @@
+import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
@@ -11342,9 +11343,21 @@ export class SessionsService {
               type: "github_issue_closure", operation: "inspect", requestId: verificationId, sessionId, issue: request.issue,
               scopeRevision: snapshot.scopeRevision, deliveryPullRequests: delivery.map(({ number, headSha }) => ({ number, headSha })),
             }, 60_000).catch(() => null);
-            if (verified?.type === "github_issue_closure_result" && verified.ok && verified.sessionId === sessionId &&
-                verified.inspection?.repository === snapshot.repository && verified.inspection.issue === snapshot.issue &&
-                verified.inspection.state === "OPEN" && verified.inspection.forgeDigest === snapshot.forgeDigest) snapshot.delivery = verified.inspection.delivery;
+            let failure: GithubIssueClosureSnapshot["deliveryVerificationFailure"];
+            if (!verified) failure = { check: "runner_unavailable" };
+            else if (verified.type !== "github_issue_closure_result" || verified.sessionId !== sessionId) failure = { check: "runner_response" };
+            else if (!verified.ok) failure = normalizeDeliveryVerificationFailure(verified.deliveryVerificationFailure) ?? { check: "runner_response" };
+            else if (verified.inspection?.repository !== snapshot.repository || verified.inspection.issue !== snapshot.issue ||
+                verified.inspection.state !== "OPEN" || verified.inspection.forgeDigest !== snapshot.forgeDigest) failure = { check: "issue_changed" };
+            else {
+              snapshot.delivery = verified.inspection.delivery;
+              if (!closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot)) failure = { check: "delivery_missing" };
+            }
+            if (failure) {
+              snapshot.deliveryVerificationFailure = failure;
+              this.log.info(JSON.stringify({ event: "campaign_issue_delivery_verification_failed", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+                issue: snapshot.issue, ...failure, pullRequests: delivery.map((pr) => pr.number).slice(0, 100) }));
+            }
           }
         }
         let proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);

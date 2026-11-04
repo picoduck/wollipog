@@ -19295,7 +19295,8 @@ export class SessionManager {
     } catch (error) {
       // Execution throws only before its mutation fence: a mutation failure is an `uncertain` result.
       return error instanceof IssueClosureInspectionError
-        ? { ...base, ok: false, failure: error.failure, error: error.message }
+        ? { ...base, ok: false, failure: error.failure, error: error.message,
+            ...(error.deliveryVerificationFailure ? { deliveryVerificationFailure: error.deliveryVerificationFailure } : {}) }
         : { ...base, ok: false, failure: "evidence_unavailable",
           error: "Issue inspection failed; verify gh or glab authentication and complete conflict evidence" };
     }
