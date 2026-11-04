@@ -111,10 +111,30 @@ root's questions, and that the root decides Orchestrator-owned matters with the 
 approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
 session ID. Later questions in the same revision are still dismissed but wake the root with no
 further notice, so a root that answers each notice with another question cannot loop; the bound is
-the durable decline ledger's first-for-class record. Since v282 the guidance also rides on every
-dismissal itself where the provider result can carry text (see
-[Full Control Response Text](#full-control-response-text)); the notice remains as the wake-up and
-for runners and providers that cannot. The dismissal is not blocked work.
+the durable decline ledger's first-for-class record. The dismissal is not blocked work. A root
+whose runner supports owner decisions (v281) receives `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`
+instead, which also names the route for a decision the campaign's owner kept. Since v282 that
+owner-route guidance also rides on every dismissal itself where the provider result can carry text
+(see [Full Control Response Text](#full-control-response-text)); the notice remains as the wake-up
+and for runners and providers that cannot.
+
+Owner decisions (#4064) are that route. `request_owner_decision` creates an `owner_decision`
+workflow decision: a question with explicit options and decision material that the evaluator makes
+human-owned (`owner_kept`) in every mode, under any boundary or grant. Only the campaign's owner
+resolves it, through the same human approval route as other human-owned requests; the root, its
+children and any other person are refused. Its card on the root is non-blocking (`async`): it
+neither sets the root `input_required` nor holds prompts, PR-watch wakes or campaign
+continuations, while Campaign Status counts it as waiting on the owner and lists it under Waiting
+for You (`ownerDecisions`). The owner's choice returns as the decision's resume prompt. The root may
+withdraw its own pending owner decision. `hand_workflow_decision_to_owner` moves one pending,
+unarmed Orchestrator-owned occurrence to the owner, one way: it records `ownerHandoff`, the owner
+alone resolves it, and every later request in the campaign for the same resource (its category
+and key, or the pull request, branch, issue or recommendation it names) is human-owned too, so a
+withdrawal and a new request cannot move it back; an Orchestrator-owned twin requested before the
+handoff is revoked when anyone tries to use it. Both routes need a v281 root runner and control
+plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
+Custom campaigns are unchanged.
+
 The root's own pending typed workflow decisions never park its provider, so they never stop a
 standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
@@ -185,7 +205,9 @@ Claude Code driver then replaces the person-worded deny text with
 `fullControlAutomaticResponseText`. It says that Wollipog dismissed or declined the request
 automatically under the campaign's Full Control policy, that no person saw it, that no option was
 chosen or nothing was approved, and what to do instead. A root question's text carries the same
-guidance as the notice, on every dismissal and not only the first in a revision. An
+guidance as `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`, including the owner-decision route
+(a v282 runner always has those v281 tools), on every dismissal and not only the first in a
+revision. An
 unresolved-effect decline says to retry with explicit worktree paths.
 
 `basis` names a class only when that is safe: `root_questions`, `external_elicitation`, the

@@ -395,6 +395,7 @@ export type RunnerRequestResult =
   | CampaignForgeObserveResultMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | import("@wollipog/protocol").RemoveWorkspaceResultMessage
   | import("@wollipog/protocol").AdoptProviderProfileResultMessage
   | import("@wollipog/protocol").ImportProviderCredentialResultMessage
   | import("@wollipog/protocol").RevokeProviderProfileGrantResultMessage

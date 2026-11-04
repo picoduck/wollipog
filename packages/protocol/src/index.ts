@@ -836,13 +836,23 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      controller's runners are v277; older peers keep it with the person.
 // 278: Issue-closure inspection can read an epic's members and their states (`epicMembers`, #4060), so
 //      a Full Control completed closure of an in-scope epic can be proven from its closed members.
+// 279: workspace removal (#4123). DELETE /api/runners/:id/workspaces/:workspaceId unregisters a
+//      Workspace. A managed one is removed in the control plane; a configured one is sent as
+//      remove_workspace, and the runner records the removal in its data directory, stops
+//      advertising it and answers remove_workspace_result. Runner views tag each Workspace's
+//      `source`. Older runners keep their configured Workspaces and the control plane refuses.
+// 281: Owner decisions (#4064). A Full Control root asks its campaign's owner a typed question that
+//      only that person can answer (`owner_decision`), and hands a pending Orchestrator-owned
+//      occurrence to the owner, one way. Both need a v281 root runner and control plane; an older
+//      root keeps today's behavior.
 // 282: Full Control response attribution (#4063). When the server's Full Control policy dismisses a
 //      question or declines a tool call, `answer_question` and `resolve_permission` carry
 //      `automaticResponse`: the policy and, only when it is safe to name, the request class. A v282
 //      runner whose provider result carries text (Claude Code) tells the agent that Wollipog
-//      declined it under Full Control, that no person saw it and what to do instead. The field is
-//      sent only to a v282 runner; older runners keep the fixed person-worded text and the separate
-//      notices. A person's dismissal or decline never carries it.
+//      declined it under Full Control, that no person saw it and what to do instead (for a root's
+//      question, including the v281 owner-decision route). The field is sent only to a v282 runner;
+//      older runners keep the fixed person-worded text and the separate notices. A person's
+//      dismissal or decline never carries it.
 export const PROTOCOL_VERSION = 282;
 
 export * from "./campaign-authority.js";
@@ -859,6 +869,7 @@ export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
+export * from "./workspace-removal.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -1059,6 +1070,9 @@ export interface RunnerControlPlaneAttestation {
  * Keep this table aligned with the version history above. Missing protocol metadata means the
  * runner predates v15, so support cannot be proven and callers must fail closed. */
 export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
+  /** v279 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
+   * Workspaces added in Wollipog are removed by the control plane on any runner. */
+  workspaceRemoval: 279,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -1215,6 +1229,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
+  /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
+   * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
+   * root's runner by the control plane and against the control plane by the runner. */
+  ownerDecisions: 281,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -2756,8 +2774,10 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
 /** `campaign_follow_up_admission` (#2940): one follow-up past the campaign's approval limit. The server
  * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
+/** `owner_decision` (#4064): a Full Control root's question for its campaign's owner, created only
+ * through request_owner_decision. Always the person's: no agent can answer, approve or resolve it. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission";
+  "campaign_follow_up_admission" | "owner_decision";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -2990,6 +3010,22 @@ export interface OrchestratorCampaignHandoff {
 /** Handed-off items the projection lists at most; `total` keeps the full count. */
 export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 
+/** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
+export interface CampaignOwnerDecision {
+  occurrenceId: string;
+  /** The session whose request it is: the root for an owner decision, else the requester. */
+  sessionId: string;
+  category: WorkflowDecisionCategory;
+  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). */
+  summary: string;
+  /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
+  handedOff: boolean;
+  createdAt: number;
+}
+
+/** Owner decisions the projection lists at most; `total` keeps the full count. */
+export const CAMPAIGN_OWNER_DECISIONS_LIMIT = 20;
+
 /** Why an Orchestrator assigned UI Evidence Approval cannot exercise it. Client-scoped codes
  * describe the campaign; evidence-scoped codes describe one exact decision. */
 export type UiEvidenceReviewUnavailableCode =
@@ -3076,6 +3112,10 @@ export interface OrchestratorCampaignProjection {
    * (#4070). The owner's to-do list; omitted when there are none. Bounded by
    * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */
   handoffs?: { total: number; items: OrchestratorCampaignHandoff[] };
+  /** v281 (#4064): pending decisions the campaign's owner kept, oldest first: the root's owner
+   * decisions and the occurrences it handed to the owner. Root view only; omitted when there are
+   * none. Bounded by CAMPAIGN_OWNER_DECISIONS_LIMIT; `total` is the full count. */
+  ownerDecisions?: { total: number; items: CampaignOwnerDecision[] };
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -3749,6 +3789,8 @@ export interface WorkspaceInfo {
   scope?: ResourceScope;
   /** Principal-specific authority to manage this Location's access. Older control planes omit it. */
   canManage?: boolean;
+  /** Where the Workspace came from (#4123). Older control planes omit it. */
+  source?: import("./workspace-removal.js").WorkspaceSource;
 }
 
 /** How a durable Project Location entered the control-plane catalog. */
@@ -5275,6 +5317,19 @@ export interface AutomationCreationResult {
   createdAt: number;
 }
 
+/** A decision the campaign's owner kept for themselves (#4064), as a Full Control root asks it. */
+export interface OwnerDecisionSnapshot {
+  category: "owner_decision";
+  question: string;
+  options: WorkflowDecisionOption[];
+  recommendedOptionId?: string;
+  /** What the owner needs to decide: links, head SHAs, check state, what each option does. */
+  material?: string;
+}
+
+/** Bounds of an owner decision, shared by the runner tool and the control plane. */
+export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, maxOptions: 12 } as const;
+
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
@@ -5286,6 +5341,7 @@ export type WorkflowDecisionResourceSnapshot =
       options: WorkflowDecisionOption[];
       recommendedOptionId?: string;
     }
+  | OwnerDecisionSnapshot
   | {
       category: "pr_merge";
       /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
@@ -5474,6 +5530,30 @@ export interface WorkflowDecisionView {
   /** The occurrence that replaced this one, when the status reads `superseded` (#4066). Absent for
    * an occurrence superseded before this was recorded. */
   supersededBy?: string;
+  /** v281 (#4064): the Full Control root handed this Orchestrator-owned occurrence to the campaign's
+   * owner. One way: it stays the person's, and so does every later request for the same resource
+   * in the campaign. Only a person resolves it. */
+  ownerHandoff?: { bySessionId: string; at: number; reason: string };
+}
+
+/** v281 (#4064): a Full Control root's question for its campaign's owner. */
+export interface CreateOwnerDecisionRequest {
+  /** Caller-owned idempotency key. Reuse with different content fails. */
+  requestId: string;
+  /** Stable identity; a newer owner decision under the same key replaces an unanswered older one. */
+  resourceKey: string;
+  question: string;
+  options: WorkflowDecisionOption[];
+  recommendedOptionId?: string;
+  material?: string;
+}
+
+/** v281 (#4064): hand one pending Orchestrator-owned occurrence to the campaign's owner. */
+export interface HandWorkflowDecisionToOwnerRequest {
+  /** Why the owner decides it. Stored on the decision; audit records only its digest. */
+  reason: string;
+  /** The requesting session, when it is not the root itself. */
+  sessionId?: string;
 }
 
 export interface CreateWorkflowDecisionRequest {
@@ -10368,6 +10448,7 @@ export type RunnerToControlPlane =
   | ProviderLoginsUpdatedMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | import("./workspace-removal.js").RemoveWorkspaceResultMessage
   | AdoptProviderProfileResultMessage
   | ImportProviderCredentialResultMessage
   | RevokeProviderProfileGrantResultMessage
@@ -12465,6 +12546,7 @@ export type ControlPlaneToRunner =
   | SubmitProviderLoginCodeMessage
   | CancelProviderLoginMessage
   | RemoveProviderAccountMessage
+  | import("./workspace-removal.js").RemoveWorkspaceMessage
   | AdoptProviderProfileMessage
   | ImportProviderCredentialMessage
   | RevokeProviderProfileGrantMessage

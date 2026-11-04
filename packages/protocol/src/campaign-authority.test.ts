@@ -2,9 +2,9 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   campaignAuthorityPreflight, campaignCodeOperationTargets, campaignWorkflowOwner, completeParentControlDecisions,
-  resolveCampaignAuthority, validCampaignControl,
+  resolveCampaignAuthority, validCampaignControl, ownerDecisionProtected,
   fullControlStandingHumanRequired, humanRequiredRulesExist, FULL_CONTROL_DECLINED_CLASSES, type GovernancePolicy,
-  fullControlAutomaticResponse, fullControlAutomaticResponseText, parseFullControlAutomaticResponse,
+  fullControlAutomaticResponse, fullControlAutomaticResponseText, parseFullControlAutomaticResponse, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE,
   HUMAN_ONLY_PARENT_CONTROL_POLICY, type CampaignControl, type ParentControlDecisionPolicy, type PendingApproval, type WorkflowDecisionResourceSnapshot,
 } from "./index.js";
 
@@ -793,8 +793,14 @@ test("Full Control response attribution names only safe classes and never invent
     { policy: "full_control", basis: "unresolved_effects" });
   assert.match(fullControlAutomaticResponseText("tool", { policy: "full_control", basis: "unresolved_effects" }),
     /could not resolve every file it would touch to a real path inside this session's worktree\. Retry with explicit file paths/);
-  assert.match(fullControlAutomaticResponseText("question", { policy: "full_control", basis: "root_questions" }),
-    /\(Root Questions\)\. No person saw it, and none of its options was chosen\. You own every Orchestrator-owned decision/);
+  // A root's in-result text says Full Control dismissed it and names the owner-decision route (#4064):
+  // only a runner new enough for the owner-decision tools receives the attribution.
+  const rootText = fullControlAutomaticResponseText("question", { policy: "full_control", basis: "root_questions" });
+  assert.match(rootText, /\(Root Questions\)\. No person saw it, and none of its options was chosen\. You own every Orchestrator-owned decision/);
+  assert.match(rootText, /request_owner_decision/);
+  assert.match(rootText, /hand_workflow_decision_to_owner/);
+  assert.ok(rootText.endsWith(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE.slice(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE.indexOf("You own"))),
+    "the in-result guidance is exactly the owner-route notice's guidance");
   // A runner claims an automatic response only as the server sent it.
   assert.equal(parseFullControlAutomaticResponse(undefined), undefined);
   assert.equal(parseFullControlAutomaticResponse({ policy: "person" }), undefined);
@@ -802,4 +808,26 @@ test("Full Control response attribution names only safe classes and never invent
   assert.deepEqual(parseFullControlAutomaticResponse({ policy: "full_control", basis: "secrets_and_sign_in" }), { policy: "full_control" });
   assert.deepEqual(parseFullControlAutomaticResponse({ policy: "full_control", basis: "root_questions", extra: 1 }),
     { policy: "full_control", basis: "root_questions" });
+});
+
+test("an owner decision is the person's in every mode and to every requester (#4064)", () => {
+  const snapshot: WorkflowDecisionResourceSnapshot = { category: "owner_decision", question: "Which merge order?",
+    options: [{ optionId: "a", label: "A First" }, { optionId: "b", label: "B First" }] };
+  for (const mode of [control, { mode: "custom" as const }, undefined]) for (const root of [true, false]) {
+    for (const decisions of [HUMAN_ONLY_PARENT_CONTROL_POLICY, { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, implementation_question: "orchestrator" as const }]) {
+      const result = resolveCampaignAuthority({ ...base, control: mode, decisions, root, snapshot, trustedSource: "workflow_route" });
+      assert.deepEqual([result.owner, result.basis, result.reason], ["human", "human_required", "owner_kept"]);
+      assert.equal(campaignWorkflowOwner(mode, decisions, "owner_decision", true), "human");
+    }
+  }
+});
+
+test("an owner decision may ask about a credential design but never for a value (#4064)", () => {
+  const options = [{ optionId: "lease", label: "Short-Lived Lease" }, { optionId: "broker", label: "Broker Process" }];
+  assert.equal(ownerDecisionProtected({ question: "Which credential design should the provider bridge use?", options,
+    material: "PR https://github.com/picoduck/wollipog/pull/7 at head abc1234; both designs pass CI." }), false);
+  assert.equal(ownerDecisionProtected({ question: "Merge picoduck/wollipog#7 with its acknowledged risk?", options }), false);
+  assert.equal(ownerDecisionProtected({ question: "Please paste your API key here", options }), true);
+  assert.equal(ownerDecisionProtected({ question: "Which credential design should the provider bridge use?", options,
+    material: "Please paste your API key here before choosing." }), true, "the material is screened too");
 });

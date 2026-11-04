@@ -34,6 +34,18 @@ export function WorkflowDecisionSummary({ snapshot, closingReferenceCheck }: {
         <p>{snapshot.question}</p>
         <ul>{snapshot.options.map((option) => <li key={option.optionId}>{option.label}</li>)}</ul>
       </>;
+    case "owner_decision":
+      // A decision the campaign's owner kept (#4064): the root's question, what it rests on, and
+      // the options, of which only the owner chooses one.
+      return <>
+        <p>{snapshot.question}</p>
+        {snapshot.material && <div className="code-well"><pre>{snapshot.material}</pre></div>}
+        <ul>{snapshot.options.map((option) => <li key={option.optionId}>
+          {option.label}{option.optionId === snapshot.recommendedOptionId ? " (Recommended)" : ""}
+          {option.description ? <>: {option.description}</> : null}
+        </li>)}</ul>
+        <p>You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.</p>
+      </>;
     case "campaign_issue_scope":
       return <CampaignIssueScopeSummary snapshot={snapshot} />;
     case "issue_closure":

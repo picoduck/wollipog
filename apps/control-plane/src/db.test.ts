@@ -1638,8 +1638,8 @@ test("registerRunner + getRunner round-trips driver/context/capabilities via JSO
   assert.deepEqual(
     view!.workspaces,
     [
-      { id: "ws-1", name: "Repo One", path: "C:/code/one", additionalDirectoryGrants: ["C:/code/shared"] },
-      { id: "ws-2", name: "Repo Two", path: "C:/code/two" },
+      { id: "ws-1", name: "Repo One", path: "C:/code/one", additionalDirectoryGrants: ["C:/code/shared"], source: "configured" },
+      { id: "ws-2", name: "Repo Two", path: "C:/code/two", source: "configured" },
     ],
   );
 
@@ -2025,7 +2025,7 @@ test("registerRunner is idempotent: re-register replaces workspaces/agents and u
   assert.equal(view.connectedAt, 900);
   assert.equal(view.agents.length, 1);
   assert.equal(view.agents[0].id, "claude-agent");
-  assert.deepEqual(view.workspaces, [{ id: "ws-9", name: "Only", path: "/only" }]);
+  assert.deepEqual(view.workspaces, [{ id: "ws-9", name: "Only", path: "/only", source: "configured" }]);
 });
 
 test("createWorkspace: CP-owned project is listed, path-resolvable, and survives re-register", () => {
@@ -2076,7 +2076,7 @@ test("Machine names and Machine-scoped Workspaces survive re-register without cr
   db.registerRunner(meta({ hostname: "same-host", workspaces: [] }), 1_000);
   const next = db.getRunner("runner-1")!;
   assert.equal(next.displayName, "Primary Development Machine");
-  assert.deepEqual(next.workspaces, [workspace]);
+  assert.deepEqual(next.workspaces, [{ ...workspace, source: "managed" }]);
 
   db.deleteRunner("runner-1");
   db.registerRunner(meta(), 1_100);

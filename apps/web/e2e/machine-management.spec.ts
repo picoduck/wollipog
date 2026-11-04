@@ -972,6 +972,45 @@ for (const width of [1440, 390]) {
   });
 }
 
+for (const width of [1440, 390]) {
+  test(`at ${width}px Remove Workspace confirms, Cancel changes nothing, a refusal explains itself, and removal drops the row (#4123)`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto(`/machine-management-e2e.html?workspaces=removable${width > 760 ? `&${DESIGN_WORKSTATION}` : ""}`);
+    if (width <= 760) await machineRow(page).click();
+    const workspaces = page.getByRole("region", { name: /^Workspaces/ });
+    const rows = workspaces.locator(".surface > .row");
+    await expect(rows).toHaveCount(3);
+    const removeIn = (name: string) => rows.filter({ hasText: name }).getByRole("button", { name: "Remove…" });
+
+    await removeIn("Scratch").click();
+    const dialog = page.getByRole("dialog", { name: "Remove Workspace" });
+    await expect(dialog.locator(".facts")).toContainText("Scratch");
+    await expect(dialog.locator(".facts")).toContainText("D:\\scratch");
+    await expect(dialog.locator(".facts")).toContainText("Design Workstation");
+    await expect(dialog).toContainText("the folder and its files stay where they are");
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(rows).toHaveCount(3);
+    expect(await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.removedWorkspaces())).toEqual([]);
+
+    await removeIn("Acme Storefront").click();
+    await dialog.getByRole("button", { name: "Remove Workspace" }).click();
+    await expect(dialog.locator('.notice.t-danger[role="alert"]'))
+      .toContainText("Remove it from the project “Acme Storefront” first.");
+    await expect(rows).toHaveCount(3);
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await dialog.getByRole("button", { name: "Cancel" }).click();
+
+    await removeIn("Scratch").click();
+    await dialog.getByRole("button", { name: "Remove Workspace" }).click();
+    await expect(dialog).toHaveCount(0);
+    await expect(page.getByText("Workspace removed.", { exact: true })).toBeVisible();
+    await expect(rows).toHaveCount(2);
+    await expect(rows.filter({ hasText: "Scratch" })).toHaveCount(0);
+    expect(await page.evaluate(() => window.__WOLLIPOG_MACHINE_E2E__.removedWorkspaces())).toEqual(["scratch"]);
+  });
+}
+
 test("turning on automatic switching confirms the provider terms first, and Cancel saves nothing (#2991)", async ({ page }) => {
   await openSettings(page);
   const dialog = settingsDialog(page);

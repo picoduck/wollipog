@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, FULL_CONTROL_ROOT_QUESTION_MESSAGE, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   type ControlPlaneToRunner, type RunnerMetadata, type RunnerToControlPlane,
 } from "@wollipog/protocol";
@@ -376,7 +376,7 @@ for (const ownDecisionPending of [true, false]) {
         record.resource.occurrenceId === recoveryCoordinate("request_ask_person")).length, 0, "no Orchestrator-owned request the root would wait on");
       assert.equal(records.filter((record) => record.reason === "request_declined").length, 0, "a root's own question is not blocked work");
       assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0, "the person is never asked");
-      const guidance = toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" && message.text === FULL_CONTROL_ROOT_QUESTION_MESSAGE);
+      const guidance = toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" && message.text === FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE);
       assert.equal(guidance.length, 1, "the root is told nobody saw the question and how to decide it");
       if (!ownDecisionPending) {
         assert.notEqual(h.db.campaignContinuationAdmission("root").reason,
@@ -406,7 +406,8 @@ for (const runnerProtocol of [PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL.f
         [1, 2].map((index) => [`ask-${index}`, "dismiss", current ? { policy: "full_control", basis: "root_questions" } : undefined]),
         "a second question in the same revision is attributed too; an older runner is never sent the field");
       assert.equal(toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" &&
-        message.text === FULL_CONTROL_ROOT_QUESTION_MESSAGE).length, 1, "the existing notice still arrives once per revision");
+        message.text === FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE).length, 1,
+      "the existing (v281 owner-route) notice still arrives once per revision");
     } finally { h.close(); }
   });
 }
@@ -433,7 +434,7 @@ test("a Full Control root that keeps asking gets every question dismissed but on
     const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
     (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
     const guidance = () => toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" &&
-      message.text === FULL_CONTROL_ROOT_QUESTION_MESSAGE).length;
+      message.text === FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE).length;
     // A root answering each notice with a fresh question: distinct request and occurrence ids.
     for (const index of [1, 2, 3]) {
       h.svc.onSessionEvent("root", { kind: "question_request", requestId: `ask-${index}`, occurrenceId: `request_ask_${index}`,
@@ -481,4 +482,26 @@ test("a queued ordinary hook ask promoted after a person resolves the gate ahead
     assert.ok(!h.declinesSent().length, "a hook ask is settled server-side, with no runner round trip");
     assert.ok(!h.fromRunner.some((message) => message.type === "session_event" && message.payload.kind === "user_message"), "no root model turn");
   } finally { h.close(); }
+});
+
+test("the dismissal notice names the owner-decision route only for a root runner that has it (#4064)", async () => {
+  for (const [runnerProtocol, expected] of [[PROTOCOL_VERSION, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE],
+    [280, FULL_CONTROL_ROOT_QUESTION_MESSAGE]] as const) {
+    const h = bridge(undefined, 0, runnerProtocol);
+    try {
+      assert.ok(h.enable().ok);
+      const toRunner: ControlPlaneToRunner[] = [];
+      const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+      (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: "kept", occurrenceId: "request_kept", requestSource: "provider_question",
+        questions: [{ id: "merge", question: "Do you consent to merging the pull request with its acknowledged risk?",
+          options: [{ label: "Merge" }, { label: "Wait" }] }] });
+      for (let index = 0; index < 4; index += 1) await tick();
+      const notices = toRunner.flatMap((message) => message.type === "prompt_session" && message.sessionId === "root" ? [message.text] : []);
+      assert.deepEqual(notices, [expected], `runner v${runnerProtocol}`);
+    } finally { h.close(); }
+  }
+  assert.match(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, /request_owner_decision/u);
+  assert.match(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, /hand_workflow_decision_to_owner/u);
+  assert.doesNotMatch(FULL_CONTROL_ROOT_QUESTION_MESSAGE, /request_owner_decision/u);
 });

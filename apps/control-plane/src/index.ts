@@ -64,6 +64,7 @@ import {
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
+  workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
@@ -96,6 +97,8 @@ import {
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
+  type CreateOwnerDecisionRequest,
+  type HandWorkflowDecisionToOwnerRequest,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
   type GetCampaignWorkItemsRequest,
@@ -1877,6 +1880,7 @@ app.register(async (instance) => {
       case "edit_queued_prompt_result":
       case "provider_login_result":
       case "remove_provider_account_result":
+      case "remove_workspace_result":
       case "adopt_provider_profile_result":
       case "import_provider_credential_result":
       case "revoke_provider_profile_grant_result":
@@ -4769,6 +4773,39 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/withdraw", async (r
   ));
 });
 
+// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
+// credential session; the service checks that it is the campaign's root and that only a person
+// can answer.
+app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// #4064: the root hands one of its pending Orchestrator-owned decisions to the campaign's owner.
+// `:id` is the caller's own credential session; the body names the requester when it is a child.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<HandWorkflowDecisionToOwnerRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  return respond(reply, svc.handWorkflowDecisionToOwner(id, occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
 app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -6504,6 +6541,68 @@ app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
     const message = (error as Error).message;
     return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
   }
+});
+
+// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
+// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
+// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
+// which keeps it removed across restarts, and older runners are refused with an update hint.
+app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  // A person removes a workspace, never an agent credential, and only one they may manage.
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  const runner = db.getRunner(runnerId);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  const source = db.workspaceSource(runnerId, workspaceId);
+  if (!source) return reply.code(404).send({ error: "workspace not found" });
+  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (source === "configured") {
+    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
+  }
+  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
+  // workspace while its runner is asked; a managed workspace is gone at this point.
+  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
+  if (!started) return reply.code(404).send({ error: "workspace not found" });
+  if (!started.ok) {
+    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
+  }
+  hub.runnerChanged(runnerId);
+  if (started.source === "managed") return { removed: true };
+  const requestId = `workspace_remove_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(runnerId, requestId, {
+      type: "remove_workspace",
+      requestId,
+      runnerId,
+      workspaceId,
+      path: started.path,
+    });
+    if (result.type !== "remove_workspace_result" || !result.ok) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return result.type === "remove_workspace_result"
+        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
+        : reply.code(502).send({ error: "unexpected runner reply" });
+    }
+  } catch (error) {
+    if (isRunnerRequestNotSentError(error)) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return reply.code(409).send({ error: "runner is offline" });
+    }
+    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
+    // restores it if the runner still has it.
+    return reply.code(504).send({
+      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
+    });
+  }
+  db.finishWorkspaceRemoval(runnerId, workspaceId);
+  return { removed: true };
 });
 
 app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {
