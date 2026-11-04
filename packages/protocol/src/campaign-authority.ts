@@ -891,6 +891,7 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
   if (control.boundary.budgetAuthority && !runnerSupportsProtocol(protocolVersion, "campaignBudgetAdmission")) {
     return olderRunner(runnerCapabilityRequirementError(protocolVersion, "campaignBudgetAdmission", "campaign limits"));
   }
-  if ((protocolVersion ?? 0) < (control.boundary.issueAuthority ? 217 : 215) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
+  const authorityFloor = control.boundary.issueAuthority ? "fullControlIssueAuthority" : "fullControlAuthority";
+  if (!runnerSupportsProtocol(protocolVersion, authorityFloor) || !["codex-app-server", "claude-code"].includes(driver)) return { supported: false, reason: "This provider path cannot enforce the Full Control authority contract; use Custom or update the runner." };
   return { supported: true };
 }
