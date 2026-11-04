@@ -2241,7 +2241,8 @@ nothing and leaves the approval in place, armed for a merge, so it can be retrie
 to five attempts. An uncertain enqueue is never replayed; reconcile it once the forge reads MERGED.
 An enqueue Wollipog ran left no provider receipt in any harness, so for every harness, Codex App
 Server included, reconciliation and a lifecycle end settle it from the forge alone. The runner
-reads the pull request (`observeOnly`, from the filesystem root) and never enqueues.
+reads the pull request (a separate `pr_merge_observe` action, from the filesystem root, which a
+runner that does not know it refuses) and never enqueues.
 An uncertain deletion may be executed again, because a compare-and-delete pinned to the approved
 head cannot do more than the approval allowed. The consume result for a merge or deletion names
 this fallback (`forgeActionFallback`).

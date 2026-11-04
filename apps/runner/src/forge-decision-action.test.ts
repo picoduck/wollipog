@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { GhOutcome } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue } from "./forge-decision-action.js";
+import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
 
 const HEAD = "a".repeat(40);
 const MERGE = "c".repeat(40);
@@ -140,15 +140,19 @@ test("a reconciliation read reports the merge and never enqueues (#4067)", async
     const calls: string[][] = [];
     return { calls, gh: async (args: string[]) => { calls.push(args); return args[0] === "api" ? ok(pullRequest(pr)) : ok(); } };
   };
-  const observe = { ...enqueue, observeOnly: true as const };
+  const observe = { kind: "pr_merge_observe" as const, repository: enqueue.repository, pullRequest: enqueue.pullRequest,
+    headSha: enqueue.headSha };
   const merged = read({ state: "MERGED" });
-  assert.deepEqual(await executePullRequestEnqueue(observe, merged.gh), { outcome: "already_merged" });
+  assert.deepEqual(await observePullRequestMerge(observe, merged.gh), { outcome: "already_merged" });
   const otherHead = read({ state: "MERGED", headRefOid: "f".repeat(40) });
-  assert.equal((await executePullRequestEnqueue(observe, otherHead.gh)).refusal?.reason, "pull_request_mismatch",
+  assert.equal((await observePullRequestMerge(observe, otherHead.gh)).refusal?.reason, "pull_request_mismatch",
     "only the exact approved head counts as merged");
   const open = read({});
-  assert.equal((await executePullRequestEnqueue(observe, open.gh)).refusal?.reason, "pull_request_mismatch");
-  for (const { calls } of [merged, otherHead, open]) {
+  assert.equal((await observePullRequestMerge(observe, open.gh)).refusal?.reason, "pull_request_mismatch");
+  const queued = read({ mergeQueueEntry: { state: "QUEUED" } });
+  assert.equal((await observePullRequestMerge(observe, queued.gh)).refusal?.reason, "pull_request_mismatch",
+    "queued is not merged");
+  for (const { calls } of [merged, otherHead, open, queued]) {
     assert.deepEqual(calls.map((args) => args[0]), ["api"], "one read, and no gh pr merge");
   }
 });

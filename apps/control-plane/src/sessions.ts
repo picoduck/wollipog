@@ -14714,8 +14714,9 @@ export class SessionsService {
       try {
         answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
           type: "forge_decision_action", requestId, sessionId: child.id, occurrenceId: decision.occurrenceId,
-          action: { kind: "pr_merge_enqueue", repository: snapshot.repository, pullRequest: snapshot.pullRequest,
-            headSha: snapshot.headSha, observeOnly: true },
+          // Its own action kind, so a runner that does not know it refuses it rather than enqueuing.
+          action: { kind: "pr_merge_observe", repository: snapshot.repository, pullRequest: snapshot.pullRequest,
+            headSha: snapshot.headSha },
         }, 45_000) as unknown as Partial<ForgeDecisionActionResultMessage>;
       } catch (error) {
         return fail(isRunnerRequestTimeoutError(error) ? "workflow action reconciliation timed out"

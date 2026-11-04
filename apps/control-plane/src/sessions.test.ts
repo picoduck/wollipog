@@ -7411,7 +7411,7 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
         { resourceSnapshot: armed.snapshot }, () => true);
       assert.equal(reconciled.data?.status, "consumed", reconciled.error);
       assert.equal(seen.length, 2);
-      assert.ok(seen.every((message) => message.action.kind === "pr_merge_enqueue" && message.action.observeOnly === true &&
+      assert.ok(seen.every((message) => message.action.kind === "pr_merge_observe" &&
         message.action.headSha === armed.snapshot.headSha), "a read-only check of exactly the approved head");
       assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === armed.decision.occurrenceId &&
         entry.outcome === "consumed" && entry.actor.id === "workflow-decision-forge-reconciliation"));

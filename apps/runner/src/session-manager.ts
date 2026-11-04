@@ -12,7 +12,7 @@ import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, 
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
-import { executeBranchDeletion, executePullRequestEnqueue } from "./forge-decision-action.js";
+import { executeBranchDeletion, executePullRequestEnqueue, observePullRequestMerge } from "./forge-decision-action.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -19133,7 +19133,9 @@ export class SessionManager {
         ? await executeBranchDeletion(message.action, gh)
         : message.action?.kind === "pr_merge_enqueue"
           ? await executePullRequestEnqueue(message.action, gh)
-          : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };
+          : message.action?.kind === "pr_merge_observe"
+            ? await observePullRequestMerge(message.action, gh)
+            : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };
       this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId,
         occurrenceId: message.occurrenceId, kind: message.action?.kind, outcome: result.outcome,
         ...(result.refusal ? { reason: result.refusal.reason } : {}) }));

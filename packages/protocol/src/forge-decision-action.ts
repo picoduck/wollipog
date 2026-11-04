@@ -89,12 +89,12 @@ export interface ExecuteWorkflowDecisionRequest {
 
 export type ForgeDecisionAction =
   | { kind: "branch_deletion"; repository: string; branch: string; pullRequest: number; headSha: string; mergeCommitSha: string }
-  | {
-    kind: "pr_merge_enqueue"; repository: string; pullRequest: number; headSha: string;
-    /** Read the pull request only, never enqueue: proof for reconciling an enqueue Wollipog already
-     * performed. `already_merged` means GitHub merged exactly `headSha`; anything else refuses. */
-    observeOnly?: true;
-  };
+  | { kind: "pr_merge_enqueue"; repository: string; pullRequest: number; headSha: string }
+  /** Read the pull request only, never enqueue: proof for reconciling an enqueue Wollipog already
+   * performed. `already_merged` means GitHub merged exactly `headSha`; anything else refuses. Its own
+   * kind, never a flag on the enqueue, so a runner that does not know it refuses it as unknown
+   * instead of running an enqueue. */
+  | { kind: "pr_merge_observe"; repository: string; pullRequest: number; headSha: string };
 
 /** Control plane to the requesting child's runner: perform exactly this approved action. */
 export interface ForgeDecisionActionMessage {

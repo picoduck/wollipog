@@ -157,6 +157,23 @@ export async function executePullRequestEnqueue(
   action: Extract<ForgeDecisionAction, { kind: "pr_merge_enqueue" }>,
   gh: GhRunner,
 ): Promise<ForgeDecisionActionResult> {
+  return pullRequestEnqueue(action, gh, true);
+}
+
+/** A reconciliation read (#4067): the same read as an enqueue, then stop. `already_merged` only for
+ * the exact approved head; an open, queued, closed or moved pull request refuses. Never writes. */
+export async function observePullRequestMerge(
+  action: Extract<ForgeDecisionAction, { kind: "pr_merge_observe" }>,
+  gh: GhRunner,
+): Promise<ForgeDecisionActionResult> {
+  return pullRequestEnqueue(action, gh, false);
+}
+
+async function pullRequestEnqueue(
+  action: { repository: string; pullRequest: number; headSha: string },
+  gh: GhRunner,
+  write: boolean,
+): Promise<ForgeDecisionActionResult> {
   if (!REPOSITORY.test(action.repository) || !Number.isSafeInteger(action.pullRequest) || action.pullRequest < 1 || !SHA.test(action.headSha)) {
     return refused("pull_request_mismatch", "The decision does not name a GitHub pull request this runner can enqueue.");
   }
@@ -170,11 +187,10 @@ export async function executePullRequestEnqueue(
     return refused("pull_request_mismatch", "The pull request's head is no longer the approved head.");
   }
   if (pr.state === "MERGED") return { outcome: "already_merged" };
+  if (!write) return refused("pull_request_mismatch", "The pull request has not merged; nothing was enqueued.");
   if (pr.state !== "OPEN") return refused("pull_request_mismatch", "The pull request is closed.");
   if (record(pr.mergeQueueEntry)) return { outcome: "already_queued" };
-  // A reconciliation read: whatever the field holds, its presence alone means never write.
-  if ("observeOnly" in action) return refused("pull_request_mismatch", "The pull request has not merged; nothing was enqueued.");
-  const url =`https://github.com/${action.repository}/pull/${action.pullRequest}`;
+  const url = `https://github.com/${action.repository}/pull/${action.pullRequest}`;
   // The canonical approved command: pinned to the head, never --delete-branch.
   const merged = await gh(["pr", "merge", url, "--squash", "--match-head-commit", action.headSha]);
   if (merged.code === null) return { outcome: "enqueued" };
