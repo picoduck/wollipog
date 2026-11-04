@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { execFileSync } from "node:child_process";
+import { execFileSync } from "@wollipog/test-support/bounded-child-process";
 import { readFileSync } from "node:fs";
 import { FAST_PROSE_FILES, verifyProseReferences, selectGroups } from "./ci-suite-policy-v1-1.mjs";
 import { makeSelection, parseSelection, SELECTION_MARKER, hash } from "./ci-suite-selection-v1-1.mjs";
@@ -54,7 +54,7 @@ test("prose guard catches direct tests, indirect selector references, basename r
 
 test("committed prose allowlist has no reference in the tracked test/selector inputs", () => {
   assert.deepEqual(FAST_PROSE_FILES, []);
-  const tree = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean).map((path) => ({ path }));
+  const tree = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8", timeout: 10000 }).split("\0").filter(Boolean).map((path) => ({ path }));
   assert.equal(verifyProseReferences({ tree, readBlob: ({ path }) => readFileSync(path, "utf8") }), true);
 });
 
