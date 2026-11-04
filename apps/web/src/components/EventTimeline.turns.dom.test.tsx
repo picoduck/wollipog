@@ -45,6 +45,9 @@ Object.defineProperty(elementPrototype, "offsetHeight", {
   get(this: HTMLElement) { return isRow(this) ? rowHeight(this) : READER_HEIGHT; },
 });
 Object.defineProperty(elementPrototype, "offsetWidth", { configurable: true, get: () => 800 });
+// The scroll viewport uses client dimensions; rows retain border-box measurements above.
+Object.defineProperty(elementPrototype, "clientHeight", { configurable: true, get: () => READER_HEIGHT });
+Object.defineProperty(elementPrototype, "clientWidth", { configurable: true, get: () => 800 });
 elementPrototype.getBoundingClientRect = function (this: HTMLElement) {
   const height = isRow(this) ? rowHeight(this) : READER_HEIGHT;
   return { top: 0, left: 0, right: 800, bottom: height, width: 800, height, x: 0, y: 0, toJSON() {} } as DOMRect;
