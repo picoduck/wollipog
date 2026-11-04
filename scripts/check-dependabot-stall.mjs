@@ -3,6 +3,7 @@
 import { appendFileSync, readFileSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
+import semver from "semver";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
@@ -131,9 +132,10 @@ export function lastScheduledUpdate(schedule, now) {
   return { dateMs, instant };
 }
 
-// Splits uncovered releases into those the last scheduled update could not yet consider because of
-// the release-age gate, and the rest. Scheduled time stands in for the run's actual start, which is
-// a few minutes later; a release without a readable publish time stays uncovered.
+// Splits uncovered packages into those with no update the last scheduled run could consider (even
+// the oldest newer release was inside the release-age gate) and the rest. Scheduled time stands in
+// for the run's actual start, which is a few minutes later; a package without a readable publish
+// time stays uncovered.
 function separateGatedReleases(candidates, schedule, now) {
   const last = schedule === null ? null : lastScheduledUpdate(schedule, now);
   const uncovered = [];
@@ -141,7 +143,7 @@ function separateGatedReleases(candidates, schedule, now) {
 
   for (const [dependency, version] of candidates) {
     const row = { dependency, current: version.current, latest: version.latest };
-    const published = Date.parse(version.latestPublishedAt ?? "");
+    const published = Date.parse(version.earliestUpdatePublishedAt ?? "");
     if (
       last === null
       || !Number.isFinite(published)
@@ -261,9 +263,9 @@ export function renderReport(result) {
       "",
       "## Waiting for Dependabot's Release-Age Gate",
       "",
-      "The last scheduled update skipped these releases because they were too new. They do not fail this check; each becomes eligible at the update shown. A release that was a security fix still needs its own advisory review.",
+      "Every release newer than the installed version was too new for the last scheduled update. These do not fail this check; each becomes eligible at the update shown. A release that was a security fix still needs its own advisory review.",
       "",
-      "| Package | Current | Latest | Published | First Eligible Update |",
+      "| Package | Current | Latest | Oldest Newer Release Published | First Eligible Update |",
       "| --- | --- | --- | --- | --- |",
       ...waiting.map(({ dependency, current, latest, publishedAt, firstEligibleUpdate }) =>
         `| \`${dependency}\` | ${current} | ${latest} | ${formatInstant(publishedAt)} | ${formatInstant(firstEligibleUpdate)} |`),
@@ -315,12 +317,29 @@ export function collectOutdated(run = spawnSync) {
   return parsed;
 }
 
-// Adds `latestPublishedAt` (ISO string, or null when the registry lookup fails) to each outdated
-// entry. A null publish time keeps an uncovered release reported as uncovered.
+// The earliest publish time among releases newer than `current` and no newer than `latest`, from a
+// registry `time` map, or null when none can be read. Prereleases count only when `current` is one.
+function earliestUpdatePublishedAt(times, current, latest) {
+  if (!semver.valid(current) || !semver.valid(latest)) return null;
+  let earliest = null;
+  for (const [candidate, published] of Object.entries(times ?? {})) {
+    if (!semver.valid(candidate) || !semver.gt(candidate, current) || semver.gt(candidate, latest)) continue;
+    if (semver.prerelease(candidate) && !semver.prerelease(current)) continue;
+    const ms = typeof published === "string" ? Date.parse(published) : Number.NaN;
+    if (!Number.isFinite(ms)) return null;
+    if (earliest === null || ms < earliest) earliest = ms;
+  }
+  return earliest === null ? null : new Date(earliest).toISOString();
+}
+
+// Adds `earliestUpdatePublishedAt` to each outdated entry: when the oldest release Dependabot
+// could move to was published. A package qualifies as waiting on the release-age gate only when
+// even that release was too new, so an older, already eligible update keeps it uncovered. A failed
+// lookup records null, which also keeps it uncovered.
 export function collectPublishTimes(outdated, run = spawnSync) {
   const annotated = {};
   for (const [dependency, version] of Object.entries(outdated)) {
-    let latestPublishedAt = null;
+    let earliest = null;
     const result = run("pnpm", ["view", dependency, "time", "--json"], {
       encoding: "utf8",
       maxBuffer: 10 * 1024 * 1024,
@@ -328,18 +347,15 @@ export function collectPublishTimes(outdated, run = spawnSync) {
     });
     if (!result.error && result.status === 0) {
       try {
-        const published = JSON.parse(result.stdout)?.[version.latest];
-        if (typeof published === "string" && Number.isFinite(Date.parse(published))) {
-          latestPublishedAt = published;
-        }
+        earliest = earliestUpdatePublishedAt(JSON.parse(result.stdout), version.current, version.latest);
       } catch {
         // Unparseable registry output leaves the publish time unknown.
       }
     }
-    if (latestPublishedAt === null) {
-      process.stderr.write(`Could not read the publish time of ${dependency}@${version.latest}.\n`);
+    if (earliest === null) {
+      process.stderr.write(`Could not read when ${dependency} releases after ${version.current} were published.\n`);
     }
-    annotated[dependency] = { ...version, latestPublishedAt };
+    annotated[dependency] = { ...version, earliestUpdatePublishedAt: earliest };
   }
   return annotated;
 }

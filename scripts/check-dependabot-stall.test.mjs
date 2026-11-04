@@ -306,8 +306,8 @@ updates:
       time: "23:00"
 `;
 
-function published(current, latest, latestPublishedAt) {
-  return { current, latest, latestPublishedAt };
+function published(current, latest, earliestUpdatePublishedAt) {
+  return { current, latest, earliestUpdatePublishedAt };
 }
 
 test("reads only the npm entry's schedule and refuses schedules it cannot place in time", () => {
@@ -423,16 +423,34 @@ test("renders waiting releases in their own section without failing the report",
   assert.doesNotMatch(report, /Outdated Packages Without Coverage/u);
 });
 
-test("annotates outdated packages with the latest version's publish time, or null", () => {
+test("annotates outdated packages with the oldest newer release's publish time, or null", () => {
   const calls = [];
   const registry = {
-    fastify: { status: 0, stdout: '{"5.12.7":"2026-10-20T00:00:00.000Z","5.12.8":"2026-11-02T10:46:39.236Z"}' },
+    fastify: {
+      status: 0,
+      stdout: JSON.stringify({
+        created: "2016-01-01T00:00:00.000Z",
+        "5.12.7": "2026-10-20T00:00:00.000Z",
+        "5.12.8": "2026-11-02T10:46:39.236Z",
+      }),
+    },
+    example: {
+      status: 0,
+      stdout: JSON.stringify({
+        "1.0.0": "2026-09-01T00:00:00.000Z",
+        "1.2.0-beta.1": "2026-09-15T00:00:00.000Z",
+        "1.1.0": "2026-10-01T00:00:00.000Z",
+        "1.2.0": "2026-11-02T10:00:00.000Z",
+        "2.0.0": "2026-08-01T00:00:00.000Z",
+      }),
+    },
     ws: { status: 1, stdout: "", stderr: "registry failed" },
     semver: { status: 0, stdout: '{"7.8.5":"2026-10-01T00:00:00.000Z"}' },
     postcss: { status: 0, stdout: "not json" },
   };
   const result = collectPublishTimes({
     fastify: outdated("5.12.7", "5.12.8"),
+    example: outdated("1.0.0", "1.2.0"),
     ws: outdated("8.22.0", "8.22.1"),
     semver: outdated("7.8.5", "7.8.6"),
     postcss: outdated("8.5.30", "8.5.32"),
@@ -442,9 +460,33 @@ test("annotates outdated packages with the latest version's publish time, or nul
   });
 
   assert.deepEqual(calls[0], ["pnpm", "view", "fastify", "time", "--json"]);
-  assert.equal(result.fastify.latestPublishedAt, "2026-11-02T10:46:39.236Z");
+  assert.equal(result.fastify.earliestUpdatePublishedAt, "2026-11-02T10:46:39.236Z");
   assert.equal(result.fastify.latest, "5.12.8");
-  assert.equal(result.ws.latestPublishedAt, null);
-  assert.equal(result.semver.latestPublishedAt, null);
-  assert.equal(result.postcss.latestPublishedAt, null);
+  // 1.1.0 is the oldest candidate: the stable install skips the prerelease, and 2.0.0 is past latest.
+  assert.equal(result.example.earliestUpdatePublishedAt, "2026-10-01T00:00:00.000Z");
+  assert.equal(result.ws.earliestUpdatePublishedAt, null);
+  assert.equal(result.semver.earliestUpdatePublishedAt, null);
+  assert.equal(result.postcss.earliestUpdatePublishedAt, null);
+});
+
+test("an older eligible update keeps a package uncovered even when its latest release is gated", () => {
+  const outdatedWithTimes = collectPublishTimes({ example: outdated("1.0.0", "1.2.0") }, () => ({
+    status: 0,
+    stdout: JSON.stringify({
+      "1.0.0": "2026-09-01T00:00:00Z",
+      "1.1.0": "2026-10-01T00:00:00Z",
+      "1.2.0": "2026-11-02T10:00:00Z",
+    }),
+  }));
+  const result = assessDependabotHealth({
+    outdated: outdatedWithTimes,
+    pulls: [],
+    issues: [],
+    config: NPM_SCHEDULE,
+    now: new Date("2026-11-03T14:00:00Z"),
+  });
+
+  assert.deepEqual(result.uncovered, [{ dependency: "example", current: "1.0.0", latest: "1.2.0" }]);
+  assert.deepEqual(result.waiting, []);
+  assert.equal(result.healthy, false);
 });
