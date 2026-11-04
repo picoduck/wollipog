@@ -1048,6 +1048,9 @@ kbd {
   .main { container: app / inline-size; }
 }
 .main-body {
+  /* Keep absolute accessibility text and compact table headers inside this scroller. Without
+     a containing block they extend the document and let the phone's whole shell scroll (#4152). */
+  position: relative;
   flex: 1;
   min-height: 0;
   overflow: auto;
@@ -1563,6 +1566,8 @@ kbd {
   padding: 0;
 }
 .master-detail-detail {
+  /* Nested details own their hidden status text too; it must not extend the outer page scroller. */
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 920px);
   align-content: start;

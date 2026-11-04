@@ -1,4 +1,6 @@
 import React from "react";
+import { Shell } from "../App.js";
+import { ThemeProvider } from "../components/ThemeProvider.js";
 import { createRoot } from "react-dom/client";
 import type {
   AutomationExecution,
@@ -32,6 +34,7 @@ import "../styles.css";
  * Two automations — one enabled that has run, one paused that never ran — on the list, their
  * pages (`?route=/automations/~<id>`, #2968) and the editor. `mobile-viewport.spec.ts` and friends are the model: a real browser, a real
  * stylesheet, a fixture only where the control plane cannot be automated.
+ * `?fullShell` includes the application's real scroll owners and navigation for layout regressions.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -787,7 +790,9 @@ createRoot(root).render(
     <ApiProvider client={client}>
       <FeedbackProvider>
         <StoreProvider connection={connection} navigation={navigation}>
-          <main className="main-pane"><AutomationsRoute /></main>
+          {params.has("fullShell")
+            ? <ThemeProvider><Shell /></ThemeProvider>
+            : <main className="main-pane"><AutomationsRoute /></main>}
         </StoreProvider>
       </FeedbackProvider>
     </ApiProvider>
