@@ -25,21 +25,21 @@ export function seedDelegatedUiEvidence(databasePath: string, workspacePath: str
       id: AGENT_ID, name: "Image Orchestrator", command: "codex", args: [], env: {},
       driver: "codex-app-server", available: true, context: { kind: "native" },
       capabilities: {
-        models: [{ id: "vision", name: "Vision", default: true, inputModalities: ["text", "image"] }],
+        models: [{ id: "vision", displayName: "Vision", default: true, inputModalities: ["text", "image"] }],
         effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
         imageToolResults: true, permissionModes: ["default", "orchestrator"],
       },
     }],
   };
-  db.registerRunner(runner, Date.now(), PROTOCOL_VERSION);
-  const hub = new Proxy({ isRunnerOnline: () => true, sendToRunner: () => true }, {
-    get(target, key: string) {
-      return key in target ? target[key as keyof typeof target] : () => undefined;
-    },
-  }) as unknown as Hub;
-  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
-  const ownerUserId = db.localIdentityContext().userId;
   try {
+    db.registerRunner(runner, Date.now(), PROTOCOL_VERSION);
+    const hub = new Proxy({ isRunnerOnline: () => true, sendToRunner: () => true }, {
+      get(target, key: string) {
+        return key in target ? target[key as keyof typeof target] : () => undefined;
+      },
+    }) as unknown as Hub;
+    const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+    const ownerUserId = db.localIdentityContext().userId;
     const parent = svc.createSession({
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID,
       role: "orchestrator", config: { permissionMode: "orchestrator" }, parentControl: "off",
