@@ -9,6 +9,11 @@ money is a proposal for the human owner.
 
 ## Findings
 
+Current collectors exclude contradictory job/step clocks as unmeasured allocation.
+See the [timing-quality JSON contract and offline replay](merge-queue-wait.md#jobstep-timing-quality)
+before comparing new occupancy results with this historical export. Older occupancy
+exports omitted step evidence and cannot retrospectively classify those conflicts.
+
 - **The pool is GitHub-hosted only, with a hard limit of 20 concurrent jobs.** All 9,353
   allocations from runs created October 20 – 28 18:00Z ran in the `GitHub Actions` runner group on
   standard labels (`ubuntu-24.04`, `windows-latest`/`windows-2025`, `macos-latest`). The

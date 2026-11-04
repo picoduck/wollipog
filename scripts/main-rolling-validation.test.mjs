@@ -18,7 +18,9 @@ const run = (overrides = {}) => ({ id: 10, run_attempt: 1, display_title: `Rolli
   run_started_at: at(1), updated_at: at(40), html_url: `https://github.com/${repository}/actions/runs/10`, ...overrides });
 const jobs = () => REQUIRED.map((name, i) => ({ id: i + 1, name, status: "completed", conclusion: "success",
   created_at: at(), started_at: at(1), completed_at: at(39), steps: [{ name: "Verify Rolling Checkout", number: 1,
-    conclusion: "success", started_at: at(1), completed_at: at(2) }] }));
+    conclusion: "success", started_at: at(1), completed_at: at(2) },
+  // The successful timing fixture includes the work after checkout through job finalization.
+  { name: "Complete job", number: 2, conclusion: "success", started_at: at(39), completed_at: at(39) }] }));
 const blobs = { worker: W, ci: B, windows: C };
 const record = (r = run(), js = jobs()) => validationRecord(repository, r, js, blobs);
 const pendingState = () => plan(emptyState(repository), { active: [], records: [] }, A, at(), claimId).next;
@@ -92,6 +94,7 @@ test("only exact worker checkout proofs and every required job can certify the t
   assert.equal(good.workflowRevision.executedBlobSha, W);
   assert.equal(good.dispatchToVerdictMinutes, 40);
   assert.ok(good.metrics.consumedRunnerMinutes > 0);
+  assert.equal(good.metrics.unmeasuredAllocationJobs, 0);
   assert.ok(good.metrics.requiredMinutes > 0);
   assert.equal(good.metrics.browserShardImbalance.observed, 5);
   assert.equal(good.jobs[1].name, REQUIRED[1]);
@@ -112,6 +115,31 @@ test("only exact worker checkout proofs and every required job can certify the t
   const rerun = record(run({ run_attempt: 2 }));
   assert.equal(rerun.attempt, 2);
   assert.equal(rerun.metrics.consumedRunnerMinutes, null, "do not invent cost for copied rerun jobs");
+});
+
+test("rolling verdicts and candidate receipts keep conflicting allocation separate from forge outcomes", () => {
+  const sample = jobs();
+  for (const job of sample) job.steps = job.steps.filter((step) => step.name === "Verify Rolling Checkout");
+  const conflicting = record(run(), sample);
+  assert.equal(conflicting.verdict, "success", "clock evidence does not rewrite the verified suite outcome");
+  assert.equal(conflicting.checkoutVerified, true);
+  assert.equal(conflicting.metrics.unmeasuredAllocationJobs, REQUIRED.length);
+  assert.equal(conflicting.metrics.consumedRunnerMinutes, null);
+  assert.equal(conflicting.metrics.criticalExecutionMinutes, null);
+  assert.equal(conflicting.metrics.criticalWaitMinutes, null);
+  for (const job of conflicting.jobs) {
+    assert.equal(job.timingQuality.reason, "unexplained-terminal-gap");
+    assert.equal(job.timingQuality.terminalGapSeconds, 2220);
+    assert.equal(job.executionMinutes, null);
+    assert.equal(job.state, "passing");
+  }
+  const ledger = queueCandidate(undefined, { targetSha: A, suiteVersion: conflicting.suiteVersion,
+    purpose: "release", requestedAt: at(), claimId });
+  const result = candidatePlan(ledger, { active: [], records: [conflicting] }, conflicting.suiteVersion, at(42), true);
+  const receipt = candidateReceipt(result.next, A, "release", conflicting.suiteVersion, at(42));
+  assert.equal(result.next.requests[0].status, "success");
+  assert.equal(receipt.waitMinutes, null);
+  assert.equal(receipt.executionMinutes, null);
 });
 
 test("delegated pipeline recovery must independently prove its exact rolling checkout", () => {

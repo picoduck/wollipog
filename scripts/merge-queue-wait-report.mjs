@@ -2,6 +2,7 @@ import { pathToFileURL } from "node:url";
 import { parseArgs } from "node:util";
 import { readFile } from "node:fs/promises";
 import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
+import { timingQuality, timingConflict, timingQualitySummary } from "./ci-job-timing.mjs";
 import { parseSelection, SELECTION_MARKER } from "./ci-suite-selection.mjs";
 import { githubApi } from "./merge-group-cleanup.mjs";
 
@@ -10,7 +11,7 @@ import { githubApi } from "./merge-group-cleanup.mjs";
 // merge-queue removals, and never changes anything.
 
 export const AGGREGATOR = "Typecheck, Test & Sidecar Bundle";
-const ADVISORY_JOBS = new Set(["Suite Selection Shadow (Advisory)", "Regression Admission Shadow (Advisory)"]);
+export const ADVISORY_JOBS = new Set(["Suite Selection Shadow (Advisory)", "Regression Admission Shadow (Advisory)"]);
 const QUEUE_BRANCH = /^gh-readonly-queue\/main\/pr-([1-9][0-9]*)-[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export const MAX_PAGES = 10;
@@ -76,6 +77,7 @@ export function dependencyCandidates(job, work, aggregator) {
  * dependency finished: the latest of its possible dependencies to complete by then.
  */
 export function criticalPath(run, job, work, aggregator = job) {
+  if ([job, ...work].some((item) => !ADVISORY_JOBS.has(item.name) && timingConflict(item))) return null;
   if (![run.created_at, job.created_at, ...work.map((item) => item.created_at)].every((time) => Number.isFinite(Date.parse(time)))) return null;
   const path = [job];
   const started = Date.parse(run.created_at);
@@ -96,7 +98,8 @@ export function criticalPath(run, job, work, aggregator = job) {
  * (see criticalPath) and everything else, which is waiting.
  */
 export function runMetrics(run, jobs) {
-  const executed = jobs.filter((job) => job.conclusion !== "skipped" && minutes(job.started_at, job.completed_at) !== null);
+  const conflicts = jobs.filter(timingConflict);
+  const executed = jobs.filter((job) => !timingConflict(job) && job.conclusion !== "skipped" && minutes(job.started_at, job.completed_at) !== null);
   const aggregator = executed.find((job) => job.name === AGGREGATOR) ?? null;
   const work = executed.filter((job) => job !== aggregator);
   const waits = executed.map((job) => minutes(job.created_at, job.started_at)).filter((value) => value !== null);
@@ -107,10 +110,12 @@ export function runMetrics(run, jobs) {
   const skippedRouting = jobs.filter((job) => job.name === "PR Suite Routing" && job.conclusion === "skipped" &&
     minutes(job.created_at, job.completed_at) !== null);
   const anchors = skippedRouting.length === 1 ? skippedRouting.map((job) => ({ ...job, started_at: job.completed_at })) : [];
-  const path = aggregator ? criticalPath(run, aggregator, [...work, ...anchors]) : null;
+  const path = aggregator && !conflicts.some((job) => !ADVISORY_JOBS.has(job.name))
+    ? criticalPath(run, aggregator, [...work, ...anchors]) : null;
   const executionMinutes = path ? path.reduce((sum, job) => sum + minutes(job.started_at, job.completed_at), 0) : null;
   return {
     id: run.id,
+    timingQuality: timingQualitySummary(jobs),
     rerun: run.run_attempt > 1,
     pullRequest: pullRequestOf(run.head_branch),
     createdAt: run.created_at,
@@ -151,6 +156,7 @@ export function summarize(metrics, removals, timeoutMinutes) {
   for (const removal of removals) reasons[removal.reason] = (reasons[removal.reason] ?? 0) + 1;
   return {
     runs: metrics.length,
+    unmeasuredAllocationJobs: metrics.reduce((sum, row) => sum + (row.timingQuality?.unmeasuredAllocationJobs ?? 0), 0),
     timeoutMinutes,
     measures,
     overTimeout: metrics.filter((m) => m.requiredMinutes !== null && m.requiredMinutes > timeoutMinutes).length,
@@ -266,16 +272,17 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
   const attempt = run.run_attempt;
   const first = attempt === 1;
   const projected = jobs.map((job) => ({
-    id: job.id ?? null, name: job.name, state: outcome(job), conclusion: job.conclusion ?? null,
+    id: job.id ?? null, name: job.name, timingQuality: timingQuality(job),
+    state: outcome(job), conclusion: job.conclusion ?? null,
     createdAt: job.created_at ?? null, startedAt: jobHasStarted(job) ? job.started_at ?? null : null,
     apiStartedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
     // Reruns may contain copied jobs with reset creation times; never interpret those as waits.
-    runnerWaitMinutes: first && jobHasStarted(job) && job.conclusion !== "skipped" ? duration(job.created_at, job.started_at) : null,
-    executionMinutes: first && jobHasStarted(job) && job.conclusion !== "skipped" ? duration(job.started_at, job.completed_at) : null,
+    runnerWaitMinutes: first && !timingConflict(job) && jobHasStarted(job) && job.conclusion !== "skipped" ? duration(job.created_at, job.started_at) : null,
+    executionMinutes: first && !timingConflict(job) && jobHasStarted(job) && job.conclusion !== "skipped" ? duration(job.started_at, job.completed_at) : null,
     steps: (job.steps ?? []).map((step) => ({ number: step.number, name: step.name,
       state: outcome(step), conclusion: step.conclusion ?? null, startedAt: step.started_at ?? null,
       completedAt: step.completed_at ?? null,
-      minutes: first && step.conclusion !== "skipped" ? duration(step.started_at, step.completed_at) : null,
+      minutes: first && !timingConflict(job) && step.conclusion !== "skipped" ? duration(step.started_at, step.completed_at) : null,
       kind: TEST_STEP.test(step.name) ? "test" : "non-test-overhead" })),
   }));
   const measured = projected.filter((job) => Number.isFinite(job.executionMinutes));
@@ -304,6 +311,7 @@ export function attemptRecord(repository, run, jobs, window, jobsTruncated = fal
       consumedRunnerMinutes: !jobsTruncated && jobs.length > 0 && missing === 0 && measured.length > 0
         ? measured.reduce((sum, job) => sum + job.executionMinutes, 0) : null,
       missingJobTiming: missing,
+      unmeasuredAllocationJobs: projected.filter(timingConflict).length,
       nonTestOverheadMinutes: first && !jobsTruncated && measured.length > 0 && projected.every((job) => job.state === "skipped" ||
         job.steps.length > 0 && job.steps.every((step) => step.state === "skipped" || step.minutes !== null))
         ? projected.flatMap((job) => job.steps).filter((step) => step.kind === "non-test-overhead")
@@ -324,6 +332,7 @@ export function eventSummary(records, assumedRate = null) {
     const states = Object.fromEntries(["passing", "failing", "cancelled", "skipped", "unfinished", "unmeasured"]
       .map((state) => [state, rows.filter((row) => row.state === state).length]));
     cohorts.push({ event, attemptClass, records: rows.length, states,
+      timingQuality: timingQualitySummary(rows.flatMap((row) => row.jobs ?? [])),
       byState: Object.fromEntries(Object.keys(states).map((state) => [state, {
         records: states[state],
         measures: Object.fromEntries([...MEASURES.map(([key]) => key), "consumedRunnerMinutes", "nonTestOverheadMinutes"]
@@ -338,7 +347,7 @@ export function eventSummary(records, assumedRate = null) {
   const retryOnlyRuns = records.filter((row) => row.attempt > 1 && row.state === "passing" && records.some((first) =>
     first.repository === row.repository && first.runId === row.runId && first.attempt === 1 && first.sha === row.sha && first.state === "failing"))
     .map((row) => ({ repository: row.repository, runId: row.runId, attempt: row.attempt, sha: row.sha }));
-  return { cohorts, retryOnlyRuns,
+  return { cohorts, retryOnlyRuns, timingQuality: timingQualitySummary(records.flatMap((row) => row.jobs ?? [])),
     // This is event duplication of exact SHAs, not equivalence of PR heads and integration SHAs.
     sharedEventShas: [...new Set(records.map((row) => row.sha).filter(Boolean))].map((sha) => ({ sha,
       events: [...new Set(records.filter((row) => row.sha === sha).map((row) => row.event))] })).filter((row) => row.events.length > 1),
@@ -512,7 +521,21 @@ export function applyTimingContext(record, summary) {
   }
 }
 
-/** Recompute cohort percentiles from deduplicated raw attempts, never from daily percentiles. */
+/** Recompute historical timing from observations, preserving extra source context. */
+export function reprojectAttempt(row) {
+  const raw = (job) => ({ ...job, status: job.state === "unfinished" ? job.startedAt != null ? "in_progress" : "queued"
+    : job.startedAt != null ? undefined : "completed",
+    conclusion: job.conclusion ?? ({ passing: "success", skipped: "skipped", failing: "failure" }[job.state]),
+    created_at: job.createdAt, started_at: job.apiStartedAt ?? job.startedAt, completed_at: job.completedAt,
+    steps: (job.steps ?? []).map((step) => ({ ...step,
+      conclusion: step.conclusion ?? ({ passing: "success", skipped: "skipped", failing: "failure" }[step.state]),
+      started_at: step.startedAt, completed_at: step.completedAt })) });
+  const fresh = attemptRecord(row.repository, { id: row.runId, run_attempt: row.attempt,
+    event: row.event, created_at: row.createdAt, head_branch: row.branch }, (row.jobs ?? []).map(raw), row.window, row.jobsTruncated);
+  return { ...row, metrics: fresh.metrics, jobs: fresh.jobs.map((job, i) => ({ ...row.jobs[i], ...job })) };
+}
+
+/** Recompute cohort percentiles from deduplicated raw attempts, never daily percentiles. */
 export function combineReports(reports) {
   if (!reports.length || reports.some((report) => report.schemaVersion !== 2 || report.repository !== reports[0].repository))
     throw new ReportError("Inputs must be version-2 reports for one repository");
@@ -520,7 +543,7 @@ export function combineReports(reports) {
     throw new ReportError("Inputs must use the same hypothetical cost rate");
   const sorted = [...reports].sort((a, b) => Date.parse(a.collectedAt) - Date.parse(b.collectedAt));
   const records = [...new Map(sorted.flatMap((report) => report.records)
-    .map((row) => [`${row.repository}/${row.runId}/${row.attempt}`, row])).values()];
+    .map((row) => [`${row.repository}/${row.runId}/${row.attempt}`, reprojectAttempt(row)])).values()];
   const removals = [...new Map(sorted.flatMap((report) => report.removals)
     .map((row) => [`${row.repository}/${row.pullRequest}/${row.at}/${row.reason}`, row])).values()];
   const queueEpisodes = [...new Map(sorted.flatMap((report) => report.queueEpisodes ?? [])
@@ -575,6 +598,7 @@ export function markdown(report) {
     "",
     `- Required result later than the ${summary.timeoutMinutes}-minute queue timeout: ${summary.overTimeout} of ${summary.runs}.`,
     `- Critical path spent longer waiting than executing: ${summary.waitingDominated} of ${summary.runs}.`,
+    `- Unmeasured allocation jobs: ${summary.unmeasuredAllocationJobs ?? 0}; excluded from measured timing.`,
     `- Aggregator never ran: ${summary.aggregatorNeverRan}. Critical path unmeasured (a job's dependency could not be identified): ${summary.criticalPathUnmeasured}.`,
     `- Queue removals in the window: ${Object.entries(summary.removalReasons).map(([reason, count]) => `${reason} ${count}`).join(", ") || "none"}` +
       (report.removalsTruncated ? ` (incomplete: a pull request has more than ${MAX_PAGES * 100} removals)` : "") + ".",
@@ -594,6 +618,7 @@ export function eventMarkdown(report) {
     ...report.summary.cohorts.map((row) => `| ${row.event} | ${row.attemptClass} | ${row.records} | ${row.states.passing} | ${row.states.failing} | ${row.states.cancelled} | ${row.states.skipped} | ${row.states.unfinished} | ${row.states.unmeasured} | ${fixed(row.measures.requiredMinutes.median)} / ${fixed(row.measures.requiredMinutes.p90)} | ${fixed(row.measuredRunnerMinutes)} |`),
     "", `Pagination: ${JSON.stringify(report.pagination)}; attempts truncated: ${report.attemptsTruncated}; removals truncated: ${report.removalsTruncated}.`,
     `Retry-only run outcomes: ${report.summary.retryOnlyRuns.length}. Missing timing is unmeasured; measured runner minutes can be a lower bound.`,
+    `Unmeasured allocation jobs: ${report.summary.timingQuality?.unmeasuredAllocationJobs ?? 0}; excluded from measured timing.`,
     "Billing unavailable. Validation lag not yet measurable (#3631/#3632). Historical per-test timing requires the safe log projection.",
     ...(report.comparison ? ["", "Before/after natural-window comparison:", "```json", JSON.stringify(report.comparison, null, 2), "```"] : []),
   ].join("\n");

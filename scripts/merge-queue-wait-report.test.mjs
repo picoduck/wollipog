@@ -214,14 +214,14 @@ test("a skipped merge-group gate leaves every disabled-gate measurement byte-for
       assert.deepEqual(withGate.metrics, without.metrics, `shape ${index} attempt metrics`);
     }
   }
-  // Offline recomputation of the committed baseline is unchanged (pinned at the pre-#3637 report).
+  // Baseline output includes the new timing-quality classification and recomputed metrics.
   const outputs = [];
   return Promise.all([["--json"], []].map(async (flags) => {
     const lines = [];
     assert.equal(await main(["--input", "docs/ci-baseline-2026-10-22.json", ...flags], { out: (line) => lines.push(line) }), 0);
     outputs.push(createHash("sha256").update(lines.join("\n") + "\n").digest("hex"));
-  })).then(() => assert.deepEqual(outputs.sort(), ["370a9e29dcf50f05510a7214a4aee0e961d3d677f0b753eff930b209aaaa2f46",
-    "e5858c017efe0d2fe7f41f8698351ba4bf7713c26207be6ea51478c9d8bb65c0"].sort()));
+  })).then(() => assert.deepEqual(outputs.sort(), ["27d81a4d3d3e0490cfaab975e12c3a12c0894e2a803bc95aa3ef21c5ac4823cd",
+    "af5e44ba4326b763905dfc1d34ab9a47bc66c418c42f20e6b95c723bb27cd994"].sort()));
 });
 
 test("the assumed dependency structure matches the CI workflow files", () => {
@@ -438,7 +438,7 @@ test("terminal cancellation with no executed step never becomes runner execution
   assert.equal(record.metrics.consumedRunnerMinutes, null);
   assert.equal(record.metrics.wallMinutes, null);
   const allocated = attemptRecord(repository, run(1, 1), [{ ...cancelled, started_at: at(3), steps: [
-    { number: 1, name: "Setup", status: "completed", conclusion: "success", started_at: at(3), completed_at: at(4) },
+    { number: 1, name: "Setup", status: "completed", conclusion: "success", started_at: at(3), completed_at: at(8) },
   ] }], {});
   assert.equal(allocated.jobs[0].runnerWaitMinutes, 3);
   assert.equal(allocated.jobs[0].executionMinutes, 5);
@@ -488,7 +488,7 @@ test("event collection uses half-open windows, actual attempt outcomes and main 
 
 test("combined reports deduplicate boundaries and compute percentiles from raw records", () => {
   const rows = [1, 2, 3, 100].map((value, i) => {
-    const row = attemptRecord(repository, { ...run(i + 1, 1), head_sha: "a".repeat(40) }, [], {});
+    const row = attemptRecord(repository, { ...run(i + 1, 1), head_sha: "a".repeat(40) }, [job(AGGREGATOR, 0, 0, value)], {});
     row.metrics.requiredMinutes = value;
     return row;
   });

@@ -14,7 +14,7 @@ const at = (minute) => new Date(Date.UTC(2026, 9, 27, 12, 0) + minute * 60_000).
 const step = { conclusion: "success", started_at: at(0) };
 const rawJob = (id, name, created, started, completed, extra = {}) => ({
   id, name, status: "completed", conclusion: "success", created_at: at(created), started_at: at(started), completed_at: at(completed),
-  runner_id: 7, runner_group_name: "GitHub Actions", labels: ["ubuntu-24.04"], steps: [step], ...extra,
+  runner_id: 7, runner_group_name: "GitHub Actions", labels: ["ubuntu-24.04"], steps: [{ ...step, started_at: at(started), completed_at: at(completed) }], ...extra,
 });
 const rawRun = (id, extra = {}) => ({
   id, path: ".github/workflows/ci.yml", event: "merge_group", status: "completed", conclusion: "success",
@@ -49,7 +49,7 @@ test("runner classes and categories come from labels and the workflow file", () 
 test("projected jobs keep only API metadata", () => {
   const projected = job(1, "Browser End-to-End Tests (1)", 0, 2, 30, { job: { runner_name: "GitHub Actions 12", steps: [{ ...step, name: "secret step" }] } });
   assert.deepEqual(Object.keys(projected).sort(), ["allocated", "apiStartedAt", "attempt", "branch", "category", "completedAt", "conclusion",
-    "createdAt", "event", "hosted", "jobId", "name", "pullRequest", "runId", "runnerClass", "status", "workflow"]);
+    "createdAt", "event", "hosted", "jobId", "name", "pullRequest", "runId", "runnerClass", "status", "steps", "timingQuality", "workflow"]);
   assert.equal(projected.hosted, true);
   assert.equal(job(1, "a", 0, 1, 2, { job: { runner_group_name: "Default" } }).hosted, false);
 });
