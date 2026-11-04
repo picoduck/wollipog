@@ -8162,7 +8162,10 @@ export class ControlPlaneDb {
     },
     manageTransaction = true,
   ): void {
-    if (manageTransaction) this.db.exec("BEGIN");
+    // Registration always writes. Acquire write intent before taking a read snapshot: a
+    // deferred read-to-write upgrade can fail SQLITE_BUSY immediately beside a live writer,
+    // bypassing the connection's busy timeout (including attached fixture connections).
+    if (manageTransaction) this.db.exec("BEGIN IMMEDIATE");
     try {
       const exists = this.stmt("SELECT 1 FROM runners WHERE runner_id = ?")
         .get(meta.runnerId);
