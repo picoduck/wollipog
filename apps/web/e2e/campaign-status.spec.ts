@@ -300,3 +300,30 @@ for (const theme of ["dark", "light"] as const) {
     });
   }
 }
+
+test("decisions the owner kept wait for them in Campaign Status, and each opens its card (#4064)", async ({ page }) => {
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=before");
+  await expect(page.locator(".campaign-status-summary")).toBeVisible();
+  await expect(page.getByRole("heading", { name: "Waiting for You" })).toHaveCount(0);
+
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=after");
+  const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+  await expect(waiting).toContainText("Which credential design should the provider bridge use?");
+  await expect(waiting).toContainText("Merge picoduck/wollipog#4141");
+  await expect(waiting).toContainText("Handed over by the Orchestrator");
+  // A child's handed-off merge opens in Requests, where the owner now decides it.
+  await waiting.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
+  await expect(page.locator(".rpanel-switcher-name")).toHaveText("Requests");
+  const detail = page.locator(".request-panel-detail");
+  await expect(detail).toContainText("PR Merge Approval Required");
+  await expect(detail.getByRole("button", { name: "Approve" })).toBeVisible();
+  // The root's own owner decision is a card for the owner too. (In the app, Open Request takes the
+  // root's own request to its dock card above the composer, which this harness does not render.)
+  await page.getByRole("button", { name: "All Requests" }).click();
+  await page.getByText("Owner Decision Required", { exact: true }).click();
+  await expect(detail).toContainText("Owner Decision Required");
+  await expect(detail).toContainText("Short-Lived Lease (Recommended)");
+  await expect(detail).toContainText("You kept this decision, so only you can make it.");
+  await expect(detail.getByRole("button", { name: "Do Not Proceed" })).toBeVisible();
+  await assertNoHorizontalOverflow(page, ".request-panel-detail");
+});

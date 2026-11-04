@@ -248,6 +248,14 @@ function AvailableCampaignStatus({
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
               <CampaignSummarySection data={data} now={now} />
+              {data.summary.campaign?.ownerDecisions && (
+                <CampaignOwnerDecisions
+                  ownerDecisions={data.summary.campaign.ownerDecisions}
+                  now={now}
+                  findRequest={findRequest}
+                  onOpenRequest={onOpenRequest}
+                />
+              )}
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs
                   handoffs={data.summary.campaign.handoffs}
@@ -298,6 +306,51 @@ function AvailableCampaignStatus({
 /* ------------------------------------------------------------------------------------------------
  * Handed Off (#4070)
  * ---------------------------------------------------------------------------------------------- */
+
+/** Decisions the campaign's owner kept (#4064), which wait for that person while the campaign keeps
+ * working: the Orchestrator's questions for them and the decisions it handed to them. */
+function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenRequest }: {
+  ownerDecisions: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["ownerDecisions"]>;
+  now: number;
+  findRequest: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest: (requestKey: string) => void;
+}) {
+  const headingId = useId();
+  const hidden = ownerDecisions.total - ownerDecisions.items.length;
+  return (
+    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
+      <h3 id={headingId} className="section-title">Waiting for You</h3>
+      <p className="section-note">
+        You kept {ownerDecisions.total === 1 ? "this decision" : "these decisions"}, so only you can make{" "}
+        {ownerDecisions.total === 1 ? "it" : "them"}. The Orchestrator keeps working on everything else meanwhile.
+      </p>
+      <ul className="campaign-detail-list">
+        {ownerDecisions.items.map((item) => {
+          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: item.sessionId });
+          return (
+            <li key={item.occurrenceId}>
+              <dl className="facts">
+                <div>
+                  <dt>{item.handedOff ? "Handed to You" : "Owner Decision"}</dt>
+                  <dd>
+                    {item.summary}
+                    <span className="campaign-status-meta">
+                      {item.handedOff ? "Handed over by the Orchestrator" : "Asked by the Orchestrator"}{" "}
+                      <RecordedTime at={item.createdAt} now={now} />
+                    </span>
+                  </dd>
+                </div>
+              </dl>
+              {requestKey && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
+                onClick={() => onOpenRequest(requestKey)}>Open Request</button>}
+            </li>
+          );
+        })}
+      </ul>
+      {hidden > 0 && <p className="section-note">{hidden} more decision{hidden === 1 ? " waits" : "s wait"} for you under Requests.</p>}
+    </section>
+  );
+}
 
 /** The owner's to-do list: unfinished items the campaign handed to a person or an outside party.
  * The server lists them whenever any exist, so none is dropped once the agents are done. */

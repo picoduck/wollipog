@@ -21,7 +21,7 @@ test("automatic run and automation choices use the effective default without sel
   const a = agent("claude", "claude-code", { authStatus: "authenticated", defaultProviderAccountId: "a",
     installation: { id: "cli", path: "/fixture/claude", via: "path" },
     providerAccountReadiness: { defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"] } });
-  const runner = { agents: [a], protocolVersion: 280 } as RunnerView;
+  const runner = { agents: [a], protocolVersion: 282 } as RunnerView;
   assert.deepEqual(defaultRunAgentIds([a]), []);
   assert.equal(defaultAgentId([a]), "");
   assert.deepEqual(bindableAgents(runner), []);

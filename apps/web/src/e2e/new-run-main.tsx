@@ -57,7 +57,7 @@ const runners = [
   ...runner, os: "linux", version: "1", connectedAt: NOW, lastSeen: NOW, protocolVersion: 141,
 })) as unknown as RunnerView[];
 if (scenario.startsWith("account-default")) {
-  runners[0]!.protocolVersion = 280;
+  runners[0]!.protocolVersion = 282;
   if (scenario === "account-default-b") runners[0]!.providerAccountDefaults = [
     { provider: "claude", accountId: "b", revision: 1 },
   ];
