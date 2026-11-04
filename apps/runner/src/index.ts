@@ -27,6 +27,7 @@ import { DatabaseSync } from "node:sqlite";
 import { CampaignLaunchInspections } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
 import { ProcessingWindow } from "./processing-window.js";
+import { projectReconnectOutboxMessage, republishReconnectState } from "./reconnect-republish.js";
 import {
   parseMessage,
   agentContextKey,
@@ -1581,7 +1582,8 @@ function flushOutbox(): void {
   const socket = ws;
   flushProjectedOutbox(
     outbox,
-    projectMessageForCurrentProtocol,
+    (message) => projectReconnectOutboxMessage(message,
+      runnerSupportsProtocol(controlPlaneProtocolVersion, "runnerProcessingBarriers"), projectMessageForCurrentProtocol),
     (message) => {
       socket.send(JSON.stringify(message));
       noteSentRegistration(message);
@@ -2468,12 +2470,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       if (ws && runnerSupportsProtocol(controlPlaneProtocolVersion, "runnerProcessingBarriers")) {
         const socket = ws;
         const republishId = randomUUID();
-        republishWindow = new ProcessingWindow(sessions.republishSessionIds(), (id) => {
-          const snapshot = sessions.republishSessionSnapshot(id);
-          if (!snapshot) return null;
-          const message = projectMessageForCurrentProtocol({ type: "session_runtime_updated", snapshot });
-          return message ? JSON.stringify(message) : null;
-        }, (wire) => {
+        republishWindow = republishReconnectState(sessions, projectMessageForCurrentProtocol, (wire) => {
           if (ws !== socket || socket.readyState !== WebSocket.OPEN || !registered) throw new Error("republish socket replaced");
           socket.send(wire);
         }, () => socket.terminate(), (details) => log(JSON.stringify({ ...details,
@@ -2495,10 +2492,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       }
       refreshMediaReviewers();
       publishSubscriptionUsageInventory(true);
-      // The CP dropped this runner's queue overlays on register (in-memory queues are assumed
-      // dead), but OURS survived the socket blip — re-report every non-empty queue or those
-      // prompts stay invisible and uncancelable until the queue next changes.
-      sessions.reportQueues();
+      // New peers share processing credits for runtime and queue inventories. Older peers retain
+      // their immediate reconnect path, including authoritative empty projections.
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "runnerProcessingBarriers")) sessions.reportQueues();
       sessions.reportCapacity(true);
       sessions.reportGovernanceTrips();
       sessions.recoverAllOrphanedWork();

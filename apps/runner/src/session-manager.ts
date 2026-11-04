@@ -11973,6 +11973,19 @@ export class SessionManager {
    * multi-hundred-KB prompt per queue change would amplify through every reconnect flush and
    * every connected dashboard. The full text stays in the runner's queue for the actual turn. */
   private emitQueue(sessionId: string): void {
+    this.send(this.queueSnapshot(sessionId));
+    // Every live queue edge is where a hold can begin or end.
+    this.syncQueueHold(sessionId);
+  }
+
+  /** Reconnect reads current state just before writing, never a cached queue projection. */
+  republishSessionQueue(sessionId: string) {
+    if (this.store.isDeleted(sessionId) || !this.store.readMeta(sessionId)) return null;
+    this.syncQueueHold(sessionId);
+    return this.queueSnapshot(sessionId);
+  }
+
+  private queueSnapshot(sessionId: string): Extract<RunnerToControlPlane, { type: "session_queue" }> {
     const entry = this.active.get(sessionId);
     // A launch publishes its entry before provider initialization, but activates its pre-admission
     // FIFO (a Restart's carried prompts, #1779) only once the provider is ready. Those prompts are
@@ -11993,7 +12006,7 @@ export class SessionManager {
         ].sort((left, right) =>
           this.ensureQueueOrdinal(sessionId, left.prompt) - this.ensureQueueOrdinal(sessionId, right.prompt))
       : [];
-    this.send({
+    return {
       type: "session_queue",
       sessionId,
       queue: visible.map(({ prompt: q, steeringState }) => {
@@ -12030,10 +12043,7 @@ export class SessionManager {
       ...(entry?.providerInitiatedTurnActive && entry.providerInitiatedTurnId
         ? { activeTurnId: entry.providerInitiatedTurnId }
         : entry?.running && entry.activeTurnId ? { activeTurnId: entry.activeTurnId } : {}),
-    });
-    // Every queue edge is where a hold can begin or end: a prompt arrives behind a deferred
-    // handoff, or the queue drains, empties, or is rejected.
-    this.syncQueueHold(sessionId);
+    };
   }
 
   /**

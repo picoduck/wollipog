@@ -22,11 +22,13 @@ async function stopChild(child: ChildProcess): Promise<void> {
 
 test("real runner dispatches processing ACKs, cancels republish on reconnect and falls back for old peers", { timeout: 60_000 }, async (t) => {
   const rows: string[][] = [];
+  const queues: string[][] = [];
   const barriers: number[][] = [];
   const cp = await startFakeControlPlane({ pongAfterPingCount: 1,
     protocolVersion: (connection) => connection < 2 ? PROTOCOL_VERSION : 269,
     onMessage: (_socket, message, connection) => {
       if (message.type === "session_runtime_updated") (rows[connection] ??= []).push(message.snapshot!.id);
+      if (message.type === "session_queue") (queues[connection] ??= []).push(message.sessionId!);
       if (message.type === "runner_processing_barrier") (barriers[connection] ??= []).push(message.barrierId!);
     },
   });
@@ -76,24 +78,33 @@ ProcessingWindow.prototype.close = function() {
   const first = await cp.waitForConnection(0, 30_000, () => output);
   await until(() => barriers[0]?.length === 1, "first processing barrier never arrived");
   assert.equal(rows[0]?.length, RUNNER_WINDOW_FRAMES);
+  assert.equal(queues[0]?.length ?? 0, 0, "queue inventory must share credits rather than publish ahead of runtime processing");
   first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: 999 }));
   await delay(100);
   assert.equal(rows[0]?.length, RUNNER_WINDOW_FRAMES, "an unrelated ACK must not advance the producer");
   first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: barriers[0]![0] }));
-  await until(() => rows[0]?.length === ids.length, "the actual ACK dispatcher did not release the next window");
-  await until(() => barriers[0]?.length === 2, "final processing barrier never arrived");
+  await until(() => queues[0]?.length === RUNNER_WINDOW_FRAMES, "the actual ACK dispatcher did not release the queue window");
+  assert.equal(rows[0]?.length, RUNNER_WINDOW_FRAMES);
+  await until(() => barriers[0]?.length === 2, "queue processing barrier never arrived");
   first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: barriers[0]![1] }));
+  await until(() => queues[0]?.length === ids.length, "the queue inventory did not use the actual ACK dispatcher");
+  await until(() => barriers[0]?.length === 3, "final queue processing barrier never arrived");
+  first.send(JSON.stringify({ type: "runner_processing_ack", barrierId: barriers[0]![2] }));
+  assert.deepEqual(queues[0], ids);
   assert.deepEqual(rows[0], ids);
   first.close();
 
   const second = await cp.waitForConnection(1, 10_000, () => output);
   await until(() => barriers[1]?.length === 1, "replacement did not begin a fresh inventory");
   assert.deepEqual(rows[1], ids.slice(0, RUNNER_WINDOW_FRAMES));
+  assert.equal(queues[1]?.length ?? 0, 0);
   second.close(); // an outstanding barrier must not leave its producer running on a new socket
 
   await cp.waitForConnection(2, 10_000, () => output);
   await until(() => rows[2]?.length === ids.length, "legacy peer did not receive the unpaced inventory");
   assert.deepEqual(rows[2], ids);
+  await until(() => queues[2]?.length === ids.length, "legacy queue inventory was lost");
+  assert.deepEqual(queues[2], ids);
   assert.equal(barriers[2]?.length ?? 0, 0, "an old peer must never receive processing barriers");
   await until(() => output.includes("TEST_PENDING_REPUBLISH_CLOSED"),
     "the real daemon never closed the producer with an outstanding processing barrier");

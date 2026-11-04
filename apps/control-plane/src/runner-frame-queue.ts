@@ -71,6 +71,14 @@ export interface RunnerFrameRuns<T> {
   handle(messages: T[]): Promise<void>;
 }
 
+// Fixed categories keep malformed type strings and frame contents out of diagnostics.
+const PRESSURE_TYPES = new Set([
+  "register", "session_queue", "session_runtime_updated", "session_status", "session_event",
+  "process_status", "durable_session_command_update", "session_command_invocation_update",
+  "shell_snapshot", "shell_output", "shell_inventory_complete", "governance_tripped",
+  "runner_processing_barrier", "review_session_update", "agents_updated", "runner_capacity_status",
+]);
+
 interface QueuedFrame<T, P> {
   message: T;
   bytes: number;
@@ -80,8 +88,14 @@ interface QueuedFrame<T, P> {
 }
 
 export class RunnerFrameQueue<T, P = never> {
-  get pressureStats(): { frames: number; bytes: number } {
-    return { frames: this.pending.length, bytes: this.bytes };
+  get pressureStats(): { frames: number; bytes: number; frameTypes: Record<string, number> } {
+    const frameTypes: Record<string, number> = {};
+    for (const { message } of this.pending) {
+      const type = (message as { type?: unknown } | null)?.type;
+      const key = typeof type === "string" && PRESSURE_TYPES.has(type) ? type : "other";
+      frameTypes[key] = (frameTypes[key] ?? 0) + 1;
+    }
+    return { frames: this.pending.length, bytes: this.bytes, frameTypes };
   }
 
   private pending: Array<QueuedFrame<T, P>> = [];
