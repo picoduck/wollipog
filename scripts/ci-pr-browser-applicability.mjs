@@ -41,9 +41,18 @@ export function applicability({ ref = "origin/main", count = 100, cwd = process.
   if (samples.length !== count) throw new Error("Insufficient standard squash-PR identities in bounded history");
   const dates = samples.map((row) => Date.parse(row.committedAt));
   const reduced = samples.filter((row) => row.mode === "fast").length;
+  const sourceHead = git(["rev-parse", "HEAD"]).trim();
+  const sourceHashes = {};
+  let sourceWorkingTreeDirty = false;
+  for (const name of ["ci-pr-browser-policy.mjs", "ci-pr-browser-applicability.mjs"]) {
+    const digest = hash(readFileSync(new URL(`./${name}`, import.meta.url), "utf8"));
+    sourceHashes[name] = digest;
+    try { sourceWorkingTreeDirty ||= hash(git(["show", `${sourceHead}:scripts/${name}`])) !== digest; }
+    catch { sourceWorkingTreeDirty = true; }
+  }
   return { version: 1, repository: "picoduck/wollipog", policy: PR_BROWSER_POLICY,
-    policySourceSha256: hash(readFileSync(new URL("./ci-pr-browser-policy.mjs", import.meta.url), "utf8")),
-    sourceHead: git(["rev-parse", "HEAD"]).trim(), pinnedMainSha: mainSha,
+    policySourceSha256: sourceHashes["ci-pr-browser-policy.mjs"], sourceHashes,
+    sourceHead, sourceWorkingTreeDirty, pinnedMainSha: mainSha,
     method: "Most recent unique standard squash PR suffixes (#N) on first-parent main history; keep newest commit per PR identity and replay parent-to-commit name-status diff against that commit's browser inventory",
     certification: "none", limitations: ["No runtime/latency prediction", "PR suffix is a Git-history convention, not a fresh forge lookup", "Commit timestamps are not merge landing times", "Trigger categories overlap and do not sum to the sample count"],
     commitClockWindow: { since: new Date(Math.min(...dates)).toISOString(), until: new Date(Math.max(...dates) + 1000).toISOString() },

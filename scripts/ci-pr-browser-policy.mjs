@@ -14,6 +14,7 @@ const safePath = (path) => typeof path === "string" && /^[A-Za-z0-9_./-]+$/.test
 // Browser infrastructure is deliberately outside the ordinary-source risk tradeoff.
 const browserInfrastructure = (path) =>
   /(?:^|\/)(?:fixtures|helpers|harness|harnesses|test-support|test-utils)\//.test(path) ||
+  /(?:^|[/-])(?:test-)?(?:fixtures?|harness|test-support|test-utils)(?:[./-]|$)/.test(path) ||
   /^playwright(?:[./-]|$)/.test(path) ||
   /(?:^|\/)(?:package\.json|pnpm-lock\.yaml|pnpm-workspace\.yaml|devbox\.(?:json|lock)|tsconfig[^/]*\.json|\.nvmrc|\.node-version|\.npmrc)$/.test(path) ||
   /^\.github\//.test(path) ||

@@ -42,6 +42,8 @@ test("shared fixtures, browser/routing infrastructure, toolchain and unknown inp
     "pnpm-workspace.yaml", "devbox.json", ".nvmrc", "apps/runner/tsconfig.json",
     "apps/web/src/e2e/fixture.ts", "packages/protocol/src/index.ts", "packages/test-support/src/x.test.ts",
     "apps/web/src/test-utils/browser.test.ts", "apps/web/e2e/missing.spec.ts",
+    "apps/control-plane/src/remote-access-test-fixture.ts", "apps/control-plane/src/video-live-validation-test-fixture.ts",
+    "apps/runner/src/ordinary-fixture.ts", "apps/web/src/test-support.ts",
     "../apps/web/e2e/x.spec.ts", "apps/web/e2e//x.spec.ts", "apps/web/e2e/x.spec.ts\nmode=fast"])
     assert.equal(select([entry(path)]).mode, "full", path);
   for (const status of ["D", "R100", "C100", "T", "U", ""])

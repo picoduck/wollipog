@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
@@ -17,6 +17,8 @@ test("replay uses each unique squash commit's diff and inventory, not the workin
   const commit = (message) => { git("add", "."); git("commit", "-qm", message); };
   git("init", "-q"); git("config", "user.name", "Fixture"); git("config", "user.email", "fixture@example.invalid");
   for (const file of CRITICAL_BROWSER_FILES) put(`apps/web/e2e/${file}`);
+  for (const file of ["ci-pr-browser-policy.mjs", "ci-pr-browser-applicability.mjs"])
+    put(`scripts/${file}`, readFileSync(new URL(`./${file}`, import.meta.url), "utf8"));
   commit("initial inventory");
   put("apps/runner/src/auth.ts"); commit("ordinary source (#1)");
   put("apps/web/e2e/helper.ts"); commit("browser support (#2)");
@@ -25,6 +27,7 @@ test("replay uses each unique squash commit's diff and inventory, not the workin
   const result = applicability({ cwd, ref: "HEAD", count: 2 });
   assert.equal(result.reduced, 2);
   assert.equal(result.skippedDuplicatePrCommits, 1);
+  assert.equal(result.sourceWorkingTreeDirty, false);
   assert.deepEqual(result.samples.map((row) => row.pullRequest), [2, 1]);
   const older = applicability({ cwd, ref: pinned, count: 2 });
   assert.equal(older.reduced, 1); assert.equal(older.full, 1);
@@ -32,5 +35,8 @@ test("replay uses each unique squash commit's diff and inventory, not the workin
   // An uncommitted critical-file deletion cannot change historical inventory.
   rmSync(join(cwd, `apps/web/e2e/${CRITICAL_BROWSER_FILES[0]}`));
   assert.deepEqual(applicability({ cwd, ref: pinned, count: 2 }), older);
+  put("scripts/ci-pr-browser-policy.mjs", "outdated committed policy");
+  commit("different replay source");
+  assert.equal(applicability({ cwd, ref: pinned, count: 2 }).sourceWorkingTreeDirty, true);
   assert.throws(() => applicability({ cwd, count: 501 }), /1–500/);
 });
