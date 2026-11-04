@@ -60,3 +60,11 @@ Automatic launches now check the effective default provider account, rather than
 - Clean worktrees can retire when their tip was an earlier head of a merged pull request.
 
 These changes do not establish unattended Full Control production readiness or waive human-owned decisions, evidence review, or managed review limits. This candidate remains a prerelease and does not replace v0.35.0 as latest stable.
+
+The release workflow builds all six supported native targets. Its base draft holds exactly 34 assets:
+14 desktop bundles, 12 runner names, 6 headless `wollipog-control-plane-<triple>` executables, the
+`wollipog-web.tar.gz` dashboard bundle, and
+`SHA256SUMS`. A signed tag run adds 12 updater signatures and `latest.json` for exactly 47 assets.
+The final workflow verifies inventory, signatures, byte-identical compatibility copies, and
+publisher digests. Publishing the verified draft remains a manual operator step.
+Stable v0.36.0 requires a separate version-checked build and exact-commit regression certification; changing this release's prerelease flag cannot graduate the signed RC packages to stable.
