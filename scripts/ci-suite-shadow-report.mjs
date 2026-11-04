@@ -3,6 +3,7 @@ import { resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parseArgs } from "node:util";
 import { hash, parseSelection, SELECTION_MARKER } from "./ci-suite-selection.mjs";
+import { parseSelection as parseSelectionV11 } from "./ci-suite-selection-v1-1.mjs";
 import { parseTiming, TIMING_MARKER } from "./ci-timing.mjs";
 import { combineReports } from "./merge-queue-wait-report.mjs";
 import { reliabilityReport } from "./ci-reliability-report.mjs";
@@ -92,7 +93,8 @@ export function shadowReport(input) {
     if (!["pull_request", "merge_group"].includes(record.event)) continue;
     const shadowJobs = (record.jobs ?? []).filter((job) => job.name === "Suite Selection Shadow (Advisory)");
     const rawPlans = shadowJobs.flatMap((job) => job.testTiming?.selections ?? []);
-    const plan = rawPlans.length === 1 ? parseSelection(SELECTION_MARKER + JSON.stringify(rawPlans[0])) : null;
+    const line = rawPlans.length === 1 ? SELECTION_MARKER + JSON.stringify(rawPlans[0]) : "";
+    const plan = parseSelectionV11(line) ?? parseSelection(line);
     if (!plan || shadowJobs.length !== 1 || shadowJobs[0].state !== "passing" || shadowJobs[0].testTiming?.truncated || shadowJobs[0].testTiming?.selectionTruncated ||
         record.jobsTruncated || plan.context.runId !== String(record.runId) || plan.context.attempt !== record.attempt ||
         plan.context.event !== record.event || plan.context.baseSha !== plan.context.trustedPolicySha ||

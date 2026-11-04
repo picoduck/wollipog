@@ -235,7 +235,7 @@ test("the assumed dependency structure matches the CI workflow files", () => {
     "needs: [suite_plan, merge_group_gate]", "needs: suite_plan", "needs: [suite_plan, merge_group_gate]",
     "needs: [checks, unit, browser, win32, webkit]",
     "needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: \$\{\{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' \|\| 'Typecheck, Test & Sidecar Bundle' \}\}\n(?:    .*\n)*?    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);

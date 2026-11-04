@@ -1026,8 +1026,8 @@ jobs:
           CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
         run: |
           git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA"
-          if test -f scripts/ci-suite-selection.mjs; then
-            node scripts/ci-suite-selection.mjs --base "$BASE_SHA" --head "$TESTED_SHA" --change-head "$CHANGE_HEAD_SHA"
+          if test -f scripts/ci-suite-selection-v1-1.mjs; then
+            node scripts/ci-suite-selection-v1-1.mjs --base "$BASE_SHA" --head "$TESTED_SHA" --change-head "$CHANGE_HEAD_SHA"
           else
             echo 'Trusted suite policy unavailable at this base; full coverage remains required.'
           fi

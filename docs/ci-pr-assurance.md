@@ -137,9 +137,13 @@ prove later settings. No ruleset migration is needed.
 
 ## Coordinated Shadow Compatibility and Measurement Status
 
-Parent-approved deferral keeps legacy shadow emission in #3812. After #4046/#4148
-merges, rebase and add v1.1 collector/report support before switching emission
-and requesting activation. Historical v1 records never certify v1.1 or this policy.
+After #4046/#4148 merged, the deferred compatibility was integrated: advisory
+shadow emission now uses v1.1, and collector/report accept both historical v1 and
+v1.1 without changing cohort identities. PR-browser routing evidence uses its
+own `ci-pr-browser-v1` marker and `browserSelections` collection, with hashed file
+identities, bounded counts and exact run/attempt/context metadata. It is never
+reinterpreted as a suite-shadow certificate; all these projections retain
+`certification: none`. Historical v1 records never certify v1.1 or this policy.
 
 Benchmark/full-PR comparison is pending. No latency, queue, runner-minute, cost
 saving or 15-minute achievement is claimed. Link measured run/job evidence before
