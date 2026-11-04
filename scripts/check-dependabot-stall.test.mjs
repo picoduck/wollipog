@@ -3,10 +3,14 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 import {
+  DEPENDABOT_RELEASE_AGE_GATE_MS,
   assessDependabotHealth,
   collectOutdated,
+  collectPublishTimes,
+  lastScheduledUpdate,
   parseIgnoredDependencies,
   parseIssueDeferrals,
+  parseNpmSchedule,
   renderReport,
 } from "./check-dependabot-stall.mjs";
 
@@ -279,4 +283,167 @@ test("Dependabot limits and TypeScript deferral are deliberate and machine-reada
   assert.equal(config.match(/time: "06:00"/gu)?.length, 2);
   assert.equal(config.match(/timezone: "America\/Chicago"/gu)?.length, 2);
   assert.ok(parseIgnoredDependencies(config).includes("typescript"));
+  assert.deepEqual(parseNpmSchedule(config), {
+    day: 1,
+    hour: 6,
+    minute: 0,
+    timezone: "America/Chicago",
+  });
+});
+
+const NPM_SCHEDULE = `
+updates:
+  - package-ecosystem: "npm"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+      day: "monday"
+      time: "06:00"
+      timezone: "America/Chicago"
+  - package-ecosystem: "cargo"
+    schedule:
+      interval: "daily"
+      time: "23:00"
+`;
+
+function published(current, latest, latestPublishedAt) {
+  return { current, latest, latestPublishedAt };
+}
+
+test("reads only the npm entry's schedule and refuses schedules it cannot place in time", () => {
+  assert.deepEqual(parseNpmSchedule(NPM_SCHEDULE), {
+    day: 1,
+    hour: 6,
+    minute: 0,
+    timezone: "America/Chicago",
+  });
+  assert.equal(parseNpmSchedule(NPM_SCHEDULE.replace('"weekly"', '"daily"')), null);
+  assert.equal(parseNpmSchedule(""), null);
+});
+
+test("places the last scheduled update in the schedule's zone across daylight saving", () => {
+  const schedule = parseNpmSchedule(NPM_SCHEDULE);
+  // 2026-11-02 06:00 CST, after daylight saving ended on 2026-11-01.
+  assert.equal(
+    new Date(lastScheduledUpdate(schedule, new Date("2026-11-03T14:00:00Z")).instant).toISOString(),
+    "2026-11-02T12:00:00.000Z",
+  );
+  // 2026-10-26 06:00 CDT.
+  assert.equal(
+    new Date(lastScheduledUpdate(schedule, new Date("2026-10-27T14:00:00Z")).instant).toISOString(),
+    "2026-10-26T11:00:00.000Z",
+  );
+  // Monday morning before the update is due: the previous Monday's update is the last one.
+  assert.equal(
+    new Date(lastScheduledUpdate(schedule, new Date("2026-11-09T11:59:00Z")).instant).toISOString(),
+    "2026-11-02T12:00:00.000Z",
+  );
+});
+
+test("reports the 2026-11-03 queue's too-new releases as waiting, not uncovered", () => {
+  const result = assessDependabotHealth({
+    outdated: {
+      "@fastify/cors": published("11.3.1", "11.4.0", "2026-11-02T08:52:17.110Z"),
+      "@fastify/websocket": published("11.3.4", "11.3.6", "2026-10-31T17:05:02.450Z"),
+      "@vitejs/plugin-react": published("6.1.2", "6.2.1", "2026-11-02T09:18:16.564Z"),
+      fastify: published("5.12.7", "5.12.8", "2026-11-02T10:46:39.236Z"),
+      semver: published("7.8.5", "7.8.6", "2026-11-02T17:05:43.359Z"),
+      ws: published("8.22.0", "8.22.1", "2026-10-31T09:58:47.842Z"),
+    },
+    pulls: [],
+    issues: [],
+    config: NPM_SCHEDULE,
+    now: new Date("2026-11-03T14:00:00Z"),
+  });
+
+  assert.deepEqual(result.uncovered, []);
+  assert.deepEqual(result.waiting.map(({ dependency, firstEligibleUpdate }) => [dependency, firstEligibleUpdate]), [
+    ["@fastify/cors", "2026-11-09T12:00:00.000Z"],
+    ["@fastify/websocket", "2026-11-09T12:00:00.000Z"],
+    ["@vitejs/plugin-react", "2026-11-09T12:00:00.000Z"],
+    ["fastify", "2026-11-09T12:00:00.000Z"],
+    ["semver", "2026-11-09T12:00:00.000Z"],
+    ["ws", "2026-11-09T12:00:00.000Z"],
+  ]);
+  assert.equal(result.healthy, true);
+});
+
+test("keeps releases the last update could already consider, or of unknown age, uncovered", () => {
+  const lastUpdate = Date.parse("2026-11-02T12:00:00Z");
+  const result = assessDependabotHealth({
+    outdated: {
+      "at-the-gate": published("1.0.0", "1.0.1", new Date(lastUpdate - DEPENDABOT_RELEASE_AGE_GATE_MS).toISOString()),
+      "inside-the-gate": published("1.0.0", "1.0.1", new Date(lastUpdate - DEPENDABOT_RELEASE_AGE_GATE_MS + 1).toISOString()),
+      "unknown-age": published("1.0.0", "1.0.1", null),
+      "unannotated": outdated("1.0.0", "1.0.1"),
+    },
+    pulls: [],
+    issues: [],
+    config: NPM_SCHEDULE,
+    now: new Date("2026-11-03T14:00:00Z"),
+  });
+
+  assert.deepEqual(result.uncovered.map(({ dependency }) => dependency), ["at-the-gate", "unannotated", "unknown-age"]);
+  assert.deepEqual(result.waiting.map(({ dependency }) => dependency), ["inside-the-gate"]);
+  assert.equal(result.healthy, false);
+});
+
+test("without a schedule it can place, every uncovered release stays uncovered", () => {
+  const result = assessDependabotHealth({
+    outdated: { ws: published("8.22.0", "8.22.1", "2026-11-02T09:58:47.842Z") },
+    pulls: [],
+    issues: [],
+    config: "",
+    now: new Date("2026-11-03T14:00:00Z"),
+  });
+
+  assert.deepEqual(result.uncovered, [{ dependency: "ws", current: "8.22.0", latest: "8.22.1" }]);
+  assert.deepEqual(result.waiting, []);
+});
+
+test("renders waiting releases in their own section without failing the report", () => {
+  const report = renderReport({
+    healthy: true,
+    uncovered: [],
+    waiting: [{
+      dependency: "fastify",
+      current: "5.12.7",
+      latest: "5.12.8",
+      publishedAt: "2026-11-02T10:46:39.236Z",
+      firstEligibleUpdate: "2026-11-09T12:00:00.000Z",
+    }],
+    stalePulls: [],
+    totals: { outdated: 1, pulls: 0, deferrals: 0 },
+  });
+
+  assert.match(report, /^# ✅ Dependabot Queue Health/u);
+  assert.match(report, /## Waiting for Dependabot's Release-Age Gate/u);
+  assert.match(report, /`fastify` \| 5\.12\.7 \| 5\.12\.8 \| 2026-11-02 10:46 UTC \| 2026-11-09 12:00 UTC/u);
+  assert.doesNotMatch(report, /Outdated Packages Without Coverage/u);
+});
+
+test("annotates outdated packages with the latest version's publish time, or null", () => {
+  const calls = [];
+  const registry = {
+    fastify: { status: 0, stdout: '{"5.12.7":"2026-10-20T00:00:00.000Z","5.12.8":"2026-11-02T10:46:39.236Z"}' },
+    ws: { status: 1, stdout: "", stderr: "registry failed" },
+    semver: { status: 0, stdout: '{"7.8.5":"2026-10-01T00:00:00.000Z"}' },
+    postcss: { status: 0, stdout: "not json" },
+  };
+  const result = collectPublishTimes({
+    fastify: outdated("5.12.7", "5.12.8"),
+    ws: outdated("8.22.0", "8.22.1"),
+    semver: outdated("7.8.5", "7.8.6"),
+    postcss: outdated("8.5.30", "8.5.32"),
+  }, (command, args) => {
+    calls.push([command, ...args]);
+    return registry[args[1]];
+  });
+
+  assert.deepEqual(calls[0], ["pnpm", "view", "fastify", "time", "--json"]);
+  assert.equal(result.fastify.latestPublishedAt, "2026-11-02T10:46:39.236Z");
+  assert.equal(result.fastify.latest, "5.12.8");
+  assert.equal(result.ws.latestPublishedAt, null);
+  assert.equal(result.semver.latestPublishedAt, null);
+  assert.equal(result.postcss.latestPublishedAt, null);
 });

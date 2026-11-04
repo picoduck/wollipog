@@ -6,6 +6,15 @@ import { pathToFileURL } from "node:url";
 
 const DAY_MS = 24 * 60 * 60 * 1_000;
 
+// Dependabot's npm updater skips releases younger than its own release-age gate. The repository
+// sets no `cooldown` in .github/dependabot.yml; the value is supplied by Dependabot, whose
+// 2026-11-02 weekly run passed `--config.minimum-release-age=4320` (minutes) to pnpm and logged
+// "Filtered out 1 versions due to cooldown" (#4155). Update this if an updater log shows another
+// minimum-release-age.
+export const DEPENDABOT_RELEASE_AGE_GATE_MS = 3 * DAY_MS;
+
+const WEEKDAYS = ["sunday", "monday", "tuesday", "wednesday", "thursday", "friday", "saturday"];
+
 function escapeRegExp(value) {
   return value.replace(/[.*+?^${}()|[\]\\]/gu, "\\$&");
 }
@@ -52,6 +61,105 @@ export function parseIssueDeferrals(issues) {
   return deferrals;
 }
 
+// The npm entry's weekly schedule, or null when it is not a weekly day/time schedule this checker
+// can place in time. A null schedule leaves every uncovered release uncovered.
+export function parseNpmSchedule(config) {
+  const fields = {};
+  let inNpm = false;
+
+  for (const line of config.split(/\r?\n/u)) {
+    const trimmed = line.trim();
+    const ecosystem = trimmed.match(/^- package-ecosystem:\s*["']?([^"'#\s]+)["']?/u);
+    if (ecosystem) {
+      inNpm = ecosystem[1] === "npm";
+      continue;
+    }
+    if (!inNpm) continue;
+    const field = trimmed.match(/^(interval|day|time|timezone):\s*["']?([^"'#\s]+)["']?\s*(#.*)?$/u);
+    if (field && !(field[1] in fields)) fields[field[1]] = field[2];
+  }
+
+  const day = WEEKDAYS.indexOf(fields.day);
+  const time = fields.time?.match(/^(\d{2}):(\d{2})$/u);
+  if (fields.interval !== "weekly" || day < 0 || !time) return null;
+  return { day, hour: Number(time[1]), minute: Number(time[2]), timezone: fields.timezone ?? "UTC" };
+}
+
+function zonedWallClock(ms, timeZone) {
+  const parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+    timeZone,
+    hourCycle: "h23",
+    year: "numeric",
+    month: "2-digit",
+    day: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+    second: "2-digit",
+  }).formatToParts(new Date(ms)).map(({ type, value }) => [type, Number(value)]));
+  return Date.UTC(parts.year, parts.month - 1, parts.day, parts.hour, parts.minute, parts.second);
+}
+
+// The instant at which the schedule's wall-clock time occurs on the calendar date `dateMs` (UTC
+// midnight of that date) in the schedule's time zone. Two passes settle the zone offset across a
+// daylight-saving change.
+function scheduledInstantOn(schedule, dateMs) {
+  const wall = dateMs + (schedule.hour * 60 + schedule.minute) * 60 * 1_000;
+  let instant = wall;
+  for (let pass = 0; pass < 2; pass += 1) {
+    instant = wall - (zonedWallClock(instant, schedule.timezone) - instant);
+  }
+  return instant;
+}
+
+// The most recent scheduled update at or before `now`, as the UTC midnight of its calendar date in
+// the schedule's zone and the instant it was due.
+export function lastScheduledUpdate(schedule, now) {
+  const local = zonedWallClock(now.getTime(), schedule.timezone);
+  const today = local - (local % DAY_MS);
+  let dateMs = today - (((new Date(today).getUTCDay() - schedule.day + 7) % 7) * DAY_MS);
+  let instant = scheduledInstantOn(schedule, dateMs);
+  if (instant > now.getTime()) {
+    dateMs -= 7 * DAY_MS;
+    instant = scheduledInstantOn(schedule, dateMs);
+  }
+  return { dateMs, instant };
+}
+
+// Splits uncovered releases into those the last scheduled update could not yet consider because of
+// the release-age gate, and the rest. Scheduled time stands in for the run's actual start, which is
+// a few minutes later; a release without a readable publish time stays uncovered.
+function separateGatedReleases(candidates, schedule, now) {
+  const last = schedule === null ? null : lastScheduledUpdate(schedule, now);
+  const uncovered = [];
+  const waiting = [];
+
+  for (const [dependency, version] of candidates) {
+    const row = { dependency, current: version.current, latest: version.latest };
+    const published = Date.parse(version.latestPublishedAt ?? "");
+    if (
+      last === null
+      || !Number.isFinite(published)
+      || published <= last.instant - DEPENDABOT_RELEASE_AGE_GATE_MS
+    ) {
+      uncovered.push(row);
+      continue;
+    }
+    let dateMs = last.dateMs;
+    let instant = last.instant;
+    while (instant < published + DEPENDABOT_RELEASE_AGE_GATE_MS) {
+      dateMs += 7 * DAY_MS;
+      instant = scheduledInstantOn(schedule, dateMs);
+    }
+    waiting.push({
+      ...row,
+      publishedAt: new Date(published).toISOString(),
+      firstEligibleUpdate: new Date(instant).toISOString(),
+    });
+  }
+
+  return { uncovered, waiting };
+}
+
 function pullMentionsDependency(pull, dependency) {
   const token = escapeRegExp(dependency);
   const boundary = `[A-Za-z0-9@._/-]`;
@@ -91,15 +199,16 @@ export function assessDependabotHealth({
   const deferrals = parseIssueDeferrals(issues);
   const updates = Object.entries(outdated).sort(([left], [right]) => left.localeCompare(right));
 
-  const uncovered = updates.flatMap(([dependency, version]) => {
+  const withoutCoverage = updates.filter(([dependency]) => {
     const pull = pulls.find((candidate) => pullMentionsDependency(candidate, dependency));
-    if (pull) return [];
+    if (pull) return false;
     const ignored = ignoredPatterns.find(({ matcher }) => matcher.test(dependency));
-    if (ignored) return [];
+    if (ignored) return false;
     const issue = deferrals.get(dependency);
-    if (issue) return [];
-    return [{ dependency, current: version.current, latest: version.latest }];
+    if (issue) return false;
+    return true;
   });
+  const { uncovered, waiting } = separateGatedReleases(withoutCoverage, parseNpmSchedule(config), now);
 
   const stalePulls = pulls.flatMap((pull) => {
     const ageMs = now.getTime() - new Date(pull.createdAt).getTime();
@@ -110,9 +219,14 @@ export function assessDependabotHealth({
   return {
     healthy: uncovered.length === 0 && stalePulls.length === 0,
     uncovered,
+    waiting,
     stalePulls,
     totals: { outdated: updates.length, pulls: pulls.length, deferrals: deferrals.size },
   };
+}
+
+function formatInstant(iso) {
+  return `${iso.slice(0, 10)} ${iso.slice(11, 16)} UTC`;
 }
 
 export function renderReport(result) {
@@ -135,6 +249,21 @@ export function renderReport(result) {
     );
   }
 
+  const waiting = result.waiting ?? [];
+  if (waiting.length > 0) {
+    lines.push(
+      "",
+      "## Waiting for Dependabot's Release-Age Gate",
+      "",
+      "The last scheduled update skipped these releases because they were too new. They do not fail this check; each becomes eligible at the update shown. A release that was a security fix still needs its own advisory review.",
+      "",
+      "| Package | Current | Latest | Published | First Eligible Update |",
+      "| --- | --- | --- | --- | --- |",
+      ...waiting.map(({ dependency, current, latest, publishedAt, firstEligibleUpdate }) =>
+        `| \`${dependency}\` | ${current} | ${latest} | ${formatInstant(publishedAt)} | ${formatInstant(firstEligibleUpdate)} |`),
+    );
+  }
+
   if (result.stalePulls.length > 0) {
     lines.push(
       "",
@@ -148,7 +277,9 @@ export function renderReport(result) {
   }
 
   if (result.healthy) {
-    lines.push("", "Every outdated package is covered, and no Dependabot pull request is stale.");
+    lines.push("", waiting.length > 0
+      ? "Every other outdated package is covered, and no Dependabot pull request is stale."
+      : "Every outdated package is covered, and no Dependabot pull request is stale.");
   } else {
     lines.push(
       "",
@@ -178,6 +309,35 @@ export function collectOutdated(run = spawnSync) {
   return parsed;
 }
 
+// Adds `latestPublishedAt` (ISO string, or null when the registry lookup fails) to each outdated
+// entry. A null publish time keeps an uncovered release reported as uncovered.
+export function collectPublishTimes(outdated, run = spawnSync) {
+  const annotated = {};
+  for (const [dependency, version] of Object.entries(outdated)) {
+    let latestPublishedAt = null;
+    const result = run("pnpm", ["view", dependency, "time", "--json"], {
+      encoding: "utf8",
+      maxBuffer: 10 * 1024 * 1024,
+      timeout: 60 * 1_000,
+    });
+    if (!result.error && result.status === 0) {
+      try {
+        const published = JSON.parse(result.stdout)?.[version.latest];
+        if (typeof published === "string" && Number.isFinite(Date.parse(published))) {
+          latestPublishedAt = published;
+        }
+      } catch {
+        // Unparseable registry output leaves the publish time unknown.
+      }
+    }
+    if (latestPublishedAt === null) {
+      process.stderr.write(`Could not read the publish time of ${dependency}@${version.latest}.\n`);
+    }
+    annotated[dependency] = { ...version, latestPublishedAt };
+  }
+  return annotated;
+}
+
 function parseArguments(argv) {
   const values = new Map();
   for (let index = 0; index < argv.length; index += 2) {
@@ -200,7 +360,7 @@ function readJson(path) {
 
 function main(argv) {
   if (argv[0] === "--collect-outdated" && argv.length === 2) {
-    const outdated = collectOutdated();
+    const outdated = collectPublishTimes(collectOutdated());
     writeFileSync(argv[1], `${JSON.stringify(outdated, null, 2)}\n`);
     return;
   }
