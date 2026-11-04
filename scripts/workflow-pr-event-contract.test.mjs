@@ -64,7 +64,7 @@ function workflowContract(path) {
       return false;
     }
     if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite_plan:") {
-      assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
+      assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
       return false;
     }
     return true;
@@ -284,18 +284,19 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // expectation by hand, which is the reviewable act the guard exists to force.
   // Assert the exact new routing text before normalising to the established full shard shape.
   // workflow-ci-routing.test.mjs executes these same expressions and both actual shell branches.
-  const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
+  const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
   const groupFastExpression = "${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}";
-  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}";
   const critical = "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts";
   const routedRun = [
-    "          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}",
+    "          ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}",
     `          PR_FAST: ${fastExpression}`,
+    "          PR_BROWSER_FILES: ${{ needs.suite_plan.outputs.files }}",
     "          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}",
     `          GROUP_FAST: ${groupFastExpression}`,
     "        run: |",
     '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
-    critical,
+    "            pnpm test:e2e --config playwright.pr.config.ts",
     '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
     critical,
     "          else",
@@ -384,14 +385,10 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "      - name: Unit Tests",
     "        timeout-minutes: 18",
     "        env:",
-    `          ROUTING_SWITCH: \${{ vars.CI_PR_SUITE_ROUTING }}`,
-    `          PR_FAST: ${fastExpression}`,
     `          GATE_SWITCH: \${{ vars.CI_MERGE_GROUP_GATE }}`,
     `          GROUP_FAST: ${groupFastExpression}`,
     "        run: |",
-    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
-    `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
-    '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
+    '          if [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
     `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
     "          else",
     `            pnpm test:ci ${shardArg}`,

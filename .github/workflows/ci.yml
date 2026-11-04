@@ -11,6 +11,10 @@ on:
         description: Immutable main snapshot admitted by the rolling controller
         type: string
         default: ''
+      browser_benchmark:
+        description: Isolated branch diagnostic; never reports the protected required context
+        type: boolean
+        default: false
   # Merge queue entries run the same required check on the queued merge group.
   merge_group:
   pull_request:
@@ -40,12 +44,14 @@ jobs:
   # but the exact shell check below forces full coverage; only lowercase enabled permits fast.
   # Non-PR events never enter selection, including merge groups and rolling validation.
   suite_plan:
-    if: github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
+    if: github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)
     name: PR Suite Routing
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     outputs:
       mode: ${{ steps.plan.outputs.mode }}
+      files: ${{ steps.plan.outputs.files }}
+      policy: ${{ steps.plan.outputs.policy }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -59,7 +65,7 @@ jobs:
       - name: Compute Trusted PR Route
         id: plan
         env:
-          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
+          ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
           TESTED_SHA: ${{ github.sha }}
           CHANGE_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
@@ -69,8 +75,8 @@ jobs:
           if [ "$ROUTING_SWITCH" != enabled ]; then
             echo 'mode=full' >> "$GITHUB_OUTPUT"
             echo 'Routing switch is not exactly enabled; full coverage required.'
-          elif git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA" && test -f scripts/ci-pr-routing.mjs; then
-            node scripts/ci-pr-routing.mjs
+          elif git fetch --no-tags origin "$TESTED_SHA" "$CHANGE_HEAD_SHA" && test -f scripts/ci-pr-browser-route.mjs; then
+            node scripts/ci-pr-browser-route.mjs
           else
             echo 'mode=full' >> "$GITHUB_OUTPUT"
             echo 'PR routing unavailable; full coverage required.'
@@ -443,14 +449,10 @@ jobs:
       - name: Unit Tests
         timeout-minutes: 18
         env:
-          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
-          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
           GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
           GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
-          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
-            node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=${{ matrix.shard }}/3
-          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
+          if [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
             node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=${{ matrix.shard }}/3
           else
             pnpm test:ci --shard=${{ matrix.shard }}/3
@@ -549,7 +551,7 @@ jobs:
         # Projects partition the live file inventory by measured duration, keeping files intact.
         # The inventory contract pins these five jobs to all five projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -665,18 +667,26 @@ jobs:
           path: ~/.cache/playwright-chromium-packages
           key: ${{ steps.playwright-chromium-packages-resolve.outputs.key }}
 
+      - name: Prepare Benchmark Browser Selection
+        if: github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark
+        run: node scripts/ci-pr-browser-benchmark.mjs
+
       - name: Remote-Instance Browser End-to-End Tests
         id: browser-tests
         env:
           PLAYWRIGHT_JSON_OUTPUT_NAME: ${{ runner.temp }}/synthetic-browser-report.json
           SYNTHETIC_ARTIFACT_FAILURE: ${{ github.event_name == 'workflow_dispatch' && inputs.synthetic_failure_artifacts && 'true' || 'false' }}
-          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
-          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+          ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}
+          PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
+          PR_BROWSER_FILES: ${{ needs.suite_plan.outputs.files }}
+          BROWSER_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark && 'true' || 'false' }}
           GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
           GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
-          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
-            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
+          if [ "$BROWSER_BENCHMARK" = true ]; then
+            PR_BROWSER_FILES="$BENCHMARK_BROWSER_FILES" pnpm test:e2e --config playwright.pr.config.ts
+          elif [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then
+            pnpm test:e2e --config playwright.pr.config.ts
           elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then
             pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts
           else
@@ -1073,15 +1083,15 @@ jobs:
     # It is a status function, so no implicit success() suppresses failure reporting.
     # Keep the draft/ready-for-review guard; see docs/ci-aggregation.md for the verification limits.
     if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
-    name: Typecheck, Test & Sidecar Bundle
+    name: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark && 'PR Browser Benchmark Result' || 'Typecheck, Test & Sidecar Bundle' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]
     steps:
       - name: Require Every Job to Have Succeeded
         env:
-          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}
-          ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && 'true' || 'false' }}
+          ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}
+          ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && 'true' || 'false' }}
           PLAN_RESULT: ${{ needs.suite_plan.result }}
           PLAN_MODE: ${{ needs.suite_plan.outputs.mode }}
           GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}

@@ -14,8 +14,8 @@ const shellOf = (text, name) => text.split(`      - name: ${name}\n`)[1].match(/
   .split("\n").map((line) => line.slice(10)).join("\n");
 function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped") {
   const context = { github: { event_name: event, event: { action, pull_request: { draft } } },
-    vars: { CI_PR_SUITE_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
-    needs: { suite_plan: { outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
+    vars: { CI_PR_BROWSER_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
+    needs: { suite_plan: { result: "success", outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
     cancelled: () => cancelled, fromJSON: JSON.parse,
     ghaEqual: (a, b) => typeof a === "string" && typeof b === "string" ? a.toUpperCase() === b.toUpperCase() : a == b };
   // GitHub's documented ==/!= ignore string case. JS's native equality concealed a real
@@ -24,7 +24,7 @@ function evaluate(value, event, variable, mode = "", cancelled = false, draft = 
     (_, left, op, right) => `${op === "!=" ? "!" : ""}ghaEqual(${left}, ${right})`);
   return vm.runInNewContext(value.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), context, { timeout: 1000 });
 }
-const fast = expression(job("unit"), "PR_FAST");
+const fast = expression(job("browser"), "PR_FAST");
 const groupFast = expression(job("unit"), "GROUP_FAST");
 const gateEnabled = expression(job("check"), "GATE_ENABLED");
 const gateAdmission = expression(job("merge_group_gate"), "if");
@@ -35,7 +35,7 @@ const states = ["success", "failure", "cancelled", "skipped", "", "unexpected"];
 const variables = ["", "false", "disabled", "Enabled", "ENABLED", "true", "enabled ", "enabled"];
 
 test("off switches preserve full work; case-variant plan admission cannot change non-PR coverage", () => {
-  assert.equal(evaluate("${{ vars.CI_PR_SUITE_ROUTING == 'enabled' }}", "pull_request", "Enabled"), true,
+  assert.equal(evaluate("${{ vars.CI_PR_BROWSER_ROUTING == 'enabled' }}", "pull_request", "Enabled"), true,
     "the expression model must reproduce GitHub's case-insensitive equality");
   for (const event of ["pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call"]) {
     for (const variable of variables) for (const mode of ["", "full", "fast", "unknown"]) {
@@ -52,10 +52,10 @@ test("off switches preserve full work; case-variant plan admission cannot change
       }
     }
   }
-  assert.equal(expression(job("browser"), "PR_FAST"), fast);
+  assert.doesNotMatch(job("unit"), /PR_FAST|ROUTING_SWITCH/);
   assert.equal(expression(job("browser"), "GROUP_FAST"), groupFast);
-  assert.ok(admission.startsWith("github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled'"));
-  assert.ok(enabled.includes("github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled'"));
+  assert.ok(admission.startsWith("github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled'"));
+  assert.ok(enabled.includes("github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled'"));
 });
 
 test("every gate and routing variable, mode and event keeps full coverage unless exactly one admitted fast path applies", () => {
@@ -219,10 +219,10 @@ test("both actual execution branches preserve commands, propagate errors and nev
       env: { ...env, STUB_EXIT: String(exit) } });
     assert.ifError(run.error);
     assert.equal(run.status, exit);
-    if (id === "unit") assert.equal(run.stdout.trim(), isFast && raw === "enabled"
+    if (id === "unit") assert.equal(run.stdout.trim(), path === "group" && isFast && raw === "enabled"
       ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=1/3" : "pnpm test:ci --shard=1/3");
     else assert.equal(run.stdout.trim(), isFast && raw === "enabled"
-      ? "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
+      ? path === "pr" ? "pnpm test:e2e --config playwright.pr.config.ts" : "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
       : "pnpm test:e2e --config playwright.ci.config.ts --project=shard-1");
   }
   for (const name of ["Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary", "Verify Node 23 Engine Boundary",
