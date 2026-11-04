@@ -47,7 +47,9 @@ test("only the isolated dispatch benchmark can reduce manual coverage and it nev
       assert.deepEqual(Array.from(evaluate(matrix, ...args)), isolated ? [1] : [1, 2, 3, 4, 5]);
       assert.equal(Boolean(evaluate(prepare, ...args)), isolated);
       assert.equal(evaluate(benchmarkFlag, ...args), isolated ? "true" : "false");
-      assert.equal(Boolean(evaluate(expression(job("check"), "if"), ...args)), !isolated);
+      assert.equal(Boolean(evaluate(expression(job("check"), "if"), ...args)), true,
+        "benchmark must execute and fail the protected job, never report a passing-equivalent skip");
+      assert.equal(evaluate(expression(job("check"), "BROWSER_BENCHMARK"), ...args), String(isolated));
       assert.equal(Boolean(evaluate(expression(job("benchmark_check"), "if"), ...args)), isolated);
       assert.equal(Boolean(evaluate(expression(job("benchmark_check"), "if"), event, "", "", true,
         false, "synchronize", "", "", "skipped", benchmark, caller)), false);
@@ -69,6 +71,19 @@ test("the separate benchmark aggregate fails on every non-success dependency", (
     const run = spawnSync("bash", ["-c", shell], { env: { ...success, [key]: result }, encoding: "utf8", timeout: 1000 });
     assert.ifError(run.error);
     assert.equal(run.status, result === "success" ? 0 : 1, `${key}/${result}`);
+  }
+});
+
+test("reduced dispatch fails the literal protected aggregate even when every work job passes", () => {
+  const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
+  const success = { ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "",
+    GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
+    CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success",
+    WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success" };
+  for (const value of ["true", "", "unexpected"]) {
+    const run = spawnSync("bash", ["-c", shell], { env: { ...success, BROWSER_BENCHMARK: value }, encoding: "utf8", timeout: 1000 });
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /Reduced benchmark cannot satisfy the protected required check/);
   }
 });
 
@@ -134,7 +149,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
   for (const variable of variables) for (const plan of states) for (const mode of ["", "full", "fast", "affected", "unknown"]) {
     const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
-      GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
+      BROWSER_BENCHMARK: "false", GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
       ROUTING_SWITCH: variable, ROUTING_ENABLED: String(variable.toLowerCase() === "enabled"), PLAN_RESULT: plan, PLAN_MODE: mode,
       CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
       DELEGATED_PIPELINE_RESULT: "success",
@@ -147,7 +162,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
   for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "UNIT_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"]) {
     for (const result of states.filter((state) => state !== "success")) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
-        GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
+        BROWSER_BENCHMARK: "false", GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
         ROUTING_SWITCH: "enabled", ROUTING_ENABLED: "true", PLAN_RESULT: "success", PLAN_MODE: mode,
         CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
         DELEGATED_PIPELINE_RESULT: "success", [key]: result,
@@ -161,7 +176,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
 test("the actual aggregate requires an admitted gate's success and unambiguous output, and rejects stray gate output", () => {
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
   const work = { CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success",
-    ROUTING_SWITCH: "", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
+    BROWSER_BENCHMARK: "false", ROUTING_SWITCH: "", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
   for (const gate of variables) for (const admitted of [true, false]) for (const result of states) {
     for (const mode of ["", "full", "fast", "affected", "unknown"]) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {

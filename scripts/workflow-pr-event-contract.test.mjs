@@ -84,7 +84,6 @@ function workflowContract(path) {
 }
 
 function unwrapAggregatorGuard(expression) {
-  expression = expression.replace(" && !(github.event_name == 'workflow_dispatch' && inputs.browser_benchmark) }}", " }}");
   const work = expression.match(/^\$\{\{ !cancelled\(\) && \((.+)\) \}\}$/);
   if (work) return work[1];
   const wrapped = expression.match(/^\$\{\{\s*\(github\.event_name != 'pull_request' \|\| !cancelled\(\)\)\s*&&\s*\((.+)\)\s*\}\}$/);

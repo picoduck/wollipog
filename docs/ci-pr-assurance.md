@@ -18,7 +18,7 @@ Workflow `CI` remains at `.github/workflows/ci.yml`. Protected result
 | Merge Group | Complete regression | Same; PR routing is never admitted |
 | Main Push or Reusable Rolling Validation | Complete regression | Same |
 | Ordinary Manual Dispatch | Complete regression | Same |
-| Explicit Branch Benchmark Dispatch | Isolated browser simulation | Same; skips protected aggregator execution |
+| Explicit Branch Benchmark Dispatch | Isolated browser simulation | Separate result; protected aggregator deliberately fails |
 
 Every PR retains all three full Node shards, typecheck, engine boundaries,
 web/control-plane/runner bundles, delegated Linux containment/recovery, Platform
@@ -102,15 +102,19 @@ A diagnostic cannot replace required PR/queue checks. Before merge, explicitly
 simulate the reduced lane on a feature branch without repository variables:
 
 ```sh
-gh workflow run ci.yml --repo picoduck/wollipog --ref <branch> -f browser_benchmark=true
+gh workflow run ci.yml --repo picoduck/wollipog --ref <benchmark-only-branch> -f browser_benchmark=true
 ```
 
 The flag exists only under workflow_dispatch, not rolling reusable inputs. The
 same event/input guard controls reduced matrix and a separate job with literal
 name **PR Browser Benchmark Result**. The protected aggregator retains the literal
-**Typecheck, Test & Sidecar Bundle** name and skips execution only for this diagnostic.
-PR/merge-group events cannot exploit the flag; a skipped diagnostic protected job
-is not passing PR assurance evidence. Default dispatch stays full. The
+**Typecheck, Test & Sidecar Bundle** name and deliberately fails for this diagnostic,
+even when all work passes. Skipping it would count as passing under GitHub branch
+protection and is unsafe. PR/merge-group events cannot exploit the flag. Use a
+dedicated benchmark branch with a distinct marker commit (same tree as the reviewed
+candidate), so the expected failing protected result cannot interfere with the PR
+head. Record both SHAs and verify tree identity. Success means the separate
+benchmark result passed; the overall workflow is expected to fail. Default dispatch stays full. The
 simulation runs critical files, full Node/check/platform work, WebKit, Windows
 and production smoke. It represents critical-only PR work, not arbitrary changed
 specs or live planning latency. At most four additional runs per PR are authorized.

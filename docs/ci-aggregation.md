@@ -23,11 +23,15 @@ Chromium files in one job. All PR Node shards execute the full suite.
 The former `CI_PR_SUITE_ROUTING` variable no longer controls PR coverage.
 The protected job name is always the static literal `Typecheck, Test & Sidecar Bundle`,
 including before GitHub starts it. An explicit dispatch-only `browser_benchmark`
-input skips execution of that aggregator and simulates critical-only work under
+input simulates critical-only work under
 the separate `benchmark_check` job, whose static name is `PR Browser Benchmark Result`.
-That job requires success from all six work dependencies. A skipped protected job
-in a diagnostic is not passing PR assurance evidence. PR/merge-group events
-cannot consume the benchmark input.
+That job requires success from all six work dependencies. The protected aggregator
+executes and deliberately fails in this mode: a skipped check would count as
+passing under [GitHub protection](https://docs.github.com/en/pull-requests/reference/status-checks).
+Dispatch on a separate marker commit with the same
+tree as the reviewed candidate, so that expected failure cannot affect PR-head
+checks. The overall benchmark workflow is expected to fail; only its separate
+benchmark result describes success. PR/merge-group events cannot consume this input.
 All other coverage stays mandatory. Checks/browser
 wait for optional routing and use `!cancelled()` plus the same draft guard so an
 expected disabled plan skip cannot skip full work. WebKit/Windows stay independent.
@@ -42,8 +46,8 @@ by the aggregator shell while the PR workflow remains active. Whole-workflow
 cancellation permits the PR aggregator to be cancelled with its obsolete run.
 The cancellation term is `(github.event_name != 'pull_request' || !cancelled())`:
 non-PR full runs retain unconditional aggregation, including after cancellation.
-The explicit benchmark exclusion is independent of cancellation; its diagnostic
-aggregate instead uses `!cancelled()` and never executes the protected job.
+The benchmark's protected aggregate fails explicitly even when every work job
+passes. Its independent diagnostic aggregate uses `!cancelled()`.
 This preserves merge-group and reusable rolling-main failure-reporting behavior
 instead of extending the PR cancellation change to those events.
 

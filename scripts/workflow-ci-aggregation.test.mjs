@@ -33,7 +33,7 @@ const events = [
   { name: "main-push", event_name: "push", expected: true },
   { name: "merge-group", event_name: "merge_group", expected: true },
   { name: "manual", event_name: "workflow_dispatch", expected: true },
-  { name: "isolated-benchmark", event_name: "workflow_dispatch", browser_benchmark: true, expected: false },
+  { name: "isolated-benchmark", event_name: "workflow_dispatch", browser_benchmark: true, expected: true },
 ];
 
 // This is an inert expression model of GitHub's documented status functions, not its
@@ -80,7 +80,7 @@ test("the actual aggregator shell succeeds only for all-success and names every 
   const labels = { checks: "Typecheck & Bundles", unit: "Unit Tests", browser: "Browser End-to-End Tests",
     win32: "Settings-Rows win32 Baselines", webkit: "WebKit End-to-End Tests", delegated_pipeline: "Delegated Pipeline Recovery" };
   for (const outcomes of [...combinations, ...work.map((id) => ({ ...Object.fromEntries(work.map((other) => [other, "success"])), [id]: "" }))]) {
-    const env = { ROUTING_ENABLED: "false", PLAN_MODE: "", GATE_ENABLED: "false", GATE_MODE: "",
+    const env = { BROWSER_BENCHMARK: "false", ROUTING_ENABLED: "false", PLAN_MODE: "", GATE_ENABLED: "false", GATE_MODE: "",
       ...Object.fromEntries(resultEnv.map((match) => [match[1], ["suite_plan", "merge_group_gate"].includes(match[2]) ? "skipped" : outcomes[match[2]]])) };
     const run = spawnSync("bash", ["-c", shell], { env, encoding: "utf8", timeout: 1_000 });
     assert.ifError(run.error);
@@ -161,7 +161,7 @@ test("concurrency remains independent for unrelated PRs, refs and workflows", ()
 test("merge groups keep the full required aggregation whatever the disabled gate's result", () => {
   const success = { CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
     DELEGATED_PIPELINE_RESULT: "success",
-    ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
+    BROWSER_BENCHMARK: "false", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
   const merge = events.find((event) => event.name === "merge-group");
   for (const outcomes of combinations) {
     // The aggregator is admitted for every merge-group outcome, with or without cancellation.

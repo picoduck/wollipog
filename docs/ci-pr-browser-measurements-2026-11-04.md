@@ -1,6 +1,6 @@
 # PR Browser Routing Measurements
 
-Refs #3630. Routing remains inactive. Benchmark dispatches used: **0/4**.
+Refs #3630. Routing remains inactive. Benchmark dispatches used: **1/4**.
 This report separates applicability, runtime and timestamp quality; none grants
 activation approval or replaces full merge-group regression.
 
@@ -98,6 +98,14 @@ Isolation is a separate optional workflow outside the required CI aggregator;
 its absence is not zero execution time. Its workflow and routing are unchanged.
 
 ## Reduced-Lane Benchmark
+
+The first dispatch, [41920114659](https://github.com/picoduck/wollipog/actions/runs/41920114659)
+on `f4b3d8e32cb7395d5c97b40619786974033e791f`, was cancelled after review found
+that skipping its protected aggregator could satisfy GitHub protection. It counts
+against the dispatch budget but supplies no completed-lane latency sample. Its
+elapsed runner consumption will be included separately in the measurement costs.
+The replacement design deliberately fails the protected check and uses a separate
+same-tree benchmark marker commit to isolate that expected failure from the PR.
 
 Pending after candidate review and CI. Report the same job rows, result latency,
 actual run/job IDs, half-open UTC window, elapsed runner-minutes, runner wait and

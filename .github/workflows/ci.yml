@@ -19,7 +19,7 @@ on:
   workflow_dispatch:
     inputs:
       browser_benchmark:
-        description: Isolated branch diagnostic; never reports the protected required context
+        description: Benchmark-only commit diagnostic; protected check deliberately fails
         type: boolean
         default: false
       synthetic_failure_artifacts:
@@ -1078,8 +1078,8 @@ jobs:
           if-no-files-found: warn
 
   benchmark_check:
-    # A reduced branch diagnostic has its own literal result name. It never runs the
-    # protected aggregator, whose static name is also visible before it starts.
+    # A reduced branch diagnostic has its own literal result name. The protected
+    # aggregator deliberately fails in this mode; skipping it would satisfy protection.
     if: ${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.browser_benchmark }}
     name: PR Browser Benchmark Result
     runs-on: ubuntu-24.04
@@ -1116,7 +1116,7 @@ jobs:
     # lets superseded PR runs cancel this job (#2452), without changing non-PR aggregation.
     # It is a status function, so no implicit success() suppresses failure reporting.
     # Keep the draft/ready-for-review guard; see docs/ci-aggregation.md for the verification limits.
-    if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) && !(github.event_name == 'workflow_dispatch' && inputs.browser_benchmark) }}
+    if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
     name: Typecheck, Test & Sidecar Bundle
     runs-on: ubuntu-24.04
     timeout-minutes: 5
@@ -1124,6 +1124,7 @@ jobs:
     steps:
       - name: Require Every Job to Have Succeeded
         env:
+          BROWSER_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'true' || 'false' }}
           ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}
           ROUTING_ENABLED: ${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && 'true' || 'false' }}
           PLAN_RESULT: ${{ needs.suite_plan.result }}
@@ -1139,6 +1140,11 @@ jobs:
           WEBKIT_RESULT: ${{ needs.webkit.result }}
           DELEGATED_PIPELINE_RESULT: ${{ needs.delegated_pipeline.result }}
         run: |
+          # Never publish a success or passing-equivalent skip from reduced dispatch work.
+          if [ "$BROWSER_BENCHMARK" != false ]; then
+            echo '::error::Reduced benchmark cannot satisfy the protected required check; use PR Browser Benchmark Result.'
+            exit 1
+          fi
           status=0
           report() {
             case "$2" in
