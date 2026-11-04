@@ -143,8 +143,8 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
   add("exact-changes", "AC1", "Exact workflow, status and ruleset changes published", "met",
     `${PROPOSAL} embeds the ruleset body computed below from the live snapshot`, text(PROPOSAL).includes(JSON.stringify(ruleset, null, 2)));
   add("protected-context-kept", "AC1", `\`${REQUIRED_CONTEXT}\` keeps its name and issuer; nothing is renamed or removed`, "met",
-    `ci.yml check job name; proposed ruleset keeps ${JSON.stringify(liveRequired[0])} first`,
-    workflow.includes(`    name: ${REQUIRED_CONTEXT}\n`) && JSON.stringify(ruleset.rules.find((r) => r.type === "required_status_checks")
+    `ci.yml keeps the protected PR/queue/main context and isolates explicit dispatch benchmarks; proposed ruleset keeps ${JSON.stringify(liveRequired[0])} first`,
+    (workflow.includes(`    name: ${REQUIRED_CONTEXT}\n`) || workflow.includes("    name: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' || 'Typecheck, Test & Sidecar Bundle' }}\n")) && JSON.stringify(ruleset.rules.find((r) => r.type === "required_status_checks")
       .parameters.required_status_checks[0]) === JSON.stringify(liveRequired[0]));
   add("unknown-checks-block", "AC1", "An unfilled, unpinned or unknown admission issuer keeps full validation", "met",
     `Gate on the unfilled template: ${decided("Proposed ruleset, issuer placeholder unfilled").mode} (${decided("Proposed ruleset, issuer placeholder unfilled").enforcement.reason})`,
@@ -195,7 +195,7 @@ export async function buildReadiness({ cutover, rollback, lease } = {}) {
     "Proposed path in the proposal; the fast gate is not evidence for #2674's full-gate criterion");
   add("prereq-3628-3629-window", "Prerequisite", "#3628/#3629 sustained critical-path and long-window suite comparison", "observation-gap", "Interim observations only");
   add("prereq-3630-post-activation", "Prerequisite", "#3630 PR routing post-activation measurement", "approval-gap",
-    `CI_PR_SUITE_ROUTING ${live.gateVariables.CI_PR_SUITE_ROUTING === null ? "absent" : "present"}; enabling needs approval, then a natural window`);
+    `Legacy CI_PR_SUITE_ROUTING ${live.gateVariables.CI_PR_SUITE_ROUTING === null ? "absent" : "present"} in the dated snapshot; current CI_PR_BROWSER_ROUTING is unmeasured by that snapshot. Fresh owner read-back, exact assurance approval and a natural post-activation window are required`);
   add("prereq-3633-enforcement-bound", "Prerequisite", "#3633 AC1 live enforcement bound", "observation-gap", "Shipped enforcement bound: none (disabled)");
   add("prereq-2674-trial", "Prerequisite", "#2674 five-working-day full-gate trial", "observation-gap", "Separate trial; not satisfied by this policy");
   add("first-real-gate-group", "Prerequisite", "The gate's first real merge group decision and job-level evidence", "observation-gap", "Never enabled");

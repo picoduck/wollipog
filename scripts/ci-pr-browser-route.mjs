@@ -23,7 +23,7 @@ export function computeBrowserRoute({ env = process.env, cwd = process.cwd() } =
     const workflow = ".github/workflows/ci.yml";
     if (git(["rev-parse", `${base}:${workflow}`]).trim() !== git(["rev-parse", `${tested}:${workflow}`]).trim())
       return full("workflow-changed-or-unavailable");
-    const paths = git(["ls-tree", "-r", "--name-only", "-z", tested]).split("\0").filter(Boolean);
+    const paths = git(["ls-tree", "-r", "--name-only", "-z", tested, "--", "apps/web/e2e/"]).split("\0").filter(Boolean);
     const inventory = paths.filter((path) => /^apps\/web\/e2e\/.+\.(?:spec|test)\.[cm]?[jt]sx?$/.test(path) && path !== "apps/web/e2e/inbox-lazy.spec.ts");
     return { ...browserSelection({ entries, inventory }), context: { base, tested, head, diffBase } };
   } catch { return full("selection-unavailable"); }

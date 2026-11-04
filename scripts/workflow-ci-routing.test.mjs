@@ -236,6 +236,20 @@ test("the actual plan shell checks exact casing before invoking Git or the selec
   }
 });
 
+test("the actual benchmark shell uses benchmark files as data and propagates failure", () => {
+  const shell = shellOf(job("browser"), "Remote-Instance Browser End-to-End Tests").replaceAll("${{ matrix.shard }}", "1");
+  const files = '["apps/web/e2e/authentication-recovery.spec.ts"]';
+  const stub = 'pnpm() { printf "%s\\n%s\\n" "$*" "$PR_BROWSER_FILES"; return "$STUB_EXIT"; };\n';
+  for (const exit of [0, 7]) {
+    const run = spawnSync("bash", ["-e", "-c", stub + shell], { encoding: "utf8", timeout: 1000,
+      env: { BROWSER_BENCHMARK: "true", BENCHMARK_BROWSER_FILES: files, PR_BROWSER_FILES: "stale PR output",
+        PR_FAST: "false", GROUP_FAST: "false", STUB_EXIT: String(exit) } });
+    assert.ifError(run.error);
+    assert.equal(run.status, exit);
+    assert.equal(run.stdout.trim(), `test:e2e --config playwright.pr.config.ts\n${files}`);
+  }
+});
+
 test("both actual execution branches preserve commands, propagate errors and never accept author arguments", () => {
   const stub = 'pnpm() { printf "pnpm %s\\n" "$*"; return "$STUB_EXIT"; }; node() { printf "node %s\\n" "$*"; return "$STUB_EXIT"; };\n';
   for (const isFast of [false, true]) for (const raw of ["enabled", "Enabled", "ENABLED", ""]) for (const exit of [0, 7]) for (const [id, name] of [

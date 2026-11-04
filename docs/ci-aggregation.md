@@ -139,7 +139,7 @@ post-merge traffic; do not manufacture runs or cancellations to measure this cha
 ## Disabled Merge-Group Gate
 
 Refs #3637 under #3625. **Nothing is activated.** Today every merge group runs full
-regression; `CI_PR_SUITE_ROUTING` only ever reduces ready pull-request runs. The
+regression; `CI_PR_BROWSER_ROUTING` only reduces ready pull-request browser runs. The
 merge-group gate is prepared, inert machinery for a later, separately approved cutover.
 
 | Repository Variable `CI_MERGE_GROUP_GATE` | Behavior |
