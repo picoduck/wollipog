@@ -13,6 +13,9 @@ const entry = (path, status = "M") => ({ path, status });
 const select = (entries, extra = {}) => browserSelection({ entries, inventory, ...extra });
 
 test("ordinary implementation selects critical journeys and every added/changed browser file", () => {
+  assert.deepEqual(CRITICAL_BROWSER_FILES, ["authentication-recovery.spec.ts", "new-session-choices.spec.ts",
+    "request-surfaces.spec.ts", "issue-closure.spec.ts", "conversation-handoff.spec.ts",
+    "automation-triggers.spec.ts", "command-inbox-projects.spec.ts"], "review manifest changes with the policy version");
   for (const path of ["apps/web/src/components/Timeline.tsx", "apps/control-plane/src/format-label.ts", "apps/runner/src/display.ts"])
     assert.deepEqual(select([entry(path)]).files, [...critical].sort());
   const entries = [entry("apps/web/src/components/Timeline.tsx"), entry(inventory.at(-1), "A"), entry(inventory.at(-2))];

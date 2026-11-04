@@ -12,10 +12,11 @@ const job = (id) => workflow.match(new RegExp(`^  ${id}:\\n[\\s\\S]*?(?=^  [\\w-
 const expression = (text, key) => text.match(new RegExp(`^\\s+${key}: (.+)$`, "m"))?.[1];
 const shellOf = (text, name) => text.split(`      - name: ${name}\n`)[1].match(/        run: \|\n((?:          .*\n?)+)/)[1]
   .split("\n").map((line) => line.slice(10)).join("\n");
-function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped") {
-  const context = { github: { event_name: event, event: { action, pull_request: { draft } } },
+function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped", benchmark = false, workflowName = "CI", planResult = "success") {
+  const context = { github: { event_name: event, workflow: workflowName, event: { action, pull_request: { draft } } },
+    inputs: { browser_benchmark: benchmark },
     vars: { CI_PR_BROWSER_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
-    needs: { suite_plan: { result: "success", outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
+    needs: { suite_plan: { result: planResult, outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
     cancelled: () => cancelled, fromJSON: JSON.parse,
     ghaEqual: (a, b) => typeof a === "string" && typeof b === "string" ? a.toUpperCase() === b.toUpperCase() : a == b };
   // GitHub's documented ==/!= ignore string case. JS's native equality concealed a real
@@ -33,6 +34,34 @@ const enabled = expression(job("check"), "ROUTING_ENABLED");
 const admission = expression(job("suite_plan"), "if");
 const states = ["success", "failure", "cancelled", "skipped", "", "unexpected"];
 const variables = ["", "false", "disabled", "Enabled", "ENABLED", "true", "enabled ", "enabled"];
+
+test("only the isolated dispatch benchmark can reduce manual coverage and it never emits the protected name", () => {
+  const name = expression(job("check"), "name");
+  const prepare = expression(job("browser").split("      - name: Prepare Benchmark Browser Selection\n")[1], "if");
+  const benchmarkFlag = expression(job("browser"), "BROWSER_BENCHMARK");
+  for (const event of ["pull_request", "merge_group", "push", "workflow_call", "workflow_dispatch"]) {
+    for (const benchmark of [false, true]) for (const caller of ["CI", "Main Rolling Validation", "PR Browser Benchmark"]) {
+      const args = [event, "", "", false, false, "synchronize", "", "", "skipped", benchmark, caller];
+      const isolated = event === "workflow_dispatch" && benchmark;
+      assert.deepEqual(Array.from(evaluate(matrix, ...args)), isolated ? [1] : [1, 2, 3, 4, 5]);
+      assert.equal(Boolean(evaluate(prepare, ...args)), isolated);
+      assert.equal(evaluate(benchmarkFlag, ...args), isolated ? "true" : "false");
+      assert.equal(evaluate(name, ...args), isolated ? "PR Browser Benchmark Result" : "Typecheck, Test & Sidecar Bundle");
+    }
+  }
+  const events = workflow.slice(workflow.indexOf("\non:\n"), workflow.indexOf("\npermissions:\n"));
+  assert.match(events, /workflow_dispatch:\n    inputs:\n      browser_benchmark:/);
+  assert.doesNotMatch(events.split("  workflow_dispatch:")[0], /browser_benchmark/);
+  assert.doesNotMatch(job("unit"), /browser_benchmark|BROWSER_BENCHMARK|PR_FAST/);
+});
+
+test("failed, cancelled and missing PR plans cannot reduce browser work using retained outputs", () => {
+  for (const result of ["failure", "cancelled", "skipped", "", "unknown"]) {
+    const args = ["pull_request", "enabled", "fast", false, false, "synchronize", "", "", "skipped", false, "CI", result];
+    assert.deepEqual(Array.from(evaluate(matrix, ...args)), [1, 2, 3, 4, 5]);
+    assert.equal(evaluate(fast, ...args), "false");
+  }
+});
 
 test("off switches preserve full work; case-variant plan admission cannot change non-PR coverage", () => {
   assert.equal(evaluate("${{ vars.CI_PR_BROWSER_ROUTING == 'enabled' }}", "pull_request", "Enabled"), true,

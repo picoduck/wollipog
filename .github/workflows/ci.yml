@@ -11,10 +11,6 @@ on:
         description: Immutable main snapshot admitted by the rolling controller
         type: string
         default: ''
-      browser_benchmark:
-        description: Isolated branch diagnostic; never reports the protected required context
-        type: boolean
-        default: false
   # Merge queue entries run the same required check on the queued merge group.
   merge_group:
   pull_request:
@@ -22,6 +18,10 @@ on:
   # Main pushes use Main Rolling Controller; rollback: scripts/restore-main-push-ci.mjs.
   workflow_dispatch:
     inputs:
+      browser_benchmark:
+        description: Isolated branch diagnostic; never reports the protected required context
+        type: boolean
+        default: false
       synthetic_failure_artifacts:
         description: Deliberately fail the isolated synthetic artifact fixture (separate validation run)
         type: boolean
@@ -551,7 +551,7 @@ jobs:
         # Projects partition the live file inventory by measured duration, keeping files intact.
         # The inventory contract pins these five jobs to all five projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -668,7 +668,7 @@ jobs:
           key: ${{ steps.playwright-chromium-packages-resolve.outputs.key }}
 
       - name: Prepare Benchmark Browser Selection
-        if: github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark
+        if: github.event_name == 'workflow_dispatch' && inputs.browser_benchmark
         run: node scripts/ci-pr-browser-benchmark.mjs
 
       - name: Remote-Instance Browser End-to-End Tests
@@ -679,7 +679,7 @@ jobs:
           ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}
           PR_FAST: ${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}
           PR_BROWSER_FILES: ${{ needs.suite_plan.outputs.files }}
-          BROWSER_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark && 'true' || 'false' }}
+          BROWSER_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'true' || 'false' }}
           GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}
           GROUP_FAST: ${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}
         run: |
@@ -1083,7 +1083,7 @@ jobs:
     # It is a status function, so no implicit success() suppresses failure reporting.
     # Keep the draft/ready-for-review guard; see docs/ci-aggregation.md for the verification limits.
     if: ${{ (github.event_name != 'pull_request' || !cancelled()) && (github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false) }}
-    name: ${{ github.event_name == 'workflow_dispatch' && github.workflow == 'PR Browser Benchmark' && inputs.browser_benchmark && 'PR Browser Benchmark Result' || 'Typecheck, Test & Sidecar Bundle' }}
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'PR Browser Benchmark Result' || 'Typecheck, Test & Sidecar Bundle' }}
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]

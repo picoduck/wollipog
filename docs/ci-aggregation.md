@@ -16,10 +16,15 @@ GitHub's case-insensitive expression matching admits a plan for case variants of
 fast aggregate. The absent/ordinary off state still adds no executed jobs.
 
 Full coverage remains five browser shards on every event while routing is off,
-and always on main, manual dispatch and reusable rolling validation. Merge groups
+and always on main, ordinary manual dispatch and reusable rolling validation. Merge groups
 stay full unless the disabled merge-group gate below is separately activated.
-Only an activated, trusted allowlisted prose fast PR uses one critical Chromium
-job and the fast Node group. All other coverage stays mandatory. Checks/browser
+Only an activated, trusted `CI_PR_BROWSER_ROUTING` plan uses critical-plus-changed
+Chromium files in one job. All PR Node shards execute the full suite.
+The former `CI_PR_SUITE_ROUTING` variable no longer controls PR coverage.
+An explicit dispatch-only `browser_benchmark` input simulates critical-only work
+under the separate `PR Browser Benchmark Result` name; it cannot report this
+protected context, and PR/merge-group events cannot consume that input.
+All other coverage stays mandatory. Checks/browser
 wait for optional routing and use `!cancelled()` plus the same draft guard so an
 expected disabled plan skip cannot skip full work. WebKit/Windows stay independent.
 
@@ -60,8 +65,8 @@ build after every test had passed, and a cancelled job names no step. The work i
 
 Coverage is unchanged: each shard runs the same discovery and plan as `pnpm test:ci`, and
 `scripts/node-test-plan.test.mjs` proves the shards are disjoint and their union is the
-plan, for every suite and shard count. The PR fast path and the disabled merge-group gate
-shard their `node-fast` selection the same way. The `unit` job uses the same guard and
+plan, for every suite and shard count. Only the disabled merge-group gate retains
+a sharded `node-fast` selection; every PR runs full Node testing. The `unit` job uses the same guard and
 `needs` as `checks`, and the aggregator requires `needs.unit.result` to be `success`: one
 failed, cancelled or skipped shard fails the required check under the name **Unit Tests**.
 Main-push validation reuses this workflow, so the rolling inventory, release
@@ -161,7 +166,7 @@ when **all** of these hold:
    A group that does not descend from current main, and every affected, full,
    high-risk or uncertain selection, stays full.
 
-A `fast` decision applies exactly the PR fast reduction: the `node-fast` group and one
+A `fast` decision retains the historical gate reduction: the `node-fast` group and one
 critical Chromium leg. Typecheck, engine boundaries, delegated containment, bundles,
 production smoke, WebKit and Windows comparison stay mandatory. The gate job records
 the decision as job-level evidence: exactly one of **Record Full Merge Group Coverage**
