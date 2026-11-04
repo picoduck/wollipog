@@ -26,6 +26,8 @@ Runner-log retention remains active for organizations that have archived-history
 
 The control plane continues to advertise the `wollipog-control-plane` service identity. Desktop v0.15.0 and later accept both the current and legacy service identities. Older clients may report `The address is not a Wollipog control plane.` and must be upgraded before connecting.
 
+Automatic launches now check the effective default provider account, rather than accepting any signed-in account. If the default is signed out or unavailable, choose a ready account explicitly or repair the default. Older control planes connected to a v283 runner see an unavailable default as an unavailable agent; upgrade the control plane first.
+
 ## Usage and Cost
 
 - Explore usage by day, model, agent, machine, and person from one tab row. The chart uses a full time axis, marks periods without recorded data, avoids overlapping labels, and shows average and peak usage with accessible agent colors.
@@ -43,6 +45,7 @@ The control plane continues to advertise the `wollipog-control-plane` service id
 ## Campaign Decisions, Reviews, and Recovery
 
 - Sessions can park while a pull request is queued and wake once on its outcome. Timed-out session waits return compact status, and waiting children no longer repeatedly wake their Orchestrator.
+- Full Control launch scoping recognizes issue ranges and reserves derived issue capacity for target epics' members; explicit ceilings stay fixed.
 - Full Control campaigns can finish with explicit handoffs. An in-scope epic can close from verified, completed members, while dispatch and merge-based closure remain restricted to authorized issues.
 - Human-owned publication decisions survive repeated requests and routine pull-request activity. Refused closures explain the gap; correctable follow-up publication failures return to the requesting child.
 - Full Control roots can hand retained decisions to the owner, and messages identify when Full Control dismissed an agent's question. Reviewer refusals name the configured grant involved.
