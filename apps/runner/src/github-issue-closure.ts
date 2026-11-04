@@ -119,7 +119,8 @@ export async function inspectGithubIssueClosure(issue: number, run: Run, deliver
   if (deliveryPullRequests !== undefined) {
     if (!deliveryPullRequests.length || deliveryPullRequests.length > 100) throw new IssueClosureInspectionError("Completed closure requires bounded actual merged PR evidence");
     const fail = (check: DeliveryVerificationFailure["check"], pullRequest?: number): never => {
-      throw new IssueClosureInspectionError("Delivery verification failed", "evidence_unavailable", { check, ...(pullRequest === undefined ? {} : { pullRequest }) });
+      throw new IssueClosureInspectionError(`Delivery verification failed at ${check}${pullRequest === undefined ? "" : ` for #${pullRequest}`}`,
+        "evidence_unavailable", { check, ...(pullRequest === undefined ? {} : { pullRequest }) });
     };
     const read = async (path: string, check: DeliveryVerificationFailure["check"], pullRequest?: number, projection?: string) => {
       try {

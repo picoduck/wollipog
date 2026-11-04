@@ -115,6 +115,29 @@ test("#4164 real runner inspection admits a merge-queue squash delivery and reje
   }
 });
 
+test("#4164 epic delivery records its own result instead of an ordinary-route failure", async () => {
+  for (const epicFails of [false, true]) {
+    const { h, observe, close } = delivery({ stage: [{ number: 10 }], epic: true });
+    try {
+      observe(10, "merged");
+      h.state.epicMembers = { readable: true, members: [{ number: 101, state: "completed" }] };
+      const runner = h.hub.requestFromRunner;
+      h.hub.requestFromRunner = async (r, id, message, timeout) => {
+        const result = await runner(r, id, message, timeout);
+        if (message.type === "github_issue_closure" && message.operation === "inspect" && message.deliveryPullRequests && (!message.epicMembers || epicFails)) {
+          return { type: "github_issue_closure_result", requestId: id, sessionId: message.sessionId, ok: false,
+            deliveryVerificationFailure: { check: message.epicMembers ? "base" : "head", pullRequest: 10 } };
+        }
+        return result;
+      };
+      const result = await close(`epic-result-${epicFails}`);
+      assert.ok(result.ok, result.error ?? "closure");
+      assert.equal(result.data!.decision!.authority, epicFails ? "human" : "orchestrator");
+      assert.equal(closureSnapshot(result.data!.decision!).deliveryVerificationFailure?.check, epicFails ? "base" : undefined);
+    } finally { h.db.close(); }
+  }
+});
+
 test("#4164 delivery diagnostics survive person routing without raw runner errors", async () => {
   for (const mode of ["merged_state", "head", "base", "comparison_read", "throw", "digest", "missing", "legacy", "confirmed"] as const) {
     const { h, observe, close } = delivery({ stage: [{ number: 10 }] });
@@ -1433,8 +1456,8 @@ test("campaign issue scope refuses each runner floor with the shared sentence an
  * named in a reported stage, then waited past the forge fact's freshness. These run the real ledger,
  * verification, `pr_merge` gate and closure route rather than a stubbed work-item detail. */
 type GateOption = "consumed" | "revoked" | "other_session" | "reassigned" | null;
-function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOption; verify?: boolean; intendedClosures?: string[] } = {}) {
-  const h = harness();
+function delivery(options: { stage?: Array<{ number: number }>; gate?: GateOption; verify?: boolean; intendedClosures?: string[]; epic?: boolean } = {}) {
+  const h = options.epic ? harness(true, 5, [100, 101]) : harness();
   const head = "b".repeat(40), merge = "c".repeat(40);
   const ref = (number: number) => ({ repository: "team/repo", number });
   type State = "open" | "closed" | "merged";

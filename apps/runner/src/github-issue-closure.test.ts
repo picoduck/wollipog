@@ -224,6 +224,7 @@ test("completed closure verifies the delivered head, actual default-branch merge
     else await assert.rejects(inspect, (error: unknown) => {
       assert.ok(error instanceof IssueClosureInspectionError);
       assert.deepEqual(error.deliveryVerificationFailure, { check: ({queued:"merged_state", "changed-head":"head", "feature-base":"base", "not-contained":"containment"} as Record<string,string>)[mode], pullRequest: 10 });
+      assert.match(error.message, new RegExp(`failed at ${error.deliveryVerificationFailure!.check} for #10`));
       return true;
     });
   }

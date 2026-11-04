@@ -42,6 +42,8 @@ function closure(repository: string, url: string, pullUrl: string): Record<strin
 
 test("GitHub closure snapshots keep their exact github.com addresses", () => {
   const snapshot = closure("team/repo", "https://github.com/team/repo/issues/12", "https://github.com/team/repo/pull/7");
+  assert.ok(normalizeIssueClosureSnapshot({ ...snapshot, deliveryVerificationFailure: { check: "future_check" } }));
+  assert.equal(normalizeIssueClosureSnapshot({ ...snapshot, deliveryVerificationFailure: { check: "future_check" } })?.deliveryVerificationFailure, undefined);
   assert.equal(normalizeIssueClosureSnapshot(snapshot)?.url, "https://github.com/team/repo/issues/12");
   for (const patch of [
     { url: "https://github.com/team/repo/issues/13" }, { url: "https://github.com/Team/Repo/issues/12" },

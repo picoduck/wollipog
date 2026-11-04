@@ -65,7 +65,6 @@ function previousRefusal(value: unknown): GithubIssueClosureSnapshot["previousRe
  * not accepted as a way for an agent to assert current forge or child evidence. */
 export function normalizeIssueClosureSnapshot(value: Record<string, unknown>): GithubIssueClosureSnapshot | null {
   const verificationFailure = value.deliveryVerificationFailure === undefined ? undefined : normalizeDeliveryVerificationFailure(value.deliveryVerificationFailure);
-  if (verificationFailure === null) return null;
   if (value.deliveryFailure !== undefined && !bounded(value.deliveryFailure, 512)) return null;
   const deliveryGaps = value.deliveryGaps === undefined ? undefined : normalizeIssueClosureDeliveryGaps(value.deliveryGaps);
   if (deliveryGaps === null) return null;
