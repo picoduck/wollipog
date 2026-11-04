@@ -1,10 +1,12 @@
 import type { WorkflowEventRetentionView, UpdateWorkflowEventRetentionRequest } from "@wollipog/protocol";
+import type { OrchestratorCampaignBehaviorView, UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
 import type {
   CampaignForgeRefreshResponse,
   CampaignWorkItemDetailResponse,
   CampaignWorkItemsPage,
   AddBoxRequest,
   BackgroundJobStopResponse,
+  QueueHoldReleaseResponse,
   SessionWorktreeCreateOperationSummary,
   SessionWorktreeCreateOperationView,
   AccessScopeChangePreview,
@@ -75,6 +77,7 @@ import type {
   PromptImageInput,
   PromptImageReference,
   ProviderLoginView,
+  ProviderCredentialImportSource,
   ProviderHomeLeaseInspection,
   QueuedPromptDraft,
   InvokeSessionCommandRequest,
@@ -141,6 +144,8 @@ import type {
   WorktreeSetupConfigStatus,
   WorkspaceReference,
   WorkspaceReferenceCandidate,
+  WorkspaceReferenceSearchLimit,
+  WorkspaceReferenceSearchMatch,
   WorkflowArtifact,
   WorkflowArtifactPage,
   WorkflowDefinition,
@@ -360,6 +365,10 @@ export function createApiClient(transport: ApiTransport) {
     }),
 
   orchestratorSettings: () => req<OrchestratorSettingsView>("/api/orchestrator-settings"),
+  reviewSettings: (projectId: string | null = null) => req<import("@wollipog/protocol").ReviewSettingsView>(`/api/review-settings${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`),
+  updateReviewSettings: (projectId: string | null, settings: import("@wollipog/protocol").ReviewSettings | null) =>
+    req<import("@wollipog/protocol").ReviewSettingsView>(`/api/review-settings${projectId ? `?projectId=${encodeURIComponent(projectId)}` : ""}`,
+      { method: "PUT", body: JSON.stringify({ settings }) }),
   videoReviewStatus: () => req<import("@wollipog/protocol").VideoReviewSettingsStatus>("/api/video-evidence/review-status"),
   fullControlLaunchPreflight: (input: import("@wollipog/protocol").FullControlLaunchRequest, signal?: AbortSignal) =>
     req<{ preflight: import("@wollipog/protocol").CampaignLaunchPreflight }>("/api/full-control-campaigns/preflight", {
@@ -922,7 +931,12 @@ export function createApiClient(transport: ApiTransport) {
       { method: "POST", body: JSON.stringify({ action }) },
     ),
 
-  restart: (id: string) => req<SessionView>(`/api/sessions/${id}/restart`, { method: "POST" }),
+  /** `waitForProviderHome` (#3240): wait for a busy provider account instead of failing. */
+  restart: (id: string, options?: { waitForProviderHome?: boolean }) =>
+    req<SessionView>(`/api/sessions/${id}/restart`, {
+      method: "POST",
+      ...(options?.waitForProviderHome ? { body: JSON.stringify({ waitForProviderHome: true }) } : {}),
+    }),
   sessionRolePreview: (id: string, role: import("@wollipog/protocol").SessionRole) =>
     req<import("@wollipog/protocol").SessionRoleConversionPreview>(`/api/sessions/${encodeURIComponent(id)}/role?role=${role}`),
   changeSessionRole: (id: string, role: import("@wollipog/protocol").SessionRole,
@@ -1145,6 +1159,13 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ proposal: { mode: "custom" }, expectedRevision }),
     }),
+  /** Authenticated Human-only change to a Full Control campaign's follow-up approval limit (#2940);
+   * `null` clears it. Compare-and-set on the campaign's policy revision. */
+  setCampaignFollowUpLimit: (id: string, acceptedFollowUps: number | null, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/follow-up-limit`, {
+      method: "POST",
+      body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
+    }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",
@@ -1154,6 +1175,13 @@ export function createApiClient(transport: ApiTransport) {
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control-policy`, {
       method: "POST",
       body: JSON.stringify({ decisions, expectedRevision }),
+    }),
+  campaignBehavior: (id: string, signal?: AbortSignal) =>
+    req<OrchestratorCampaignBehaviorView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/behavior`, { signal }),
+  setCampaignBehavior: (id: string, request: UpdateOrchestratorCampaignBehaviorRequest) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/behavior`, {
+      method: "POST",
+      body: JSON.stringify(request),
     }),
   descendantRequests: (id: string, signal?: AbortSignal) =>
     req<DescendantRequestsView>(
@@ -1221,6 +1249,14 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(id)}/background-jobs/${encodeURIComponent(jobId)}/stop`,
       { method: "POST" },
     ),
+
+  /** Proceed Now (#3752): end the work a worktree or account handoff hold waits on, then run the
+   * queued prompts. `holdId` is the hold the person confirmed; the server refuses any other. */
+  releaseQueueHold: (id: string, holdId: string) =>
+    req<QueueHoldReleaseResponse>(`/api/sessions/${encodeURIComponent(id)}/queue-hold/release`, {
+      method: "POST",
+      body: JSON.stringify({ holdId }),
+    }),
 
   setReminder: (id: string, body: SetSessionReminderRequest) =>
     req<SessionReminderView>(`/api/sessions/${encodeURIComponent(id)}/reminder`, {
@@ -1423,6 +1459,17 @@ export function createApiClient(transport: ApiTransport) {
       { method: "DELETE" },
     ),
 
+  /** Owner/Admin (#3719): create a managed Codex profile by copying an existing API-key sign-in on
+   * the same Machine, after the person confirmed the source and the new profile's label. */
+  importProviderCredential: (runnerId: string, body: {
+    provider: "codex"; label: string; source: ProviderCredentialImportSource; sourceLabel: string;
+  }) =>
+    req<{ accountId: string; profileId: string; grantId: string }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/provider-imports`,
+      { method: "POST", body: JSON.stringify({ provider: body.provider, label: body.label, source: body.source,
+        confirmation: { acknowledgeCredentialImport: true, sourceLabel: body.sourceLabel, destinationLabel: body.label } }) },
+    ),
+
   /** Owner/Admin: adopt the account's HOME as a provider profile granted to this control plane. */
   adoptProviderProfile: (runnerId: string, accountId: string) =>
     req<{ status: "active"; profileId: string; grantId: string }>(
@@ -1546,9 +1593,15 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
     ),
 
-  searchWorkspaceReferences: (sessionId: string, query: string) =>
-    req<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query }).toString()}`,
+  /** `match` is echoed only when the runner and control plane applied it (#1263). */
+  searchWorkspaceReferences: (sessionId: string, query: string, match?: WorkspaceReferenceSearchMatch) =>
+    req<{
+      results: WorkspaceReferenceCandidate[];
+      truncated: boolean;
+      match?: WorkspaceReferenceSearchMatch;
+      limit?: WorkspaceReferenceSearchLimit;
+    }>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query, ...(match ? { match } : {}) }).toString()}`,
     ),
 
   createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>
@@ -1647,6 +1700,10 @@ export function createApiClient(transport: ApiTransport) {
     req<{ team: TeamView }>(`/api/identity/teams/${encodeURIComponent(teamId)}/members`, {
       method: "PUT", body: JSON.stringify({ memberUserIds }),
     }),
+  renameIdentityTeam: (teamId: string, name: string) =>
+    req<{ team: TeamView }>(`/api/identity/teams/${encodeURIComponent(teamId)}`, {
+      method: "PATCH", body: JSON.stringify({ name }),
+    }),
   deleteIdentityTeam: (teamId: string) =>
     req<void>(`/api/identity/teams/${encodeURIComponent(teamId)}`, { method: "DELETE" }),
   listMutationAudit: (limit = 100) =>
@@ -1725,6 +1782,13 @@ export function createApiClient(transport: ApiTransport) {
     req<{ workspace: WorkspaceInfo }>(
       `/api/runners/${encodeURIComponent(runnerId)}/workspaces/register`,
       { method: "POST", body: JSON.stringify(body) },
+    ),
+
+  // Remove Workspace (#4123): unregisters it; nothing on disk is deleted.
+  removeMachineWorkspace: (runnerId: string, workspaceId: string) =>
+    req<{ removed: true }>(
+      `/api/runners/${encodeURIComponent(runnerId)}/workspaces/${encodeURIComponent(workspaceId)}`,
+      { method: "DELETE" },
     ),
 
   // Project menu: rename a workspace (CP-owned display-name override; empty name resets).

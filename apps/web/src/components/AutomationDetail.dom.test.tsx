@@ -921,49 +921,56 @@ test("a create the control plane refuses stays in the dialog as a notice", async
   }
 });
 
-test("each trigger row names it, its kind and use in words, with Copy URL and ⋯ and nothing of the protocol", async () => {
-  const called = calledTrigger();
-  const view = await mount({
-    view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN,
-    triggers: { "automation-a": [called, { ...trigger("quiet"), kind: "chatops", name: "Release", generation: 4 }] },
-  });
-  try {
-    const row = triggerRow(view.body, "called")!;
-    assert.ok(row.classList.contains("row-2"), "a two-line row");
-    assert.equal(row.querySelector(".row-title")?.textContent, "Issue Intake");
-    const [kind, last, calls, accepts] = rowMeta(row);
-    assert.equal(kind, "Webhook");
-    assert.match(last ?? "", /^Last called Today, /);
-    assert.equal(calls, "14 calls");
-    assert.equal(accepts, "Accepts prompt text and issue, run_id");
-    assert.deepEqual(rowMeta(triggerRow(view.body, "quiet")!), ["Chat-Ops", "Never called"]);
-    assert.ok(buttonNamed(row, "Copy URL"), "Copy URL trails the row");
-    const text = triggersSection(view.body).textContent ?? "";
-    for (const retired of [/Key Generation/, /Signed body/, /application\/vnd/, /X-Wollipog/, /Deliveries/]) {
-      assert.doesNotMatch(text, retired);
+// Local calendar inputs exercise the viewer's midnight boundary in any test-runner time zone.
+for (const { scenario, hour, expectedLastCall } of [
+  { scenario: "just after midnight", hour: 0, expectedLastCall: "Last called Yesterday, 11:59 PM" },
+  { scenario: "daytime", hour: 12, expectedLastCall: "Last called Today, 11:59 AM" },
+]) {
+  test(`each trigger row names it, its kind and use in words, with Copy URL and ⋯ and nothing of the protocol (${scenario})`, async (t) => {
+    t.mock.timers.enable({ apis: ["Date"], now: new Date(2026, 10, 2, hour, 0, 15, 458) });
+    const called = calledTrigger();
+    const view = await mount({
+      view: route("automation-a"), items: [automation("automation-a", "Nightly Sweep")], origin: ORIGIN,
+      triggers: { "automation-a": [called, { ...trigger("quiet"), kind: "chatops", name: "Release", generation: 4 }] },
+    });
+    try {
+      const row = triggerRow(view.body, "called")!;
+      assert.ok(row.classList.contains("row-2"), "a two-line row");
+      assert.equal(row.querySelector(".row-title")?.textContent, "Issue Intake");
+      const [kind, last, calls, accepts] = rowMeta(row);
+      assert.equal(kind, "Webhook");
+      assert.equal(last, expectedLastCall);
+      assert.equal(calls, "14 calls");
+      assert.equal(accepts, "Accepts prompt text and issue, run_id");
+      assert.deepEqual(rowMeta(triggerRow(view.body, "quiet")!), ["Chat-Ops", "Never called"]);
+      assert.ok(buttonNamed(row, "Copy URL"), "Copy URL trails the row");
+      const text = triggersSection(view.body).textContent ?? "";
+      for (const retired of [/Key Generation/, /Signed body/, /application\/vnd/, /X-Wollipog/, /Deliveries/]) {
+        assert.doesNotMatch(text, retired);
+      }
+      assertNoDomNode(buttonNamed(row, "Rotate Secret"), "Rotate Secret is not a row button");
+      assertNoDomNode(buttonNamed(row, "Revoke"), "Revoke is not a row button");
+
+      const menu = await openRowMenu(view.body, called);
+      assert.deepEqual(menuLabels(menu), ["Copy URL", "How to Call…", "Rotate Secret…", "Revoke Trigger…"]);
+      const children = [...menu.children];
+      const revoke = children.findIndex((child) => child.textContent === "Revoke Trigger…");
+      assert.equal(revoke, children.length - 1, "Revoke Trigger… is last");
+      assert.equal(children[revoke - 1]?.getAttribute("role"), "separator", "after a separator");
+      assert.ok(menuItem(menu, "Revoke Trigger…")?.classList.contains("danger"));
+
+      await click(menuItem(menu, "How to Call…"));
+      const how = dialogNamed(view.body, "How to Call")!;
+      assert.equal(how.querySelector(".field .code-well.one-line code")?.textContent, `${ORIGIN}/hooks/v1/automation-triggers/called`);
+      assert.match(how.textContent ?? "", /POST \/hooks\/v1\/automation-triggers\/called/);
+      assert.match(how.textContent ?? "", /"parameters": \{\s+"issue": "<issue>",\s+"run_id": "<run_id>"/);
+      assert.deepEqual([...how.querySelectorAll(".code-well button")].map((button) => button.getAttribute("aria-label")),
+        ["Copy URL", "Copy Request", "Copy Body", "Copy Signed Text"]);
+    } finally {
+      await view.unmount();
     }
-    assertNoDomNode(buttonNamed(row, "Rotate Secret"), "Rotate Secret is not a row button");
-    assertNoDomNode(buttonNamed(row, "Revoke"), "Revoke is not a row button");
-
-    const menu = await openRowMenu(view.body, called);
-    assert.deepEqual(menuLabels(menu), ["Copy URL", "How to Call…", "Rotate Secret…", "Revoke Trigger…"]);
-    const children = [...menu.children];
-    const revoke = children.findIndex((child) => child.textContent === "Revoke Trigger…");
-    assert.equal(revoke, children.length - 1, "Revoke Trigger… is last");
-    assert.equal(children[revoke - 1]?.getAttribute("role"), "separator", "after a separator");
-    assert.ok(menuItem(menu, "Revoke Trigger…")?.classList.contains("danger"));
-
-    await click(menuItem(menu, "How to Call…"));
-    const how = dialogNamed(view.body, "How to Call")!;
-    assert.equal(how.querySelector(".field .code-well.one-line code")?.textContent, `${ORIGIN}/hooks/v1/automation-triggers/called`);
-    assert.match(how.textContent ?? "", /POST \/hooks\/v1\/automation-triggers\/called/);
-    assert.match(how.textContent ?? "", /"parameters": \{\s+"issue": "<issue>",\s+"run_id": "<run_id>"/);
-    assert.deepEqual([...how.querySelectorAll(".code-well button")].map((button) => button.getAttribute("aria-label")),
-      ["Copy URL", "Copy Request", "Copy Body", "Copy Signed Text"]);
-  } finally {
-    await view.unmount();
-  }
-});
+  });
+}
 
 test("without a public address, Copy URL is disabled and the row says No reachable address yet", async () => {
   const view = await mount({

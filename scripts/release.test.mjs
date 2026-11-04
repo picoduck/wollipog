@@ -14,6 +14,24 @@ const state = () => ({ schema: 1, repository: "example/project", version: "0.35.
   branch: "release/v0.35.0", baseSha: base, headSha: head, prNumber: 42, notesPath: notesPath("0.35.0"),
   notesSha256: createHash("sha256").update(notes).digest("hex"), stage: "review" });
 const grants = { reviewedHead: head, allowTag: true, allowPublish: true };
+const certificate = () => ({ schema: "exact-full-regression-v1", repository: "example/project", targetSha: merge,
+  coverageVersion: "rolling-full-v1", status: "certified", reason: null, suiteVersion: "d".repeat(64),
+  observedAt: "2026-10-25T12:00:00Z", runId: 90, attempt: 1, sourceSha: base, mainSha: base,
+  url: "https://github.com/example/project/actions/runs/90/attempts/1" });
+
+/** Stable-release fixtures must not inherit a prerelease checkout's version or dependencies. */
+function versionFiles(version = "0.34.0") {
+  return {
+    "package.json": JSON.stringify({ name: "wollipog", version,
+      scripts: { test: "node --test", typecheck: "tsc --noEmit" }, devDependencies: { semver: "7.8.5" } }) + "\n",
+    "apps/desktop/package.json": JSON.stringify({ name: "@wollipog/desktop", version }) + "\n",
+    "apps/desktop/src-tauri/tauri.conf.json": JSON.stringify({ productName: "Wollipog", version }) + "\n",
+    "apps/desktop/src-tauri/Cargo.toml": `[package]\nname = "wollipog-desktop"\nversion = "${version}"\n`,
+    "apps/desktop/src-tauri/Cargo.lock": `version = 4\n\n[[package]]\nname = "wollipog-desktop"\nversion = "${version}"\n`,
+    "apps/runner/src/version.ts": `export const VERSION = "${version}";\n`,
+    "apps/control-plane/src/release-version.ts": `export const APP_RELEASE_VERSION = "${version}";\n`,
+  };
+}
 
 /** Inert forge: API mutations update observable state, including a crash after an accepted PATCH. */
 function fixture() {
@@ -24,7 +42,8 @@ function fixture() {
     repository: { full_name: "example/project" }, event: "push", head_branch: "v0.35.0", head_sha: merge };
   const release = { id: 200, tag_name: "v0.35.0", draft: true, prerelease: false };
   let tag = { object: { type: "commit", sha: merge } };
-  const controls = { failVerification: false, crashAfterPublish: false, changedPreparation: false, runs: [run], latestId: 200, previousTag: "v0.34.0" };
+  const controls = { failVerification: false, crashAfterPublish: false, changedPreparation: false, runs: [run], latestId: 200,
+    previousTag: "v0.34.0", certificationStatus: "certified", certificationChecks: 0 };
   const io = {
     api(path, body, method) {
       calls.push({ path, body, method });
@@ -55,12 +74,14 @@ function fixture() {
       assert.equal(program, "git"); assert.equal(args[0], "show");
       const path = args[1].slice(41);
       if (path === notesPath("0.35.0")) return notes;
-      const originals = Object.fromEntries(["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"].map((file) => [file, readFileSync(new URL(`../${file}`, import.meta.url), "utf8")]));
+      const originals = versionFiles();
       const files = bumpVersions(originals, JSON.parse(originals["package.json"]).version, "0.35.0");
       return controls.changedPreparation && path === "package.json"
         ? JSON.stringify({ ...JSON.parse(files[path]), version: "0.0.0-drift" }) : files[path];
     },
     notes() { return notes; },
+    certification() { controls.certificationChecks++; calls.push({ certification: true });
+      return { ...certificate(), status: controls.certificationStatus }; },
     gates() { verifyReleaseJobs({ runId: 100, runAttempt: run.run_attempt, mergeSha: merge }, releaseJobs()); },
     timings() { return { runId: 100, attempt: run.run_attempt, headSha: merge, conclusion: run.conclusion, jobs: [{ conclusion: run.conclusion }] }; },
     verify() { calls.push({ verify: true }); if (controls.failVerification) throw new Error("bad signature or digest"); return () => calls.push({ recheck: true }); },
@@ -87,8 +108,7 @@ test("checkpoints are private atomic snapshots and carry no publication grant", 
 });
 
 test("version preparation changes each release field, retains dependencies, and recovers partial edits", () => {
-  const paths = ["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"];
-  const originals = Object.fromEntries(paths.map((path) => [path, readFileSync(new URL(`../${path}`, import.meta.url), "utf8")]));
+  const originals = versionFiles();
   const currentVersion = JSON.parse(originals["package.json"]).version;
   const changed = bumpVersions(originals, currentVersion, "0.35.0");
   assert.equal(JSON.parse(changed["package.json"]).version, "0.35.0");
@@ -241,6 +261,105 @@ test("a rerun starting during final verification invalidates publication", () =>
   assert.equal(f.mutations().length, 0);
 });
 
+test("the final publication fences run after the expensive certification scan", () => {
+  for (const change of ["attempt", "tag", "latest", "assets"]) {
+    const f = fixture(); let scans = 0, changedAssets = false;
+    f.io.verify = () => () => { if (changedAssets) throw new Error("assets changed"); };
+    f.io.certification = () => {
+      if (++scans === 2) {
+        if (change === "attempt") { f.run.run_attempt++; f.run.status = "in_progress"; }
+        if (change === "tag") f.setTag({ object: { type: "commit", sha: base } });
+        if (change === "latest") f.controls.previousTag = "v0.36.0";
+        if (change === "assets") changedAssets = true;
+      }
+      return certificate();
+    };
+    assert.throws(() => advance(state(), grants, f.io), undefined, change);
+    assert.equal(f.mutations().length, 0, change);
+  }
+});
+
+test("published recovery rechecks metadata, latest and tag after certification without mutation", () => {
+  for (const change of ["metadata", "latest", "tag"]) {
+    const f = fixture(); advance(state(), grants, f.io);
+    f.io.certification = () => {
+      if (change === "metadata") f.release.body = "changed after publication";
+      if (change === "latest") f.controls.latestId = 201;
+      if (change === "tag") f.setTag({ object: { type: "commit", sha: base } });
+      return certificate();
+    };
+    assert.throws(() => advance(state(), {}, f.io), undefined, change);
+    assert.equal(f.mutations().length, 1, change);
+  }
+});
+
+test("older checkpoints reconcile certification before tagging and cannot reuse cached green", () => {
+  for (const status of ["missing", "pending", "failed", "incompatible", "unknown"]) {
+    const f = fixture(), s = { ...state(), mergeSha: merge, stage: "published", certification: certificate() };
+    f.setTag(null); f.controls.certificationStatus = status;
+    const result = advance(s, grants, f.io, f.save);
+    assert.equal(result.stage, "full-regression-certification");
+    assert.equal(result.waiting, status === "pending");
+    assert.equal(s.certification.status, status);
+    assert.match(result.requestCommand, new RegExp(`candidate_sha=${merge} -f purpose=release$`));
+    assert.equal(f.mutations().length, 0, status);
+    f.controls.certificationStatus = "certified";
+    assert.equal(advance(s, grants, f.io).stage, "tag-created");
+  }
+  const f = fixture(); // Existing schema-1 checkpoints without the new field remain supported.
+  assert.equal(advance(state(), {}, f.io).stage, "publish-approval");
+  assert.ok(f.controls.certificationChecks > 0);
+});
+
+test("mismatched certificate targets and incompatible coverage cannot authorize publication", () => {
+  for (const edit of [{ targetSha: head }, { targetSha: base }, { coverageVersion: "rolling-full-v2" },
+    { schema: "unreviewed-equivalence-v1" }, { runId: null }, { suiteVersion: null }]) {
+    const f = fixture(); f.io.certification = () => ({ ...certificate(), ...edit });
+    assert.throws(() => advance(state(), grants, f.io));
+    assert.equal(f.mutations().length, 0);
+  }
+  assert.throws(() => validateCheckpoint({ ...state(), mergeSha: merge,
+    certification: { ...certificate(), token: "must not be persisted" } }), /Unexpected certification/);
+});
+
+test("full-regression rerun during final asset verification blocks the publication mutation", () => {
+  const f = fixture(), s = state();
+  f.io.verify = () => { f.controls.certificationStatus = "pending"; return () => {}; };
+  assert.equal(advance(s, grants, f.io, f.save).stage, "full-regression-certification");
+  assert.equal(f.controls.certificationChecks, 2);
+  assert.equal(f.saved.at(-1).certification.status, "pending");
+  assert.equal(f.mutations().length, 0);
+});
+
+test("native-build watch reuses observation only within one invocation and rechecks before publication", () => {
+  const f = fixture(), s = state();
+  f.run.status = "in_progress";
+  assert.equal(advance(s, {}, f.io).stage, "native-builds-and-verification");
+  assert.equal(f.controls.certificationChecks, 1);
+  advance(s, {}, f.io, () => {}, { reconcileOnResume: false });
+  assert.equal(f.controls.certificationChecks, 1, "native polling must not exhaust quota by rescanning full proof");
+  f.controls.certificationStatus = "pending";
+  assert.equal(advance(s, {}, f.io).stage, "full-regression-certification", "a new invocation reconciles current evidence");
+  f.controls.certificationStatus = "certified";
+  advance(s, {}, f.io);
+  f.run.status = "completed";
+  f.controls.certificationStatus = "failed";
+  assert.equal(advance(s, grants, f.io, () => {}, { reconcileOnResume: false }).stage, "full-regression-certification");
+  assert.equal(f.mutations().length, 0, "cached watch proof cannot authorize publication");
+});
+
+test("interruption and already-published recovery require fresh proof without repeating publication", () => {
+  const f = fixture(), s = state(); f.controls.crashAfterPublish = true;
+  assert.throws(() => advance(s, grants, f.io, f.save), /lost connection/);
+  const recovered = structuredClone(f.saved.at(-1));
+  f.controls.certificationStatus = "pending";
+  assert.equal(advance(recovered, {}, f.io, f.save).stage, "full-regression-certification");
+  assert.equal(f.mutations().length, 1);
+  f.controls.certificationStatus = "certified";
+  assert.equal(advance(recovered, {}, f.io).stage, "published");
+  assert.equal(f.mutations().length, 1, "accepted publication must not be repeated");
+});
+
 test("last-moment tag changes, changed assets, and newer stable releases block publication", () => {
   for (const change of ["tag", "assets", "latest"]) {
     const f = fixture();
@@ -261,10 +380,10 @@ test("preparation recovers accepted commits and PR creation without repeating ei
   try {
     mkdirSync(primary); git(["init", "--initial-branch=main"], primary);
     git(["config", "user.name", "Release Test"], primary); git(["config", "user.email", "release-test@example.invalid"], primary);
-    const paths = ["package.json", "apps/desktop/package.json", "apps/desktop/src-tauri/tauri.conf.json", "apps/desktop/src-tauri/Cargo.toml", "apps/desktop/src-tauri/Cargo.lock", "apps/runner/src/version.ts", "apps/control-plane/src/release-version.ts"];
-    for (const path of paths) {
+    const originals = versionFiles();
+    for (const [path, text] of Object.entries(originals)) {
       const target = join(primary, path); mkdirSync(dirname(target), { recursive: true });
-      writeFileSync(target, readFileSync(new URL(`../${path}`, import.meta.url)));
+      writeFileSync(target, text);
     }
     git(["add", "."], primary); git(["commit", "-m", "Initial fixture"], primary);
     git(["remote", "add", "origin", "https://github.com/example/project.git"], primary);
@@ -320,7 +439,7 @@ test("preparation recovers accepted commits and PR creation without repeating ei
     assert.equal(resumed.prNumber, 42); assert.equal(resumed.headSha, committedHead);
     assert.deepEqual(checks, ["typecheck", "test"]); assert.equal(creations.length, 1);
     assert.equal(git(["rev-list", "--count", "HEAD"]), "2");
-    assert.equal(readFileSync(join(primary, "package.json"), "utf8"), readFileSync(new URL("../package.json", import.meta.url), "utf8"));
+    assert.equal(readFileSync(join(primary, "package.json"), "utf8"), originals["package.json"]);
     assert.equal(resumed.notesSha256, createHash("sha256").update(fixtureNotes).digest("hex"));
     const packagePath = join(worktree, "package.json");
     const packageText = readFileSync(packagePath, "utf8");

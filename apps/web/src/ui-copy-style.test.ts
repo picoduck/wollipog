@@ -11,12 +11,13 @@ import { archiveAndStopMessage } from "./archive-actions.js";
 import { projectArchiveMessage, projectDeleteMessage, projectRemoveLocationMessage } from "./project-actions.js";
 import { deleteSessionMessage, signOutOfAgentMessage, stopArchivedSessionMessage, stopSessionMessage } from "./session-confirmation-copy.js";
 import { STOP_JOB_OUTCOME } from "./background-job-stop.js";
+import { queueHoldReleaseOutcome } from "./queue-hold-release.js";
 import { closeWarning } from "./components/DesktopCloseGuard.js";
 import { heldUpdateMessage } from "./desktop-updates.js";
 import { HIDDEN_IDENTIFIER_TEXT } from "./components/PersonalIdentifier.js";
 import { lifecycleConflictPresentation } from "./components/MachineDetail.js";
-import { backLabel, SETTINGS_SECTIONS } from "./navigation.js";
-import { SETTINGS_DESCRIPTION } from "./components/SettingsView.js";
+import { deleteTeamMessage } from "./components/TeamDialog.js";
+import { backLabel, SETTINGS_DESCRIPTION, SETTINGS_SECTIONS } from "./navigation.js";
 import { reminderMenuActionLabel } from "./session-reminders.js";
 import {
   DEPLOY_TO_TRACKING_MACHINES_CONSENT,
@@ -311,16 +312,6 @@ const LABEL_FRAGMENTS: readonly LabelFragment[] = [
     file: "components/GitDiffViewer.tsx",
     fragment: "s",
     reason: 'the plural suffix of "{hiddenCount} More Hunk{…}", which reads "3 More Hunks"',
-  },
-  {
-    file: "components/UsageView.tsx",
-    fragment: "· unpriced",
-    reason: "a status note after the model name in its row header, not part of the name",
-  },
-  {
-    file: "components/UsageView.tsx",
-    fragment: "· paused by daily budget",
-    reason: "a status note after the user's name in its row header, not part of the name",
   },
 ];
 
@@ -999,7 +990,8 @@ const MAX_BODY_BRANCHES = 256;
  */
 const COMPUTED_BODIES = [/^archiveAndStopMessage\(/, /^projectArchiveMessage\(/, /^conflict\.message$/, /^closeWarning\(/, /^heldUpdateMessage\(/,
   /^stopSessionMessage\(/, /^stopArchivedSessionMessage\(/, /^deleteSessionMessage\(/, /^signOutOfAgentMessage\(/,
-  /^STOP_JOB_OUTCOME$/, /^projectDeleteMessage\(/, /^projectRemoveLocationMessage\(/];
+  /^STOP_JOB_OUTCOME$/, /^projectDeleteMessage\(/, /^projectRemoveLocationMessage\(/, /^queueHoldReleaseOutcome\(/,
+  /^deleteTeamMessage\(/, /^revokeDeviceMessage\(/, /^shortenHistoryMessage\(/];
 
 /**
  * Every text a confirmation body can produce: conditions, template holes and `+` concatenation are
@@ -1216,8 +1208,11 @@ test("confirmation bodies built by a helper are one or two sentences too", () =>
       projectArchiveMessage({ projectName: "Payments Service", count, stops, onProjectPage })))),
     ...[0, 1, 3].map((count) => projectDeleteMessage("Payments Service", count)),
     projectRemoveLocationMessage("Payments Service", "Studio Mac"),
+    ...(["worktree_rebind", "provider_account_switch"] as const).flatMap((kind) => [1, 3].map((queuedPrompts) =>
+      queueHoldReleaseOutcome({ kind, queuedPrompts }))),
+    ...[0, 1, 3].map((count) => deleteTeamMessage("Support", count)),
   ];
-  assert.equal(bodies.length, 51);
+  assert.equal(bodies.length, 58);
   for (const body of bodies) assert.ok(sentenceCount(body) <= 2, JSON.stringify(body));
 });
 
@@ -1299,6 +1294,7 @@ test("New Session's agent and account strings name the choice, never the mechani
     ts.forEachChild(node, visit);
   };
   visit(sourceFile);
+  visit(parseSource(path.join(SOURCE_ROOT, "native-tui-availability.ts")));
   assert.deepEqual(texts.filter((text) => NEW_SESSION_MECHANISM_WORDS.test(text)), []);
 
   // Every reason an agent under Needs Setup can give, and every limit a ready one can name.

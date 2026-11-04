@@ -14,8 +14,51 @@ recovers it.
   hold the write lock. A statement that meets that lock now waits up to 250 ms instead of failing
   at once with `SQLITE_BUSY`. The wait blocks the event loop, so it stays short: a lock held longer
   still fails fast, and periodic work defers its tick as before.
+- Runner frame handling retries base `SQLITE_BUSY` (errcode 5) at the failed prepared statement
+  or transaction boundary, with three retries shared by the entire frame or runtime-update run.
+  A cumulative one-second contention-time budget measured by a monotonic clock also stops new
+  retries; an in-flight SQLite operation can add its existing 250 ms wait. These retries are synchronous: contention
+  can block the event loop for about one second, but never replays already-published frame side
+  effects or lets later socket frames overtake the failed write. Cooperative inventory yields
+  retain that same budget, without counting time spent processing or yielding between operations.
+  Single-statement deferred transaction starts acquire write intent within runner frame handling,
+  avoiding stale read transactions during lock upgrades. Savepoint-based stores acquire the same
+  write intent with a zero-row update immediately after opening their savepoint, before any reads;
+  nested rollback and root RELEASE semantics are unchanged. Failed admission unwinds its savepoint.
+  Registration first checks for a recognized active or pending credential read-only, so unknown or
+  revoked tokens do not contend for write intent, then rechecks under the write lock before
+  activation. Recognized expired pending credentials retain their existing revoke-and-prune path.
+  Other entry points retain their prior
+  behavior and timeout. Extended busy codes and arbitrary multi-statement scripts are not replayed.
+  `runner_persistence_contention` identifies the message type, runner, retry count and exhaustion;
+  an exhausted frame logs `runner_persistence_exhausted` and closes only that socket with 1011,
+  `runner persistence unavailable`. Malformed frames keep their separate 1008 rejection.
+- A second connection beside a running control plane, such as a test that inspects or adjusts its
+  database, uses `ControlPlaneDb.attach`, never `open` (#3789). `open` applies the schema and runs
+  startup work, so it takes the write lock repeatedly. An attached connection applies no schema,
+  can be read-only, and waits up to 10 s (`ATTACHED_DB_BUSY_TIMEOUT_MS`) for the server's lock.
+  Its own commits skip the WAL sync, so they release the lock well within the server's 250 ms wait.
+  It never collects artifact blobs, because only the owning server knows which blobs it is staging.
+  Read-only suits only plain queries, since some reads settle derived state (`getSession`).
 - `synchronous=FULL` on the connection: every commit flushes the WAL before it returns, so a
   control-plane decision is durable once it has been acknowledged.
+- Live runtime snapshots (`session_runtime_updated`) stay `FULL` but are grouped. After
+  registration a runner republishes one snapshot per retained session, and a separate flush for
+  each held newer live snapshots back for tens of seconds under disk contention (#2601). A run of
+  up to 32 consecutive queued snapshots from one runner, for distinct sessions, now commits in one
+  transaction (`updateSessionsFromRuntimeSnapshots`). Nothing about the run is broadcast or sent
+  to a runner until that commit returns, and a failed commit rolls back the whole run. A snapshot
+  with stop, decision, hook, policy, media or cost-repair work keeps its own commit, in order. The
+  event loop still yields between runs. Protocol-270 runners pace only their regenerable reconnect
+  runtime republish in windows of at most 128 frames / 2 MiB (a single larger legal snapshot uses
+  the existing receive-pressure backstop). A FIFO processing barrier is acknowledged after earlier
+  frames have been applied, keeping routine republish below socket read-pressure thresholds so
+  WebSocket pings remain readable. This does not change the commit's `FULL` flush or order. Live
+  state, shell output, skill reporting and outbox sends keep their existing transport behavior.
+  Unsent republish snapshots are read afresh when written and discarded on reconnect; the next
+  registration starts a new inventory, without adding them to the capped live outbox.
+  A crash before a run commits loses only frames that nothing
+  has acknowledged yet, and the runner republishes them when it next registers.
 - `secure_delete=ON`: SQLite overwrites deleted ordinary-table content with zeros rather than
   leaving session text, credentials or decision content recoverable from free pages in the main
   database file. The extra delete I/O is an intentional privacy tradeoff; reducing maintenance
@@ -30,11 +73,17 @@ recovers it.
   transaction and back to `FULL` afterwards (`replayableCommit`). They are relaxed only in WAL mode
   (outside WAL, `NORMAL` can corrupt the file), and never for a transaction that carries a
   `token_usage` event (see below).
-- [Archived-history retention](./archived-history-retention.md) removal batches are the other
+- [Archived-history retention](./archived-history-retention.md) removal batches are another
   (`relaxedCommit` in `pruneArchivedHistoryBatch`). A removal is idempotent, so one an OS crash
   rolls back is removed again by the next pass. The step that closes a session's prune is `FULL`,
   and payload blob files are deleted only after it, so a restored artifact row never points at a
   missing blob.
+- A runner heartbeat's `last_seen` write is the last (`relaxedCommit` in `touch`, #3874). A
+  heartbeat arrives every few seconds on the event loop, and under disk contention a flush per
+  heartbeat held HTTP requests behind it long enough to time them out. The next heartbeat rewrites
+  the value, and the liveness sweep also reads in-memory frame activity, so a rolled-back heartbeat
+  changes nothing. A runner's registration and its going offline are status changes and stay
+  `FULL`.
 - Checkpoints run on a worker thread (`WalCheckpointer` in `apps/control-plane/src/wal-checkpointer.ts`),
   started by the control plane after it opens the database. About every 250 ms the worker runs
   `wal_checkpoint(PASSIVE)` on its own connection, which uses `synchronous=FULL`. PASSIVE never
@@ -157,8 +206,8 @@ are already in the operating system's page cache.
 
 **An OS crash or power loss never corrupts the database.** WAL frames are checksummed, and recovery
 discards an incomplete tail. It can roll back only relaxed commits that no later flush has covered:
-an event-ingest transaction, or a retention removal batch, whose events then reappear until the next
-retention pass removes them again.
+an event-ingest transaction, a retention removal batch, whose events then reappear until the next
+retention pass removes them again, or a heartbeat's `last_seen`, which the next heartbeat rewrites.
 
 The WAL is flushed by every `FULL` commit (that is, any other write: a status change, a prompt, a
 decision) and by every checkpoint that copies frames: a worker pass, about every 250 ms while the
@@ -299,7 +348,8 @@ Limits:
 - `db.test.ts`, test "only runner-replayable event ingest commits without a per-commit WAL flush":
   records the `synchronous` level at every commit. It fails if ingest flushes again, or if the
   relaxation leaks to the connection or to control-plane writes. The test "archived-history prune
-  removals commit without a WAL flush, and closing a run flushes" does the same for retention.
+  removals commit without a WAL flush, and closing a run flushes" does the same for retention, and
+  "a runner heartbeat's last_seen commits without a WAL flush (#3874)" for heartbeats.
 - `wal-checkpointer.test.ts`: the worker checkpoints while the connection stays `FULL` in WAL mode;
   only PASSIVE checkpoints exist; main-connection writes with no busy timeout never meet a lock
   while the worker runs, even beside a long-lived reader; a dead worker leaves the log bounded by

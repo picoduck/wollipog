@@ -80,6 +80,8 @@ import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
+import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "../device-token.js";
+import { adoptManagedDesktopPairing } from "../desktop-local-pairing.js";
 import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
@@ -188,8 +190,18 @@ const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
  */
 const SESSION_LOOKUP_MODE = FIXTURE_QUERY.get("lookup");
 let sessionLookupFailed = false;
-/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner. */
+/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner,
+ * until Pair This Device stores `PAIRING_ACCEPTED_CODE`, which the fixture accepts (#3005). */
 const PAIRING_REQUIRED = FIXTURE_QUERY.get("pairingRequired") === "1";
+const PAIRING_ACCEPTED_CODE = "e2eAcceptedPairingCode0123456789";
+/** `?managedPairingFailure=1` is the desktop app that couldn't read its saved pairing: its banner offers
+ * Retry Pairing, which here finds another Wollipog on the port, as a browser build's adoption does. */
+if (FIXTURE_QUERY.get("managedPairingFailure") === "1") {
+  void adoptManagedDesktopPairing({
+    isTauri: () => true,
+    invoke: async () => { throw new Error("The saved pairing file could not be read."); },
+  }).catch(() => {});
+}
 /** `?unarchiveRestart=1` advertises the control plane's one preflighted Unarchive and Restart. */
 const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
 /** `?archiveStop=failed` or `?archiveStop=pending`: every archive reports its sessions' stops as
@@ -461,7 +473,11 @@ function initialModel(): FixtureModel {
           source: "created",
         }],
       }],
-      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
+      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {
+        // #4076: an Orchestrator's type mark leads the longest title. (A review lists only under its
+        // requester, so this flat scenario cannot carry one.)
+        role: "orchestrator",
+      }],
       ["session-plain", "Plain", {}],
       // #782: line three is unconditional, so the scenario has to carry every combination of branch
       // state and background work — that product is exactly what used to make cards two, three, or
@@ -1069,9 +1085,13 @@ for (const value of model.sessions) {
   });
 }
 if (SESSION_TOOLS) {
-  // Nine uncommitted changes, none staged, and no operation in progress.
+  // Nine uncommitted changes, none staged, and no operation in progress; with `committed=1`, all of
+  // the work committed instead: a clean worktree three commits ahead of main (#3035).
   const alpha = gitFixtures.get("session-alpha")!;
-  Object.assign(alpha.status, {
+  Object.assign(alpha.status, FIXTURE_QUERY.get("committed") === "1" ? {
+    files: [], hasChanges: false, ahead: 3, stagedCount: 0, modifiedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    operation: null, addedLines: 0, deletedLines: 0,
+  } : {
     files: Array.from({ length: 9 }, (_, index) => ({ status: "M", path: `src/session-tools/file-${index + 1}.ts` })),
     hasChanges: true, stagedCount: 0, modifiedCount: 9, untrackedCount: 0, conflictedCount: 0, operation: null,
   });
@@ -1596,7 +1616,7 @@ const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
   { id: "run-art-log", kind: "test_log", name: "e2e shard 3 of 5.log", mimeType: "text/plain", ageMinutes: 14,
     author: { kind: "agent", id: "session-alpha" },
     body: async () => runArtifactText.encode(Array.from({ length: 60 }, (_, index) => `12:04:${String(index).padStart(2, "0")} ✔ checkout.spec.ts › case ${index + 1} (${(index % 9) + 3}ms)`).join("\n")) },
-  { id: "run-art-html", kind: "html_preview", name: "Order summary preview", mimeType: "text/html", ageMinutes: 20,
+  { id: "run-art-html", kind: "html_preview", name: "Order summary preview for the redesigned checkout flow", mimeType: "text/html", ageMinutes: 20,
     author: { kind: "agent", id: "session-alpha" },
     body: async () => runArtifactText.encode("<!doctype html><style>body{font:14px system-ui;margin:24px}h1{font-size:20px}</style><h1>Order Summary</h1><p>3 items · $42.00</p>") },
   { id: "run-art-verdict", kind: "verdict", name: "Gate verdict", mimeType: "application/json", ageMinutes: 31,
@@ -1751,7 +1771,7 @@ const connection: UiConnectionRuntime = {
   runtimeKey: "project-inbox-e2e:1",
   createSocket() {
     if (offlineBannerLost) return offlineBannerSocket = new NeverOpenSocket();
-    if (PAIRING_REQUIRED) {
+    if (PAIRING_REQUIRED && deviceToken() !== PAIRING_ACCEPTED_CODE) {
       const unpaired = new NeverOpenSocket();
       window.setTimeout(() => unpaired.onclose?.({ code: 1008 }), 0);
       return unpaired;
@@ -1768,6 +1788,11 @@ const connection: UiConnectionRuntime = {
       }, 50);
     }
     return opened;
+  },
+  // A stored pairing reopens the socket in-process, as the browser runtime's does.
+  onCredentialChange(listener) {
+    window.addEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
+    return () => window.removeEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
   },
   close() {},
 };
@@ -2719,6 +2744,30 @@ const client = {
     value.updatedAt += 1;
     pushSession(value);
     return { sessionId: id, jobId, outcome: "stopped" as const, terminalStatus: "killed" as const };
+  },
+  // #3752: Proceed Now ends every unfinished job as killed, then the handoff and the queued prompts run.
+  releaseQueueHold: async (id: string, holdId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new ApiError("Session not found", 404);
+    if (value.queueHold?.holdId !== holdId) {
+      throw new ApiError("This session is no longer held by that handoff, so nothing was ended.", 409);
+    }
+    const now = Date.now();
+    const jobIds: string[] = [];
+    for (const job of value.backgroundJobs ?? []) {
+      if (job.terminalStatus) continue;
+      Object.assign(job, {
+        terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now,
+        endedBy: { actor: { kind: "user" }, reason: "stop_request", endedAt: now },
+      });
+      jobIds.push(job.id);
+    }
+    delete value.queueHold;
+    value.holds = value.holds?.filter((hold) => hold.holdId !== holdId);
+    value.status = "running";
+    value.updatedAt += 1;
+    pushSession(value);
+    return { sessionId: id, holdId, outcome: "released" as const, jobIds };
   },
   acknowledgeBackgroundBlockedResults: async (id, targets) => {
     const value = model.sessions.find((candidate) => candidate.id === id);

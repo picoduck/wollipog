@@ -81,6 +81,7 @@ export function SessionsSituationState({
   })();
   return (
     <State
+      pageLevel
       icon={situationIcon(situation)}
       title={sessionsSituationTitle(situation)}
       headingLevel={2}
@@ -190,6 +191,7 @@ export function SessionsArrivalFailed({
   return (
     <State
       variant="error"
+      pageLevel
       title={`Couldn't Load ${destination("inbox").name}`}
       headingLevel={2}
       actions={<button type="button" className="btn lg" onClick={onRetry}>Retry</button>}

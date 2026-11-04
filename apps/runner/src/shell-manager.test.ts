@@ -258,7 +258,7 @@ test("an agent TUI reports its process-tree proof exactly once when it ends, how
   }
 });
 
-test("Agent TUI writer evidence survives reconstruction and retires only with a full tree proof", {
+test("unsandboxed Agent TUIs are observed without durable writers; legacy TUI records still block", {
   skip: !agentTuiPlatformSupported(process.platform, NATIVE) || process.platform === "win32",
 }, async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-tui-writers-"));
@@ -271,8 +271,9 @@ test("Agent TUI writer evidence survives reconstruction and retires only with a 
     kind: "agent_tui", launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
     onEnded: (proven) => { proof = proven; },
   });
-  assert.equal(readdirSync(directory).length, 1);
-  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), ["s_writer"]);
+  assert.equal(readdirSync(directory).length, 0);
+  assert.deepEqual(mgr.unprotectedAgentTuiSessions(), ["s_writer"]);
+  assert.deepEqual(new ShellManager(cb, directory).unprotectedAgentTuiSessions(), []);
   mgr.close("writer");
   await waitFor(() => proof !== undefined);
   assert.equal(proof, true);
@@ -298,7 +299,7 @@ test("runner shutdown reports no agent TUI ending, so it settles no provider-HOM
     launch: { command: process.execPath, args: ["-e", "setInterval(() => {}, 1000)"] },
     onEnded: (proven) => ended.push(proven),
   });
-  assert.equal(readdirSync(directory).length, 1);
+  assert.equal(readdirSync(directory).length, 0);
   mgr.dispose();
   assert.equal(await waitForPendingKills(10_000), true);
   assert.deepEqual(readdirSync(directory), [], "the bounded kill drain includes exact proof and marker retirement");

@@ -29,15 +29,20 @@ async function bounded(promise, ms, label) {
     ]);
   } finally { clearTimeout(timer); }
 }
+// The fixture's own bounds must fire first so its phase diagnostics and owned cleanup run:
+// ten-second readiness, a reporting deadline of at most 58 seconds and a cleanup grace of at
+// most 23 (both scaled by the measured helper call, #3859), then five seconds of forced cleanup.
+const FIXTURE_TIMEOUT_MS = 110_000;
 async function run() {
   healthy();
   await runFocusedValidation({
     cwd: repo,
     args: [
-      "--import", "tsx", "--test", "--test-reporter=tap", "--test-timeout=35000",
+      "--import", "tsx", "--test", "--test-reporter=tap", `--test-timeout=${FIXTURE_TIMEOUT_MS}`,
       "--test-name-pattern=^the exclusive successor elects one winner across real runner processes$",
       "apps/runner/src/provider-home-lease.test.ts",
     ],
+    outerMs: FIXTURE_TIMEOUT_MS + 15_000,
     onOutput: (chunk) => process.stdout.write(chunk),
   });
 }

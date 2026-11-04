@@ -84,6 +84,8 @@ test("Skills on This Machine reads the machine when opened and lists every remov
     assert.doesNotMatch(text, /[·—]/u, "meta sits 12px apart, never dot- or dash-joined");
     const [unmanaged, removals] = surfaces(view.container);
     assert.deepEqual(rows(unmanaged!), [["local-notes", "Claude Code", "Work Account", "Scratch skill"]]);
+    assert.equal(unmanaged!.querySelector(".row-title")?.getAttribute("title"), "local-notes",
+      "a truncated name keeps its full text as a tooltip, as the description does (#3526)");
     assert.doesNotMatch(text, /claude-main|acct-work/, "the agent's name and the account's label, never their ids");
     assert.match(text, /can then be adopted with an explicit recovery-aware confirmation/);
     // The machine's whole history: every skill's, including one the library no longer has.

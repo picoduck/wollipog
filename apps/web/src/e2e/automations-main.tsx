@@ -123,6 +123,11 @@ if (params.has("waiting-target")) {
   };
 }
 
+// A saved configured exec agent stays visible, with its retirement reason.
+if (params.has("retired-exec")) {
+  runner.agents[0] = { ...runner.agents[0]!, name: "Codex Non-Interactive", driver: "codex", available: true };
+}
+
 if (params.has("saved-installation")) {
   runner.protocolVersion = 175;
   runner.agents[0]!.installation = {
@@ -256,7 +261,8 @@ const triggerItems: AutomationTriggerView[] = [{
   name: "Issue Intake",
   generation: 1,
   invocationCount: 12,
-  lastInvokedAt: Date.now() - 2 * 3_600_000,
+  // Two hours ago, but never before midnight, so the row says Today at any time of day (#3617).
+  lastInvokedAt: Math.max(Date.now() - 2 * 3_600_000, new Date().setHours(0, 0, 0, 0)),
   createdBy: { kind: "human", id: "e2e" },
   createdAt: 1,
   updatedAt: 1,

@@ -29,6 +29,13 @@ export interface StaleProviderProfileGrant {
   grantId: string;
 }
 
+/** Command-local capability, never serialized or accepted from an RPC. */
+export interface ProviderProfileAdoptionTicket {
+  readonly grantId: string;
+  readonly generation: object;
+}
+const ADOPTION_TICKET_LIMIT = 32;
+
 interface KnownGrant {
   /** Known from the control plane (active) or from this HOME's marker (pending or adopted here). */
   profileId?: string;
@@ -42,6 +49,10 @@ interface KnownGrant {
  */
 export class ProviderProfileGrants {
   private supported = false;
+  // Fresh object identity cannot wrap or ABA. At most 32 outstanding capabilities retain old
+  // generations; no grant-id tombstones or event history is accumulated.
+  private adoptionGeneration: object = {};
+  private readonly adoptionTickets = new Set<ProviderProfileAdoptionTicket>();
   private readonly grants = new Map<string, KnownGrant>();
   /** The exact profile ids the most recent register frame reported. The control plane lists grants
    * only for those, so only a marker holding one of them can carry a grant the list omitted. */
@@ -69,13 +80,18 @@ export class ProviderProfileGrants {
    * next registration.
    */
   synchronize(protocolVersion: number | null, list: unknown): StaleProviderProfileGrant[] {
-    this.supported = runnerSupportsProtocol(protocolVersion, "providerProfiles");
+    const supported = runnerSupportsProtocol(protocolVersion, "providerProfiles");
+    if (supported !== this.supported) this.adoptionGeneration = {};
+    this.supported = supported;
     if (!this.supported) {
       this.grants.clear();
       return [];
     }
     const parsed = parseGrantList(list);
     if (!parsed) return [];
+    // Every authoritative complete snapshot invalidates in-flight decisions, including
+    // same-content snapshots and remove/re-add ABA. An absent/malformed list is not a snapshot.
+    this.adoptionGeneration = {};
     this.grants.clear();
     for (const grant of parsed) {
       const profileId = grant.profileId ?? (grant.status === "pending" ? this.creations.get(grant.grantId) : undefined);
@@ -126,11 +142,33 @@ export class ProviderProfileGrants {
     return this.supported;
   }
 
-  /** Record a grant this runner just wrote into a marker on the control plane's request. The reply
-   * carrying the profile id is what activates the control plane's row, so it counts as active. */
-  recordAdopted(profileId: string, grantId: string): void {
-    if (!this.supported) return;
-    this.grants.set(grantId, { status: "active", profileId });
+  /** No allocation after the bounded command capacity is exhausted. */
+  captureAdoptionTicket(grantId: string): ProviderProfileAdoptionTicket | undefined {
+    if (!this.supported || !isProviderProfileGrantId(grantId) || this.adoptionTickets.size >= ADOPTION_TICKET_LIMIT) return undefined;
+    const ticket = Object.freeze({ grantId, generation: this.adoptionGeneration });
+    this.adoptionTickets.add(ticket);
+    return ticket;
+  }
+
+  adoptionTicketCurrent(ticket: ProviderProfileAdoptionTicket): boolean {
+    return this.supported && this.adoptionTickets.has(ticket) && ticket.generation === this.adoptionGeneration;
+  }
+
+  releaseAdoptionTicket(ticket: ProviderProfileAdoptionTicket): void {
+    this.adoptionTickets.delete(ticket);
+  }
+
+  /** Check, consume and activate synchronously: no await/callback may separate these steps. */
+  activateAdoption(profileId: string, ticket: ProviderProfileAdoptionTicket): boolean {
+    if (!isProviderProfileId(profileId) || !this.adoptionTicketCurrent(ticket)) return false;
+    this.adoptionTickets.delete(ticket);
+    this.grants.set(ticket.grantId, { status: "active", profileId });
+    return true;
+  }
+
+  /** Exact current knowledge is useful for retention, never proof that an old ticket is current. */
+  hasKnownGrant(profileId: string, grantId: string): boolean {
+    return this.supported && this.grants.get(grantId)?.profileId === profileId;
   }
 
   /** Record the grant a new managed profile's marker was just created with (Add Account). The
@@ -154,6 +192,8 @@ export class ProviderProfileGrants {
   /** Forget a revoked grant at once, before its marker update, so no new reference uses it. A
    * control plane holds at most one active grant per profile, so its other entries go too. */
   recordRevoked(profileId: string | undefined, grantId: string): void {
+    // Even revocation of an as-yet unknown initial-adoption grant fences its pending command.
+    this.adoptionGeneration = {};
     this.grants.delete(grantId);
     if (!profileId) return;
     for (const [id, grant] of this.grants) if (grant.profileId === profileId) this.grants.delete(id);

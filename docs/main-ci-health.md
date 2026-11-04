@@ -1,5 +1,14 @@
 # Main CI Health
 
+The [regression merge-admission runbook](main-merge-admission.md) documents #3633's
+disabled policy and optional read-only shadow. It does not change required checks
+or admit repairs; candidate integration and enforcement remain later slices.
+Merge groups still run full regression. The disabled fast merge-group gate, its
+readiness evidence, rollback triggers and the exact operator steps are in the
+[activation proposal](fast-gate-activation-proposal.md). If it is ever activated, a
+regression can reach `main` through a reduced group, and this health signal becomes the
+primary way it is caught.
+
 The merge queue tests every entry on top of `main`, so a red `main` fails every queued pull
 request, whatever it changes. Normally nothing reaches `main` without passing the queue. The one
 exception is the `main: merge queue` ruleset's bypass: organization admins can merge without the
@@ -328,7 +337,8 @@ public before it lands, which in practice means a security fix prepared in a tem
    run (`.github/workflows/ci.yml` is the authority):
    `pnpm install --frozen-lockfile`, `pnpm typecheck`, `pnpm test`,
    `pnpm --filter @wollipog/web build`,
-   `pnpm --filter @wollipog/runner exec node scripts/build-binary.mjs --bundle-only`,
+   `TARGET_TRIPLE=x86_64-unknown-linux-gnu pnpm --filter @wollipog/runner build:binary`,
+   `node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs apps/runner/dist-bin/wollipog-runner-x86_64-unknown-linux-gnu`,
    `pnpm --filter @wollipog/desktop exec node scripts/build-sidecar.mjs --bundle-only`
    and `pnpm test:e2e`. The required check also covers the Node engine boundary and WebKit, which a
    local run rarely reproduces. A local run narrows the risk; it does not replace CI.

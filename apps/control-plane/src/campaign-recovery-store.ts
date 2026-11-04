@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { CAMPAIGN_RECOVERY_EXPLANATIONS, CAMPAIGN_RECOVERY_LIMITS,
-  type CampaignRecoveryAction, type CampaignRecoveryInput, type CampaignRecoveryProjection,
+import { CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_RECOVERY_EXPLANATIONS, CAMPAIGN_RECOVERY_LIMITS,
+  type CampaignPublicationAdmissionFailure, type CampaignRecoveryAction, type CampaignRecoveryInput, type CampaignRecoveryProjection,
   type CampaignRecoveryReason, type CampaignRecoveryRecord, type CampaignRecoveryResource } from "@wollipog/protocol";
 
 export const CAMPAIGN_RECOVERY_SCHEMA = `
@@ -49,7 +49,28 @@ CREATE TABLE IF NOT EXISTS campaign_recovery_declined_occurrences (
   PRIMARY KEY (campaign_session_id, occurrence),
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS campaign_publication_refusals (
+  campaign_session_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  failure TEXT NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  refused_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, subject_session_id, occurrence),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 `;
+
+/** A member's correctable publication refusal (#4065), kept until the member requests that
+ * recommendation again or its report is verified. Only the failure code and a hashed
+ * session/recommendation coordinate are stored. */
+export interface CampaignPublicationRefusal {
+  sessionId: string;
+  occurrenceId: string;
+  failure: CampaignPublicationAdmissionFailure;
+  policyRevision: number;
+  refusedAt: number;
+}
 
 /** One Full Control decline, kept as blocked work. Its class and hashed first occurrence are the
  * only request facts stored: never a title, command, question text, path or answer. */
@@ -82,18 +103,26 @@ export interface CampaignRecoveryObservation {
   signal: string;
   /** Evidence of a completed repair/reconciliation. Absence from a partial scan is not resolution. */
   resolved?: boolean;
+  /** #4065: the publication admission failure this record reports; its signal must include it. */
+  admissionFailure?: CampaignPublicationAdmissionFailure;
 }
 interface Row { id: string; signal: string; record_json: string }
 const inputFor: Partial<Record<CampaignRecoveryReason, CampaignRecoveryInput>> = {
   missing_human_information: "answer_existing_request", missing_access: "restore_existing_access",
   boundary_enlargement: "authorize_exact_boundary_change", human_required_rule: "perform_human_required_action",
   unsupported_capability: "use_supported_capability", uncertain_outcome: "reconcile_original_outcome",
+  publication_not_admitted: "perform_human_required_action",
 };
 const terminal = new Set(["resolved", "cancelled"]);
 // A Full Control decline is final for its occurrence: blocked, never dispatched, never asked.
-const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted", "request_declined"]);
+const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted", "request_declined",
+  "intentional_stop", "unverified_stop"]);
+// How a stopped worker is classified (#3362), least to most severe. Each is a hard block. A worker
+// record keeps its work item across replacement workers, so its label may only escalate: a later
+// worker's denial is never hidden behind an inherited intentional stop, and nothing relabels a denial.
+const stopSeverity: Partial<Record<CampaignRecoveryReason, number>> = { intentional_stop: 1, unverified_stop: 2, hard_denial: 3 };
 const human = new Set<CampaignRecoveryReason>(["missing_human_information", "missing_access",
-  "boundary_enlargement", "human_required_rule", "unsupported_capability"]);
+  "boundary_enlargement", "human_required_rule", "unsupported_capability", "publication_not_admitted"]);
 
 /** How long a delivered, completed wake may stay unanswered (same signal, quiet campaign) before
  * the same record is woken again: 2, 4, 8 then 16 minutes, capped at 30. The attempt ceiling
@@ -181,6 +210,31 @@ export class CampaignRecoveryStore {
       .run(campaignId, sessionId);
   }
 
+  /** Record a member's correctable publication refusal (#4065). A later refusal of the same
+   * recommendation replaces the failure; the recovery record keeps its identity and attempts. */
+  recordPublicationRefusal(campaignId: string, sessionId: string, occurrenceId: string,
+    failure: CampaignPublicationAdmissionFailure, policyRevision: number, now: number): void {
+    this.db.prepare(`INSERT INTO campaign_publication_refusals (campaign_session_id,subject_session_id,occurrence,failure,
+      policy_revision,refused_at) VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_session_id,subject_session_id,occurrence) DO UPDATE SET
+        failure=excluded.failure,policy_revision=excluded.policy_revision,refused_at=excluded.refused_at`)
+      .run(campaignId, sessionId, occurrenceId, failure, policyRevision, now);
+  }
+
+  /** Refusals still awaiting the member's corrected request under the current revision. */
+  publicationRefusals(campaignId: string, policyRevision: number): CampaignPublicationRefusal[] {
+    return (this.db.prepare(`SELECT subject_session_id,occurrence,failure,policy_revision,refused_at FROM campaign_publication_refusals
+      WHERE campaign_session_id=? AND policy_revision=? ORDER BY refused_at,subject_session_id,occurrence`).all(campaignId, policyRevision) as Array<{
+        subject_session_id: string; occurrence: string; failure: CampaignPublicationAdmissionFailure; policy_revision: number; refused_at: number }>)
+      .map(row => ({ sessionId: row.subject_session_id, occurrenceId: row.occurrence, failure: row.failure,
+        policyRevision: row.policy_revision, refusedAt: row.refused_at }));
+  }
+
+  /** A new decision for the same recommendation, or a verified report (no `occurrenceId`), settles it. */
+  retirePublicationRefusals(campaignId: string, sessionId: string, occurrenceId?: string): boolean {
+    return this.db.prepare(`DELETE FROM campaign_publication_refusals WHERE campaign_session_id=? AND subject_session_id=?
+      ${occurrenceId === undefined ? "" : "AND occurrence=?"}`).run(campaignId, sessionId, ...(occurrenceId === undefined ? [] : [occurrenceId])).changes > 0;
+  }
+
   campaignIds(): string[] {
     return (this.db.prepare(`SELECT DISTINCT campaign_session_id AS id FROM campaign_recovery
       WHERE json_extract(record_json,'$.state') NOT IN ('resolved','cancelled')`)
@@ -256,8 +310,10 @@ export class CampaignRecoveryStore {
         // flight. The same record (same occurrence) is woken again, or exhausted past its ceiling.
         const settledAt = currentDispatch && authorized && !observation.resolved ? settledWakeAt?.(old!) : undefined;
         const stalled = settledAt !== undefined && now >= settledAt + stalledRecoveryWakeDelayMs(attempts);
+        const escalatedStop = old?.action === "replace_worker" &&
+          (stopSeverity[observation.reason] ?? 0) > (stopSeverity[old.reason] ?? Infinity);
         let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && (!currentDispatch || stalled)
-          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved
+          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved && !escalatedStop
             ? old.reason : observation.reason;
         const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
           ? reason === "uncertain_outcome" ? "blocked" : "cancelled" : hard.has(reason) ? "blocked"
@@ -273,7 +329,10 @@ export class CampaignRecoveryStore {
           effectiveOwner: observation.owner, policyRevision, ...(dispatchFenced ? { dispatchFenced: true } : {}),
           attempts, maxAttempts: CAMPAIGN_RECOVERY_LIMITS.maxAttempts,
           attemptedRecovery: old?.attemptedRecovery ?? [], requiredInput: inputFor[reason] ?? "none",
-          explanation: CAMPAIGN_RECOVERY_EXPLANATIONS[reason], createdAt: old?.createdAt ?? now, updatedAt: now,
+          explanation: CAMPAIGN_RECOVERY_EXPLANATIONS[reason] + (observation.admissionFailure && reason === observation.reason
+            ? ` ${CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[observation.admissionFailure]}` : ""),
+          ...(observation.admissionFailure ? { admissionFailure: observation.admissionFailure } : {}),
+          createdAt: old?.createdAt ?? now, updatedAt: now,
           ...(state === "backoff" ? { nextAttemptAt: now + Math.min(CAMPAIGN_RECOVERY_LIMITS.maxBackoffMs,
             CAMPAIGN_RECOVERY_LIMITS.baseBackoffMs * 2 ** attempts) } : {}),
         };

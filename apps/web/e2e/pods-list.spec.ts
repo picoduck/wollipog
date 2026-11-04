@@ -1,5 +1,6 @@
 import { join } from "node:path";
 import { expect, test, type Page } from "@playwright/test";
+import { expectCenteredState } from "./page-state.js";
 
 /**
  * The Pods list (#2979; docs/design-system.md §5.2, §11, §12, §15.1), measured in a real browser:
@@ -163,6 +164,7 @@ test("an empty list offers exactly one New Pod, in the empty state", async ({ pa
   await expect(page.getByText("No Pods Yet")).toBeVisible();
   await expect(page.getByRole("button", { name: "New Pod", exact: true })).toHaveCount(1);
   await expect(page.locator(".state").getByRole("button", { name: "New Pod", exact: true })).toBeVisible();
+  await expectCenteredState(page.locator(".state"));
 });
 
 for (const { label, viewport } of [

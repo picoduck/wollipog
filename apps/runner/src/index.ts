@@ -1,10 +1,15 @@
 import { projectMemoryAgentVersion } from "./project-memory.js";
-import { ControlledCampaignReviewer, discoverControlledReview } from "./campaign-review-jobs.js";
-import { SessionReviewJobs, configuredSessionWritablePaths, defaultSessionReviewDependencies } from "./session-review-jobs.js";
+import { assertLegacyReviewsDrained, retiredReviewReceipt } from "./retired-review-jobs.js";
+import { reviewRetirementPeerRefusal, projectProviderAccountReadinessForPeer } from "@wollipog/protocol";
+import { configuredSessionWritableGrants } from "./review-trust.js";
 import { configuredCodexHomes } from "./review-trust.js";
+import { reviewerInstallations } from "./reviewer-installations.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { ReviewSnapshotter } from "./review-snapshot.js";
-import { defaultReviewSessionDependencies, reviewLaunchArgs, ReviewSessionLauncher } from "./review-sessions.js";
+import { defaultReviewSessionDependencies, reviewLaunchArgs, reviewSessionDiscoveryReason, ReviewSessionLauncher } from "./review-sessions.js";
+import { PullRequestWatcher } from "./pull-request-watches.js";
+import { removeConfiguredWorkspace, WorkspaceRemovals } from "./workspace-removals.js";
+import { contextGhRunner } from "./campaign-forge-status.js";
 import { MediaReviewerDispatcher, installedMediaReviewer } from "./media-reviewer-dispatcher.js";
 import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 /**
@@ -15,12 +20,13 @@ import { MediaReviewerAdvertisement } from "./media-reviewer-advertisement.js";
 
 import { setTimeout as delay } from "node:timers/promises";
 import { homedir, hostname } from "node:os";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { CampaignLaunchInspections } from "./campaign-launch-inspection.js";
 import WebSocket from "ws";
+import { ProcessingWindow } from "./processing-window.js";
 import {
   parseMessage,
   agentContextKey,
@@ -36,6 +42,7 @@ import {
   type AgentDriverKind,
   type AgentDefinition,
   type AgentContext,
+  type ProviderCredentialImportCode,
   type AgentsUpdatedMessage,
   type ControlPlaneToRunner,
   type DurableSessionCommandResultMessage,
@@ -56,7 +63,6 @@ import {
   type RegisterMessage,
   type ReprocessSessionMessage,
   type RunnerMetadata,
-  type SessionReviewCapability,
   type RunnerToControlPlane,
   type SessionCommandInvocationResultMessage,
   type SessionCommandInvocationUpdateMessage,
@@ -79,6 +85,7 @@ import {
   resolveAgentEnvironment,
   resolveAgentEnvironmentValue,
   resolveRunnerLocalAgentEnvironment,
+  captureProviderAccountsConfigPreimage,
   writeProviderAccountsConfig,
   type RunnerConfig,
 } from "./config.js";
@@ -166,10 +173,12 @@ import {
   writeStarterWorktreeSetupConfig,
 } from "./worktree-setup-generator.js";
 import { createRunnerProviderAuthRecovery } from "./provider-auth-recovery.js";
-import { ProviderLoginSupervisor } from "./provider-login.js";
+import { ProviderCredentialImportError, ProviderLoginSupervisor, type ProviderCredentialImportSourceHome } from "./provider-login.js";
+import { providerCredentialImportHostSupported } from "./provider-credential-import.js";
 import { inspectProviderHomeLeaseCommand, recoverProviderHomeLeaseCommand, type ProviderHomeLeaseCommandDeps } from "./provider-home-lease-commands.js";
 import { ProviderProfileGrants } from "./provider-profile-grants.js";
 import { managedProviderProfileRoot } from "./provider-profile-home.js";
+import { createProviderProfileLoginSettlement } from "./provider-profile-login-settlement.js";
 import { runnerCredentialRoots, setCampaignCredentialRoots } from "./campaign-operation-evidence.js";
 import {
   adoptProviderProfileCommand,
@@ -185,9 +194,13 @@ import {
   providerAccountDefinition,
   providerAccountEnvironment,
   providerForDriver,
+  probeProviderAccountsForDiscovery,
+  projectProviderAccountDiscoveryReadiness,
   selectProviderAccount,
+  selectProviderAccountForDiscovery,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
+import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
 import { inheritProviderPlugins, pluginProviderForDriver } from "./provider-plugins.js";
 import { handleResolveSteeringAttemptMessage, handleSteerSessionMessage } from "./steering-handler.js";
 import {
@@ -202,6 +215,7 @@ import {
   waitForPendingKills,
 } from "./spawn.js";
 import { providerContainmentEmpty, providerContainmentIdentity } from "./linux-cgroup.js";
+import { watchSshLifetime } from "./ssh-supervision.js";
 import {
   cleanupPiExternalSession,
   findExternalSession,
@@ -229,7 +243,7 @@ import {
   searchWorkspaceReferences,
 } from "./session-files.js";
 import { ShellManager } from "./shell-manager.js";
-import { prepareAgentTuiLaunch } from "./agent-tui.js";
+import { agentTuiProviderEnvironment, prepareAgentTuiLaunch } from "./agent-tui.js";
 import { provisionAgentTuiManagedWorktreeGuard } from "./agent-tui-guard.js";
 import { UnguardedAgentTuiRegistry } from "./agent-tui-guard-notice.js";
 import { capabilitiesFor } from "./catalog.js";
@@ -379,6 +393,16 @@ try {
 
 async function startRunner(config: RunnerConfig, allowInsecureTransport: boolean): Promise<void> {
 const log = (msg: string) => console.log(`[runner ${config.runnerId}] ${msg}`);
+// Before attestation succeeds no provider HOME or mutable store is owned. Arm transport
+// cancellation now, so an unavailable control plane cannot strand a supervised SSH launch.
+// Startup after attestation is synchronous through the assignment to graceful shutdown below.
+let onSshTransportClosed: () => void = () => process.exit(0);
+if (process.env.WOLLIPOG_SSH_SUPERVISED === "1") {
+  watchSshLifetime(process.stdin, () => {
+    log("ssh_transport_closed; draining runner-owned work");
+    onSshTransportClosed();
+  });
+}
 validateControlPlaneUrl(config.controlPlaneUrl, allowInsecureTransport);
 const warnLegacyEnvironment = (message: string) => console.warn(`[runner ${config.runnerId}] ${message}`);
 const claudeHookFeatureEnabled = claudeHooksEnabled(process.env, warnLegacyEnvironment);
@@ -437,8 +461,12 @@ if (resolve(requestedDataDir) !== resolve(dataDirLease.dataDir)) {
 config.dataDir = dataDirLease.dataDir;
 // Runtime containment is selected before provider-HOME acquisitions; staging can use the owned
 // runner data directory when the temporary filesystem is noexec. This never moves the runner.
-providerContainmentIdentity(config.dataDir);
 process.once("exit", dataDirLease.release);
+const containment = providerContainmentIdentity(config.dataDir);
+if (process.env.WOLLIPOG_SSH_REQUIRE_CGROUP === "1" && !containment) {
+  console.error("[runner] ssh_launch_failed reason=containment-unavailable; verify delegated cgroup v2 support before reconnecting; preserve existing ownership evidence");
+  process.exit(1);
+}
 if (dataDirLease.migratedLegacyDataDir) {
   log(`claimed legacy data directory ${config.dataDir} after explicit --adopt-legacy-data-dir authorization`);
 }
@@ -533,6 +561,14 @@ const runnerHostname = hostname();
 const sessionNamingCustomModel = new RunnerSessionNamingCustomModel(resolve(config.dataDir, "session-naming"));
 const containerTargets = new ContainerTargetRegistry(config.runnerId, runnerHostname, config.containerTargets);
 const cloudTargets = new CloudTargetRegistry(config.runnerId, runnerHostname, config.cloudTargets);
+// Refuse unfinished legacy work before constructing any provider/session managers.
+assertLegacyReviewsDrained(config.dataDir);
+// Configured Workspaces removed in Wollipog stay removed (#4123); nothing below sees them.
+const workspaceRemovals = new WorkspaceRemovals(config.dataDir, log);
+for (const workspace of workspaceRemovals.apply(config.workspaces)) {
+  log(`workspace ${workspace.id} (${workspace.path}) is configured but was removed in Wollipog; delete its entry from ${workspaceRemovals.file} to restore it`);
+}
+
 const configuredAgentDefinitions = config.agents.map((a) => {
   const driver = a.driver ?? "acp";
   // Git Bash is a non-secret native-provider prerequisite. Project only that one resolved value
@@ -580,7 +616,7 @@ const metadata: RunnerMetadata = {
       : {}),
   })),
   runtime: {
-    campaignLaunchInspection: { version: 2 },
+    campaignLaunchInspection: { version: 3 },
     dataDir: config.dataDir,
     worktreeRoot: resolve(config.dataDir, "worktrees"),
     worktreePorts: {
@@ -590,10 +626,10 @@ const metadata: RunnerMetadata = {
       ),
     },
     maxConcurrentSessions: config.maxConcurrentSessions,
-    campaignReview: config.executionIsolation.mode==="provider"?await discoverControlledReview(configuredAgentDefinitions.find((a)=>
-      a.driver==="claude-code" && (!a.context || a.context.kind==="native") && a.command==="claude")?.id):undefined,
     admission: config.admission,
     executionIsolation: config.executionIsolation,
+    // #3719: the control plane offers import only on hosts that report this.
+    ...(providerCredentialImportHostSupported() ? { providerCredentialImport: { version: 1 as const, providers: ["codex" as const] } } : {}),
   },
   sessionNamingCustomModel: sessionNamingCustomModel.status(),
 };
@@ -615,7 +651,8 @@ function safeWslLaunchKey(value: Pick<AgentDefinition, "command" | "args" | "dri
  * to a control plane that cannot enforce its credential boundary. */
 function agentsForControlPlane() {
   return withMediaReviewerCapabilities(projectOrchestratorPresetForPeer(metadata.agents.map((agent) =>
-    invalidateStaleNativeInstallation(agent)), {
+    projectProviderAccountReadinessForPeer(invalidateStaleNativeInstallation(agent),
+      runnerSupportsProtocol(controlPlaneProtocolVersion, "providerAccountReadiness"))), {
     controlPlaneProtocolVersion,
     isolationMode: config.executionIsolation.mode,
   }).filter((agent) =>
@@ -688,6 +725,13 @@ function runnerLocalAgentEnv(agentId: string | null, driver: AgentDriverKind, co
   const configured = agentId ? config.agents.find((agent) => agent.id === agentId) : undefined;
   if (configured) return resolveRunnerLocalAgentEnvironment(configured, exact?.env);
   return { ...(exact?.env ?? resolveAdoptionLaunch(driver, context)?.env ?? {}) };
+}
+
+/** The runner-local agent environment a session launch starts from (see `prepareLaunch`). */
+function sessionAgentEnvironment(meta: SessionMeta): Record<string, string> {
+  return meta.adopted && !meta.agentId
+    ? adoptedLaunchEnvironment(meta)
+    : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context);
 }
 
 /** Native adopted rows retain the recorded launch command across later selection changes. */
@@ -796,8 +840,10 @@ function sameAcpCapabilities(
 }
 
 let ws: WebSocket | null = null;
+let controlPlanePeerRefused = false;
 let registered = false;
 let controlPlaneProtocolVersion: number | null = null;
+let republishWindow: ProcessingWindow | null = null;
 let policyHookRegistrationGeneration = 0;
 const registerPolicyHookCredential = (sessionId: string, tokenHash: string) =>
   sendUp({ type: "policy_hook_credential", sessionId, tokenHash });
@@ -850,6 +896,20 @@ const registerAgentControlCredentialAndWait = (sessionId: string, tokenHash: str
     }
   });
 };
+/** #3719: the runner user's own Codex HOME, as its native Codex agents inherit it: their
+ * `CODEX_HOME`, else `~/.codex` under their HOME (the lease then covers that HOME). Undefined when
+ * the native Codex agents disagree, since the source must be one unambiguous HOME. */
+function defaultCodexImportSource(): ProviderCredentialImportSourceHome | undefined {
+  const agents = metadata.agents.filter((agent) => (agent.context?.kind ?? "native") === "native" &&
+    (agent.driver === "codex" || agent.driver === "codex-app-server"));
+  const sources = (agents.length ? agents.map((agent) => ({ ...process.env, ...runnerLocalAgentEnv(agent.id, agent.driver ?? "codex", { kind: "native" }) }))
+    : [{ ...process.env }]).map((env): ProviderCredentialImportSourceHome => env.CODEX_HOME
+    ? { home: resolve(env.CODEX_HOME), layout: "codex_home" }
+    : { home: resolve(env.HOME || homedir()), layout: "user_home" });
+  const keys = new Set(sources.map((source) => `${source.layout}\u0000${source.home}`));
+  return keys.size === 1 ? sources[0] : undefined;
+}
+const providerCredentialImportSupported = providerCredentialImportHostSupported();
 const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSupervisor({
   dataDir: config.dataDir,
   configPath: parsed.configPath,
@@ -879,6 +939,9 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
     });
     void subscriptionUsage.refreshAccount(account.id)
       .catch(() => log("subscription usage refresh after Provider Sign-In failed"));
+    // Installation probes use empty private state; readiness comes from the selected persistent
+    // account, so a completed setup must refresh that separate leased observation.
+    void runDiscovery(false, false).catch(() => log("discovery after Provider Sign-In failed"));
   },
   removalBlocker: (account) => {
     const agent = config.agents.find((candidate) => candidate.defaultProviderAccountId === account.id);
@@ -900,16 +963,25 @@ const providerLoginSupervisor: ProviderLoginSupervisor = new ProviderLoginSuperv
       await sessions.createProviderProfile(home, provider, profileId, grantId);
       providerProfileGrants.recordCreated(profileId, grantId);
     },
-    settle: async ({ home, provider, profileId, grantId, recorded, homeRemoved }) => {
-      providerProfileGrants.settleCreated(profileId, grantId, recorded);
-      // Absence is not proof that cleanup removed the HOME. Keep the old missing-path guard
-      // separately so grant settlement does not recreate a HOME that moved or disappeared.
-      if (recorded || homeRemoved || !existsSync(home)) return;
-      // Physical cleanup has no proved retirement authority yet; retain the HOME without this grant.
-      await sessions.revokeProviderProfileGrant(home, provider, profileId, grantId)
-        .catch((error) => log(`a discarded provider profile's grant could not be removed from its marker: ${errText(error)}`));
-    },
+    settle: createProviderProfileLoginSettlement({
+      settleCreated: (profileId, grantId, recorded) => providerProfileGrants.settleCreated(profileId, grantId, recorded),
+      revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
+      log,
+    }),
   },
+  // #3719: copying an existing Codex API-key sign-in into a managed profile, on supported hosts only.
+  ...(providerCredentialImportSupported ? {
+    imports: {
+      defaultCodexHome: () => defaultCodexImportSource(),
+      copyCodex: async ({ source, root, profileId, grantId }) => {
+        if (!attestation.instanceId || !providerProfileGrants.supportsProfiles()) {
+          throw new Error("This control plane did not negotiate provider profiles.");
+        }
+        await sessions.importCodexCredential(source.home, source.layout, root, profileId, grantId, source.expectedProfileId);
+        providerProfileGrants.recordCreated(profileId, grantId);
+      },
+    },
+  } : {}),
   onAccountRemoved: (account) => {
     providerAccountAuthStatus.delete(account.id);
     sendUp({
@@ -940,7 +1012,8 @@ setCampaignCredentialRoots(() => {
     providerAccountDirectories: config.providerAccounts.map((account) => account.directory),
     agentEnvs: [process.env, ...config.agents.map(agentEnv), ...sessions.map((meta) => meta.env)],
     credentialHomes: sessions.flatMap((meta) => [meta.providerCredentialHome, meta.pendingProviderCredentialHome]),
-    workspacePaths: config.workspaces.map((workspace) => workspace.path), userHome: homedir(),
+    workspacePaths: [...config.workspaces, ...workspaceRemovals.writableHistory()].map((workspace) => workspace.path),
+    userHome: homedir(),
   });
 });
 store.scrubLegacyAgentEnv();
@@ -1229,6 +1302,8 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
         },
         spec.driver ?? "acp",
         spec.providerAccountId,
+        process.platform,
+        (account) => providerProfileGrants.usable(account),
       ),
   (meta) => {
     const provider = providerForDriver(meta.driver);
@@ -1240,8 +1315,9 @@ const sessions: SessionManager = new SessionManager(() => {}, log, store, config
   () => subscriptionUsage.inventory(),
   attestation.instanceId,
 );
-sessions.configureSharedDirectories(config.workspaces, [parsed.configPath,
-  ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)]);
+const sharedDirectoryForbiddenRoots = [parsed.configPath,
+  ...(tokenFile ? [tokenFile] : []), ...config.providerAccounts.map((account) => account.directory)];
+sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
 sessions.configureProviderProfiles({
   access: () => providerProfileGrants.access(),
   expectedProfileIdForHome: (home) => providerProfileGrants.expectedProfileIdForHome(home),
@@ -1255,7 +1331,8 @@ const providerProfileCommands: ProviderProfileCommandDeps = {
   revoke: (home, provider, profileId, grantId) => sessions.revokeProviderProfileGrant(home, provider, profileId, grantId),
   retire: (home, provider, expectedProfileId) => sessions.retireProviderAccountHome(home, provider, expectedProfileId),
   profileRoot: managedProviderProfileRoot(),
-  persistAccounts: (accounts) => writeProviderAccountsConfig(parsed.configPath, accounts),
+  captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(parsed.configPath, config.providerAccounts),
+  persistAccounts: (accounts, preimage) => writeProviderAccountsConfig(parsed.configPath, accounts, preimage),
   removeAccount: (accountId, options) => providerLoginSupervisor.removeAccount(accountId, options),
   publish: () => publishProviderAccountInventory(),
   log,
@@ -1277,7 +1354,7 @@ const pendingShellOpenCancellations = new PendingShellOpenCancellations();
 // authoritative inventory after every registration instead.
 /** Agent TUIs running without the managed-worktree guard, which a later worktree cannot reach (#1438). */
 const unguardedAgentTuis = new UnguardedAgentTuiRegistry();
-// Reviewer admission is native-Linux only; avoid accumulating unsupported-platform records.
+// Writer lifecycle diagnostics are native-Linux only and never gate reviewer admission.
 const reviewWriters = new ReviewWriterRegistry(process.platform === "linux"
   ? join(config.dataDir, "unprotected-agent-writers") : undefined);
 sessions.setReviewWriterRegistry(reviewWriters);
@@ -1449,7 +1526,8 @@ function projectMessageForCurrentProtocol(msg: RunnerToControlPlane): RunnerToCo
 
 function sendUp(msg: RunnerToControlPlane): void {
   // Registration precedes agent discovery, so the review-session capability it advertised can say
-  // no reviewer is available. Every discovery result carries it again, from the agents it found.
+  // no reviewer is available. Every update recomputes it, including the existing five-minute
+  // discovery pass, so repaired tools/agents recover without reconnecting.
   if (msg.type === "agents_updated" && process.platform === "linux") {
     msg = { ...msg, reviewSession: reviewSessionCapability() ?? null };
   }
@@ -1619,14 +1697,11 @@ function recoverStaleSessionCommands(): void {
 }
 
 sessions.setSend(sendUp);
-const campaignReviewer = new ControlledCampaignReviewer(resolve(config.dataDir,"campaign-review-jobs"),store,sendUp,
-  (jobId,agentId)=>sessions.reserveControlledReviewAdmission(jobId,agentId),(jobId)=>sessions.releaseControlledReviewAdmission(jobId));
-// A session's own cross-model review, run outside its sandbox (#3306). Linux only: job liveness is
-// read from /proc, and the protected session namespace it works around exists only there.
-// Nothing it runs may live where a session can write: project checkouts, provider account homes,
-// provider homes an agent's or session's environment names, and every session's provider homes.
-const sessionWritablePaths = () => configuredSessionWritablePaths({
+// Shared trusted-tool roots for review sessions, with the configuration that grants each. A removed
+// Workspace's directory grants stay with the sessions that ran there (#4123).
+const sessionWritableGrants = () => configuredSessionWritableGrants({
   workspaces: config.workspaces, providerAccounts: config.providerAccounts, agents: config.agents,
+  removedWorkspaces: workspaceRemovals.entries(),
   sessions: store.listSessions(), hostEnv: process.env,
 });
 sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
@@ -1634,18 +1709,21 @@ sessions.setCodexHomes(() => configuredCodexHomes(homedir(), {
   sessions: store.listSessions(), hostEnv: process.env,
 }));
 const codexProtection = () => sessions.codexReviewerProtection();
-const sessionReviewDependencies = defaultSessionReviewDependencies(config.dataDir, log, sessionWritablePaths, codexProtection);
-// One owner of every review mirror, so the bridge's fetches and review sessions' never race.
-const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), sessionReviewDependencies.exec, log);
-const sessionReviewJobs = new SessionReviewJobs(resolve(config.dataDir, "session-review-jobs"), store, sendUp,
-  sessionReviewDependencies, undefined, reviewSnapshots);
-// Review sessions (#3368): a typed reviewer session launched outside the requester's sandbox.
-const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store,
-  defaultReviewSessionDependencies(config.dataDir, log, sessionWritablePaths, agentsForControlPlane,
-    (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
-    codexProtection));
+sessions.setReviewerInstallations(() => reviewerInstallations(agentsForControlPlane(),
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH));
+const reviewDependencies = defaultReviewSessionDependencies(config.dataDir, log, sessionWritableGrants, agentsForControlPlane,
+  (agentId, driver) => runnerLocalAgentEnv(agentId, driver ?? "acp", { kind: "native" }).PATH ?? process.env.PATH,
+  codexProtection);
+const reviewSnapshots = new ReviewSnapshotter(resolve(config.dataDir, "review-snapshots"), reviewDependencies.exec, log);
+const reviewSessionLauncher = new ReviewSessionLauncher(resolve(config.dataDir, "review-snapshots"), reviewSnapshots, store, reviewDependencies);
 // Startup reconciliation has already settled every review session: no checkout is in use.
 reviewSessionLauncher.releaseAll();
+// Merge-queue watches live in the control plane, which resends each one on registration (#4071).
+const pullRequestWatcher = new PullRequestWatcher({
+  gh: contextGhRunner({ kind: "native" }, process.cwd()),
+  send: (update) => sendUp(update),
+  log,
+});
 sessions.setReviewSessions({
   markPreparing: (sessionId) => reviewSessionLauncher.markPreparing(sessionId),
   recordOutcome: (update) => reviewSessionLauncher.recordOutcome(update),
@@ -1661,7 +1739,8 @@ const mediaReviewRoot = resolve(config.dataDir, "media-review");
 mkdirSync(join(mediaReviewRoot, "sessions"), { recursive: true, mode: 0o700 });
 /** Operator state the reviewer namespace must never expose (it mounts none of it in any case). */
 function mediaReviewerForbiddenRoots(): string[] {
-  const roots = [...config.workspaces.map((workspace) => workspace.path), resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
+  const roots = [...[...config.workspaces, ...workspaceRemovals.writableHistory()].map((workspace) => workspace.path),
+    resolve(config.dataDir, "worktrees"), agentControlHost.configDir];
   return [...new Set(roots.filter((path) => {
     try { return existsSync(path) && statSync(path).isDirectory(); } catch { return false; }
   }).map((path) => realpathSync(path)))].slice(0, 32);
@@ -1701,30 +1780,20 @@ const mediaReviewers = new MediaReviewerDispatcher({
   log,
 });
 
-/** Discovery runs at every registration so an installed or removed controller is advertised. */
-function sessionReviewCapability(): SessionReviewCapability | undefined {
-  if (process.platform !== "linux") return undefined;
-  try {
-    return sessionReviewJobs.capability();
-  } catch (error) {
-    log(`session review discovery failed: ${errText(error)}`);
-    return undefined;
-  }
-}
 /** The review-session capability from the agents discovered so far (#3368, #3369). */
 function reviewSessionCapability(): ReturnType<ReviewSessionLauncher["capability"]> {
+  if (process.platform !== "linux") return undefined;
   try {
     return reviewSessionLauncher.capability();
   } catch (error) {
     log(`review session discovery failed: ${errText(error)}`);
-    return undefined;
+    return { reviewers: [], unavailable: { tools: reviewSessionDiscoveryReason(error) } };
   }
 }
 function withSessionReviewRuntime(runtime: NonNullable<RunnerMetadata["runtime"]>): NonNullable<RunnerMetadata["runtime"]> {
-  const { sessionReview: _previous, reviewSession: _previousReviewSession, ...rest } = runtime;
-  const sessionReview = sessionReviewCapability();
+  const { sessionReview: _previous, campaignReview: _previousCampaignReview, reviewSession: _previousReviewSession, ...rest } = runtime;
   const reviewSession = reviewSessionCapability();
-  return { ...rest, ...(sessionReview ? { sessionReview } : {}), ...(reviewSession ? { reviewSession } : {}) };
+  return { ...rest, ...(reviewSession ? { reviewSession } : {}) };
 }
 
 function startTrackedSession(
@@ -2082,6 +2151,17 @@ let discovering = false;
 let rediscoverPending = false;
 let rediscoverRefreshModels = false;
 let rediscoverRefreshSubscriptionUsage = false;
+
+/** Inspect the same account a new native launch would select, under its own lease. Installation
+ * discovery remains independent when this HOME is held by another runner. */
+async function authorizeDiscoveryLaunchHome(agent: AgentDefinition, env: Record<string, string>) {
+  const configured = config.agents.find((candidate) => candidate.id === agent.id);
+  const launchEnv = configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : { ...env };
+  const definition = configAgents.find((candidate) => candidate.id === agent.id) ?? agent;
+  const account = selectProviderAccountForDiscovery(config.providerAccounts, definition, (candidate) => providerProfileGrants.usable(candidate));
+  if (account) Object.assign(launchEnv, providerAccountEnvironment(account));
+  return sessions.prepareDiscoveryProbe(agent, launchEnv, { useLaunchHome: true });
+}
 /** At least one discovery pass has completed — its result is baked into metadata.agents. */
 let discoveryDone = false;
 const DISCOVERY_REFRESH_MS = 5 * 60_000;
@@ -2131,7 +2211,7 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
         })
       : Promise.resolve([]);
     const [nativeAgents, registryAgents, configuredAcpAgents, editors] = await Promise.all([
-      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) }),
+      discoverAgents({ authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env), authorizeLaunchHome: authorizeDiscoveryLaunchHome }),
       registryPromise,
       probeConfiguredAcpAgents(configAgents, (agentId) => {
         const configured = config.agents.find((agent) => agent.id === agentId);
@@ -2144,7 +2224,8 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       const configured = config.agents.find((agent) => agent.id === agentId);
       if (!configured) throw new Error("configured agent is unavailable");
       return resolveAgentEnvironment(configured);
-    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env) });
+    }, { discovered: nativeAgents, authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+      authorizeLaunchHome: authorizeDiscoveryLaunchHome });
     const discovered = [...nativeAgents, ...registryAgents];
     freshSafeWslLaunches.clear();
     for (const agent of nativeAgents) {
@@ -2160,6 +2241,11 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
           new Set(config.agents.filter((agent) => Object.keys(agent.env ?? {}).length > 0).map((agent) => agent.id))), {
         refresh: refreshModels,
         authorize: (agent, env) => sessions.prepareDiscoveryProbe(agent, env),
+        authorizeLaunchHome: authorizeDiscoveryLaunchHome,
+        resolveEnv: (agent) => {
+          const configured = config.agents.find((candidate) => candidate.id === agent.id);
+          return configured ? resolveRunnerLocalAgentEnvironment(configured, agent.env) : agent.env;
+        },
       }),
       claudeHookFeatureEnabled,
       log,
@@ -2183,30 +2269,19 @@ async function runDiscovery(refreshModels = false, refreshSubscriptionUsage = tr
       await Promise.all([containerTargets.refreshInstallations(), cloudTargets.refreshInstallations()]);
       metadata.executionTargets = [...containerTargets.definitions(), ...cloudTargets.definitions()];
     }
-    await Promise.all(config.providerAccounts.map(async (account) => {
-      const agent = agentForProviderAccount(metadata.agents, account);
-      // A profile this control plane is not granted is refused before acquisition; report it as
-      // unknown instead of letting the refusal fail the probe pass (#3239).
-      if (!agent || agent.available !== true || !providerProfileGrants.usable(account)) {
-        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
-        return;
-      }
-      const env = runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" });
-      Object.assign(env, providerAccountEnvironment({
-        provider: account.provider,
-        credentialHome: account.directory,
-      }));
-      try {
-        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(
-          account,
-          await sessions.probeProviderAccountAuthentication(agent, env),
-        ));
-      } catch (error) {
-        void error;
-        providerAccountAuthStatus.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
-        log(`${account.provider} provider-account authentication probe failed`);
-      }
-    }));
+    const accountStatus = await probeProviderAccountsForDiscovery({ accounts: config.providerAccounts, agents: metadata.agents,
+      usable: (account) => providerProfileGrants.usable(account),
+      environment: (agent) => runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" }),
+      probe: (agent, env) => sessions.probeProviderAccountAuthentication(agent, env),
+      failed: (account) => log(`${account.provider} provider-account authentication probe failed`),
+    });
+    for (const [accountId, status] of accountStatus) providerAccountAuthStatus.set(accountId, status);
+    metadata.agents = projectProviderAccountDiscoveryReadiness(metadata.agents, config.providerAccounts, accountStatus,
+      (account) => providerProfileGrants.usable(account));
+    log(JSON.stringify({ event: "provider_discovery_completed", runnerId: config.runnerId,
+      nativeProbeHome: "isolated", agents: metadata.agents.length,
+      available: metadata.agents.filter((agent) => agent.available === true).length,
+      signInRequired: metadata.agents.filter((agent) => agent.authStatus === "unauthenticated").length }));
     discoveryDone = true;
     const extra = metadata.agents.length - configAgents.length;
     log(
@@ -2335,8 +2410,11 @@ function runCommandTask(kind: string, task: Promise<void>): void {
 }
 
 function handleCommand(msg: ControlPlaneToRunner): void {
+  if (controlPlanePeerRefused) return;
   switch (msg.type) {
-    case "registered":
+    case "registered": {
+      const refusal = reviewRetirementPeerRefusal(msg.protocolVersion);
+      if (refusal) { controlPlanePeerRefused = true; log(refusal); ws?.terminate(); break; }
       try {
         stagedRunnerCredential.promote();
       } catch (error) {
@@ -2385,7 +2463,24 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       // Registration snapshots are sent before the control plane's protocol version is known, so
       // they conservatively omit native capability overlays. Re-publish negotiated snapshots now;
       // v65 peers continue to receive no overlay, while v66+ peers get the hook transport truth.
-      publishNegotiatedSessionSnapshots(sessions, sendUp);
+      republishWindow?.close();
+      republishWindow = null;
+      if (ws && runnerSupportsProtocol(controlPlaneProtocolVersion, "runnerProcessingBarriers")) {
+        const socket = ws;
+        const republishId = randomUUID();
+        republishWindow = new ProcessingWindow(sessions.republishSessionIds(), (id) => {
+          const snapshot = sessions.republishSessionSnapshot(id);
+          if (!snapshot) return null;
+          const message = projectMessageForCurrentProtocol({ type: "session_runtime_updated", snapshot });
+          return message ? JSON.stringify(message) : null;
+        }, (wire) => {
+          if (ws !== socket || socket.readyState !== WebSocket.OPEN || !registered) throw new Error("republish socket replaced");
+          socket.send(wire);
+        }, () => socket.terminate(), (details) => log(JSON.stringify({ ...details,
+          entryPoint: "runner_republish", republishId })));
+      } else {
+        publishNegotiatedSessionSnapshots(sessions, sendUp);
+      }
       // The CP may have restarted or missed live frames. Reconcile retained terminal processes
       // from bounded, sequence-addressed snapshots, then close the inventory with a fence.
       const shellSnapshots = shells.snapshots();
@@ -2410,6 +2505,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       for (const receipt of durableCommands.recentUpdates()) sendDurableUpdate(receipt);
       for (const receipt of sessionCommandReceipts.recentUpdates()) sendSessionCommandUpdate(receipt);
       break;
+    }
     case "register_rejected":
       log(`registration rejected: ${msg.reason}`);
       // Keep the staged bytes for the reconnect loop. A transient rejection can be followed by a
@@ -2428,6 +2524,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void subscriptionUsage.refreshAll()
         .then(() => subscriptionUsage.refreshAll())
         .catch((error) => log(`subscription usage refresh after harness installation selection failed: ${errText(error)}`));
+      break;
+    case "runner_processing_ack":
+      if (Number.isSafeInteger(msg.barrierId)) republishWindow?.acknowledge(msg.barrierId);
       break;
     case "policy_hook_credential_registered":
       try {
@@ -2507,16 +2606,52 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       break;
     }
     case "campaign_issue_scope": {
-      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg).then(sendUp));
+      // The Orchestrator's own forge login and environment, as its agent would read the issues (#3539).
+      runCommandTask("campaign_issue_scope", sessions.campaignIssueScope(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "github_issue_closure": {
-      runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg).then(sendUp));
+      runCommandTask("github_issue_closure", sessions.githubIssueClosure(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
       break;
     }
     case "campaign_forge_observe": {
       // The same runner-local environment the Orchestrator's agent launches with (see prepareLaunch).
       runCommandTask("campaign_forge_observe", sessions.campaignForgeObserve(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
+    case "gitlab_merge_preflight": {
+      // The child's own glab login and environment, as its agent would run the merge (#3602).
+      runCommandTask("gitlab_merge_preflight", sessions.gitlabMergePreflight(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
+    case "github_merge_preflight": {
+      // The child's own gh login and environment, as its agent would run the merge (#3713).
+      runCommandTask("github_merge_preflight", sessions.githubMergePreflight(msg, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then(sendUp));
+      break;
+    }
+    case "forge_decision_action": {
+      // The child's own gh and git logins and environment, as its agent would run the action (#4067).
+      runCommandTask("forge_decision_action", sessions.forgeDecisionAction(msg, {
         agentEnv: (meta) => meta.adopted && !meta.agentId
           ? adoptedLaunchEnvironment(meta)
           : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
@@ -2534,7 +2669,11 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ...(msg.runnerHistoryEpoch !== undefined ? { runnerHistoryEpoch: msg.runnerHistoryEpoch } : {}),
         ...(msg.actionProviderThreadId ? { actionProviderThreadId: msg.actionProviderThreadId } : {}),
         ...(msg.actionProviderTurnId ? { actionProviderTurnId: msg.actionProviderTurnId } : {}),
-      }, controlPlaneProtocolVersion).then((reconciled) => {
+      }, controlPlaneProtocolVersion, {
+        agentEnv: (meta) => meta.adopted && !meta.agentId
+          ? adoptedLaunchEnvironment(meta)
+          : runnerLocalAgentEnv(meta.agentId, meta.driver, meta.context),
+      }).then((reconciled) => {
         sendUp({
           type: "workflow_action_reconciliation_result",
           requestId: msg.requestId,
@@ -2735,7 +2874,7 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             undefined,
             undefined,
             undefined,
-            Boolean(msg.command.campaignContinuation),
+            Boolean(msg.command.campaignContinuation || msg.command.reviewContinuation),
           );
         } catch (error) {
           lifecycle.failed(`prompt acceptance failed: ${errText(error)}`);
@@ -2789,6 +2928,19 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       );
       break;
     }
+    case "release_queue_hold": {
+      const { requestId, sessionId, holdId } = msg;
+      void sessions.releaseQueueHold(sessionId, holdId, msg.actor).then(
+        (result) => sendUp({ type: "release_queue_hold_result", requestId, sessionId, holdId, ...result }),
+        (error) => {
+          log(`releasing queue hold ${holdId} of ${sessionId} failed: ${errText(error)}`);
+          sendUp({
+            type: "release_queue_hold_result", requestId, sessionId, holdId, outcome: "refused", reason: "in_progress",
+          });
+        },
+      );
+      break;
+    }
     case "cancel_queued_prompt":
       sessions.removeQueuedPrompt(msg.sessionId, msg.promptId);
       break;
@@ -2837,16 +2989,22 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       mediaReviewers.stop(msg.request);
       break;
     case "campaign_review_job":
-      runCommandTask("campaign_review_job",campaignReviewer.dispatch(msg));
+      sendUp(retiredReviewReceipt(config.dataDir, "campaign", msg.jobId, msg.nonce));
       break;
     case "cancel_campaign_review_job":
-      campaignReviewer.cancel(msg.jobId,msg.nonce);
+      sendUp(retiredReviewReceipt(config.dataDir, "campaign", msg.jobId, msg.nonce));
       break;
     case "session_review_job":
-      runCommandTask("session_review_job", sessionReviewJobs.dispatch(msg));
+      sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
       break;
     case "cancel_session_review_job":
-      sessionReviewJobs.cancel(msg.jobId, msg.nonce);
+      sendUp(retiredReviewReceipt(config.dataDir, "bridge", msg.jobId, msg.nonce));
+      break;
+    case "pull_request_watch_start":
+      pullRequestWatcher.start(msg);
+      break;
+    case "pull_request_watch_cancel":
+      pullRequestWatcher.cancel(msg.watchId);
       break;
     case "priced_session_cost":
       sessions.syncPricedSessionCost(msg.sessionId, msg.costUsd, msg.costReconciliationRevision, msg.costReconciliationDeltaUsd, msg);
@@ -2864,11 +3022,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void agentControlFifoRelays?.close(msg.sessionId);
       break;
     case "resolve_permission":
-      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy);
+      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy,
+        msg.automaticResponse);
       break;
     case "answer_question":
       sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action, msg.resolvedByParentSessionId,
-        msg.occurrenceId, msg.answerSummary, msg.answeredByUserId);
+        msg.occurrenceId, msg.answerSummary, msg.answeredByUserId, msg.automaticResponse);
       break;
     case "rewind_session": {
       // Serialize behind the same per-session queue as mutating git actions: a rewind
@@ -2937,6 +3096,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             events: result.events,
             handoffDraft: result.handoffDraft,
             retainedPrompt: result.retainedPrompt,
+            ...(result.providerHomeRefusal &&
+              runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeForkRefusals")
+              ? { providerHomeRefusal: result.providerHomeRefusal } : {}),
           }),
         )
         .catch((err) =>
@@ -2963,13 +3125,16 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         path?: ".wollipog.json";
         detected?: string[];
       }> = msg.operation === "create"
-        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress)
+        ? sessions.requestWorktree(msg.sessionId, { branch: msg.branch, baseRef: msg.baseRef }, reportProgress,
+          { requestedBySession: msg.requestedBySession === true })
         : msg.operation === "attach"
-          ? sessions.attachWorktree(msg.sessionId, msg.path)
+          ? sessions.attachWorktree(msg.sessionId, msg.path, { requestedBySession: msg.requestedBySession === true })
           : msg.operation === "select"
-            ? sessions.selectWorktree(msg.sessionId, msg.path).then((snapshot) => ({
+            ? sessions.selectWorktreeWithNotice(msg.sessionId, msg.path,
+              { requestedBySession: msg.requestedBySession === true }).then(({ snapshot, isolation }) => ({
               snapshot,
               worktree: snapshot.worktrees?.find((item) => item.path === snapshot.worktreePath),
+              isolation,
             }))
             : msg.operation === "retry_setup"
               ? sessions.retryWorktreeSetup(msg.sessionId, msg.path)
@@ -3116,6 +3281,24 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         error: errText(error),
       })));
       break;
+    case "import_provider_credential": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerCredentialImport")) break;
+      const refuse = (code: ProviderCredentialImportCode, error: string) =>
+        sendUp({ type: "import_provider_credential_result", requestId: msg.requestId, ok: false, code, error });
+      if (msg.runnerId !== config.runnerId) { refuse("FAILED", "The import targeted a different Machine."); break; }
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) {
+        refuse("UNSUPPORTED", "This control plane did not negotiate provider profiles.");
+        break;
+      }
+      runCommandTask("import_provider_credential", providerLoginSupervisor.importAccount({
+        provider: msg.provider, label: msg.label, source: msg.source, accountId: msg.accountId, profileGrantId: msg.profileGrantId,
+      }).then(({ accountId, profileId }) => sendUp({
+        type: "import_provider_credential_result", requestId: msg.requestId, ok: true, accountId, profileId,
+      })).catch((error) => error instanceof ProviderCredentialImportError
+        ? refuse(error.code, error.message)
+        : refuse("FAILED", "The sign-in could not be copied. Sign in to create the profile instead.")));
+      break;
+    }
     case "submit_provider_login_code":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerLogin")) break;
       try {
@@ -3185,6 +3368,33 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           error: errText(error),
         })));
       break;
+    case "remove_workspace": {
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "workspaceRemoval")) break;
+      const result = msg.runnerId !== config.runnerId
+        ? { ok: false as const, error: "Workspace removal targeted a different machine." }
+        : removeConfiguredWorkspace({
+          workspaces: config.workspaces,
+          removals: workspaceRemovals,
+          workspaceId: msg.workspaceId,
+          path: msg.path,
+          sessionRunningIn: (workspaceId) => sessions.liveSessionIds()
+            .some((sessionId) => store.readMeta(sessionId)?.workspaceId === workspaceId),
+        });
+      if (result.ok && result.removed) {
+        // Every reader of the live configuration stops using it now; these two copied it at startup.
+        metadata.workspaces = metadata.workspaces.filter((workspace) => workspace.id !== msg.workspaceId);
+        sessions.configureSharedDirectories(config.workspaces, sharedDirectoryForbiddenRoots);
+        sessions.setConfiguredProjectPaths(config.workspaces.map((workspace) => workspace.path));
+        log(`workspace ${msg.workspaceId} (${msg.path}) removed; recorded in ${workspaceRemovals.file}`);
+      }
+      sendUp({
+        type: "remove_workspace_result",
+        requestId: msg.requestId,
+        ok: result.ok,
+        ...(result.ok ? {} : { error: result.error }),
+      });
+      break;
+    }
     case "adopt_provider_profile":
       if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "providerProfiles")) break;
       runCommandTask("adopt_provider_profile", adoptProviderProfileCommand(providerProfileCommands, msg).then(sendUp));
@@ -3255,6 +3465,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
             config.providerAccounts,
             agent,
             agent.driver ?? "acp",
+            undefined,
+            process.platform,
+            (candidate) => providerProfileGrants.usable(candidate),
           );
         } catch {
           sendUp({
@@ -3547,14 +3760,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
           // `provision` writes an agent-control credential file or registers a credential (#1379).
           assertSessionNotDeleted: (sessionId) => void agentTuiSessionMeta(sessionId),
           assertLaunchCurrent: assertCurrent,
+          agentEnvironment: sessionAgentEnvironment,
           provision: async (prepared) => {
-            prepared.env = runnerLocalAgentEnv(prepared.agentId, prepared.driver, prepared.context);
-            if (prepared.providerCredentialHome && prepared.providerAccountProvider) {
-              Object.assign(prepared.env, providerAccountEnvironment({
-                provider: prepared.providerAccountProvider,
-                credentialHome: prepared.providerCredentialHome,
-              }));
-            }
+            prepared.env = agentTuiProviderEnvironment(prepared, sessionAgentEnvironment(prepared));
             await provisionAgentControl(prepared, {
               controlPlaneUrl: config.controlPlaneUrl, controlPlaneProtocolVersion,
               allowInsecureTransport, registerCredential: registerAgentControlCredential,
@@ -3639,6 +3847,9 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         },
         send: (result) => sendUp(result),
         errorText: (error) => errText(error),
+        providerHomeRefusal: (error, meta) =>
+          runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeAgentTuiRefusals")
+            ? providerHomeLaunchRefusal(error, meta) : undefined,
       }));
       break;
     }
@@ -3790,7 +4001,7 @@ async function handleSearchWorkspaceReferences(msg: SearchWorkspaceReferencesReq
       error: targetError ?? "unknown session" });
   }
   try {
-    const found = await searchWorkspaceReferences(target.context, target.root, msg.query);
+    const found = await searchWorkspaceReferences(target.context, target.root, msg.query, msg.match);
     sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: true, ...found });
   } catch (err) {
     sendUp({ type: "search_workspace_references_result", requestId: msg.requestId, ok: false, error: errText(err) });
@@ -4172,7 +4383,10 @@ async function runOneGitAction(msg: GitActionRequestMessage): Promise<void> {
 
 function connect(): void {
   log(`connecting to ${config.controlPlaneUrl}`);
+  republishWindow?.close();
+  republishWindow = null;
   registered = false;
+  controlPlanePeerRefused = false;
   controlPlaneProtocolVersion = null;
   automaticAccountSwitchConfigurationSynchronized = false;
   sessions.setAutomaticAccountSwitchAuthorityReady(false);
@@ -4207,7 +4421,7 @@ function connect(): void {
   });
 
   socket.on("message", (raw: Buffer) => {
-    if (ws !== socket) return;
+    if (ws !== socket || controlPlanePeerRefused) return;
     const msg = parseMessage<ControlPlaneToRunner>(raw.toString());
     if (!msg) return;
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) must not
@@ -4223,6 +4437,8 @@ function connect(): void {
 
   socket.on("close", () => {
     if (ws !== socket) return;
+    republishWindow?.close();
+    republishWindow = null;
     stopHeartbeat();
     registered = false;
     forgetAgentControlRegistrationAnswers();
@@ -4277,8 +4493,6 @@ function shutdown(exitCode = 0): void {
   });
   bestEffort("stop subscription usage", () => subscriptionUsage.shutdown());
   bestEffort("stop provider sign-ins", () => providerLoginSupervisor.shutdown());
-  // Running reviews continue detached and are recovered from their job files on restart.
-  bestEffort("stop session review polling", () => sessionReviewJobs.close());
   // Track whether every provider driver was disposed. If not (a dispose threw), a provider may still
   // be alive with no registered kill, so we must NOT release its provider-home lease below even if
   // waitForPendingKills reports "reaped" — releasing it could let a replacement runner share the HOME.
@@ -4342,6 +4556,7 @@ function shutdown(exitCode = 0): void {
 process.on("SIGINT", () => shutdown());
 process.on("SIGTERM", () => shutdown());
 process.on("SIGHUP", () => shutdown());
+onSshTransportClosed = () => { if (!shuttingDown) shutdown(); };
 // A synchronous uncaughtException leaves the process in an unknown, possibly corrupt state, so run
 // the graceful shutdown() (waits for pending kills, releases provider-home leases) before exiting —
 // a hard crash would strand the lease and block every future agent. shutdown()'s own `shuttingDown`

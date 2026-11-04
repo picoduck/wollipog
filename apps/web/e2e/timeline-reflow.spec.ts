@@ -1585,11 +1585,13 @@ async function expectEveryPaintedFramePinned(page: Page, control: string) {
   await expect(reader).toHaveAttribute("data-follow-tail-state", "following");
 }
 
-for (const { control, growth } of tailGrowthControls) {
-  test(`following live output keeps every painted frame pinned while ${growth} grows`, async ({ page }) => {
-    await expectEveryPaintedFramePinned(page, control);
-  });
-}
+test("following live output keeps every painted frame pinned while a long streamed row grows @production", async ({ page }) => {
+  await expectEveryPaintedFramePinned(page, "stream-tail");
+});
+
+test("following live output keeps every painted frame pinned while a new reply grows @production", async ({ page }) => {
+  await expectEveryPaintedFramePinned(page, "stream-live-reply");
+});
 
 // The composer is geometry outside the virtual list that moves in step with the follow-tail
 // re-pin. The reduced-motion guard once gave every element a 1ms transition on every property, so

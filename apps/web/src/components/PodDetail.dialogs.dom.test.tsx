@@ -226,6 +226,44 @@ test("the pod page has no orchestration or merge panel; ⋯ lists Automatic Turn
   }
 });
 
+
+for (const phone of [false, true]) {
+  test(`Close Pod names its target and preserves confirmation behavior on ${phone ? "phone" : "desktop"}`, async () => {
+    await act(async () => domWindow.happyDOM.setWindowSize(phone
+      ? { width: 390, height: 844 } : { width: 1440, height: 900 }));
+    const closed: string[] = [];
+    const target = { ...pod(), title: "Release & Migration <Review>" };
+    const view = await mount([target], sessions(), {
+      closePod: async (id) => { closed.push(id); return { pod: { ...target, status: "closed" }, sessions: [] }; },
+    });
+    try {
+      let dialog = await openDialog("Close Pod…", "Close Pod");
+      assert.ok(dialog.textContent?.includes(`Relays and membership changes stop for “${target.title}”.`));
+      assert.ok(buttonNamed(dialog, "Close Pod")?.classList.contains("danger"));
+      assert.deepEqual(closed, [], "opening the confirmation closes nothing");
+      if (phone) {
+        const back = dialog.querySelector<HTMLButtonElement>('button[aria-label="Back to More Actions"]');
+        assert.ok(back);
+        await act(async () => back.click());
+        await settle();
+        const menu = body().querySelector<HTMLElement>('[role="menu"][aria-label="More Actions"]');
+        assert.ok(menu, "Back restores the menu");
+        assert.deepEqual(closed, []);
+        await act(async () => itemNamed(menu, "Close Pod…").click());
+        await settle();
+        dialog = [...body().querySelectorAll<HTMLElement>('[role="dialog"]')]
+          .find((candidate) => candidate.querySelector("h2")?.textContent?.trim() === "Close Pod")!;
+      }
+      await act(async () => buttonNamed(dialog, "Close Pod")!.click());
+      await settle();
+      assert.deepEqual(closed, [target.id]);
+    } finally {
+      await view.unmount();
+      await act(async () => domWindow.happyDOM.setWindowSize({ width: 1440, height: 900 }));
+    }
+  });
+}
+
 test("a closed pod or a running merge disables the dialogs' items with their reason", async () => {
   const closed = await mount([{ ...pod(), status: "closed" }], sessions());
   try {

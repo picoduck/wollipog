@@ -44,7 +44,13 @@ and maximum for:
   `PR Suite Routing` job; its execution is counted as execution, not queue wait.
   A skipped routing job with known creation/completion timestamps is a zero-execution
   dependency anchor, so its scheduling delay is retained without inventing runner time.
-  Missing or ambiguous anchor timestamps leave the split unmeasured.
+  Missing or ambiguous anchor timestamps leave the split unmeasured. Checks/browser also
+  depend on the [disabled merge-group gate](ci-aggregation.md#disabled-merge-group-gate)
+  (`Merge Group Gate`). When it executes, its runtime counts as critical-path execution
+  and only its runner wait as waiting. A skipped gate is not executed work, so every
+  disabled-gate run, and every historical cohort and baseline output, is measured
+  exactly as before. Fast-gate activation measurement uses this model
+  ([measurement plan](fast-gate-activation-proposal.md#measurement-plan-ac3-and-ac4)).
   The advisory suite shadow is never a required dependency. A run with a job created
   late for any other reason is counted as unmeasured rather than guessed.
 - **Critical path waiting:** the rest of the time to the required result.
@@ -63,7 +69,9 @@ report understates the window used. Removals are read only for pull requests wit
 a merge-group run created in the window, up to 1,000 per pull request; the report
 says when that bound cut a history short. `--since` and `--until` accept any ISO
 8601 offset and are compared as instants. The report does not attribute a wait to a
-cause; runner contention is the observed pattern, measured separately in #2674.
+cause; runner contention is the observed pattern, measured separately in #2674. Pool-wide occupancy
+across every workflow, with a trace-driven capacity replay, is measured by
+`scripts/ci-runner-occupancy.mjs`; see [CI Runner Contention](ci-runner-contention-2026-10-28.md).
 
 ## Event, Attempt, and Test Measurements
 
@@ -143,7 +151,8 @@ successful measurement. The collector dispatches, reruns and cancels nothing.
 ### Content-Safe Test Timing
 
 Ordinary CI uses `pnpm test:ci` with the same complete Node inventory/timeouts as
-`pnpm test`. An additional reporter emits one `ci-timing-v1` JSON line. Browser
+`pnpm test`, split across the three `Unit Tests (n)` shard jobs since #3770. An additional
+reporter emits one `ci-timing-v1` JSON line per shard. Browser
 development, WebKit and production reporters emit the same schema. Existing
 reporters, retries, fail-on-flaky behavior and exit statuses remain intact.
 Only counts, duration, retry index, state and SHA-256 identities are emitted;

@@ -8,7 +8,7 @@ import { PROTOCOL_VERSION, type BoxView, type RunnerView } from "@wollipog/proto
 import { createRoot } from "react-dom/client";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
-import { MachineDetail, useMachineActions } from "../components/MachineDetail.js";
+import { MachineDetail, useMachineActions, useMachineOperations } from "../components/MachineDetail.js";
 import { machineListEntries } from "../runners.js";
 import { SETTINGS_SECTIONS, type SettingsSection } from "../navigation.js";
 import { COLOR_SCHEMES, THEME_OPTIONS } from "../theme.js";
@@ -114,7 +114,7 @@ const noopRunnerAction = () => {};
 function FixtureMachine({ runner, box }: { runner: RunnerView; box?: BoxView }) {
   const entry = machineListEntries(new Map([[runner.runnerId, runner]]), box ? [box] : [])[0]!;
   const actions = useMachineActions(entry, { canManage: false, canOpenSettings: false, canFindSessions: false },
-    { onSettings: noopRunnerAction, onRepair: noopRunnerAction });
+    { onSettings: noopRunnerAction, onRepair: noopRunnerAction }, useMachineOperations());
   return <MachineDetail entry={entry} actions={actions} showTitle />;
 }
 
@@ -320,9 +320,6 @@ function Sample() {
             <FixtureMachine runner={boxRunner} box={box} />
             <FixtureMachine runner={nativeRunner} />
           </div>
-          {/* Usage's cards keep `.runner-card` and its density padding after the machine detail
-              stopped being a card (#2988). */}
-          <article className="runner-card"><span>A usage card</span></article>
           <div className="table-wrap"><table className="table"><tbody><tr><td>A usage cell</td></tr></tbody></table></div>
           <div className="codeview">
             <code className="codeview-lines">

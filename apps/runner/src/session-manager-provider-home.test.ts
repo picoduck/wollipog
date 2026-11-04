@@ -49,7 +49,8 @@ test("a refused home lease reaches failed status and the visible conversation er
   // The bounded worker returns a fixed refusal instead of forwarding native paths/exception data.
   assert.ok(!failed.detail?.includes(lock));
   assert.equal(failed.detail, LEASE_WORKER_ERRORS.invalid_journal);
-  assert.match(failed.detail!, /preserve all records.*Do not remove individual records/);
+  assert.match(failed.detail!, /Choose another account.*check the recovery details/);
+  assert.doesNotMatch(failed.detail!, /quarantine|delete|remove individual|journal/iu);
   assert.deepEqual(readdirSync(lock), [], "refusal preserves the original malformed lock evidence");
   assert.equal(store.readMeta(meta.sessionId)?.providerHomeRefusal?.code, "unverifiable");
   const error = store.readEvents(meta.sessionId).find((event) => event.payload.kind === "error");

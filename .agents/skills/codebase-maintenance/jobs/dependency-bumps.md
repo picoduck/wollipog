@@ -32,8 +32,14 @@ log is a lead, not a replacement for the ground-truth commands below.
   retry date. A gate can be supplied by the updater even when no repository cooldown is set:
   the October 19 npm log passed `--config.minimum-release-age=4320` (three days).
 - `pnpm audit --json` for known advisories. Do not run `pnpm audit --fix`; it changes the tree.
-- For the desktop crate, `cargo update --dry-run --manifest-path apps/desktop/src-tauri/Cargo.toml`
-  for the version gap and `cargo audit` (run from `apps/desktop/src-tauri/`) for advisories. Do not
+- For every Rust lockfile, `cargo update --dry-run` for the version gap and `cargo audit` for
+  advisories, each run from the lockfile's directory. Enumerate them with
+  `find . -name Cargo.lock -not -path '*/target/*' -not -path '*/node_modules/*'` rather than
+  assuming `apps/desktop/src-tauri` is the only one: `apps/runner/native-media-core` arrived on
+  2026-10-16 with 18 advisories, and the 2026-10-28 run found it only through a Dependabot run
+  title. Before ranking an advisory, check whether a build compiles the crate that carries it —
+  `apps/runner/native-media-core` puts every dependency behind an optional feature that no
+  workflow builds, and its README records how its advisories are handled. Do not
   trust `command -v cargo` alone: the toolchain lives in `~/.cargo/bin`, which non-interactive
   shells may not have on PATH. Check `ls ~/.cargo/bin/cargo` first and, if it exists,
   `export PATH="$HOME/.cargo/bin:$PATH"` before running. Only if that check comes back empty, fall

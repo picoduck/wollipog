@@ -504,7 +504,7 @@ export function ProjectLocationDialog({
         </div>
       )}
       {chosen?.availability === "runner_offline" && (
-        <Notice tone="warning" compact className="add-location-note">
+        <Notice tone="warning" compact>
           {machineName(chosen.runnerId)} is offline. You can add this location, but sessions can't start there until it reconnects.
         </Notice>
       )}
@@ -660,7 +660,7 @@ export function ProjectLocationDialog({
       )}
     >
       {onboarding && (
-        <Notice tone="success" compact className="add-location-note">
+        <Notice tone="success" compact>
           {project.name} was created. Add the folder where its sessions run.
         </Notice>
       )}

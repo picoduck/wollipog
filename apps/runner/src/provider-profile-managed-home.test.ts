@@ -5,7 +5,7 @@ import { basename, join } from "node:path";
 import { test, type TestContext } from "node:test";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
-import { validateProviderAccounts, writeProviderAccountsConfig } from "./config.js";
+import { captureProviderAccountsConfigPreimage, validateProviderAccounts, writeProviderAccountsConfig } from "./config.js";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import { ProviderLoginSupervisor } from "./provider-login.js";
@@ -32,8 +32,14 @@ function sshAccount(t: TestContext) {
   const home = join(root, "home");
   mkdirSync(home);
   const configPath = join(root, "runner.config.json");
-  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1" })}\n`);
+  writeFileSync(configPath, `${JSON.stringify({ runnerId: "runner-1" })}\n`, { mode: 0o600 });
   return { root, home, profiles: managedProviderProfileRoot(home), configPath };
+}
+
+/** Setup publishes against the actual existing fixture revision, before any runner decision. */
+function persistSetupAccounts(configPath: string, accounts: RunnerProviderAccount[]) {
+  const before = validateProviderAccounts(JSON.parse(readFileSync(configPath, "utf8")).providerAccounts ?? []);
+  writeProviderAccountsConfig(configPath, accounts, captureProviderAccountsConfigPreimage(configPath, before));
 }
 
 /** One runner process on the SSH account: its own owner hash and data directory, one control plane. */
@@ -59,7 +65,8 @@ function runnerOn(t: TestContext, ssh: ReturnType<typeof sshAccount>, input: {
     revoke: (home, provider, profileId, grantId) => leases.revokeProfileGrant(home, provider, profileId, grantId),
     retire: (home, provider, expectedProfileId) => leases.retireProfileHome(home, provider, expectedProfileId),
     profileRoot: ssh.profiles,
-    persistAccounts: (next) => writeProviderAccountsConfig(ssh.configPath, next),
+    captureAccountsPreimage: () => captureProviderAccountsConfigPreimage(ssh.configPath, input.accounts),
+    persistAccounts: (next, preimage) => writeProviderAccountsConfig(ssh.configPath, next, preimage),
     removeAccount: (accountId, options) => supervisor.removeAccount(accountId, options),
     publish: () => {}, log: () => {},
   };
@@ -95,7 +102,7 @@ test("removing managed profile accounts retains their HOMEs and revokes this con
   const shared = await managedHome(ssh, creator.leases, IDS[1]!, SECOND_GRANT);
   accounts.push({ id: "solo", label: "Solo", provider: "claude", directory: solo, profileId: IDS[0] },
     { id: "shared", label: "Shared", provider: "claude", directory: shared, profileId: IDS[1] });
-  writeProviderAccountsConfig(ssh.configPath, accounts);
+  persistSetupAccounts(ssh.configPath, accounts);
   await creator.close();
   // Another control plane on the same SSH account was granted the second profile.
   const other = runnerOn(t, ssh, { ownerHash: "c".repeat(64), instance: OTHER_INSTANCE, accounts: [], dataDir: join(ssh.root, "other") });
@@ -137,7 +144,7 @@ test("removal keeps a managed profile HOME that no longer holds the account's re
   };
   const add = (id: string, directory: string, profileId: string) => {
     accounts.push({ id, label: id, provider: "claude", directory, profileId });
-    writeProviderAccountsConfig(ssh.configPath, accounts);
+    persistSetupAccounts(ssh.configPath, accounts);
   };
 
   // `profiles/A` replaced by profile B, granted only to this control plane.
@@ -219,7 +226,7 @@ test("nothing outside the exact managed profile HOME is ever deleted", posixOnly
     { id: "misnamed", label: "Misnamed", provider: "claude", directory: misnamed, profileId: IDS[2] },
     { id: "linked", label: "Linked", provider: "claude", directory: linked, profileId: IDS[3] },
   );
-  writeProviderAccountsConfig(ssh.configPath, accounts);
+  persistSetupAccounts(ssh.configPath, accounts);
   for (const id of ["operator", "misnamed", "linked"]) {
     assert.deepEqual(await removeProviderAccountWithProfile(runner.deps, id), { credentialsRetained: true }, id);
   }
@@ -235,7 +242,7 @@ test("nothing outside the exact managed profile HOME is ever deleted", posixOnly
   symlinkSync(renamedRoot, ssh.profiles);
   assert.equal(isManagedProviderProfileHome(ssh.profiles, real, IDS[4]), false);
   accounts.push({ id: "real", label: "Real", provider: "claude", directory: real, profileId: IDS[4] });
-  writeProviderAccountsConfig(ssh.configPath, accounts);
+  persistSetupAccounts(ssh.configPath, accounts);
   assert.deepEqual(await runner.supervisor.removeAccount("real"), { credentialsRetained: true });
   assert.equal(existsSync(join(renamedRoot, IDS[4]!, ".credentials.json")), true);
 });
@@ -248,7 +255,7 @@ test("a replacement runner reuses the profile and its grant; another control pla
   first.grants.synchronize(PROTOCOL_VERSION, []);
   const home = await managedHome(ssh, first.leases, IDS[0]!);
   firstAccounts.push({ id: "work", label: "Work", provider: "claude", directory: home, profileId: IDS[0] });
-  writeProviderAccountsConfig(ssh.configPath, firstAccounts);
+  persistSetupAccounts(ssh.configPath, firstAccounts);
   // The control plane completed the grant from the account report; the first runner uses the HOME.
   const activeGrants = [{ grantId: GRANT, status: "active" as const, profileId: IDS[0]! }];
   first.grants.reportedProfileIds();

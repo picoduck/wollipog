@@ -46,6 +46,29 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     const geometry = await scope.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
     expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
   });
+
+  test(`a first message's context-only references sit beside its derived scope and promote through scope approval at ${viewport.width}px (#3920)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=first-message");
+    const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
+    const facts = scope.locator("dl.facts");
+    await expect(facts.locator("div").filter({ hasText: "Authorized Issues" }).locator("dd")).toHaveText("team/repo#123, team/repo#124, team/repo#125");
+    // The owner sees the context list once, as the selectable group, not also as a fact row.
+    await expect(facts.locator("div").filter({ hasText: "Context-Only References" })).toHaveCount(0);
+    await expect(scope.getByText("Context-Only References", { exact: true })).toHaveCount(1);
+    const context = scope.getByRole("group", { name: "Context-Only References" });
+    await expect(context).toHaveAccessibleDescription(/grant no authority/u);
+    await expect(context.getByRole("checkbox")).toHaveCount(2);
+    await context.getByRole("checkbox", { name: "team/repo#126" }).check();
+    await scope.getByLabel("Issue Removals", { exact: true }).fill("team/repo#125");
+    await scope.getByRole("button", { name: "Request Scope Approval", exact: true }).click();
+    await expect(scope.getByRole("status").filter({ hasText: "Scope is unchanged" })).toBeVisible();
+    expect(await page.evaluate(() => (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__)).toMatchObject({
+      expectedRevision: 2, additions: [{ repository: "team/repo", number: 126 }], removals: [{ repository: "team/repo", number: 125 }],
+    });
+    const geometry = await scope.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+  });
 }
 
 for (const [scope, requirement] of [

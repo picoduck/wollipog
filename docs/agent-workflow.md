@@ -16,8 +16,9 @@ Never overwrite a dirty primary checkout or update a checkout hosting the live s
 Protocol-v220 clients can pass `campaignWorkItemId` at child creation. Verify the actual tool
 schema as well as the runner version. If the active host lacks this input, a Custom campaign may
 create a read-only bootstrap child, verify its effective configuration, bind the original work
-item through the supported assignment operation, and select its dedicated fresh-main worktree
-before releasing implementation. A bootstrap prompt is not a recorded work-item assignment.
+item through the supported assignment operation, and select its dedicated worktree based on the
+fetched remote default branch before releasing implementation. A bootstrap prompt is not a
+recorded work-item assignment.
 Do not claim atomic creation, omit required protected admission, or update the hosting stack to
 make an unavailable interface appear. Report an unsupported mandatory path during preflight.
 
@@ -30,7 +31,61 @@ policy. Do not edit installed skills or live provider configuration to remove th
 Explicitly authorized repository policy alignment must itself pass normal review and merge gates.
 Committed wording never overrides the current session's higher-priority instructions.
 
+## Worktree Bases and Checkout Maintenance
+
+Create new issue worktrees with `wollipog worktree create --branch <branch>` and omit `--base`.
+Wollipog fetches the remote default branch and uses it as the base, independently of the primary
+checkout's HEAD. Use an explicit base for intentional stacks or another task-specific starting
+point; that path uses the supplied ref without the default-branch fetch, so verify its freshness
+when the task requires it. Resuming an existing worktree preserves its work rather than rebasing
+it automatically.
+
+Do not pull or fast-forward the primary checkout as post-merge cleanup. Delivery requires the
+verified merge, tracker updates, and appropriate session-owned cleanup, not a current local
+`main`. Do not report a stale primary checkout or the sandbox's refusal to update it as an
+unfinished delivery step.
+
+Primary-checkout maintenance is a separate, explicitly requested operation. Preserve local work
+and check whether a running process uses the checkout before updating it; never update a checkout
+hosting the live stack. Runtime updates remain a separately authorized deployment operation.
+
+For reviews, maintenance sweeps, or tools that read the primary checkout directly, establish the
+required baseline explicitly. Fetch the remote default branch and inspect its files, or run code
+in a separate worktree pinned to the required commit. Record that commit and do not assume the
+primary checkout is current or change it merely to obtain fresh input.
+
 ## Decisions and Delivery
+
+Before the first dispatch, the root may declare completion relationships in `record_campaign_plan`
+using `fixedBy: [{ issue: { repository, number }, workItemKeys: ["unit:a", "unit:b"] }]`.
+The target issue must already be in the human-established scope; every key must name an item in
+this campaign (including items in the same plan call). Record all required units together. These
+relationships are immutable and cannot be added after dispatch, including after an attempt ends.
+They supplement the target issue's own work items, including items recorded later; every own item
+still needs its existing completion proof. They grant no scope or delivery authority: every cited unit must remain in scope and independently
+pass delivery, report verification and exact merged-PR checks before the completed closure can be
+Orchestrator-owned. Missing proof retains human ownership with a server-derived delivery gap.
+Existing closure requests never gain authority retroactively. Issues without relationships retain
+their own-work-item behavior. Epic prose and other agent-written text cannot create a relationship;
+this implementation supports the recorded-plan source. Clients need protocol 268 to send `fixedBy`;
+older servers keep such closures human-owned. Do not update the hosting stack to gain support.
+
+An in-scope epic has a second source, its members, and needs no plan. When a completed closure of
+an issue without a fixed-by plan fails its own-work proof, the runner reads the issue's members on
+the forge at request time from the sources scope admission accepts (GitHub sub-issues and the
+epic body's member checklist), never from agent text, and binds that read into the closure. The
+closure is Orchestrator-owned when every member is in the campaign's scope and closed as
+completed, and every work item of the epic itself is either delivered under the existing proof or
+a placeholder that was never dispatched. Anything else keeps the closure human-owned and names the
+member: open (`epic_member_open`; close it through its own closure request first, then ask again),
+closed another way, outside scope (including a member added after launch that scope never
+admitted), or unreadable. An epic never closes while a member is open on the forge, even one whose
+own closure would pass. If a member joins, leaves or changes state before execution, the runner
+refuses the approval with `epic_members_changed`. A placeholder item of an epic closed this way no
+longer holds the campaign's completion, so the root need not mark it `scope_removed`; any epic
+item with an attempt still needs its own delivery. Not-planned closures, issues with a fixed-by
+plan and issues without members are unchanged. The member read needs runner protocol 278 and a
+GitHub repository; elsewhere the epic keeps the own-work proof and its closure stays human-owned.
 
 Custom preserves existing user approval rules. Full Control delegates an eligible exact decision
 only when the server-established human boundary, current occurrence owner and repository rules
@@ -44,20 +99,29 @@ retain the drafting context, exact sanitized payload, fresh duplicate checks and
 Follow-up recommendations go to the parent for recording and deduplication before anyone acts.
 Scope and closure use their dedicated exact typed routes. Current hosts without eligible issue
 authority retain human review even when the campaign requests Full Control. Use non-closing PR
-references in campaigns so merge cannot bypass the closure gate. Delivery comments compare every
+references in campaigns so merge cannot bypass the closure gate: write "Refs #N", and never put
+close, fix or resolve (any tense, even negated as in "does not close" or hyphenated as in
+"auto-close") directly before an issue reference that must stay open, in a PR description, title or
+commit message. Code spans do not close an issue, but paraphrase rather than rely on them. Check a
+draft with `wollipog pr closures --file <draft>` and an open PR with `wollipog pr closures <url>`. A
+GitHub `pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge
+would close (#3713). Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required
 cross-model review, including from an isolated campaign child. Follow the shipped `using-wollipog`
 skill: provide the brief, let the completion continuation arrive when idle, read the full verdict
 and report, adjudicate findings, and push fixes before delta rounds. A rewritten head starts a new
-review epoch. Exhausted rounds require the exact `review_round_extension` decision; its default
-owner is human and Full Control does not delegate it. With protocol 232 or later, campaign review
+review epoch. A head that only merges the moved base branch gets a round that does not use the
+epoch's budget, or none at all when the pull request's own diff is unchanged since an upvote
+(protocol 277, #4075). Exhausted rounds require the exact `review_round_extension` decision; its
+default owner is human. Full Control owns it only within a server-enforced cap per pull request of
+the run's configured round budget once more (the owner approved this change to the #3369 decision);
+past the cap it is the person's. With protocol 232 or later, campaign review
 sessions reserve allowance before launch and record actual Session usage against it. Exhausted,
 stopped or unavailable allowances refuse admission with a reason; original human cost ceilings
-still apply across attempts. Use the older runner bridge
-only for an unavailable version, never to bypass those limits or a missing reviewer. An explicit
-human-approved native review exception must remain disclosed as such.
+still apply across attempts. The older bridge and controlled campaign review jobs are retired.
+Upgrade unsupported peers; never use a native subprocess to bypass an admission or budget refusal.
 
 Run the required cross-model review using the installed workflow's exact reviewer model/effort,
 read-only contract, attempt limits and private ledger. Independently adjudicate every finding.
@@ -65,23 +129,19 @@ Delegated review does not permit extra attempts after an exhausted limit or trea
 attempt as valid. External unmetered reviewers are unsupported for production admission when
 managed budget reservations are required; do not disguise an ordinary CLI review as accounted work.
 
-The installed Codex cross-model-review runner launches its controlled Claude Opus 5.5 high reviewer
-as a native subprocess. A manual launch outside supported campaign admission remains unaccounted
-for protected admission purposes; report its actual raw costs and invalid attempts, never zero
-cost. Main includes the #2936 controlled native adapter described in `docs/campaign-limits.md`.
-Its availability requires the actual registered `campaignReview` profile, matching audited
-controller/executable, human-established controlled-review budget authority and available limits;
-a protocol number or merged feature code proves none of those. Preserve the installed runner's
-strict Read-only/dontAsk contract, full pinned patch and tracked-path catalog, exact harness/model/
-effort, coverage validation, no helper or MCP tools, and four-valid-round/two-attempt limits with
-a 30-minute attempt timeout including infrastructure. Do not substitute a matching model on a
-different harness, edit installed guardrails, change campaign settings or invent accounting.
-#2939 must prove actual integrated delivery, cost and zero-prompt behavior before production
-readiness is claimed. This policy alignment grants no live configuration or paid-launch authority.
+Hosted review sessions preserve the required harness/model/effort, read-only snapshot, coverage
+contract and attempt limits. Native reviewer subprocesses outside managed Session accounting remain
+unaccounted for protected admission; disclose their actual raw cost and invalid attempts. Retirement
+adds no native fallback or paid-launch authority. Drain historical jobs with their prior runner and
+follow the control-plane-first transition in `docs/agent-control.md`; never update the hosting stack
+from this session. Old grants and unknown charges require their existing human/accounting recovery.
 
 Before merge, verify the reviewed head equals the pushed head and required CI passed on that SHA.
 The required check is `Typecheck, Test & Sidecar Bundle`; an empty required list into `main` with
-an active workflow is pending. Draft-skipped and absent runs need repair. Inspect dependencies and
+an active workflow is pending. Merge groups run full regression: the fast merge-group gate and
+regression admission are disabled, and activating them needs the separate human approvals in
+`docs/fast-gate-activation-proposal.md`. Agents never set `CI_MERGE_GROUP_GATE`,
+`CI_REGRESSION_ADMISSION` or `CI_PR_SUITE_ROUTING`, or change the ruleset. Draft-skipped and absent runs need repair. Inspect dependencies and
 direct stacked children. Request the exact typed merge decision and arm/execute the canonical
 `gh pr merge URL --squash --match-head-commit SHA` command; never use `--delete-branch` on enqueue.
 Wait for merge-group CI and actual `MERGED` state. Obtain a separate typed branch-deletion approval

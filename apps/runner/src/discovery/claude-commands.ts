@@ -11,6 +11,7 @@
  * containment and link-swap protections without depending on guest GNU utilities.
  */
 
+import { targetHasHostHome as includeClaudeUserCommandsForTarget } from "@wollipog/protocol";
 import { constants, type Dir, type Dirent, type Stats } from "node:fs";
 import { lstat, open, opendir, realpath, stat, type FileHandle } from "node:fs/promises";
 import { homedir } from "node:os";
@@ -25,6 +26,8 @@ import {
   type ClaudeSkillMetadata,
 } from "./claude-slash-catalog.js";
 import { run, type ExecResult } from "./resolve.js";
+
+export { includeClaudeUserCommandsForTarget };
 
 export const CLAUDE_COMMAND_LIMITS = {
   maxFilesPerSource: 256,
@@ -42,10 +45,6 @@ export const CLAUDE_COMMAND_LIMITS = {
 } as const;
 
 export type DiscoveredClaudeSlashCommand = AgentSlashCommand;
-
-export function includeClaudeUserCommandsForTarget(adapter: "host" | "container" | "cloud" | undefined): boolean {
-  return adapter !== "container" && adapter !== "cloud";
-}
 
 export interface ClaudeSlashCommandDiscoveryRequest {
   context: AgentContext;

@@ -12,8 +12,8 @@ export interface SessionOptionsSummaryItem {
 
 /**
  * Something inside Options that needs the person before Create Session: an unsupported saved
- * default, skills missing on the chosen target, a defaults load error, an unavailable role. Each one
- * is named in the closed head, and a new one opens Options by itself.
+ * default, skills missing on the chosen target, a defaults load error. Each one is named in the
+ * closed head, and a new one opens Options by itself.
  */
 export interface SessionOptionsAttention {
   key: string;
@@ -22,9 +22,9 @@ export interface SessionOptionsAttention {
 }
 
 /**
- * New Session's options below Agent, folded into one row (§5.5): a `.disclosure` whose closed head
- * lists the current values as meta, so most people never open it, and which opens by itself when
- * something inside needs attention (#2954).
+ * New Session's options below Agent and Role, folded into one row (§5.5): a `.disclosure` whose
+ * closed head lists the current values as meta, so most people never open it, and which opens by
+ * itself when something inside needs attention (#2954). Role stays outside it (#3929).
  *
  * The body stays mounted while closed, `hidden`: Full Control's preparation and every draft inside
  * it keep their state, and a submit problem can open Options and focus the control it is about.

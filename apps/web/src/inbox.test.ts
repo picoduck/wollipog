@@ -489,7 +489,7 @@ test("threadInboxRows nests children under a present parent and drops a collapse
     ["parent", 0, null, false],
     ["a", 1, "parent", false],
     ["b", 1, "parent", true],
-    ["b1", 1, "b", true],
+    ["b1", 2, "b", true],
     ["lone", 0, null, false],
     ["orphan", 0, null, false],
   ]);
@@ -515,6 +515,83 @@ test("threadInboxRows nests children under a present parent and drops a collapse
   const held = threadInboxRows([rows[1]!, rows[0]!, rows[4]!], new Set());
   assert.deepEqual(held.map((row) => row.session.id), ["parent", "a", "lone"]);
   assert.deepEqual(threadInboxRows([], new Set()), []);
+});
+
+test("a review or grandchild indents one step under its own parent, and spines end at their last sibling (#4077)", () => {
+  const orchestrator = { session: session("orch", { status: "running", role: "orchestrator" }) };
+  const childA = { session: session("a", { status: "running", parentSessionId: "orch", title: "Child A" }) };
+  const reviewA = { session: session("review-a", { status: "running", parentSessionId: "a", kind: "review", title: "Review A" }) };
+  const childB = { session: session("b", { status: "completed", parentSessionId: "orch", title: "Child B" }) };
+  const place = (rows: Array<{ session: SessionView }>, collapsed = new Set<string>()) =>
+    threadInboxRows(rows, collapsed).map((row) =>
+      [row.session.id, row.thread.depth, row.thread.parentId, row.thread.last, row.thread.outerSpine]);
+
+  // The review sits between A and B, one step deeper than A, on A's spine; the Orchestrator's spine
+  // runs past the review to B, where it ends.
+  assert.deepEqual(place([orchestrator, childA, reviewA, childB]), [
+    ["orch", 0, null, false, false],
+    ["a", 1, "orch", false, false],
+    ["review-a", 2, "a", true, true],
+    ["b", 1, "orch", true, false],
+  ]);
+  // A as the last child: the Orchestrator's spine ends at A, and only A's spine reaches its review.
+  assert.deepEqual(place([orchestrator, childB, childA, reviewA]), [
+    ["orch", 0, null, false, false],
+    ["b", 1, "orch", false, false],
+    ["a", 1, "orch", true, false],
+    ["review-a", 2, "a", true, false],
+  ]);
+  // Collapsing A hides only its review; collapsing the Orchestrator hides A, B, and the review.
+  assert.deepEqual(place([orchestrator, childA, reviewA, childB], new Set(["a"])).map(([id]) => id), ["orch", "a", "b"]);
+  const collapsedA = threadInboxRows([orchestrator, childA, reviewA, childB], new Set(["a"]));
+  assert.equal(collapsedA[1]!.thread.collapsed, true);
+  assert.equal(collapsedA[2]!.thread.last, true, "B still ends the Orchestrator's spine");
+  assert.deepEqual(place([orchestrator, childA, reviewA, childB], new Set(["orch"])).map(([id]) => id), ["orch"]);
+
+  // A review of a top-level normal session is that session's child, at depth 1.
+  const normal = { session: session("normal", { status: "running" }) };
+  const reviewNormal = { session: session("review-normal", { status: "running", parentSessionId: "normal", kind: "review" }) };
+  assert.deepEqual(place([normal, reviewNormal]), [
+    ["normal", 0, null, false, false],
+    ["review-normal", 1, "normal", true, false],
+  ]);
+
+  // Anything deeper indents at depth 2 under its nearest ancestor, which stays its parent, and the
+  // deeper row extends the depth-2 spine rather than ending it early.
+  const grandchild = { session: session("a1", { status: "running", parentSessionId: "a", title: "Grandchild" }) };
+  const great = { session: session("a1x", { status: "running", parentSessionId: "a1", title: "Great-Grandchild" }) };
+  assert.deepEqual(place([orchestrator, childA, grandchild, great, reviewA, childB]), [
+    ["orch", 0, null, false, false],
+    ["a", 1, "orch", false, false],
+    ["a1", 2, "a", false, true],
+    ["a1x", 2, "a1", false, true],
+    ["review-a", 2, "a", true, true],
+    ["b", 1, "orch", true, false],
+  ]);
+  const nested = threadInboxRows([orchestrator, childA, grandchild, great, reviewA, childB], new Set(["a1"]));
+  assert.deepEqual(nested.map((row) => row.session.id), ["orch", "a", "a1", "review-a", "b"]);
+  assert.equal(nested[2]!.thread.collapsed, true, "a depth-2 parent collapses like a top-level one");
+});
+
+test("a family chip names reviews as reviews, not children (#4077)", () => {
+  const rows = [
+    { session: session("orch", { status: "running" }) },
+    { session: session("a", { status: "running", parentSessionId: "orch" }) },
+    { session: session("review-a", { status: "completed", parentSessionId: "a", kind: "review" }) },
+    { session: session("b", { status: "running", parentSessionId: "orch" }) },
+    { session: session("review-orch", { status: "running", parentSessionId: "orch", kind: "review" }) },
+  ];
+  const threaded = new Map(threadInboxRows(rows, new Set()).map((row) => [row.session.id, row.thread.children]));
+  assert.equal(threaded.get("a")!.reviews, 1);
+  assert.equal(inboxThreadChildrenLabel(threaded.get("a")!, { includeWorking: false }), "1 Review · 1 Completed");
+  assert.equal(threaded.get("orch")!.count, 3);
+  assert.equal(inboxThreadChildrenLabel(threaded.get("orch")!, { includeWorking: false }), "2 Children · 1 Review");
+  assert.equal(inboxThreadChildrenLabel(threaded.get("orch")!), "2 Children · 1 Review · 3 Working");
+  assert.equal(threaded.get("b"), null);
+  assert.equal(inboxThreadChildrenLabel({ count: 1, reviews: 1, waiting: 0,
+    children: [{ id: "r", title: "Review", state: "idle" }] }), "1 Review");
+  assert.equal(inboxThreadChildrenLabel({ count: 2, reviews: 2, waiting: 0,
+    children: [{ id: "r1", title: "Review", state: "idle" }, { id: "r2", title: "Review", state: "idle" }] }), "2 Reviews");
 });
 
 test("a parent cycle and a child placed ahead of its parent both keep every session", () => {
@@ -840,7 +917,7 @@ test("background child dots and working counts follow job and continuation trans
     assert.equal(family.children[0]!.state, active ? "running" : "idle", String(backgroundWorkState));
     assert.equal(family.working, active ? 1 : 0, String(backgroundWorkState));
     assert.equal(family.hasActiveWork, active, String(backgroundWorkState));
-    if (active) assert.match(family.children[0]!.statusLabel!, /Waiting on External Job|Continuation Pending/);
+    if (active) assert.match(family.children[0]!.statusLabel!, /Waiting on External Job|Follow-Up Pending/);
   }
 });
 

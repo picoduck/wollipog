@@ -4,6 +4,7 @@ import {
   AlarmClockOff as LucideAlarmClockOff,
   Archive as LucideArchive,
   ArrowDown as LucideArrowDown,
+  ArrowLeftRight as LucideArrowLeftRight,
   ArrowRightLeft as LucideArrowRightLeft,
   ArrowUp as LucideArrowUp,
   ArrowUpRight as LucideArrowUpRight,
@@ -61,6 +62,7 @@ import {
   Files as LucideFiles,
   Film as LucideFilm,
   Fence as LucideFence,
+  FingerprintPattern as LucideFingerprintPattern,
   FlaskConical as LucideFlaskConical,
   Folder as LucideFolder,
   FolderInput as LucideFolderInput,
@@ -69,7 +71,6 @@ import {
   Gauge as LucideGauge,
   GitBranch as LucideGitBranch,
   GitBranchPlus as LucideGitBranchPlus,
-  GitCommitVertical as LucideGitCommitVertical,
   GitFork as LucideGitFork,
   FoldVertical as LucideFoldVertical,
   GitPullRequest as LucideGitPullRequest,
@@ -82,6 +83,7 @@ import {
   ImageOff as LucideImageOff,
   Inbox as LucideInbox,
   Info as LucideInfo,
+  Key as LucideKey,
   Keyboard as LucideKeyboard,
   KeyRound as LucideKeyRound,
   LayoutGrid as LucideLayoutGrid,
@@ -102,11 +104,11 @@ import {
   MessageCircleQuestion as LucideMessageCircleQuestion,
   MessageSquare as LucideMessageSquare,
   MessageSquareCheck as LucideMessageSquareCheck,
+  MessageSquareCode as LucideMessageSquareCode,
   MessageSquareDot as LucideMessageSquareDot,
   Mic as LucideMic,
   Monitor as LucideMonitor,
   MonitorCog as LucideMonitorCog,
-  NotebookText as LucideNotebookText,
   Package as LucidePackage,
   PanelBottom as LucidePanelBottom,
   PanelLeftClose as LucidePanelLeftClose,
@@ -125,6 +127,7 @@ import {
   Repeat as LucideRepeat,
   Reply as LucideReply,
   RotateCcw as LucideRotateCcw,
+  ScanEye as LucideScanEye,
   ScrollText as LucideScrollText,
   Search as LucideSearch,
   SearchX as LucideSearchX,
@@ -300,6 +303,11 @@ export function CostIcon(props: IconProps) {
 
 export function CountIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideHash} {...props} />;
+}
+
+/** An entity's own identifier, such as the Pinned Summary's Session ID (#3897). */
+export function IdentifierIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideFingerprintPattern} {...props} />;
 }
 
 export function SkillsIcon(props: IconProps) {
@@ -519,6 +527,16 @@ export function KeyboardIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideKeyboard} {...props} />;
 }
 
+/** Re-Pair…: replace this app's saved pairing with an instance (#3002). */
+export function KeyIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideKey} {...props} />;
+}
+
+/** Switch: make another saved instance the one this app shows (#3002). */
+export function ArrowLeftRightIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideArrowLeftRight} {...props} />;
+}
+
 /** A sign-in the session waits for: the Request Card's Sign-In kind (#2198). */
 export function SignInIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideKeyRound} {...props} />;
@@ -682,10 +700,6 @@ export function PaperclipIcon(props: IconProps) {
 
 export function AtSignIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideAtSign} {...props} />;
-}
-
-export function ChainIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideGitCommitVertical} {...props} />;
 }
 
 export function CodeIcon(props: IconProps) {
@@ -864,28 +878,6 @@ export function TuningIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideSlidersHorizontal} {...props} />;
 }
 
-/** Brand mark: GitHub's official solid, 16-unit geometry is not a Lucide interface glyph. */
-export function GitHubIcon({ size = 16, className, ...props }: IconProps) {
-  return (
-    <svg
-      viewBox="0 0 16 16"
-      width={size}
-      height={size}
-      fill="currentColor"
-      aria-hidden="true"
-      focusable="false"
-      className={`app-icon${className ? ` ${className}` : ""}`}
-      {...props}
-    >
-      <path d="M8 0C3.58 0 0 3.58 0 8c0 3.54 2.29 6.53 5.47 7.59.4.07.55-.17.55-.38 0-.19-.01-.82-.01-1.49-2.01.37-2.53-.49-2.69-.94-.09-.23-.48-.94-.82-1.13-.28-.15-.68-.52-.01-.53.63-.01 1.08.58 1.23.82.72 1.21 1.87.87 2.33.66.07-.52.28-.87.51-1.07-1.78-.2-3.64-.89-3.64-3.95 0-.87.31-1.59.82-2.15-.08-.2-.36-1.02.08-2.12 0 0 .67-.21 2.2.82.64-.18 1.32-.27 2-.27s1.36.09 2 .27c1.53-1.04 2.2-.82 2.2-.82.44 1.1.16 1.92.08 2.12.51.56.82 1.27.82 2.15 0 3.07-1.87 3.75-3.65 3.95.29.25.54.73.54 1.48 0 1.07-.01 1.93-.01 2.2 0 .21.15.46.55.38A8.01 8.01 0 0 0 16 8c0-4.42-3.58-8-8-8z" />
-    </svg>
-  );
-}
-
-export function NotesIcon(props: IconProps) {
-  return <LibraryIcon glyph={LucideNotebookText} {...props} />;
-}
-
 export function ComputerIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMonitor} {...props} />;
 }
@@ -966,8 +958,14 @@ export function GuardrailsIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideFence} {...props} />;
 }
 
-export function OrchestratorControlsIcon(props: IconProps) {
+/** An Orchestrator: its controls, Settings › Orchestrator, and an Orchestrator session's type (#4076). */
+export function OrchestratorIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideWaypoints} {...props} />;
+}
+
+/** A review session's type (#4076). `Eye` already means show and hide. */
+export function ReviewSessionIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideScanEye} {...props} />;
 }
 
 export function ExternalLinkIcon(props: IconProps) {
@@ -1024,6 +1022,11 @@ export function HistoryIcon(props: IconProps) {
 /** Side Chat: a question asked beside the session without interrupting its agent (#2844). */
 export function MessageSquareIcon(props: IconProps) {
   return <LibraryIcon glyph={LucideMessageSquare} {...props} />;
+}
+
+/** A review finding: a note written against a line of the diff (#2851). */
+export function FindingIcon(props: IconProps) {
+  return <LibraryIcon glyph={LucideMessageSquareCode} {...props} />;
 }
 
 export function FilesIcon(props: IconProps) {

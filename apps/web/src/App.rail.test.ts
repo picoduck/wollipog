@@ -41,7 +41,7 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   // testable, the remote instance banner so the instance harness can show it (#1970), and the pairing
   // banner so its browser and desktop copy is DOM tested (#2303). The shell itself draws none.
   assert.doesNotMatch(app, /<Notice\b/, "the shell renders its banners through their components");
-  assert.match(app, /<PairingBanner connecting=\{conn === "connecting"\} \/>/);
+  assert.match(app, /<PairingBanner conn=\{conn\} \/>/);
   assert.equal(remoteInstanceBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
     "the remote instance banner renders the Notice page banner");
   assert.equal(offlineBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
@@ -182,21 +182,21 @@ test("the transcript's lower edge has one floating tail control, and context and
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
   // The trailing cluster holds context, then cost, then the mic: only while the bar has room.
-  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
+  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
     "context and cost sit just before the mic in the composer bar's trailing cluster");
-  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} \/>\s*: null\}/,
+  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} models=\{agentCaps\?\.models\} \/>\s*: null\}/,
     "otherwise Model Settings opens with the Session Usage group, and only then");
   assert.match(detail, /const composerUsageNarrow = isMobile \|\| composerColumnNarrow;/);
   assert.match(detail, /const usagePlacement = composerUsagePlacement\(\{\s*narrow: composerUsageNarrow,\s*modelSettingsOpenable: modelSettingsAvailable && composerControlsDisabledReason === null,\s*\}\);/);
   // A narrow column whose Model Settings cannot open gives the figures a row above the bar.
-  assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
+  assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
   assert.match(detail, /<div\s+ref=\{composerBoxRef\}\s+className=\{`composer-box/, "the column measured is the composer card's own");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);/,
     "every meter placement consumes the shared capacity result");
   assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\}/g)?.length, 3,
     "the composer bar, its own row and Answer Mode each place the meter once; the preview has none (#2210)");
   // Answer Mode replaces the bar, Model Settings included, so it carries the two triggers itself.
-  assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
+  assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
   // The Reply shortcut's hint is a keycap in the idle, unfocused composer's placeholder row.
   assert.match(detail, /const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && !composerHasText &&\s*!composerIdleCollapsed && !composerAnswerActive;/);
   assert.match(detail, /\{composerReplyKeycap && \([\s\S]*<div className="composer-reply-hint" aria-hidden="true">\s*<kbd>\{shortcutDisplay\("session-reading-reply"\)\}<\/kbd>\s*<\/div>\s*\)\}\s*<ComposerTextarea/,
@@ -267,7 +267,7 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
   // and its own scroll; the list pane gives it the flexible area.
   assert.match(css, /\.master-detail-state\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/,
     "the page state scrolls on its own");
-  assert.match(css, /\.inbox-state \{ flex: 1; \}/, "the page state consumes the flexible list area");
+  assert.match(css, /\.inbox-state\s*\{[^}]*\bflex:\s*1;/, "the page state consumes the flexible list area");
   assert.doesNotMatch(css, /\.inbox-(list|preview)-pane:has\([^{]*focus-visible/,
     "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
@@ -452,6 +452,13 @@ test("the software keyboard shrinks the layout viewport, not just the visual one
   assert.match(viewport!, /viewport-fit=cover/, "and the notch handling must survive");
 });
 
+test("a disabled rail item is faint ink with no hover fill (#3004)", () => {
+  assert.match(css, /\.rail-item\[aria-disabled="true"\] \{[^}]*color: var\(--text-faint\);[^}]*cursor: default;/,
+    "at rest it is the faint tier, below a normal item's --text-dim");
+  assert.match(css, /\.rail-item\[aria-disabled="true"\]:hover \{[^}]*color: var\(--text-faint\);[^}]*background: transparent;/,
+    "a hover neither brightens nor fills it");
+});
+
 test("an open More sheet suppresses the toast stack", () => {
   // The merged suppression named .menu-pop and .instance-selector-pop, and the More sheet was
   // neither, so persistent toasts still covered and intercepted taps on its lower destinations.
@@ -505,7 +512,8 @@ test("Settings survives the breakpoint because it is a route", () => {
     "the phone entry point is a routed row in the More sheet");
   // Gated on the breakpoint, not on overflowItems: hiding every optional destination by experiment
   // would otherwise unmount the trigger and leave Settings no entry point in the phone chrome.
-  assert.match(rail, /const showMore = isMobile;[\s\S]*?\{showMore && \(/,
+  // A disabled rail (the desktop recovery screen, #3004) has no More: nothing behind it opens.
+  assert.match(rail, /const showMore = isMobile && !disabled;[\s\S]*?\{showMore && \(/,
     "the sheet survives an empty overflow list");
   assert.doesNotMatch(app, /SettingsDialog/, "the dialog is replaced by the route, not kept beside it");
   assert.doesNotMatch(app, /settingsOpen/, "there is no open state to hoist once it is a route");
@@ -531,11 +539,13 @@ test("the phone topbar cannot push its controls off-screen", () => {
 });
 
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
-  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
-    "the mobile app bar must replace its generic Session heading with Back and the live title");
+  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionType\}\{sessionTitle \?\? title\}<\/h1>/,
+    "the mobile app bar must replace its generic Session heading with Back and the live title, after its type mark");
   // Only the phone Session route mounts the app-level bar now; destinations draw a page header (#1801).
   assert.match(app, /\{view\.name === "session" && isMobile && !\(rightPanel\.open && activeSession\) && \(\s*<Header[\s\S]*?sessionTitle=\{activeSession\s*\? sessionDisplayTitle\(activeSession\.title\) \|\| "Session"\s*: routedSessionPlaceholder\(view\.id, routedSessionLookup, conn, snapshotLoaded\)\.title\}/,
     "the shell must pass the routed Session's one-line title, or its placeholder's title (#2202), into the app bar");
+  assert.match(app, /<Header[\s\S]*?sessionType=\{activeSession \? <SessionTypeIcon session=\{activeSession\} \/> : null\}/,
+    "the phone bar marks an Orchestrator or review session's title as the desktop session bar does (#4076)");
   assert.match(app, /\{!isMobile && \(\s*<>\s*<EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>/,
     "Open destinations must not be mounted on the mobile Session route");
 });
@@ -582,13 +592,11 @@ test("the Multi-Agent Run and Pod create actions are page header primaries", () 
   assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
     /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
-  // One `.btn.primary` with a `+` icon; on a phone it is the 44px `+` alone, and its label stays
-  // in the accessibility tree (clipped, never display: none) so the name still matches.
-  assert.match(pageHeader, /className="btn primary page-primary"[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
+  // One `.btn.primary` with a `+` icon; on a phone it is the quiet `+` icon button alone, and its
+  // label stays in the accessibility tree (clipped, never display: none) so the name still matches.
+  assert.match(pageHeader, /className=\{phone \? "icon-btn page-primary" : "btn primary page-primary"\}[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.page-primary-label \{[^}]*clip-path: inset\(50%\)/);
   assert.doesNotMatch(css, /\.page-primary-label \{[^}]*display: none/);
-  assert.match(css, /\.page-primary \{[^}]*width: var\(--control-h\);/,
-    "the phone primary is one square control height, 44px on touch");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

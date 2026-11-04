@@ -12,13 +12,16 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import { firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
+import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
+import { campaignBehaviorValues } from "./campaign-behavior.js";
+import { randomUUID } from "node:crypto";
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
@@ -32,7 +35,7 @@ const request: CreateSessionRequest = { runnerId: "r", workspaceId: "w", project
 const review: ControlledReviewCapability = { profile: CONTROLLED_REVIEW_PROFILE, controllerSha256: "c".repeat(64), executableSha256: "e".repeat(64),
   cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" };
 const runtime: RunnerRuntimeInfo = { dataDir: "/fixture/data", worktreeRoot: "/fixture/data/worktrees", maxConcurrentSessions: 4,
-  campaignLaunchInspection: { version: 2 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
+  campaignLaunchInspection: { version: 3 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
 const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 } as const;
 const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
@@ -68,7 +71,9 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   // the whole read. Synchronization echoes the revision it persisted.
   const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>(), holdSync: null as Promise<void> | null,
     // The fixture runner acknowledges each durable prompt it receives, as a live runner does.
-    ackDurable: true };
+    ackDurable: true,
+    // Each epic's sub-issues, read as the runner reads them; an epic not listed has none.
+    epics: new Map<number, number[]>() };
   let receipts: ((message: Extract<Parameters<SessionsService["onDurablePromptReceipt"]>[1], { type: "durable_session_command_result" }>) => void) | null = null;
   hub.sendToRunner = (_, message) => {
     sent.push(message);
@@ -84,10 +89,15 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     }
     if (message.type === "campaign_issue_scope" && (message.operation === "inspect" || message.operation === "synchronize")) {
       const requested = message.operation === "inspect" ? message.issues ?? [] : [];
+      const epic = message.operation === "inspect" ? message.epic : undefined;
+      const members = epic === undefined ? [] : issues.epics.get(epic) ?? [];
+      const candidate = (n: number, source: "umbrella" | "sub_issue" | "member_checklist") =>
+        ({ issue: { repository: issues.repository!, number: n }, title: `Issue ${n}`, source });
       const answer = message.operation === "synchronize" ? { ok: true, repository: "owner/repo", revision: message.scope.revision }
-        : issues.repository && !requested.some((n) => issues.notIssues.has(n))
-          ? { ok: true, repository: issues.repository, candidates: requested.map((n) => ({ issue: { repository: issues.repository!, number: n },
-            title: `Issue ${n}`, source: "member_checklist" as const })) }
+        : issues.repository && ![...requested, ...members, ...epic === undefined ? [] : [epic]].some((n) => issues.notIssues.has(n))
+          ? { ok: true, repository: issues.repository, candidates: [...epic === undefined ? [] : [candidate(epic, "umbrella")],
+            ...members.map((n) => candidate(n, "sub_issue")),
+            ...requested.filter((n) => n !== epic && !members.includes(n)).map((n) => candidate(n, "member_checklist"))] }
           : { ok: false };
       const respond = () => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
         sessionId: message.sessionId, ...answer }, "r");
@@ -131,7 +141,61 @@ async function preflight(server: Awaited<ReturnType<typeof app>>["server"], body
 }
 const sessionCount = (f: ReturnType<typeof fixture>) => f.db.raw().prepare("SELECT count(*) AS n FROM sessions").get()!.n;
 
-test("a ready Human launch admits one Full Control root that owns every authorized decision and controlled review", async () => {
+test("launch inspection and ordinary session launch use the same authorized dynamic location path (#4090)", async () => {
+  const f = fixture();
+  const workspace = f.db.createWorkspace("r", { name: "SSH Project", path: "/fixture/home/project" }, f.scope);
+  const location = f.db.findProjectLocation("r", workspace.id)!;
+  const body = { ...launch, workspaceId: workspace.id, projectId: location.projectId, projectLocationId: location.id };
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true);
+    const inspection = f.sent.find((message) => message.type === "campaign_launch_inspect");
+    assert.equal(inspection?.type === "campaign_launch_inspect" && inspection.workspacePath, "/fixture/home/project");
+    assert.equal(inspection?.type === "campaign_launch_inspect" && inspection.workspaceId, workspace.id);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "dynamic-location", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const start = f.starts.find((message) => message.type === "start_session");
+    assert.equal(start?.type === "start_session" && start.spec.workspacePath, "/fixture/home/project");
+    assert.doesNotMatch(JSON.stringify(checked), /\/fixture\/home\/project/);
+    const count = f.sent.length;
+    const injected = await preflight(server, { ...body, workspacePath: "/foreign" } as FullControlLaunchRequest);
+    assert.equal(injected.response.statusCode, 400);
+    assert.equal(f.sent.length, count, "browser paths never reach the runner");
+    const unknown = await preflight(server, { ...body, projectLocationId: "unknown" });
+    assert.equal(unknown.response.statusCode, 409);
+    assert.equal(f.sent.length, count, "unknown locations never start inspection");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("preflight shows only closed failure reasons and refuses old inspection runners with update guidance (#4090)", async () => {
+  for (const version of [1, 2] as const) {
+    const f = fixture({ runtime: { ...runtime, campaignLaunchInspection: { version } } });
+    const { server } = await app(f);
+    try {
+      const { preflight: checked } = await preflight(server, launch);
+      assert.equal(checked!.ready, false);
+      assert.match(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason, /update the runner/);
+      assert.equal(f.sent.some((message) => message.type === "campaign_launch_inspect"), false);
+    } finally { await server.close(); f.db.close(); }
+  }
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const [failure, reason] of Object.entries(CAMPAIGN_LAUNCH_INSPECTION_ERRORS)) {
+      f.state.inspect = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId,
+        workspaceId: message.workspaceId, ok: false, failure: failure as keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS,
+        error: "secret://token /private/path RAW_OUTPUT" });
+      const { preflight: checked } = await preflight(server, launch);
+      assert.equal(checked!.ready, false);
+      assert.equal(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason, reason);
+      assert.doesNotMatch(JSON.stringify(checked), /secret:\/\/token|private\/path|RAW_OUTPUT/);
+    }
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a ready Human launch preserves its authority while retired native review stays unavailable", async () => {
   const f = fixture();
   const { server, logs } = await app(f);
   try {
@@ -184,17 +248,18 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     assert.equal(root.agentId, "claude");
     assert.equal(root.parentControlPolicy!.revision, control.boundary.revision);
     for (const category of [...WORKFLOW_DECISION_CATEGORIES, "issue_closure", "campaign_issue_scope"] as const) {
-      // Extra review rounds are never part of Full Control's own authority (#3369).
+      // Without peers that support its cap, extra review rounds stay outside Full Control (#3369, #4075).
       assert.equal(campaignWorkflowOwner(control, root.parentControlPolicy!.decisions, category, true),
         category === "review_round_extension" ? "human" : "orchestrator", category);
     }
+    // A current runner supports the cap, so the campaign owns every category, extensions within it.
     const projection = f.db.campaignProjection(root.id)!;
-    for (const category of WORKFLOW_DECISION_CATEGORIES) {
-      assert.equal(projection.decisionOwners[category], category === "review_round_extension" ? "human" : "orchestrator", category);
-    }
+    for (const category of WORKFLOW_DECISION_CATEGORIES) assert.equal(projection.decisionOwners[category], "orchestrator", category);
+    assert.deepEqual(projection.reviewRoundExtensionCap, { scope: "pull_request", extraRounds: "configured_round_budget" });
     assert.equal(f.db.campaignBudgets.view(root.id)!.state, "active");
     assert.deepEqual(f.db.campaignBudgets.view(root.id)!.authority.controlledReview, review);
-    assert.equal(projection.budget!.requiredNativeReview!.supported, true, "the launched campaign can actually admit controlled review");
+    assert.equal(projection.budget!.requiredNativeReview!.supported, false);
+    assert.match(projection.budget!.requiredNativeReview!.reason, /retired.*review session/u);
     assert.equal(f.starts.length, 1);
     const start = f.starts[0]! as Extract<ControlPlaneToRunner, { type: "start_session" }>;
     assert.deepEqual(start.spec.orchestrator!.control, control);
@@ -226,8 +291,9 @@ test("each genuine impossibility blocks launch with a specific reason and create
     // Checkpoints are amounts within a cost ceiling; without one they are refused, never dropped.
     { name: "cost checkpoints without a cost limit", body: { ...launch, overrides: { session: launch.overrides!.session, budget: { toolCalls: 400, checkpointsUsd: [5] } } },
       id: "accounting_budget", reason: /^Cost checkpoints need a cost limit; enter one or remove the checkpoints\.$/ },
-    { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract", reason: /protocol-v218/ },
-    { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
+    { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract",
+      reason: /^This machine needs a newer runner for campaign limits\. Update and restart the runner\.$/ },
+    { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the authorized project location/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
   ];
   for (const item of cases) {
@@ -303,7 +369,7 @@ test("infrastructure gaps never block launch: each is informational and the camp
   }
 });
 
-test("with no budget the campaign launches unbounded, metered, and still charges controlled review per job", async () => {
+test("with no budget the campaign launches unbounded and metered without reviving native review", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
@@ -331,7 +397,7 @@ test("with no budget the campaign launches unbounded, metered, and still charges
     assert.deepEqual(f.db.campaignBudgets.allocation(root.id), { sessionId: root.id }, "the root holds no allocation ceiling");
     assert.equal(root.costBudgetUsd ?? null, null);
     assert.equal(root.maxToolCalls ?? null, null);
-    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, false);
     assert.equal(f.starts.length, 1);
   } finally { await server.close(); f.db.close(); }
 });
@@ -623,7 +689,7 @@ test("Project child-session ceilings route review to the regular workflow, and a
       projectLocationId: location.id, agentId: "claude" });
     assert.ok(ordinary.ok);
     assert.deepEqual(ordinary.scope, organizationScope);
-    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, false);
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -776,8 +842,8 @@ test("a cancelled caller stops only its own inspection, and older runners report
   f.state.inspect = () => null;
   const runner = f.db.getRunner("r")!;
   const caller = new AbortController();
-  const pending = inspectCampaignWorkspace(f.hub, runner, "w", [1, 2, 3], caller.signal, 60_000);
-  const other = inspectCampaignWorkspace(f.hub, runner, "w", [4], new AbortController().signal, 60_000);
+  const pending = inspectCampaignWorkspace(f.hub, runner, "w", [1, 2, 3], caller.signal, 60_000, "/fixture/repository");
+  const other = inspectCampaignWorkspace(f.hub, runner, "w", [4], new AbortController().signal, 60_000, "/fixture/repository");
   const [mine, theirs] = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<{ requestId: string }>;
   caller.abort();
   assert.equal(await pending, undefined);
@@ -799,7 +865,7 @@ test("a cancelled caller stops only its own inspection, and older runners report
     assert.equal(legacy.sent.filter((message) => message.type === "campaign_launch_inspect_cancel").length, 0,
       "a version-1 runner is never sent a message it cannot parse");
     const taskOnly = await preflight(server, { runnerId: "r", workspaceId: "w", task: "No issues" });
-    assert.match(taskOnly.preflight!.capabilities.find((item) => item.id === "repository_scope")!.reason, /select issue numbers or update the runner/);
+    assert.match(taskOnly.preflight!.capabilities.find((item) => item.id === "repository_scope")!.reason, /update the runner/);
   } finally { await server.close(); legacy.db.close(); }
 });
 
@@ -980,9 +1046,9 @@ test("an existing campaign enables Full Control through one exact reviewed autho
     assert.equal(control.boundary.authorizedByUserId, f.human.userId);
     assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
     assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
+    // Review round extensions included, within their per-pull-request cap (#4075).
     for (const category of WORKFLOW_DECISION_CATEGORIES) {
-      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category],
-        category === "review_round_extension" ? "human" : "orchestrator", category);
+      assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category], "orchestrator", category);
     }
     const replay = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
       payload: { expectedRevision, preflightDigest: enablePreflight.digest } });
@@ -1086,8 +1152,11 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     assert.equal(f.sent.filter((message) => message.type === "prompt_session" || message.type === "durable_session_command").length, 0);
 
     f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
-    const text = "Ship #12 and owner/repo#7.\nAlso https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
-      "https://github.com/owner/repo/pull/8 or https://github.com/other/repo/issues/6; #3 was the earlier pull request.";
+    // Only references the message asks the campaign to act on become scope (#3920): background and
+    // negated ones are verified the same way and kept as context, with no authority.
+    const text = "Ship #12 and owner/repo#7.\nAlso fix https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
+      "https://github.com/owner/repo/pull/8 or https://github.com/other/repo/issues/6; #3 was the earlier pull request.\n" +
+      "See #20 for background, and don't touch #21 (another campaign has it).";
     const before = f.sent.length;
     const result = await f.sessions.promptFromHuman(f.human, id, text);
     assert.equal(result.ok, true, result.error ?? "the first message was delivered");
@@ -1097,7 +1166,7 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
       authorizedByUserId: f.human.userId, authorizedAt: policy.issueScope!.authorizedAt });
     assert.deepEqual(policy.issueNumbers, [7, 9, 12]);
     assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(text),
-      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt });
+      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [20, 21] });
     const boundary = boundaryOf(f, id);
     assert.equal(boundary.objective, firstMessageObjective(text));
     assert.doesNotMatch(boundary.objective, /\n/u);
@@ -1131,6 +1200,105 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 41 and 42")).ok, true);
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [7, 9, 12]);
     assert.equal(boundaryOf(f, id).revision, 2);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message's background reference gets no scope or epic; Campaign Status shows it as context, and scope review promotes or removes (#3920)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    // The shape of a real launch: the targets follow "fix ...:", and one more issue appears only in a
+    // parenthetical citation that explains a command-guard behavior.
+    const text = "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #31, #32 and #33. " +
+      "Each issue specifies its acceptance criteria. Commands: the command guard refuses heredocs and pipelines that name " +
+      "the state directory (#90). The acceptance test for #91 is handled elsewhere.";
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    let root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 33]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31, 32, 33], "a cited issue is never an authorized epic");
+    assert.equal(campaignBoundaryCurrent(root), true);
+    const view = await f.sessions.campaignIssueScope(id);
+    assert.equal(view.ok, true, view.error ?? "");
+    assert.deepEqual(view.data!.issueNumbers, [31, 32, 33]);
+    assert.deepEqual(view.data!.contextIssueNumbers, [90, 91], "Campaign Status shows the derived scope beside the context-only references");
+
+    // The owner promotes a context reference and removes a derived issue through the existing scope review.
+    const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: "promote-and-remove", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 90 }], removals: [{ repository: "owner/repo", number: 33 }],
+      explanation: "Promote a context reference and remove a derived issue" }, () => true, f.human);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const approved = f.sessions.resolveWorkflowDecision(id, id, proposed.data!.occurrenceId, { outcome: "approve" }, "human",
+      { kind: "human", id: f.human.userId }, () => true);
+    assert.equal(approved.ok, true, approved.error ?? "");
+    root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 90]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31, 32], "a removed issue is no longer an epic; a promoted one is scope only");
+    assert.equal(campaignBoundaryCurrent(root), true);
+    assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.contextIssueNumbers, [91]);
+
+    // An epic removed from scope can no longer seed lineage additions.
+    const lineage = await f.sessions.proposeCampaignIssueScope(id, { requestId: "removed-epic-lineage", expectedRevision: 3,
+      additions: [{ repository: "owner/repo", number: 34 }], removals: [], explanation: "Member of a removed epic", lineage: { kind: "epic", epic: 33 } });
+    assert.equal(lineage.ok, false);
+    assert.equal(lineage.status, 403);
+    assert.equal(lineage.errorDetails?.code, "epic_not_authorized");
+
+    // The Orchestrator's own removal narrows the epics too.
+    const removal = await f.sessions.proposeCampaignIssueScope(id, { requestId: "orchestrator-removal", expectedRevision: 3,
+      additions: [], removals: [{ repository: "owner/repo", number: 32 }], explanation: "Drop a finished target" });
+    assert.equal(removal.ok, true, removal.error ?? "");
+    assert.equal(removal.data!.authority, "orchestrator");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, removal.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, true);
+    root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 90]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31]);
+    assert.equal(campaignBoundaryCurrent(root), true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message's range scopes each verified issue, and a derived limit leaves room to add its target epic's members (#4061)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.issues.epics.set(40, [41, 42, 43, 44, 45, 46, 47, 48]);
+    const text = "Implement epic #40 in owner/repo: units #41–#42. Close #40 when all its units have merged.";
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42]);
+    // Three scoped issues, six verified members outside them and three derived follow-ups.
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 12);
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 3, "members never add follow-ups");
+    const members = [43, 44, 45, 46, 47, 48].map((number) => ({ repository: "owner/repo", number }));
+    const added = await f.sessions.proposeCampaignIssueScope(id, { requestId: "epic-members", expectedRevision: 2,
+      additions: members, removals: [], explanation: "Add the epic's remaining units", lineage: { kind: "epic", epic: 40 } });
+    assert.equal(added.ok, true, added.error ?? "");
+    assert.equal(added.data!.authority, "orchestrator");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, added.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42, 43, 44, 45, 46, 47, 48]);
+
+    // An explicit Maximum Issues never grows; the refusal names the limit and the owner's route to raise it.
+    const { id: capped } = await firstMessageLaunch(f, server, { issues: { maxIssues: 3 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, capped, text)).ok, true);
+    assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42]);
+    assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 3);
+    const refused = await f.sessions.proposeCampaignIssueScope(capped, { requestId: "epic-members-capped", expectedRevision: 2,
+      additions: members, removals: [], explanation: "Add the epic's remaining units", lineage: { kind: "epic", epic: 40 } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.status, 409);
+    assert.deepEqual(refused.errorDetails, { code: "capacity_exhausted", limit: 3, requested: 9 });
+    assert.match(refused.error ?? "", /Maximum Issues/u);
+    assert.match(refused.error ?? "", /Only the person who authorized Full Control can raise it: in Campaign Status, raise the Follow-Up Limit/u);
+
+    // An issue in a range that is not an issue of the repository drops out like any unverified reference.
+    f.issues.notIssues.add(52);
+    const { id: ranged } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, ranged, "Fix #51 through #54. See #55..#56.")).ok, true);
+    assert.deepEqual(f.db.getSession(ranged)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 53, 54]);
+    assert.deepEqual((await f.sessions.campaignIssueScope(ranged)).data!.contextIssueNumbers, [55, 56]);
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -1174,11 +1342,12 @@ test("revoking a campaign that waits for its first message restores Custom: no m
     const { id } = await firstMessageLaunch(f, server);
     const revoked = f.sessions.setCampaignControl(id, { mode: "custom" }, f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
     assert.equal(revoked.ok, true, revoked.error ?? "Revoke succeeded");
-    // Revoke stops the launch's allowance as it always has; the first-message wait no longer applies.
+    // Revoke stops the launch's allowance, and the campaign runs under Custom rules (#2940): its
+    // messages are admitted, but the first-message wait no longer applies, so none sets its scope.
+    assert.equal(f.db.campaignBudgets.view(id)!.state, "revoked");
     for (const sent of [await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 7"),
       await f.sessions.promptFromHuman(f.human, id, "Orchestrate issues 12 and 7")]) {
-      assert.equal(sent.ok, false);
-      assert.match(sent.error!, /allowance was revoked/u);
+      assert.equal(sent.ok, true, sent.error ?? "admitted under Custom");
     }
     assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.equal(f.db.getSession(id)!.orchestratorPolicy!.control!.mode, "custom");
@@ -1314,6 +1483,35 @@ test("explicit launch ceilings survive the first message: 0 follow-ups and 1 iss
     assert.equal((await f.sessions.promptFromHuman(f.human, capped, "Fix #12 and #13")).ok, true);
     assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
     assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a follow-up limit the person sets before the first message survives it: 0 stays 0 and No Limit stays omitted (#2940)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const limit of [0, null] as const) {
+      // A taskless launch derives its follow-up limit until the person sets one.
+      const { id } = await firstMessageLaunch(f, server);
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+        { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: true } });
+      const edited = f.sessions.setCampaignFollowUpLimit(id,
+        { acceptedFollowUps: limit, expectedRevision: f.db.parentControlPolicy(id)!.revision }, f.human);
+      assert.equal(edited.ok, true, edited.error ?? "");
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+        { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: true } }, "the person's limit is explicit now");
+      assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+      const after = boundaryOf(f, id);
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+      if (limit === null) {
+        assert.equal("acceptedFollowUps" in after.budgetAuthority!, false, "No Limit stays omitted, never a derived number");
+        assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, undefined);
+        assert.equal(after.issueAuthority!.maxIssues, 100, "with no follow-up limit the derived issue limit reaches its ceiling");
+      } else {
+        assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "an explicit 0 is not replaced by the derived count");
+        assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0);
+      }
+    }
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -1720,5 +1918,87 @@ test("a completed receipt arriving first settles the first message by its identi
       commandId: laterSent.commandId, sessionId: later, state: "completed", duplicate: true,
       revision: f.db.getSessionPromptCommand(laterSent.commandId)!.revision + 1 });
     assert.equal(f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Follow-Ups change while the first message is delivering keeps the launch's follow-up limit when that delivery fails and the next arrives (#3580 CR-1.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // A taskless Full Control launch with Recommend Only: it authorizes no follow-up without approval.
+    const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "recommend_only" } } } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "recommend-only-first", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const id = admitted.json().id as string;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 0);
+
+    // The owner's first message reaches the delivering state, exactly as the prompt path takes it there.
+    const launched = f.db.getSession(id)!.orchestratorPolicy!;
+    const waiting = launched.firstMessageScope as { state: "pending"; derivedLimits: { acceptedFollowUps: boolean; maxIssues: boolean } };
+    assert.deepEqual(waiting.derivedLimits, { acceptedFollowUps: true, maxIssues: true });
+    const revision = f.db.parentControlPolicy(id)!.revision;
+    const text = "Fix #12";
+    const now = Date.now();
+    const scope = { repository: launched.issueScope!.repository, issueNumbers: [12], revision: launched.issueScope!.revision + 1,
+      authorizedByUserId: f.human.userId, authorizedAt: now };
+    assert.equal(f.db.establishFirstMessageScope(id, { control: { mode: "full_control", boundary: firstMessageBoundary(boundaryOf(f, id),
+      launched.behavior.followUps, [12], firstMessageObjective(text), revision + 1, scope.revision, now, waiting.derivedLimits) },
+    scope, messageDigest: firstMessageDigest(text), deliveryId: `first_message_${randomUUID()}`, expectedRevision: revision, now }), true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering");
+
+    // While it is delivered, the person switches Follow-Ups to Execute Approved.
+    const edited = f.sessions.setCampaignBehavior(id, { expectedRevision: 0,
+      behavior: { ...campaignBehaviorValues(launched), followUps: "execute_approved" } }, { kind: "human", id: f.human.userId }, () => null);
+    assert.equal(edited.ok, true, edited.error ?? "");
+
+    // The delivery fails, and the next first message is admitted through the real prompt path.
+    assert.equal(f.db.settleFirstMessageDelivery(id, firstMessageDigest(text), false, Date.now()), true);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    const after = boundaryOf(f, id);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+    assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "the boundary keeps the follow-up limit the launch authorized");
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "and so does the campaign allowance");
+    assert.equal(after.issueAuthority!.maxIssues, 2, "Maximum Issues grows only with the issues, not with derived follow-ups");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("context-only references stay disjoint from the scope, survive delivery, and include issues an explicit Maximum Issues left out (#3920)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server, { issues: { maxIssues: 1 } });
+    const launched = f.db.getSession(id)!.orchestratorPolicy!;
+    const revision = f.db.parentControlPolicy(id)!.revision;
+    const text = "Fix #12";
+    const now = Date.now();
+    const scope = { repository: launched.issueScope!.repository, issueNumbers: [12], revision: launched.issueScope!.revision + 1,
+      authorizedByUserId: f.human.userId, authorizedAt: now };
+    const establish = (contextIssueNumbers: number[]) => f.db.establishFirstMessageScope(id, { control: { mode: "full_control",
+      boundary: firstMessageBoundary(boundaryOf(f, id), launched.behavior.followUps, [12], firstMessageObjective(text), revision + 1, scope.revision, now) },
+    scope, contextIssueNumbers, messageDigest: firstMessageDigest(text), deliveryId: `first_message_${randomUUID()}`, expectedRevision: revision, now });
+    assert.equal(establish([12, 14]), false, "a scoped issue is never also context");
+    assert.equal(establish([14, 14]), false);
+    assert.equal(establish([0]), false);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "pending");
+    assert.equal(establish([14]), true);
+    assert.deepEqual((f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope as { contextIssueNumbers?: number[] }).contextIssueNumbers, [14]);
+    // A delivery that fails reopens the wait without the old message's context.
+    assert.equal(f.db.settleFirstMessageDelivery(id, firstMessageDigest(text), false, Date.now()), true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: false } });
+
+    // Through the real path: the explicit limit of one keeps #13 out of scope, so it is context with #14.
+    const next = "Fix #12 and #13. See #14.";
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, next)).ok, true);
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    assert.deepEqual(policy.issueScope!.issueNumbers, [12]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [12]);
+    assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(next),
+      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [13, 14] });
+    assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.contextIssueNumbers, [13, 14]);
   } finally { await server.close(); f.db.close(); }
 });

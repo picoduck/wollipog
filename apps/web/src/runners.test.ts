@@ -10,14 +10,11 @@ import {
   formatAdmissionPolicy,
   formatExecutionIsolation,
   machineSettingsMutationError,
-  outdatedBoxHint,
-  outdatedRunnerTitle,
   nativeRunnerUpdateHint,
   runnerDisplay,
   runnerOutdated,
   sshRunnerLifecycleHint,
   sshTargetHost,
-  unknownRunnerTitle,
   machineOptionLabels,
 } from "./runners.js";
 
@@ -107,20 +104,7 @@ test("runnerOutdated defaults its baseline to this build's PROTOCOL_VERSION", ()
   assert.equal(runnerOutdated(PROTOCOL_VERSION - 1), true);
 });
 
-test("runner update guidance stays concise and end-user focused", () => {
-  const hint = outdatedBoxHint();
-  assert.equal(hint, "Update this connection to enable the latest features.");
-  assert.doesNotMatch(hint, /protocol|binary|(?:MAM|WOLLIPOG)_RUNNER_BIN_DIR|rebuild|release/i);
-});
-
-test("outdated runner tooltips explain the action without implementation details", () => {
-  const title = outdatedRunnerTitle();
-  assert.match(title, /update is available.*enable all current features/i);
-  assert.doesNotMatch(title, /protocol|dashboard expects|restart the runner/i);
-});
-
-test("unknown/native runner health copy fails closed without developer commands", () => {
-  assert.match(unknownRunnerTitle(), /version information is unavailable.*features may remain disabled/i);
+test("native runner update copy fails closed without developer commands", () => {
   assert.equal(nativeRunnerUpdateHint(29, 29), null);
   assert.equal(nativeRunnerUpdateHint(30, 29), null);
   assert.match(nativeRunnerUpdateHint(28, 29)!, /started outside Wollipog.*cannot be updated here.*same setup method/i);

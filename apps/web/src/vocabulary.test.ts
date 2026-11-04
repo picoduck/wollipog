@@ -192,7 +192,7 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./runners.ts",
     "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again."],
   ["./components/UsageView.tsx", "Checking whether this version of Wollipog supports weekly aggregation."],
-  ["./components/UsageView.tsx", "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week."],
+  ["./components/UsageView.tsx", "Week grouping needs a newer version of Wollipog."],
   // The transcript column's earlier-activity failure and unpaired-device state (#2579).
   ["./components/SessionDetail.tsx",
     "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it."],
@@ -237,7 +237,7 @@ const CODEX_USAGE_NOTES: ReadonlyArray<[string, string]> = [
   ["./components/UsageView.tsx",
     "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
   ["./components/SessionUsageControl.tsx",
-    "Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
+    "Codex App Server usage recorded before the machine's Wollipog update counts only the final response of each turn, so older figures are incomplete."],
 ];
 
 test("Codex App Server usage notes name the Wollipog update, not a runner protocol number", () => {

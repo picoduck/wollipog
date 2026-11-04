@@ -260,7 +260,7 @@ describe("a comparison run's page (#2975)", () => {
       assertNoDomNode(loading.querySelector(".muted"), "not a muted sentence");
 
       const failed = column(fixture.container, "Gemini CLI")!;
-      const notice = failed.querySelector('.compare-member-notice .transcript-history-notice[data-state="error"]');
+      const notice = failed.querySelector('.compare-member-notice > .notice[data-state="error"]');
       assert.ok(notice, "the danger notice heads the column");
       assert.match(notice.textContent ?? "", /Couldn't Load the Full Conversation/u);
       assertNoDomNode(failed.querySelector(".muted"), "not a muted sentence");
@@ -269,7 +269,7 @@ describe("a comparison run's page (#2975)", () => {
       failGemini = false;
       await click([...notice.querySelectorAll("button")].find((button) => button.textContent === "Retry"));
       assert.ok(requests.filter((id) => id === gemini.id).length > before, "Retry loads the history again");
-      assertNoDomNode(column(fixture.container, "Gemini CLI")?.querySelector(".transcript-history-notice"), "the notice clears once it loads");
+      assertNoDomNode(column(fixture.container, "Gemini CLI")?.querySelector(".compare-member-notice > .notice"), "the notice clears once it loads");
     } finally {
       await unmount(fixture);
     }

@@ -447,6 +447,8 @@ test("Update Runner… on a busy machine asks to interrupt the sessions it names
     const notice = view.detail().querySelector(".notice")!;
     assert.match(notice.textContent ?? "", /Runner Update Required/);
     assert.match(notice.textContent ?? "", /This machine's runner is out of date\./);
+    assert.doesNotMatch(notice.textContent ?? "", /protocol|binary|(?:MAM|WOLLIPOG)_RUNNER_BIN_DIR|rebuild|dashboard expects/i,
+      "update copy names the action, not implementation details");
     await act(async () => buttonNamed(notice, "Update Runner…")!.click());
     await settle();
     const confirmation = dialogNamed(view.body, "Interrupt Sessions and Update")!;

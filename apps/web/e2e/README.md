@@ -219,6 +219,11 @@ Chromium-measured geometry, so WebKit runs just the specs listed in `WEBKIT_SPEC
 - `number-fields.spec.ts`: the 96px number fields keep their values whole beside their units, with
   no spin buttons (#3185). WebKit draws its own spin buttons and keeps room for them, and with the
   `appearance: textfield` and spin-button rules removed, three of the five tests fail in WebKit.
+- `compact-notice-icon-alignment.spec.ts`: a compact notice's icon stays on its first line when it
+  wraps, and a one-line notice stays centered (#3522), including with touch-sized actions. WebKit
+  places a wrapping flex row by its first part's baseline as if that part sat at the row's top, so
+  without the title and sentence padded to an action's height it lifts a one-line notice with Retry
+  out of center, and with 44px actions out of the notice.
 
 CI runs them in the **WebKit End-to-End Tests** job, beside the Chromium shards rather than inside
 one, so they add nothing to the browser job's budget. That job is part of the required check: a

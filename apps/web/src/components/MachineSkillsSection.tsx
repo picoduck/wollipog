@@ -97,7 +97,7 @@ export function MachineSkillsSection({ runner }: { runner: RunnerView }) {
                     <li key={key} className="row row-2">
                       <span className="row-body">
                         <span className="row-line">
-                          <span className="row-title">{entry.name}</span>
+                          <span className="row-title" title={entry.name}>{entry.name}</span>
                           <span className="machine-skill-meta">{agentName(entry.agentId)}</span>
                           {entry.providerAccountId && account(entry.providerAccountId, key)}
                         </span>

@@ -224,11 +224,12 @@ With #3589's existing v233 launch-refusal view, live-holder/survivor causes map 
 unverifiable-boundary/process/journal causes map to `unverifiable`. This compatibility mapping
 adds no protocol values; the internal causes remain distinct for #3585.
 
-The non-delegated guidance names the reason: the runner's systemd unit is not delegated. An
-operator must use `Delegate=yes` for future leases. The live dogfood stack's `Delegate=no` scope
-correctly retains fallback; this change does not move, update or restart it. Changing its launcher
-does not upgrade existing leases. For #79 phase 2, an external operator can run an isolated stack
-in a delegated user scope, using temporary provider HOMEs/data/ports, and leave a real SSH login
+The typed non-delegated cause remains available in authorized account recovery details. Primary
+messages explain that Wollipog cannot safely unlock the account and offer another account or saving
+work and restarting the machine. For future leases, the operator must use `Delegate=yes`; #3620
+updated the dogfood launcher and deployed a delegated scope. That does not retroactively add
+containment evidence to historical leases. For #79 phase 2, an external operator can run an isolated
+stack in a delegated user scope with temporary provider HOMEs/data/ports and leave a real SSH login
 open throughout recovery.
 
 Configured ACP discovery now acquires its effective credential-HOME reference before constructing
@@ -245,9 +246,9 @@ their tracked trees to the owning discovery reference. Resolution utilities (`co
 inspection) and fixed native helpers are not providers. WSL probes retain their existing in-distro execution and do not acquire
 the unrelated native host HOME; WSL session isolation is handled separately.
 
-Detached session/campaign review controllers join provider cgroup leaves before exec. Their root
-closing triggers only a non-killing emptiness check, preserving detached review recovery. Empty
-leaves retire asynchronously. Runner shutdown additionally requires the entire provider parent
+Legacy detached review controllers must finish under their prior runner before the review-job
+retirement upgrade. New runners refuse unfinished legacy records and never launch those controllers.
+Existing provider cgroup leaves retire asynchronously after a non-killing emptiness check. Runner shutdown additionally requires the entire provider parent
 empty before releasing HOME leases. A surviving detached controller legitimately blocks handoff
 until its provider work finishes; shutdown and recovery guidance name this possibility.
 
@@ -393,7 +394,7 @@ refused as `profile_changed` for sessions, Agent TUIs, probes, sign-in and skill
 
 ### Profile Marker Operations
 
-Four operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
+Five operations change a marker, and only these do; see [Provider Profiles](./provider-profiles.md)
 for the grant model:
 
 - `profile_create { home, provider, profileId, grantId }` writes the first marker of a new managed
@@ -419,7 +420,22 @@ for the grant model:
   may still depend on the released HOME. Current cleanup retains every HOME and its canonical
   evidence; see [Provider HOME Cleanup Status](provider-home-cleanup.md).
 
-All four take the HOME's lease the same way an acquisition does, but skip the grant check, since
+- `profile_import { home, provider: "codex", layout, destinationRoot, profileId, grantId, profile?, credentialProfile? }`
+  copies a Codex API-key sign-in from the existing HOME `home` into the new managed profile HOME
+  `<destinationRoot>/<profileId>` (#3719; see
+  [Importing an Existing Sign-In](./provider-profiles.md#importing-an-existing-sign-in)). Unlike the
+  others it takes the source's lease with the source's own dispatch-time `profile` context, never
+  creates the source, and refuses it while this registry holds, initializes, completes or migrates
+  it, so a same-runner reference is refused rather than borrowed. With `layout: "user_home"` the
+  credential directory `home/.codex` is admitted the same way with its own `credentialProfile`
+  context. The credential is read and validated under those leases and the source checked unchanged
+  once more; only then is the destination created, leased without the grant check, given its first
+  marker (as `profile_create`) and a fresh API-key-only `auth.json`, so every refusal precedes the
+  destination. All references are dropped before the reply, which adds no field. Its refusals are `import_source_missing`,
+  `import_source_held`, `import_source_unsafe`, `import_source_foreign`, `import_source_unsupported`
+  and `import_source_changed`, besides the acquisition's own codes; each has a fixed, path-free text.
+
+The first four take the HOME's lease the same way an acquisition does, but skip the grant check, since
 they are how grants change. A HOME another live owner holds is refused with the acquisition's code
 (`busy`, `foreign_owner`, `foreign_host`). The marker is read with the operation's provider while
 the lease is held; an unreadable marker, or one for the other provider, is never replaced: creation,

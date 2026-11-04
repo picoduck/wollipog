@@ -1,752 +1,558 @@
-import React, { lazy, Suspense, useEffect, useId, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import { statusMeta } from "../status-meta.js";
 import { State } from "./State.js";
+import { StaleContent } from "./StaleContent.js";
+import { useOptionalStoreSelector } from "../store.js";
 import type {
   DeviceView,
   IdentityAdministrationView,
   OrganizationMembershipView,
-  OrganizationRole,
   TeamView,
-  UserStatus,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
-import { pairingLinks } from "../device-token.js";
 import { relativeTime, titleCaseLabel } from "../format.js";
-import { accountLabelText, isPersonalIdentifier, maskedAccountTitles } from "../personal-identifiers.js";
-import { CopyButton, Modal } from "./common.js";
-import { ChoiceRows } from "./ui/ChoiceControls.js";
-import { ChevronRightIcon, DeviceIcon, EditIcon, PlusIcon, TeamIcon, UserPlusIcon } from "./Icons.js";
-import { useFeedback } from "./FeedbackProvider.js";
+import { isPersonalIdentifier } from "../personal-identifiers.js";
+import { ChevronRightIcon, DeviceIcon, LockIcon, PlusIcon, ShieldIcon, TeamIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
+import { TEAM_PURPOSE, TeamDialog } from "./TeamDialog.js";
 import {
   PersonalIdentifier,
-  PersonalIdentifierMask,
   PersonalIdentifierRevealButton,
+  PersonalIdentifierText,
   usePersonalIdentifierReveal,
 } from "./PersonalIdentifier.js";
+import { AddPersonDialog, ManagePersonDialog } from "./PersonAccessDialogs.js";
+import { PairDeviceDialog } from "./PairDeviceDialog.js";
+import { DeviceDetailsDialog, PairedTime, useRevokeDevice } from "./DeviceDetailsDialog.js";
+import { useIsMobile } from "./useIsMobile.js";
+import {
+  canAdminister,
+  deviceCountLabel,
+  devicesByPerson,
+  isOwnRow,
+  OWNER_LOCKED_REASON,
+  personRowAction,
+} from "./people-device-rows.js";
+import { useInstanceScope } from "../instance-scope.js";
+import { dismissSetYourName, setYourNameDismissed } from "../set-your-name.js";
 
 type AccessDialog =
   | { kind: "add-person" }
   | { kind: "manage-person"; member: OrganizationMembershipView }
+  | { kind: "your-name"; member: OrganizationMembershipView }
   | { kind: "pair-device" }
+  | { kind: "device"; device: DeviceView }
   | { kind: "create-team" }
   | { kind: "manage-team"; team: TeamView };
 
-const QRCodeSVG = lazy(() => import("qrcode.react").then((module) => ({ default: module.QRCodeSVG })));
+const DEVICE_SKELETON_ROWS = 2;
 
-const ROLE_HELP: Record<OrganizationRole, string> = {
-  owner: "Full organization control, including ownership and administrator changes.",
-  admin: "Manage connections, people, teams, and paired devices.",
-  operator: "Run and manage work without changing organization access.",
-  viewer: "Read-only access to shared work and connection status.",
-};
-
-function RoleOptions({ actorRole }: { actorRole: OrganizationRole }) {
-  return (
-    <>
-      <option value="owner" disabled={actorRole !== "owner"}>Owner</option>
-      <option value="admin">Admin</option>
-      <option value="operator">Operator</option>
-      <option value="viewer">Viewer</option>
-    </>
-  );
-}
-
-function DialogError({ error }: { error: string | null }) {
-  return error ? <div className="form-error" role="alert">{error}</div> : null;
-}
-
-function AddPersonDialog({
-  actorRole,
-  onClose,
-  onSaved,
+/** A section of the tab (§4.5, §5.1): its title with a plain count, and at most one action. */
+function AccessSection({
+  id,
+  title,
+  count,
+  note,
+  action,
+  children,
 }: {
-  actorRole: OrganizationRole;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
+  id: string;
+  title: string;
+  /** Omitted while the list is unknown: not loaded, failed, or not visible to this person. */
+  count?: number;
+  note?: string;
+  action?: React.ReactNode;
+  children: React.ReactNode;
 }) {
-  const api = useApi();
-  const [name, setName] = useState("");
-  const [role, setRole] = useState<OrganizationRole>("viewer");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (busy || !name.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.createIdentityMember({ displayName: name.trim(), role });
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
   return (
-    <Modal
-      title="Add a Person"
-      onClose={onClose}
-      describedBy="add-person-description"
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || !name.trim()}>
-            {busy ? "Adding…" : "Add Person"}
-          </button>
-        </>
-      }
-    >
-      <p className="access-dialog-intro" id="add-person-description">
-        Add the person first. You can pair a device for them after their access level is set.
-      </p>
-      <div className="access-form">
-        <label>
-          <span>Name</span>
-          <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Person name" />
-        </label>
-        <label>
-          <span>Access Level</span>
-          <select value={role} onChange={(event) => setRole(event.target.value as OrganizationRole)}>
-            <RoleOptions actorRole={actorRole} />
-          </select>
-          <small>{ROLE_HELP[role]}</small>
-        </label>
-        <DialogError error={error} />
+    <section className="section" aria-labelledby={`${id}-heading`}>
+      <div className="section-head">
+        <h2 className="section-title" id={`${id}-heading`}>
+          {title}{count !== undefined && <> <span className="count">{count}</span></>}
+        </h2>
+        {action}
       </div>
-    </Modal>
+      {note && <p className="section-note">{note}</p>}
+      {children}
+    </section>
   );
 }
 
-export function ManagePersonDialog({
-  actorRole,
+/** A section's one action: a small button with a plus, ending in an ellipsis because it opens a form. */
+function SectionAction({ label, onClick }: { label: string; onClick: () => void }) {
+  return (
+    <button type="button" className="btn sm" aria-haspopup="dialog" onClick={onClick}>
+      <PlusIcon />
+      <span>{label}</span>
+    </button>
+  );
+}
+
+/**
+ * One two-line row of the tab (§5.2). When it opens something, its title is the one open target,
+ * stretched over the whole row; the reveal controls and the trailing action are siblings above it,
+ * never nested inside it. A row that opens nothing is plain text.
+ */
+function AccessRow({
+  title,
+  titleAfter,
+  meta,
+  onOpen,
+  trailing,
+  kind,
+}: {
+  title: React.ReactNode;
+  /** Beside the title, outside the open target: a reveal control, the You or Suspended badge. */
+  titleAfter?: React.ReactNode;
+  meta: React.ReactNode;
+  onOpen?: () => void;
+  trailing?: React.ReactNode;
+  /** Which list the row is in, for tests and evidence. */
+  kind: "person" | "device" | "team";
+}) {
+  return (
+    <div className={`row row-2 access-row${onOpen ? " is-openable" : ""}`} data-row={kind}>
+      <div className="row-body">
+        <div className="row-line">
+          {onOpen
+            ? <button type="button" className="row-title access-row-open" aria-haspopup="dialog" onClick={onOpen}>{title}</button>
+            : <span className="row-title">{title}</span>}
+          {titleAfter}
+        </div>
+        <div className="row-sub access-row-meta">{meta}</div>
+      </div>
+      {trailing && <div className="access-row-trail">{trailing}</div>}
+    </div>
+  );
+}
+
+/** A line-2 fact, after its 14px icon when it has one (§11.3). */
+function MetaItem({ icon, children }: { icon?: React.ReactNode; children: React.ReactNode }) {
+  return <span className="access-meta">{icon}<span>{children}</span></span>;
+}
+
+/** The chevron a phone row shows instead of its action (§15.1). */
+function RowChevron() {
+  return <ChevronRightIcon aria-hidden="true" />;
+}
+
+/** A person's name as a row title: masked when email-shaped, with its reveal control outside the
+ * row's open target so the row never nests buttons. */
+function usePersonTitle(name: string): { title: React.ReactNode; reveal: React.ReactNode } {
+  const [revealed, toggle] = usePersonalIdentifierReveal(name);
+  if (!isPersonalIdentifier(name)) return { title: name, reveal: null };
+  return {
+    title: <span className="pid" data-revealed={revealed}><PersonalIdentifierText value={name} revealed={revealed} lead="Person" /></span>,
+    reveal: <PersonalIdentifierRevealButton label="Person Name" revealed={revealed} onToggle={toggle} />,
+  };
+}
+
+function PersonRow({
   member,
-  onClose,
-  onSaved,
+  context,
+  deviceCount,
+  teamNames,
+  phone,
+  onManage,
 }: {
-  actorRole: OrganizationRole;
   member: OrganizationMembershipView;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
+  context: IdentityAdministrationView["context"];
+  /** Null when the devices are not loaded or not visible to this person. */
+  deviceCount: number | null;
+  teamNames: string[];
+  phone: boolean;
+  onManage: () => void;
 }) {
-  const api = useApi();
-  const [displayName, setDisplayName] = useState(member.userName);
-  // An email-shaped name stays out of the editable field until the admin deliberately shows it.
-  const nameIsPersonal = isPersonalIdentifier(member.userName);
-  const [nameShown, setNameShown] = useState(!nameIsPersonal);
-  const nameId = useId();
-  const [role, setRole] = useState(member.role);
-  const [status, setStatus] = useState<UserStatus>(member.userStatus);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const save = async () => {
-    if (busy || !displayName.trim()) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.updateIdentityMember(member.userId, {
-        displayName: displayName.trim(),
-        role,
-        status,
-      });
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
+  const { title, reveal } = usePersonTitle(member.userName);
+  const action = personRowAction(member, context);
+  const own = action === "you" || action === "edit-own-name";
+  const opens = action === "manage" || action === "edit-own-name";
+  const trailing = opens
+    ? phone ? <RowChevron /> : (
+      <button type="button" className="btn sm ghost" aria-haspopup="dialog" onClick={onManage}>
+        {action === "manage" ? "Manage…" : "Edit Name…"}
+      </button>
+    )
+    : action === "owner-locked"
+      ? phone
+        ? <span className="access-row-lock" role="img" aria-label={OWNER_LOCKED_REASON} title={OWNER_LOCKED_REASON}><LockIcon /></span>
+        : <span className="access-row-note">{OWNER_LOCKED_REASON}</span>
+      : null;
   return (
-    <Modal
-      title={`Manage ${accountLabelText(member.userName, "Person")}`}
-      onClose={onClose}
-      footer={
+    <AccessRow
+      kind="person"
+      title={title}
+      titleAfter={(
         <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || !displayName.trim()}>
-            {busy ? "Saving…" : "Save Changes"}
-          </button>
+          {reveal}
+          {own && <StatusBadge tone="neutral" noDot label="You" />}
+          {/* Status shows only when it is an exception: Active shows nothing (§11.1). */}
+          {member.userStatus === "suspended" && <StatusBadge meta={statusMeta("member", "suspended")} />}
         </>
-      }
-    >
-      <div className="access-form">
-        {nameIsPersonal ? (
-          <div className="access-form-field">
-            <div className="pid-field-head">
-              {nameShown ? <label htmlFor={nameId}>Name</label> : <span>Name</span>}
-              <PersonalIdentifierRevealButton
-                label="Person Name"
-                revealed={nameShown}
-                onToggle={() => setNameShown((shown) => !shown)}
-                controls={nameShown ? nameId : undefined}
-                withText
-              />
-            </div>
-            {nameShown
-              // No autofocus: a keyboard reveal keeps focus on the toggle so Enter can hide it again.
-              ? <input id={nameId} value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-              : <PersonalIdentifierMask />}
-          </div>
-        ) : (
-          <label>
-            <span>Name</span>
-            <input autoFocus value={displayName} onChange={(event) => setDisplayName(event.target.value)} />
-          </label>
-        )}
-        <label>
-          <span>Access Level</span>
-          <select value={role} onChange={(event) => setRole(event.target.value as OrganizationRole)}>
-            <RoleOptions actorRole={actorRole} />
-          </select>
-          <small>{ROLE_HELP[role]}</small>
-        </label>
-        <label>
-          <span>Account Status</span>
-          <select value={status} onChange={(event) => setStatus(event.target.value as UserStatus)}>
-            <option value="active">Active</option>
-            <option value="suspended">Suspended</option>
-          </select>
-          <small>Suspending access invalidates this person's authenticated requests.</small>
-        </label>
-        <DialogError error={error} />
-      </div>
-    </Modal>
-  );
-}
-
-export function PairDeviceDialog({
-  identity,
-  onClose,
-  onSaved,
-}: {
-  identity: IdentityAdministrationView;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
-}) {
-  const api = useApi();
-  const activeMembers = identity.memberships.filter((member) => member.userStatus === "active");
-  const [step, setStep] = useState<"person" | "device" | "success">("person");
-  const [userId, setUserId] = useState(
-    activeMembers.some((member) => member.userId === identity.context.userId)
-      ? identity.context.userId
-      : activeMembers[0]?.userId ?? "",
-  );
-  const [name, setName] = useState("");
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const [result, setResult] = useState<{
-    token: string;
-    links: string[];
-    blocked: string | null;
-  } | null>(null);
-  const [selectedPairingLink, setSelectedPairingLink] = useState("");
-  const mountedRef = useRef(true);
-  useEffect(() => () => {
-    mountedRef.current = false;
-  }, []);
-  const person = activeMembers.find((member) => member.userId === userId);
-  const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
-  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
-    activeMembers.map((member) => member.userName).join("\n"),
-  );
-  const requestClose = () => {
-    if (!busy) onClose();
-  };
-  const pair = async () => {
-    if (busy || !name.trim() || !userId) return;
-    setBusy(true);
-    setError(null);
-    let response: Awaited<ReturnType<typeof api.pairDevice>>;
-    try {
-      response = await api.pairDevice(name.trim(), userId);
-    } catch (cause) {
-      setError((cause as Error).message);
-      setBusy(false);
-      return;
-    }
-
-    // The credential is returned exactly once. Reveal it as soon as creation succeeds; refreshing
-    // the surrounding lists is useful but must never make the only plaintext copy inaccessible.
-    const pairing = pairingLinks(response.token, response.pairing);
-    setResult({ token: response.token, ...pairing });
-    setSelectedPairingLink(pairing.links[0] ?? "");
-    setStep("success");
-    setBusy(false);
-    try {
-      await onSaved();
-    } catch (cause) {
-      if (mountedRef.current) {
-        setError(`Device created, but the device list could not be refreshed: ${(cause as Error).message}`);
-      }
-    }
-  };
-  if (step === "success" && result) {
-    const primaryLink = result.links.includes(selectedPairingLink)
-      ? selectedPairingLink
-      : result.links[0] ?? null;
-    const copyValue = primaryLink ?? `#pair=${result.token}`;
-    return (
-      <Modal
-        title="Device Ready to Pair"
-        onClose={requestClose}
-        footer={<button type="button" className="btn primary" onClick={onClose}>Done</button>}
-      >
-        <div className="access-success" role="status">
-          <strong>{name}</strong> is ready for{" "}
-          {person ? <PersonalIdentifier value={person.userName} label="Person Name" /> : "this person"}. This credential is shown once.
-        </div>
-        {primaryLink ? (
-          <section className="access-pairing-qr" aria-labelledby="pair-device-qr-heading">
-            <h3 id="pair-device-qr-heading">Scan to Pair</h3>
-            {result.links.length > 1 && (
-              <label className="access-pairing-address">
-                Network Address
-                <select
-                  value={primaryLink ?? ""}
-                  onChange={(event) => setSelectedPairingLink(event.target.value)}
-                >
-                  {result.links.map((link) => (
-                    <option key={link} value={link}>{new URL(link).host}</option>
-                  ))}
-                </select>
-                <small>Choose an address the device you are pairing can reach.</small>
-              </label>
-            )}
-            <div className="access-pairing-qr-frame">
-              <Suspense fallback={<State variant="loading" compact>Loading pairing code…</State>}>
-              <QRCodeSVG
-                value={primaryLink}
-                title={`Pair ${name} with Wollipog`}
-                size={208}
-                level="M"
-                marginSize={4}
-              />
-              </Suspense>
-            </div>
-            <p>On the device you are pairing, open the camera and scan this code.</p>
-            <CopyButton text={copyValue} label="Copy Pairing Link" className="btn" />
-          </section>
-        ) : (
-          <div className="access-copy-primary">
-            <CopyButton text={copyValue} label="Copy Pairing Link" className="btn primary" />
-          </div>
-        )}
-        {result.blocked && <p className="hint">{result.blocked}</p>}
-        <DialogError error={error} />
-        <details className="disclosure">
-          <summary><ChevronRightIcon className="disclosure-chevron" />Manual Setup</summary>
-          <div className="disclosure-body">
-            <p className="hint">Use this only when the dashboard cannot provide a clickable pairing link.</p>
-            <pre className="code-block install-cmd">
-              {`#pair=${result.token}`}
-              <CopyButton text={`#pair=${result.token}`} />
-            </pre>
-            <pre className="code-block install-cmd">
-              {result.token}
-              <CopyButton text={result.token} />
-            </pre>
-          </div>
-        </details>
-      </Modal>
-    );
-  }
-  return (
-    <Modal
-      title={step === "person" ? "Choose a Person" : "Name the Device"}
-      onClose={requestClose}
-      footer={step === "person"
-        ? (
-          <>
-            <button type="button" className="btn" onClick={onClose}>Cancel</button>
-            <button type="button" className="btn primary" onClick={() => setStep("device")} disabled={!userId}>Continue</button>
-          </>
-        )
-        : (
-          <>
-            <button type="button" className="btn" onClick={() => setStep("person")} disabled={busy}>Back</button>
-            <button type="button" className="btn primary" onClick={() => void pair()} disabled={busy || !name.trim()}>
-              {busy ? "Pairing…" : "Create Pairing"}
-            </button>
-          </>
-        )}
-    >
-      {step === "person" ? (
-        <>
-          {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
-            <div className="pid-field-head">
-              <PersonalIdentifierRevealButton
-                label="Person Names"
-                revealed={namesRevealed}
-                onToggle={toggleNames}
-                controls="pair-person-choices"
-                withText
-              />
-            </div>
-          )}
-          <ChoiceRows<string>
-            id="pair-person-choices"
-            label="Person"
-            value={userId || null}
-            onChange={setUserId}
-            options={activeMembers.map((member, index) => ({
-              value: member.userId,
-              title: namesRevealed ? member.userName : memberTitles[index]!,
-              description: `${titleCaseLabel(member.role)} Access`,
-            }))}
-          />
-          {activeMembers.length === 0 && <div className="access-empty-copy">Add an active person before pairing a device.</div>}
-        </>
-      ) : (
-        <div className="access-form">
-          <p className="access-dialog-intro">
-            Pairing for <strong>{person && <PersonalIdentifier value={person.userName} label="Person Name" />}</strong>. Use a name they will recognize later.
-          </p>
-          <label>
-            <span>Device Name</span>
-            <input
-              autoFocus
-              value={name}
-              onChange={(event) => setName(event.target.value)}
-              placeholder="For example, Pixel 9 or Home laptop"
-            />
-          </label>
-          <DialogError error={error} />
-        </div>
       )}
-    </Modal>
+      meta={(
+        <>
+          <MetaItem icon={<ShieldIcon size={14} />}>{titleCaseLabel(member.role)}</MetaItem>
+          {/* Your name is still the one the server gave you, until you save one (#3001). */}
+          {own && context.defaultName && <MetaItem>Default name</MetaItem>}
+          {deviceCount !== null && <MetaItem icon={<DeviceIcon size={14} />}>{deviceCountLabel(deviceCount)}</MetaItem>}
+          {teamNames.length > 0 && <MetaItem icon={<TeamIcon size={14} />}>{teamNames.join(", ")}</MetaItem>}
+        </>
+      )}
+      onOpen={opens ? onManage : undefined}
+      trailing={trailing}
+    />
   );
 }
 
-function TeamDialog({
-  identity,
+function DeviceRow({
+  device,
+  canRevoke,
+  phone,
+  onOpen,
+  onRevoke,
+}: {
+  device: DeviceView;
+  canRevoke: boolean;
+  phone: boolean;
+  onOpen: () => void;
+  onRevoke: () => void;
+}) {
+  return (
+    <AccessRow
+      kind="device"
+      title={device.name}
+      meta={(
+        <>
+          <MetaItem><PersonalIdentifier value={device.userName} label="Person Name" lead="Person" /></MetaItem>
+          {/* A phone keeps whose it is and its last use whole; Device Details has the pairing date. */}
+          {!phone && <MetaItem>Paired <PairedTime at={device.createdAt} /></MetaItem>}
+          <MetaItem>{device.lastSeenAt == null ? "Never used" : `Last used ${relativeTime(device.lastSeenAt)}`}</MetaItem>
+        </>
+      )}
+      onOpen={onOpen}
+      trailing={phone ? <RowChevron /> : canRevoke && (
+        <button type="button" className="btn sm ghost danger" aria-haspopup="dialog" onClick={onRevoke}>Revoke…</button>
+      )}
+    />
+  );
+}
+
+function TeamRow({
   team,
-  onClose,
-  onSaved,
+  members,
+  canManage,
+  phone,
+  onManage,
 }: {
-  identity: IdentityAdministrationView;
-  team?: TeamView;
-  onClose: () => void;
-  onSaved: () => Promise<void>;
+  team: TeamView;
+  members: OrganizationMembershipView[];
+  canManage: boolean;
+  phone: boolean;
+  onManage: () => void;
 }) {
-  const api = useApi();
-  const { confirm } = useFeedback();
-  const activeMembers = identity.memberships.filter((member) => member.userStatus === "active");
-  const [name, setName] = useState(team?.name ?? "");
-  const [memberIds, setMemberIds] = useState<string[]>(team?.memberUserIds ?? []);
-  const memberTitles = maskedAccountTitles(activeMembers.map((member) => member.userName), "Hidden Name");
-  const [namesRevealed, toggleNames] = usePersonalIdentifierReveal(
-    activeMembers.map((member) => member.userName).join("\n"),
-  );
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  const toggle = (userId: string) => {
-    setMemberIds((current) =>
-      current.includes(userId) ? current.filter((id) => id !== userId) : [...current, userId],
-    );
-  };
-  const save = async () => {
-    if (busy || (!team && !name.trim())) return;
-    setBusy(true);
-    setError(null);
-    try {
-      if (team) await api.updateIdentityTeamMembers(team.teamId, memberIds);
-      else await api.createIdentityTeam({ name: name.trim(), memberUserIds: memberIds });
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(false);
-    }
-  };
-  const remove = async () => {
-    if (!team || busy || !await confirm({
-      title: "Delete Team",
-      message: `“${team.name}” is removed permanently. People and paired devices are unchanged.`,
-      confirmLabel: "Delete Team",
-      tone: "danger",
-    })) return;
-    setBusy(true);
-    setError(null);
-    try {
-      await api.deleteIdentityTeam(team.teamId);
-      await onSaved();
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-      setBusy(false);
-    }
-  };
   return (
-    <Modal
-      title={team ? `Manage ${team.name}` : "Create a Team"}
-      onClose={onClose}
-      describedBy="team-dialog-description"
-      tertiary={team && (
-        <button type="button" className="btn ghost danger" onClick={() => void remove()} disabled={busy}>
-          Delete Team
-        </button>
+    <AccessRow
+      kind="team"
+      title={team.name}
+      meta={members.length === 0 ? "No members yet" : (
+        <MetaItem>
+          {members.length === 1 ? "1 member: " : `${members.length} members: `}
+          {members.map((member, index) => (
+            <React.Fragment key={member.userId}>
+              {index > 0 && ", "}
+              <PersonalIdentifier value={member.userName} label="Member Name" />
+            </React.Fragment>
+          ))}
+        </MetaItem>
       )}
-      footer={
-        <>
-          <button type="button" className="btn" onClick={onClose} disabled={busy}>Cancel</button>
-          <button type="button" className="btn primary" onClick={() => void save()} disabled={busy || (!team && !name.trim())}>
-            {busy ? "Saving…" : team ? "Save Members" : "Create Team"}
-          </button>
-        </>
-      }
-    >
-      <p className="access-dialog-intro" id="team-dialog-description">
-        Teams provide a shared ownership scope for machines, workspaces, and sessions.
-      </p>
-      <div className="access-form">
-        {!team && (
-          <label>
-            <span>Team Name</span>
-            <input autoFocus value={name} onChange={(event) => setName(event.target.value)} placeholder="Team name" />
-          </label>
-        )}
-        <fieldset className="access-member-picker">
-          <legend>Members</legend>
-          {activeMembers.some((member) => isPersonalIdentifier(member.userName)) && (
-            <PersonalIdentifierRevealButton
-              label="Person Names"
-              revealed={namesRevealed}
-              onToggle={toggleNames}
-              withText
-            />
-          )}
-          <ChoiceRows<string>
-            multiple
-            label="Members"
-            value={memberIds}
-            onChange={toggle}
-            options={activeMembers.map((member, index) => ({
-              value: member.userId,
-              title: namesRevealed ? member.userName : memberTitles[index]!,
-              description: titleCaseLabel(member.role),
-            }))}
-          />
-          {activeMembers.length === 0 && <div className="access-empty-copy">No active people are available.</div>}
-        </fieldset>
-        <DialogError error={error} />
-      </div>
-    </Modal>
+      onOpen={canManage ? onManage : undefined}
+      trailing={canManage && (phone ? <RowChevron /> : (
+        <button type="button" className="btn sm ghost" aria-haspopup="dialog" onClick={onManage}>Manage…</button>
+      ))}
+    />
   );
 }
 
+/** Skeleton rows at the real row's height and anatomy, a title bar over a meta bar (§12.3). */
+function AccessSkeleton({ rows, announcement }: { rows: number; announcement: string }) {
+  return (
+    <div className="skeleton access-skeleton" role="status" aria-live="polite">
+      <span className="sr-only">{announcement}</span>
+      <div className="surface" aria-hidden="true">
+        {Array.from({ length: rows }, (_, index) => (
+          <div className="row row-2 access-row-skeleton" key={index}>
+            <span className="row-body">
+              <span className="skeleton-bar title" />
+              <span className="skeleton-bar" />
+            </span>
+          </div>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * People and Devices (#2997): People, Paired Devices and Teams as three sections of two-line rows.
+ * Each section keeps its own permissions, loading and errors, so a failed device list never hides
+ * the people or teams. The dialogs the rows open belong to #2998, #2999 and #3000.
+ */
 export function PeopleDevicesPanel({
   identity,
   onIdentityChange,
+  offline = false,
 }: {
   identity: IdentityAdministrationView;
   onIdentityChange: (identity: IdentityAdministrationView) => void;
+  /** The connection is down: the last lists stay on screen (dimmed by the caller) without errors. */
+  offline?: boolean;
 }) {
   const api = useApi();
-  const { confirm } = useFeedback();
+  const phone = useIsMobile();
   const [devices, setDevices] = useState<DeviceView[] | null>(null);
+  const [devicesLoading, setDevicesLoading] = useState(() => canAdminister(identity.context));
+  const [deviceError, setDeviceError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState<string | null>(null);
   const [dialog, setDialog] = useState<AccessDialog | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [loading, setLoading] = useState(true);
-  const admin = identity.context.role === "owner" || identity.context.role === "admin";
+  const admin = canAdminister(identity.context);
+  // Pairing and revoking are trusted-local operations; a paired dashboard only lists.
   const canPair = admin && identity.context.localBootstrap;
+  // Set Your Name (#3001): only the person whose name is still the server's default is asked, and only
+  // when they can rename themselves. Not Now hides it on this device; saving a name ends it everywhere.
+  const instanceScope = useInstanceScope();
+  const ownUserId = identity.context.userId;
+  const [notNow, setNotNow] = useState(() => setYourNameDismissed(ownUserId, instanceScope));
+  const ownMember = identity.memberships.find((member) => isOwnRow(member, identity.context));
+  const askForName = admin && identity.context.defaultName === true && !notNow;
+  const dismissNotice = () => {
+    dismissSetYourName(ownUserId, instanceScope);
+    setNotNow(true);
+  };
+  const contextRef = useRef(identity.context);
+  contextRef.current = identity.context;
 
+  // Only the latest device load answers, so a slow earlier one can't replace a newer list or error.
+  const deviceLoad = useRef(0);
+  const loadDevices = async () => {
+    const load = ++deviceLoad.current;
+    setDevicesLoading(true);
+    setDeviceError(null);
+    try {
+      const next = await api.listDevices();
+      if (load === deviceLoad.current) setDevices(next.devices);
+    } catch (cause) {
+      if (load === deviceLoad.current) setDeviceError((cause as Error).message);
+    } finally {
+      if (load === deviceLoad.current) setDevicesLoading(false);
+    }
+  };
+
+  // Only the latest refresh answers, as a whole: an earlier one that resolves after a newer one (an
+  // edit's refresh overtaken by the reconnect's) must not put back an older directory or role, nor
+  // ask for devices on that older role's behalf.
+  const refreshLoad = useRef(0);
   const refresh = async () => {
-    setError(null);
+    const load = ++refreshLoad.current;
+    let context = contextRef.current;
     try {
       const nextIdentity = await api.getIdentity();
-      const nextAdmin = nextIdentity.context.role === "owner" || nextIdentity.context.role === "admin";
-      const nextDevices = nextAdmin ? await api.listDevices() : { devices: [] };
+      if (load !== refreshLoad.current) return;
+      setRefreshError(null);
       onIdentityChange(nextIdentity);
-      setDevices(nextDevices.devices);
+      context = nextIdentity.context;
     } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setLoading(false);
+      if (load !== refreshLoad.current) return;
+      setRefreshError((cause as Error).message);
+    }
+    // Only owners and admins may read the device list, so nobody else asks for it. Their devices stay
+    // unloaded rather than empty: the section says why it shows none.
+    if (canAdminister(context)) {
+      await loadDevices();
+    } else {
+      deviceLoad.current += 1;
+      setDevices(null);
+      setDeviceError(null);
+      setDevicesLoading(false);
     }
   };
   useEffect(() => {
     void refresh();
   }, [api]);
+  // Unmounted, nothing in flight answers any more.
+  useEffect(() => () => {
+    refreshLoad.current += 1;
+    deviceLoad.current += 1;
+  }, []);
+  // Back online, the lists are read again: what was on screen may no longer be true (§12.5).
+  const wasOffline = useRef(offline);
+  useEffect(() => {
+    if (wasOffline.current && !offline) void refresh();
+    wasOffline.current = offline;
+  }, [offline]);
+  // Another dashboard changed the member directory (#2606): the control plane says so in place of a
+  // reconnect, and the lists are read again without leaving the tab.
+  const directoryRevision = useOptionalStoreSelector((state) => state.identityDirectoryRevision);
+  const shownRevision = useRef(directoryRevision);
+  useEffect(() => {
+    if (shownRevision.current === directoryRevision) return;
+    shownRevision.current = directoryRevision;
+    void refresh();
+  }, [directoryRevision]);
 
-  const revoke = async (device: DeviceView) => {
-    if (!canPair || !await confirm({
-      title: "Revoke Device",
-      message: `“${device.name}” loses access immediately. Pair it again to restore access.`,
-      confirmLabel: "Revoke Device",
-      tone: "danger",
-    })) return;
-    try {
-      await api.revokeDevice(device.deviceId);
-      await refresh();
-    } catch (cause) {
-      setError((cause as Error).message);
-    }
-  };
+  const revokeDevice = useRevokeDevice(refresh);
 
   const people = useMemo(
     () => [...identity.memberships].sort((a, b) => a.userName.localeCompare(b.userName)),
     [identity.memberships],
   );
   const teams = useMemo(() => [...identity.teams].sort((a, b) => a.name.localeCompare(b.name)), [identity.teams]);
+  // Offline, the last list stays on screen and a failure says nothing: the banner explains it.
+  const showDeviceError = deviceError !== null && !offline;
+  // People count devices only from a list Paired Devices is showing, never from one it says failed.
+  const deviceCounts = useMemo(
+    () => admin && devices && !showDeviceError ? devicesByPerson(devices) : null,
+    [admin, devices, showDeviceError],
+  );
+  const teamNamesByPerson = useMemo(() => {
+    const names = new Map<string, string[]>();
+    for (const team of teams) {
+      for (const userId of team.memberUserIds) names.set(userId, [...names.get(userId) ?? [], team.name]);
+    }
+    return names;
+  }, [teams]);
 
   return (
-    <div className="access-page">
-      <div className="access-page-intro">
-        <div>
-          <h2>People &amp; Devices</h2>
-          <p>
-            Manage who can use this organization and which devices can connect. Forms open only when
-            you start a specific task.
-          </p>
-        </div>
-        <span className="access-context">
-          <PersonalIdentifier value={identity.context.userName} label="Your Name" lead="Signed in as" /> · {identity.context.role}
-        </span>
-      </div>
-      {error && <div className="connection-access-error" role="alert">{error}</div>}
+    <div className="access-sections">
+      {refreshError && !offline && (
+        <Notice
+          compact
+          tone="danger"
+          role="alert"
+          title="Couldn't Refresh People and Teams"
+          actions={<button type="button" className="btn sm" onClick={() => void refresh()}>Retry</button>}
+          details={refreshError}
+        >
+          The lists below may be out of date.
+        </Notice>
+      )}
 
-      <section className="access-section" aria-labelledby="people-heading">
-        <div className="access-section-head">
-          <div className="access-section-title">
-            <UserPlusIcon />
-            <div>
-              <h3 id="people-heading">People</h3>
-              <p>{people.length === 1 ? "Only you have access." : `${people.length} people have organization access.`}</p>
-            </div>
-          </div>
-          {admin && (
-            <button type="button" className="btn access-task-button" onClick={() => setDialog({ kind: "add-person" })}>
-              <PlusIcon />
-              <span>Add Person</span>
-            </button>
-          )}
+      <AccessSection
+        id="people"
+        title="People"
+        count={people.length}
+        action={admin && <SectionAction label="Add Person…" onClick={() => setDialog({ kind: "add-person" })} />}
+      >
+        {ownMember && askForName && (
+          <Notice
+            tone="neutral"
+            title="Set Your Name"
+            actions={(
+              <>
+                <button type="button" className="btn sm" aria-haspopup="dialog"
+                  onClick={() => setDialog({ kind: "your-name", member: ownMember })}>
+                  Set Your Name…
+                </button>
+                <button type="button" className="btn sm" onClick={dismissNotice}>Not Now</button>
+              </>
+            )}
+          >
+            People in your organization see you as “{ownMember.userName}”. Add your name so they know who you are.
+          </Notice>
+        )}
+        <div className="surface">
+          {people.map((member) => (
+            <PersonRow
+              key={member.userId}
+              member={member}
+              context={identity.context}
+              deviceCount={deviceCounts ? deviceCounts.get(member.userId) ?? 0 : null}
+              teamNames={teamNamesByPerson.get(member.userId) ?? []}
+              phone={phone}
+              onManage={() => setDialog({ kind: isOwnRow(member, identity.context) ? "your-name" : "manage-person", member })}
+            />
+          ))}
         </div>
-        <div className="access-list">
-          {people.map((member) => {
-            const protectedOwner = identity.context.role !== "owner" && member.role === "owner";
-            return (
-              <div className="access-row" key={member.userId}>
-                <div className="access-row-main">
-                  <strong><PersonalIdentifier value={member.userName} label="Person Name" lead="Person" /></strong>
-                  <span className="access-row-meta">
-                    <StatusBadge tone="neutral" noDot label={titleCaseLabel(member.role)} />
-                    <StatusBadge meta={statusMeta("member", member.userStatus)} />
-                  </span>
-                </div>
-                {admin && (
-                  <button
-                    type="button"
-                    className="btn subtle access-row-action"
-                    disabled={member.userId === identity.context.userId || protectedOwner}
-                    onClick={() => setDialog({ kind: "manage-person", member })}
-                  >
-                    <EditIcon />
-                    <span>Manage</span>
-                  </button>
-                )}
-              </div>
-            );
-          })}
-        </div>
-      </section>
+      </AccessSection>
 
-      <section className="access-section" aria-labelledby="devices-heading">
-        <div className="access-section-head">
-          <div className="access-section-title">
-            <DeviceIcon />
-            <div>
-              <h3 id="devices-heading">Paired Devices</h3>
-              <p>Credentials for dashboards that connect beyond this control-plane machine.</p>
-            </div>
-          </div>
-          {canPair && (
-            <button type="button" className="btn access-task-button" onClick={() => setDialog({ kind: "pair-device" })}>
-              <PlusIcon />
-              <span>Pair Device</span>
-            </button>
-          )}
-        </div>
-        {!identity.context.localBootstrap && (
-          <div className="connection-access-note" role="note">
-            Pairing and revocation must be started from this instance’s trusted local dashboard.
-          </div>
-        )}
-        {loading && <div className="access-empty-copy">Loading paired devices…</div>}
-        {!loading && devices?.length === 0 && (
-          <div className="access-empty">
-            <strong>No remote devices are paired.</strong>
-            <span>{canPair ? "Pair a phone or another computer when you need remote dashboard access." : "Pairing must be started from the trusted local dashboard."}</span>
-          </div>
-        )}
-        {devices && devices.length > 0 && (
-          <div className="access-list">
-            {devices.map((device) => (
-              <div className="access-row" key={device.deviceId}>
-                <div className="access-row-main">
-                  <strong>{device.name}</strong>
-                  <span><PersonalIdentifier value={device.userName} label="Person Name" lead="Person" /> · {titleCaseLabel(device.role)}</span>
-                  <small>
-                    Paired {relativeTime(device.createdAt)}
-                    {device.lastSeenAt == null ? " · never used" : ` · last seen ${relativeTime(device.lastSeenAt)}`}
-                  </small>
-                </div>
-                {canPair && (
-                  <button type="button" className="btn subtle danger-text access-row-action" onClick={() => void revoke(device)}>
-                    Revoke
-                  </button>
-                )}
-              </div>
-            ))}
-          </div>
-        )}
-      </section>
-
-      <section className="access-section" aria-labelledby="teams-heading">
-        <div className="access-section-head">
-          <div className="access-section-title">
-            <TeamIcon />
-            <div>
-              <div className="access-heading-line">
-                <h3 id="teams-heading">Teams</h3>
-                <span className="access-secondary-badge">Advanced</span>
-              </div>
-              <p>Use teams when machines and work need a shared ownership scope.</p>
-            </div>
-          </div>
-          {admin && (
-            <button type="button" className="btn access-task-button" onClick={() => setDialog({ kind: "create-team" })}>
-              <PlusIcon />
-              <span>Create Team</span>
-            </button>
-          )}
-        </div>
-        {teams.length === 0 ? (
-          <div className="access-empty">
-            <strong>No teams yet.</strong>
-            <span>Most personal fleets do not need one. Create a team only for shared ownership.</span>
-          </div>
+      <AccessSection
+        id="devices"
+        title="Paired Devices"
+        count={admin && devices && !showDeviceError ? devices.length : undefined}
+        note="Phones and other computers that can open Wollipog away from this computer."
+        action={canPair && <SectionAction label="Pair Device…" onClick={() => setDialog({ kind: "pair-device" })} />}
+      >
+        {!admin ? (
+          <Notice compact tone="neutral" role="note" icon={<LockIcon />}>
+            Only owners and admins can see paired devices.
+          </Notice>
         ) : (
-          <div className="access-list">
-            {teams.map((team) => (
-              <div className="access-row" key={team.teamId}>
-                <div className="access-row-main">
-                  <strong>{team.name}</strong>
-                  <span>{team.memberUserIds.length} Member{team.memberUserIds.length === 1 ? "" : "s"}</span>
-                </div>
-                {admin && (
-                  <button type="button" className="btn subtle access-row-action" onClick={() => setDialog({ kind: "manage-team", team })}>
-                    <EditIcon />
-                    <span>Manage</span>
-                  </button>
-                )}
+          <>
+            {!identity.context.localBootstrap && (
+              <Notice compact tone="neutral" role="note">
+                You're on a paired device. Pair and revoke devices from the computer running Wollipog.
+              </Notice>
+            )}
+            {showDeviceError ? (
+              <Notice
+                compact
+                tone="danger"
+                role="alert"
+                title="Couldn't Load Paired Devices"
+                actions={<button type="button" className="btn sm" onClick={() => void loadDevices()}>Retry</button>}
+                details={deviceError}
+              >
+                Wollipog didn't get the device list. People and teams are unaffected.
+              </Notice>
+            ) : devices === null ? (
+              devicesLoading && !offline ? <AccessSkeleton rows={DEVICE_SKELETON_ROWS} announcement="Loading paired devices…" /> : null
+            ) : devices.length === 0 ? (
+              <p className="access-empty">
+                {canPair
+                  ? "No devices yet. Pair your phone to check on agents when you're away from this computer."
+                  : "No devices yet."}
+              </p>
+            ) : (
+              <div className="surface">
+                {devices.map((device) => (
+                  <DeviceRow
+                    key={device.deviceId}
+                    device={device}
+                    canRevoke={canPair}
+                    phone={phone}
+                    onOpen={() => setDialog({ kind: "device", device })}
+                    onRevoke={() => void revokeDevice(device)}
+                  />
+                ))}
               </div>
+            )}
+          </>
+        )}
+      </AccessSection>
+
+      <AccessSection
+        id="teams"
+        title="Teams"
+        count={teams.length}
+        note={TEAM_PURPOSE}
+        action={admin && <SectionAction label="Create Team…" onClick={() => setDialog({ kind: "create-team" })} />}
+      >
+        {teams.length === 0 ? <p className="access-empty">No teams yet.</p> : (
+          <div className="surface">
+            {teams.map((team) => (
+              <TeamRow
+                key={team.teamId}
+                team={team}
+                members={people.filter((member) => team.memberUserIds.includes(member.userId))}
+                canManage={admin}
+                phone={phone}
+                onManage={() => setDialog({ kind: "manage-team", team })}
+              />
             ))}
           </div>
         )}
-      </section>
+      </AccessSection>
 
       {dialog?.kind === "add-person" && (
         <AddPersonDialog
@@ -759,12 +565,32 @@ export function PeopleDevicesPanel({
         <ManagePersonDialog
           actorRole={identity.context.role}
           member={dialog.member}
+          pairedDevices={canPair && devices
+            ? devices.filter((device) => device.userId === dialog.member.userId).length
+            : null}
+          onClose={() => setDialog(null)}
+          onSaved={refresh}
+        />
+      )}
+      {dialog?.kind === "your-name" && (
+        <ManagePersonDialog
+          actorRole={identity.context.role}
+          member={dialog.member}
+          self={{ defaultName: identity.context.defaultName === true }}
           onClose={() => setDialog(null)}
           onSaved={refresh}
         />
       )}
       {dialog?.kind === "pair-device" && (
         <PairDeviceDialog identity={identity} onClose={() => setDialog(null)} onSaved={refresh} />
+      )}
+      {dialog?.kind === "device" && (
+        <DeviceDetailsDialog
+          device={dialog.device}
+          canRevoke={canPair}
+          onRevoke={revokeDevice}
+          onClose={() => setDialog(null)}
+        />
       )}
       {dialog?.kind === "create-team" && (
         <TeamDialog identity={identity} onClose={() => setDialog(null)} onSaved={refresh} />
@@ -774,4 +600,58 @@ export function PeopleDevicesPanel({
       )}
     </div>
   );
+}
+
+const IDENTITY_SKELETON_ROWS = 3;
+
+/**
+ * The People and Devices tab around its panel (#2997): the one state it shows before the directory
+ * is there, or the panel itself. An unpaired device shows one line, since the pairing banner is the
+ * next step; a lost connection keeps the last lists, dimmed, under Reconnecting… (§12.5).
+ */
+export function PeopleDevicesTab({
+  identity,
+  identityError,
+  offline,
+  onIdentityChange,
+  onRetry,
+}: {
+  identity: IdentityAdministrationView | null;
+  identityError: string | null;
+  offline: boolean;
+  onIdentityChange: (identity: IdentityAdministrationView) => void;
+  onRetry: () => void;
+}) {
+  // As the shell's pairing banner does: latched by the refusal, through the background retries'
+  // connecting and offline states, until a connection succeeds.
+  const pairing = useOptionalStoreSelector((state) => state.authRequired && state.conn !== "online");
+  if (pairing) {
+    return <State variant="offline" className="access-state">People and devices load after this device is paired.</State>;
+  }
+  if (identity) {
+    // The panel stays mounted through a disconnect, so its last device list and reveals survive it.
+    return (
+      <>
+        {offline && <State variant="offline" className="access-state">Reconnecting…</State>}
+        <StaleContent stale={offline}>
+          <PeopleDevicesPanel identity={identity} onIdentityChange={onIdentityChange} offline={offline} />
+        </StaleContent>
+      </>
+    );
+  }
+  if (offline) return <State variant="offline" className="access-state">Reconnecting…</State>;
+  if (identityError) {
+    return (
+      <Notice
+        tone="danger"
+        role="alert"
+        title="Couldn't Load People and Devices"
+        actions={<button type="button" className="btn sm" onClick={onRetry}>Retry</button>}
+        details={identityError}
+      >
+        Wollipog didn't get the list of people and devices.
+      </Notice>
+    );
+  }
+  return <AccessSkeleton rows={IDENTITY_SKELETON_ROWS} announcement="Loading people and devices…" />;
 }

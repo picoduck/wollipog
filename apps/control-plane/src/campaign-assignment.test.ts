@@ -54,7 +54,8 @@ test("Full Control describes the exact boundary and effective owners without cre
   assert.match(text, /native reviewer subprocess outside Session accounting/);
   assert.match(text, /not charged to that allowance/);
   assert.match(text, /actual raw cost, including invalid attempts/);
-  assert.match(text, /actual registered audited profile/);
+  assert.match(text, /review bridge and campaign review jobs are retired/);
+  assert.match(text, /without a native fallback/);
   assert.match(text, /Never update or restart the hosting stack/);
   assert.match(text, /one-shot runner permission completes consumption/);
   assert.match(text, /merge-group CI passes and the forge reports actual MERGED state/);
@@ -92,4 +93,14 @@ test("unsupported or stale authority names human fallback rather than a consumab
   assert.match(text, /campaign_issue_scope=human, issue_closure=human/);
   assert.match(text, /Category owners are guidance, not action grants/);
   assert.match(text, /authorityEvaluation of each exact typed occurrence/);
+});
+
+test("modern assignments describe fixed review fields and legacy policies retain their prior prompt", () => {
+  const campaign = fixture();
+  Object.assign(campaign.orchestratorPolicy.behavior, { reviewHarness: "codex", reviewModel: "gpt-review", reviewEffort: "high", reviewRoundBudget: 2 });
+  const modern = formatCampaignAssignment(campaign, humanProjection, { supported: true }, "Task");
+  assert.match(modern, /Review Harness codex; Review Model gpt-review; Review Effort high; Review Round Budget 2/);
+  assert.match(modern, /Children snapshot review settings at launch/);
+  delete campaign.orchestratorPolicy.reviewPolicySnapshotVersion;
+  assert.doesNotMatch(formatCampaignAssignment(campaign, humanProjection, { supported: true }, "Task"), /Review Round Budget/);
 });

@@ -355,6 +355,30 @@ test("the empty Machines tab owns the create actions: three method rows for an o
   }
 });
 
+test("the Instances tab is a 960px page of rows whose header's one primary is Add Remote Instance…", async () => {
+  const opened: Parameters<InstanceManager["openInstanceDialog"]>[0][] = [];
+  const view = await mount({
+    instances: { ...multiInstance, openInstanceDialog(options) { opened.push(options); } },
+    view: { name: "runners", section: "instances" },
+  });
+  try {
+    const { body } = view;
+    assert.equal(body.querySelector(".page")?.className, "page", "the shared 960px page, as People and Devices");
+    const panel = body.querySelector("#connections-instances-panel")!;
+    assert.ok(panel.querySelector(":scope > .surface.instance-list"), "one surface of rows");
+    assertNoDomNode(panel.querySelector(".toolbar"), "no count toolbar: the tab carries the count");
+    const primary = header(body).querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(primary.textContent, "Add Remote Instance…");
+    assert.equal(body.querySelectorAll(".btn.primary").length, 1, "the page's only primary");
+    await act(async () => primary.click());
+    assert.equal(opened.length, 1);
+    assert.equal(opened[0]!.mode, "add");
+    assert.ok(opened[0]!.returnFocus === (primary as never), "the dialog returns focus to it");
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("on a phone there is no Instances tab, its route lands on Machines in place, and `+` opens the methods", async () => {
   await act(async () => domWindow.happyDOM.setWindowSize({ width: 390, height: 844 }));
   const view = await mount({ instances: multiInstance, view: { name: "runners", section: "instances" } });
@@ -365,6 +389,9 @@ test("on a phone there is no Instances tab, its route lands on Machines in place
     assert.ok(body.querySelector("#connections-machines-panel"));
     assert.deepEqual(view.replaced, [{ name: "runners", section: "machines" }], "a replace, so Back does not return to it");
     assert.deepEqual(view.pushed, []);
+    // None of the Instances tab renders: its rows, its panel or its header primary (#3002).
+    assertNoDomNode(body.querySelector("#connections-instances-panel, .instance-list, .instance-row"));
+    assert.doesNotMatch(header(body).textContent ?? "", /Add Remote Instance/);
     const plus = addMachine(body)!;
     assert.equal(plus.textContent, "Add Machine", "the `+` is named Add Machine");
     const sheet = await openAddMachine(body);

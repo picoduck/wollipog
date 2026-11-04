@@ -10,7 +10,7 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { DatabaseSync } from "node:sqlite";
 import { hashToken } from "./auth.js";
-import { ControlPlaneDb } from "./db.js";
+import { ATTACHED_DB_BUSY_TIMEOUT_MS, ControlPlaneDb } from "./db.js";
 import {
   LEGACY_POLICY_HOOK_POLL_CAPABILITY_HEADER,
   LEGACY_POLICY_HOOK_SESSION_HEADER,
@@ -162,7 +162,7 @@ test("real policy-hook route enforces the per-session credential, lifecycle, dri
   let hookChild: ChildProcess | null = null;
   try {
     await waitForHealth(port, () => logs);
-    const live = new DatabaseSync(database);
+    const live = new DatabaseSync(database, { timeout: ATTACHED_DB_BUSY_TIMEOUT_MS });
     live.prepare(
       "UPDATE sessions SET status=CASE WHEN id='session-idle' THEN 'idle' ELSE 'running' END",
     ).run();

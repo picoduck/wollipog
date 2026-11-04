@@ -1,7 +1,9 @@
+import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { randomUUID } from "node:crypto";
 import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
   CODEX_EXEC_RETIRED_REASON,
+  campaignStatusTerminal,
   isDurableSessionCommandErrorCode,
   isRetiredCodexExec,
   runnerSupportsProtocol,
@@ -22,6 +24,9 @@ export type RetryablePendingPrompt = {
   errorCode: "PROVIDER_AUTHENTICATION_REQUIRED" | "WORKTREE_RECOVERY_REQUIRED";
 };
 
+export const REVIEW_CONTINUATION_UNSUPPORTED_REASON =
+  "runner no longer supports question-preserving review continuations";
+
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
 const CAMPAIGN_HOLD_RECHECK_MS = 10_000;
@@ -39,6 +44,7 @@ export class SessionPromptOutbox {
     private readonly db: ControlPlaneDb,
     private readonly hub: Hub,
     private readonly log: Logger,
+    private readonly beforeFlush: (now: number) => void = () => {},
   ) {}
 
   stage(
@@ -133,6 +139,29 @@ export class SessionPromptOutbox {
     });
   }
 
+  /** Stage the command that carries a parked session's watch wake (#4071), bound to each watch it
+   * names in the same transaction. Throws, staging nothing, unless each is still held. */
+  stagePullRequestWatchWake(
+    watchIds: readonly string[],
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stagePullRequestWatchWake({
+      watchIds,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
+    });
+  }
+
   stageCampaignContinuation(input: {
     continuationId: string;
     campaignSessionId: string;
@@ -180,6 +209,7 @@ export class SessionPromptOutbox {
   }
 
   flush(now = Date.now(), runnerId?: string): number {
+    this.beforeFlush(now);
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;
@@ -234,7 +264,7 @@ export class SessionPromptOutbox {
             this.db.campaignContinuationAdmission(row.sessionId).state !== "available") ||
             (projection.status === "waiting_human" &&
             !this.db.campaignMayContinueWhileHumanWaiting(command.campaignContinuation.campaignSessionId)) ||
-            projection.status === "verified_complete") {
+            campaignStatusTerminal(projection.status)) {
           this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
           continue;
         }
@@ -244,7 +274,10 @@ export class SessionPromptOutbox {
         : command.type === "prompt_session" && command.campaignContinuation
           ? "campaignContinuations"
           : "durablePromptQueueIdentity";
-      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
+      const runner = this.db.getRunner(row.runnerId);
+      if (!runnerSupportsProtocol(runner?.protocolVersion, capability) ||
+          (command.type === "prompt_session" && command.reviewContinuation &&
+            !runnerSupportsReviewQuestionPreservation(runner))) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
           runnerId: row.runnerId,
@@ -255,7 +288,9 @@ export class SessionPromptOutbox {
             ? "runner no longer supports resumable structured-question answers"
             : command.type === "prompt_session" && command.campaignContinuation
               ? "runner no longer supports durable campaign continuations"
-              : "runner no longer supports durable queued prompt identity",
+              : command.type === "prompt_session" && command.reviewContinuation
+                ? REVIEW_CONTINUATION_UNSUPPORTED_REASON
+                : "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

@@ -306,10 +306,14 @@ export function MachineSettingsDialog({
         label: "Saved Account Not Found",
         description: "It's no longer on this machine. Choose another account.",
       }] : []),
-      ...candidates.map((account) => ({
+      // A profile only other control planes may use can't be saved as the default (#3240); one
+      // saved before stays listed, saying why.
+      ...candidates.filter((account) => account.profile?.access !== "not_granted" || account.id === savedId).map((account) => ({
         value: account.id,
         label: revealed ? account.label : titles[accounts.indexOf(account)]!,
-        description: accountStatusLabel(account.authStatus),
+        description: account.profile?.access === "not_granted"
+          ? "Its provider profile isn't granted to this control plane."
+          : accountStatusLabel(account.authStatus),
       })),
     ];
   };

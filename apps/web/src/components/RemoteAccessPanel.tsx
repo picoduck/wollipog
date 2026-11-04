@@ -9,7 +9,7 @@ import { BusyButton } from "./ui/BusyButton.js";
 import { ChoiceRows } from "./ui/ChoiceControls.js";
 import { ActionRow, SettingsGroup, ValueRow } from "./ui/SettingsRows.js";
 
-const PairDeviceDialog = lazy(() => import("./PeopleDevicesPanel.js").then((module) => ({ default: module.PairDeviceDialog })));
+const PairDeviceDialog = lazy(() => import("./PairDeviceDialog.js").then((module) => ({ default: module.PairDeviceDialog })));
 
 export function RemoteAccessPanel() {
   const api = useApi();

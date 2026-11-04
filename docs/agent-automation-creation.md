@@ -95,10 +95,19 @@ Creation does not reserve runner capacity, bypass governance or grant blanket
 approval for actions taken by scheduled sessions. Runtime admission and finite
 limits remain unchanged.
 
-An approved but unexecuted proposal currently remains in decision history after
-its execution deadline. It cannot create an automation, but can block session
-role conversion until a fresh proposal with the same resource key supersedes it
-or the session ends. Parent Control or campaign policy changes also conservatively
+Pending proposals and unexecuted approvals become terminal `revoked` decisions
+when their applicable deadline expires. The control plane retires them on startup,
+during periodic maintenance, and before inspection, role conversion and approval
+resume delivery, even if the requesting runner is offline. They no longer block
+role conversion. Configuration, approving identity, original approval time and
+audit history remain available; consumed creation receipts never expire.
+Card and audit settlement commits before notifications or workflow/pod lifecycle
+callbacks run. Owed lifecycle work survives restart; a failed expiration is retried
+without stopping unrelated prompt delivery. Expired approval resumes remain fenced
+even while cleanup is deferred.
+Held or unsent approval resumes are abandoned. Delivery already handed to a runner
+cannot be recalled; it is retained as uncertain without further control-plane retries,
+and the expired decision cannot authorize creation. Parent Control or campaign policy changes also conservatively
 revoke unconsumed proposals; request fresh human approval after those changes.
 
 Requires updated runner and control-plane components advertising

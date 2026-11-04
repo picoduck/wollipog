@@ -586,9 +586,10 @@ test("a colour-only rule clears AA on the fill its own element's base rule paint
   // Thirty-odd since #1802 folded the per-surface badge tone classes (`.st-running` and the rest)
   // into the status recipe, whose tones the paired check above measures one by one, and two fewer
   // since Set Up This Machine (#2993) dropped the local runner's ✓ and ! marks, and four fewer since
-  // the agent rows (#2990) dropped their per-driver `.atag` tints, and three fewer since Provider
-  // Accounts (#2995) retired the `.atag` chips themselves.
-  assert.ok(pairs.length >= 16,`expected many colour-only rules over a base fill, found ${pairs.length}`);
+  // the agent rows (#2990) dropped their per-driver `.atag` tints, three fewer since Provider
+  // Accounts (#2995) retired the `.atag` chips themselves, and one fewer since the Instances rows
+  // (#3002) retired the card's red `.instance-card-error` line for a danger notice.
+  assert.ok(pairs.length >= 15,`expected many colour-only rules over a base fill, found ${pairs.length}`);
   // Status inks over the fill their base rule paints, as the "Not Signed In" chip was (#1892).
   for (const chip of [".copy-btn.icon-only-copy.copy-status-copied", ".copy-btn.icon-only-copy.copy-status-failed"]) {
     assert.ok(pairs.some(({ selector }) => selector === chip), `${chip} must be measured over its base fill`);

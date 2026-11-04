@@ -4,13 +4,15 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
-  DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  DEFAULT_ORCHESTRATOR_DEFAULTS, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, pendingRequests,
+  RUNNER_CAPABILITY_MIN_PROTOCOL,
   type ControlPlaneToRunner, type RunnerMetadata, type RunnerToControlPlane,
 } from "@wollipog/protocol";
 import type { Driver, DriverCallbacks } from "../../runner/src/drivers/driver.js";
 import type { ProviderAuthRecoveryController } from "../../runner/src/provider-auth-recovery.js";
 import { SessionManager } from "../../runner/src/session-manager.js";
 import { SessionStore } from "../../runner/src/session-store.js";
+import { recoveryCoordinate } from "./campaign-recovery.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
@@ -336,6 +338,120 @@ test("an async credential question is dismissed at once and recorded as blocked 
   } finally { h.close(); }
 });
 
+/** The live shape of #2940's deadlock: a root that has just requested its own typed decision asks
+ * the person to approve it. The pending decision once blocked the standing response, leaving an
+ * Orchestrator-owned question only the parked root itself could answer. */
+for (const ownDecisionPending of [true, false]) {
+  test(`a Full Control root's own question is dismissed at once with guidance, never answered for it or left waiting${ownDecisionPending ? " (own typed decision pending)" : ""}`, async () => {
+    const h = bridge();
+    try {
+      assert.ok(h.enable().ok);
+      const toRunner: ControlPlaneToRunner[] = [];
+      const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+      (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+      if (ownDecisionPending) {
+        const own = h.svc.createWorkflowDecision("root", { requestId: "own-question", resourceKey: "own-question", resourceSnapshot: {
+          category: "implementation_question", question: "Which layout should the status page use?",
+          options: [{ optionId: "stacked", label: "Stacked" }, { optionId: "split", label: "Split" }] } });
+        assert.ok(own.ok, own.error ?? "own decision");
+        assert.equal(own.data!.authority, "orchestrator");
+        assert.equal(own.data!.status, "pending");
+        assert.ok(JSON.stringify(h.db.getSession("root")!.pendingApproval).includes(own.data!.occurrenceId), "the root holds its own pending typed decision");
+      }
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: "ask-person", occurrenceId: "request_ask_person",
+        requestSource: "provider_question", questions: [{ id: "close", header: "Close #2940", question: "Close #2940 as completed? Approve it in Campaign Status, then pick an option.",
+          options: [{ label: "Approved in Wollipog", description: "I approved the pending closure" }, { label: "Leave it open" }] }] });
+      for (let index = 0; index < 4; index += 1) await tick();
+
+      const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+      assert.deepEqual(answers.map((message) => [message.requestId, message.action]), [["ask-person", "dismiss"]],
+        "the server dismisses it once and never submits an option such as 'Approved in Wollipog'");
+      const root = h.db.getSession("root")!;
+      assert.ok(!JSON.stringify(root.pendingApproval ?? null).includes("ask-person"), "the question is no longer pending");
+      // What stays pending is only the root's own typed decision, which it resolves itself.
+      assert.deepEqual(pendingRequests(root.pendingApproval).map((request) => request.kind), ownDecisionPending ? ["workflow_decision"] : []);
+      if (!ownDecisionPending) assert.notEqual(root.status, "input_required");
+      const records = h.db.campaignProjection("root")!.recovery!.records;
+      assert.equal(records.filter((record) => record.action === "answer_request" && record.state !== "resolved" && record.resource.sessionId === "root" &&
+        record.resource.occurrenceId === recoveryCoordinate("request_ask_person")).length, 0, "no Orchestrator-owned request the root would wait on");
+      assert.equal(records.filter((record) => record.reason === "request_declined").length, 0, "a root's own question is not blocked work");
+      assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0, "the person is never asked");
+      const guidance = toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" && message.text === FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE);
+      assert.equal(guidance.length, 1, "the root is told nobody saw the question and how to decide it");
+      if (!ownDecisionPending) {
+        assert.notEqual(h.db.campaignContinuationAdmission("root").reason,
+          "Automatic continuation is held by the campaign's current lifecycle or pending recovery.", "the question no longer holds the campaign");
+      }
+    } finally { h.close(); }
+  });
+}
+
+for (const runnerProtocol of [PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlResponseAttribution - 1]) {
+  const current = runnerProtocol >= RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlResponseAttribution;
+  test(`a v${runnerProtocol} runner ${current ? "gets the Full Control attribution on every root question dismissal" : "keeps today's dismissal and the notice"} (#4063)`, async () => {
+    const h = bridge(undefined, 0, runnerProtocol);
+    try {
+      assert.ok(h.enable().ok);
+      const toRunner: ControlPlaneToRunner[] = [];
+      const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+      (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+      for (const index of [1, 2]) {
+        h.svc.onSessionEvent("root", { kind: "question_request", requestId: `ask-${index}`, occurrenceId: `request_ask_${index}`,
+          requestSource: "provider_question", questions: [{ id: "close", question: `Close #2940? (attempt ${index})`,
+            options: [{ label: "Approved in Wollipog" }, { label: "Leave it open" }] }] });
+        for (let tickIndex = 0; tickIndex < 4; tickIndex += 1) await tick();
+      }
+      const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+      assert.deepEqual(answers.map((message) => [message.requestId, message.action, message.automaticResponse]),
+        [1, 2].map((index) => [`ask-${index}`, "dismiss", current ? { policy: "full_control", basis: "root_questions" } : undefined]),
+        "a second question in the same revision is attributed too; an older runner is never sent the field");
+      assert.equal(toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" &&
+        message.text === FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE).length, 1,
+      "the existing (v281 owner-route) notice still arrives once per revision");
+    } finally { h.close(); }
+  });
+}
+
+test("a person's dismissal of a child question carries no Full Control attribution (#4063)", () => {
+  const h = bridge();
+  try {
+    const toRunner: ControlPlaneToRunner[] = [];
+    const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+    (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+    h.svc.onSessionEvent("child", { kind: "question_request", requestId: "person-ask", occurrenceId: "person_ask",
+      requestSource: "provider_question", questions: [{ id: "layout", question: "Stacked or split?", options: [{ label: "Stacked" }, { label: "Split" }] }] });
+    assert.ok(h.svc.answerQuestion("child", "person-ask", {}, { kind: "human", id: "owner" }, "dismiss", undefined, "person_ask").ok);
+    const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+    assert.deepEqual(answers.map((message) => [message.requestId, message.action, message.automaticResponse]), [["person-ask", "dismiss", undefined]]);
+  } finally { h.close(); }
+});
+
+test("a Full Control root that keeps asking gets every question dismissed but one guidance notice per policy revision (CR-1.1)", async () => {
+  const h = bridge();
+  try {
+    assert.ok(h.enable().ok);
+    const toRunner: ControlPlaneToRunner[] = [];
+    const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+    (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+    const guidance = () => toRunner.filter((message) => message.type === "prompt_session" && message.sessionId === "root" &&
+      message.text === FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE).length;
+    // A root answering each notice with a fresh question: distinct request and occurrence ids.
+    for (const index of [1, 2, 3]) {
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: `ask-${index}`, occurrenceId: `request_ask_${index}`,
+        requestSource: "provider_question", questions: [{ id: "close", question: `Close #2940? (attempt ${index})`,
+          options: [{ label: "Approved in Wollipog (Recommended)" }, { label: "Leave it open" }] }] });
+      for (let tickIndex = 0; tickIndex < 4; tickIndex += 1) await tick();
+    }
+    const answers = toRunner.filter((message) => message.type === "answer_question") as Array<Extract<ControlPlaneToRunner, { type: "answer_question" }>>;
+    assert.deepEqual(answers.map((message) => [message.requestId, message.action, Object.keys(message.answers).length]),
+      [["ask-1", "dismiss", 0], ["ask-2", "dismiss", 0], ["ask-3", "dismiss", 0]], "every question is dismissed and no option is ever applied");
+    assert.equal(pendingRequests(h.db.getSession("root")!.pendingApproval).length, 0);
+    assert.equal(guidance(), 1, "the notice is bounded, so repeated questions cannot drive a wake-up loop");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 0,
+      "bounding the notice does not turn the root's questions into blocked work");
+  } finally { h.close(); }
+});
+
 test("a queued ordinary hook ask promoted after a person resolves the gate ahead of it gets the standing decline", () => {
   const h = bridge();
   try {
@@ -366,4 +482,26 @@ test("a queued ordinary hook ask promoted after a person resolves the gate ahead
     assert.ok(!h.declinesSent().length, "a hook ask is settled server-side, with no runner round trip");
     assert.ok(!h.fromRunner.some((message) => message.type === "session_event" && message.payload.kind === "user_message"), "no root model turn");
   } finally { h.close(); }
+});
+
+test("the dismissal notice names the owner-decision route only for a root runner that has it (#4064)", async () => {
+  for (const [runnerProtocol, expected] of [[PROTOCOL_VERSION, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE],
+    [280, FULL_CONTROL_ROOT_QUESTION_MESSAGE]] as const) {
+    const h = bridge(undefined, 0, runnerProtocol);
+    try {
+      assert.ok(h.enable().ok);
+      const toRunner: ControlPlaneToRunner[] = [];
+      const deliver = (h.svc as unknown as { hub: Hub }).hub.sendToRunner;
+      (h.svc as unknown as { hub: Hub }).hub.sendToRunner = (runnerId, message) => { toRunner.push(message); return deliver.call(null, runnerId, message); };
+      h.svc.onSessionEvent("root", { kind: "question_request", requestId: "kept", occurrenceId: "request_kept", requestSource: "provider_question",
+        questions: [{ id: "merge", question: "Do you consent to merging the pull request with its acknowledged risk?",
+          options: [{ label: "Merge" }, { label: "Wait" }] }] });
+      for (let index = 0; index < 4; index += 1) await tick();
+      const notices = toRunner.flatMap((message) => message.type === "prompt_session" && message.sessionId === "root" ? [message.text] : []);
+      assert.deepEqual(notices, [expected], `runner v${runnerProtocol}`);
+    } finally { h.close(); }
+  }
+  assert.match(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, /request_owner_decision/u);
+  assert.match(FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, /hand_workflow_decision_to_owner/u);
+  assert.doesNotMatch(FULL_CONTROL_ROOT_QUESTION_MESSAGE, /request_owner_decision/u);
 });

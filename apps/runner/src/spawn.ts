@@ -28,7 +28,7 @@ import {
   WORKTREE_DESCENDANT_MARKER_ENV,
 } from "./posix-process-tree.js";
 import { currentProviderHomeRunnerMarker, PROVIDER_HOME_RUNNER_MARKER_ENV } from "./provider-home-lease-evidence.js";
-import { spawnWithLinuxCgroup, type LinuxCgroupBoundary } from "./linux-cgroup.js";
+import { spawnWithLinuxCgroup, type LinuxCgroupBoundary, type LinuxCgroupGroup } from "./linux-cgroup.js";
 import { quoteWindowsCmdToken } from "./windows-cmd.js";
 import {
   attachWslAgentControlBroker,
@@ -72,6 +72,22 @@ const RUNNER_ONLY_ENV = [
 
 function inheritedEnvironmentScrub(names: readonly string[] = []): string[] {
   return [...new Set([...RUNNER_ONLY_ENV, ...names])];
+}
+
+/** Layer a provider's environment, later layers winning (#3858). Windows names match in any case,
+ * so there a later spelling replaces an earlier one: left side by side, Node would keep only the
+ * lexicographically first, and a runner's `CODEX_HOME` would shadow a configured `codex_home`
+ * that the provider-HOME lease (`providerHomeLeaseEnv`) correctly reads as the launch's. */
+export function layerLaunchEnvironment(
+  layers: readonly Readonly<Record<string, string | undefined>>[],
+  platform: NodeJS.Platform = process.platform,
+): NodeJS.ProcessEnv {
+  if (platform !== "win32") return Object.assign({}, ...layers) as NodeJS.ProcessEnv;
+  const merged = new Map<string, [string, string | undefined]>();
+  for (const layer of layers) {
+    for (const [key, value] of Object.entries(layer)) merged.set(key.toUpperCase(), [key, value]);
+  }
+  return Object.fromEntries(merged.values());
 }
 
 function withoutRunnerOnlyEnv(env: Record<string, string> | undefined): Record<string, string> {
@@ -744,16 +760,14 @@ export function spawnAgent(opts: SpawnAgentOptions): AgentProcess {
   // #3241: a provider-HOME lease's lifecycle evidence is this runner's marker; an explicit
   // environment must not drop or replace it.
   const leaseRunnerMarker = currentProviderHomeRunnerMarker();
-  const launchEnv: NodeJS.ProcessEnv = {
-    ...inherited,
-    ...explicitEnv,
-    ...isolationEnv,
-    ...(leaseRunnerMarker ? { [PROVIDER_HOME_RUNNER_MARKER_ENV]: leaseRunnerMarker } : {}),
-    ...(descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {}),
-    ...(worktreeDescendantMarker
-      ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker }
-      : {}),
-  };
+  const launchEnv = layerLaunchEnvironment([
+    inherited,
+    explicitEnv,
+    isolationEnv,
+    leaseRunnerMarker ? { [PROVIDER_HOME_RUNNER_MARKER_ENV]: leaseRunnerMarker } : {},
+    descendantMarker ? { [DESCENDANT_MARKER_ENV]: descendantMarker } : {},
+    worktreeDescendantMarker ? { [WORKTREE_DESCENDANT_MARKER_ENV]: worktreeDescendantMarker } : {},
+  ]);
   if (opts.claudeNamespaceProvider && opts.isolation?.backend === "bwrap" &&
       opts.context?.kind !== "wsl" && opts.descendantOwner) {
     return spawnClaudeNamespaceProvider(
@@ -946,8 +960,15 @@ export class ProviderProcessLedger {
   private readonly observations = new Set<Promise<boolean>>();
   private readonly namespaceFor: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined;
 
-  constructor(options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined } = {}) {
+  constructor(private readonly options: { namespaceFor?: (child: AgentProcess) => ClaudeNamespaceLifetime | undefined; cgroup?: LinuxCgroupGroup } = {}) {
     this.namespaceFor = options.namespaceFor ?? claudeNamespaceFor;
+  }
+
+  /** Enter the writer's durable parent before spawning, never after a child can execute. */
+  launch(spawn: typeof spawnAgent, options: SpawnAgentOptions): AgentProcess {
+    this.assertOpen();
+    const work = () => this.record(spawn(options));
+    return this.options.cgroup ? this.options.cgroup.run(work) : work();
   }
 
   /** Throws once the instance has ended; call before every spawn. */
@@ -1019,7 +1040,8 @@ export class ProviderProcessLedger {
       this.observations.delete(proof);
     });
     try {
-      return await work({ onProcess: (process) => { processes.push(process.catch(() => false)); } });
+      const run = () => work({ onProcess: (process: Promise<boolean>) => { processes.push(process.catch(() => false)); } });
+      return await (this.options.cgroup ? this.options.cgroup.run(run) : run());
     } finally { finish(); }
   }
 

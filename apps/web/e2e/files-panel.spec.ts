@@ -108,10 +108,41 @@ test.describe("at 400px", () => {
     await expect(goToFile(page)).toBeFocused();
   });
 
-  test("a truncated search says so", async ({ page }) => {
-    await open(page, "?truncated=1");
+  test("a managed worktree is named by its workspace, with the folder's full path as the first crumb's tooltip (#3037)", async ({ page }) => {
+    await open(page, "?worktree=managed");
+    const root = page.locator(".crumbs .crumb").first();
+    await expect(root).toHaveText("acme-storefront");
+    await expect(root).toHaveAttribute("title", "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_8c41d2");
+    await expect(page.locator("#right-panel")).not.toContainText("s_8c41d2");
     await goToFile(page).fill("check");
-    await expect(page.locator(".files-goto-count")).toHaveText("Showing the first matches only. Type more to narrow them.");
+    await expect(page.locator(".files-goto-count")).toHaveText("5 matches in acme-storefront");
+    await goToFile(page).fill("zzz");
+    await expect(page.getByText("Nothing in acme-storefront matches that name.")).toBeVisible();
+  });
+
+  test("a truncated search says which cap cut it", async ({ page }) => {
+    for (const [query, label] of [
+      ["?truncated=1", "Showing the best matches only. Type more to narrow them."],
+      ["?truncated=entries", "The workspace is too large to search in full, so some files may be missing."],
+      ["?truncated=1&runner=old", "Showing the first matches only. Type more to narrow them."],
+    ]) {
+      await open(page, query);
+      await goToFile(page).fill("check");
+      await expect(page.locator(".files-goto-count")).toHaveText(label!);
+    }
+  });
+
+  test("Go to File finds a file from scattered letters and opens the top match on Enter (#1263)", async ({ page }) => {
+    await open(page);
+    await goToFile(page).fill("sdtsx");
+    const options = page.getByRole("option");
+    // The strong name match leads; the changed file's scattered s…d…tsx does not lift it above.
+    await expect(options).toHaveCount(2);
+    await expect(options.first()).toHaveAttribute("title", "apps/web/src/components/SessionDetail.tsx");
+    await expect(options.first().locator(".files-goto-name .files-goto-match")).toHaveText(["S", "D", "tsx"]);
+    await expect(options.nth(1)).toHaveAttribute("title", "apps/web/src/components/CheckBadge.tsx");
+    await goToFile(page).press("Enter");
+    await expect(page.locator(".crumbs .crumb.is-current")).toHaveText("SessionDetail.tsx");
   });
 
   test("an empty folder offers the way up", async ({ page }) => {

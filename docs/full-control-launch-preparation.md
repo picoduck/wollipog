@@ -1,5 +1,11 @@
 # Full Control Launch Preparation
 
+Native code-review profile details below describe the historical launch schema. Protocol 254
+retires those jobs; campaign members use their own review sessions with managed Session accounting.
+Existing human grants retain their restrictions until a person replaces the obsolete boundary.
+The legacy launch-profile UI/schema needs a separate migration; its fields cannot establish
+native-review readiness. See [Retired Review Jobs](agent-control.md#retired-review-jobs).
+
 Issue #2940 offers Custom and Full Control in Orchestrator defaults, New Session, and active
 Orchestrator Controls. Full Control launches exactly like a Custom Orchestrator session: choose
 it in Orchestrator Policy, press the same Create Session, and write the first message in the
@@ -19,7 +25,8 @@ campaign budget. Neither grants authority, and older settings APIs refuse saving
 no saved campaign budget, the campaign has no limit.
 
 The Full Control boundary owns every operation it lists, so the Custom per-decision owners never
-apply under it, whatever their toggles say (Review Round Extensions follow Parent Control, #3369).
+apply under it, whatever their toggles say. Review Round Extensions follow a Parent Control grant,
+and otherwise Full Control owns them only within its per-pull-request cap (#4075 changed #3369).
 When Full Control is chosen or in effect, Orchestrator Controls shows only the mode, its line, any
 inline blocker, and Enable Full Control or Revoke. Child Session Requests, Workflow Decisions, the
 evidence and retention notes, and Campaign Behavior return when Custom is chosen. On the
@@ -41,18 +48,84 @@ only) establishes the boundary before the Orchestrator's first turn:
   text: a slash command or image-only message is refused, so that the task is stated.
 - The objective is the message, normalized to one line and bounded to 4000 characters. The
   boundary records the SHA-256 digest of the exact message text (`messageDigest`).
-- The issue scope is the message's references to the campaign's own repository (`#123`,
-  `owner/repo#123`, `https://github.com/owner/repo/issues/123`). References to other repositories
-  and pull request URLs are ignored. The runner then reads each reference, and only verified
-  issues are kept: a pull request, a missing issue, or an unreadable origin leaves that reference
-  out. With none, the scope stays task-only.
+- The issue scope is the references to the campaign's own repository (`#123`, `owner/repo#123`,
+  `https://github.com/owner/repo/issues/123`, or a GitLab project's
+  `https://<host>/<project>/-/issues/123`) that the message asks the campaign to act on (#3920,
+  `firstMessageIssueIntent`). References to other repositories and pull or merge request URLs are
+  ignored. The message is split into sentences, and each sentence into clauses: at subordinating,
+  contrasting and sequencing words (`but`, `without`, `except`, `because`, `which`, `before`,
+  `so` and the like), at a dash, at `, not`, and at `and`, `or`, `then`, `also` or `plus` when a
+  word rather than another reference follows. A reference is a request only in a clause that asks
+  for action (deliver, implement, fix, close, claim, resolve, address, finish, ship, land, tackle,
+  solve, handle, orchestrate, work on, take on, pick up) and carries no background or negation
+  cue. Everything else is context: a reference in parentheses, brackets or inline code (a
+  citation), one in a background clause ("see", "related to", "known cause", "acceptance test
+  for", "handled elsewhere", "duplicate of", past tense such as "fixed" or "closed"), one in a
+  negated clause ("not", "don't touch", "never", "without", "leave"), including a negation inside
+  parentheses, and one whose intent is unclear (no request at all, or a clause mixing a request
+  with a background or negation cue). Negation also covers rejected alternatives ("instead of",
+  "rather than", "other than", "apart from") and stopping or putting off work ("stop", "pause",
+  "defer", "postpone", "hold off"), and it reaches every later clause of its sentence, so "Do not
+  fix #1 or close #2" withholds both. Quoted words (`"…"`, `“…”`, a `>` blockquote line) and work
+  assigned to someone else ("someone else", "another campaign", "other teams") are background. A
+  question asks nothing unless it is phrased as a request ("Can you fix #5?", "Please …?"), so
+  "Should we fix #5?" leaves #5 as context. A citation grants nothing, and every negation around
+  it (its clause and sentence, a withholding lead, an enclosing parenthetical or quote) still
+  reaches its references: "Do not touch \"#2\"" withholds #2. A line ending in a colon leads what follows: a requesting
+  lead passes its request only to list items with no cue of their own, while a negated or
+  background lead governs every following list item, whatever verb the item uses, and plain lines
+  up to the next blank line. One negated occurrence keeps an issue out of scope even where another
+  clause asks for it; a background occurrence does not. An
+  epic named as the target is scope like any other issue, so it is an authorized epic and its
+  verified members can be added through epic lineage. When in doubt a reference is context, never
+  scope. Classification runs in linear time and is bounded: a message longer than 64 KiB, or with
+  more than 1000 reference occurrences, scopes nothing and keeps every reference as context, since
+  truncating it could drop a negation.
+- A range of short references names every issue from its first end to its last (#4061): `#A–#B`,
+  `#A-#B`, `#A—#B`, `#A..#B`, `#A to #B` and `#A through #B`, with or without spaces, on one line.
+  It is one reference, so the clause holding its first end governs every issue in it: "Implement
+  epic #40: units #41–#48" scopes #40 through #48, while "not #41–#48" or "see #41–#48" withholds
+  all eight. A range is bounded. One that is wider than 100 issues, or whose first end is not below
+  its last (`#9–#5`, `#5–#5`), names nothing: only its two endpoints are recorded, as context. If
+  the expanded ranges would take the message past 100 distinct issues (or past 1000 expanded
+  occurrences), no range in it expands, and each one's endpoints are context. A chain such as
+  `#1–#3–#5` or `#1 – #3 to #5`, spaced or not and whatever its separators, is no range: each
+  reference stands alone, so no issue between them is ever scoped. Expansion depends only on the text, and the
+  runner still verifies every issue a range names, so a pull request or missing issue inside one
+  drops out like any other unverified reference.
+- The runner then reads every reference, requested or context, and only verified issues are kept:
+  a pull request, a missing issue, or an unreadable origin leaves that reference out. With no
+  verified requested issue, the scope stays task-only. Verified context references, and requested
+  issues an explicit Maximum Issues left out, are recorded on the first-message record
+  (`firstMessageScope.contextIssueNumbers`), disjoint from the scope. They grant nothing: they are
+  never in the scope or `issueAuthority.epics`.
+- After launch, Campaign Status's Authorized Issue Scope shows the derived scope as Authorized
+  Issues and the context references as Context-Only References (less any the scope has since
+  added). Nothing new is asked before launch. The owner can select a context reference and remove
+  a derived issue through the existing scope controls, Request Scope Approval, which opens the
+  ordinary scope review. Every approved scope change, whoever approves it, narrows
+  `issueAuthority.epics` to the issues the new scope still holds, so a removed issue is no longer an
+  authorized epic and its members can no longer be added by lineage. A promoted issue joins the
+  scope only; it does not become an epic. Boundaries established before #3920 keep the scope they
+  were given; only new first messages use this derivation.
 - The next issue-scope revision, and the boundary revision that names it, commit together in one
   compare-and-set on the policy revision (`establishFirstMessageScope`). Every authorization
   (launch, enable or a later reauthorization) records which limits it derived (`derivedLimits`, no
-  Human override), replacing any earlier record. Only a derived Accepted Follow-Ups or
-  Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
+  Human override), replacing any earlier record. Only a derived Follow-Ups Without Approval (the
+  follow-up limit: past it, each follow-up waits for the person's approval) or Maximum Issues grows to what a launch naming those issues derives, and never shrinks. An
   explicit ceiling never changes, and an explicit Maximum Issues bounds how many referenced issues
   enter the scope. Operations, policy asks, evidence and cost or tool ceilings are unchanged.
+- A derived Maximum Issues also leaves room for target epics' members (#4061). A target epic is a
+  scoped `#N` or issue URL written right after the word "epic" ("Implement epic #40"); a message
+  naming more than five names none. The runner reads each one's sub-issues and member checklist,
+  as an epic-lineage scope addition does, and every verified member outside the scope adds one
+  slot, up to the 100-issue ceiling, so the Orchestrator's later epic-lineage addition of them is
+  admitted. Members add no follow-ups, an epic the runner can't read in full adds no room, and an
+  explicit Maximum Issues never grows.
+- When an Orchestrator's own scope change would exceed the limit, the refusal (`capacity_exhausted`,
+  with the effective `limit` and the `requested` count) names Maximum Issues and the owner's route:
+  only the person who authorized Full Control can raise it, by raising the Follow-Up Limit in
+  Campaign Status (which raises Maximum Issues by as much) or choosing No Limit.
 - The scope and boundary are synchronized to the runner (`campaign_issue_scope synchronize`)
   before the message is delivered. A runner that misses the update keeps its older revision, which
   authorizes no issue write, and every issue operation synchronizes again before it acts.
@@ -136,8 +209,8 @@ derives everything else:
   task (or the issue list); the root installation defaults to the controlled reviewer's Claude
   Code installation, else the first available native Claude Code or Codex App Server one, and
   the root joins the workspace's Project.
-- Concurrency from `behavior.maximumConcurrentChildren`; accepted follow-ups from the saved
-  follow-up policy (none for Recommend Only); closure reasons default to completed. Each of the
+- Concurrency from `behavior.maximumConcurrentChildren`; Follow-Ups Without Approval (the follow-up
+  limit, an approval threshold since #3826) from the saved follow-up policy (none for Recommend Only); closure reasons default to completed. Each of the
   cost and tool-call ceilings is this request's override, else the Human's saved Full Control
   campaign budget (`campaignBudget` in Orchestrator defaults; omitted by older clients, cleared by
   `null`), else absent. An absent ceiling is a first-class "no limit" state, never a fake large
@@ -205,9 +278,9 @@ Enabling requires the exact reviewed digest, which also binds the campaign and i
 revision. It then runs the existing `setCampaignControl` operation. Revoke keeps using the ordinary
 control endpoint.
 
-In a campaign whose allowance includes controlled review, child creation refuses a resolved
-cost or tool-call ceiling (Orchestrator-supplied or from Project child-session defaults) with an
-actionable reason. Every admitted child therefore stays admissible for its required review.
+In a campaign retaining an obsolete controlled-review boundary, child creation still refuses a
+resolved cost or tool-call ceiling (Orchestrator-supplied or from Project child-session defaults).
+The reason requires human replacement of that boundary; it does not claim native-review admission.
 
 The paced-media evidence envelope (`evidenceAuthority`) is minted by the same launch only when
 every peer declares the private media contract. The hosting control plane supplies its disclosures:

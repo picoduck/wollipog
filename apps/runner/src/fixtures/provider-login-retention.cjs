@@ -10,7 +10,7 @@ async function main() {
   const root = process.argv[2];
   assert.ok(root, "an isolated synthetic root is required");
   const configPath = join(root, "runner.json");
-  writeFileSync(configPath, JSON.stringify({ runnerId: "synthetic", untouched: true }));
+  writeFileSync(configPath, JSON.stringify({ runnerId: "synthetic", untouched: true }), { mode: 0o600 });
   const accounts = [];
   let child;
   let releases = 0;
@@ -49,6 +49,7 @@ async function main() {
   mkdirSync(removed);
   writeFileSync(join(removed, "auth.json"), "synthetic configured credentials");
   accounts.push({ id: "removed", label: "Removed", provider: "codex", directory: removed });
+  writeFileSync(configPath, JSON.stringify({ runnerId: "synthetic", untouched: true, providerAccounts: accounts }), { mode: 0o600 });
   assert.deepEqual(await supervisor.removeAccount("removed"), { credentialsRetained: true });
   assert.equal(readFileSync(join(removed, "auth.json"), "utf8"), "synthetic configured credentials");
   assert.equal(accounts.some((account) => account.id === "removed"), false);

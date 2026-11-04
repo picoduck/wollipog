@@ -116,6 +116,56 @@ test("a rejected code is a field error under the field, with the field invalid a
   }
 });
 
+test("the embedded sign-in's code field never puts the code in the DOM: typed, rejected, failed or submitted (#3529)", async () => {
+  const submitted: string[] = [];
+  const replies: Array<() => never | undefined> = [
+    () => { throw new ApiError("The provider rejected this code. Paste the code the page shows.", 409); },
+    () => { throw new TypeError("Failed to fetch"); },
+    () => undefined,
+  ];
+  const view = await mount(<ProviderLoginCard runnerId="runner-1" login={login} embedded />, {
+    submitProviderLoginCode: async (_runnerId: string, _operationId: string, code: string) => {
+      submitted.push(code);
+      replies.shift()!();
+      return { login };
+    },
+  });
+  try {
+    const card = view.container.querySelector<HTMLElement>("article.provider-login-card")!;
+    assert.equal(card.dataset.embedded, "true");
+    const input = card.querySelector<HTMLInputElement>("input")!;
+    assert.equal(input.type, "password");
+    const submit = view.button("Submit Code");
+    assert.equal(submit.disabled, true, "nothing to submit yet");
+    await act(async () => fireDomEvent.change(input, { target: { value: "   " } }));
+    assert.equal(submit.disabled, true, "a whitespace-only field has nothing to submit");
+    await act(async () => fireDomEvent.change(input, { target: { value: "embedded-secret" } }));
+    assert.equal(submit.disabled, false);
+    assert.equal(input.getAttribute("value"), null, "the code is not a value attribute");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/, "a typed code is not in the DOM");
+
+    await act(async () => fireDomEvent.submit(card.querySelector("form")!));
+    await view.settle();
+    assert.equal(card.querySelector(".form-error")?.textContent, "The provider rejected this code. Paste the code the page shows.");
+    assert.equal(input.value, "embedded-secret", "a rejected code stays in the field to correct");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/, "a rejected code is not in the DOM");
+
+    await act(async () => fireDomEvent.submit(card.querySelector("form")!));
+    await view.settle();
+    assert.equal(card.querySelector(".form-error")?.textContent, "Failed to fetch");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/, "a code whose request failed is not in the DOM");
+
+    await act(async () => fireDomEvent.submit(card.querySelector("form")!));
+    await view.settle();
+    assert.deepEqual(submitted, ["embedded-secret", "embedded-secret", "embedded-secret"]);
+    assert.equal(input.value, "", "a submitted code is cleared");
+    assert.equal(submit.disabled, true, "nothing to submit after it");
+    assert.doesNotMatch(view.container.innerHTML, /embedded-secret/);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("a device-code sign-in shows the code with its copy button and the waiting line, with nothing to paste", async () => {
   const view = await mount(<ProviderSignIn runnerId="runner-1" login={device} />);
   try {
@@ -207,6 +257,61 @@ test("the duplicate-account ending is recognized by the runner's message, for ei
     error: "A Claude account with this label is already on this Machine. Use Sign In on that account to refresh its login." }), false,
     "a label clash refuses the start; it is not this ending");
   assert.equal(providerSignInAlreadyOnMachine({ status: "failed" }), false);
+});
+
+/** A runner sentence that no longer matches today's wording (#3519). */
+const REWORDED = "That Claude login belongs to an account this machine already has; nothing was added.";
+
+test("from v253 the duplicate-account ending is decided by its failure code, whatever the sentence says (#3519)", () => {
+  const code = "account_already_on_machine" as const;
+  assert.equal(providerSignInAlreadyOnMachine({ status: "failed", error: REWORDED, failureCode: code }), true,
+    "a reworded sentence with the code");
+  assert.equal(providerSignInAlreadyOnMachine({ status: "failed", failureCode: code }), true, "the code without a sentence");
+  assert.equal(providerSignInAlreadyOnMachine({ status: "failed", error: DUPLICATE, failureCode: code }), true);
+  assert.equal(providerSignInAlreadyOnMachine({ status: "timed_out", error: DUPLICATE, failureCode: code }), false,
+    "only a failed sign-in");
+  // Any other code is a plain failure, even beside today's sentence: the code decides when present.
+  for (const other of ["unrecognized", "provider_did_not_confirm", "", "Account_Already_On_Machine"]) {
+    assert.equal(providerSignInAlreadyOnMachine({ status: "failed", error: DUPLICATE,
+      failureCode: other as ProviderLoginView["failureCode"] }), false, JSON.stringify(other));
+  }
+  assert.equal(providerSignInAlreadyOnMachine({ status: "failed", error: REWORDED }), false,
+    "without the code a sentence that does not match is a plain failure");
+});
+
+test("a v253 duplicate-account ending with a reworded sentence still says Already on This Machine with Dismiss only (#3519)", async () => {
+  const view = await mount(
+    <ProviderSignIn runnerId="runner-1"
+      login={{ ...login, status: "failed", expectsCode: false, error: REWORDED, failureCode: "account_already_on_machine" }}
+      restart={{ provider: "claude", label: "Work Claude" }} />,
+  );
+  try {
+    const notice = view.container.querySelector<HTMLElement>(".notice")!;
+    assert.match(notice.className, /\bt-neutral\b/);
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Already on This Machine");
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "This Claude account is already on this machine, so Wollipog discarded the duplicate sign-in.");
+    assert.deepEqual(view.buttons(), ["Dismiss"], "trying again would reach the same account");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a failed sign-in with an unknown code is Sign-In Failed with Try Again, even beside today's sentence (#3519)", async () => {
+  const view = await mount(
+    <ProviderSignIn runnerId="runner-1"
+      login={{ ...login, status: "failed", expectsCode: false, error: DUPLICATE,
+        failureCode: "some_future_code" as ProviderLoginView["failureCode"] }}
+      restart={{ provider: "claude", label: "Work Claude" }} />,
+  );
+  try {
+    const notice = view.container.querySelector<HTMLElement>(".notice")!;
+    assert.match(notice.className, /\bt-danger\b/);
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Sign-In Failed");
+    assert.deepEqual(view.buttons(), ["Try Again", "Dismiss"]);
+  } finally {
+    await view.unmount();
+  }
 });
 
 test("a session's sign-in has no Dismiss, and without a restart there is no Try Again", async () => {

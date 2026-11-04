@@ -22,16 +22,18 @@ import { InstanceProvider, desktopMultiInstanceAvailable } from "./InstanceProvi
 import { ActiveInstanceConnectionProvider, activeInstanceConnection, useInstances } from "./instances-context.js";
 import { disablePush, enablePush, pushAvailable, reconcilePushSubscription, type PushSetting } from "./push.js";
 import { pickTopmost } from "./layers.js";
-import { useIsMobile } from "./components/useIsMobile.js";
+import { useIsCompact, useIsMobile } from "./components/useIsMobile.js";
 import { ViewerIdentityProvider } from "./components/ViewerIdentityProvider.js";
 import { EntityTitleProvider, reportedTitleFor, useEntityTitleState } from "./entity-title.js";
 import { GovernancePolicyNamesProvider } from "./components/GovernancePolicyNamesProvider.js";
 import { SessionPanelToggles } from "./components/SessionPanelToggles.js";
+import { SessionTypeIcon } from "./components/SessionTypeIcon.js";
 import { parseStoredDockVisible } from "./dock.js";
 import { isInboxBlocked } from "./inbox.js";
 import { sessionVisibleForReminderMode } from "./session-reminders.js";
 import { InboxView } from "./components/InboxView.js";
 import {
+  handleSidePanelChord,
   openGoToFile,
   openSideChat,
   terminalToolShowing,
@@ -48,7 +50,7 @@ import { closeGuardLinks } from "./desktop-close-guard.js";
 import { DesktopUpdateNotifier } from "./components/DesktopUpdateNotifier.js";
 import { useDesktopUpdateSetting } from "./desktop-updates.js";
 import { DesktopExternalLinkRouter } from "./components/DesktopExternalLinkRouter.js";
-import { useWindowTitle, windowDragRegion } from "./desktop-window.js";
+import { useWindowTitle } from "./desktop-window.js";
 import { ErrorBoundary } from "./components/ErrorBoundary.js";
 import { LazyDialogBoundary } from "./components/LazyDialogBoundary.js";
 import { LazyRouteFocusRecovery, LazyRouteLoading, routeFocusIsLost } from "./components/LazyRouteLoading.js";
@@ -80,7 +82,7 @@ import { OfflineBanner } from "./components/OfflineBanner.js";
 import { SecureDashboardNotice } from "./components/SecureDashboardNotice.js";
 import { PairingBanner } from "./components/PairingBanner.js";
 import { ChevronLeftIcon, KeyboardIcon, LockIcon, PlusIcon } from "./components/Icons.js";
-import { backLabel, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
+import { backLabel, viewDescription, viewHasHeaderTabs, viewPageWidth, viewPath, viewSubjectName, viewTitle } from "./navigation.js";
 import { sessionDisplayTitle } from "./session-title.js";
 import { routedSessionPlaceholder } from "./detail-placeholder.js";
 import { useRoutedSessionLookup } from "./routed-session-lookup.js";
@@ -96,8 +98,8 @@ import { handleSettingsNavigationKey } from "./settings-navigation.js";
 import { InstanceSelector } from "./components/InstanceSelector.js";
 import { RemoteInstanceBanner } from "./components/RemoteInstanceBanner.js";
 import { AppBarSearchProvider } from "./components/PageHeader.js";
-import { Rail, RailDragStrip } from "./components/Rail.js";
-import { InstancesPanel } from "./components/InstancesPanel.js";
+import { Rail } from "./components/Rail.js";
+import { InstanceRecoveryShell } from "./components/InstanceRecoveryShell.js";
 import { useNewSessionShortcut } from "./useNewSessionShortcut.js";
 import { useSessionsViewToggleKey } from "./useSessionsViewToggleKey.js";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
@@ -132,6 +134,7 @@ const UsageView = lazy(() => import("./components/UsageView.js").then((module) =
 const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
 const ProjectsView = lazy(() => import("./components/ProjectsView.js").then((module) => ({ default: module.ProjectsView })));
 const OrchestratorSettingsPanel = lazy(() => import("./components/OrchestratorSettingsPanel.js").then((module) => ({ default: module.OrchestratorSettingsPanel })));
+const ReviewSettingsPanel = lazy(() => import("./components/ReviewSettingsPanel.js").then((module) => ({ default: module.ReviewSettingsPanel })));
 const ShortcutReference = lazy(() => import("./components/ShortcutReference.js").then((module) => ({ default: module.ShortcutReference })));
 const CommandPalette = lazy(() => import("./components/CommandPalette.js").then((module) => ({ default: module.CommandPalette })));
 const AboutPanel = lazy(() => import("./components/SettingsView.js").then((module) => ({ default: module.AboutPanel })));
@@ -250,55 +253,6 @@ function CloseGuardSessionSource() {
     });
   }, [scope]);
   return null;
-}
-
-function InstanceRecoveryShell() {
-  const instances = useInstances();
-  const loading = instances.phase === "loading" || instances.phase === "opening";
-  useWindowTitle("Instances");
-  return (
-    <div className="app instance-recovery-app">
-      <aside className="instance-recovery-nav" aria-label="Instance Navigation">
-        <div className="brand">
-          <img className="brand-mark" src="/icons/icon-192.png" alt="" aria-hidden="true" />
-          <div className="brand-name">Wollipog</div>
-        </div>
-        <InstanceSelector labelled />
-        <RailDragStrip />
-      </aside>
-      <main className="main">
-        <header className="topbar" {...windowDragRegion()}><h1>Instances</h1></header>
-        <div className="main-body instance-recovery-body">
-          {loading ? (
-            <div className="instance-recovery-state" role="status" aria-live="polite">
-              <h2>{instances.phase === "loading" ? "Loading Instances" : `Connecting to ${instances.activeProfile.label}`}</h2>
-              <p>{instances.phase === "loading" ? "Loading saved Wollipog instances…" : "Opening a secure connection…"}</p>
-            </div>
-          ) : (
-            <>
-              <div className="instance-recovery-state" role={instances.phase === "missing" ? "alert" : "status"}>
-                <h2>{instances.phase === "missing" ? "Instance Not Found" : `${instances.activeProfile.label} Is Unavailable`}</h2>
-                <p>
-                  {instances.phase === "missing"
-                    ? "This saved instance no longer exists. Choose another instance before opening this resource."
-                    : instances.error ?? "Wollipog could not open this instance."}
-                </p>
-                <div className="toolbar-actions">
-                  {instances.phase !== "missing" && (
-                    <button type="button" className="btn primary" onClick={() => void instances.retryActive()}>Retry</button>
-                  )}
-                  {(instances.phase === "missing" || instances.activeProfile.id !== "local") && (
-                    <button type="button" className="btn" onClick={() => void instances.goToThisMachine()}>Go to This Machine</button>
-                  )}
-                </div>
-              </div>
-              <InstancesPanel />
-            </>
-          )}
-        </div>
-      </main>
-    </div>
-  );
 }
 
 function xtermOwnsKey(target: EventTarget | null): boolean {
@@ -433,6 +387,15 @@ export function Shell() {
     // The scalar route key is the trigger; panel callbacks are intentionally app-state methods.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [sourceLocationKey]);
+  // An artifact link (#3924) opens Browser → Artifacts on its artifact, again on each arrival.
+  const artifactsTarget = view.name === "session" ? view.artifacts : undefined;
+  const artifactsRouteKey = view.name === "session" && artifactsTarget
+    ? `${view.id}\0${artifactsTarget.artifactId ?? ""}\0${artifactsTarget.activationId ?? ""}`
+    : null;
+  useEffect(() => {
+    if (view.name === "session" && artifactsTarget) rightPanel.showArtifact?.(view.id, artifactsTarget.artifactId);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [artifactsRouteKey]);
 
   // Bottom terminal dock visibility (Codex layout: toggled, never an always-visible bar).
   // Migrates the legacy wollipog.shelldock.collapsed pref on first run.
@@ -505,6 +468,7 @@ export function Shell() {
   // props — so a session upsert anywhere re-renders every visible row despite the memo. Making the
   // callbacks stable in InboxList and InboxView was necessary and not sufficient.
   const isMobile = useIsMobile();
+  const isCompact = useIsCompact();
   const rightPanelOpen = rightPanel.open;
   const setRightPanelExpanded = rightPanel.setExpanded;
   const expandSession = useCallback((sessionId: string, focusComposer = false) => {
@@ -755,10 +719,6 @@ export function Shell() {
         if (filesSupported) openGoToFile(rightPanel);
         else rightPanel.show("launcher");
       }
-      if (matchesShortcut(e, "open-review")) {
-        e.preventDefault();
-        rightPanel.openMode("review");
-      }
       // Side Chat: opens the panel on it with focus in its message field, never closes it (#2862).
       if (matchesShortcut(e, "open-side-chat")) {
         e.preventDefault();
@@ -768,18 +728,9 @@ export function Shell() {
         e.preventDefault();
         toggleTerminal();
       }
-      // The Side Panel toggle's chord: closing keeps the tool, so it reopens on the last one (#1260).
-      // Opening lands on the tool switcher, so the arrow keys reach every other tool (#2843).
-      if (matchesShortcut(e, "toggle-side-panel") && activeSession) {
-        e.preventDefault();
-        const opening = !rightPanel.open;
-        rightPanel.toggle();
-        if (opening) {
-          window.requestAnimationFrame(() => {
-            document.querySelector<HTMLElement>("#right-panel .rpanel-switcher")?.focus();
-          });
-        }
-      }
+      // The Side Panel toggle, Review and the other tools' chords (#1260). Only a loaded session has
+      // a panel: a missing one's page is a placeholder (#2202).
+      if (activeSession) handleSidePanelChord(e, rightPanel);
     };
     window.addEventListener("keydown", onKey);
     return () => window.removeEventListener("keydown", onKey);
@@ -877,6 +828,7 @@ export function Shell() {
             sessionTitle={activeSession
               ? sessionDisplayTitle(activeSession.title) || "Session"
               : routedSessionPlaceholder(view.id, routedSessionLookup, conn, snapshotLoaded).title}
+            sessionType={activeSession ? <SessionTypeIcon session={activeSession} /> : null}
             onSessionBack={() => navigate(sessionsDestination(instanceScope))}
           />
         )}
@@ -885,7 +837,7 @@ export function Shell() {
         {authRequired && conn !== "online" ? (
           instances.activeProfile.kind === "remote"
             ? <RemoteInstanceBanner authenticationRequired />
-            : <PairingBanner connecting={conn === "connecting"} />
+            : <PairingBanner conn={conn} />
         ) : (
           offlineHeld && (
             instances.activeProfile.kind === "remote"
@@ -911,6 +863,9 @@ export function Shell() {
             resetKey={viewPath(view)}
             // The Session's own bar owns its title (the phone top bar sits outside this boundary).
             pageTitle={view.name === "session" ? undefined : viewTitle(view, entityTitle)}
+            pageDescription={viewDescription(view)}
+            pageTabs={viewHasHeaderTabs(view, { phone: isMobile, compact: isCompact })}
+            pageWidth={viewPageWidth(view)}
           >
           <Suspense fallback={<LazyRouteLoading title={viewTitle(view, entityTitle)} pending={pendingRouteTitleFocus} />}>
           <LazyRouteFocusRecovery path={path} pending={pendingRouteTitleFocus} />
@@ -945,20 +900,26 @@ export function Shell() {
           {/* A route into a feature this device has switched off keeps its page and says so:
               removing the branch entirely would make a bookmarked /runs a silent Inbox redirect. */}
           {(view.name === "runs" || view.name === "run") && (
-            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
+            <ExperimentGate experiment="multiAgent" pageTitle={viewTitle(view, entityTitle)} pageDescription={viewDescription(view)} onOpenSettings={openExperimentalSettings}>
               {view.name === "runs" ? <RunsView onNewRun={() => setDialog({ kind: "run" })} /> : <RunDetail runId={view.id} member={view.member} />}
             </ExperimentGate>
           )}
           {(view.name === "pods" || view.name === "pod") && (
-            <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} onOpenSettings={openExperimentalSettings}>
+            <ExperimentGate experiment="pods" pageTitle={viewTitle(view, entityTitle)} pageDescription={viewDescription(view)} onOpenSettings={openExperimentalSettings}>
               {view.name === "pods" ? <PodsView onNewPod={() => setDialog({ kind: "pod" })} /> : <PodDetail podId={view.id} member={view.member} onNewSession={() => setDialog({ kind: "session", preset: { worktree: true } })} />}
             </ExperimentGate>
           )}
           {view.name === "automations" && (view.editor ? <AutomationEditor key={viewPath(view)} route={view.editor} /> : <AutomationsView />)}
           {view.name === "automation" && <AutomationDetail key={view.id} automationId={view.id} />}
           {view.name === "skills" && <SkillsView route={view} />}
-          {view.name === "usage" && <UsageView />}
-          {view.name === "archived" && <ArchivedSessionsView />}
+          {view.name === "usage" && (
+            <UsageView
+              tab={view.tab}
+              onSelectTab={(tab) => navigate(tab ? { name: "usage", tab } : { name: "usage" })}
+              onOpenConnections={() => navigate({ name: "runners", section: "machines" })}
+            />
+          )}
+          {view.name === "archived" && <ArchivedSessionsView key={view.browseVisit?.activationId} restoreBrowse={view.browseVisit?.restore} initialSearch={view.archiveSearch} />}
           {view.name === "settings" && (
             <SettingsView
               section={view.section}
@@ -1003,6 +964,7 @@ export function Shell() {
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
                 orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
+                reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 storage: <><ArchivedHistoryRetentionPanel /><WorkflowEventRetentionPanel /></>,
                 experimental: (
@@ -1092,6 +1054,7 @@ export function Header({
   view,
   sessionActions,
   sessionTitle,
+  sessionType,
   onSessionBack,
 }: {
   view: View;
@@ -1099,6 +1062,8 @@ export function Header({
    * a row in the rail's More sheet, and the phone layout has no instance switcher (#1970). */
   sessionActions?: React.ReactNode;
   sessionTitle?: string;
+  /** The open session's `SessionTypeIcon`, before its title as on the desktop session bar (#4076). */
+  sessionType?: React.ReactNode;
   onSessionBack?: () => void;
 }) {
   const title = viewTitle(view);
@@ -1117,7 +1082,7 @@ export function Header({
           >
             <ChevronLeftIcon size={20} />
           </button>
-          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionTitle ?? title}</h1>
+          <h1 id="page-title" tabIndex={-1} title={sessionTitle}>{sessionType}{sessionTitle ?? title}</h1>
         </>
       ) : (
         <h1 id="page-title" tabIndex={-1}>{title}</h1>

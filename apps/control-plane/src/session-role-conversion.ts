@@ -81,10 +81,12 @@ function samePolicySettings(left: OrchestratorCampaignPolicy, right: Orchestrato
 export class SessionRoleConversions {
   private readonly advancing = new Map<string, Promise<void>>();
   constructor(private readonly db: ControlPlaneDb, private readonly hub: Hub,
-    private readonly log: (event: string, fields: Record<string, unknown>) => void = () => {}) {}
+    private readonly log: (event: string, fields: Record<string, unknown>) => void = () => {},
+    private readonly settleExpiredDecisions: () => void = () => {}) {}
 
   preview(id: string, targetRole: SessionRole, defaults: OrchestratorSettingsView,
     validate: (policy: OrchestratorCampaignPolicy) => string | null, overrides: OrchestratorCampaignOverrides = {}): SessionRoleConversionPreview {
+    this.settleExpiredDecisions();
     const session = this.db.getSession(id);
     if (!session) throw new Error("session not found");
     const currentRole = sessionRole(session);

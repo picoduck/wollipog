@@ -10,7 +10,7 @@ test("scope removal impact distinguishes equal issue numbers across repositories
     campaignWorkLedger: { page: () => ({ ok: true, data: { items: [
       { issue: { repository: "TEAM/REPO", number: 124 }, currentAttempt: { sessionId: "member" } },
       { issue: { repository: "other/repo", number: 124 }, currentAttempt: { sessionId: "foreign-member" } },
-    ], nextCursor: null } }) },
+    ], nextCursor: null } }), sessionsUnrelatedToIssues: () => new Set<string>() },
     unconsumedWorkflowDecisionsForController: () => [],
     campaignDescendantIds: () => [],
   } as unknown as ControlPlaneDb;

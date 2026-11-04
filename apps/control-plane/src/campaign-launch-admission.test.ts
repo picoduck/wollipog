@@ -65,6 +65,13 @@ test("a first message's issue references name only the campaign's own repository
   assert.equal(issueReferencesInMessage(many, "owner/repo").length, 100, "a scope holds at most 100 issues");
 });
 
+test("GitLab first messages name their own project's issues by #N or exact issue address (#3539)", () => {
+  const text = "Fix #3, https://gitlab.example.com/Group/Sub/Project/-/issues/4, " +
+    "https://gitlab.example.com/group/sub/other/-/issues/5, https://elsewhere.example.com/group/sub/project/-/issues/6, " +
+    "https://gitlab.example.com/group/sub/project/-/merge_requests/7 and https://github.com/group/sub/issues/8.";
+  assert.deepEqual(issueReferencesInMessage(text, "gitlab.example.com/group/sub/project"), [3, 4]);
+});
+
 test("a first message becomes a one-line bounded objective, and its digest binds the exact text", () => {
   assert.equal(firstMessageObjective("  Ship #12\n\n\tthen\u0007 tidy  "), "Ship #12 then tidy");
   const long = firstMessageObjective("x".repeat(5000));
@@ -115,4 +122,25 @@ test("explicit follow-up and issue ceilings never grow, and an explicit Maximum 
   assert.deepEqual(firstMessageIssues(boundary, [12, 13, 14], { acceptedFollowUps: true, maxIssues: true }), [12, 13, 14]);
   assert.deepEqual(derivedLaunchLimits({ budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } }), explicit);
   assert.deepEqual(derivedLaunchLimits(undefined), { acceptedFollowUps: true, maxIssues: true });
+});
+
+test("a derived Maximum Issues leaves room for a target epic's verified members; an explicit one never grows (#4061)", () => {
+  const boundary = { version: 1 as const, revision: 1, issueScopeRevision: 1, repository: "owner/repo", objective: "pending",
+    authorizedByUserId: "u", authorizedAt: 1, operations: ["campaign_issue_scope" as const], delegatablePolicyIds: [],
+    issueAuthority: { epics: [], relatedFollowUps: true, maxIssues: 1, closureReasons: ["completed" as const] },
+    budgetAuthority: { version: 1 as const, concurrency: 1, acceptedFollowUps: 1, accounting: "managed_workers_only" as const, unpriced: "stop" as const } };
+  const derived = { acceptedFollowUps: true, maxIssues: true };
+  // The reported launch: epic 3032 and two units scoped, seven more members verified.
+  const members = [2997, 2998, 2999, 3000, 3001, 3002, 3003, 3004, 3005];
+  const next = firstMessageBoundary(boundary, "execute_approved", [2997, 3005, 3032], "Implement", 2, 2, 9, derived, members);
+  assert.equal(next.issueAuthority!.maxIssues, 3 + 7 + 3, "scope, members outside it, and the derived follow-ups");
+  assert.equal(next.budgetAuthority!.acceptedFollowUps, 3, "members never add follow-ups");
+  assert.equal(firstMessageBoundary(boundary, "execute_approved", [2997, 3005, 3032], "Implement", 2, 2, 9, derived).issueAuthority!.maxIssues, 6);
+  // The room is bounded by the 100-issue ceiling.
+  assert.equal(firstMessageBoundary(boundary, "execute_approved", [1], "Implement", 2, 2, 9, derived,
+    Array.from({ length: 200 }, (_, i) => i + 2)).issueAuthority!.maxIssues, 100);
+  // An explicit Maximum Issues, or a missing record of which limits were derived, is never raised.
+  for (const limits of [{ acceptedFollowUps: true, maxIssues: false }, undefined]) {
+    assert.equal(firstMessageBoundary(boundary, "execute_approved", [2997, 3005, 3032], "Implement", 2, 2, 9, limits, members).issueAuthority!.maxIssues, 1);
+  }
 });

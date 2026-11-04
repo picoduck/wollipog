@@ -1,6 +1,13 @@
 import assert from "node:assert/strict";
+import Fastify from "fastify";
+import { sessionCredentialRefusal } from "./session-credential-refusal.js";
+import { registerAuthGate, UNAUTHORIZED } from "./http-auth.js";
+import { hashToken, isAuthenticatedAgentControlClaim } from "./auth.js";
+import { WOLLIPOG_AGENT_ACTOR_SESSION_HEADER } from "@wollipog/protocol";
 import { test } from "node:test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { once } from "node:events";
+import { Worker } from "node:worker_threads";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -37,6 +44,7 @@ import {
   type OrchestratorCampaignPolicy,
 } from "@wollipog/protocol";
 import { archiveSessionPage } from "./archive-session-page.js";
+import { artifactBlobFilePath } from "./artifact-blob-store.js";
 import { parseRateTable } from "./usage-pricing.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import {
@@ -411,6 +419,85 @@ function recordCommitSynchronousLevels(db: ControlPlaneDb): number[] {
   return levels;
 }
 
+test("a connection attached beside a live writer reads through its lock and waits out its commit (#3789)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attached-db-"));
+  const path = join(root, "control-plane.db");
+  try {
+    assert.throws(() => ControlPlaneDb.attach(path), /already initialized/u, "attach never creates a schema");
+    const server = ControlPlaneDb.open(path);
+    server.registerRunner(meta(), 1);
+    server.createSession(newSession());
+    const schemaVersion = () => Number(Object.values(server.raw().prepare("PRAGMA schema_version").get()!)[0]);
+    const schemaBefore = schemaVersion();
+    // The live server mid-commit: it holds the write lock past every 250 ms wait.
+    const writer = new DatabaseSync(path);
+    writer.exec("BEGIN IMMEDIATE; UPDATE sessions SET title='server write' WHERE id='sess-1';");
+    try {
+      assert.throws(() => ControlPlaneDb.open(path), /database is locked/u, "open writes its schema, so the lock refuses it");
+      const reader = ControlPlaneDb.attach(path, { readOnly: true });
+      try {
+        assert.equal((reader.raw().prepare("SELECT status FROM sessions WHERE id=?").get("sess-1") as { status: string }).status, "queued");
+        assert.throws(() => reader.updateSessionStatus("sess-1", "running", 2), /readonly database/u);
+      } finally { reader.close(); }
+    } finally { writer.exec("ROLLBACK"); writer.close(); }
+
+    // A writer in another thread holds the lock for 750 ms; the attached write waits for it.
+    const holder = new Worker(`
+      const { DatabaseSync } = require("node:sqlite");
+      const { parentPort, workerData } = require("node:worker_threads");
+      const db = new DatabaseSync(workerData);
+      db.exec("BEGIN IMMEDIATE; UPDATE sessions SET title='server write' WHERE id='sess-1';");
+      parentPort.postMessage("locked");
+      Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, 750);
+      db.exec("COMMIT");
+      db.close();
+    `, { eval: true, workerData: path });
+    const exited = once(holder, "exit");
+    await once(holder, "message");
+    const started = Date.now();
+    const attached = ControlPlaneDb.attach(path);
+    try {
+      attached.updateSessionStatus("sess-1", "running", 3);
+      assert.ok(Date.now() - started >= CONTROL_PLANE_DB_BUSY_TIMEOUT_MS, "the write waited past the server's own timeout");
+    } finally { attached.close(); }
+    await exited;
+    assert.equal(server.getSession("sess-1")?.status, "running");
+    assert.equal(server.getSession("sess-1")?.title, "server write");
+    // Neither attached connection rewrote a table, index or trigger under the live server.
+    assert.equal(schemaVersion(), schemaBefore);
+    server.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("an attached connection leaves artifact blob collection to the control plane that stages them (#3789 CR-1.1)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-attached-blobs-"));
+  const path = join(root, "control-plane.db");
+  try {
+    const server = ControlPlaneDb.open(path);
+    const bytes = Buffer.from("restaged blob");
+    const key = createHash("sha256").update(bytes).digest("hex");
+    // A deleted artifact queued its blob for collection; the server is now staging the same bytes
+    // again, ahead of the row that will reference them. Only the server's own map knows that.
+    server.raw().prepare("INSERT INTO artifact_blob_gc (blob_key, queued_at) VALUES (?, 1)").run(key);
+    await server.stageArtifactBlob(key, bytes, 2);
+    const blobFile = artifactBlobFilePath(server.workflowArtifactBlobRoot()!, key);
+    try {
+      for (const readOnly of [true, false]) {
+        const attached = ControlPlaneDb.attach(path, { readOnly });
+        assert.deepEqual(attached.collectWorkflowArtifactBlobs(), { examined: 0, deleted: 0, retained: 0 });
+        attached.close();
+        assert.ok(existsSync(blobFile), `closing a ${readOnly ? "read-only" : "writable"} attached connection keeps the staged blob`);
+        assert.ok(server.raw().prepare("SELECT 1 FROM artifact_blob_gc WHERE blob_key=?").get(key), "the queue stays for the server");
+      }
+    } finally { server.releaseStagedArtifactBlob(key); }
+    server.close();
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("only runner-replayable event ingest commits without a per-commit WAL flush", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-commit-durability-"));
   let db: ControlPlaneDb | undefined;
@@ -496,6 +583,36 @@ test("archived-history prune removals commit without a WAL flush, and closing a 
   } finally {
     db?.close();
     rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a runner heartbeat's last_seen commits without a WAL flush (#3874)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-heartbeat-durability-"));
+  let db: ControlPlaneDb | undefined;
+  try {
+    db = ControlPlaneDb.open(join(root, "control-plane.db"));
+    db.registerRunner(meta(), 1);
+    const levels = recordCommitSynchronousLevels(db);
+    db.touch("runner-1", 2);
+    db.touch("runner-1", 3);
+    // The next heartbeat rewrites last_seen and liveness also reads in-memory frame activity, so a
+    // heartbeat an OS crash rolls back loses nothing.
+    assert.deepEqual(levels, [1, 1]);
+    assert.equal(Object.values(db.raw().prepare("PRAGMA synchronous").get()!)[0], 2,
+      "the connection returns to FULL after each heartbeat");
+    assert.equal(db.getRunner("runner-1")?.lastSeen, 3);
+  } finally {
+    db?.close();
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const memory = withRunner();
+  try {
+    const levels = recordCommitSynchronousLevels(memory);
+    memory.touch("runner-1", 2);
+    assert.deepEqual(levels, [2], "NORMAL is only corruption-safe under WAL, so any other journal keeps FULL");
+  } finally {
+    memory.close();
   }
 });
 
@@ -1521,8 +1638,8 @@ test("registerRunner + getRunner round-trips driver/context/capabilities via JSO
   assert.deepEqual(
     view!.workspaces,
     [
-      { id: "ws-1", name: "Repo One", path: "C:/code/one", additionalDirectoryGrants: ["C:/code/shared"] },
-      { id: "ws-2", name: "Repo Two", path: "C:/code/two" },
+      { id: "ws-1", name: "Repo One", path: "C:/code/one", additionalDirectoryGrants: ["C:/code/shared"], source: "configured" },
+      { id: "ws-2", name: "Repo Two", path: "C:/code/two", source: "configured" },
     ],
   );
 
@@ -1908,7 +2025,7 @@ test("registerRunner is idempotent: re-register replaces workspaces/agents and u
   assert.equal(view.connectedAt, 900);
   assert.equal(view.agents.length, 1);
   assert.equal(view.agents[0].id, "claude-agent");
-  assert.deepEqual(view.workspaces, [{ id: "ws-9", name: "Only", path: "/only" }]);
+  assert.deepEqual(view.workspaces, [{ id: "ws-9", name: "Only", path: "/only", source: "configured" }]);
 });
 
 test("createWorkspace: CP-owned project is listed, path-resolvable, and survives re-register", () => {
@@ -1959,7 +2076,7 @@ test("Machine names and Machine-scoped Workspaces survive re-register without cr
   db.registerRunner(meta({ hostname: "same-host", workspaces: [] }), 1_000);
   const next = db.getRunner("runner-1")!;
   assert.equal(next.displayName, "Primary Development Machine");
-  assert.deepEqual(next.workspaces, [workspace]);
+  assert.deepEqual(next.workspaces, [{ ...workspace, source: "managed" }]);
 
   db.deleteRunner("runner-1");
   db.registerRunner(meta(), 1_100);
@@ -2132,6 +2249,49 @@ test("provider sign-in projections are validated, version-gated, and replace ato
   assert.equal(db.getRunner("runner-1")?.providerLogins, undefined);
 });
 
+test("a failed sign-in's failure code is only ever one from the closed set, and its error is validated as before (#3519)", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  const duplicate = {
+    operationId: "login_12345678-1234-4123-8123-123456789abc",
+    accountId: "work",
+    label: "Work",
+    provider: "claude" as const,
+    status: "failed" as const,
+    expectsCode: false,
+    error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+    startedAt: 500,
+  };
+  const stored = () => db.getRunner("runner-1")?.providerLogins?.[0];
+  db.registerRunner(meta({ providerLogins: [duplicate] }), 500, RUNNER_CAPABILITY_MIN_PROTOCOL.providerLogin);
+  assert.deepEqual(stored(), duplicate, "a login without the code, from an older runner, is stored as it was");
+  assert.equal(stored()?.failureCode, undefined);
+
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: "account_already_on_machine" }], 525);
+  assert.deepEqual(stored(), { ...duplicate, failureCode: "account_already_on_machine" }, "the known code passes with its sentence");
+
+  // A code outside the closed set never passes, and is not simply dropped either: without a code the
+  // dashboard would match this duplicate sentence and show Already on This Machine for what the
+  // newer runner reported as some other failure. `unrecognized` keeps it a plain failure.
+  for (const failureCode of ["account_already_on_this_machine", "", 7, { code: "account_already_on_machine" }]) {
+    db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode } as never], 550);
+    assert.deepEqual(stored(), { ...duplicate, failureCode: "unrecognized" },
+      `an unknown code is replaced, and the login and its sentence kept: ${JSON.stringify(failureCode)}`);
+  }
+  db.updateRunnerProviderLogins("runner-1", [{ ...duplicate, failureCode: null } as never], 560);
+  assert.deepEqual(stored(), duplicate, "a null code reads as none");
+  db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, status: "awaiting_code", error: undefined, failureCode: "account_already_on_machine",
+  }], 575);
+  assert.equal(stored()?.failureCode, undefined, "only a failed sign-in carries a failure code");
+
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "x".repeat(501),
+  }], 600), /provider sign-in inventory/, "the error sentence is still validated beside a code");
+  assert.throws(() => db.updateRunnerProviderLogins("runner-1", [{
+    ...duplicate, failureCode: "account_already_on_machine", error: "bad\u0000sentence",
+  }], 625), /provider sign-in inventory/);
+});
+
 test("machine sign-in dismissals persist per user, runner, and completed attempt", () => {
   const temp = mkdtempSync(join(tmpdir(), "wollipog-login-dismiss-"));
   const location = join(temp, "control-plane.db");
@@ -2187,6 +2347,23 @@ test("agentsRefreshed: register resets the marker, a discovery push sets it (gap
   // A re-register (reconnect / runner restart) resets it until the next agents_updated.
   db.registerRunner(meta(), 900);
   assert.equal(db.getRunner("runner-1")!.agentsRefreshed, false);
+});
+
+test("implicit launch admission uses effective default readiness and retains explicit selection", () => {
+  const db = withRunner();
+  const agent: AgentDefinition = { ...claudeAgent(), context: { kind: "native" }, defaultProviderAccountId: "a",
+    providerAccountReadiness: { defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"] } };
+  db.updateRunnerAgents("runner-1", [agent], 901);
+  assert.deepEqual(db.getRunner("runner-1")?.agents[0]?.providerAccountReadiness, agent.providerAccountReadiness);
+  assert.equal(db.getAgentLaunch("runner-1", agent.id), null, "automatic launch must not choose signed-out A");
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, false, { allowAccountSelection: true }), "manual selection can still offer B");
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, false, { providerAccountId: "b" }));
+  assert.equal(db.getAgentLaunch("runner-1", agent.id, false, { providerAccountId: "a" }), null);
+  assert.ok(db.getAgentLaunch("runner-1", agent.id, true), "target-local credentials do not use the host default");
+  db.setMachineProviderAccountDefault("runner-1", "claude", "b", 0, 902);
+  assert.ok(db.getAgentLaunch("runner-1", agent.id), "a saved Machine default B takes precedence");
+  assert.equal(db.getRunner("runner-1")?.agents[0]?.defaultProviderAccountId, "a");
+  db.close();
 });
 
 test("getAgentLaunch returns command/args/env/driver/context/version", () => {
@@ -2643,6 +2820,58 @@ test("a queue hold keeps the runner's word that one job can be stopped (#1780)",
     id: "not-stoppable-hold", status: "queued", queueHold: { ...queueHold, canStopJobs: "yes" as never },
   }), "runner-1", 6_000);
   assert.equal(db.getSession("not-stoppable-hold")!.queueHold?.canStopJobs, undefined, "only an exact true is kept");
+});
+
+test("a queue hold keeps the runner's word that it can be released now (#3752)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "provider_account_switch" as const, holdId: "provider-account-switch:5000", since: 5_000, target: "Work",
+    queuedPrompts: 2, unfinishedBackgroundJobs: 1, canRelease: true as const,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "releasable-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("releasable-hold")!;
+  assert.deepEqual(held.queueHold, queueHold);
+  assert.match(held.holds?.[0]?.recoveryAction ?? "", /release_queue_hold \(hold provider-account-switch:5000\)/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "not-releasable-hold", status: "queued", queueHold: { ...queueHold, canRelease: "yes" as never },
+  }), "runner-1", 6_000);
+  const unreleasable = db.getSession("not-releasable-hold")!;
+  assert.equal(unreleasable.queueHold?.canRelease, undefined, "only an exact true is kept");
+  assert.doesNotMatch(unreleasable.holds?.[0]?.recoveryAction ?? "", /release_queue_hold/u);
+});
+
+test("a queue hold keeps the unlisted work it waits on, dropping malformed entries (#3752)", () => {
+  const db = withRunner();
+  const unlistedJobs = [{ id: "tool:toolu_watch", kind: "provisional" as const }, { id: "b5p3g2lyb", kind: "unregistered" as const }];
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:5000", since: 5_000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 2, unlistedJobs,
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "unlisted-hold", status: "queued", queueHold }), "runner-1", 6_000);
+  const held = db.getSession("unlisted-hold")!;
+  assert.deepEqual(held.queueHold?.unlistedJobs, unlistedJobs);
+  assert.match(held.holds?.[0]?.reason ?? "", /none of which Background Work lists\.$/u);
+  db.createSessionFromSnapshot(snapshot({
+    id: "malformed-unlisted-hold", status: "queued",
+    queueHold: { ...queueHold, unlistedJobs: [{ id: "", kind: "provisional" }, { id: "x", kind: "other" }, unlistedJobs[0]] as never },
+  }), "runner-1", 6_000);
+  const malformed = db.getSession("malformed-unlisted-hold")!;
+  assert.equal(malformed.queueHold?.holdId, "worktree-rebind:5000", "the hold itself is kept");
+  assert.deepEqual(malformed.queueHold?.unlistedJobs, [unlistedJobs[0]]);
+});
+
+test("unlisted hold start times and full count survive storage (#3894)", () => {
+  const db = withRunner();
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "times", since: 5000, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 25, unlistedJobCount: 25,
+    oldestUnfinishedJob: { launchType: "unregistered" as const, startedAt: 1000 },
+    unlistedJobs: Array.from({ length: 20 }, (_, i) => ({ id: `task-${i}`, kind: "provisional" as const, startedAt: 2000 + i })),
+  };
+  db.createSessionFromSnapshot(snapshot({ id: "times", status: "queued", queueHold }), "runner-1", 6000);
+  assert.deepEqual(db.getSession("times")!.queueHold, queueHold);
+  assert.match(db.getSession("times")!.holds![0]!.reason, /an unregistered task started at/u);
+  assert.match(db.getSession("times")!.holds![0]!.reason, /none of which Background Work lists/u);
 });
 
 test("a queue hold keeps the runner's word that a restart keeps the queue (#1779)", () => {
@@ -3561,6 +3790,35 @@ test("old campaign report tables migrate without losing an existing verification
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 
+test("old campaign request resolutions migrate, keep their resolver and record a server revocation's reason (#3916)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-campaign-resolution-migration-"));
+  const file = join(root, "cp.db");
+  try {
+    const db = ControlPlaneDb.open(file);
+    db.registerRunner(meta(), 500, PROTOCOL_VERSION);
+    db.createSession(newSession({ id: "campaign", config: { permissionMode: "orchestrator" } }));
+    for (const column of ["revocation_reason", "triggered_by"]) {
+      db.raw().exec(`ALTER TABLE orchestrator_campaign_request_resolutions DROP COLUMN ${column}`);
+    }
+    db.raw().prepare(`INSERT INTO orchestrator_campaign_request_resolutions
+      (campaign_session_id,request_token,subject_session_id,occurrence_id,category,outcome,resolved_by,resolved_at)
+      VALUES ('campaign','old','campaign','wd_old','campaign_issue_scope','revoked','human',?)`).run(Date.now());
+    db.close();
+    const reopened = ControlPlaneDb.open(file);
+    const old = reopened.campaignRequestResolution("campaign", "old");
+    assert.equal(old?.resolvedBy, "human");
+    assert.equal(old?.revocationReason, undefined);
+    assert.equal(old?.triggeredBy, undefined);
+    reopened.recordCampaignRequestResolution({ campaignSessionId: "campaign", requestToken: "new", subjectSessionId: "campaign",
+      occurrenceId: "wd_new", category: "campaign_issue_scope", outcome: "revoked", resolvedBy: "system", resolvedAt: Date.now(),
+      revocationReason: "approval_refused_stale", triggeredBy: "human" });
+    const recorded = reopened.campaignRequestResolution("campaign", "new");
+    assert.equal(recorded?.revocationReason, "approval_refused_stale");
+    assert.equal(recorded?.triggeredBy, "human");
+    reopened.close();
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("createSession persists driver + config and sessionView reflects them", () => {
   const db = withRunner();
   const config: SessionConfig = {
@@ -3628,6 +3886,63 @@ test("agent-control credentials are hash-only, exact-session, runner-bound, repl
   assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), true);
   db.deleteSession("agent-session");
   assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", second), false);
+});
+
+test("refused session credentials disclose stop provenance only to the matching bearer", async () => {
+  const db = withRunner();
+  db.createSession(newSession({ id: "agent-session" }));
+  db.setAgentControlCredential("agent-session", "runner-1", hashToken("known-secret"), 1);
+  const app = Fastify();
+  const reasons: string[] = [];
+  registerAuthGate(app, {
+    authenticate: () => null,
+    isAllowedOrigin: () => true,
+    authenticationRefusal: (req) => {
+      const refusal = sessionCredentialRefusal(req.headers, db);
+      if (refusal) reasons.push(refusal.reason);
+      return refusal?.error;
+    },
+  });
+  app.get("/api/compatibility", async () => assert.fail("refused request reached the handler"));
+  const request = (token: string, actor = "agent-session") => app.inject({
+    url: "/api/compatibility", headers: {
+      authorization: `Bearer ${token}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor,
+    },
+  });
+  try {
+    db.updateSessionStatus("agent-session", "stopped", 2, { cause: "runner_disconnect" });
+    assert.equal(db.agentControlCredentialValid("agent-session", "runner-1", hashToken("known-secret")), true);
+    assert.equal(isAuthenticatedAgentControlClaim({ credentialValid: true, claimedSessionId: "agent-session",
+      session: db.getSession("agent-session") }), false, "diagnostics do not make stopped credentials accepted");
+    const reconnecting = await request("known-secret");
+    assert.equal(reconnecting.statusCode, 401);
+    assert.match(reconnecting.json().error, /runner reconnecting; retry/);
+    for (const [token, actor] of [["wrong", "agent-session"], ["known-secret", "missing"], ["", "agent-session"]]) {
+      const unknown = await request(token!, actor!);
+      assert.equal(unknown.statusCode, 401);
+      assert.equal(unknown.json().error, UNAUTHORIZED);
+    }
+    db.confirmSessionStop("agent-session", "runner_absent", 3);
+    assert.match((await request("known-secret")).json().error, /session stopped.*Orchestrator.*restart/);
+    db.updateSessionStatus("agent-session", "running", 4);
+    assert.equal(isAuthenticatedAgentControlClaim({ credentialValid: true, claimedSessionId: "agent-session",
+      session: db.getSession("agent-session") }), true);
+    for (const state of ["running", "idle"] as const) {
+      db.updateSessionStatus("agent-session", state, 5);
+      const unavailable = await request("known-secret");
+      assert.equal(unavailable.statusCode, 401);
+      assert.match(unavailable.json().error, /check the requested operation, session state and delegated access/);
+      assert.doesNotMatch(unavailable.json().error, /restart|reconnect|stopped/);
+    }
+    db.raw().prepare(`INSERT INTO session_role_conversions
+      (session_id, conversion_id, command, state, created_at) VALUES (?, ?, ?, ?, ?)`)
+      .run("agent-session", "conversion-test", "{}", "preparing", 6);
+    const fenced = await request("known-secret");
+    assert.equal(fenced.statusCode, 401);
+    assert.equal(fenced.json().error, UNAUTHORIZED);
+    assert.deepEqual(reasons, ["runner_reconnecting", "unknown_credential", "unknown_credential", "unknown_credential", "session_stopped", "session_unavailable", "session_unavailable", "unknown_credential"]);
+    assert.doesNotMatch(JSON.stringify(reasons), /known-secret|agent-session|runner-1/);
+  } finally { await app.close(); db.close(); }
 });
 
 test("policy hook reconciliation queries use session/status indexes instead of optional-filter scans", () => {
@@ -4204,6 +4519,26 @@ test("setSessionArchived hides from default listSessions but visible with includ
   assert.equal(db.listSessions({ includeArchived: true }).length, 1);
 });
 
+test("runnerSessionInventory matches listSessions for one runner without materializing other runners", () => {
+  const db = withRunner();
+  db.registerRunner(meta({ runnerId: "runner-2", hostname: "host-2" }), 500);
+  db.createSession(newSession({ id: "old", now: 1000 }));
+  db.createSession(newSession({ id: "archived", now: 2000 }));
+  db.createSession(newSession({ id: "other", runnerId: "runner-2", now: 3000 }));
+  db.createSession(newSession({ id: "new", now: 4000 }));
+  db.setSessionArchived("archived", true, 5000);
+  db.setWorktreePath("archived", "/worktrees/archived");
+  db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id=?")
+    .run(JSON.stringify([{ id: "wt", path: "/worktrees/archived", branch: "agent/archived", source: "created" }]), "archived");
+  db.updateSessionStatus("old", "completed", 6000);
+  const fields = ["id", "runnerId", "projectId", "status", "archived", "worktreePath", "worktrees"] as const;
+  const expected = db.listSessions({ includeArchived: true }).filter((session) => session.runnerId === "runner-1")
+    .map((session) => Object.fromEntries(fields.map((field) => [field, session[field]])));
+  assert.deepEqual(db.runnerSessionInventory("runner-1"), expected);
+  assert.deepEqual(expected.map((session) => session.id), ["new", "archived", "old"]);
+  assert.deepEqual(db.runnerSessionInventory("runner-2").map((session) => session.id), ["other"]);
+});
+
 /* ----------------------------- Events ---------------------------------- */
 
 test("appendEvent + listEvents return events in seq order with stable ids", () => {
@@ -4487,6 +4822,66 @@ test("provider-HOME launch refusals round-trip, survive an older runner's snapsh
   assert.equal(db.getSession("launch-refusal")?.providerHomeRefusal, undefined, "null clears it");
 });
 
+test("a starting session's provider-HOME wait is stored, projected only while starting, and cleared (#3240)", () => {
+  const db = withRunner();
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  const wait = { provider: "codex" as const, cause: "holder_alive" as const, providerAccountId: "work",
+    providerAccountLabel: "Work", waitingSince: 2_000, waitUntil: 3_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "waiting", status: "starting", providerHomeWait: wait }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("waiting")?.providerHomeWait, wait);
+  assert.deepEqual(summary("waiting")?.providerHomeWait, wait, "lists show it too");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 1 }), 3_000);
+  assert.deepEqual(db.getSession("waiting")?.providerHomeWait, wait, "an older runner's absent field keeps it");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 2,
+    providerHomeWait: { ...wait, home: "/home/user/.codex" } as never }), 4_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a malformed wait is not stored");
+
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 3, providerHomeWait: wait }), 5_000);
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "starting", seq: 4, providerHomeWait: null }), 6_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "null clears it");
+
+  // A wait never outlives its launch: any other status hides it, and a status change ends it.
+  db.updateSessionFromSnapshot("waiting", snapshot({ id: "waiting", status: "running", seq: 5, providerHomeWait: wait }), 7_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined);
+  assert.equal(summary("waiting")?.providerHomeWait, undefined);
+  db.updateSessionStatus("waiting", "failed", 8_000);
+  db.updateSessionStatus("waiting", "starting", 9_000);
+  assert.equal(db.getSession("waiting")?.providerHomeWait, undefined, "a later launch starts without the old wait");
+});
+
+test("a session's worktree switch is stored, projected while it lives, kept when absent and cleared by null (#3810)", () => {
+  const db = withRunner();
+  const summary = (id: string) => db.listSessionSummaries().find((session) => session.id === id);
+  const pending = { phase: "pending" as const, branch: "fix/switch", since: 2_000 };
+  db.createSessionFromSnapshot(snapshot({ id: "switching", status: "idle", worktreeSwitch: pending }), "runner-1", 2_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, pending);
+  assert.deepEqual(summary("switching")?.worktreeSwitch, pending, "lists show it too");
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 1 }), 3_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, pending, "an older runner's absent field keeps it");
+
+  const relaunching = { ...pending, phase: "relaunching" as const };
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 2,
+    worktreeSwitch: relaunching }), 4_000);
+  assert.deepEqual(db.getSession("switching")?.worktreeSwitch, relaunching);
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "starting", seq: 3,
+    worktreeSwitch: { ...pending, path: "/home/user/worktrees/fix" } as never }), 5_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined, "a malformed switch, or one naming a path, is not stored");
+
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 4, worktreeSwitch: pending }), 6_000);
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 5, worktreeSwitch: null }), 7_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined, "null clears it");
+
+  // A finished session is switching nothing, even if the clearing snapshot never arrived.
+  db.updateSessionFromSnapshot("switching", snapshot({ id: "switching", status: "idle", seq: 6, worktreeSwitch: pending }), 8_000);
+  db.updateSessionStatus("switching", "stopped", 9_000);
+  assert.equal(db.getSession("switching")?.worktreeSwitch, undefined);
+  assert.equal(summary("switching")?.worktreeSwitch, undefined);
+});
+
 test("a session's recorded provider profile id is stored, projected, kept when absent and cleared by null (#3239)", () => {
   const db = withRunner();
   const profileId = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
@@ -4545,6 +4940,27 @@ test("the adopted marker round-trips through create/update snapshot into Session
   // adopted is runner-authoritative — an updated snapshot carries it through
   db.updateSessionFromSnapshot("no", snapshot({ id: "no", adopted: true }), 3000);
   assert.equal(db.getSession("no")?.adopted, true);
+});
+
+test("follow-up facts round-trip through full and summary views, and old peers clear live claims", () => {
+  const db = withRunner();
+  const followUp = { state: "queued" as const, queuedAt: 1_000, retryScheduled: true };
+  const snap = snapshot({ backgroundWorkState: "continuation_pending", backgroundFollowUp: followUp });
+  db.createSessionFromSnapshot(snap, "runner-1", 2_000);
+  const summary = () => db.listSessionSummaries().find((session) => session.id === snap.id)!;
+  assert.deepEqual(db.getSession(snap.id)?.backgroundFollowUp, followUp);
+  assert.deepEqual(summary().backgroundFollowUp, followUp);
+  const blocked = { state: "blocked" as const, queuedAt: 1_000, blocker: "budget" as const };
+  db.updateSessionFromSnapshot(snap.id, { ...snap, backgroundFollowUp: blocked }, 3_000);
+  assert.deepEqual(db.getSession(snap.id)?.backgroundFollowUp, blocked);
+  assert.deepEqual(summary().backgroundFollowUp, blocked);
+  // Persisted rows survive projection/reload without inventing a new queue start time.
+  assert.match(db.raw().prepare("SELECT background_follow_up FROM sessions WHERE id=?").get(snap.id)!.background_follow_up as string,
+    /"queuedAt":1000/);
+  db.updateSessionFromSnapshot(snap.id, { ...snap, backgroundFollowUp: undefined }, 4_000);
+  assert.equal(db.getSession(snap.id)?.backgroundFollowUp, undefined);
+  assert.equal(summary().backgroundFollowUp, undefined);
+  db.close();
 });
 
 test("background work state round-trips while legacy settled sentinels clear current status", () => {
@@ -9457,6 +9873,38 @@ test("per-user cost windows and the daily budget read the owner-scoped buckets i
   assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).dailyBudgetUsd, 20);
   assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd]), [["usr_local_owner", 1.5]]);
   assert.deepEqual(db.sessionOwnerUser("sess-1"), { organizationId: "org_personal", userId: "usr_local_owner" });
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).todayEstimateUsd, undefined, "no turn is running");
+
+  // A running turn's open estimate is what the daily-budget gate adds to today's settled spend
+  // (#3196), so the windows carry it beside the settled figure while a budget is set.
+  db.raw().prepare("UPDATE sessions SET status='running', live_cost_usd=2.25, live_settling=0, live_observed_at=? WHERE id='sess-1'").run(now - 60_000);
+  assert.equal(db.userCostWindows("org_personal", "usr_local_owner", now).todayEstimateUsd, 2.25);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.todayUsd, row.todayEstimateUsd]), [[1.5, 2.25]],
+    "the settled figure stays settled; the estimate is its own field");
+  db.setUsageDailyBudget("org_personal", null, now);
+  assert.equal(db.listUserCostWindows("org_personal", now)[0]!.todayEstimateUsd, undefined, "without a budget there is nothing to gate");
+  db.setUsageDailyBudget("org_personal", 20, now);
+
+  // Someone with no settled usage at all, whose first turn is running: the gate already counts its
+  // estimate, so the table lists them, ahead of a person whose settled spend today is lower.
+  db.createSession(newSession({ id: "sess-2", driver: "claude-code", config: { model: "claude-fable-5-1" } }));
+  db.raw().prepare("UPDATE session_ownership SET owner_kind='user', owner_id='usr_first_turn' WHERE session_id='sess-2'").run();
+  db.raw().prepare("UPDATE sessions SET status='running', live_cost_usd=21, live_settling=0, live_observed_at=? WHERE id='sess-2'").run(now - 60_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => [row.userId, row.todayUsd, row.todayEstimateUsd ?? 0, row.last30DaysUsd]), [
+    ["usr_first_turn", 0, 21, 0],
+    ["usr_local_owner", 1.5, 2.25, 13.5],
+  ]);
+  // A turn the day before is not today's spend, and a settling window is already in the ledger.
+  db.raw().prepare("UPDATE sessions SET live_observed_at=? WHERE id='sess-2'").run(now - 86_400_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"]);
+  db.raw().prepare("UPDATE sessions SET live_observed_at=?, live_settling=1 WHERE id='sess-2'").run(now - 60_000);
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"]);
+  db.setUsageDailyBudget("org_personal", null, now);
+  db.raw().prepare("UPDATE sessions SET live_settling=0 WHERE id='sess-2'").run();
+  assert.deepEqual(db.listUserCostWindows("org_personal", now).map((row) => row.userId), ["usr_local_owner"],
+    "without a budget the table lists settled usage only");
+  db.setUsageDailyBudget("org_personal", 20, now);
+  db.raw().prepare("UPDATE sessions SET status='idle', live_cost_usd=0, live_observed_at=NULL WHERE id IN ('sess-1','sess-2')").run();
 
   // Shorten hourly retention so the 3-day and 20-day samples roll into daily buckets, then the
   // windows must read them from usage_daily rather than lose them.
@@ -9817,6 +10265,57 @@ test("zeroed provider accounting is unpriced and historical Claude estimates rem
   usage = db.queryUsageAggregation(localOwner(), { since: 0, through: 10000000, granularity: "hour" });
   assert.equal(usage.legacyClaudeCostRecords, 1);
   assert.equal(usage.totals.costUsd, 1.1);
+});
+
+test("Claude turns that billed a running total are shown as uncertain in every cost view (#4069)", () => {
+  const root = mkdtempSync(join(tmpdir(), "claude-running-totals-"));
+  const file = join(root, "control-plane.sqlite");
+  const checkpoint = (totalCostUsd: number, cacheReadInputTokens: number, accountingScope: "process" | "conversation" = "process") => ({
+    sessionId: "conversation", totalCostUsd, accountingScope,
+    models: { "claude-opus-5": { inputTokens: 100, outputTokens: 50, cacheReadInputTokens, cacheCreationInputTokens: 10, costUSD: totalCostUsd } } });
+  const turn = (costUsd: number, closing: ReturnType<typeof checkpoint>) => ({ kind: "token_usage" as const, model: "claude-opus-5",
+    inputTokens: 1, costUsd, costIsEstimate: true as const, claudeUsageCheckpoint: closing });
+  const range = { since: 0, through: 10_000_000, granularity: "hour" as const };
+  let db = ControlPlaneDb.open(file);
+  try {
+    db.registerRunner(meta(), 500);
+    db.createSession(newSession({ driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.appendEvent("sess-1", turn(15, checkpoint(15, 7_000)), 3_600_100, { accrueUsage: true });
+    // A long turn's display-only records never hide its baseline.
+    for (let request = 0; request < 600; request++) {
+      db.appendEvent("sess-1", { kind: "token_usage", model: "claude-opus-5", inputTokens: 1, liveUsage: "provisional" }, 3_600_150, { accrueUsage: true });
+    }
+    db.appendEvent("sess-1", turn(20, checkpoint(20, 7_400)), 3_600_200, { accrueUsage: true }); // the whole total again
+    db.appendEvent("sess-1", turn(5, checkpoint(25, 7_500)), 3_600_300, { accrueUsage: true }); // a correct delta
+    db.appendEvent("sess-1", turn(30, checkpoint(30, 7_600)), 3_600_400, { accrueUsage: true }); // the whole total again
+    const expected = { records: 2, costUsd: 50 };
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the session's cost view");
+    assert.equal(db.queryUsageAggregation(localOwner(), range).runningTotalClaudeRecords, 2, "the Usage view");
+    assert.equal(db.queryUsageAggregation(localOwner(), { ...range, driver: "codex" }).runningTotalClaudeRecords, undefined,
+      "with the same filters as its buckets");
+    assert.equal(db.queryUsageAggregation(localOwner(), range).totals.costUsd, 70, "the amount itself is unchanged");
+
+    // History recorded before the flag existed is found once, at startup.
+    db.raw().exec("DELETE FROM usage_claude_running_totals; DELETE FROM control_plane_metadata WHERE key='claude_running_totals_v1_backfilled'");
+    assert.equal(db.sessionUsageByModel("sess-1").runningTotalRecords, undefined);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected);
+    db.close();
+    db = ControlPlaneDb.open(file);
+    assert.deepEqual(db.sessionUsageByModel("sess-1").runningTotalRecords, expected, "the backfill runs once");
+
+    // A reconnect's snapshot accrues the cost first; history hydrated afterwards is still flagged.
+    db.createSession(newSession({ id: "snapshot-first", driver: "claude-code", config: { model: "claude-opus-5" } }));
+    db.updateSessionFromSnapshot("snapshot-first", snapshot({ id: "snapshot-first", driver: "claude-code", tokensIn: 2,
+      costUsd: 35, costIsEstimate: true, seq: 2 }), 3_600_500);
+    db.appendEvent("snapshot-first", turn(15, checkpoint(15, 7_000)), 3_600_600, { accrueUsage: true, runnerSeq: 1 });
+    db.appendEvent("snapshot-first", turn(20, checkpoint(20, 7_400)), 3_600_700, { accrueUsage: true, runnerSeq: 2 });
+    assert.deepEqual(db.sessionUsageByModel("snapshot-first").runningTotalRecords, { records: 1, costUsd: 20 });
+  } finally {
+    db.close();
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("new Claude snapshot catch-up preserves estimate provenance without a legacy warning", () => {

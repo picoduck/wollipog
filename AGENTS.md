@@ -24,6 +24,15 @@
   `.agents/skills/review-contributor-pr/SKILL.md`, which reuses the installed
   `cross-model-review` skill and independently verifies findings before publication.
 
+## Worktrees and Checkout Maintenance
+
+- Implement in an isolated worktree. For new issue work, create a managed worktree without an
+  explicit base so Wollipog fetches the remote default branch. Use an explicit base for an
+  intentional stack or another task-specific starting point.
+- Do not fast-forward the primary checkout as post-merge cleanup. Its freshness is separate from
+  issue completion; a stale primary checkout is not unfinished delivery. See
+  `docs/agent-workflow.md` for checkout maintenance and analysis freshness policy.
+
 ## Stylesheet Debt Inventory
 
 - `apps/web/src/stylesheet-guardrails.test.ts` compares the stylesheet's measured debt with the

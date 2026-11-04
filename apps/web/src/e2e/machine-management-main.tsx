@@ -16,7 +16,7 @@ import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
 import { RunnersView } from "../components/RunnersView.js";
 import { InstanceScopeProvider } from "../instance-scope.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import type { MachineAccountsIntent, View, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import "../styles.css";
@@ -165,6 +165,7 @@ if (signInFixture && runner.providerAccounts) {
       operationId: "login_fixture_duplicate", accountId: "work-2-1a2b3c4d", label: emailLabels ? "work.two@example.com" : "Work 2",
       provider: "claude", status: "failed", startedAt: Date.now(),
       error: "This Claude account is already on this Machine. The duplicate sign-in was discarded.",
+      failureCode: "account_already_on_machine",
     },
   ];
 }
@@ -172,6 +173,7 @@ if (signInFixture && runner.providerAccounts) {
 if (new URLSearchParams(window.location.search).has("profiles") && runner.providerAccounts) {
   // A Windows runner refuses every adoption, so the Machine that adopts is a Linux one (#3240).
   runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
   const access = { "claude-work": "granted", "claude-personal": "pending", "codex-team": "not_granted" } as const;
   for (const account of runner.providerAccounts) {
     const state = access[account.id as keyof typeof access];
@@ -262,6 +264,20 @@ let socket: FixtureSocket | null = null;
 let box: BoxView | null = null;
 // `outdated` gives Design Workstation an older runner protocol (#2988's Runner Update Required).
 if (fixtureParams.has("outdated") && runner) runner.protocolVersion = PROTOCOL_VERSION - 1;
+// `credentialImport` (#3719) makes Design Workstation a Linux machine whose runner can copy an
+// existing Codex API-key sign-in into a new managed profile. `credentialImport=unsupported` is a
+// Linux runner that reports no such capability (one inside WSL or a container).
+if (fixtureParams.has("credentialImport") && runner) {
+  runner.os = "linux";
+  runner.workspaces = [{ id: "home", name: "Home", path: "/home/misko" }];
+  runner.runtime = { dataDir: "/home/misko/.agent-manager", worktreeRoot: "/home/misko/.agent-manager/worktrees", maxConcurrentSessions: 8,
+    ...(fixtureParams.get("credentialImport") === "unsupported" ? {} : { providerCredentialImport: { version: 1 as const, providers: ["codex" as const] } }) };
+  // `credentialImport=emails`: both Codex accounts are labelled with email addresses.
+  if (fixtureParams.get("credentialImport") === "emails") {
+    const emails: Record<string, string> = { "codex-team": "team@example.com", "codex-solo": "solo@example.com" };
+    runner.providerAccounts = runner.providerAccounts?.map((account) => ({ ...account, label: emails[account.id] ?? account.label }));
+  }
+}
 // `capacity=waiting` is Design Workstation before its first live report (#2989).
 if (fixtureParams.get("capacity") === "waiting" && runner?.capacity) {
   runner.capacity = { configuredUnits: runner.capacity.configuredUnits, revision: runner.capacity.revision, authority: "control_plane" };
@@ -274,7 +290,20 @@ if (fixtureParams.get("workspaces") === "long" && runner) {
     { id: "notes", name: "Research Notes With a Long Name for a Narrow Row", path: "D:\\archive\\2026\\research\\notes" },
   );
 }
-/** `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989). */
+// `workspaces=removable` is Remove Workspace (#4123): one configured workspace and two added in
+// Wollipog, the first of which a project still uses, so removing it is refused.
+if (fixtureParams.get("workspaces") === "removable" && runner) {
+  runner.workspaces = [
+    { id: "home", name: "Home", path: "C:\\Users\\misko", source: "configured" },
+    { id: "storefront", name: "Acme Storefront", path: "C:\\Users\\misko\\src\\clients\\acme\\acme-storefront", source: "managed" },
+    { id: "scratch", name: "Scratch", path: "D:\\scratch", source: "managed" },
+  ];
+}
+const removedWorkspaces: string[] = [];
+/**
+ * `skills=empty` reports nothing unmanaged and no removals; `skills=fail` fails the first read only, so Retry recovers (#2989).
+ * `skills=long` adds a name that fits a phone row once the agent gives way, and one that never fits (#3526).
+ */
 const skillsScenario = fixtureParams.get("skills");
 let skillsFailures = skillsScenario === "fail" ? 1 : 0;
 /**
@@ -298,6 +327,9 @@ if (sshState && runner) {
 let failingSettingsSave: "capacity" | null = null;
 /** How many lifecycle requests the busy machine refuses before it is forced (`busy` in the URL). */
 const busyMachine = fixtureParams.has("busy");
+/** `reconnect=hold` leaves Reconnect's request unanswered; `reconnect=fail` never reaches the server (#3525). */
+const reconnectOutcome = fixtureParams.get("reconnect");
+let reconnectRequests = 0;
 const activeSessionsConflict = () => new ApiError("this machine has 2 active sessions", 409, "BOX_HAS_ACTIVE_SESSIONS", {
   activeSessions: [
     { id: "s1", title: "Fix the half-cent rounding bug", status: "running" },
@@ -367,8 +399,16 @@ const connection: UiConnectionRuntime = {
 
 // `machine=<runnerId>` opens that machine's route, as a link or a reload does (#2985).
 const initialMachine = fixtureParams.get("machine");
+// Set Up Managed Profile and Recover Existing Profile from a refused session (#3240), with
+// `accounts=add-<provider>` or `accounts=recover-<accountId>`: the intent the session notice sends.
+const accountsParam = fixtureParams.get("accounts");
+const accountsIntent: MachineAccountsIntent | undefined = accountsParam?.startsWith("add-")
+  ? { kind: "add_account", provider: accountsParam.slice(4) === "codex" ? "codex" : "claude", activationId: 1 }
+  : accountsParam?.startsWith("recover-")
+    ? { kind: "recover_profile", accountId: accountsParam.slice(8), activationId: 1 }
+    : undefined;
 const initialView: View = initialMachine
-  ? { name: "runners", section: "machines", machineId: initialMachine }
+  ? { name: "runners", section: "machines", machineId: initialMachine, ...(accountsIntent ? { accounts: accountsIntent } : {}) }
   : { name: "runners", section: "machines" };
 const navigation: ViewNavigation = {
   current: () => initialView,
@@ -382,7 +422,11 @@ const skillsReport = () => ({
   desired: [],
   reported: {
     unmanaged: [{ agentId: "custom-acp", name: "local-notes", description: "Scratch notes kept outside Wollipog",
-      providerAccountId: "claude-work" }],
+      providerAccountId: "claude-work" },
+    ...(skillsScenario === "long" ? [
+      { agentId: "custom-acp", name: "design-review", providerAccountId: "claude-work" },
+      { agentId: "custom-acp", name: "frontend-design-review-for-every-storefront-page", providerAccountId: "claude-work" },
+    ] : [])],
     removals: [
       { path: "~/.claude/skills/code-review", reason: "No longer in the desired skill list." },
       { path: "~/.codex/skills/retired-skill-with-a-long-name-that-wraps", reason: "The canonical location it routes through is conflicted." },
@@ -565,6 +609,16 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { workspace };
   },
+  removeMachineWorkspace: async (_runnerId: string, workspaceId: string) => {
+    if (!runner) throw new Error("runner not found");
+    if (workspaceId === "storefront") {
+      throw new ApiError("This workspace is still in use. Remove it from the project “Acme Storefront” first.", 409);
+    }
+    removedWorkspaces.push(workspaceId);
+    runner.workspaces = runner.workspaces.filter((workspace) => workspace.id !== workspaceId);
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { removed: true as const };
+  },
   startProviderLogin: async (
     _runnerId: string,
     body: { provider: "claude" | "codex"; label: string } | { accountId: string },
@@ -604,6 +658,13 @@ const client = {
     if (!login) throw new Error("login not found");
     const completed = { ...login, status: "succeeded" as const, expectsCode: false };
     runner.providerLogins = [completed];
+    // The runner records a new account when its sign-in succeeds; Add Account's is a managed profile.
+    if (!runner.providerAccounts?.some((account) => account.id === login.accountId)) {
+      runner.providerAccounts = [...(runner.providerAccounts ?? []), {
+        id: login.accountId, label: login.label, provider: login.provider, authStatus: "authenticated",
+        profile: { id: `profile-${login.accountId}`, access: "granted" },
+      }];
+    }
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { login: completed };
   },
@@ -623,8 +684,8 @@ const client = {
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
     return { dismissed: true as const };
   },
-  // Removal (#2995): Codex Solo is Custom ACP's default, so the runner refuses it; Work's credentials
-  // are kept because a session still uses them; any other account is simply removed.
+  // Removal (#2995): Codex Solo is Custom ACP's default, so the runner refuses it. Current runners keep
+  // the stored sign-in (#3157) and report it; Work stands in for an older runner that doesn't.
   removeProviderAccount: async (_runnerId: string, accountId: string) => {
     if (!runner) throw new Error("runner not found");
     if (accountId === "codex-solo") {
@@ -633,7 +694,20 @@ const client = {
     }
     runner.providerAccounts = runner.providerAccounts?.filter((account) => account.id !== accountId);
     socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
-    return { removed: true as const, credentialsRetained: accountId === "claude-work" };
+    return { removed: true as const, credentialsRetained: accountId !== "claude-work" };
+  },
+  // #3719, with `?credentialImport`: a label of "ChatGPT" is refused as an OAuth sign-in would be;
+  // any other copy records a managed profile account.
+  importProviderCredential: async (_runnerId: string, body: { provider: "codex"; label: string }) => {
+    if (!runner) throw new Error("runner not found");
+    if (body.label === "ChatGPT") {
+      throw new ApiError("Only a Codex sign-in that uses an API key stored in auth.json can be copied. A ChatGPT sign-in, or one kept in the keyring, can't be shared safely; sign in instead.", 409, "SOURCE_UNSUPPORTED");
+    }
+    const accountId = `copied-${runner.providerAccounts?.length ?? 0}`;
+    runner.providerAccounts = [...runner.providerAccounts ?? [],
+      { id: accountId, label: body.label, provider: "codex", authStatus: "authenticated", profile: { id: `profile-${accountId}`, access: "granted" } }];
+    socket?.push({ type: "runner_upsert", runner: structuredClone(runner) });
+    return { accountId, profileId: `profile-${accountId}`, grantId: `grant-${accountId}` };
   },
   // Provider profiles (#3239), with `?profiles`: adoption succeeds, and the first revocation of an
   // account with sessions is refused so the force confirmation can be exercised.
@@ -680,6 +754,9 @@ const client = {
   rediscover: async () => ({ ok: true as const }),
   reconnectBox: async (_boxId: string, force = false) => {
     if (busyMachine && !force) throw activeSessionsConflict();
+    reconnectRequests += 1;
+    if (reconnectOutcome === "fail") throw new TypeError("Failed to fetch");
+    if (reconnectOutcome === "hold") await new Promise(() => {});
     return { ok: true as const };
   },
   updateBoxRunner: async (_boxId: string, force = false) => {
@@ -697,7 +774,11 @@ declare global {
   interface Window {
     __WOLLIPOG_MACHINE_E2E__: {
       lastRegisteredWorkspace(): { name: string; path: string } | null;
+      /** The workspaces Remove Workspace removed, in order (#4123). */
+      removedWorkspaces(): string[];
       lastAddBoxRequest(): AddBoxRequest | null;
+      /** How many Reconnect requests reached the fixture's API (#3525). */
+      reconnectRequests(): number;
       /** status 0 is a request that never reached the server (the browser's TypeError). */
       setAddBoxOutcome(outcome: { kind: "accept" } | { kind: "refuse"; message: string; status: number } | { kind: "hold" }): void;
       setAgentAvailabilityScenario(scenario: "legacy-unverified" | "verified-unavailable" |
@@ -719,7 +800,9 @@ declare global {
 
 window.__WOLLIPOG_MACHINE_E2E__ = {
   lastRegisteredWorkspace: () => structuredClone(lastRegisteredWorkspace),
+  removedWorkspaces: () => [...removedWorkspaces],
   lastAddBoxRequest: () => structuredClone(lastAddBoxRequest),
+  reconnectRequests: () => reconnectRequests,
   setAddBoxOutcome: (outcome) => { addBoxOutcome = outcome; },
   setAgentAvailabilityScenario: (scenario) => {
     if (!runner) return;

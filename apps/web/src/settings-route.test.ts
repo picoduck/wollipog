@@ -35,10 +35,11 @@ test("every section round-trips through the URL", () => {
   }
 });
 
-test("Approvals sits between Behavior and Orchestrator, in the section list and the palette (#2158)", () => {
+test("Approvals and Reviews sit between Behavior and Orchestrator, in the section list and the palette", () => {
   const ids = SETTINGS_SECTIONS.map((section) => section.id);
   assert.equal(ids.indexOf("approvals"), ids.indexOf("behavior") + 1);
-  assert.equal(ids.indexOf("orchestrator"), ids.indexOf("approvals") + 1);
+  assert.equal(ids.indexOf("reviews"), ids.indexOf("approvals") + 1);
+  assert.equal(ids.indexOf("orchestrator"), ids.indexOf("reviews") + 1);
   assert.equal(SETTINGS_SECTIONS.find((section) => section.id === "approvals")?.title, "Approvals");
   assert.ok(EXTRA_PALETTE_DESTINATIONS.some((entry) =>
     entry.label === "Approvals" && entry.detail === "Settings" &&

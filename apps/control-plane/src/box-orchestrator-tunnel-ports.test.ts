@@ -101,7 +101,10 @@ function controlPlane(host: FakeRemoteHost, label: string, db = boxDb()): Simula
       }
       host.listeners.set(port, label);
       live.set(port, child);
-      orchestrator.onRunnerRegistered(RUNNER_ID, `rcred_${"0".repeat(32)}`);
+      db.registerRunner({ runnerId: RUNNER_ID, hostname: "host", os: "linux", version: "test", agents: [], workspaces: [] }, Date.now());
+      orchestrator.onRunnerRegistered(RUNNER_ID, `rcred_${(credentials - 1).toString(16).padStart(32, "0")}`);
+      db.updateRunnerAgents(RUNNER_ID, [], Date.now());
+      orchestrator.onRunnerAgentsUpdated(RUNNER_ID);
     });
     return child as unknown as ChildProcess;
   };

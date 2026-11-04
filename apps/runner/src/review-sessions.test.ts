@@ -1,16 +1,20 @@
 import assert from "node:assert/strict";
 import { execFileSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync } from "node:fs";
+import {
+  chmodSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, renameSync, rmSync, statSync, symlinkSync, writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import {
   REVIEW_CONTRACT, REVIEW_OUTPUT_SCHEMA, REVIEW_ROUND_REFUSALS, type AgentDefinition, type ReviewLaunchPolicy, type ReviewRunHistory,
 } from "@wollipog/protocol";
-import { ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
+import { repositoryKey, ReviewScopeRefusal, ReviewSnapshotter, type PullRequestFacts } from "./review-snapshot.js";
 import {
-  reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand, type ReviewSessionDependencies,
+  defaultReviewSessionDependencies, gitlabHostConfigured, gitlabMergeRequestFacts, prepareCodexReviewWorkingDirectory, reviewLaunchArgs, reviewPrompt, ReviewSessionLauncher, verifySpawnedCommand,
+  reviewSessionDiscoveryReason, type ReviewSessionDependencies,
 } from "./review-sessions.js";
+import { configuredSessionWritableGrants, explainSessionWritableRefusal, SessionWritableRootError } from "./review-trust.js";
 import type { SessionMeta } from "./session-store.js";
 
 const rootUid = statSync("/").uid;
@@ -21,6 +25,8 @@ const AGENTS = [
   { id: "claude", name: "Claude", command: "claude", driver: "claude-code", available: true },
 ] as unknown as AgentDefinition[];
 const GIT = execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim();
+/** A GitLab project in a nested namespace on a self-managed host. */
+const GITLAB = "gitlab.example.com/acme/team/widget";
 
 function git(cwd: string, ...args: string[]): string {
   return execFileSync(GIT, ["-c", "user.name=Test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", ...args], {
@@ -40,6 +46,10 @@ interface Fixture {
   logs: string[];
   /** The forge's facts for the pull request; a test that pushes again updates its head. */
   facts: PullRequestFacts;
+  /** Every GitLab merge request read: glab, host, project and IID. */
+  mergeRequestReads: unknown[][];
+  /** Every host the GitLab host gate was asked about. */
+  hostChecks: string[];
   policy(overrides?: Partial<ReviewLaunchPolicy>): ReviewLaunchPolicy;
 }
 
@@ -51,19 +61,31 @@ function fixture(t: { after(fn: () => void): void }, options: {
   tools?: ReturnType<ReviewSessionDependencies["tools"]>;
   untrusted?: boolean;
   agents?: AgentDefinition[];
+  /** The project is the GitLab project `GITLAB`, read through a fake glab. */
+  gitlab?: boolean;
+  /** Leave out the GitLab merge request reader. */
+  noMergeRequestReader?: boolean;
+  deletedFile?: boolean;
+  /** Hosts the user's global glab configuration names; `null` leaves out the host gate. */
+  gitlabHosts?: string[] | null;
 } = {}): Fixture {
   const root = mkdtempSync(join(tmpdir(), "wollipog-review-sessions-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const repo = join(root, "repo");
   mkdirSync(repo);
   git(repo, "init", "--quiet", "--initial-branch=main");
-  git(repo, "remote", "add", "origin", "https://github.com/acme/widget.git");
+  git(repo, "remote", "add", "origin", options.gitlab ? `https://${GITLAB}.git` : "https://github.com/acme/widget.git");
   writeFileSync(join(repo, "app.ts"), "export const answer = 41;\n");
   git(repo, "add", "app.ts");
+  if (options.deletedFile) {
+    writeFileSync(join(repo, "gone.ts"), "export const obsolete = true;\n");
+    git(repo, "add", "gone.ts");
+  }
   git(repo, "commit", "--quiet", "-m", "base");
   const base = git(repo, "rev-parse", "HEAD");
   const worktree = join(root, "worktree");
   git(repo, "worktree", "add", "--quiet", "-b", "fix/feature", worktree);
+  if (options.deletedFile) git(worktree, "rm", "gone.ts");
   writeFileSync(join(worktree, "app.ts"), "export const answer = 42;\n");
   writeFileSync(join(worktree, "notes.md"), "Uses ``` fences.\n");
   symlinkSync("/etc/hostname", join(worktree, "outside"));
@@ -77,16 +99,26 @@ function fixture(t: { after(fn: () => void): void }, options: {
   } as unknown as SessionMeta;
   const metas = new Map<string, SessionMeta>([[requester.sessionId, requester]]);
   const logs: string[] = [];
+  const repository = options.gitlab ? GITLAB : "acme/widget";
   const facts: PullRequestFacts = {
-    state: "open", baseRepository: "acme/widget", headRepository: "acme/widget", headRef: "fix/feature",
+    state: "open", baseRepository: repository, headRepository: repository, headRef: "fix/feature",
     headSha: head, baseSha: base, ...options.pr,
   };
+  const mergeRequestReads: unknown[][] = [];
+  const hostChecks: string[] = [];
+  const gitlabHosts = options.gitlabHosts === undefined ? ["gitlab.example.com"] : options.gitlabHosts;
   const exec: ReviewSessionDependencies["exec"] = async (command, args, execOptions) =>
     execFileSync(command, args, { encoding: "utf8", ...(execOptions?.cwd ? { cwd: execOptions.cwd } : {}), env: execOptions?.env });
   const deps: ReviewSessionDependencies = {
     exec,
     pullRequest: async () => ({ ...facts }),
-    tools: () => options.tools ?? { git: GIT, gh: "/trusted/gh" },
+    ...(options.noMergeRequestReader ? {} : {
+      mergeRequest: async (...args: unknown[]) => { mergeRequestReads.push(args.slice(0, 4)); return { ...facts }; },
+    }),
+    ...(gitlabHosts === null ? {} : {
+      gitlabHostConfigured: async (_glab: string, host: string) => { hostChecks.push(host); return gitlabHosts.includes(host); },
+    }),
+    tools: () => options.tools ?? (options.gitlab ? { git: GIT, glab: "/trusted/glab" } : { git: GIT, gh: "/trusted/gh" }),
     verifyCommand: () => { if (options.untrusted) throw new Error("planted"); },
     agents: () => options.agents ?? AGENTS,
     agentPath: () => "/usr/bin:/bin",
@@ -95,9 +127,9 @@ function fixture(t: { after(fn: () => void): void }, options: {
   const snapshots = new ReviewSnapshotter(join(root, "snapshots"), exec, (message) => logs.push(message));
   const launcher = new ReviewSessionLauncher(join(root, "snapshots"), snapshots, { readMeta: (id) => metas.get(id) ?? null }, deps);
   return {
-    root, repo, worktree, base, head, requester, metas, launcher, logs, facts,
+    root, repo, worktree, base, head, requester, metas, launcher, logs, facts, mergeRequestReads, hostChecks,
     policy: (overrides = {}) => ({
-      requesterSessionId: "s_requester", pullRequest: { repository: "acme/widget", number: 7 }, headSha: facts.headSha,
+      requesterSessionId: "s_requester", pullRequest: { repository, number: 7 }, headSha: facts.headSha,
       harness: "codex", ...overrides,
     }),
   };
@@ -234,11 +266,90 @@ test("capability names one available native agent per reviewer harness and repor
   ] as unknown as AgentDefinition[];
   assert.equal(f.launcher.capability(agents, "darwin"), undefined);
   assert.deepEqual(f.launcher.capability(agents, "linux"), {
-    reviewers: [{ harness: "claude-code", agentId: "claude" }],
+    configuration: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }],
     unavailable: { codex: "no available native agent uses this harness" },
   });
   const noTools = fixture(t, { tools: { unavailable: "git is not installed" } });
-  assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], unavailable: { tools: "git is not installed" } });
+  assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "git is not installed" } });
+});
+
+test("review admission skips a signed-out implicit default even when explicit B is ready", (t) => {
+  const f = fixture(t);
+  const agents: AgentDefinition[] = [{ ...AGENTS[0]!, providerAccountReadiness: {
+    defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+  } }];
+  const result = f.launcher.capability(agents, "linux");
+  assert.deepEqual(result?.reviewers, []);
+  assert.ok(result?.unavailable?.codex);
+  assert.equal(agents[0]?.providerAccountReadiness?.defaultAccountId, "a");
+  agents[0]!.providerAccountReadiness = {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated", readyAccountIds: ["b"],
+  };
+  assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, [{ harness: "codex", agentId: "codex" }],
+    "an implicit granted default remains reviewable when an earlier account is not granted");
+});
+
+test("long writer refusals stay within the control plane capability limit", () => {
+  const reason = "Codex packages are unprotected from the following writers: " + Array.from({ length: 10 }, (_, index) =>
+    `session s_writer_${index} (complete exit unproven; ${"retained writer detail ".repeat(7)}).`).join("\n");
+  const logs: string[] = [];
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    exec: async () => "", pullRequest: async () => { throw new Error("unused"); },
+    tools: () => ({ git: GIT, gh: "/trusted/gh" }), agents: () => AGENTS, agentPath: () => "/trusted",
+    verifyCommand: (command) => { if (command === "codex") throw new Error(reason); }, log: (message) => logs.push(message),
+  });
+  const capability = launcher.capability(undefined, "linux")!;
+  assert.ok(capability.unavailable!.codex!.length <= 500, "otherwise agents_updated discards the whole capability");
+  assert.match(capability.unavailable!.codex!, /10 retaining sessions: s_writer_0, s_writer_1, s_writer_2 \(\+7 more\).*--state-doctor review-writers inspect/u);
+  assert.deepEqual(capability.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+  assert.ok(logs.some((message) => String((JSON.parse(message) as { reason: string }).reason).includes(reason)),
+    "retain the complete refusal in the runner log");
+});
+
+test("unchanged discovery failures log once, and recovery allows a recurrence to be logged", () => {
+  let unavailable = true;
+  const logs: string[] = [];
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    exec: async () => "", pullRequest: async () => { throw new Error("unused"); },
+    tools: () => ({ git: GIT, gh: "/trusted/gh" }), agents: () => AGENTS, agentPath: () => "/trusted",
+    verifyCommand: (command) => { if (command === "codex" && unavailable) throw new Error("codex unavailable"); },
+    log: (message) => logs.push(message),
+  });
+  launcher.capability(undefined, "linux");
+  launcher.capability(undefined, "linux");
+  assert.equal(logs.length, 1);
+  unavailable = false;
+  launcher.capability(undefined, "linux");
+  unavailable = true;
+  launcher.capability(undefined, "linux");
+  assert.equal(logs.length, 2);
+  assert.deepEqual(JSON.parse(logs[0]!), { event: "review_session_discovery_failed", component: "codex", reason: "Error: codex unavailable" });
+});
+
+test("capability contains tool-root and agent discovery exceptions and recovers on the next computation", () => {
+  let failure: "tools" | "agents" | null = "tools";
+  const deps = defaultReviewSessionDependencies("/state", () => {}, () => {
+    if (failure === "tools") throw new Error("tool roots unavailable during startup");
+    return [];
+  }, () => {
+    if (failure === "agents") throw new Error("agent catalog unavailable during startup");
+    return AGENTS;
+  });
+  const tools = deps.tools;
+  const launcher = new ReviewSessionLauncher("/unused", {} as ReviewSnapshotter, { readMeta: () => null }, {
+    ...deps, tools: () => failure === "tools" ? tools() : { git: GIT, gh: "/trusted/gh" }, verifyCommand: () => {},
+  });
+  assert.deepEqual(launcher.capability(undefined, "linux"), {
+    reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "tool roots unavailable during startup" },
+  });
+  failure = "agents";
+  assert.deepEqual(launcher.capability(undefined, "linux"), {
+    reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "agent catalog unavailable during startup" },
+  });
+  failure = null;
+  assert.deepEqual(launcher.capability(undefined, "linux"), {
+    configuration: true, questionPreservation: true, reviewers: [{ harness: "claude-code", agentId: "claude" }, { harness: "codex", agentId: "codex" }],
+  });
 });
 
 test("a spawned reviewer command must be trusted as the first PATH match, with its env interpreter", (t) => {
@@ -263,6 +374,52 @@ test("a spawned reviewer command must be trusted as the first PATH match, with i
     assert.throws(() => verifySpawnedCommand("claude", path, [writable], uid, rootUid), /relative entry/u, path);
   }
   assert.throws(() => verifySpawnedCommand("../claude", trusted, [], uid, rootUid), /is not installed/u);
+});
+
+test("the runner's reviewer check names the configured grant that makes the reviewer session-writable (#4122)", {
+  skip: process.platform === "win32",
+}, (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-grant-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "claude"), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const claude = join(realpathSync(root), "claude");
+  // A workspace registered at the temporary directory is named, but removing it cannot help:
+  // the temporary directory is session-writable regardless. review-trust.test.ts covers HOME.
+  const deps = defaultReviewSessionDependencies("/state", () => {}, () => [
+    { path: tmpdir(), grant: `workspace "scratch"`, recovery: `remove workspace "scratch" from this machine` },
+  ]);
+  assert.throws(() => deps.verifyCommand(claude), {
+    message: `${claude} is inside a directory a session can write (${realpathSync(tmpdir())}). To use it, install the reviewer ` +
+      `where no session can write and set its agent's command to that absolute path. Granted by workspace "scratch"`,
+  });
+});
+
+test("a bounded capability reason keeps a recovery however many grants contain the reviewer", () => {
+  const home = "/home/operator";
+  const names = Array.from({ length: 8 }, (_, index) => `${index}-${"a-long-project-name-".repeat(5)}`);
+  const grants = configuredSessionWritableGrants({
+    workspaces: names.map((name, index) => ({ name, path: `/srv/project-${index}`, additionalDirectoryGrants: [home] })),
+    sessions: Array.from({ length: 12 }, (_, index) => ({ sessionId: `s_${"0".repeat(11)}${index}`, repoPath: home, worktreePath: null, env: {} })),
+  });
+  const relocation = "install the reviewer where no session can write and set its agent's command to that absolute path";
+  const full = explainSessionWritableRefusal(new SessionWritableRootError(`${home}/.local/bin`, home), grants, relocation, []) as Error;
+  const reason = reviewSessionDiscoveryReason(full);
+  assert.ok(reason.length <= 500, reason);
+  assert.ok(reason.startsWith(`${home}/.local/bin is inside a directory a session can write (${home}). To use it, ${relocation}, or `), reason);
+  // Labels are bounded, and the runner log (the whole message) keeps every grant.
+  for (const name of names) assert.ok(full.message.includes(`workspace "${name.slice(0, 63)}…"`), full.message);
+  assert.ok(full.message.endsWith(` and sessions ${Array.from({ length: 12 }, (_, index) => `s_${"0".repeat(11)}${index}`).join(", ")}`));
+
+  // Long paths are elided in the reason, never in the logged message.
+  const longRoot = `/srv/${"a".repeat(400)}`;
+  const longGrants = configuredSessionWritableGrants({
+    workspaces: names.map((name, index) => ({ name, path: `/srv/project-${index}`, additionalDirectoryGrants: [longRoot] })),
+  });
+  const long = explainSessionWritableRefusal(new SessionWritableRootError(`${longRoot}/.local/bin`, longRoot), longGrants, relocation, []) as Error;
+  const longReason = reviewSessionDiscoveryReason(long);
+  assert.ok(longReason.length <= 500, longReason);
+  assert.match(longReason, new RegExp(`^…a{108}/\\.local/bin is inside a directory a session can write \\(…a{119}\\)\\. To use it, ${relocation}, or `, "u"));
+  assert.ok(long.message.startsWith(`${longRoot}/.local/bin is inside a directory a session can write (${longRoot}). To use it, `));
 });
 
 test("prepare checks out the exact pushed head privately and pins the patch in the prompt", async (t) => {
@@ -339,6 +496,129 @@ test("prepare refuses every request outside the requester's own pull request at 
   assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
 });
 
+test("prepare binds a GitLab merge request in a nested namespace through glab, from the session's own branch", async (t) => {
+  const f = fixture(t, { gitlab: true });
+  const prepared = await f.launcher.prepare("s_review", f.policy({ pullRequest: { repository: GITLAB, number: 12 } }), CODEX, "b");
+  // Read once, by host, project and IID, with the verified glab.
+  assert.deepEqual(f.mergeRequestReads, [["/trusted/glab", "gitlab.example.com", "acme/team/widget", 12]]);
+  // The host was proven configured before that read.
+  assert.deepEqual(f.hostChecks, ["gitlab.example.com"]);
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), f.head);
+  assert.equal(prepared.baseSha, f.base);
+  assert.match(prepared.prompt, /- Merge request: gitlab\.example\.com\/acme\/team\/widget!12\n/u);
+  assert.match(prepared.prompt, /-export const answer = 41;\n\+export const answer = 42;/u);
+  // The head and the merge base came from the session's own branch: the forge URL is unreachable.
+  assert.equal(existsSync(join(f.root, "snapshots", "mirrors", `${repositoryKey(GITLAB)}.git`)), true);
+  f.launcher.release("s_review");
+});
+
+test("prepare refuses a GitLab merge request outside the session's own project, branch and head", async (t) => {
+  const f = fixture(t, { gitlab: true });
+  const policy = (overrides: Partial<ReviewLaunchPolicy> = {}) => f.policy({ pullRequest: { repository: GITLAB, number: 12 }, ...overrides });
+  // Another project on the same host, or the same path on another host, is not the origin's.
+  for (const repository of ["gitlab.example.com/acme/team/other", "gitlab.other.example/acme/team/widget"]) {
+    assert.equal(await refusal(f.launcher.prepare("s_review", policy({ pullRequest: { repository, number: 12 } }), CODEX, "b")),
+      "the pull request is not this session's open, same-repository pull request");
+  }
+  // A bare namespace names no host, and is never guessed to be gitlab.com.
+  assert.equal(await refusal(f.launcher.prepare("s_review", policy({ pullRequest: { repository: "acme/team/widget", number: 12 } }), CODEX, "b")),
+    "the pull request is not this session's open, same-repository pull request");
+  for (const [pr, reason] of [
+    [{ state: "locked" }, "the pull request is not this session's open, same-repository pull request"],
+    [{ headRepository: "" }, "the pull request is not this session's open, same-repository pull request"],
+    [{ headRef: "other-branch" }, "the pull request is not this session's open, same-repository pull request"],
+    [{ baseSha: "" }, "the review snapshot could not be prepared"],
+  ] as const) {
+    const g = fixture(t, { gitlab: true, pr });
+    assert.equal(await refusal(g.launcher.prepare("s_review", g.policy(), CODEX, "b")), reason);
+  }
+  // A self-managed host the user's global glab configuration does not name is never asked, so a
+  // session-written origin cannot send glab's credentials elsewhere; nor is it without the gate.
+  for (const gitlabHosts of [[], null]) {
+    const unconfigured = fixture(t, { gitlab: true, gitlabHosts });
+    assert.equal(await refusal(unconfigured.launcher.prepare("s_review", unconfigured.policy(), CODEX, "b")),
+      "the runner's glab is not configured for this GitLab host");
+    assert.deepEqual(unconfigured.mergeRequestReads, []);
+  }
+  const noGlab = fixture(t, { gitlab: true, tools: { git: GIT, gh: "/trusted/gh" } });
+  assert.equal(await refusal(noGlab.launcher.prepare("s_review", noGlab.policy(), CODEX, "b")),
+    "the runner is missing a trusted glab for GitLab reviews");
+  assert.deepEqual(noGlab.mergeRequestReads, []);
+  const noReader = fixture(t, { gitlab: true, noMergeRequestReader: true });
+  assert.equal(await refusal(noReader.launcher.prepare("s_review", noReader.policy(), CODEX, "b")),
+    "the pull request is not this session's open, same-repository pull request");
+  // A runner with only glab still refuses a GitHub pull request by what it lacks.
+  const noGh = fixture(t, { tools: { git: GIT, glab: "/trusted/glab" } });
+  assert.equal(await refusal(noGh.launcher.prepare("s_review", noGh.policy(), CODEX, "b")),
+    "the runner is missing a trusted gh for GitHub reviews");
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+});
+
+test("the GitLab host gate reads only the user's global glab configuration, and fails closed", async (t) => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-glab-gate-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const glab = join(root, "glab");
+  const calls = join(root, "calls");
+  // A fake glab: records its arguments, and answers api_protocol for the hosts it is configured for.
+  writeFileSync(glab, [
+    "#!/bin/sh",
+    `printf '%s\\n' "$*" >> '${calls}'`,
+    'case "$5" in',
+    "  gitlab.example.com) echo https ;;",
+    "  ssh.example.com) echo ssh ;;",
+    "  *) echo 'not configured' >&2; exit 1 ;;",
+    "esac",
+    "",
+  ].join("\n"));
+  chmodSync(glab, 0o755);
+  assert.equal(await gitlabHostConfigured(glab, "gitlab.example.com"), true);
+  assert.equal(await gitlabHostConfigured(glab, "attacker.example"), false);
+  assert.equal(await gitlabHostConfigured(glab, "ssh.example.com"), false);
+  assert.equal(await gitlabHostConfigured("glab", "gitlab.example.com"), false, "only a verified absolute glab");
+  assert.equal(await gitlabHostConfigured(join(root, "missing"), "gitlab.example.com"), false);
+  assert.deepEqual(readFileSync(calls, "utf8").trim().split("\n"), [
+    "config get api_protocol --host gitlab.example.com --global",
+    "config get api_protocol --host attacker.example --global",
+    "config get api_protocol --host ssh.example.com --global",
+  ]);
+});
+
+test("a GitLab merge request is open only when opened, same-project, and diffed at its head", () => {
+  const head = "a".repeat(40);
+  const base = "b".repeat(40);
+  const mr = {
+    iid: 12, state: "opened", sha: head, source_branch: "fix/feature", source_project_id: 5, target_project_id: 5,
+    diff_refs: { base_sha: base, head_sha: head, start_sha: "c".repeat(40) },
+  };
+  assert.deepEqual(gitlabMergeRequestFacts(mr, GITLAB, 12), {
+    state: "open", baseRepository: GITLAB, headRepository: GITLAB, headRef: "fix/feature", headSha: head, baseSha: base,
+  });
+  // GitLab's merge base, never the target branch's tip (start_sha).
+  assert.equal(gitlabMergeRequestFacts(mr, GITLAB, 12).baseSha, base);
+  assert.equal(gitlabMergeRequestFacts({ ...mr, state: "locked" }, GITLAB, 12).state, "locked");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, state: "merged" }, GITLAB, 12).state, "merged");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, source_project_id: 9 }, GITLAB, 12).headRepository, "");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, source_project_id: undefined, target_project_id: undefined }, GITLAB, 12).headRepository, "");
+  // A diff computed for an earlier head gives no base.
+  assert.equal(gitlabMergeRequestFacts({ ...mr, diff_refs: { base_sha: base, head_sha: "d".repeat(40) } }, GITLAB, 12).baseSha, "");
+  assert.equal(gitlabMergeRequestFacts({ ...mr, diff_refs: null }, GITLAB, 12).baseSha, "");
+  // Another merge request's answer names nothing.
+  const other = gitlabMergeRequestFacts({ ...mr, iid: 13 }, GITLAB, 12);
+  assert.equal(other.state, "opened");
+  assert.equal(other.baseRepository, "");
+  assert.deepEqual(gitlabMergeRequestFacts("not an object", GITLAB, 12), {
+    state: "", baseRepository: "", headRepository: "", headRef: "", headSha: "", baseSha: "",
+  });
+});
+
+test("mirror keys keep a GitHub repository readable and hash a nested GitLab project apart from it", () => {
+  assert.equal(repositoryKey("Acme/Widget"), "acme__widget");
+  const key = repositoryKey(GITLAB);
+  assert.match(key, /^gitlab-[0-9a-f]{32}$/u);
+  assert.equal(repositoryKey(GITLAB.toUpperCase()), key);
+  assert.notEqual(repositoryKey("gitlab.example.com/acme/team/other"), key);
+});
+
 const FINDING = {
   severity: "high" as const, blocking: true, file: "app.ts", line: 1, title: "Wrong answer", scenario: "s", evidence: "e", verify: "v",
 };
@@ -393,6 +673,161 @@ test("a later round reviews only the changes since the last valid head, with its
   f.launcher.release("s_review");
 });
 
+test("a delta report may examine a PR-deleted file provided as context", async (t) => {
+  const f = fixture(t, { deletedFile: true });
+  writeFileSync(join(f.worktree, "notes.md"), "Updated notes.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "notes");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.equal(prepared.round.mode, "delta");
+  assert.deepEqual(prepared.round.scopeFiles, ["notes.md"]);
+  assert.match(prepared.prompt, /context only; do not classify\):[^]*- `gone.ts`/u);
+  assert.equal(existsSync(join(prepared.checkout, "gone.ts")), false);
+  const report = {
+    schema_version: 2, reviewed_head: head, vote: "UPVOTE", summary: "ok", findings: [],
+    examined_changed_files: ["notes.md"], not_examined_changed_files: [],
+    context_files_examined: ["gone.ts"], commands_run: [], verification_requests: [],
+  };
+  const observation = { output: JSON.stringify(report), timedOut: false, fatal: [], exitedWithError: false, modelOk: null };
+  assert.deepEqual(await f.launcher.evaluate("s_review", observation),
+    { valid: true, consumed: true, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] });
+  const invalid = await f.launcher.evaluate("s_review", {
+    ...observation, output: JSON.stringify({ ...report, context_files_examined: ["unrelated.ts"] }),
+  });
+  assert.equal(invalid.valid, false);
+  assert.match(invalid.validationErrors.join(), /non-repository paths/u);
+  f.launcher.release("s_review");
+});
+
+/** Move the base branch with files the pull request never touches, plus `extra`, and make it the
+ * pull request's base. */
+function moveBase(f: Fixture, extra: Record<string, string> = {}): string {
+  const files: Record<string, string> = { ...extra };
+  for (let index = 0; index < 30; index++) files[`lib/module-${index}.ts`] = `export const value${index} = ${index};\n`;
+  for (const [path, content] of Object.entries(files)) {
+    mkdirSync(join(f.repo, path, ".."), { recursive: true });
+    writeFileSync(join(f.repo, path), content);
+  }
+  git(f.repo, "add", "--all");
+  git(f.repo, "commit", "--quiet", "-m", "base moves");
+  f.facts.baseSha = git(f.repo, "rev-parse", "HEAD");
+  return f.facts.baseSha;
+}
+
+test("a follow-up round over a merge of a moved base scopes only the pull request's own changes", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "notes.md"), "Uses no fences.\n");
+  git(f.worktree, "add", "notes.md");
+  const head = push(f, "-m", "notes");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 2, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["notes.md"], since: f.head,
+  });
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), head);
+  assert.match(prepared.prompt, new RegExp(`- Mode: follow-up round: the files whose pull request changes moved since ${f.head}, which merged the base branch`, "u"));
+  assert.match(prepared.prompt, /Changed files to classify \(each exactly once\):\n- `notes.md`\n\n/u);
+  assert.match(prepared.prompt, /context only; do not classify\):\n- `app.ts`\n- `outside`\n\n/u);
+  assert.match(prepared.prompt, /## Pinned Patch\n\n```diff\n[^]*\+Uses no fences\./u);
+  assert.doesNotMatch(prepared.prompt, /lib\/module-|value\d+/u, "nothing the base branch alone changed");
+  assert.doesNotMatch(prepared.prompt, /answer = 42/u, "only the scoped files' diff");
+  f.launcher.release("s_review");
+});
+
+test("a follow-up round over a pure merge of the base is refused as unchanged", async (t) => {
+  const f = fixture(t);
+  moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  assert.notEqual(f.facts.headSha, f.head);
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.unchanged);
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false);
+  // Merging the base again on top still has nothing of the pull request's own to review.
+  moveBase(f, { "lib/later.ts": "export const later = true;\n" });
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.unchanged);
+});
+
+test("a follow-up round over a merge keeps a conflict resolution in a file both sides changed", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 42; // was 40 on main\n");
+  git(f.worktree, "add", "app.ts");
+  const head = push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: reviewed(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual([prepared.round.mode, prepared.round.baseSha, prepared.round.scopeFiles], ["delta", base, ["app.ts"]]);
+  assert.equal(git(prepared.checkout, "rev-parse", "HEAD"), head);
+  // The patch is the pull request's diff of app.ts against the moved base, resolution included.
+  assert.match(prepared.prompt, /-export const answer = 40;\n\+export const answer = 42; \/\/ was 40 on main/u);
+  assert.doesNotMatch(prepared.prompt, /lib\/module-/u);
+  f.launcher.release("s_review");
+
+  // Resolving by keeping the reviewed content unchanged still reverts the base's change: in scope.
+  const g = fixture(t);
+  moveBase(g, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(g.worktree, "merge", "--quiet", "--no-edit", "main"));
+  git(g.worktree, "checkout", "--ours", "app.ts");
+  git(g.worktree, "add", "app.ts");
+  push(g, "--no-edit");
+  assert.equal(git(g.worktree, "diff", g.head, "HEAD", "--", "app.ts"), "");
+  const kept = await g.launcher.prepare("s_review", g.policy({ history: reviewed(g, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(kept.round.scopeFiles, ["app.ts"]);
+  assert.match(kept.prompt, /-export const answer = 40;\n\+export const answer = 42;/u);
+  g.launcher.release("s_review");
+});
+
+/** A run whose epoch used all four rounds, its last one at the fixture's head. v277 control plane. */
+function exhausted(f: Fixture, vote: "UPVOTE" | "DOWNVOTE"): ReviewRunHistory {
+  const run = reviewed(f, vote);
+  return { ...run, lastValid: { ...run.lastValid!, round: 4 }, lastAttempt: { ...run.lastAttempt!, round: 4 }, validRounds: 4, baseMergeRounds: true };
+}
+
+test("a base merge with a conflict resolution gets a free round scoped to the merge's effect (#4075)", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f, { "app.ts": "export const answer = 40;\n" });
+  assert.throws(() => git(f.worktree, "merge", "--quiet", "--no-edit", "main"));
+  writeFileSync(join(f.worktree, "app.ts"), "export const answer = 42; // was 40 on main\n");
+  git(f.worktree, "add", "app.ts");
+  push(f, "--no-edit");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared.round, {
+    epoch: 1, round: 5, attempt: 1, mode: "delta", baseSha: base, scopeFiles: ["app.ts"], since: f.head, baseMerge: true,
+  }, "beyond the epoch's four rounds, without an extension");
+  assert.doesNotMatch(prepared.prompt, /lib\/module-/u);
+  f.launcher.release("s_review");
+  // A control plane that does not count base merges still refuses it at the round limit.
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: { ...exhausted(f, "DOWNVOTE"), baseMergeRounds: undefined } }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
+test("a pure base merge onto an upvoted head is recorded as an equivalence without a reviewer (#4075)", async (t) => {
+  const f = fixture(t);
+  const base = moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  f.facts.headSha = git(f.worktree, "rev-parse", "HEAD");
+  const prepared = await f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "UPVOTE") }), CODEX, "b");
+  assert.deepEqual(prepared, { equivalent: true, checkout: "", prompt: "", baseSha: base, round: {
+    epoch: 1, round: 5, attempt: 1, mode: "equivalent", baseSha: base, scopeFiles: [], baseMerge: true, equivalentTo: f.head,
+  } });
+  assert.equal(existsSync(join(f.root, "snapshots", "checkouts", "s_review")), false, "no checkout is left behind");
+});
+
+test("a non-merge fix after the budget is used still needs an extension (#4075)", async (t) => {
+  const f = fixture(t);
+  moveBase(f);
+  git(f.worktree, "merge", "--quiet", "--no-edit", "main");
+  writeFileSync(join(f.worktree, "notes.md"), "Uses no fences.\n");
+  git(f.worktree, "add", "notes.md");
+  push(f, "-m", "a fix after the merge");
+  assert.equal(await refusal(f.launcher.prepare("s_review", f.policy({ history: exhausted(f, "DOWNVOTE") }), CODEX, "b")),
+    REVIEW_ROUND_REFUSALS.roundLimit);
+});
+
 test("a head that no longer descends from the reviewed one starts an epoch that reviews the range-diff", async (t) => {
   const f = fixture(t);
   // The first round fetched the head that is about to be rewritten.
@@ -423,6 +858,19 @@ test("a head that no longer descends from the reviewed one starts an epoch that 
   const full = await g.launcher.prepare("s_review", g.policy({ history: reviewed(g, "DOWNVOTE") }), CODEX, "b");
   assert.deepEqual([full.round.epoch, full.round.mode, full.round.rebasedFrom], [2, "full", undefined]);
   g.launcher.release("s_review");
+});
+
+test("Codex discovery directories are retired with their checkout, including repeated release", async (t) => {
+  const f = fixture(t);
+  const prepared = await f.launcher.prepare("s_review", f.policy(), CODEX, "b");
+  assert.ok(prepared.prompt.includes(JSON.stringify(prepared.checkout)));
+  assert.ok(!prepared.prompt.includes("The working directory is a checkout"));
+  const cwd = prepareCodexReviewWorkingDirectory(prepared.checkout);
+  assert.ok(existsSync(join(cwd, ".git")));
+  f.launcher.release("s_review");
+  assert.ok(!existsSync(cwd));
+  assert.ok(!existsSync(prepared.checkout));
+  f.launcher.release("s_review");
 });
 
 test("an attempt is judged against its pinned head and scope, on a checkout nothing changed", async (t) => {
@@ -522,4 +970,16 @@ test("an extra round after an upvote snapshots only the post-upvote delta", asyn
   assert.match(prepared.prompt, /Verified correction after upvote/u);
   assert.doesNotMatch(prepared.prompt, /answer = 42/u);
   f.launcher.release("s_review");
+});
+
+test("configured review launches recheck model, effort and explicit same-family consent on the runner", async (t) => {
+  const agents = structuredClone(AGENTS);
+  for (const agent of agents) agent.capabilities = { models: [{ id: agent.id === "codex" ? "gpt-6.1-sol" : "claude-opus-5-5", default: true }],
+    effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true };
+  const f = fixture(t, { agents, requester: { driver: "codex-app-server", config: { model: "gpt-6.1-sol" } } });
+  const configuration = { model: "gpt-6.1-sol", effort: "high", roundBudget: 2, allowSameFamily: false };
+  await assert.rejects(f.launcher.prepare("s_refused", f.policy({ harness: "codex", configuration }), { ...CODEX, model: "gpt-6.1-sol", effort: "high" }, "brief"), /model family without explicit permission/u);
+  await assert.rejects(f.launcher.prepare("s_changed", f.policy({ harness: "codex", configuration: { ...configuration, allowSameFamily: true } }), { ...CODEX, model: "retired", effort: "high" }, "brief"), /configured reviewer/u);
+  const prepared = await f.launcher.prepare("s_allowed", f.policy({ harness: "codex", configuration: { ...configuration, allowSameFamily: true } }), { ...CODEX, model: "gpt-6.1-sol", effort: "high" }, "brief");
+  assert.equal(prepared.round.round, 1);
 });

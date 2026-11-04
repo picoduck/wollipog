@@ -48,14 +48,15 @@ export function instanceRouteFromPath(pathname: string, search = ""): InstanceRo
 }
 
 /**
- * A redirect's focus target (#3023) that `InstanceProvider` canonicalized before the store first read
- * the address: the canonical route no longer says what to focus. Held for that one read only.
+ * A focus or history intent that `InstanceProvider` must carry across rebuilding an instance's
+ * store: the canonical route does not serialize it. Held for that one read only.
  */
 let heldRedirect: { path: string; view: View } | null = null;
 
-/** Hold `view`'s focus target for the store's first read of `instanceId`'s canonical route. */
+/** Hold the transient arrival intent for the store's first read of the canonical route. */
 export function holdRedirectFocus(instanceId: string, view: View): void {
-  heldRedirect = view.name === "settings" && view.focus ? { path: instanceViewPath(instanceId, view), view } : null;
+  const hasIntent = (view.name === "settings" && view.focus) || (view.name === "archived" && view.browseVisit?.restore);
+  heldRedirect = hasIntent ? { path: instanceViewPath(instanceId, view), view } : null;
 }
 
 /** The held view, if it is for exactly this address; the hold ends either way. */

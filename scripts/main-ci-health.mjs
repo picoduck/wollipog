@@ -63,7 +63,7 @@ function isAlert(issue) {
     Array.isArray(issue.labels) && issue.labels.some((label) => label?.name === ALERT_LABEL);
 }
 
-async function readAlert(api, repository) {
+export async function readAlert(api, repository) {
   const issues = await api(`/repos/${repository}/issues?state=open&labels=${ALERT_LABEL}&per_page=20`);
   if (!Array.isArray(issues) || issues.length >= 20) fail("issue-pagination-incomplete");
   return issues.filter(isAlert).sort((a, b) => a.number - b.number)[0] ?? null;
@@ -274,19 +274,20 @@ export async function writeHealthState(api, repository, previous, health) {
   return commit.sha;
 }
 
-const CORE_STEPS = ["Typecheck", "Unit Tests", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
+const CORE_STEPS = ["Typecheck", "Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary",
   "Verify Node 23 Engine Boundary", "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment",
   "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"];
-const EVIDENCE_STEPS = [...CORE_STEPS, "Verify Rolling Checkout", "Remote-Instance Browser End-to-End Tests",
+const EVIDENCE_STEPS = [...CORE_STEPS, "Unit Tests", "Verify Rolling Checkout", "Remote-Instance Browser End-to-End Tests",
   "Rendered Production Browser Smoke", "WebKit Browser End-to-End Tests", "Compare the Diff Against the Settings-Rows Paths",
-  "Compare Against the Committed win32 Baselines", "Require Every Job to Have Succeeded"];
+  "Compare Against the Committed win32 Baselines", "Verify Recorded-Boundary Pipeline Recovery",
+  "Require Every Job to Have Succeeded"];
 
 /** Independent forge reads. Never consume coordination state or uploaded artifacts. */
 export async function collectHealth(repository, { api, pointers = [], incidentRunId = null, checkpointDisabled = false,
   now = () => new Date().toISOString() } = {}) {
   const observedAt = now(), health = unknownHealth(repository, observedAt, "no-full-evidence");
   try {
-    const { workerIdentity, REQUIRED } = await import("./main-rolling-validation.mjs");
+    const { workerIdentity, REQUIRED, UNIT_SHARDS } = await import("./main-rolling-validation.mjs");
     const root = `/repos/${repository}`;
     const mainSha = (await api(`${root}/git/ref/heads/main`))?.object?.sha;
     if (!SHA.test(mainSha)) fail("main-unavailable");
@@ -410,7 +411,9 @@ export async function collectHealth(repository, { api, pointers = [], incidentRu
           stepPassed(inventory[6], "WebKit Browser End-to-End Tests") &&
           stepPassed(inventory[7], "Compare the Diff Against the Settings-Rows Paths") &&
           stepPassed(inventory[8], "Compare Against the Committed win32 Baselines") &&
-          stepPassed(inventory[9], "Require Every Job to Have Succeeded");
+          UNIT_SHARDS.every((name) => stepPassed(inventory.find((job) => job.name === prefix + name), "Unit Tests")) &&
+          stepPassed(inventory.find((job) => job.name === prefix + "Delegated Pipeline Recovery"), "Verify Recorded-Boundary Pipeline Recovery") &&
+          stepPassed(inventory.at(-1), "Require Every Job to Have Succeeded");
         const fullSuccess = identity && checkoutVerified && testsVerified && completed &&
           inventory.every((job) => job.conclusion === "success") && snapshot.status === "completed" && snapshot.conclusion === "success";
         const failure = snapshot.status === "completed" && RED.has(snapshot.conclusion) &&
@@ -770,7 +773,7 @@ export async function reconcile(target, { api, log = console.log, collect = coll
 }
 
 export async function main(argv = [], { env = process.env, api, log = console.log, error = console.error,
-  waitForWorker = awaitWorkerTerminal } = {}) {
+  waitForWorker = awaitWorkerTerminal, now = () => new Date().toISOString() } = {}) {
   let bounded, workerHandoff;
   const entryPoint = env.GITHUB_EVENT_NAME ?? "cli";
   const observationId = positive(Number(env.GITHUB_RUN_ID)) ? `${env.GITHUB_RUN_ID}:${env.GITHUB_RUN_ATTEMPT}` : randomUUID();
@@ -789,7 +792,8 @@ export async function main(argv = [], { env = process.env, api, log = console.lo
       const previous = await readHealthState(api, repository);
       const issue = await readAlert(api, repository);
       const incidentRunId = Number(LATEST.exec(issue?.body ?? "")?.[1]);
-      const health = await collectHealth(repository, { api, incidentRunId,
+      // A caller-owned clock lets an injected forge replay virtual time; production uses wall time.
+      const health = await collectHealth(repository, { api, incidentRunId, now,
         pointers: [...new Set([...previous.pointers, ...(positive(incidentRunId) ? [incidentRunId] : [])])] });
       health.apiBudget = { ...api.budget };
       if (issue && !positive(incidentRunId)) {

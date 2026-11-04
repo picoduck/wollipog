@@ -47,6 +47,7 @@ const routes: Array<[View, string]> = [
   [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
   [{ name: "skills", pane: "overview" }, "/skills/overview"],
   [{ name: "usage" }, "/usage"],
+  [{ name: "usage", tab: "subscriptions" }, "/usage/subscriptions"],
   [{ name: "projects" }, "/projects"],
   [{ name: "projects", pane: "overview" }, "/projects/overview"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],
@@ -71,6 +72,24 @@ test("attention routes retain exact opaque request identity and epoch through re
     assert.equal(viewFromPath(path, query), null);
   }
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
+});
+
+test("an artifact link names its session's Browser tab and, optionally, one artifact (#3924)", () => {
+  for (const artifacts of [{}, { artifactId: "art_1" }, { artifactId: "artifact / ..? # % ✅" }]) {
+    const view: View = { name: "session", id: "session / ✅", artifacts };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+    assert.equal(sameView(view, { name: "session", id: "session / ✅" }), false);
+  }
+  // The ephemeral activation never reaches the address.
+  assert.equal(
+    viewPath({ name: "session", id: "s", artifacts: { artifactId: "a", activationId: 7 } }),
+    `/sessions/~${encodeResourceId("s")}/artifacts/~${encodeResourceId("a")}`,
+  );
+  const path = `/sessions/~${encodeResourceId("s")}/artifacts/~${encodeResourceId("a")}`;
+  assert.equal(viewFromPath(path, "?epoch=1"), null);
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/~!`), null);
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/`)?.name, "session");
 });
 
 test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
@@ -201,7 +220,7 @@ const RETIRED_TERMS = [
   "content-free",
 ];
 
-test("page descriptions are one short sentence in user terms", () => {
+test("page descriptions use short sentence-case copy in user terms", () => {
   assert.deepEqual(
     Object.fromEntries(GLOBAL_VIEW_ITEMS.map((item) => [item.id, item.description])),
     {
@@ -212,15 +231,17 @@ test("page descriptions are one short sentence in user terms", () => {
       pods: "Agents that share notes and a worktree while they work toward one objective.",
       runners: undefined,
       skills: "Write a skill once, then choose which machines and agents get it.",
-      archived: undefined,
-      usage: "What your agents spent, by day, agent and project.",
+      archived: "Archived sessions keep their transcripts. Restore one to keep working.",
+      usage: "What your sessions would cost at API rates and what's left on each subscription.",
     },
   );
   for (const item of GLOBAL_VIEW_ITEMS) {
     if (item.description === undefined) continue;
     assert.ok(item.description.length <= 80, `${item.name}: ${item.description.length} characters`);
-    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it.
-    assert.match(item.description, /^[A-Z][^A-Z]*\.$/u, `${item.name} is one sentence-case line`);
+    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it. An
+    // established acronym keeps its capitals (AGENTS.md, UI Copy).
+    assert.match(item.description.replace(/\bAPI\b/g, "api"), item.id === "archived" ? /^[A-Z][^A-Z]*\. [A-Z][^A-Z]*\.$/u : /^[A-Z][^A-Z]*\.$/u,
+      `${item.name} uses sentence case`);
     for (const term of RETIRED_TERMS) {
       assert.ok(!item.description.toLowerCase().includes(term), `${item.name} uses the retired term "${term}"`);
     }
@@ -644,7 +665,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
   assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
-    ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
   const view = viewFromPath("/settings/keyboard");
   assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");

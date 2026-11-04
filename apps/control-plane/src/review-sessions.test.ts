@@ -1,19 +1,22 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { test } from "node:test";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, REVIEW_SESSION_BRIEF_LIMIT_BYTES, REVIEW_SESSION_OUTPUT_LIMIT_BYTES,
-  planReviewRound, REVIEW_ROUND_REFUSALS,
+  planReviewRound, REVIEW_EQUIVALENCE_OUTPUT, REVIEW_ROUND_REFUSALS,
   type CampaignBudgetAuthority,
   type ReviewAttemptRound, type ReviewAttemptVerdictView, type ReviewReportFinding, type ReviewRunHistory,
   type ReviewSessionCapability, type ReviewSessionRequest, type RunnerMetadata, type StartSessionMessage,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
+import { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 
 const HEAD = "a".repeat(40);
 const CAPABILITY: ReviewSessionCapability = {
+  questionPreservation: true,
   reviewers: [{ harness: "codex", agentId: "codex" }, { harness: "claude-code", agentId: "claude" }],
 };
 const request = (extra: Partial<ReviewSessionRequest> = {}): ReviewSessionRequest => ({
@@ -25,6 +28,9 @@ function harness(options: {
   reviewSession?: ReviewSessionCapability | null;
   driver?: "claude-code" | "codex-app-server" | "pi";
   campaign?: boolean;
+  configuration?: boolean;
+  delegatedMerge?: boolean;
+  reviewPolicy?: Partial<import("@wollipog/protocol").OrchestratorReviewPolicy>;
 } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
@@ -36,24 +42,27 @@ function harness(options: {
       { id: "pi", name: "Pi", command: "pi", args: [], env: {}, driver: "pi", available: true },
     ],
     runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
-      ...(options.reviewSession === null ? {} : { reviewSession: options.reviewSession ?? CAPABILITY }) } };
+      ...(options.reviewSession === null ? {} : { reviewSession: options.reviewSession ?? { ...CAPABILITY, ...(options.configuration ? { configuration: true as const } : {}) } }) } };
   db.registerRunner(metadata, 1, options.protocol ?? PROTOCOL_VERSION);
-  if (options.campaign) {
+  if (options.configuration || options.campaign) {
     for (const agent of metadata.agents.filter((agent) => agent.id !== "pi")) {
       agent.capabilities = { models: [{ id: agent.id === "claude" ? "claude-opus-5-5" : "gpt-6.1-sol", default: true }],
         effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true,
         permissionModes: [agent.id === "claude" ? "dontAsk" : "read-only"] };
     }
     db.registerRunner(metadata, 1, options.protocol ?? PROTOCOL_VERSION);
+  }
+  if (options.campaign) {
     db.setUsageRateTable(new Map(["claude-opus-5-5", "gpt-6.1-sol"].map((model) => [model,
       { inputCostPerToken: 0.000001, outputCostPerToken: 0.000001, cacheReadCostPerToken: 0.000001, cacheCreationCostPerToken: 0.000001 }])));
-    const policy = resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default");
+    const policy = resolveOrchestratorCampaignPolicy({ ...DEFAULT_ORCHESTRATOR_DEFAULTS, behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, ...options.reviewPolicy } }, "system_default");
     policy.issueScope = { repository: "picoduck/wollipog", issueNumbers: [3371], revision: 1,
       authorizedByUserId: identity.userId, authorizedAt: 1 };
     policy.issueNumbers = [3371];
     db.createSession({ id: "root", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Campaign", useWorktree: false,
       driver: "claude-code", config: { model: "claude-opus-5-5" }, now: 2, role: "orchestrator", orchestratorPolicy: policy,
-      parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } },
+      parentControlPolicy: { decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY,
+        ...(options.delegatedMerge ? { pr_merge: "orchestrator" as const } : {}) } },
       scope: { organizationId: identity.organizationId, owner: { kind: "user", userId: identity.userId } } });
     db.updateSessionStatus("root", "running", 3);
   }
@@ -99,6 +108,253 @@ const BLOCKER: ReviewReportFinding = {
 };
 const VALID: ReviewAttemptVerdictView = { valid: true, consumed: true, effectiveVote: "DOWNVOTE", failureClass: null, validationErrors: [] };
 
+function mergeSnapshot(reviewSessionId?: string) {
+  return { category: "pr_merge" as const, repository: request().pullRequest.repository,
+    pullRequest: request().pullRequest.number, headSha: HEAD, reviewResult: "merge" as const,
+    ...(reviewSessionId === undefined ? {} : { reviewSessionId }),
+    requiredChecks: { headSha: HEAD, status: "passed" as const, checkedAt: 10,
+      checks: [{ name: "required", state: "passed" as const }] } };
+}
+
+async function armCitedMerge(h: ReturnType<typeof harness>) {
+  evidenceAttempt(h, "upvote");
+  const snapshot = mergeSnapshot("upvote");
+  const created = h.svc.createWorkflowDecision("s1", { requestId: "cited-arm", resourceKey: "merge", resourceSnapshot: snapshot });
+  assert.ok(created.data, created.error ?? "refused");
+  const approved = created.data.authority === "orchestrator"
+    ? h.svc.resolveDescendantRequest("root", "s1", created.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true)
+    : h.svc.approve("s1", created.data.occurrenceId, "approve");
+  assert.ok(approved.ok, approved.error ?? "approval refused");
+  const command = `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${HEAD}`;
+  h.hub.requestFromRunner = async (_runner, requestId) => ({ type: "github_merge_preflight_result", requestId,
+    sessionId: "s1", ok: true, check: { checkedAt: 10, closures: [] } });
+  const armed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot,
+    action: { kind: "pr_merge_enqueue", command } });
+  assert.ok(armed.data?.actionAdmission, armed.error ?? "not armed");
+  assert.equal(armed.data.reviewEvidence?.status, "verified");
+  return { snapshot, command, occurrenceId: created.data.occurrenceId };
+}
+
+test("correlated authorization rechecks a cited upvote immediately before allowing the command", async () => {
+  for (const newer of ["none", "invalid", "downvote", "downgrade"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      const armed = await armCitedMerge(h);
+      if (newer === "invalid") evidenceAttempt(h, "retry", { invalid: true });
+      if (newer === "downvote") evidenceAttempt(h, "later-vote", { vote: "DOWNVOTE" });
+      if (newer === "downgrade") h.db.registerRunner(h.metadata, 30, 242);
+      h.svc.onSessionEvent("s1", { kind: "permission_request", requestId: "exact-enqueue", title: "Enqueue PR",
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+        context: { toolName: "Bash", input: armed.command } });
+      assert.equal(h.db.workflowDecisionByOccurrence(armed.occurrenceId)?.status,
+        newer === "downvote" || newer === "downgrade" ? "revoked" : "consumed", newer);
+    } finally { h.db.close(); }
+  }
+});
+
+test("record-only reconciliation preserves an already-authorized merge after a later vote or runner downgrade", async () => {
+  for (const later of ["vote", "downgrade"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      const armed = await armCitedMerge(h);
+      if (later === "vote") evidenceAttempt(h, "later-vote", { vote: "DOWNVOTE" });
+      else h.db.registerRunner(h.metadata, 30, 242);
+      let merged = false;
+      h.hub.requestFromRunner = async (_runner, requestId) => ({ type: "workflow_action_reconciliation_result", requestId,
+        sessionId: "s1", occurrenceId: armed.occurrenceId, accepted: merged,
+        commandDigest: createHash("sha256").update(armed.command).digest("hex"), forgeHeadSha: HEAD });
+      const pending = await h.svc.reconcileWorkflowDecision("s1", armed.occurrenceId, { resourceSnapshot: armed.snapshot });
+      assert.equal(pending.status, 409, "an enqueued or unproven action is never recorded as consumed");
+      assert.equal(h.db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, "approved");
+      merged = true;
+      const recorded = await h.svc.reconcileWorkflowDecision("s1", armed.occurrenceId, { resourceSnapshot: armed.snapshot });
+      assert.equal(recorded.data?.status, "consumed", recorded.error ?? "recording failed");
+      assert.equal((await h.svc.reconcileWorkflowDecision("s1", armed.occurrenceId, { resourceSnapshot: armed.snapshot })).status, 409);
+      assert.equal(h.svc.workflowDecision("s1", armed.occurrenceId).data?.reviewEvidence?.status, "refused",
+        "current evidence remains refused even though the past successful action is recorded");
+    } finally { h.db.close(); }
+  }
+});
+
+test("lifecycle settlement records a landed cited merge after a newer vote, but leaves an unproven action revoked", async () => {
+  for (const lifecycle of ["stop", "restart"] as const) for (const merged of [false, true]) {
+    const h = harness({ campaign: true, delegatedMerge: true });
+    try {
+      const armed = await armCitedMerge(h);
+      evidenceAttempt(h, "later-vote", { vote: "DOWNVOTE" });
+      h.hub.requestFromRunner = async (_runner, requestId) => ({ type: "workflow_action_reconciliation_result", requestId,
+        sessionId: "s1", occurrenceId: armed.occurrenceId, accepted: merged,
+        commandDigest: createHash("sha256").update(armed.command).digest("hex"), forgeHeadSha: HEAD });
+      assert.ok(h.svc[lifecycle]("s1").ok);
+      for (let attempt = 0; attempt < 20; attempt++) await new Promise<void>(resolve => setImmediate(resolve));
+      assert.equal(h.db.workflowDecisionByOccurrence(armed.occurrenceId)?.status, merged ? "consumed" : "revoked", `${lifecycle}/${merged}`);
+    } finally { h.db.close(); }
+  }
+});
+
+/** Insert and deliver a runner-owned attempt, including cases the admission planner would
+ * normally refuse, to exercise verification independently of admission. */
+function evidenceAttempt(h: ReturnType<typeof harness>, id: string, options: {
+  requester?: string; head?: string; pr?: number; state?: "requested" | "running" | "completed" | "failed" | "cancelled";
+  vote?: "UPVOTE" | "DOWNVOTE"; invalid?: boolean;
+} = {}) {
+  const head = options.head ?? HEAD;
+  const state = options.state ?? "completed";
+  h.db.reviewSessions.record({ reviewSessionId: id, requesterSessionId: options.requester ?? "s1", runnerId: "r",
+    pullRequest: { ...request().pullRequest, number: options.pr ?? request().pullRequest.number }, headSha: head, reviewer: "codex" }, 10);
+  if (state !== "requested") h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state,
+    round: ROUND, ...(state === "completed" ? { output: options.invalid ? "{}" : report(head, {
+      vote: options.vote ?? "UPVOTE", findings: options.vote === "DOWNVOTE" ? [BLOCKER] : [],
+    }), verdict: VALID } : {}) }, 11);
+}
+
+test("merge citations expose server-verified evidence without approving or consuming the decision", () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const result = h.svc.createWorkflowDecision("s1", { requestId: "cited", resourceKey: "merge", resourceSnapshot: mergeSnapshot("upvote") });
+    assert.ok(result.data, result.error ?? "refused");
+    assert.equal(result.data.status, "pending");
+    assert.equal(result.data.actionAdmission, undefined);
+    assert.deepEqual(result.data.reviewEvidence, { status: "verified", reviewSessionId: "upvote", requesterSessionId: "s1",
+      repository: request().pullRequest.repository, pullRequest: request().pullRequest.number, headSha: HEAD, vote: "UPVOTE",
+      reviewer: "codex", epoch: 1, round: 1, attempt: 1, completedAt: 11 });
+    assert.deepEqual(h.svc.workflowDecision("s1", result.data.occurrenceId).data?.reviewEvidence, result.data.reviewEvidence);
+    assert.deepEqual(h.svc.workflowDecisions("s1", undefined, 10).data?.decisions[0]?.reviewEvidence, result.data.reviewEvidence);
+    assert.equal(h.svc.workflowDecision("s2", result.data.occurrenceId).status, 404);
+    const mixedCase = { ...mergeSnapshot("upvote"), repository: request().pullRequest.repository.toUpperCase() };
+    assert.ok(h.svc.createWorkflowDecision("s1", { requestId: "case", resourceKey: "case", resourceSnapshot: mixedCase }).ok);
+  } finally { h.db.close(); }
+});
+
+test("merge citations reject missing, foreign, wrong-PR, wrong-head and non-upvoting attempts with reasons", () => {
+  for (const [id, options, reason] of [
+    ["missing", null, /does not exist/u],
+    ["foreign", { requester: "s2" }, /another requester/u],
+    ["other-pr", { pr: 99 }, /another pull request/u],
+    ["other-head", { head: "c".repeat(40) }, /not decision head/u],
+    ["downvote", { vote: "DOWNVOTE" }, /no valid UPVOTE/u],
+    ["invalid", { invalid: true }, /no valid UPVOTE/u],
+    ["cancelled", { state: "cancelled" }, /cancelled.*no valid UPVOTE/u],
+    ["failed", { state: "failed" }, /failed.*no valid UPVOTE/u],
+    ["running", { state: "running" }, /running.*no valid UPVOTE/u],
+    ["requested", { state: "requested" }, /requested.*no valid UPVOTE/u],
+  ] as const) {
+    const h = harness({ campaign: true });
+    try {
+      if (options) evidenceAttempt(h, id, options);
+      const result = h.svc.createWorkflowDecision("s1", { requestId: id, resourceKey: "merge", resourceSnapshot: mergeSnapshot(id) });
+      assert.equal(result.status, 409, id);
+      assert.match(result.error!, reason);
+      assert.match(result.error!, /review session/u);
+      assert.equal(h.svc.workflowDecisions("s1", undefined, 10).data?.decisions.length, 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("only a newer valid vote supersedes a citation, on either the same or another head", () => {
+  for (const head of [HEAD, "c".repeat(40)]) for (const vote of ["UPVOTE", "DOWNVOTE"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      evidenceAttempt(h, "upvote");
+      evidenceAttempt(h, "new-vote", { head, vote });
+      const result = h.svc.createWorkflowDecision("s1", { requestId: "stale", resourceKey: "merge", resourceSnapshot: mergeSnapshot("upvote") });
+      assert.equal(result.status, 409);
+      assert.match(result.error!, new RegExp(`superseded by valid review new-vote at head ${head}`, "u"));
+    } finally { h.db.close(); }
+  }
+  for (const state of ["cancelled", "failed", "running", "requested", "invalid"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      evidenceAttempt(h, "upvote");
+      evidenceAttempt(h, "retry", { head: "c".repeat(40), ...(state === "invalid" ? { invalid: true } : { state }) });
+      const result = h.svc.createWorkflowDecision("s1", { requestId: "preserved", resourceKey: "merge", resourceSnapshot: mergeSnapshot("upvote") });
+      assert.ok(result.ok, `${state}: ${result.error}`);
+      assert.equal(result.data?.reviewEvidence?.status, "verified");
+    } finally { h.db.close(); }
+  }
+});
+
+test("a newer vote revokes a cited decision at approval and consumption and updates its view", async () => {
+  for (const stage of ["approval", "consume"] as const) {
+    const h = harness({ campaign: true });
+    try {
+      evidenceAttempt(h, "upvote");
+      const snapshot = mergeSnapshot("upvote");
+      const created = h.svc.createWorkflowDecision("s1", { requestId: stage, resourceKey: "merge", resourceSnapshot: snapshot });
+      assert.ok(created.data, created.error ?? "refused");
+      if (stage === "consume") assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+      evidenceAttempt(h, "new-downvote", { vote: "DOWNVOTE" });
+      const result = stage === "approval" ? h.svc.approve("s1", created.data.occurrenceId, "approve")
+        : await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot });
+      assert.equal(result.status, 409);
+      assert.match(result.error!, /superseded by valid review new-downvote/u);
+      const view = h.svc.workflowDecision("s1", created.data.occurrenceId).data!;
+      assert.equal(view.status, "revoked");
+      assert.equal(view.reviewEvidence?.status, "refused");
+    } finally { h.db.close(); }
+  }
+});
+
+test("citation verification survives control-plane reconstruction, reconnect, and a failed restart attempt", () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const snapshot = mergeSnapshot("upvote");
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "durable", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(created.data, created.error ?? "refused");
+    h.setOnline(false);
+    evidenceAttempt(h, "interrupted", { state: "running", head: "c".repeat(40) });
+    h.db.reviewSessions.abandon("interrupted", "the runner restarted", 20);
+    h.setOnline(true);
+    h.db.registerRunner(h.metadata, 30, PROTOCOL_VERSION);
+    const reconstructed = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(reconstructed.workflowDecision("s1", created.data.occurrenceId).data?.reviewEvidence?.status, "verified");
+    assert.ok(reconstructed.approve("s1", created.data.occurrenceId, "approve").ok);
+  } finally { h.db.close(); }
+});
+
+test("a citation is rechecked after an asynchronous merge preflight, before action arming", async () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const snapshot = mergeSnapshot("upvote");
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "arm", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(created.data, created.error ?? "refused");
+    assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+    h.hub.requestFromRunner = async (_runner, requestId) => {
+      evidenceAttempt(h, "during-preflight", { vote: "DOWNVOTE" });
+      return { type: "github_merge_preflight_result", requestId, sessionId: "s1", ok: true,
+        check: { checkedAt: 10, closures: [] } };
+    };
+    const consumed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot,
+      action: { kind: "pr_merge_enqueue", command: `gh pr merge https://github.com/${snapshot.repository}/pull/${snapshot.pullRequest} --squash --match-head-commit ${HEAD}` } });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /superseded by valid review during-preflight/u);
+    assert.equal(h.svc.workflowDecision("s1", created.data.occurrenceId).data?.actionAdmission, undefined);
+  } finally { h.db.close(); }
+});
+
+test("mixed-version runners refuse citations and downgrade invalidates an approved cited grant; uncited stays compatible", async () => {
+  const h = harness({ campaign: true });
+  try {
+    evidenceAttempt(h, "upvote");
+    const snapshot = mergeSnapshot("upvote");
+    const created = h.svc.createWorkflowDecision("s1", { requestId: "current", resourceKey: "merge", resourceSnapshot: snapshot });
+    assert.ok(created.data, created.error ?? "refused");
+    assert.ok(h.svc.approve("s1", created.data.occurrenceId, "approve").ok);
+    h.db.registerRunner(h.metadata, 30, 242);
+    const old = h.svc.createWorkflowDecision("s1", { requestId: "old", resourceKey: "old", resourceSnapshot: snapshot });
+    assert.equal(old.status, 409);
+    assert.match(old.error!, /upgrade and reconnect.*review session/u);
+    const consumed = await h.svc.consumeWorkflowDecision("s1", created.data.occurrenceId, { resourceSnapshot: snapshot });
+    assert.equal(consumed.status, 409);
+    assert.match(consumed.error!, /compatible runner/u);
+    assert.ok(h.svc.createWorkflowDecision("s1", { requestId: "uncited", resourceKey: "uncited", resourceSnapshot: mergeSnapshot() }).ok);
+  } finally { h.db.close(); }
+});
+
 /** A contract-conforming report of `ROUND` at `head`. */
 function report(head = HEAD, extra: Record<string, unknown> = {}): string {
   return JSON.stringify({
@@ -136,7 +392,7 @@ test("a session requests a review session: a typed reviewer of the other family,
     assert.equal(start.spec.config?.effort, "high");
     assert.deepEqual(start.spec.review, {
       requesterSessionId: "s1", pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: HEAD, harness: "codex",
-      history: EMPTY_HISTORY,
+      history: { ...EMPTY_HISTORY, baseMergeRounds: true },
     });
     const reviewSession = h.db.getSession(view.reviewSessionId)!;
     assert.equal(reviewSession.kind, "review");
@@ -175,6 +431,42 @@ test("a requester has one active review; another starts once it settles", () => 
     const older = h.svc.reviewSessionsPage("s1", { limit: 1, afterReviewSessionId: page.data!.nextAfterReviewSessionId! });
     assert.equal(older.data?.reviews[0]?.reviewSessionId, first.reviewSessionId);
     assert.equal(older.data?.nextAfterReviewSessionId, null);
+  } finally { h.db.close(); }
+});
+
+test("get_review_session exposes the immutable Codex host-access admission snapshot", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId } = requested(h);
+    const admission = { observedAt: 123, unsandboxedSessions: [
+      { sessionId: "s_orchestrator", kind: "provider" as const }, { sessionId: "s_tui", kind: "agent_tui" as const },
+    ] };
+    assert.equal(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, undefined);
+    assert.equal(h.db.reviewSessions.accept("wrong-runner", { type: "review_session_update", sessionId: reviewSessionId,
+      state: "running", admission }, 124), false);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId, state: "running", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId,
+      state: "completed", output: "{}", admission: { observedAt: 456, unsandboxedSessions: [] } });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission, "first admission is immutable");
+    assert.equal(h.svc.reviewSessionView("s2", reviewSessionId).status, 404);
+    const next = requested(h);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: next.reviewSessionId,
+      state: "completed", output: "{}", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", next.reviewSessionId).data?.admission, admission,
+      "terminal-first delivery also persists the snapshot");
+  } finally { h.db.close(); }
+});
+
+test("admission preserves a large valid inventory rather than silently dropping the snapshot", () => {
+  const h = harness();
+  try {
+    const { reviewSessionId } = requested(h);
+    const admission = { observedAt: 123, unsandboxedSessions: Array.from({ length: 10_001 }, (_, index) => ({
+      sessionId: `s_observed_${index}`, kind: "provider" as const,
+    })) };
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: reviewSessionId, state: "running", admission });
+    assert.deepEqual(h.svc.reviewSessionView("s1", reviewSessionId).data?.admission, admission);
   } finally { h.db.close(); }
 });
 
@@ -270,6 +562,56 @@ test("reviews under a campaign remain outside its membership, counts, requests a
   } finally { h.db.close(); }
 });
 
+const GITLAB = "gitlab.example.com/acme/team/widget";
+
+test("a GitLab merge request is reviewed by host-qualified project and IID, only on a v244+ runner", () => {
+  const h = harness();
+  try {
+    const result = h.svc.requestReviewSession("s1", request({ pullRequest: { repository: GITLAB, number: 12 } }));
+    assert.ok(result.ok && result.data, result.error ?? "request refused");
+    const [start] = h.starts();
+    assert.deepEqual(start?.spec.review, {
+      requesterSessionId: "s1", pullRequest: { repository: GITLAB, number: 12 }, headSha: HEAD, harness: "codex",
+      history: { ...EMPTY_HISTORY, baseMergeRounds: true },
+    });
+    assert.equal(h.db.getSession(result.data.reviewSessionId)!.title, `Codex Review of ${GITLAB}!12`);
+  } finally { h.db.close(); }
+  // A pre-v244 runner cannot read a merge request, so it is refused with an update message, while
+  // its GitHub reviews still work.
+  const old = harness({ protocol: 239 });
+  try {
+    const refused = old.svc.requestReviewSession("s1", request({ pullRequest: { repository: GITLAB, number: 12 } }));
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /review sessions of GitLab merge requests/u);
+    assert.deepEqual(old.sent, []);
+    assert.ok(old.svc.requestReviewSession("s1", request()).ok);
+  } finally { old.db.close(); }
+  // A bare namespace names no host, and a host-qualified GitHub path is not a GitLab project.
+  const malformed = harness();
+  try {
+    for (const repository of ["acme/team/widget", "github.com/acme/widget", "gitlab.example.com/widget", `${GITLAB}.git`]) {
+      assert.equal(malformed.svc.requestReviewSession("s1", request({ pullRequest: { repository, number: 12 } })).status, 400, repository);
+    }
+    assert.deepEqual(malformed.sent, []);
+  } finally { malformed.db.close(); }
+});
+
+test("a review-round extension can name a GitLab merge request's run", () => {
+  const h = harness();
+  try {
+    const snapshot = {
+      category: "review_round_extension" as const, repository: GITLAB, pullRequest: 12, epoch: 1,
+      headSha: "c".repeat(40), roundsUsed: 4, blockingFindings: 1, extraRounds: 2, reason: "One blocker left.",
+    };
+    const key = `review_round_extension:${GITLAB}#12:epoch-1:rounds-4`;
+    // The shape is accepted; the run is then checked, and this session has none.
+    assert.match(h.svc.createWorkflowDecision("s1", { requestId: "gl", resourceKey: key, resourceSnapshot: snapshot }).error!,
+      /no valid review of that pull request/u);
+    assert.equal(h.svc.createWorkflowDecision("s1", { requestId: "bare", resourceKey: key,
+      resourceSnapshot: { ...snapshot, repository: "acme/team/widget" } }).status, 400);
+  } finally { h.db.close(); }
+});
+
 test("malformed review session requests are refused before anything is created or sent", () => {
   const h = harness();
   try {
@@ -306,10 +648,73 @@ test("a discovery result replaces the reviewer capability a registration made be
     assert.ok(h.svc.requestReviewSession("s1", request()).ok, "the discovered reviewer is used");
     // A malformed capability is dropped, so the next request is refused rather than launched on it.
     h.db.updateRunnerReviewSessionCapability("r", { reviewers: [{ harness: "bash", agentId: "x" }] } as never);
-    assert.equal(h.db.getRunner("r")!.runtime?.reviewSession, undefined);
+    assert.deepEqual(h.db.getRunner("r")!.runtime?.reviewSession?.reviewers, []);
     h.db.updateRunnerReviewSessionCapability("r", null);
     assert.equal(h.db.getRunner("r")!.runtime?.reviewSession, undefined);
   } finally { h.db.close(); }
+});
+
+test("a tool discovery failure is named in the refusal and a refreshed capability restores admission", () => {
+  const h = harness({ reviewSession: { reviewers: [], unavailable: { tools: "tool roots unavailable during startup" } } });
+  try {
+    const result = h.svc.requestReviewSession("s1", request());
+    assert.equal(result.ok, false);
+    assert.match(result.error!, /tool roots unavailable during startup/u);
+    h.db.updateRunnerReviewSessionCapability("r", CAPABILITY);
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+  } finally { h.db.close(); }
+});
+
+test("an overlong Codex reason preserves a valid Claude reviewer and remains visible in Codex refusals", () => {
+  const reason = "Codex packages are unprotected: " + "x".repeat(2000 - "Codex packages are unprotected: ".length);
+  const capability: ReviewSessionCapability = {
+    reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable: { codex: reason },
+  };
+  const claude = harness({ driver: "codex-app-server" });
+  const codex = harness();
+  try {
+    for (const h of [claude, codex]) h.db.updateRunnerReviewSessionCapability("r", capability);
+    const stored = claude.db.getRunner("r")!.runtime!.reviewSession!;
+    assert.deepEqual(stored.reviewers, capability.reviewers);
+    assert.ok(stored.unavailable!.codex!.length <= 500);
+    assert.match(stored.unavailable!.codex!, /^Codex packages are unprotected: .*\+\d+ more/u);
+    assert.ok(claude.svc.requestReviewSession("s1", request()).ok, "the unrelated valid Claude reviewer still launches");
+    const refusal = codex.svc.requestReviewSession("s1", request());
+    assert.equal(refusal.ok, false);
+    assert.ok(refusal.error!.includes(stored.unavailable!.codex!), "the refusal preserves the complete clamped diagnostic");
+  } finally { claude.db.close(); codex.db.close(); }
+});
+
+test("invalid unavailability reasons never discard valid reviewer entries", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    for (const unavailable of [{ codex: 42 }, { codex: null }, { codex: "" }, null, []]) {
+      h.db.updateRunnerReviewSessionCapability("r", {
+        reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable,
+      } as never);
+      const stored = h.db.getRunner("r")!.runtime!.reviewSession!;
+      assert.deepEqual(stored.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+      assert.ok(Object.values(stored.unavailable!).every((reason) => typeof reason === "string" && reason.length > 0 && reason.length <= 500));
+    }
+    assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+  } finally { h.db.close(); }
+});
+
+test("invalid reviewer entries cannot discard the other harness at registration or refresh", () => {
+  const capability = { reviewers: [
+    { harness: "codex", agentId: null }, { harness: "bash", agentId: "unknown" },
+    { harness: "claude-code", agentId: "claude" },
+  ], unavailable: { codex: " " } } as unknown as ReviewSessionCapability;
+  for (const registration of [true, false]) {
+    const h = harness({ driver: "codex-app-server", ...(registration ? { reviewSession: capability } : {}) });
+    try {
+      if (!registration) h.db.updateRunnerReviewSessionCapability("r", capability);
+      const stored = h.db.getRunner("r")!.runtime!.reviewSession!;
+      assert.deepEqual(stored.reviewers, [{ harness: "claude-code", agentId: "claude" }]);
+      assert.ok(stored.unavailable?.codex?.trim());
+      assert.ok(h.svc.requestReviewSession("s1", request()).ok);
+    } finally { h.db.close(); }
+  }
 });
 
 test("a review session is refused without a supporting runner, reviewer or connection, and for unsupported requesters", () => {
@@ -320,7 +725,7 @@ test("a review session is refused without a supporting runner, reviewer or conne
     assert.match(result.error!, /review sessions/u);
   } finally { old.db.close(); }
   const none = harness({ reviewSession: null });
-  try { assert.match(none.svc.requestReviewSession("s1", request()).error!, /Codex reviewer is unavailable/u); } finally { none.db.close(); }
+  try { assert.match(none.svc.requestReviewSession("s1", request()).error!, /runner reported no review-session capability/u); } finally { none.db.close(); }
   const partial = harness({ reviewSession: { reviewers: [{ harness: "claude-code", agentId: "claude" }], unavailable: { codex: "codex is not installed" } } });
   try {
     assert.match(partial.svc.requestReviewSession("s1", request()).error!, /Codex reviewer is unavailable on this session's runner: codex is not installed/u);
@@ -394,7 +799,7 @@ test("a review run records each attempt's round and verdict and sends its histor
     assert.deepEqual(start.spec.review?.history, {
       ...EMPTY_HISTORY, epoch: 1, validRounds: 1, consumedInLastRound: 1,
       lastValid: { headSha: HEAD, baseSha: BASE, round: 1, vote: "DOWNVOTE", findings: [BLOCKER] },
-      lastAttempt: { headSha: HEAD, round: 1, attempt: 1, valid: true },
+      lastAttempt: { headSha: HEAD, round: 1, attempt: 1, valid: true }, baseMergeRounds: true,
     });
     assert.equal(start.spec.review?.fullReason, "The base moved.");
     assert.equal(h.db.reviewSessions.view(first.reviewSessionId)!.stale, true, "a newer review covers another head");
@@ -491,8 +896,8 @@ function immediatePrompts(h: ReturnType<typeof harness>): string[] {
     .map((message) => String((message as { text?: unknown }).text ?? ""));
 }
 
-test("without a worktree the continuation goes out once on the immediate lane, claimed before the send", () => {
-  const h = harness();
+test("an unadvertised runner without a worktree gets one immediately claimed review continuation", () => {
+  const h = harness({ protocol: PROTOCOL_VERSION + 100, reviewSession: { reviewers: CAPABILITY.reviewers } });
   try {
     h.db.updateSessionStatus("s1", "idle", 10);
     const view = requested(h);
@@ -503,6 +908,142 @@ test("without a worktree the continuation goes out once on the immediate lane, c
     assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered");
     h.svc.retryDuePrompts();
     assert.equal(immediatePrompts(h).length, 1, "a later sweep sends nothing again");
+  } finally { h.db.close(); }
+});
+
+test("review completion preserves an unanswered async question (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.svc.onSessionEvent("s1", {
+      kind: "question_request", async: true, requestId: "async-ui-approval", occurrenceId: "question-occurrence",
+      questions: [{ id: "0", question: "Approve the UI evidence?", options: [{ label: "Approve" }] }],
+    }, 1, 10);
+    const question = h.db.getSession("s1")!.pendingApproval;
+    assert.equal(question?.async, true);
+    h.db.updateSessionStatus("s1", "idle", 11);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const command = h.sent.find((message) => message.type === "durable_session_command")?.command;
+    assert.ok(command);
+    assert.equal((command as { reviewContinuation?: boolean }).reviewContinuation, true,
+      "the runner must receive a trusted automatic-continuation marker, not a human prompt");
+    assert.equal(h.db.getSession("s1")!.pendingApproval?.occurrenceId, question?.occurrenceId);
+  } finally { h.db.close(); }
+});
+
+test("unadvertised runners hold review notifications until the pending async question is answered (#3938)", () => {
+  const h = harness({ driver: "codex-app-server", protocol: PROTOCOL_VERSION + 100, reviewSession: { reviewers: CAPABILITY.reviewers } });
+  try {
+    h.db.setWorktreePath("s1", "/repo/worktrees/s1");
+    const view = requested(h);
+    h.svc.onSessionEvent("s1", { kind: "question_request", async: true, requestId: "async-approval",
+      occurrenceId: "occurrence", questions: [{ id: "0", question: "Approve?", options: [] }] }, 1, 10);
+    h.db.updateSessionStatus("s1", "idle", 11);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(continuationCommands(h).size, 0);
+    assert.equal(h.db.getSession("s1")!.pendingApproval?.occurrenceId, "occurrence");
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 0);
+    h.svc.onSessionEvent("s1", { kind: "question_resolved", requestId: "async-approval",
+      occurrenceId: "occurrence", answered: true, resolutionReason: "submitted" }, 2, 12);
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 1);
+    const command = h.sent.find((message) => message.type === "durable_session_command")?.command;
+    assert.equal((command as { reviewContinuation?: boolean }).reviewContinuation, undefined);
+  } finally { h.db.close(); }
+});
+
+test("an unsent review notification cancelled by Restart remains owed (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const commandId = [...continuationCommands(h).keys()][0]!;
+    assert.ok(commandId);
+    // A provider-rejection hold parked the automatic turn; Restart cancels it before submission.
+    h.db.updateSessionStatus("s1", "running", 11);
+    h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId,
+      sessionId: "s1", state: "failed", revision: 5, code: "COMMAND_CANCELLED",
+      error: "session restart cleared the provider rejection hold before this automatic turn was sent" });
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
+    h.db.updateSessionStatus("s1", "idle", 12);
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 2, "one fresh durable attempt follows the proven unsent attempt");
+  } finally { h.db.close(); }
+});
+
+test("a review notification staged before a runner downgrade returns to the question hold (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.svc.onSessionEvent("s1", { kind: "question_request", async: true, requestId: "async-approval",
+      occurrenceId: "original-question", questions: [{ id: "0", question: "Approve?", options: [] }] }, 1, 10);
+    // Finish while busy, so the service owes the continuation but has not staged or sent it yet.
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const outbox = new SessionPromptOutbox(h.db, h.hub, { warn() {} });
+    const row = outbox.stageReviewContinuation([view.reviewSessionId], "s1", "r",
+      { type: "prompt_session", sessionId: "s1", text: "Automatic review result", reviewContinuation: true }, Date.now());
+    h.db.updateRunnerReviewSessionCapability("r", { reviewers: CAPABILITY.reviewers });
+    h.db.updateSessionStatus("s1", "idle", 14);
+    outbox.flush(Date.now());
+    assert.equal(h.db.getSessionPromptCommand(row.commandId)?.state, "failed");
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "pending");
+    assert.equal(continuationCommands(h).size, 0);
+    assert.equal(h.db.getSession("s1")!.pendingApproval?.occurrenceId, "original-question");
+    h.db.registerRunner(h.metadata, 15, PROTOCOL_VERSION);
+    h.svc.retryDuePrompts();
+    assert.equal(continuationCommands(h).size, 1, "an upgraded runner receives the still-owed notification");
+  } finally { h.db.close(); }
+});
+
+test("a downgraded review notification settles its real queued admission before retry (#3938)", () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    const stage = h.db.stageReviewContinuation.bind(h.db);
+    h.db.stageReviewContinuation = (...args) => {
+      const row = stage(...args);
+      // Downgrade after admission has chosen the marked durable lane, before its first send.
+      h.db.updateRunnerReviewSessionCapability("r", { reviewers: CAPABILITY.reviewers });
+      return row;
+    };
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    assert.equal(h.db.getSession("s1")!.status, "queued");
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation, "delivered",
+      "the old-runner fallback must run without another runner status update");
+    assert.equal(immediatePrompts(h).length, 1);
+  } finally { h.db.close(); }
+});
+
+for (const delivery of ["uncertain", "user-event", "human-cancelled"] as const) test(`review recovery never replays ${delivery} delivery (#3938)`, () => {
+  const h = harness({ driver: "codex-app-server" });
+  try {
+    const view = requested(h);
+    h.db.updateSessionStatus("s1", "idle", 10);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: view.reviewSessionId,
+      state: "completed", output: report(), round: ROUND, verdict: VALID } as never);
+    const commandId = [...continuationCommands(h).keys()][0]!;
+    if (delivery === "user-event") h.svc.onSessionEvent("s1", {
+      kind: "user_message", text: "Automatic review result", commandId, campaignContinuation: true,
+    }, 1, 11);
+    h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId,
+      sessionId: "s1", state: delivery === "uncertain" ? "uncertain" : "failed", revision: 5,
+      code: "COMMAND_CANCELLED", error: "delivery is not proven unsent",
+      ...(delivery === "user-event" ? { userEventSeq: 1 } : {}) });
+    h.db.updateSessionStatus("s1", "idle", 12);
+    h.svc.retryDuePrompts();
+    assert.equal(h.db.reviewSessions.view(view.reviewSessionId)!.continuation,
+      delivery === "uncertain" ? "uncertain" : "failed");
+    assert.equal(continuationCommands(h).size, 1);
   } finally { h.db.close(); }
 });
 
@@ -559,7 +1100,7 @@ test("a failed review is reported to its requester; one it cancelled is not", ()
     h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: failed.reviewSessionId, state: "failed",
       reason: "the reviewer timed out", round: ROUND,
       verdict: { valid: false, consumed: false, effectiveVote: null, failureClass: "timeout", validationErrors: ["the reviewer timed out"] } } as never);
-    const text = immediatePrompts(h)[0]!;
+    const text = [...continuationCommands(h).values()][0]!;
     assert.match(text, /ended with an invalid attempt that does not count as a review: "the reviewer timed out" \(it did not use one of the round's attempts\)\./u);
     // Cancelled by the requester itself: nothing is owed.
     h.db.updateSessionStatus("s1", "idle", 11);
@@ -568,7 +1109,7 @@ test("a failed review is reported to its requester; one it cancelled is not", ()
       reason: "the review was cancelled" });
     h.svc.retryDuePrompts();
     assert.equal(h.db.reviewSessions.view(cancelled.reviewSessionId)!.continuation, null);
-    assert.equal(immediatePrompts(h).length, 1);
+    assert.equal(continuationCommands(h).size, 1);
   } finally { h.db.close(); }
 });
 
@@ -756,6 +1297,152 @@ test("a run with rounds left, or an upvote, is not extended", () => {
   } finally { h.db.close(); }
 });
 
+/** Record one finished attempt of s1's run directly, as its runner would report it. */
+function attempt(h: ReturnType<typeof harness>, id: string, head: string, round: ReviewAttemptRound, vote: "UPVOTE" | "DOWNVOTE" = "DOWNVOTE") {
+  h.db.reviewSessions.record({ reviewSessionId: id, requesterSessionId: "s1", runnerId: "r", pullRequest: request().pullRequest,
+    headSha: head, reviewer: "codex" }, 10);
+  assert.ok(h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", round,
+    output: report(head, { vote, findings: vote === "DOWNVOTE" ? [BLOCKER] : [] }), verdict: VALID }, 11));
+}
+
+const C = "c".repeat(40), D = "d".repeat(40), E = "e".repeat(40);
+
+test("base-merge rounds use none of the epoch's budget, and only a v277 runner is asked to plan them (#4075)", () => {
+  const h = harness();
+  try {
+    const pr = request().pullRequest;
+    for (let round = 1; round <= 4; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+    assert.equal(h.db.reviewSessions.history("s1", pr).validRounds, 4);
+    // A base merge with a conflict resolution: reviewed in a fifth round, without an extension.
+    attempt(h, "merge", C, { ...ROUND, round: 5, mode: "delta", since: HEAD, baseMerge: true });
+    let run = h.db.reviewSessions.history("s1", pr);
+    assert.deepEqual([run.validRounds, run.roundBudget, run.lastValid?.headSha, run.lastAttempt?.round], [4, 4, C, 5],
+      "the merge's round is the new reference but leaves the budget untouched");
+    assert.equal(h.db.reviewSessions.view("merge")!.round?.baseMerge, true, "the round accounting names it");
+    // A base-merge claim that is not on the last valid head counts, whatever the runner said.
+    attempt(h, "stray", D, { ...ROUND, round: 6, mode: "delta", since: HEAD, baseMerge: true });
+    run = h.db.reviewSessions.history("s1", pr);
+    assert.deepEqual([run.validRounds, h.db.reviewSessions.view("stray")!.round?.baseMerge], [5, undefined]);
+    // The next request tells a v277 runner it may plan base-merge rounds.
+    assert.ok(h.svc.requestReviewSession("s1", request({ headSha: E })).ok);
+    assert.equal(h.starts().at(-1)!.spec.review?.history?.baseMergeRounds, true);
+  } finally { h.db.close(); }
+  const older = harness({ protocol: 276 });
+  try {
+    attempt(older, "r1", HEAD, ROUND);
+    assert.ok(older.svc.requestReviewSession("s1", request({ headSha: C })).ok);
+    assert.equal(older.starts().at(-1)!.spec.review?.history?.baseMergeRounds, undefined, "an older runner keeps counting every round");
+  } finally { older.db.close(); }
+});
+
+test("a pure base merge's equivalence is recorded on the run and satisfies the merge gate without a new round (#4075)", () => {
+  const h = harness();
+  try {
+    const pr = request().pullRequest;
+    for (let round = 1; round <= 3; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+    attempt(h, "upvote", HEAD, { ...ROUND, round: 4 }, "UPVOTE");
+    const equivalence = (id: string, head: string, equivalentTo: string, round: number) => {
+      h.db.reviewSessions.record({ reviewSessionId: id, requesterSessionId: "s1", runnerId: "r", pullRequest: pr, headSha: head, reviewer: "codex" }, 12);
+      h.db.reviewSessions.accept("r", { type: "review_session_update", sessionId: id, state: "completed", output: "runner text is ignored",
+        round: { ...ROUND, round, mode: "equivalent", scopeFiles: [], baseMerge: true, equivalentTo },
+        verdict: { ...VALID, effectiveVote: "DOWNVOTE" } }, 13);
+      return h.db.reviewSessions.view(id)!;
+    };
+    const recorded = equivalence("same", C, HEAD, 5);
+    assert.deepEqual([recorded.state, recorded.verdict, recorded.output, recorded.round?.equivalentTo],
+      ["completed", { valid: true, consumed: false, effectiveVote: "UPVOTE", failureClass: null, validationErrors: [] }, REVIEW_EQUIVALENCE_OUTPUT, HEAD],
+      "the control plane writes the verdict itself and carries the upvote");
+    const run = h.db.reviewSessions.history("s1", pr);
+    assert.deepEqual([run.validRounds, run.lastValid?.headSha, run.lastValid?.vote], [4, C, "UPVOTE"], "no round was used");
+    assert.deepEqual(h.db.reviewSessions.mergeEvidence("s1", { ...mergeSnapshot("same"), headSha: C }),
+      { status: "verified", reviewSessionId: "same", requesterSessionId: "s1", repository: pr.repository, pullRequest: pr.number,
+        headSha: C, vote: "UPVOTE", reviewer: "codex", epoch: 1, round: 5, attempt: 1, completedAt: 13 },
+      "the merge gate accepts the merged head without restoring the old one");
+    // An equivalence to a head that is no longer the last valid one is not recorded.
+    const stale = equivalence("stale", D, HEAD, 6);
+    assert.deepEqual([stale.state, stale.reason, stale.round, stale.verdict], ["failed", "the recorded equivalence no longer matches the review run", null, null]);
+    assert.equal(h.db.reviewSessions.mergeEvidence("s1", { ...mergeSnapshot("stale"), headSha: D })?.status, "refused");
+    // Nor one after a downvote.
+    attempt(h, "down", D, { ...ROUND, round: 6, mode: "delta", since: C }, "DOWNVOTE");
+    assert.equal(equivalence("down-eq", E, D, 7).state, "failed");
+  } finally { h.db.close(); }
+});
+
+test("a Full Control child's extra rounds are the Orchestrator's within its pull request's cap, counted durably (#4075)", async () => {
+  const h = harness({ campaign: true });
+  try {
+    h.enableCampaign({ costUsd: 1000, toolCalls: 1000 });
+    const pr = request().pullRequest;
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.decisionOwners.review_round_extension, "orchestrator");
+    assert.deepEqual(projection.reviewRoundExtensionCap, { scope: "pull_request", extraRounds: "configured_round_budget" });
+    for (let round = 1; round <= 4; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+    const ask = (requestId: string, roundsUsed: number, extraRounds: number, headSha: string) => {
+      const created = h.svc.createWorkflowDecision("s1", { requestId,
+        resourceKey: `review_round_extension:${pr.repository}#${pr.number}:epoch-1:rounds-${roundsUsed}`,
+        resourceSnapshot: { category: "review_round_extension", repository: pr.repository, pullRequest: pr.number, epoch: 1, headSha,
+          roundsUsed, blockingFindings: 1, extraRounds, reason: "A verified blocker, fixed." } });
+      assert.ok(created.data, created.error ?? "refused");
+      return created.data;
+    };
+    const grant = async (decision: { occurrenceId: string; resourceSnapshot: unknown }) => {
+      const approved = h.svc.resolveDescendantRequest("root", "s1", decision.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true);
+      assert.ok(approved.ok, approved.error ?? "approval refused");
+      const consumed = await h.svc.consumeWorkflowDecision("s1", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot as never });
+      assert.equal(consumed.data?.status, "consumed", consumed.error ?? "consumed");
+    };
+    // Within the cap (the run's four configured rounds once more), the Orchestrator owns and grants it.
+    const first = ask("ext-1", 4, 3, C);
+    assert.deepEqual([first.authority, first.controllingSessionId, first.authorityEvaluation?.basis, first.authorityEvaluation?.reason],
+      ["orchestrator", "root", "campaign_delegation", "authorized_operation"]);
+    assert.equal(h.db.campaignProjection("root")!.children.waitingHuman, 0, "no human request was created");
+    assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+    await grant(first);
+    assert.equal(h.db.reviewSessions.history("s1", pr).roundBudget, 7, "the granted rounds are in the run's round accounting");
+    // A review under the grant is charged to the campaign's review allowance like any other.
+    const before = h.db.campaignBudgets.view("root")!.outstanding.costUsd;
+    const granted = h.svc.requestReviewSession("s1", request({ headSha: C }));
+    assert.ok(granted.data, granted.error ?? "refused");
+    assert.ok(h.starts().at(-1)!.spec.campaignBudgetDispatch);
+    assert.ok(h.db.campaignBudgets.view("root")!.outstanding.costUsd > before);
+    h.svc.onReviewSessionUpdate("r", { type: "review_session_update", sessionId: granted.data.reviewSessionId, state: "completed",
+      output: report(C), round: { ...ROUND, round: 5, mode: "delta", since: HEAD }, verdict: VALID } as never);
+    for (let round = 6; round <= 7; round += 1) attempt(h, `r${round}`, C, { ...ROUND, round, mode: "delta", since: HEAD });
+    // Two more would pass the cap: the person's. One more fits exactly: the Orchestrator's again.
+    const past = ask("ext-2", 7, 2, D);
+    assert.deepEqual([past.authority, past.authorityEvaluation?.reason], ["human", "review_extension_cap_reached"]);
+    const fits = ask("ext-3", 7, 1, D);
+    assert.equal(fits.authority, "orchestrator", "a re-request of the same resource replaces the earlier one");
+    await grant(fits);
+    attempt(h, "r8", D, { ...ROUND, round: 8, mode: "delta", since: C });
+    // The cap is spent for this pull request: every later extension is the person's, whatever its epoch.
+    const after = ask("ext-4", 8, 1, E);
+    assert.deepEqual([after.authority, after.authorityEvaluation?.reason], ["human", "review_extension_cap_reached"]);
+    assert.equal(h.db.reviewExtensionCap("s1", { category: "review_round_extension", repository: pr.repository.toUpperCase(),
+      pullRequest: pr.number, epoch: 2, headSha: E, roundsUsed: 1, blockingFindings: 0, extraRounds: 1, reason: "x" }), "exceeded",
+    "counted per pull request across epochs, whatever the repository's case");
+  } finally { h.db.close(); }
+});
+
+test("a Custom campaign, or an older peer, keeps a child's extra rounds with the person (#4075)", () => {
+  for (const variant of ["custom", "older"] as const) {
+    const h = harness({ campaign: true, ...(variant === "older" ? { protocol: 276 } : {}) });
+    try {
+      if (variant === "older") h.enableCampaign({ costUsd: 1000, toolCalls: 1000 });
+      const pr = request().pullRequest;
+      for (let round = 1; round <= 4; round += 1) attempt(h, `r${round}`, HEAD, { ...ROUND, round });
+      const created = h.svc.createWorkflowDecision("s1", { requestId: "ext",
+        resourceKey: `review_round_extension:${pr.repository}#${pr.number}:epoch-1:rounds-4`,
+        resourceSnapshot: { category: "review_round_extension", repository: pr.repository, pullRequest: pr.number, epoch: 1, headSha: C,
+          roundsUsed: 4, blockingFindings: 1, extraRounds: 1, reason: "One blocker." } });
+      assert.equal(created.data?.authority, "human", `${variant}: ${created.error}`);
+      assert.equal(h.db.campaignProjection("root")!.decisionOwners.review_round_extension, "human");
+      assert.equal(h.db.campaignProjection("root")!.reviewRoundExtensionCap, undefined);
+    } finally { h.db.close(); }
+  }
+});
+
 test("a campaign member's review reserves allowance and settles actual usage without child authority", () => {
   for (const driver of ["claude-code", "codex-app-server"] as const) {
     const h = harness({ campaign: true, driver });
@@ -927,12 +1614,12 @@ test("campaign reviews require accounting-aware runners and priced models, while
   } finally { ordinary.db.close(); }
 });
 
-test("the legacy bridge still refuses campaign allowance members", () => {
+test("the retired bridge points campaign allowance members to their own review sessions", () => {
   const h = harness({ campaign: true });
   try {
     h.enableCampaign();
     const result = h.svc.requestSessionReviewJob("s1", request());
-    assert.match(result.error!, /part of a campaign with an allowance/);
+    assert.match(result.error!, /retired.*review session/u);
     assert.equal(h.starts().length, 0);
   } finally { h.db.close(); }
 });
@@ -1172,8 +1859,10 @@ test("a post-upvote round uses ordinary campaign admission, reservation and actu
     h.enableCampaign();
     const decision = askPostUpvote(h);
     assert.ok(decision.data, decision.error ?? "refused");
-    assert.equal(decision.data.authority, "human");
-    assert.ok(h.svc.approve("s1", decision.data.occurrenceId, "approve").ok);
+    // Within its pull request's cap, Full Control's Orchestrator owns it (#4075).
+    assert.equal(decision.data.authority, "orchestrator");
+    assert.ok(h.svc.resolveDescendantRequest("root", "s1", decision.data.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
     const before = h.db.campaignBudgets.view("root")!;
     const next = h.svc.requestReviewSession("s1", request({ headSha: postUpvoteSnapshot().headSha }));
     assert.ok(next.data, next.error ?? "refused");
@@ -1221,4 +1910,234 @@ test("consuming a merge decision rechecks the review run's head and revokes a st
     assert.match(consumed.error!, /current pull request head needs a valid review/u);
     assert.equal(h.db.workflowDecisionByOccurrence(merge.data.occurrenceId)?.status, "revoked");
   } finally { h.db.close(); }
+});
+
+
+test("configured review admission selects discovered models and pins one round budget without changing legacy defaults", () => {
+  const h = harness({ configuration: true });
+  try {
+    const userId = h.db.localIdentityContext().userId;
+    h.db.reviewSettings.set(userId, null, { version: 1, roundBudget: 2, reviewers: [{
+      implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      harness: "codex", model: "gpt-6.1-sol", effort: "high", allowSameFamily: false,
+    }] });
+    const view = requested(h);
+    const start = h.starts().at(-1)!;
+    assert.equal(start.spec.config?.model, "gpt-6.1-sol");
+    assert.equal(start.spec.review?.history?.roundBudget, 2);
+    assert.deepEqual(start.spec.review?.configuration, { model: "gpt-6.1-sol", effort: "high", allowSameFamily: false, roundBudget: 2 });
+    h.db.reviewSettings.set(userId, null, { version: 1, roundBudget: 8, reviewers: [] });
+    assert.equal(h.db.reviewSessions.history("s1", request().pullRequest).roundBudget, 2);
+    assert.equal(h.db.getSession(view.reviewSessionId)?.model, "gpt-6.1-sol");
+  } finally { h.db.close(); }
+});
+
+test("configured reviews refuse unavailable models, same-family selection without consent, and unsupported runners", () => {
+  for (const scenario of ["missing", "same-family", "old-runner", "allowed"] as const) {
+    const h = harness({ configuration: scenario !== "old-runner" });
+    try {
+      h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 4, reviewers: [{
+        implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+        harness: scenario === "same-family" || scenario === "allowed" ? "claude-code" : "codex",
+        model: scenario === "missing" ? "retired" : null, effort: "high", allowSameFamily: scenario === "allowed",
+      }] });
+      const result = h.svc.requestReviewSession("s1", request());
+      if (scenario === "allowed") { assert.ok(result.ok, result.error ?? "request refused"); assert.equal(h.starts().at(-1)?.spec.agentId, "claude"); }
+      else {
+        assert.equal(result.ok, false);
+        assert.match(result.error!, scenario === "missing" ? /codex.*retired.*unavailable/u : scenario === "same-family" ? /same-family/u : /configured codex reviewer \(default model, high effort\).*Update Wollipog/u);
+        assert.equal(h.starts().length, 0);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+test("personal project rules replace user rules at review admission and shared sessions retain their launching user", () => {
+  const h = harness({ configuration: true });
+  try {
+    const local = h.db.localIdentityContext();
+    const project = h.db.createProject({ name: "Personal Project" });
+    h.db.setSessionProject("s1", project.id);
+    h.db.reviewSettings.set(local.userId, null, { version: 1, roundBudget: 7, reviewers: [{
+      implementer: { agentId: "claude", driver: "claude-code", context: { kind: "native" } },
+      harness: "claude-code", model: null, effort: "high", allowSameFamily: true,
+    }] });
+    h.db.reviewSettings.set(local.userId, project.id, { version: 1, roundBudget: 2, reviewers: [] });
+    requested(h);
+    assert.equal(h.starts().at(-1)?.spec.agentId, "codex", "the project document replaces every user reviewer rule");
+    assert.equal(h.starts().at(-1)?.spec.review?.history?.roundBudget, 2);
+    h.db.createSession({ id: "shared", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Shared", useWorktree: true,
+      reviewSettingsUserId: local.userId, driver: "claude-code", config: {}, now: 3,
+      scope: { organizationId: local.organizationId, owner: { kind: "organization", organizationId: local.organizationId } } });
+    h.db.updateSessionStatus("shared", "running", 4);
+    requested(h, "shared");
+    assert.equal(h.starts().at(-1)?.spec.agentId, "claude");
+    assert.equal(h.starts().at(-1)?.spec.review?.history?.roundBudget, 7);
+  } finally { h.db.close(); }
+});
+
+test("Automatic reviewer models resolve catalog placeholders before the immutable launch configuration is formed", () => {
+  const h = harness({ configuration: true, driver: "codex-app-server" });
+  try {
+    h.metadata.agents.find(a => a.id === "claude")!.capabilities!.models = [
+      { id: "default", default: true, efforts: ["high"] },
+      { id: "claude-opus-5-5", efforts: ["high"] },
+    ];
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 6, reviewers: [] });
+    requested(h);
+    const start = h.starts().at(-1)!;
+    assert.equal(start.spec.review?.configuration?.model, start.spec.config?.model);
+    assert.equal(start.spec.review?.configuration?.model, "claude-opus-5-5");
+  } finally { h.db.close(); }
+});
+
+
+function campaignReviewChild(h: ReturnType<typeof harness>, id = "snapshot-child") {
+  const result = h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", title: id, useWorktree: true,
+    config: { model: "claude-opus-5-5", effort: "high" } }, undefined, undefined, false, false, false, { parentSessionId: "root" });
+  assert.ok(result.ok && result.data, result.error ?? "child creation refused");
+  h.db.updateSessionStatus(result.data.id, "running", Date.now());
+  return result.data;
+}
+
+test("campaign review fields are captured at child launch and fixed policy wins over later personal changes", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: {
+    reviewHarness: "codex", reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2,
+  } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 8, reviewers: [] });
+    const child = campaignReviewChild(h);
+    assert.equal(child.reviewPolicy?.reviewHarness, "codex");
+    assert.equal(child.reviewPolicy?.reviewRoundBudget, 2);
+    assert.equal(child.reviewPolicy?.source, "campaign_policy");
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 9, reviewers: [] });
+    requested(h, child.id);
+    const review = h.starts().at(-1)!;
+    assert.equal(review.spec.review?.configuration?.model, "gpt-6.1-sol");
+    assert.equal(review.spec.review?.history?.roundBudget, 2);
+    assert.equal(h.db.getSession(child.id)?.reviewPolicy?.reviewRoundBudget, 2);
+  } finally { h.db.close(); }
+});
+
+test("Automatic campaign fields freeze the child's personal review choices and preserve absent-row defaults", () => {
+  for (const configured of [false, true]) {
+    const h = harness({ campaign: true, configuration: true });
+    try {
+      const user = h.db.localIdentityContext().userId;
+      if (configured) h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 6, reviewers: [] });
+      const child = campaignReviewChild(h);
+      h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 9, reviewers: [] });
+      requested(h, child.id);
+      const review = h.starts().at(-1)!;
+      assert.equal(review.spec.review?.history?.roundBudget, configured ? 6 : 4);
+      assert.equal(review.spec.review?.configuration !== undefined, configured);
+    } finally { h.db.close(); }
+  }
+});
+
+test("same-family campaign consent must target the actual reviewer harness", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "codex" as const, model: "gpt-6.1-sol", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    assert.equal(child.reviewPolicy?.reviewModel, "claude-opus-5-5", "a fixed Claude harness resolves its own default instead of inheriting the Codex rule's model");
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    assert.equal(h.starts().filter(start => start.spec.review).length, 0, "consent refusal never falls back to another reviewer");
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [
+      { ...rule, harness: "claude-code", model: "claude-opus-5-5" },
+    ] });
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.model, "claude-opus-5-5");
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+test("a project override replaces personal same-family consent for a captured reviewer", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    const project = h.db.createProject({ name: "Consent Override" });
+    h.db.setSessionProject(child.id, project.id);
+    h.db.reviewSettings.set(user, project.id, { version: 1, roundBudget: 4, reviewers: [
+      { ...rule, harness: "codex", model: "gpt-6.1-sol" },
+    ] });
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    h.db.reviewSettings.set(user, project.id, null);
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+test("a child snapshot never overrides a later matching same-family consent revocation", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewHarness: "claude-code" } });
+  try {
+    const user = h.db.localIdentityContext().userId;
+    const rule = { implementer: { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } },
+      harness: "claude-code" as const, model: "claude-opus-5-5", effort: "high", allowSameFamily: true };
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    const child = campaignReviewChild(h);
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [{ ...rule, allowSameFamily: false }] });
+    const refused = h.svc.requestReviewSession(child.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured claude-code reviewer.*same-family.*Settings → Reviews/u);
+    h.db.reviewSettings.set(user, null, { version: 1, roundBudget: 4, reviewers: [rule] });
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.allowSameFamily, true);
+  } finally { h.db.close(); }
+});
+
+
+test("a child's Automatic model remains pinned when runner defaults change and refuses when it disappears", () => {
+  const h = harness({ campaign: true, configuration: true, reviewPolicy: { reviewRoundBudget: 3 } });
+  try {
+    const child = campaignReviewChild(h);
+    assert.equal(child.reviewPolicy?.reviewModel, "gpt-6.1-sol");
+    const second = campaignReviewChild(h, "second-snapshot-child");
+    const codex = h.metadata.agents.find(a => a.id === "codex")!;
+    codex.capabilities!.models = [{ id: "gpt-next", default: true }, { id: "gpt-6.1-sol" }];
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    requested(h, child.id);
+    assert.equal(h.starts().at(-1)?.spec.review?.configuration?.model, "gpt-6.1-sol");
+    codex.capabilities!.models = [{ id: "gpt-next", default: true }];
+    h.db.registerRunner(h.metadata, Date.now(), PROTOCOL_VERSION);
+    const refused = h.svc.requestReviewSession(second.id, request());
+    assert.equal(refused.ok, false);
+    assert.match(refused.error!, /configured codex reviewer \(gpt-6.1-sol.*unavailable/u);
+  } finally { h.db.close(); }
+});
+
+test("legacy campaigns keep live personal settings and all-Automatic new campaigns preserve older runners' launch", () => {
+  for (const legacy of [false, true]) {
+    const h = harness({ campaign: true, configuration: legacy });
+    try {
+      if (legacy) {
+        const policy = h.db.getSession("root")!.orchestratorPolicy!;
+        delete policy.reviewPolicySnapshotVersion;
+        for (const key of ["reviewHarness", "reviewModel", "reviewEffort", "reviewRoundBudget"] as const) {
+          delete policy.behavior[key]; delete policy.sources.behavior[key];
+        }
+        h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='root'").run(JSON.stringify(policy));
+      }
+      const child = campaignReviewChild(h);
+      assert.equal(child.reviewPolicy !== undefined, !legacy);
+      if (legacy) h.db.reviewSettings.set(h.db.localIdentityContext().userId, null, { version: 1, roundBudget: 7, reviewers: [] });
+      requested(h, child.id);
+      const review = h.starts().at(-1)!;
+      assert.equal(review.spec.review?.history?.roundBudget, legacy ? 7 : 4);
+      assert.equal(review.spec.review?.configuration !== undefined, legacy);
+    } finally { h.db.close(); }
+  }
 });

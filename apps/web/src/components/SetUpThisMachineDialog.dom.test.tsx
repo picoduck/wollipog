@@ -1,5 +1,5 @@
 import assert from "node:assert/strict";
-import test, { afterEach } from "node:test";
+import test, { afterEach, describe, mock } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
@@ -15,7 +15,12 @@ import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { RunnersView } from "./RunnersView.js";
-import { SetUpThisMachineDialog, setUpPhase } from "./SetUpThisMachineDialog.js";
+import {
+  LOCAL_RUNNER_STATUS_POLL_MS,
+  RUNNER_CONNECT_WAIT_MS,
+  SetUpThisMachineDialog,
+  setUpPhase,
+} from "./SetUpThisMachineDialog.js";
 
 /**
  * Set Up This Machine (#2993) with the desktop bridge mocked: `local_runner_status` and
@@ -129,8 +134,12 @@ function deferred<T>(): Deferred<T> {
   return { promise, resolve, reject };
 }
 
-/** The desktop bridge. Each `connect_local_runner` call waits on its own deferred, so a test settles it. */
-function installBridge(status: LocalRunnerStatus | Error) {
+/**
+ * The desktop bridge. Each `connect_local_runner` call waits on its own deferred, so a test settles
+ * it; its reply becomes what `local_runner_status` reports next, until a test sets another.
+ */
+function installBridge(initial: LocalRunnerStatus | Error) {
+  let status = initial;
   const connects: { runnerId: string; answer: Deferred<LocalRunnerStatus> }[] = [];
   Object.defineProperty(globalThis, "isTauri", { configurable: true, writable: true, value: true });
   Object.defineProperty(domWindow, "__TAURI_INTERNALS__", {
@@ -145,16 +154,17 @@ function installBridge(status: LocalRunnerStatus | Error) {
         if (command === "connect_local_runner") {
           const answer = deferred<LocalRunnerStatus>();
           connects.push({ runnerId: args?.runnerId ?? "", answer });
-          return answer.promise;
+          return answer.promise.then((next) => { status = next; return next; });
         }
         throw new Error(`${command} is not part of this test`);
       },
     },
   });
-  return connects;
+  return Object.assign(connects, { setStatus: (next: LocalRunnerStatus) => { status = next; } });
 }
 
 afterEach(() => {
+  mock.timers.reset();
   matchingMedia = new Set();
   Reflect.deleteProperty(globalThis, "isTauri");
   Reflect.deleteProperty(domWindow, "__TAURI_INTERNALS__");
@@ -208,6 +218,10 @@ async function mount(node: React.ReactNode, client: Partial<ApiClient> = {}, run
     push: async (views: RunnerView[]) => {
       await act(async () => { socket.push(snapshot(views)); });
       await settle();
+    },
+    /** `push` for a test on fake timers, where `settle` would never return. */
+    pushNow: async (views: RunnerView[]) => {
+      await act(async () => { socket.push(snapshot(views)); });
     },
     unmount: async () => {
       await act(async () => { root.unmount(); });
@@ -452,7 +466,8 @@ test("Repair Connection… on the desktop app's own runner opens Set Up This Mac
 
 test("the phase follows the bridge and the runner, and an open's setup counts as running before it starts", () => {
   const phase = (overrides: Partial<Parameters<typeof setUpPhase>[0]>) => setUpPhase({
-    infoLoaded: true, loadFailed: false, status: started, connecting: false, connectFailed: false, readiness: "ready", ...overrides,
+    infoLoaded: true, loadFailed: false, status: started, connecting: false, connectFailed: false, readiness: "ready",
+    waitExpired: false, ...overrides,
   });
   assert.equal(phase({ infoLoaded: false }), "loading");
   assert.equal(phase({ infoLoaded: false, loadFailed: true }), "load-failed");
@@ -466,4 +481,121 @@ test("the phase follows the bridge and the runner, and an open's setup counts as
   assert.equal(phase({ readiness: "discovering" }), "setting-up");
   assert.equal(phase({ readiness: "needs-attention" }), "needs-attention");
   assert.equal(phase({}), "ready");
+  // The wait is bounded (#3524): past it, a runner not online or still discovering needs attention.
+  assert.equal(phase({ readiness: "starting", waitExpired: true }), "needs-attention");
+  assert.equal(phase({ readiness: "discovering", waitExpired: true }), "needs-attention");
+  assert.equal(phase({ waitExpired: true }), "ready", "a runner that connects after the bound is ready");
+  assert.equal(phase({ connecting: true, waitExpired: true }), "setting-up", "Reconnect waits again");
+});
+
+// The bounded wait (#3524). Fake timers start once the dialog has mounted on real ones, before the
+// bridge reports the start that begins the wait.
+describe("a runner that started but never finishes connecting", () => {
+  const flush = () => act(async () => { for (let turn = 0; turn < 10; turn += 1) await Promise.resolve(); });
+  const tick = async (ms: number) => {
+    await act(async () => { mock.timers.tick(ms); });
+    await flush();
+  };
+  const notice = () => dialog().querySelector<HTMLElement>(".notice");
+  const noticeTitle = () => notice()?.querySelector(".notice-title")?.textContent;
+  async function startedAndWaiting(runners: RunnerView[] = []) {
+    const bridge = installBridge(notSetUp);
+    const view = await mount(<SetUpThisMachineDialog onClose={() => {}} />, {
+      rediscover: async () => ({ ok: true as const }),
+    }, runners);
+    mock.timers.enable({ apis: ["setTimeout"] });
+    await act(async () => { bridge[0]!.answer.resolve(started); });
+    await flush();
+    assert.ok(dialog().querySelector(".connection-check"), "Setting Up shows the Connection Check");
+    return { bridge, view };
+  }
+  function assertStoppedWaiting() {
+    assertNoDomNode(dialog().querySelector(".connection-check"), "the check gives way to the notice");
+    assertNoDomNode(footer().querySelector(".spinner"), "the footer stops spinning");
+    assert.doesNotMatch(footer().textContent ?? "", /Waiting for the runner/u);
+    assertOnePrimaryInFooter("Done");
+    assert.ok(buttonNamed("Install Manually Instead"), "Install Manually Instead is offered again");
+  }
+
+  test("a runner that is not online after the bound says it hasn't connected, and Reconnect starts it again", async () => {
+    const { bridge, view } = await startedAndWaiting();
+    try {
+      await tick(RUNNER_CONNECT_WAIT_MS - 1);
+      assert.ok(check("Runner Connection")!.classList.contains("connection-check-pending"), "still waiting just before the bound");
+      assert.ok(footer().textContent?.includes("Waiting for the runner…"));
+      assert.equal(buttonNamed("Install Manually Instead"), undefined);
+
+      await tick(1);
+      assert.equal(noticeTitle(), "This Machine Hasn't Connected");
+      assert.ok(notice()!.classList.contains("t-warning"), "a warning notice");
+      assert.match(notice()!.textContent ?? "", /The bundled runner started, but it hasn't connected to Wollipog\./u);
+      assertStoppedWaiting();
+      assert.equal(buttonNamed("Rediscover"), undefined);
+
+      await act(async () => { buttonNamed("Reconnect This Machine")!.click(); });
+      await flush();
+      assert.equal(bridge.length, 2, "Reconnect restarts the bundled runner through the connect path");
+      assert.ok(check("Bundled Runner")!.classList.contains("connection-check-pending"));
+      await act(async () => { bridge[1]!.answer.resolve(started); });
+      await flush();
+      assert.ok(check("Runner Connection")!.classList.contains("connection-check-pending"), "a new wait starts");
+      await tick(RUNNER_CONNECT_WAIT_MS);
+      assert.equal(noticeTitle(), "This Machine Hasn't Connected", "and it is bounded too");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a runner that connects after the bound moves the dialog to Ready on its own", async () => {
+    const { view } = await startedAndWaiting();
+    try {
+      await tick(RUNNER_CONNECT_WAIT_MS);
+      assert.equal(noticeTitle(), "This Machine Hasn't Connected");
+      await view.pushNow([machine()]);
+      assert.equal(noticeTitle(), "This Machine Is Ready");
+      assert.equal(buttonNamed("Done")!.disabled, false);
+      assert.equal(buttonNamed("Install Manually Instead"), undefined);
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("a runner still discovering its agents after the bound offers Rediscover, and its agents arriving later settle it", async () => {
+    const { view } = await startedAndWaiting();
+    try {
+      await view.pushNow([machine({ agentsRefreshed: false, agents: [] })]);
+      assert.ok(check("Agent Readiness")!.classList.contains("connection-check-pending"));
+      await tick(RUNNER_CONNECT_WAIT_MS);
+      assert.equal(noticeTitle(), "This Machine Hasn't Reported Its Agents");
+      assert.ok(notice()!.classList.contains("t-warning"));
+      assert.match(notice()!.textContent ?? "", /The bundled runner connected, but it hasn't reported its agents yet\./u);
+      assertStoppedWaiting();
+      assert.ok(buttonNamed("Rediscover"));
+      assert.equal(buttonNamed("Reconnect This Machine"), undefined);
+
+      // Agents that need attention arrive later: Needs Attention for its agents, with no action.
+      await view.pushNow([machine({ agents: [claudeSignedOut] })]);
+      assert.equal(noticeTitle(), "Agents Need Attention");
+      await view.pushNow([machine()]);
+      assert.equal(noticeTitle(), "This Machine Is Ready");
+    } finally {
+      await view.unmount();
+    }
+  });
+
+  test("while waiting it reads the bridge again, and a runner process that exits shows This Machine Isn't Connected", async () => {
+    const { bridge, view } = await startedAndWaiting();
+    try {
+      await tick(LOCAL_RUNNER_STATUS_POLL_MS);
+      assert.ok(dialog().querySelector(".connection-check"), "a running process keeps the wait");
+      bridge.setStatus({ ...started, running: false });
+      await tick(LOCAL_RUNNER_STATUS_POLL_MS);
+      assert.equal(noticeTitle(), "This Machine Isn't Connected");
+      assert.match(notice()!.textContent ?? "", /The bundled runner isn't running\./u);
+      assert.ok(buttonNamed("Reconnect This Machine"));
+      assertStoppedWaiting();
+    } finally {
+      await view.unmount();
+    }
+  });
 });

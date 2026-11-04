@@ -57,7 +57,10 @@ const policyView: OrchestratorSettingsView = {
   },
   source: "user_default",
   controlModeSupported: true,
+  ...(fixtureParams.get("reviewPolicy") === "1" ? { reviewPolicySupported: true } : {}),
   capabilities: {
+    reviewers: ["codex", "claude-code"].map(harness => ({ harness: harness as "codex" | "claude-code", name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
+      capabilities: { models: [{ id: harness === "codex" ? "gpt-sol" : "claude-opus", displayName: harness === "codex" ? "GPT Sol" : "Claude Opus", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
     harnesses: [
       {
         agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude Code",

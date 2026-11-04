@@ -1,1 +1,0 @@
-|.subscription-source>header|gap|10px

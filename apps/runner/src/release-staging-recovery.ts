@@ -290,7 +290,7 @@ interface Evidence {
 }
 
 /** Any unexpected I/O error makes the inspection unavailable rather than escaping the caller. */
-function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions, legacyTag?: string): Evidence {
+function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions, legacyTag?: string, discoveredEntries?: StagingInspection["parentEntries"]): Evidence {
   const parent = join(dataDir, STAGING_PARENT);
   const inspection: StagingInspection = {
     mode: context.mode, dataDir, parent, slot: join(parent, legacyTag ?? STAGING_SLOT), state: "clear", problem: null, parentEntries: [], slotEntries: null,
@@ -302,7 +302,7 @@ function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem
   };
   const evidence: Evidence = { inspection, parentStat: null, slotStat: null, uid: null };
   try {
-    return gather(evidence, context, fs, procs, options, legacyTag);
+    return gather(evidence, context, fs, procs, options, legacyTag, discoveredEntries);
   } catch (error) {
     inspection.state = "unavailable";
     inspection.problem = redactDetail((error as Error).message);
@@ -311,7 +311,7 @@ function examine(dataDir: string, context: StagingContext, fs: StagingFilesystem
   }
 }
 
-function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions, legacyTag?: string): Evidence {
+function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions, legacyTag?: string, discoveredEntries?: StagingInspection["parentEntries"]): Evidence {
   const { inspection } = evidence;
   const { dataDir, parent, slot } = inspection;
   const refuse = (reason: string) => { inspection.recovery.reasons.push(reason); };
@@ -345,19 +345,23 @@ function gather(evidence: Evidence, context: StagingContext, fs: StagingFilesyst
   evidence.parentStat = parentStat;
   // Legacy releases each have their own parent entry. The single-slot content bound
   // must not hide candidates when many interrupted releases have accumulated.
-  const parentList = list(parent, fs, Infinity);
-  inspection.parentEntries = parentList.observed.map(({ entry }) => ({ name: entry.name, kind: entry.kind }));
-  if (parentList.observed.length === 0) { refuse("staging is clear; there is nothing to recover"); return evidence; }
+  // Within one read-only inspection, reuse discovery names only. Candidate safety and
+  // contents are still checked afresh below; recovery examinations never pass this list.
+  const parentList = legacyTag && discoveredEntries ? null : list(parent, fs, Infinity);
+  inspection.parentEntries = parentList
+    ? parentList.observed.map(({ entry }) => ({ name: entry.name, kind: entry.kind }))
+    : discoveredEntries!;
+  if (inspection.parentEntries.length === 0) { refuse("staging is clear; there is nothing to recover"); return evidence; }
   inspection.state = "blocked";
-  const foreign = parentList.observed.filter(({ entry }) => entry.name !== STAGING_SLOT).map(({ entry }) => entry.name);
-  if (!legacyTag && (foreign.length || parentList.truncated)) refuse(`${parent} holds entries other than the attempt slot (${foreign.join(", ")}${parentList.truncated ? ", and more" : ""}); current-slot recovery is unavailable until those entries are preserved or reviewed; unknown entries remain protected`);
   inspection.holders = findHolders(parent, uid, procs);
   if (inspection.holders.reason) refuse(inspection.holders.reason);
   if (legacyTag) {
     gatherLegacy(evidence, legacyTag, root, fs, options);
     return evidence;
   }
-  const slotObserved = parentList.observed.find(({ entry }) => entry.name === STAGING_SLOT);
+  const foreign = parentList!.observed.filter(({ entry }) => entry.name !== STAGING_SLOT).map(({ entry }) => entry.name);
+  if (foreign.length || parentList!.truncated) refuse(`${parent} holds entries other than the attempt slot (${foreign.join(", ")}${parentList!.truncated ? ", and more" : ""}); current-slot recovery is unavailable until those entries are preserved or reviewed; unknown entries remain protected`);
+  const slotObserved = parentList!.observed.find(({ entry }) => entry.name === STAGING_SLOT);
   if (!slotObserved) return evidence;
   const slotStat = slotObserved.stat;
   if (!slotStat.isDirectory() || slotStat.isSymbolicLink()) { refuse(`${slot} is not a real directory; it is protected`); return evidence; }
@@ -502,7 +506,7 @@ export interface RecoveryOptions {
 export function inspectStaging(dataDir: string, context: StagingContext, fs: StagingFilesystem, procs: StagingProcesses, options: RecoveryOptions = {}): StagingInspection {
   const inspection = examine(dataDir, context, fs, procs, options).inspection;
   inspection.legacy = inspection.parentEntries.filter(({ name }) => TAG_RE.test(name)).map(({ name }) => {
-    const legacy = examine(dataDir, context, fs, procs, options, name).inspection;
+    const legacy = examine(dataDir, context, fs, procs, options, name, inspection.parentEntries).inspection;
     return { tag: name, path: legacy.slot, entries: legacy.slotEntries, recovery: legacy.recovery, holders: legacy.holders };
   });
   return inspection;

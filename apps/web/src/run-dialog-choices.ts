@@ -1,4 +1,5 @@
 import type { AgentDefinition, ProjectLocationView, ProjectView, RunnerView, WorkflowDefinition } from "@wollipog/protocol";
+import { agentAvailableForRunnerDefault } from "@wollipog/protocol";
 import { agentOptions, agentSetupReason, type AgentOption } from "./components/agent-options.js";
 import { titleCaseLabel } from "./format.js";
 import { liveLocationAvailability } from "./project-session-selection.js";
@@ -39,11 +40,16 @@ export function runAgentChoices(
   agents: AgentDefinition[],
   machine: string,
   availabilityVerified: boolean,
+  defaults?: RunnerView["providerAccountDefaults"],
 ): RunAgentChoice[] {
   return agentOptions(agents).map((option) => {
     const { agent } = option;
     if (option.disabled) {
       const disabledReason = agentSetupReason(agent, machine, availabilityVerified);
+      return { option, description: disabledReason, disabledReason };
+    }
+    if (!agentAvailableForRunnerDefault(agent, defaults)) {
+      const disabledReason = `The default provider account is not ready on ${machine}.`;
       return { option, description: disabledReason, disabledReason };
     }
     if (agentSignedOut(agent)) {
@@ -57,9 +63,9 @@ export function runAgentChoices(
 
 /** The ids a comparison can run: available, interactive (agentOptions never offers the retired
  * non-interactive Codex exec) and not signed out. */
-export function selectableRunAgentIds(agents: AgentDefinition[]): string[] {
+export function selectableRunAgentIds(agents: AgentDefinition[], defaults?: RunnerView["providerAccountDefaults"]): string[] {
   return agentOptions(agents)
-    .filter((option) => !option.disabled && !agentSignedOut(option.agent))
+    .filter((option) => !option.disabled && !agentSignedOut(option.agent) && agentAvailableForRunnerDefault(option.agent, defaults))
     .map((option) => option.agent.id);
 }
 
@@ -70,8 +76,8 @@ export const DEFAULT_RUN_AGENT_LIMIT = 3;
  * The agents Compare Agents starts with: at most three that can run, one per driver first (so a
  * comparison compares different harnesses), then the rest in agentOptions' order.
  */
-export function defaultRunAgentIds(agents: AgentDefinition[]): string[] {
-  const selectable = new Set(selectableRunAgentIds(agents));
+export function defaultRunAgentIds(agents: AgentDefinition[], defaults?: RunnerView["providerAccountDefaults"]): string[] {
+  const selectable = new Set(selectableRunAgentIds(agents, defaults));
   const candidates = agentOptions(agents).filter((option) => selectable.has(option.agent.id)).map((option) => option.agent);
   const chosen: AgentDefinition[] = [];
   const drivers = new Set<string>();

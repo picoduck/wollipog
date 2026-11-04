@@ -850,3 +850,22 @@ test.describe("Board cards on an 834px touch tablet (#2222)", () => {
     }
   });
 });
+
+test("an Orchestrator card's type mark stacks above the stretched click, so a hover reaches its tooltip (#4076)", async ({ page }) => {
+  await page.setViewportSize({ width: 1440, height: 900 });
+  await openCards(page);
+  const mark = page.locator('.board .card[data-session-id="s-parent"] .card-open > .session-type-icon');
+  await expect(mark).toHaveAttribute("title", "Orchestrator Session");
+  expect(await mark.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    return node.contains(document.elementFromPoint(box.x + box.width / 2, box.y + box.height / 2));
+  }), "the pointer over the mark reaches the mark").toBe(true);
+  // The card's padding, and its title text beside the mark, are still the one stretched click.
+  const card = page.locator('.board .card[data-session-id="s-parent"]');
+  expect(await card.evaluate((node) => {
+    const box = node.getBoundingClientRect();
+    const title = node.querySelector(".card-open")!.getBoundingClientRect();
+    return [document.elementFromPoint(box.left + 4, box.bottom - 4), document.elementFromPoint(title.left + 60, title.top + 10)]
+      .map((hit) => hit?.classList.contains("card-open") ?? false);
+  }), "padding and title text open the card").toEqual([true, true]);
+});

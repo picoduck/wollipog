@@ -75,6 +75,19 @@ item and continue without widening permissions. If the retry still fails, report
 unavailable and stop coverage-based triage; passing tests alone do not establish coverage gaps.
 Never weaken tests or repeat the full suite indefinitely to obtain a report.
 
+If the coverage command exits non-zero but `lcov.info` is populated and the TAP stream shows failing
+tests, the report is still usable for triage. Record the failing tests; they are not coverage gaps.
+Rerun each failing test file twice with the same `node --import tsx --test` invocation minus
+`--experimental-test-coverage` and the lcov reporter: once plain, and once with only
+`NODE_V8_COVERAGE=<scratch>/<dir>` set, each with its own TAP destination in the scratch directory.
+Then remove that raw coverage directory using its literal absolute path. A file that passes plain
+but fails with `NODE_V8_COVERAGE` is a coverage-only failure: report it as its own finding or
+tracker item. Leave a failure that also happens without coverage to `flaky-test-triage`. Never
+weaken a test to get a clean exit status. One run exited 1 with a 12.4 MB `lcov.info` and four
+failing tests: the sandboxed CLI integration test passed 6/6 plain but failed under coverage and
+under `NODE_V8_COVERAGE` alone (#3893), while a `database is locked` failure reproduced without
+coverage and was an ordinary flake.
+
 When a finding rests on a mutation probe (the real module against a copy with one guard removed),
 write the probe files in the run's scratch directory with the `.mts` extension and run them from
 the repository root: `node --import tsx <scratch>/probe.mts`. Two things fail otherwise and cost a

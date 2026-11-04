@@ -365,3 +365,93 @@ test("an unavailable custom agent keeps installation hints when native harnesses
     assert.ok(state.querySelector('.code-well button[aria-label="Copy Claude Code Install Command"]'));
   } finally { await view.unmount(); }
 });
+
+const assessment = (status: NonNullable<AgentDefinition["update"]>["status"], guidance: string,
+  overrides: Partial<NonNullable<AgentDefinition["update"]>> = {}): NonNullable<AgentDefinition["update"]> => ({
+  status, installedVersion: "2.1.4", checkedAt: 1, channel: "stable", evidenceSource: "npm dist-tags for @anthropic-ai/claude-code",
+  managedExternally: true, guidance, ...overrides,
+});
+const updatesFact = (details: HTMLElement) =>
+  [...details.querySelectorAll("dt")].find((term) => term.textContent === "Updates")!.nextElementSibling as HTMLElement;
+const updatesLines = (details: HTMLElement) => [...updatesFact(details).children].map((line) => line.textContent);
+
+test("the Updates fact gives the release guidance under its label for every assessment, Ready or not (#3523)", async () => {
+  const states: Array<[string, NonNullable<AgentDefinition["update"]>]> = [
+    ["New Release Published", assessment("update_available", "A newer release is published, but compatibility with this Machine has not been verified.")],
+    ["Check Failed", assessment("check_failed", "The release check could not complete. Select Rediscover for a native Machine, or Reconnect for an SSH Machine after active sessions finish.")],
+    ["Pinned by Machine Policy", assessment("managed_externally", "Ask the Machine operator to change the pin before planning an upgrade.",
+      { evidenceSource: "Machine pinned-version policy" })],
+    ["Checks Disabled by Machine Policy", assessment("managed_externally", "Ask the Machine operator whether manual upgrades are permitted.",
+      { evidenceSource: "Machine update-check policy" })],
+    ["Preview Channel", assessment("preview_channel", "This installation is on a preview channel.", { channel: "preview" })],
+    ["Managed Externally", assessment("managed_externally", "Use this installation's original package or version manager.",
+      { evidenceSource: "Executable installation provenance" })],
+  ];
+  for (const [label, update] of states) {
+    for (const ready of [true, false]) {
+      const agent: AgentDefinition = ready ? { ...readyClaude, update }
+        : { ...readyClaude, authStatus: "unauthenticated", claudeCode: { ...claudeCode("ready")!, status: "unauthenticated" }, update };
+      const view = await mount(runner([agent]));
+      try {
+        await act(async () => rowNamed(view.body, "Claude Code")!.click());
+        const details = dialog(view.body)!;
+        const where = `${label}, ${ready ? "Ready" : "Sign-In Required"}`;
+        if (ready) assertNoDomNode(details.querySelector(".notice"), where);
+        else assert.ok(details.querySelector(".notice"), where);
+        assert.deepEqual(updatesLines(details), [label, update.guidance], where);
+      } finally {
+        await view.unmount();
+      }
+    }
+  }
+});
+
+test("a machine that is not online gives the guidance under its Last Reported label (#3523)", async () => {
+  const update = assessment("update_available", "A newer release is published, but compatibility with this Machine has not been verified.");
+  const view = await mount(runner([{ ...readyClaude, update }], { status: "offline" }));
+  try {
+    await act(async () => rowNamed(view.body, "Claude Code")!.click());
+    assert.deepEqual(updatesLines(dialog(view.body)!), ["Last Reported: New Release Published", update.guidance]);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a notice that already quotes the guidance keeps it, and the Updates fact gives only its label (#3523)", async () => {
+  const guidance = "Use the package or version manager that installed this exact copy. Restart and Rediscover before treating the new version as ready.";
+  const old = appServer("codex", "0.140.0", {
+    available: false,
+    codexAppServer: { status: "unsupported", installedVersion: "0.140.0", appServerAvailable: true,
+      failure: { code: "version_unverified", message: "Codex 0.140.0 is older than the supported version 0.147.0.", retryable: false } },
+    update: assessment("update_available", guidance, { installedVersion: "0.140.0", evidenceSource: "npm dist-tags for @openai/codex" }),
+  });
+  const view = await mount(runner([old]));
+  try {
+    await act(async () => rowNamed(view.body, "Codex App Server")!.click());
+    const details = dialog(view.body)!;
+    assert.ok((details.querySelector(".notice")!.textContent ?? "").includes(guidance), "the notice quotes the guidance");
+    assert.equal(updatesFact(details).textContent, "New Release Published");
+    assert.equal((details.textContent ?? "").split(guidance).length - 1, 1, "the guidance appears once");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("an older runner's PowerShell update command for a reference-only Windows launch is replaced (#3523)", async () => {
+  const unsafe = "This installation advertises its built-in `codex update` command. Run `& 'C:\\Windows\\System32\\cmd.exe' '/d' '/c' 'echo' '%PATH%' 'update'` in PowerShell 7.3 or later on this Machine after stopping sessions.";
+  const interpreter = appServer("codex", "0.155.1", {
+    command: "C:\\Windows\\System32\\cmd.exe", args: ["/d", "/c", "echo", "%PATH%"],
+    update: assessment("managed_externally", unsafe, { evidenceSource: "Executable installation provenance" }),
+  });
+  const view = await mount(runner([interpreter], { os: "windows", protocolVersion: 179 }));
+  try {
+    await act(async () => rowNamed(view.body, "Codex App Server")!.click());
+    const details = dialog(view.body)!;
+    const [label, guidance] = updatesLines(details);
+    assert.equal(label, "Managed Externally");
+    assert.match(guidance ?? "", /^This Windows launch may resolve to a batch wrapper.*No copyable update command is available/u);
+    assert.ok(!(details.textContent ?? "").includes("Run `& 'C:\\Windows"), "never the unsafe command");
+  } finally {
+    await view.unmount();
+  }
+});

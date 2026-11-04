@@ -40,6 +40,7 @@ import { basename, join } from "node:path";
 import { createHash, randomUUID } from "node:crypto";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { TextDecoder } from "node:util";
+import { restartResumeId } from "./restart-resume.js";
 import {
   PROTOCOL_VERSION,
   SESSION_HISTORY_PAGE_MAX_BYTES,
@@ -74,6 +75,7 @@ import type {
   ProviderHistoryQuarantineView,
   ProviderHistoryRecoveryMode,
   RunnerCapacityBlocker,
+  SessionLaunchFailureCode,
   SessionConfig,
   AcpSessionContextConfig,
   SessionEventPayload,
@@ -146,6 +148,8 @@ export interface SessionMeta {
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Discovered adapter/CLI version, refreshed before launch for capability gates and telemetry; never an auth source. */
   agentVersion?: string;
+  /** Provider task ids ended by Stop, retained after its visible job ledger is cleared. */
+  stoppedBackgroundTaskIds?: string[];
   claudeUsageCheckpoint?: import("./drivers/claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Durable event coverage for the raw baseline; generic seq repair must not advance it. */
   claudeUsageCheckpointSeq?: number;
@@ -198,6 +202,8 @@ export interface SessionMeta {
   status: SessionStatus;
   /** Current durable admission wait explanation; cleared on every non-queued status. */
   capacityWait?: RunnerCapacityBlocker;
+  /** Typed reason the last launch failed (#3843); kept only while the status is `failed`. */
+  launchFailure?: SessionLaunchFailureCode;
   title: string;
   titleSource?: SessionTitleSource;
   providerUpdatedAt?: string;
@@ -209,6 +215,9 @@ export interface SessionMeta {
   /** Effective Orchestrator restriction. Missing legacy metadata remains strict at launch, and a
    * missing `integrationIsolation` matches that: a strict launch never carried user integrations. */
   orchestrator?: { strictProjectIsolation: boolean; integrationIsolation?: boolean; issueNumbers?: number[]; issueScope?: import("@wollipog/protocol").CampaignIssueScope; control?: import("@wollipog/protocol").CampaignControl };
+  /** v276 (#4074): a delegated image evidence reviewer. Every launch of it restricts the harness to
+   * the two review tools, and it is never relaunched without this marker. */
+  uiEvidenceReviewer?: { reviewId: string };
   /** A review session (#3368): what it reviews, its runner-owned checkout, the runner process that
    * launched it (a review session is never relaunched by another), and its one outcome. */
   review?: import("@wollipog/protocol").ReviewLaunchPolicy & {
@@ -216,6 +225,8 @@ export interface SessionMeta {
     launchOwner: string;
     /** Accounting-only snapshot preparation record; no provider session has been launched. */
     preparing?: true;
+    /** Host-access observations at Codex reviewer admission (#3705). */
+    admission?: import("@wollipog/protocol").ReviewSessionAdmission;
     /** v228 (#3369): the attempt's planned place in its review run. */
     round?: import("@wollipog/protocol").ReviewAttemptRound;
     update?: import("@wollipog/protocol").ReviewSessionUpdate;
@@ -346,6 +357,8 @@ export interface SessionMeta {
   backgroundJobs?: DurableBackgroundJob[];
   /** Provider task ids retained across runner restarts for automatic recovery. */
   pendingBackgroundTaskIds?: string[];
+  /** First observation of each currently pending id without an unfinished ledger row. */
+  unlistedBackgroundTaskStarts?: Record<string, number>;
   /** Task ids whose latest orphan artifact already received one unattended recovery attempt.
    * They suppress replay of the same markerless artifact until a live provider re-observes it. */
   recoveredBackgroundTaskIds?: string[];
@@ -469,9 +482,11 @@ export interface DurableBackgroundJob {
   terminalObservedAt?: number;
   /** Present only when Wollipog ended the job itself (#1778): who asked, why, and when. */
   endedBy?: BackgroundJobEnd;
-  /** When an explicit Restart replaced the conversation that started this job (#1779). Its result
-   * can no longer arrive as a provider task notification, so its continuation says so. */
+  /** When Restart carried this job across a process boundary (#1779). Without restartResumed,
+   * its conversation was replaced and its continuation must use the retained result. */
   restartedAt?: number;
+  /** The restart kept the provider conversation, so terminal task ids still belong to it. */
+  restartResumed?: true;
   continuationRequired?: boolean;
   /** Stable identity shared by every job in one parent-turn barrier continuation. */
   continuationId?: string;
@@ -2166,6 +2181,15 @@ export class SessionStore {
     const cur = this.readMeta(id);
     if (!cur) return null;
     const next: SessionMeta = { ...cur, ...patch, sessionId: cur.sessionId, updatedAt: Date.now() };
+    if ("pendingBackgroundTaskIds" in patch || "backgroundJobs" in patch) {
+      const listed = new Set((next.backgroundJobs ?? []).filter((job) => !job.terminalStatus)
+        .flatMap((job) => job.toolUseId ? [job.id, `tool:${job.toolUseId}`] : [job.id]));
+      next.unlistedBackgroundTaskStarts = Object.fromEntries(
+        [...new Set(next.pendingBackgroundTaskIds ?? [])].filter((taskId) => !listed.has(taskId))
+          .map((taskId) => [taskId, cur.unlistedBackgroundTaskStarts && Object.hasOwn(cur.unlistedBackgroundTaskStarts, taskId)
+            ? cur.unlistedBackgroundTaskStarts[taskId]! : next.updatedAt]));
+      patch = { ...patch, unlistedBackgroundTaskStarts: next.unlistedBackgroundTaskStarts };
+    }
     if (Object.keys(patch).every((k) => LAZY_META_KEYS.has(k))) {
       this.patchMetaLazy(id, { ...patch, updatedAt: next.updatedAt });
     } else {
@@ -3726,37 +3750,44 @@ export class SessionStore {
   ): SessionSnapshot[] {
     const snapshots: SessionSnapshot[] = [];
     for (const listed of this.listSessions()) {
-      if (this.isDeleted(listed.sessionId)) continue;
-      // A reset intent may be published after listSessions read this metadata. Recovery is the
-      // commit point, so run it again and re-read the bumped epoch/cleared seq before registering.
-      this.recoverHistoryReset(listed.sessionId);
-      const meta = this.readMeta(listed.sessionId);
-      if (!meta) continue;
-      // A crash may lose the debounced metadata flush after events.ndjson was already appended.
-      // Registration must advertise the authoritative durable tail or the CP can incorrectly mark
-      // a stale cache complete and never open a page chain for those recovered events.
-      let durableSeq = meta.seq;
-      try {
-        durableSeq = this.historyTail(meta.sessionId).seq;
-        if (!exactEventSeq) {
-          durableSeq = this.projectedEventSeq(meta.sessionId, durableSeq, controlPlaneProtocolVersion);
-        }
-      } catch {
-        // An exact peer can safely retain the metadata high-water. A projected peer cannot: that
-        // number belongs to the local sequence space and may exceed every dense cursor it can page.
-        // Zero is a conservative same-generation tail; a later page attempt still fails closed.
-        if (!exactEventSeq && this.eventProjectionRequired(controlPlaneProtocolVersion)) durableSeq = 0;
-      }
-      const snapshot = metaToSnapshot(meta, controlPlaneProtocolVersion);
-      snapshots.push({
-        ...snapshot,
-        seq: durableSeq,
-        ...(!exactEventSeq && snapshot.historyEpoch !== undefined
-          ? { historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }
-          : {}),
-      });
+      const snapshot = this.sessionSnapshot(listed.sessionId, controlPlaneProtocolVersion, exactEventSeq);
+      if (snapshot) snapshots.push(snapshot);
     }
     return snapshots;
+  }
+
+  /** Read one current negotiated snapshot when a reconnect window is ready to write it. */
+  sessionSnapshot(id: string, controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
+    exactEventSeq = false): SessionSnapshot | null {
+    if (this.isDeleted(id)) return null;
+    // A reset intent may be published after listSessions read this metadata. Recovery is the
+    // commit point, so run it again and re-read the bumped epoch/cleared seq before registering.
+    this.recoverHistoryReset(id);
+    const meta = this.readMeta(id);
+    if (!meta) return null;
+    // A crash may lose the debounced metadata flush after events.ndjson was already appended.
+    // Registration must advertise the authoritative durable tail or the CP can incorrectly mark
+    // a stale cache complete and never open a page chain for those recovered events.
+    let durableSeq = meta.seq;
+    try {
+      durableSeq = this.historyTail(meta.sessionId).seq;
+      if (!exactEventSeq) {
+        durableSeq = this.projectedEventSeq(meta.sessionId, durableSeq, controlPlaneProtocolVersion);
+      }
+    } catch {
+      // An exact peer can safely retain the metadata high-water. A projected peer cannot: that
+      // number belongs to the local sequence space and may exceed every dense cursor it can page.
+      // Zero is a conservative same-generation tail; a later page attempt still fails closed.
+      if (!exactEventSeq && this.eventProjectionRequired(controlPlaneProtocolVersion)) durableSeq = 0;
+    }
+    const snapshot = metaToSnapshot(meta, controlPlaneProtocolVersion);
+    return {
+      ...snapshot,
+      seq: durableSeq,
+      ...(!exactEventSeq && snapshot.historyEpoch !== undefined
+        ? { historyEpoch: this.projectedHistoryEpoch(snapshot.historyEpoch, controlPlaneProtocolVersion) }
+        : {}),
+    };
   }
 
   remove(id: string): void {
@@ -4233,6 +4264,8 @@ export function metaToSnapshot(
   m: SessionMeta,
   controlPlaneProtocolVersion: number | null = PROTOCOL_VERSION,
 ): SessionSnapshot {
+  const restartCapability = runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionRestartResume")
+    ? { restartResumesConversation: !!restartResumeId(m) } : undefined;
   const nativeElicitation = controlPlaneProtocolVersion != null &&
     controlPlaneProtocolVersion >= NATIVE_ELICITATION_OVERLAY_PROTOCOL_VERSION
     ? m.capabilities?.elicitation
@@ -4263,6 +4296,9 @@ export function metaToSnapshot(
             : {}),
         }
       : undefined;
+  const providerCapabilities = m.driver === "acp" ? m.capabilities : nativeCapabilities;
+  const agentCapabilities = providerCapabilities || restartCapability
+    ? { ...providerCapabilities, ...restartCapability } : undefined;
   return {
     id: m.sessionId,
     controlPlaneLaunchId: m.controlPlaneLaunchId,
@@ -4300,6 +4336,7 @@ export function metaToSnapshot(
     capacityWait: runnerSupportsProtocol(controlPlaneProtocolVersion, "machineRunnerCapacity")
       ? m.capacityWait
       : undefined,
+    ...(m.status === "failed" && m.launchFailure ? { launchFailure: m.launchFailure } : {}),
     driver: m.driver,
     useWorktree: m.worktreePath != null,
     worktreePath: m.worktreePath,
@@ -4314,11 +4351,9 @@ export function metaToSnapshot(
     config,
     resolvedModel: m.resolvedModel,
     acpSessionContext: m.acpSessionOverrides,
-    // ACP owns complete per-session controls. Native drivers publish only the elicitation overlay;
+    // ACP owns complete per-session controls. Native drivers publish session overlays and lifecycle facts;
     // their model/effort/mode/modalities remain live runner-catalog truth after CLI upgrades.
-    agentCapabilities: m.driver === "acp"
-      ? m.capabilities
-      : nativeCapabilities,
+    agentCapabilities,
     preview: m.preview,
     pendingApproval: m.pendingApproval,
     // A supporting peer always hears the current truth, including its absence: `null` is how a

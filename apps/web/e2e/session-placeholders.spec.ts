@@ -83,6 +83,38 @@ test("a load error says Couldn't Load Session, hides the raw error behind Show D
   await expect(page.locator("header.session-bar .session-bar-title")).toHaveText("Alpha Session");
 });
 
+test("a load error's notice is centered and keeps the page gutter, on a desktop and a phone (#3875)", async ({ page }) => {
+  // Reached as in the load-error test above, then narrowed to a phone while the error shows.
+  await open(page, 1440, ALPHA, "&lookup=error");
+  await expect(page.locator("header.session-bar .session-bar-title")).toHaveText("Alpha Session");
+  await page.evaluate(() => {
+    window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { archived: true, status: "stopped" });
+  });
+  const notice = page.locator(".session-detail > .notice.state-error");
+  const geometry = () => notice.evaluate((element) => {
+    const parent = element.parentElement!;
+    // The gutter as a length: a probe resolves the token the way a margin would.
+    const probe = document.createElement("div");
+    probe.style.marginLeft = "var(--page-gutter)";
+    parent.append(probe);
+    const gutter = parseFloat(getComputedStyle(probe).marginLeft);
+    probe.remove();
+    const area = parent.getBoundingClientRect();
+    const box = element.getBoundingClientRect();
+    return { left: box.left - area.left, right: area.right - box.right, width: box.width, gutter };
+  });
+  for (const width of [1440, 390]) {
+    await page.setViewportSize({ width, height: width > 760 ? 900 : 844 });
+    await expect(notice).toBeVisible();
+    const measured = await geometry();
+    expect(measured.gutter, `${width}px`).toBeGreaterThan(0);
+    expect(measured.left, `${width}px left gutter`).toBeGreaterThanOrEqual(measured.gutter - 0.5);
+    expect(measured.right, `${width}px right gutter`).toBeGreaterThanOrEqual(measured.gutter - 0.5);
+    expect(Math.abs(measured.left - measured.right), `${width}px centered`).toBeLessThanOrEqual(1);
+    expect(measured.width, `${width}px measure`).toBeLessThanOrEqual(480.5);
+  }
+});
+
 test("Loading shows skeleton rows and no sentence about the control plane", async ({ page }) => {
   // Not before 300ms is pinned in SessionDetail.placeholder.dom.test.tsx, where time is controlled.
   await open(page, 1440, MISSING, "&lookup=pending");
@@ -103,13 +135,18 @@ test("offline and unpaired states name the next step without Wollipog's internal
   await expect(page.getByText("This device needs to be paired before it can open sessions.")).toBeVisible();
   // The pairing banner above is the next step; the page itself never names Wollipog's internals.
   await expect(page.locator("[data-placeholder]")).not.toContainText(/control[ -]plane/iu);
-  // Nor does the banner (#2303): the startup-link command waits behind Show Details.
+  // Nor does the banner (#2303, #3005): one sentence and Pair This Device…; the startup-link
+  // commands are the dialog's, behind Where Do I Find the Link?.
   const banner = page.locator(".notice.page-banner");
-  await expect(banner).toContainText("Pair this device to use Wollipog");
-  await expect(banner).not.toContainText(/control[ -]plane|print-pair-url/iu);
-  await banner.getByRole("button", { name: "Show Details" }).click();
-  await expect(banner.locator(".notice-details-body code")).toHaveText(["wollipog pair url", "--print-pair-url"]);
-  await expect(banner).not.toContainText(/control[ -]plane/iu);
+  await expect(banner).toHaveCount(1);
+  await expect(banner.locator(".notice-body")).toHaveText("This device isn't paired with Wollipog yet.");
+  await expect(banner).not.toContainText(/control[ -]plane|token|print-pair-url|wollipog pair url/iu);
+  await expect(banner.locator("input")).toHaveCount(0);
+  await banner.getByRole("button", { name: "Pair This Device…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Pair This Device" });
+  await dialog.getByText("Where Do I Find the Link?").click();
+  await expect(dialog.locator(".disclosure-body code")).toHaveText(["wollipog pair url", "--print-pair-url"]);
+  await expect(dialog).not.toContainText(/control[ -]plane|token/iu);
 });
 
 async function openArchived(page: Page, width: number, query = "&unarchiveRestart=1") {

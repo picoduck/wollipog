@@ -11,6 +11,7 @@ import {
   type SessionView,
   type SourceLocation,
   type WorkspaceReferenceCandidate,
+  type WorkspaceReferenceSearchLimit,
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
@@ -74,22 +75,28 @@ const connection: UiConnectionRuntime = {
   close() {},
 };
 
+/** A session working directly in its folder, which Files names by the folder (#2852). */
 const session = {
   id: "files-session",
   runnerId: "runner-1",
   title: "Files Fixture",
   status: "idle",
   driver: "claude-code",
-  useWorktree: true,
+  useWorktree: false,
   worktreePath: "/home/me/.agent-worktrees/wollipog-fix",
   workspaceName: "Wollipog",
   eventEpoch: 0,
   adopted: false,
 } as SessionView;
 
+/** The session the harness shows; a test may swap in another before mounting. */
+let shownSession: SessionView;
 let tree: Record<string, SessionFileEntry[]>;
 let searchResults: WorkspaceReferenceCandidate[];
 let searchTruncated: boolean;
+/** What the runner says it applied: `fuzzy` from a current runner, nothing from an older one. */
+let searchMatch: "fuzzy" | undefined;
+let searchLimit: WorkspaceReferenceSearchLimit | undefined;
 let searches: string[];
 let reads: string[];
 let heldListing: (() => void) | null;
@@ -103,6 +110,7 @@ let searchAnswer: ((query: string) => Promise<{ results: WorkspaceReferenceCandi
 beforeEach(() => {
   domWindow.localStorage.clear();
   clearPanelScratch();
+  shownSession = session;
   tree = {
     "": [
       { name: "src", path: "src", isDir: true },
@@ -126,6 +134,8 @@ beforeEach(() => {
     { path: "src/precheck.ts", isDirectory: false },
   ];
   searchTruncated = false;
+  searchMatch = "fuzzy";
+  searchLimit = undefined;
   searches = [];
   reads = [];
   heldListing = null;
@@ -152,10 +162,10 @@ const client = {
     if (failRead) throw new Error(failRead);
     return { path, content: `// ${path}\n`, size: 12 };
   },
-  searchWorkspaceReferences: async (_id: string, query: string) => {
-    searches.push(query);
+  searchWorkspaceReferences: async (_id: string, query: string, match?: string) => {
+    searches.push(match ? `${query} (${match})` : query);
     if (searchAnswer) return searchAnswer(query);
-    return { results: searchResults, truncated: searchTruncated };
+    return { results: searchResults, truncated: searchTruncated, match: searchMatch, limit: searchLimit };
   },
   sessionWorkflowArtifacts: async () => ({ artifacts: [] }),
 } as unknown as ApiClient;
@@ -201,7 +211,7 @@ function Harness({ onControls }: { onControls: (controls: Controls) => void }) {
   return (
     <ApiProvider client={client}><StoreProvider connection={connection}><RightPanel
       state={state}
-      session={session}
+      session={shownSession}
       runnerOnline={online}
       runnerProtocolVersion={protocol}
       git={gitStatus()}
@@ -339,7 +349,7 @@ test("typing lists matching files, changed ones first; Down then Enter opens the
   try {
     await pressGoToFile();
     await typeQuery(mounted, "check");
-    assert.deepEqual(searches, ["check"], "one search once typing pauses");
+    assert.deepEqual(searches, ["check (fuzzy)"], "one fuzzy search once typing pauses");
     const field = goToFile(mounted)!;
     assert.equal(field.getAttribute("role"), "combobox");
     assert.equal(field.getAttribute("aria-expanded"), "true");
@@ -423,16 +433,123 @@ test("Enter opens only what answers the typed text: never an earlier query's row
   }
 });
 
-test("a truncated search says only the first matches show", async () => {
+test("a truncated search names which cap cut it: the best matches, the workspace, or an older runner's first matches", async () => {
   searchTruncated = true;
+  const cases: [typeof searchMatch, typeof searchLimit, string][] = [
+    ["fuzzy", "results", "Showing the best matches only. Type more to narrow them."],
+    ["fuzzy", "entries", "The workspace is too large to search in full, so some files may be missing."],
+    [undefined, undefined, "Showing the first matches only. Type more to narrow them."],
+  ];
+  for (const [match, limit, label] of cases) {
+    searchMatch = match;
+    searchLimit = limit;
+    const mounted = await mount();
+    try {
+      await pressGoToFile();
+      await typeQuery(mounted, "check");
+      assert.equal(mounted.container.querySelector(".files-goto-count")?.textContent, label);
+      assert.ok(options(mounted).length > 0, "the matches it has still show");
+    } finally {
+      await mounted.dispose();
+    }
+  }
+});
+
+test("fuzzy Go to File: scattered letters find the file, recent and changed files lead, Enter opens the top match (#1263)", async () => {
+  // The runner's best-first answer: ShellDock edges out SessionDetail, and sidebar-details is weakest.
+  searchResults = [
+    { path: "apps/web/src/components/ShellDock.tsx", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+    { path: "docs/sidebar-details.tsx", isDirectory: false },
+  ];
+  changedFiles = [{ status: "M", path: "apps/web/src/components/SessionDetail.tsx" }];
+  // Recent files are remembered per session for the page visit, so each test gets its own session.
+  shownSession = { ...session, id: "files-session-fuzzy" };
   const mounted = await mount();
   try {
     await pressGoToFile();
-    await typeQuery(mounted, "check");
-    assert.equal(
-      mounted.container.querySelector(".files-goto-count")?.textContent,
-      "Showing the first matches only. Type more to narrow them.",
-    );
+    assert.ok(focused(goToFile(mounted)), "Ctrl+P puts focus in the field");
+    await typeQuery(mounted, "sdtsx");
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), [
+      "apps/web/src/components/SessionDetail.tsx",
+      "apps/web/src/components/ShellDock.tsx",
+      "docs/sidebar-details.tsx",
+    ], "the changed file leads the better unrelated match");
+    const marked = (option: HTMLElement) =>
+      [...option.querySelectorAll(".files-goto-name .files-goto-match")].map((mark) => mark.textContent);
+    assert.deepEqual(marked(options(mounted)[0]!), ["S", "D", "tsx"], "each matched run is marked in the name");
+    assert.equal(options(mounted)[0]!.querySelector(".files-goto-folder")?.textContent, "apps/web/src/components",
+      "the folder shows relative to the workspace root");
+
+    // Open the weakest match; searching again ranks it with the changed file, above the unrelated one.
+    await key(mounted, "ArrowDown");
+    await key(mounted, "ArrowDown");
+    await key(mounted, "Enter");
+    await settle();
+    assert.deepEqual(reads, ["docs/sidebar-details.tsx"]);
+    await typeQuery(mounted, "sd tsx");
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), [
+      "apps/web/src/components/SessionDetail.tsx",
+      "docs/sidebar-details.tsx",
+      "apps/web/src/components/ShellDock.tsx",
+    ], "the recently opened file now ranks above the unrelated match");
+    await key(mounted, "Enter");
+    await settle();
+    assert.deepEqual(reads, ["docs/sidebar-details.tsx", "apps/web/src/components/SessionDetail.tsx"],
+      "Enter opens the top match");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("a changed file whose letters only scatter never tops a strong name match; Enter opens the strong one", async () => {
+  searchResults = [
+    { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+  ];
+  changedFiles = [{ status: "M", path: "apps/web/src/components/CheckBadge.tsx" }];
+  shownSession = { ...session, id: "files-session-scatter" };
+  const mounted = await mount();
+  try {
+    await pressGoToFile();
+    await typeQuery(mounted, "sdtsx");
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), [
+      "apps/web/src/components/SessionDetail.tsx",
+      "apps/web/src/components/CheckBadge.tsx",
+    ]);
+    assert.equal(options(mounted)[1]!.querySelector(".files-git-marker")?.textContent, "MModified",
+      "the changed file is still listed, and marked");
+    await key(mounted, "Enter");
+    await settle();
+    assert.deepEqual(reads, ["apps/web/src/components/SessionDetail.tsx"], "Enter opens the strong match");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("a recent file the runner's capped answer left out is still offered when it matches", async () => {
+  searchResults = [{ path: "src/session.ts", isDirectory: false }];
+  shownSession = { ...session, id: "files-session-capped" };
+  const mounted = await mount();
+  try {
+    await pressGoToFile();
+    await typeQuery(mounted, "session");
+    await key(mounted, "Enter");
+    await settle();
+    assert.deepEqual(reads, ["src/session.ts"]);
+
+    // The runner now answers with other files only, cut at its cap.
+    searchResults = [{ path: "apps/sessions/list.ts", isDirectory: false }];
+    searchTruncated = true;
+    searchLimit = "results";
+    await typeQuery(mounted, "session");
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), ["src/session.ts", "apps/sessions/list.ts"]);
+
+    // A complete answer without it means it is gone, so it is not offered.
+    searchTruncated = false;
+    searchLimit = undefined;
+    await typeQuery(mounted, "sessio");
+    assert.deepEqual(options(mounted).map((option) => option.getAttribute("title")), ["apps/sessions/list.ts"]);
   } finally {
     await mounted.dispose();
   }
@@ -458,11 +575,40 @@ test("no matching files is a no-results state whose Clear Filter returns to the 
   }
 });
 
+test("a managed worktree is named by its workspace in Session Tools, the crumbs and Go to File (#2852)", async () => {
+  const worktreePath = "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_files";
+  shownSession = { ...session, useWorktree: true, worktreePath, workspaceName: "acme-storefront" };
+  const mounted = await mount();
+  try {
+    await act(async () => mounted.controls.state.show("launcher"));
+    await settle();
+    const filesRow = mounted.container.querySelector('.session-tools [data-tool="files"]');
+    assert.equal(filesRow?.querySelector(".row-sub")?.textContent, "Browse acme-storefront");
+    assert.ok(!text(mounted).includes("s_files"), "the session-id folder name is never shown");
+
+    await showFiles(mounted);
+    assert.deepEqual(crumbTexts(mounted), ["acme-storefront"]);
+    assert.equal(mounted.container.querySelector(".crumbs .crumb")?.getAttribute("title"), worktreePath,
+      "the worktree's full path is the first crumb's tooltip");
+
+    await pressGoToFile();
+    await typeQuery(mounted, "check");
+    assert.equal(mounted.container.querySelector(".files-goto-count")?.textContent, "4 matches in acme-storefront");
+    searchResults = [{ path: "checks", isDirectory: true }];
+    await typeQuery(mounted, "checks");
+    assert.equal(mounted.container.querySelector(".state.no-results .state-body")?.textContent,
+      "Nothing in acme-storefront matches that name.");
+  } finally {
+    await mounted.dispose();
+  }
+});
+
 test("the folder: crumbs start at the folder's name, icons not emoji, changed files marked, Refresh in the header", async () => {
   const mounted = await mount();
   try {
     await showFiles(mounted);
     assert.deepEqual(crumbTexts(mounted), ["wollipog-fix"], "the first crumb is the workspace folder's name");
+    assert.equal(mounted.container.querySelector(".crumbs .crumb")?.getAttribute("title"), session.worktreePath);
     const rows = [...mounted.container.querySelectorAll<HTMLButtonElement>(".files-list .row.dense")];
     assert.deepEqual(rows.map((row) => row.querySelector(".row-title")?.textContent),
       ["src", "empty", "README.md", "logo.png", "notes.txt"]);

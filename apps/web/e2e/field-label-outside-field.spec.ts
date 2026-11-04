@@ -72,15 +72,18 @@ for (const theme of ["dark", "light"] as const) {
     test.describe(`${theme} at ${width}px`, () => {
       test.use({ viewport: { width, height: 900 } });
 
-      test("the Archived Sessions search and filter labels are §8.1 field labels", async ({ page }) => {
+      test("the Archived Sessions Filters sheet uses §8.1 field labels", async ({ page }) => {
         const url = `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(viewPath({ name: "archived" }))}`;
         await page.goto(url);
         await page.evaluate(() => localStorage.clear());
         await page.goto(url);
         await setTheme(page, theme);
-        await expect(page.locator(".archive-filter").first()).toBeVisible();
-        await expectLabelStyle(page, page.locator(".archive-search > span, .archive-filter > .field-label"),
-          ["Search Sessions and Transcripts", "Project", "Location", "Agent", "Archive State", "Lifecycle State"]);
+        if (width === 1440) await page.setViewportSize({ width: 834, height: 900 });
+        await page.getByRole("button", { name: /^Filters/ }).click();
+        await page.setViewportSize({ width, height: 900 });
+        await dialogMotionSettled(page);
+        await expectLabelStyle(page, page.getByRole("dialog", { name: "Filters", exact: true }).locator(".field:visible > span:first-child"),
+          [...(width === 390 ? ["Show"] : []), "Project", "Location", "Agent", "Status"]);
       });
 
       test("New Automation's labels are §8.1 field labels", async ({ page }) => {

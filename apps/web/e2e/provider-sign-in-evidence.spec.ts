@@ -80,14 +80,25 @@ for (const width of WIDTHS) {
   }
 }
 
-for (const theme of THEMES) {
-  for (const [flow, query] of [["authorization-code", ""], ["device-code", "&deviceCode=1"]] as const) {
-    test(`embedded Request Card, ${flow}, ${theme}`, async ({ page }) => {
-      await page.setViewportSize({ width: 1440, height: 900 });
-      await page.goto(`/authentication-recovery-e2e.html?scenario=signing-in${query}&theme=${theme}&width=1440&height=900`);
-      const card = page.locator(".request-dock").getByRole("region", { name: "Signing In — Claude Code" });
-      await expect(card).toBeVisible();
-      await capture(card, `request-card-${flow}-1440-${theme}`);
-    });
+for (const width of WIDTHS) {
+  const height = width === 1440 ? 900 : 844;
+  for (const theme of THEMES) {
+    for (const [flow, query] of [["authorization-code", ""], ["device-code", "&deviceCode=1"]] as const) {
+      test(`embedded Request Card, ${flow}, ${width}, ${theme}`, async ({ page, context }) => {
+        await page.setViewportSize({ width, height });
+        await page.goto(`/authentication-recovery-e2e.html?scenario=signing-in${query}&theme=${theme}&width=${width}&height=${height}`);
+        const card = page.locator(".request-dock").getByRole("region", { name: "Signing In — Claude Code" });
+        await expect(card).toBeVisible();
+        await capture(card, `request-card-${flow}-${width}-${theme}`);
+        if (flow !== "device-code") return;
+        // Copy Device Code's confirmation (#3521), pressed from the keyboard so its focus ring shows.
+        await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+        const copy = card.getByRole("button", { name: "Copy Device Code" });
+        await copy.focus();
+        await page.keyboard.press("Enter");
+        await expect(copy).toHaveClass(/copy-status-copied/);
+        await capture(card, `request-card-${flow}-copied-${width}-${theme}`);
+      });
+    }
   }
 }

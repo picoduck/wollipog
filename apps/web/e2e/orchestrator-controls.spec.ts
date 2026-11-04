@@ -40,8 +40,9 @@ for (const viewport of [
         await openFixture(page, viewport.width, viewport.height, `&fullControlFixture=1&${fixture}`);
         await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
         const dialog = await openControls(page);
-        // The boundary owns every gate (#2940): no Custom owner, request choice, evidence note or stored behavior.
-        await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control"]);
+        // The boundary owns every gate (#2940): no Custom owner, request choice or evidence note. Campaign
+        // Behavior stays, since it governs every child Full Control creates (#3580).
+        await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control", "Campaign Behavior"]);
         await expect(dialog).toContainText("Effective Mode: Full Control.");
         await expect(dialog).toContainText("The Orchestrator runs this campaign end to end.");
         await expect(dialog.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
@@ -210,5 +211,90 @@ for (const theme of ["dark", "light"] as const) {
     await dialog.getByRole("button", { name: "Done" }).click();
     await expect(dialog).toHaveCount(0);
     await expect(decisions).toBeFocused();
+  });
+}
+
+/** #3580, as it happened live: a Full Control campaign launched with fixed Codex children moves to
+ * Claude Code children from the Edit action on Campaign Behavior. */
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+] as const) {
+  test(`${viewport.name}: a running Full Control campaign's Child Harness, Model and Effort change from Campaign Behavior`, async ({ page }) => {
+    await openFixture(page, viewport.width, viewport.height, "&fullControlFixture=1&childHarness=codex");
+    const dialog = await openControls(page);
+    await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control", "Campaign Behavior"]);
+    const heading = dialog.getByRole("heading", { name: "Campaign Behavior", exact: true });
+    const edit = dialog.getByRole("button", { name: "Edit Campaign Behavior", exact: true });
+    await expect(edit).toHaveText("Edit");
+    const facts = dialog.locator("dl.facts");
+    await expect(facts).toContainText("Codex");
+    // The stored model id reads as the Child Model selector names it, not as its raw id.
+    await expect(facts).toContainText("GPT-6.1 Sol");
+    await expect(facts).not.toContainText("gpt-6.1-sol");
+    await heading.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-edit-action.png` });
+
+    await edit.click();
+    const form = dialog.getByRole("form", { name: "Edit Campaign Behavior" });
+    await expect(form).toContainText("Changes apply to children created from now on.");
+    await expect(form).toContainText("Full Control stays as you authorized it");
+    const save = form.getByRole("button", { name: "Save Changes", exact: true });
+    await expect(save).toBeDisabled();
+    const choose = async (select: string, option: RegExp) => {
+      await form.locator(`[aria-label^="${select}:"]`).click();
+      await page.getByRole("option", { name: option }).click();
+    };
+    await choose("Child Harness", /^Claude Code/);
+    await choose("Child Model", /^Claude Opus 5\.5/);
+    await choose("Child Effort", /^High/);
+    await expect(save).toBeEnabled();
+    const overflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+    expect(overflow).toBeLessThanOrEqual(0);
+    await heading.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-edit-form.png` });
+    await save.scrollIntoViewIfNeeded();
+    await expect(save).toBeInViewport();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-edit-form-save.png` });
+
+    await save.click();
+    await expect(form).toHaveCount(0);
+    await expect(dialog.locator(".section-head").filter({ hasText: "Campaign Behavior" })).toContainText("Saved");
+    const fact = (label: string) => facts.locator("div").filter({ has: page.locator("dt", { hasText: new RegExp(`^${label}$`) }) });
+    await expect(fact("Child Harness")).toContainText("Claude Code");
+    await expect(fact("Child Harness")).toContainText("Changed After Launch");
+    await expect(fact("Child Model")).toContainText("Claude Opus 5.5");
+    await expect(fact("Child Model")).toContainText("Changed After Launch");
+    await expect(fact("Follow-Ups")).not.toContainText("Changed After Launch");
+    await expect(edit).toBeFocused();
+    await heading.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-saved.png` });
+  });
+}
+
+/** #3580 CR-1.3: the machines that offer the campaign's fixed children are offline. That is no
+ * problem for a change to Follow-Ups or Completion, which saves with the unchanged child values. */
+for (const viewport of [
+  { name: "desktop", width: 1440, height: 900 },
+  { name: "phone", width: 390, height: 844 },
+] as const) {
+  test(`${viewport.name}: with the fixed children's machines offline, Follow-Ups still changes from Campaign Behavior`, async ({ page }) => {
+    await openFixture(page, viewport.width, viewport.height, "&fullControlFixture=1&childHarness=codex&childMachines=offline");
+    const dialog = await openControls(page);
+    await dialog.getByRole("button", { name: "Edit Campaign Behavior", exact: true }).click();
+    const form = dialog.getByRole("form", { name: "Edit Campaign Behavior" });
+    const save = form.getByRole("button", { name: "Save Changes", exact: true });
+    await expect(save).toBeDisabled();
+    await form.locator('[aria-label^="Follow-Ups:"]').click();
+    await page.getByRole("option", { name: /^Execute Approved/ }).click();
+    await expect(save).toBeEnabled();
+    await expect(form.locator(".field-error")).toHaveCount(0);
+    await save.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: `${SHOT}/${viewport.name}-campaign-behavior-offline-children.png` });
+    await save.click();
+    await expect(form).toHaveCount(0);
+    const facts = dialog.locator("dl.facts");
+    await expect(facts).toContainText("Codex");
+    await expect(facts).toContainText("Execute Approved");
   });
 }

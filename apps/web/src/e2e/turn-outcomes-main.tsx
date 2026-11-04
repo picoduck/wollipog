@@ -41,6 +41,28 @@ const events: SessionEvent[] = [
   event(start + 13 * minute + 9_000, { kind: "error", message: "Rate limit reached for claude-opus-5-5. Your limit resets at 1:00 AM." }),
 ];
 
+// `?problem=nonfatal` adds a turn that kept running past a problem the driver reported (#3806): a
+// rejected async question, which is a Problem During Turn notice rather than a failed turn.
+if (params.get("problem") === "nonfatal") {
+  const at = start + 20 * minute;
+  events.push(
+    event(at, { kind: "user_message", text: "Ask me to approve the three merges." }),
+    event(at + 1_000, { kind: "checkpoint", turn: 4 } as SessionEvent["payload"]),
+    event(at + 8_000, { kind: "agent_message", text: "Authorize squash merges for #3660, #3661 and #3662?", final: true }),
+    event(at + 8_000, {
+      kind: "error",
+      nonFatal: true,
+      message: "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message.",
+    }),
+    event(at + 14_000, {
+      kind: "agent_message",
+      text: "The approval card couldn't be shown, so please answer here: approve the three merges, or hold any of them?",
+      final: true,
+    }),
+    event(at + 15_000, { kind: "agent_response_completed" }),
+  );
+}
+
 declare global {
   interface Window {
     turnOutcomesE2E: { retried: () => string[] };

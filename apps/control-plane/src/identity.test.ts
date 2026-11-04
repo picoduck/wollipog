@@ -14,6 +14,7 @@ import {
   providerForkNeedsCleanup,
   providerForkSnapshotIdError,
   workflowActorForPrincipal,
+  worktreeRequestedBySession,
   type AgentPrincipal,
   type HumanPrincipal,
 } from "./identity.js";
@@ -103,10 +104,11 @@ test("orchestrators can mutate verified descendants while execution policy gover
       assert.match(agentCredentialSessionTargetError(route, credential, "s_parent", true)!, /descendants/);
     }
   }
-  const stopJob = "/api/sessions/:id/background-jobs/:jobId/stop";
-  assert.equal(agentCredentialSessionTargetError(stopJob, credential, "s_child", true), null);
-  assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_sibling")!, /descendants/);
-  assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_parent", true)!, /descendants/);
+  for (const stopJob of ["/api/sessions/:id/background-jobs/:jobId/stop", "/api/sessions/:id/queue-hold/release"]) {
+    assert.equal(agentCredentialSessionTargetError(stopJob, credential, "s_child", true), null, stopJob);
+    assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_sibling")!, /descendants/, stopJob);
+    assert.match(agentCredentialSessionTargetError(stopJob, credential, "s_parent", true)!, /descendants/, stopJob);
+  }
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_parent"), null);
   assert.equal(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_child", true), null);
   assert.match(agentCredentialSessionTargetError("/api/sessions/:id/config", credential, "s_sibling")!, /descendants/);
@@ -114,6 +116,21 @@ test("orchestrators can mutate verified descendants while execution policy gover
   assert.match(orchestratorSelfWorktreeAuthorizationError(credential, "s_parent", true)!, /Strict Project Isolation/);
   assert.equal(orchestratorSelfWorktreeAuthorizationError(credential, "s_parent", false), null);
   assert.equal(orchestratorSelfWorktreeAuthorizationError(credential, "s_child", true), null);
+});
+
+test("only a session's own agent credential switches its worktree on its own behalf (#3810)", () => {
+  const own: AgentPrincipal = {
+    kind: "agent", actorId: "s_calling", credentialSessionId: "s_calling",
+    organizationId: "org_1", delegatedScope: { organizationId: "org_1", owner: { kind: "user", userId: "usr_1" } },
+  };
+  assert.equal(worktreeRequestedBySession(own, "s_calling"), true);
+  // A parent Orchestrator acting on its child, a person in the dashboard, and an agent credential
+  // bound to no session all switch someone else's worktree; that turn arrives with their prompt.
+  assert.equal(worktreeRequestedBySession({ ...own, actorId: "s_parent", credentialSessionId: "s_parent",
+    orchestrator: true }, "s_calling"), false);
+  assert.equal(worktreeRequestedBySession(human("operator"), "s_calling"), false);
+  assert.equal(worktreeRequestedBySession({ ...own, credentialSessionId: undefined }, "s_calling"), false);
+  assert.equal(worktreeRequestedBySession(null, "s_calling"), false);
 });
 
 test("ordinary credentials retain self worktrees but confine descendant lifecycle and guardrail mutations", () => {

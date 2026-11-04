@@ -202,6 +202,12 @@ export function parseRemoteInstanceAdvanced(
   return { ok: true, value: { endpoint: parsed.value, token: checkedToken.value } };
 }
 
+/** Check a pairing code entered on its own, by the same rule `parseRemoteInstanceAdvanced` applies,
+ * so a form can report the code and the address at once. */
+export function checkRemoteInstancePairingCode(token: string): InstancePairingResult<string> {
+  return tokenResult(token, "token");
+}
+
 /** Validate and canonicalize a token-free remote origin for profile storage and comparisons. */
 export function normalizeRemoteInstanceOrigin(origin: string): InstancePairingResult<RemoteInstanceEndpoint> {
   const parsed = parseEndpointUrl(origin, "origin");

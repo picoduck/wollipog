@@ -2,20 +2,17 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
-  PERSONAL_ORGANIZATION_ID,
-  type AgentDefinition,
   type IdentityAdministrationView,
-  type IdentityContextView,
   type RunnerView,
 } from "@wollipog/protocol";
-import { ApiError } from "../api.js";
+import { canManageProviderProfiles } from "../provider-profile-access.js";
 import { useApi } from "../api-context.js";
 import { useStore } from "../store.js";
 import { activeSessionCounts } from "../rail-attention.js";
 import { machineListEntries } from "../runners.js";
 
 import { DetailSkeleton } from "./common.js";
-import { lifecycleConflictPresentation, MachineDetail, phoneMachineMenu, useMachineActions } from "./MachineDetail.js";
+import { MachineDetail, phoneMachineMenu, useMachineActions, useMachineOperations } from "./MachineDetail.js";
 import { MachineSettingsDialog } from "./MachineSettingsDialog.js";
 import { MachineList } from "./MachineList.js";
 import { MachinesOverview } from "./MachinesOverview.js";
@@ -25,15 +22,14 @@ import { InstallManuallyDialog } from "./InstallManuallyDialog.js";
 import { RepairConnectionDialog } from "./RepairConnectionDialog.js";
 import { SetUpThisMachineDialog } from "./SetUpThisMachineDialog.js";
 import { AddBoxDialog } from "./AddBoxDialog.js";
-import { useFeedback } from "./FeedbackProvider.js";
 import { MachineAgentsSection } from "./MachineAgentsSection.js";
 import {
   CommandLineIcon,
   NetworkIcon,
   ComputerIcon,
 } from "./Icons.js";
-import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
-import { InstancesPanel } from "./InstancesPanel.js";
+import { PeopleDevicesTab } from "./PeopleDevicesPanel.js";
+import { addRemoteInstanceAction, InstancesPanel } from "./InstancesPanel.js";
 import { ProviderAccountsSection } from "./ProviderAccountsSection.js";
 import { MachineCapacitySection } from "./MachineCapacitySection.js";
 import { MachineSkillsSection } from "./MachineSkillsSection.js";
@@ -43,17 +39,13 @@ import { DetailBar, PageHeader, type PageHeaderActions } from "./PageHeader.js";
 import { useIsMobile } from "./useIsMobile.js";
 import { useInstances } from "../instances-context.js";
 import type { MachineSettingsTarget } from "../machine-settings.js";
-import { backLabel, destination, type ConnectionSection } from "../navigation.js";
+import { backLabel, destination, type ConnectionSection, type MachineAccountsIntent } from "../navigation.js";
 import {
   hasBundledLocalRunner,
   isManagedLocalRunnerRepair,
   readLocalRunnerStatus,
   type LocalRunnerStatus,
 } from "../local-runner.js";
-
-export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "Unavailable" | "Unverified" {
-  return agent.available === true ? "Available" : agent.available === false ? "Unavailable" : "Unverified";
-}
 
 /**
  * A machine's sections under its header and notice (#2988), each its own block so the units that
@@ -62,6 +54,7 @@ export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "U
  */
 function MachineSections({
   runner, name, online, canFindSessions, onChooseInstallation, canManageProfiles = false, canManageMachines, onChangeLimit,
+  accountsIntent, profileAccessKnown = true,
 }: {
   runner: RunnerView;
   name: string;
@@ -73,28 +66,25 @@ function MachineSections({
   /** An organization owner or admin. */
   canManageMachines: boolean;
   onChangeLimit: () => void;
+  /** An Add Account or Recover Existing Profile the route asks the accounts section to open (#3240). */
+  accountsIntent?: MachineAccountsIntent;
+  /** The viewer's identity has answered (or failed), so `canManageProfiles` is final. */
+  profileAccessKnown?: boolean;
 }) {
   return (
     <div className="machine-detail-sections">
       <MachineCapacitySection runner={runner} onChangeLimit={onChangeLimit} />
       <MachineAgentsSection runner={runner} online={online} machineName={name}
         canFindSessions={canFindSessions} onChooseInstallation={onChooseInstallation} />
-      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles} />
+      <ProviderAccountsSection runner={runner} online={online} machineName={name} canManageProfiles={canManageProfiles}
+        profileAccessKnown={profileAccessKnown} intent={accountsIntent} />
       <MachineWorkspacesSection runner={runner} machineName={name} online={online} canAdd={canManageMachines} />
       <MachineSkillsSection runner={runner} />
     </div>
   );
 }
 
-/** Provider profile routes (#3239) are neither member-scoped nor organization-admin routes, so the
- * control plane confines them to Owners and Admins of its personal organization; an Owner or Admin
- * of any other organization would be refused, so the actions are not offered there. */
-export function canManageProviderProfiles(
-  context: Pick<IdentityContextView, "organizationId" | "role"> | null | undefined,
-): boolean {
-  return !!context && (context.role === "owner" || context.role === "admin") &&
-    context.organizationId === PERSONAL_ORGANIZATION_ID;
-}
+export { canManageProviderProfiles };
 
 /** One way to connect a machine: an item of the Add Machine menu and a row of the empty Machines tab. */
 export interface AddMachineMethod {
@@ -156,13 +146,14 @@ export function addMachineMethods({ offerLocalSetup, localRunnerEnabled, onLocal
 }
 
 /**
- * The Machines tab before its first machine (§12.1): one top-left state that owns the create
+ * The Machines tab before its first machine (§12.1): one centered page-level state that owns the create
  * actions, so the header hides Add Machine, and under it one row per method with the first as the
  * primary. A viewer gets the sentence and no rows.
  */
 function EmptyMachines({ methods, sentence }: { methods: AddMachineMethod[]; sentence: string }) {
   return (
     <State
+      pageLevel
       className="connections-empty"
       icon={<ComputerIcon />}
       title="No Machines Yet"
@@ -201,7 +192,6 @@ export function RunnersView() {
   const api = useApi();
   const { runners, boxes, sessions, view, navigate } = useStore();
   const snapshot = useSnapshotState();
-  const { confirm } = useFeedback();
   const instances = useInstances();
   const bundledLocalRunner = hasBundledLocalRunner();
   const [onboarding, setOnboarding] = useState<"local" | "manual" | null>(null);
@@ -217,6 +207,8 @@ export function RunnersView() {
   // tab as the one-instance app does, and its route lands on Machines in place.
   const isMobile = useIsMobile();
   const instancesTab = instances.desktopMultiInstance && !isMobile;
+  /** The Instances tab's Add Remote Instance…, where focus returns after a removal (#3002). */
+  const addInstanceRef = useRef<HTMLButtonElement>(null);
   const requestedSection = view.name === "runners" ? view.section ?? "machines" : "machines";
   const section: ConnectionSection = !instancesTab && requestedSection === "instances"
     ? "machines"
@@ -297,25 +289,6 @@ export function RunnersView() {
     if (!machineId && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
   }, [machineId]);
 
-  // The overview's Reconnect (#2986), confirming first when it would interrupt sessions, as the
-  // machine's own Reconnect does.
-  const reconnectFromOverview = async (boxId: string) => {
-    try {
-      await api.reconnectBox(boxId, false);
-    } catch (cause) {
-      if (!(cause instanceof ApiError) || cause.status !== 409 || cause.code !== "BOX_HAS_ACTIVE_SESSIONS") throw cause;
-      const conflict = lifecycleConflictPresentation(cause, "reconnect");
-      const approved = await confirm({
-        title: "Interrupt Sessions and Reconnect",
-        message: conflict.message,
-        detailRows: conflict.detailRows,
-        detailRowsOverflow: conflict.detailRowsOverflow,
-        confirmLabel: "Interrupt Sessions and Reconnect",
-        tone: "danger",
-      });
-      if (approved) await api.reconnectBox(boxId, true);
-    }
-  };
   // Settings… opens on the machine it was chosen for, while that machine is still listed.
   const settingsMachine = settings ? machines.find((machine) => machine.runnerId === settings.runnerId) ?? null : null;
   const dialogs = (
@@ -366,11 +339,13 @@ export function RunnersView() {
     setRepairRunnerId(runnerId);
   };
   const canFindSessions = identityRole !== null && identityRole !== "viewer";
+  // One set of requests in flight for the overview and the detail, so they agree on each machine (#3525).
+  const machineOperations = useMachineOperations();
   const selectedActions = useMachineActions(selectedMachine, {
     canManage: canManageMachines,
     canOpenSettings: canManageMachines || selectedMachine?.runner?.canManage === true,
     canFindSessions,
-  }, { onSettings: (runnerId) => openSettings(runnerId), onRepair: repairRunner });
+  }, { onSettings: (runnerId) => openSettings(runnerId), onRepair: repairRunner }, machineOperations);
   // "local" onboarding drives the desktop bridge, whose runner credential and socket work is
   // hard-coded to the loopback control plane, so on a remote instance it would set up a machine the
   // page in front of you does not show, and could overwrite the local runner while doing it.
@@ -393,6 +368,7 @@ export function RunnersView() {
   // Each tab supplies the header's actions (§3.3). Only owners and admins add machines, and while the
   // tab is empty its state offers the same methods, so the header does not repeat them (§12.1).
   const tabActions = (tab: ConnectionSection): PageHeaderActions => {
+    if (tab === "instances") return { primary: addRemoteInstanceAction(instances, addInstanceRef) };
     if (tab === "machines" && canManageMachines && !machinesEmpty) {
       return {
         primary: {
@@ -434,6 +410,8 @@ export function RunnersView() {
           canManageProfiles={canManageProfiles}
           canManageMachines={canManageMachines}
           onChangeLimit={() => openSettings(selectedMachine.runnerId, "capacity")}
+          accountsIntent={view.name === "runners" ? view.accounts : undefined}
+          profileAccessKnown={identity !== null || identityError !== null}
         />
       )}
     </MachineDetail>
@@ -455,7 +433,7 @@ export function RunnersView() {
           canManage={canManageMachines}
           onOpen={selectMachine}
           onRepair={repairRunner}
-          onReconnect={reconnectFromOverview}
+          machines={machineOperations}
         />
       </StaleContent>
     )
@@ -505,25 +483,22 @@ export function RunnersView() {
           aria-labelledby="connections-instances-tab"
           className="connections-panel"
         >
-          <InstancesPanel />
+          <InstancesPanel addButtonRef={addInstanceRef} />
         </div>
       ) : section === "people" ? (
         <div
           id="connections-people-panel"
           role="tabpanel"
           aria-labelledby="connections-people-tab"
-          className="connections-panel access-panel"
+          className="connections-panel"
         >
-          {identity ? (
-            <PeopleDevicesPanel identity={identity} onIdentityChange={setIdentity} />
-          ) : identityError ? (
-            <div className="connection-access-error" role="alert">
-              People and device access could not be loaded: {identityError}
-              <button type="button" className="btn ghost sm" onClick={loadMachineAccess}>Retry</button>
-            </div>
-          ) : (
-            <div className="access-loading">Loading organization access…</div>
-          )}
+          <PeopleDevicesTab
+            identity={identity}
+            identityError={identityError}
+            offline={stale}
+            onIdentityChange={setIdentity}
+            onRetry={loadMachineAccess}
+          />
         </div>
       ) : (
       <div
@@ -546,7 +521,7 @@ export function RunnersView() {
         )}
         {total === 0 && snapshot.offline ? (
           <div className="master-detail-state">
-            <State variant="offline">Reconnecting…</State>
+            <State variant="offline" pageLevel>Reconnecting…</State>
           </div>
         ) : machinesEmpty ? (
           // No machines is one state across both panes (§6.1, §12.1).

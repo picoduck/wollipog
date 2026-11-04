@@ -12,6 +12,7 @@ import { Window } from "happy-dom";
 import type {
   ControlPlaneToUi, OrchestratorCampaignProjection, RunnerView, SessionEvent, SessionView,
 } from "@wollipog/protocol";
+import { PERSONAL_ORGANIZATION_ID } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { View, ViewNavigation } from "../navigation.js";
@@ -151,8 +152,10 @@ async function flush(delay = 0) {
   });
 }
 
-async function mount(current: SessionView, { online = true, client: overrides = {}, events, unarchiveAndRestart = false, draftLoader }: {
+async function mount(current: SessionView, { online = true, runner: runnerOverrides = {}, client: overrides = {}, events, unarchiveAndRestart = false, draftLoader }: {
   online?: boolean;
+  /** Fields of the session's machine beyond `runnerView`. */
+  runner?: Partial<RunnerView>;
   client?: Partial<ApiClient>;
   /** Transcript events, delivered live once the session is in the store. */
   events?: SessionEvent["payload"][];
@@ -207,7 +210,7 @@ async function mount(current: SessionView, { online = true, client: overrides = 
     capabilities: {
       sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true, unarchiveAndRestart,
     },
-    runners: [runnerView(online)], boxes: [], projects: [], sessions: [current], runs: [], pods: [],
+    runners: [{ ...runnerView(online), ...runnerOverrides }], boxes: [], projects: [], sessions: [current], runs: [], pods: [],
   }));
   await flush();
   const slot = () => container.querySelector(".session-notice-slot") as HTMLElement | null;
@@ -426,7 +429,7 @@ test("a launch refused at its account's lease says why and opens the Machine's a
     assert.equal(notice.getAttribute("aria-label"), "Account Locked by Another Runner");
     assert.ok(notice.classList.contains("t-warning"));
     assert.equal(notice.querySelector(".notice-body")?.textContent,
-      "A runner or control plane that stopped left Work locked. An Owner or Admin can recover the lease from the Machine's accounts, or you can switch to another account.");
+      "A runner or control plane that stopped left Work locked. An Owner or Admin can unlock it with Recover Existing Profile, or you can switch to another account.");
     assert.deepEqual(actionNames(notice), ["Open Machine Accounts", "Switch Account…"]);
     await act(async () => { fixture.button("Open Machine Accounts")!.click(); });
     await flush();
@@ -464,8 +467,66 @@ test("a refusal of the Machine's own provider HOME names it and offers no accoun
     providerHomeRefusal: launchRefusal("foreign_owner", false) }));
   try {
     const notice = fixture.notices()[0]!;
-    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Add an account for this control plane/);
+    assert.match(notice.querySelector(".notice-body")?.textContent ?? "", /this Machine's Codex sign-in locked\. Set up a managed profile for this control plane's new sessions\./);
     assert.deepEqual(actionNames(notice), ["Open Machine Accounts"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+/** A machine this viewer manages, on a runner that creates managed profiles, and the identity of a
+ * personal-organization Owner (`owner`) or a member. */
+const PROFILE_RUNNER: Partial<RunnerView> = { canManage: true, protocolVersion: 233 };
+const identityAs = (role: "owner" | "member") => (async () => ({
+  context: { organizationId: PERSONAL_ORGANIZATION_ID, role },
+})) as unknown as ApiClient["getIdentity"];
+
+test("an Owner recovers a refused account's existing profile from the notice, in the Machine's accounts (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: launchRefusal("profile_not_granted") }), {
+    runner: PROFILE_RUNNER,
+    client: { getIdentity: identityAs("owner"), sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient>,
+  });
+  try {
+    await flush();
+    const notice = fixture.notices()[0]!;
+    assert.deepEqual(actionNames(notice), ["Recover Existing Profile…", "Switch Account…"]);
+    await act(async () => { fixture.button("Recover Existing Profile…")!.click(); });
+    await flush();
+    const opened = fixture.pushed.at(-1);
+    assert.ok(opened?.name === "runners", JSON.stringify(opened));
+    assert.equal(opened.machineId, "runner-1");
+    assert.equal(opened.accounts?.kind, "recover_profile");
+    assert.ok(opened.accounts?.kind === "recover_profile" && opened.accounts.accountId === "acct-1");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a member who manages the Machine gets Open Machine Accounts instead of Recover Existing Profile (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: launchRefusal("foreign_owner") }), {
+    runner: PROFILE_RUNNER,
+    client: { getIdentity: identityAs("member"), sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient>,
+  });
+  try {
+    await flush();
+    assert.deepEqual(actionNames(fixture.notices()[0]!), ["Open Machine Accounts", "Switch Account…"]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("the Machine's own HOME refused offers Set Up Managed Profile, which opens Add Account for the provider (#3240)", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerAccountId: undefined, providerAccountLabel: undefined,
+    providerHomeRefusal: launchRefusal("busy", false) }), { runner: PROFILE_RUNNER, client: { getIdentity: identityAs("member") } as Partial<ApiClient> });
+  try {
+    await flush();
+    const notice = fixture.notices()[0]!;
+    assert.deepEqual(actionNames(notice), ["Restart Session", "Set Up Managed Profile…"]);
+    await act(async () => { fixture.button("Set Up Managed Profile…")!.click(); });
+    await flush();
+    const opened = fixture.pushed.at(-1);
+    assert.ok(opened?.name === "runners" && opened.accounts?.kind === "add_account" && opened.accounts.provider === "codex",
+      JSON.stringify(opened));
   } finally {
     await fixture.unmount();
   }
@@ -494,6 +555,55 @@ test("an archived session's refusal offers no ordinary restart, and says to unar
     await act(async () => { restart.click(); });
     await flush();
     assert.deepEqual(restarts, []);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a busy account on a v248 runner offers Wait for Account, which restarts the session waiting (#3240)", async () => {
+  const restarts: Array<[string, unknown]> = [];
+  const current = sessionView({ status: "failed", providerHomeRefusal: launchRefusal("busy") });
+  const fixture = await mount(current, {
+    runner: { protocolVersion: 248 },
+    client: { restart: async (id: string, options?: unknown) => {
+      restarts.push([id, options]);
+      return { ...current, status: "starting" };
+    } } as Partial<ApiClient>,
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.deepEqual(actionNames(notice), ["Wait for Account", "Switch Account…"]);
+    assert.match(notice.querySelector(".notice-body")?.textContent ?? "",
+      /Wait for the account to start the session as soon as it's free, or switch to another account\./);
+    await act(async () => { fixture.button("Wait for Account")!.click(); });
+    await flush();
+    assert.deepEqual(restarts, [[current.id, { waitForProviderHome: true }]]);
+  } finally {
+    await fixture.unmount();
+  }
+});
+
+test("a starting session waiting for its account says so, and Stop Waiting stops it (#3240)", async () => {
+  const stops: string[] = [];
+  const current = sessionView({ status: "starting", providerHomeWait: {
+    provider: "codex", cause: "holder_alive", providerAccountId: "acct-1", providerAccountLabel: "Work",
+    waitingSince: 0, waitUntil: 8 * 3_600_000,
+  } });
+  const fixture = await mount(current, {
+    runner: { protocolVersion: 248 },
+    client: { stop: async (id: string) => { stops.push(id); return { ...current, status: "stopped", providerHomeWait: undefined }; } } as Partial<ApiClient>,
+  });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Waiting for Account");
+    assert.ok(notice.classList.contains("t-info"), "waiting is a state, not a failure");
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "Another Wollipog runner is using Work. This session starts as soon as it's free. If it's still in use after 8 hours, the session stops waiting and doesn't start.");
+    assert.deepEqual(actionNames(notice), ["Stop Waiting"]);
+    await act(async () => { fixture.button("Stop Waiting")!.click(); });
+    await flush();
+    assert.deepEqual(stops, [current.id]);
+    assertNoDomNode(fixture.container.querySelector('[aria-label="Waiting for Account"]'), "a stopped session no longer waits");
   } finally {
     await fixture.unmount();
   }
@@ -1191,6 +1301,26 @@ test("a server refusal keeps its words behind Show Details, not in the sentence"
   }
 });
 
+test("a stale Full Control authority refusal says what happened and how to recover in the sentence (#2940)", async () => {
+  const reason = "This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+    "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.";
+  const fixture = await mount(sessionView({}), {
+    client: { prompt: () => Promise.reject(new ApiError(reason, 409, "campaign_authority_stale")) } as Partial<ApiClient>,
+  });
+  try {
+    await typeDraft(fixture.container, "Hello");
+    await sendDraft(fixture.container);
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Message Not Sent");
+    assert.equal(notice.querySelector(".notice-body p")?.textContent, `${reason} Your draft is kept.`);
+    assert.equal(fixture.button("Show Details"), undefined, "nothing is held back behind details");
+    assert.equal(fixture.button("Retry"), undefined, "resending before the recovery would meet the same refusal");
+    assert.equal((fixture.container.querySelector("textarea") as HTMLTextAreaElement).value, "Hello", "the draft waits in the composer");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 test("a composer error waits through a pending request and is still there after it resolves", async () => {
   const session = sessionView({});
   const fixture = await mount(session, { client: { prompt: unreachable } as Partial<ApiClient> });
@@ -1206,4 +1336,22 @@ test("a composer error waits through a pending request and is still there after 
   } finally {
     await fixture.unmount();
   }
+});
+
+test("a legacy account lock explains the next step and opens account switching", async () => {
+  const fixture = await mount(sessionView({ status: "failed", providerHomeRefusal: {
+    ...launchRefusal("unverifiable"), cause: "process_uninspectable",
+  } }), { client: { sessionProviderAccounts: async () => ({ accounts: [] }) } as Partial<ApiClient> });
+  try {
+    const notice = fixture.notices()[0]!;
+    assert.equal(notice.getAttribute("aria-label"), "Account Is Locked");
+    const text = notice.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(text, /another program is still using Work/);
+    assert.match(text, /save your work and restart the machine/);
+    assert.doesNotMatch(text, /lease|journal|fallback|boundary|delegat|cgroup|inspectability/iu);
+    assert.deepEqual(actionNames(notice), ["Switch Account…", "Open Machine Accounts"]);
+    await act(async () => { fixture.button("Switch Account…")!.click(); });
+    await flush();
+    assert.ok(domWindow.document.querySelector('[role="dialog"]'));
+  } finally { await fixture.unmount(); }
 });

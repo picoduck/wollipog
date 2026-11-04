@@ -10,13 +10,14 @@ import { githubApi } from "./merge-group-cleanup.mjs";
 // merge-queue removals, and never changes anything.
 
 export const AGGREGATOR = "Typecheck, Test & Sidecar Bundle";
+const ADVISORY_JOBS = new Set(["Suite Selection Shadow (Advisory)", "Regression Admission Shadow (Advisory)"]);
 const QUEUE_BRANCH = /^gh-readonly-queue\/main\/pr-([1-9][0-9]*)-[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
 export const MAX_PAGES = 10;
 const POOL = 6;
 const MINUTE = 60_000;
 // GitHub creates a job within seconds of its last dependency finishing.
-const DEPENDENCY_SLACK_MS = 5_000;
+export const DEPENDENCY_SLACK_MS = 5_000;
 
 /** A failure this script describes itself; anything else is reported without its message. */
 export class ReportError extends Error {}
@@ -48,16 +49,23 @@ const callerOf = (job) => job.name.includes(" / ") ? job.name.slice(0, job.name.
 
 /**
  * The jobs `job` can depend on, from ci.yml's structure: the aggregator needs every other
- * required work job. Activated PR checks/browser work also waits for PR Suite Routing. A called
+ * required work job. Checks/browser work waits for PR Suite Routing and the Merge Group
+ * Gate (#3637); delegated recovery waits only for PR routing. An executed gate is execution
+ * on the critical path, never queue wait. A skipped gate consumes no execution. A called
  * workflow's jobs depend only on jobs of the same call. Advisory shadow work is never a dependency.
- * Older runs have no routing job. The jobs API does not name dependencies; tests pin this model.
+ * Older runs have neither planning job. The jobs API does not name dependencies; tests pin this model.
  */
-function dependencyCandidates(job, work, aggregator) {
-  const requiredWork = work.filter((other) => other.name !== "Suite Selection Shadow (Advisory)");
+const PLANNING_JOBS = new Set(["PR Suite Routing", "Merge Group Gate"]);
+export function dependencyCandidates(job, work, aggregator) {
+  const requiredWork = work.filter((other) => !ADVISORY_JOBS.has(other.name));
   if (job === aggregator) return requiredWork;
-  if (job.name === "PR Suite Routing") return [];
-  const routed = job.name === "Typecheck, Unit Tests & Bundles" || /^Browser End-to-End Tests \([1-5]\)$/.test(job.name);
-  const routing = routed ? requiredWork.filter((other) => other.name === "PR Suite Routing") : [];
+  if (PLANNING_JOBS.has(job.name)) return [];
+  // Runs before #3770 named the checks job "Typecheck, Unit Tests & Bundles" and had no unit shards.
+  const gated = ["Typecheck & Bundles", "Typecheck, Unit Tests & Bundles"].includes(job.name) ||
+    /^(?:Browser End-to-End Tests \([1-5]\)|Unit Tests \([1-9]\))$/.test(job.name);
+  const routed = gated || job.name === "Delegated Pipeline Recovery";
+  const routing = routed ? requiredWork.filter((other) => other.name === "PR Suite Routing" ||
+    gated && other.name === "Merge Group Gate") : [];
   const caller = callerOf(job);
   return caller === null ? routing : work.filter((other) => other !== job && callerOf(other) === caller);
 }

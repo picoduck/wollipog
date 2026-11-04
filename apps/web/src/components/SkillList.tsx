@@ -145,7 +145,7 @@ export function SkillList({ skills, groups, runners, machineSkills, selectedId, 
           </MenuSurface>
         )}
       </div>
-      <div ref={bodyRef} className="master-detail-list-body clip-focus" onScroll={onBodyScroll}>
+      <div ref={bodyRef} className="master-detail-list-body skill-list-body clip-focus" onScroll={onBodyScroll}>
         {skills !== null && overview && (
           <>
             <button

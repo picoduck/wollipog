@@ -128,13 +128,14 @@ export function SharedTranscript({ token }: { token: string | null }) {
         </div>
         {state.kind === "loading" && <TranscriptSkeleton label="Loading Shared Transcript" />}
         {state.kind === "unavailable" && (
-          <State compact icon={<LinkIcon />} title="This Link Isn't Available" headingLevel={2}>
+          <State compact pageLevel icon={<LinkIcon />} title="This Link Isn't Available" headingLevel={2}>
             Ask the person who shared it for a new link.
           </State>
         )}
         {state.kind === "network" && (
           <State
             variant="error"
+            pageLevel
             title="Couldn't Load This Transcript"
             headingLevel={2}
             actions={<button className="btn sm" type="button" onClick={retry}>Retry</button>}
@@ -144,7 +145,7 @@ export function SharedTranscript({ token }: { token: string | null }) {
           </State>
         )}
         {state.kind === "ready" && messages.length === 0 && (
-          <State compact>This transcript has no messages yet.</State>
+          <State compact pageLevel>This transcript has no messages yet.</State>
         )}
         {state.kind === "ready" && messages.length > 0 && (
           <div className="timeline" role="list" aria-label="Messages">

@@ -129,6 +129,29 @@ test("PR repair ceilings survive changing heads and resolved history", () => {
   } finally { db.close(); }
 });
 
+test("a worker record's stop label only escalates, however often a replacement is observed (#3362)", () => {
+  const db = database();
+  try {
+    const store = db.campaignRecovery;
+    const worker = (sessionId: string, reason: "hard_denial" | "intentional_stop" | "unverified_stop" | "transient_failure") => ({
+      action: "replace_worker" as const, owner: "orchestrator" as const, reason,
+      resource: { kind: "worker" as const, sessionId, occurrenceId: "epoch:0", workItemId: "item" }, signal: `${sessionId}:0:stopped` });
+    const reason = () => store.projection("root").records[0]!.reason;
+    store.synchronize("root", 1, true, [worker("A", "hard_denial")], 1);
+    for (const now of [2, 3, 4]) store.synchronize("root", 1, true, [worker("B", "intentional_stop")], now);
+    assert.equal(reason(), "hard_denial", "an inherited denial is never relabeled as an intentional stop");
+    store.synchronize("root", 1, true, [], 5);
+    store.synchronize("root", 1, true, [worker("C", "intentional_stop")], 6);
+    for (const [now, next, expected] of [[7, "unverified_stop", "unverified_stop"], [8, "intentional_stop", "unverified_stop"],
+      [9, "transient_failure", "unverified_stop"], [10, "hard_denial", "hard_denial"], [11, "unverified_stop", "hard_denial"]] as const) {
+      store.synchronize("root", 1, true, [worker(`D${now}`, next)], now);
+      assert.equal(reason(), expected, `${next} after a stop`);
+      assert.equal(store.projection("root").records[0]!.state, "blocked");
+    }
+    assert.equal(store.dispatchDue("root", 1, 1_000_000, () => assert.fail("a stopped worker is never replaced automatically")), 0);
+  } finally { db.close(); }
+});
+
 test("resolved worker exhaustion remains blocked when a replacement fails", () => {
   const db = database();
   try {

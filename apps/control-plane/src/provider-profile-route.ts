@@ -1,10 +1,14 @@
 import { randomUUID } from "node:crypto";
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
+  PROVIDER_CREDENTIAL_IMPORT_CODES,
+  PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL,
   runnerCapabilityRequirementError,
   runnerSupportsProtocol,
+  runnerSupportsProviderCredentialImport,
   TERMINAL_STATUSES,
   type ProviderAccountDefinition,
+  type ProviderCredentialImportSource,
   type ProviderProfileGrantView,
   type ResourceScope,
   type SessionStatus,
@@ -12,7 +16,7 @@ import {
 import { parseBoxLifecycleForce } from "./box-lifecycle.js";
 import type { ControlPlaneDb, ProviderProfileGrantRecord } from "./db.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
-import type { Hub } from "./hub.js";
+import { isRunnerRequestNotSentError, type Hub } from "./hub.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 
 const ACCOUNT_ID = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
@@ -47,6 +51,45 @@ export function parseProviderHomeLeaseRecovery(body: unknown): { ok: true; stale
   }
   if (typeof staleTipHash !== "string" || !/^[a-f0-9]{64}$/u.test(staleTipHash)) return { ok: false, error: "staleTipHash must be the inspected lease record's hash" };
   return { ok: true, staleTipHash };
+}
+
+/** #3719: an import request. The confirmation must name the source (the account's label, or the
+ * Machine's own sign-in) and the new profile's label exactly as the person confirmed them. */
+export function parseProviderCredentialImport(body: unknown):
+  | { ok: true; provider: "codex"; label: string; source: ProviderCredentialImportSource; sourceLabel: string }
+  | { ok: false; error: string } {
+  if (typeof body !== "object" || body === null || Array.isArray(body)) return { ok: false, error: "request body must be an object" };
+  const { provider, label, source, confirmation } = body as Record<string, unknown>;
+  if (provider !== "codex") return { ok: false, error: "only a Codex sign-in can be imported" };
+  if (typeof label !== "string" || !label.trim() || label.trim().length > 100 || /[\u0000-\u001f\u007f]/u.test(label)) {
+    return { ok: false, error: "a 1 to 100 character label is required" };
+  }
+  let parsedSource: ProviderCredentialImportSource;
+  if (typeof source === "object" && source !== null && !Array.isArray(source) &&
+      (source as { kind?: unknown }).kind === "default_home" && Object.keys(source).length === 1) {
+    parsedSource = { kind: "default_home" };
+  } else if (typeof source === "object" && source !== null && !Array.isArray(source) &&
+      (source as { kind?: unknown }).kind === "account" && Object.keys(source).length === 2 &&
+      typeof (source as { accountId?: unknown }).accountId === "string" && ACCOUNT_ID.test((source as { accountId: string }).accountId)) {
+    parsedSource = { kind: "account", accountId: (source as { accountId: string }).accountId };
+  } else {
+    return { ok: false, error: "source must be the Machine's own sign-in or a configured account" };
+  }
+  const confirmed = typeof confirmation === "object" && confirmation !== null && !Array.isArray(confirmation)
+    ? confirmation as Record<string, unknown> : undefined;
+  if (confirmed?.acknowledgeCredentialImport !== true || typeof confirmed.sourceLabel !== "string" ||
+      typeof confirmed.destinationLabel !== "string" || confirmed.destinationLabel !== label.trim()) {
+    return { ok: false, error: "confirmation must acknowledge the import and name its source and the new profile" };
+  }
+  return { ok: true, provider, label: label.trim(), source: parsedSource, sourceLabel: confirmed.sourceLabel };
+}
+
+const IMPORT_CODES = new Set<string>(PROVIDER_CREDENTIAL_IMPORT_CODES);
+const IMPORT_CAPABILITY_LABEL = "provider sign-in import";
+
+/** A runner's refusal sentence, passed on only when it is short plain text. */
+function boundedRunnerText(value: unknown): string | undefined {
+  return typeof value === "string" && value.length > 0 && value.length <= 1000 && !/[\u0000-\u001f\u007f]/u.test(value) ? value : undefined;
 }
 
 export const PROVIDER_PROFILE_REVOKED_FOR_SESSION = "Access to this provider profile was revoked for this control plane.";
@@ -460,6 +503,124 @@ export function registerProviderProfileRoutes(
     }
     deps.hub.runnerChanged(id);
     return { status: "active", profileId: result.profileId, grantId };
+  });
+
+  /**
+   * #3719: an Owner or Admin creates a managed profile from an existing sign-in on the same Machine,
+   * after confirming the source and the new profile. The authorization and the new profile's
+   * pending grant are recorded first; the runner resolves the source and copies only the
+   * credential, and its account report completes the grant as for Add Account. No path or
+   * credential value reaches the control plane.
+   */
+  app.post("/api/runners/:id/provider-imports", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const principal = deps.requestHuman(req);
+    if (!canAuthorizeProviderProfileGrant(principal)) {
+      return reply.code(403).send({ error: "organization owner or admin permission is required" });
+    }
+    const runner = deps.db.getRunner(id);
+    if (!runner || !deps.db.canAccessRunner(principal, id)) return reply.code(404).send({ error: "runner not found" });
+    const parsed = parseProviderCredentialImport(req.body);
+    if (!parsed.ok) return reply.code(400).send({ error: parsed.error });
+    if (!runnerSupportsProtocol(runner.protocolVersion, "providerCredentialImport")) {
+      return reply.code(409).send(runnerCapabilityRequirementError(runner.protocolVersion, "providerCredentialImport", IMPORT_CAPABILITY_LABEL));
+    }
+    if (!runnerSupportsProviderCredentialImport(runner)) {
+      return reply.code(409).send({ error: "This Machine can't copy an existing sign-in. Sign in to create the profile instead.", code: "UNSUPPORTED" });
+    }
+    if (!deps.hub.isRunnerOnline(id)) return reply.code(409).send({ error: "runner is offline" });
+    const { source } = parsed;
+    if (source.kind === "account") {
+      const account = runner.providerAccounts?.find((candidate) => candidate.id === source.accountId);
+      if (!account) return reply.code(404).send({ error: "The provider account is not available on this Machine.", code: "SOURCE_NOT_FOUND" });
+      if (account.provider !== parsed.provider) return reply.code(409).send({ error: "This account belongs to another provider.", code: "SOURCE_FOREIGN" });
+      if (parsed.sourceLabel !== account.label) {
+        return reply.code(409).send({ error: "The confirmation names a different source. Review the source and confirm again.", code: "CONFIRMATION_MISMATCH" });
+      }
+    } else if (parsed.sourceLabel !== PROVIDER_CREDENTIAL_IMPORT_DEFAULT_SOURCE_LABEL) {
+      return reply.code(409).send({ error: "The confirmation names a different source. Review the source and confirm again.", code: "CONFIRMATION_MISMATCH" });
+    }
+    const requestId = `provider_credential_import_${randomUUID()}`;
+    // The control plane names the new account, and the new profile's pending grant is bound to that
+    // account from the start. However the reply goes (lost, or a publication whose outcome is
+    // unknown), a later account report that names the account and its profile completes the grant,
+    // as for an adopted account.
+    const accountId = `import-${randomUUID().slice(0, 8)}`;
+    let authorized;
+    try {
+      authorized = deps.db.authorizeAndEnrollProviderProfileDispatch({
+        grantId: randomUUID(), runnerId: id, providerAccountId: accountId, provider: parsed.provider, origin: "created",
+        grantedBy: principal.userId, grantedRole: principal.role, now: now(), requestId, kind: "login",
+      });
+    } catch (error) {
+      if (!(error instanceof ProviderPublicationUnavailable)) throw error;
+      return reply.code(503).send({ error: error.message, code: error.code });
+    }
+    if (!authorized) return reply.code(404).send({ error: "runner not found" });
+    const { grantId } = authorized.grant;
+    const importId = randomUUID();
+    const audit = deps.db.authorizeProviderCredentialImport({ importId, runnerId: id, provider: parsed.provider, source, grantId,
+      authorizedBy: principal.userId, authorizedRole: principal.role, now: now() });
+    // Only an outcome that proves the account was not recorded spends the grant.
+    const spendGrant = () => deps.db.revokeProviderProfileGrant({ grantId, revokedBy: principal.userId, revokedRole: principal.role, now: now() });
+    if (!audit) {
+      spendGrant();
+      return reply.code(404).send({ error: "runner not found" });
+    }
+    const observe = (observation: PublicationObservation) => {
+      try { deps.db.observeProviderProfileDispatch(requestId, observation); }
+      catch {
+        app.log.warn({ event: "provider_publication_observation_unavailable", entryPoint: "credential_import", requestId },
+          "Provider publication observation could not be recorded.");
+      }
+    };
+    let result;
+    try {
+      result = await deps.hub.requestFromRunner(id, requestId, {
+        type: "import_provider_credential", requestId, runnerId: id, provider: parsed.provider, label: parsed.label, source,
+        accountId, profileGrantId: grantId,
+      });
+    } catch (error) {
+      const notSent = isRunnerRequestNotSentError(error);
+      observe(notSent ? "not_sent" : "uncertain");
+      if (notSent) {
+        spendGrant();
+        deps.db.settleProviderCredentialImport(importId, { status: "refused", code: "FAILED" }, now());
+      } else {
+        // A lost reply leaves the grant pending and bound to the named account; its report completes it.
+        deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
+      }
+      return reply.code(504).send({ error: (error as Error).message });
+    }
+    observe("reply");
+    if (result.type !== "import_provider_credential_result") {
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    if (!result.ok && result.code === "PUBLICATION_UNKNOWN") {
+      // The runner copied the credential but cannot say whether its configuration recorded the
+      // account (#3506). The grant stays pending and bound to the named account, so a report of
+      // that account and its profile completes it. Never reported as a success.
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
+      return reply.code(409).send({
+        error: boundedRunnerText(result.error) ?? "The sign-in was copied, but whether the account was recorded is unknown.",
+        code: "PUBLICATION_UNKNOWN", status: "pending", grantId,
+      });
+    }
+    if (!result.ok) {
+      spendGrant();
+      const code = typeof result.code === "string" && IMPORT_CODES.has(result.code) ? result.code : "FAILED";
+      deps.db.settleProviderCredentialImport(importId, { status: "refused", code }, now());
+      return reply.code(409).send({ error: boundedRunnerText(result.error) ?? "The sign-in could not be copied.", code });
+    }
+    if (result.accountId !== accountId || typeof result.profileId !== "string" || !PROFILE_ID.test(result.profileId)) {
+      // A success naming another account or no profile cannot be trusted; its account report decides.
+      deps.db.settleProviderCredentialImport(importId, { status: "unknown", accountId }, now());
+      return reply.code(502).send({ error: "unexpected runner reply" });
+    }
+    deps.db.settleProviderCredentialImport(importId, { status: "imported", accountId, profileId: result.profileId }, now());
+    deps.hub.runnerChanged(id);
+    return reply.code(201).send({ accountId, profileId: result.profileId, grantId });
   });
 
   /** The online v229+ runner and configured account a lease route acts on, or the reply already sent. */

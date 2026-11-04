@@ -630,3 +630,31 @@ test("a read that stored nothing still backs off, and the interval runs from whe
     queued.db.close();
   }
 });
+
+test("readNow reads past the rate limit and any read in flight, batched within the runner's limit and the shared bound (#2940)", async () => {
+  const many = Array.from({ length: 17 }, (_, index) => ({ repository: "picoduck/wollipog", number: index + 1 }));
+  const fixture = forgeFixture(PROTOCOL_VERSION, many.slice(0, 16));
+  try {
+    const now = Date.now();
+    const runner = fakeRunner(allOk());
+    const forge = observer(fixture, runner, { now: () => now });
+    await forge.refresh(fixture.root, many.slice(0, 1));
+    assert.equal(runner.requests.length, 1);
+    runner.hold();
+    const background = forge.refresh(fixture.root, many.slice(1, 2));
+    const fresh = forge.readNow(fixture.root, many);
+    runner.release();
+    const [results] = await Promise.all([fresh, background]);
+    assert.deepEqual(results?.map((result) => result.ref.number), many.map((ref) => ref.number), "one result per ref, in order");
+    assert.deepEqual(runner.requests.slice(1).map((request) => request.pullRequests.length).sort((a, b) => a - b), [1, 1, 16],
+      "readNow neither skips a ref read within the minimum interval nor joins the read in flight");
+    assert.ok(runner.maxInFlight <= CAMPAIGN_FORGE_OBSERVATION.concurrentRequests, `max in flight ${runner.maxInFlight}`);
+
+    // Any unanswered batch, an older runner, or a disconnected one proves nothing.
+    const failing = observer(fixture, fakeRunner(() => new Error("timed out")), { now: () => now });
+    assert.equal(await failing.readNow(fixture.root, many), null);
+    assert.equal(await observer(fixture, fakeRunner(allOk()), { online: false }).readNow(fixture.root, many), null);
+  } finally {
+    fixture.db.close();
+  }
+});

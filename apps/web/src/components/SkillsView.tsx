@@ -648,6 +648,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
         <div className="master-detail-state">
           <State
             variant="error"
+            pageLevel
             title="Couldn't Load Skills"
             actions={<button type="button" className="btn sm" onClick={loadList}>Retry</button>}
             details={<div className="code-well"><code>{listError}</code></div>}
@@ -658,6 +659,7 @@ export function SkillsView({ route = { name: "skills" } }: { route?: SkillsRoute
       ) : spanningEmpty ? (
         <div className="master-detail-state">
           <State
+            pageLevel
             icon={<SkillsIcon />}
             title={`No ${destination("skills").name} Yet`}
             headingLevel={2}

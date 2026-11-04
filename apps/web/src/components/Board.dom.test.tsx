@@ -326,6 +326,30 @@ test("every card says Agent · Project and never shows a transcript preview (#31
   }
 });
 
+test("an Orchestrator or review card marks its type before its title, and an ordinary card does not (#4076)", async () => {
+  const board = await mount({ sessions: [
+    session("orchestrator", { role: "orchestrator", title: "Coordinate the campaign" }),
+    session("legacy-orchestrator", { permissionMode: "orchestrator", title: "Coordinate the old campaign" }),
+    session("review", { kind: "review", title: "Review pull request 12" }),
+    session("normal", { role: "normal", kind: "standard", title: "Fix the build" }),
+  ] });
+  try {
+    for (const [id, label] of [["orchestrator", "Orchestrator Session"], ["legacy-orchestrator", "Orchestrator Session"],
+      ["review", "Review Session"]] as const) {
+      const icon = board.card(id).querySelector(".card-open > .session-type-icon");
+      assert.ok(icon, `the ${id} card's open button leads with its type`);
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), label);
+      assert.equal(icon.getAttribute("title"), label);
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+      assert.equal(board.card(id).querySelector(".card-open")?.firstElementChild, icon, "the mark comes before the title");
+    }
+    assertNoDomNode(board.card("normal").querySelector(".session-type-icon"), "an ordinary card draws no type mark");
+  } finally {
+    await board.unmount();
+  }
+});
+
 test("with more than one machine, the machine follows the project as quiet meta", async () => {
   const board = await mount({ runners: [runner("runner-1", "Studio"), runner("runner-2", "Build Box")] });
   try {
@@ -566,7 +590,7 @@ test("Board defers an idle parent's result until background descendants finish (
       assert.equal(card.querySelectorAll(".inbox-thread-dot.running").length, backgroundWorkState === "resumed" ? 0 : 1);
       if (backgroundWorkState !== "resumed") {
         assert.match(card.querySelector(".inbox-thread-family")!.getAttribute("aria-label")!, /1 Working/);
-        assert.match(card.querySelector(".inbox-thread-dot")!.getAttribute("title")!, /Waiting on External Job|Continuation Pending/);
+        assert.match(card.querySelector(".inbox-thread-dot")!.getAttribute("title")!, /Waiting on External Job|Follow-Up Pending/);
       }
     } finally { await board.unmount(); }
   }

@@ -21,6 +21,9 @@ test("each lease state a launch can meet maps to its launch refusal code; everyt
     cancelled: undefined, cancel_release_failed: undefined, expired: undefined,
     profile_unsupported_control_plane: "unverifiable", profile_grant_limit: "unverifiable",
     stale_tip_changed: undefined, no_reboot_proof: "unverifiable", recovery_unconfirmed: undefined,
+    // Only an import (#3719) meets these, never a launch.
+    import_source_missing: undefined, import_source_held: undefined, import_source_unsafe: undefined,
+    import_source_foreign: undefined, import_source_unsupported: undefined, import_source_changed: undefined,
   };
   for (const [code, launch] of Object.entries(expected) as [LeaseWorkerError, string | undefined][]) {
     assert.equal(providerHomeLaunchRefusalCode(new ProviderHomeLeaseError(code)), launch, code);
@@ -162,7 +165,7 @@ test("surviving boundary work keeps ownership and reports the existing busy laun
   assert.equal(h.store.readMeta("refused")?.providerHomeRefusal?.code, "busy");
   assert.equal(lastRefusal(h.messages)?.code, "busy");
   const guidance = LEASE_WORKER_ERRORS.boundary_survivor;
-  assert.match(guidance, /ownership is retained until the recorded boundary is empty/u);
+  assert.match(guidance, /earlier session is still using this account/u);
   assert.doesNotMatch(guidance, /kill|stop/iu);
   assert.ok(h.messages.some((message) => message.type === "session_status" && message.detail === guidance));
 });
@@ -174,7 +177,8 @@ test("uninspectable fallback reports the existing unverifiable launch category w
   assert.equal(h.driversCreated(), 0);
   assert.equal(h.store.readMeta("refused")?.providerHomeRefusal?.code, "unverifiable");
   assert.equal(lastRefusal(h.messages)?.code, "unverifiable");
-  assert.ok(errorEvents(h.messages).some((message) => message.includes("systemd unit is not delegated")));
+  assert.ok(errorEvents(h.messages).some((message) => message.includes("save your work and restart the machine")));
+  for (const message of errorEvents(h.messages)) assert.doesNotMatch(message, /HOME|fallback|delegat|cgroup|journal/iu);
 });
 
 test("a launch preparation refused at the account's lease is reported as the account, not as isolation", async (t) => {
@@ -201,7 +205,9 @@ test("specific ownership causes survive preparation and driver-lease launch boun
       assert.equal(refusal?.cause, cause);
       assert.equal(refusal?.code, PROVIDER_HOME_RECOVERY_CAUSE_CODES[cause]);
       assert.equal(lastRefusal(h.messages)?.cause, cause);
-      assert.ok(!errorEvents(h.messages).some(message => message.includes("execution isolation")), cause);
+      const errors = errorEvents(h.messages);
+      assert.ok(!errors.some(message => message.includes("execution isolation")), cause);
+      assert.ok(errors.some(message => message.startsWith("provider account unavailable: ")), `${cause}: both launch paths retain the transcript classifier's compatible prefix`);
       assert.ok(h.messages.some(message => message.type === "session_status" && message.detail === LEASE_WORKER_ERRORS[cause]), cause);
     }
     stage.refuse = undefined;
@@ -217,4 +223,20 @@ test("v233-v234 peers keep the coarse refusal while v235 receives its specific c
     const { cause: _cause, ...coarse } = refusal;
     assert.deepEqual(metaToSnapshot(meta, version).providerHomeRefusal, coarse);
   }
+});
+
+// Covers the actual user-visible transcript and status emitted before provider construction.
+test("legacy recovery refuses safely with an actionable session error and its structured cause", async (t) => {
+  const h = harness(t);
+  h.preparation.refuse = "process_uninspectable";
+  assert.equal(await h.launch(), false);
+  assert.equal(h.driversCreated(), 0);
+  const refusal = lastRefusal(h.messages);
+  assert.equal(refusal?.cause, "process_uninspectable");
+  assert.equal(refusal?.code, "unverifiable");
+  const errors = errorEvents(h.messages);
+  assert.ok(errors.some(message => /can't check whether another program is still using this account/.test(message)));
+  assert.ok(errors.some(message => /Choose another account.*save your work and restart the machine/.test(message)));
+  assert.ok(h.messages.some(message => message.type === "session_status" && message.status === "failed" && message.detail === LEASE_WORKER_ERRORS.process_uninspectable));
+  for (const message of errors) assert.doesNotMatch(message, /HOME|fallback|boundary|delegat|cgroup|journal|inspectability/iu);
 });

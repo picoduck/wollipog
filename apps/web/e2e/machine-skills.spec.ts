@@ -81,3 +81,53 @@ for (const width of [1280, 390]) {
     await expect(failed.getByRole("heading", { name: "Unmanaged Skills" })).toBeVisible();
   });
 }
+
+/** #3526: on a phone the agent gives way before the skill's name, which truncates only once the
+ * agent is down to its minimum; a truncated name keeps its full text as a tooltip. A wide row,
+ * where everything fits, shows every name and agent whole. */
+for (const width of [390, 360, 1440]) {
+  test(`the agent gives way before the skill's name, and the account stays whole, at ${width}`, async ({ page }, info) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.addInitScript(() => localStorage.setItem("wollipog.hide-account-emails", "true"));
+    await page.goto("/machine-management-e2e.html?emailLabels&skills=long");
+    await page.getByRole("complementary", { name: "Machines" }).locator("button.row.row-2").click();
+    const disclosure = page.locator("details.machine-skills");
+    await disclosure.locator("summary").click();
+    const list = disclosure.getByRole("list", { name: "Unmanaged Skills" });
+    await expect(list.getByRole("listitem")).toHaveCount(3);
+    await list.scrollIntoViewIfNeeded();
+    const rows = await list.evaluate((ul) => [...ul.querySelectorAll(".row-line")].map((line) => {
+      const name = line.querySelector(".row-title")!;
+      const meta = line.querySelector(".machine-skill-meta")!;
+      const reveal = line.querySelector("button")!.getBoundingClientRect();
+      const hit = document.elementFromPoint(reveal.x + reveal.width / 2, reveal.y + reveal.height / 2);
+      return {
+        name: name.textContent,
+        tooltip: name.getAttribute("title"),
+        nameTruncated: name.scrollWidth > name.clientWidth,
+        metaTruncated: meta.scrollWidth > meta.clientWidth,
+        metaWidth: meta.getBoundingClientRect().width,
+        metaMinimum: parseFloat(getComputedStyle(meta).minWidth),
+        revealWhole: reveal.right <= line.getBoundingClientRect().right + 0.5 && Boolean(hit?.closest("button")),
+      };
+    }));
+    for (const row of rows) {
+      expect(row.tooltip, "a truncated name keeps its full text as a tooltip").toBe(row.name);
+      expect(row.revealWhole, `${row.name}: Show Account Email is whole and clickable (CR-1.2)`).toBe(true);
+      // The name loses a character only once the agent is down to its minimum.
+      if (row.nameTruncated) expect(Math.abs(row.metaWidth - row.metaMinimum), `${row.name}: the agent gave way first`).toBeLessThan(1);
+    }
+    const [, fits, long] = rows;
+    if (width >= 1440) {
+      expect(rows.every((row) => !row.nameTruncated && !row.metaTruncated), "a wide row shows everything whole").toBe(true);
+    } else {
+      expect(long!.nameTruncated, "a name too long for the row still truncates").toBe(true);
+      if (width === 390) {
+        expect(fits!.nameTruncated, "a name that fits once the agent gives way is shown in full").toBe(false);
+        expect(fits!.metaTruncated, "the agent is ellipsized instead").toBe(true);
+      }
+    }
+    expect(await page.evaluate(() => document.documentElement.scrollWidth <= document.documentElement.clientWidth)).toBe(true);
+    await list.screenshot({ path: info.outputPath(`machine-skills-give-way-${width}.png`) });
+  });
+}

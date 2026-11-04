@@ -25,10 +25,10 @@ const SURFACES: Array<{
     email: "morgan.lee@example.com",
   },
   {
-    name: "a Usage subscription row",
+    name: "a Usage subscription account",
     open: async (page) => {
-      await page.goto("/usage-view-e2e.html?subscriptions=1");
-      return page.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-account");
+      await page.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
+      return page.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-plan-head");
     },
     reveal: "Show Account Email",
     email: "codex@example.com",
@@ -38,7 +38,7 @@ const SURFACES: Array<{
     open: async (page) => {
       await page.goto("/people-devices-e2e.html");
       await expect(page.getByRole("region", { name: "Paired Devices" }).getByText("Pat's Phone")).toBeVisible();
-      return page.locator(".access-row-main").filter({ hasText: "Owner" }).first();
+      return page.locator(".access-row[data-row=\"person\"]").filter({ hasText: "Owner" }).first();
     },
     reveal: "Show Person Name",
     email: "owner@example.com",

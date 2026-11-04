@@ -16,9 +16,19 @@ import type { SessionReviewHarness } from "./session-review-job.js";
 /** Ordinary sessions omit `kind` or report "standard"; only the control plane creates "review". */
 export type SessionKind = "standard" | "review";
 
+/** A COMMAND_CANCELLED receipt with this reason attests an automatic turn stayed behind a
+ * provider-rejection hold until Restart, rather than being cancelled by a person. */
+export const AUTOMATIC_TURN_RESTART_CANCELLED_REASON =
+  "session restart cleared the provider rejection hold before this automatic turn was sent";
+
 /** The reviewer harnesses a runner can launch as review sessions, each through one configured
  * native agent. Advertised with the runner's runtime metadata. */
 export interface ReviewSessionCapability {
+  /** The runner preserves pending async questions through durable automatic review prompts.
+   * Missing means unsupported, regardless of its numeric protocol version. */
+  questionPreservation?: true;
+  /** #3370: revalidates configured reviewer/model/effort, same-family consent and round budget. */
+  configuration?: true;
   reviewers: Array<{ harness: SessionReviewHarness; agentId: string }>;
   /** Why a reviewer (or the whole feature, under "tools") is unavailable, for display. */
   unavailable?: Partial<Record<SessionReviewHarness | "tools", string>>;
@@ -27,6 +37,8 @@ export interface ReviewSessionCapability {
 /** Runner-enforced review launch, carried on the review session's `start_session`. The runner
  * proves the scope again against the requester's own runner-recorded worktree. */
 export interface ReviewLaunchPolicy {
+  /** Sent only to a runner advertising reviewSession.configuration. */
+  configuration?: import("./review-settings.js").ReviewConfiguration;
   requesterSessionId: string;
   pullRequest: { repository: string; number: number };
   headSha: string;
@@ -47,6 +59,8 @@ export interface ReviewSessionLink {
 }
 
 export interface ReviewSessionRequest {
+  /** A GitHub `owner/name` and pull request number, or (v244, #3539) a GitLab project named by its
+   * host and full namespace and a merge request IID. */
   pullRequest: { repository: string; number: number };
   /** The exact head to review; it must be the pull request's pushed head. */
   headSha: string;
@@ -59,9 +73,17 @@ export interface ReviewSessionRequest {
 
 export type ReviewSessionState = "requested" | "running" | "completed" | "failed" | "cancelled";
 
+/** Informational host-access snapshot; these launches do not block Codex admission (#3705).
+ * Optional for compatibility with peers predating this observation. */
+export interface ReviewSessionAdmission {
+  observedAt: number;
+  unsandboxedSessions: Array<{ sessionId: string; kind: "provider" | "agent_tui" }>;
+}
+
 /** A review session as its requester sees it. `output` is the reviewer's final structured output
  * exactly as returned: it is not validated against the review contract in this phase. */
 export interface ReviewSessionView {
+  admission?: ReviewSessionAdmission;
   reviewSessionId: string;
   requesterSessionId: string;
   pullRequest: { repository: string; number: number };
@@ -118,7 +140,15 @@ export interface ReviewAttemptRound {
   scopeFiles: string[];
   since?: string;
   rebasedFrom?: { baseSha: string; headSha: string };
+  /** v277 (#4075): a base-merge round, which does not count against the epoch's round budget. */
+  baseMerge?: true;
+  /** v277, with mode `equivalent`: the upvoted head whose review this head's equivalence carries. */
+  equivalentTo?: string;
 }
+
+/** v277: the output of an equivalence record, where no reviewer ran. */
+export const REVIEW_EQUIVALENCE_OUTPUT = "No reviewer ran: the runner proved this head only merges the moved base branch " +
+  "into an upvoted head and leaves the pull request's own diff unchanged, so that upvote carries over.";
 
 export interface ReviewAttemptVerdictView {
   valid: boolean;
@@ -133,6 +163,7 @@ export interface ReviewAttemptVerdictView {
 /** Runner to control plane: the review session's outcome. Accepted only from the runner that owns
  * the review session; a terminal state is final. */
 export interface ReviewSessionUpdate {
+  admission?: ReviewSessionAdmission;
   type: "review_session_update";
   sessionId: string;
   state: Exclude<ReviewSessionState, "requested">;
@@ -158,6 +189,7 @@ export function reviewerHarnessFor(driver: string | null | undefined): SessionRe
 }
 
 const REVIEW_SESSION_REASONS = new Set([
+  "the configured reviewer is unavailable or belongs to the implementer's model family without explicit permission",
   "the review must cover the session's own native managed worktree",
   "resume this session once so the runner can verify its automatic worktree before requesting a review",
   "the automatic worktree is no longer registered on this session's expected branch; restore it before requesting a review",
@@ -167,6 +199,9 @@ const REVIEW_SESSION_REASONS = new Set([
   "the runner cannot launch this reviewer",
   "the reviewer command is not trusted: install it where sessions cannot write, outside provider homes and caches",
   "the runner is missing a trusted git or gh for reviews",
+  "the runner is missing a trusted gh for GitHub reviews",
+  "the runner is missing a trusted glab for GitLab reviews",
+  "the runner's glab is not configured for this GitLab host",
   "the review session could not be launched",
   "the review was cancelled",
   "the review ended without a result",
@@ -177,6 +212,7 @@ const REVIEW_SESSION_REASONS = new Set([
   "this pull request has reached its review round limit",
   "this review round has used its attempts",
   "the reviewer timed out",
+  "the recorded equivalence no longer matches the review run",
 ]);
 
 export function sanitizedReviewSessionReason(value: unknown): string {

@@ -185,8 +185,8 @@ export function shellProcessTreeProof(child: AgentProcess | WindowsConptyProcess
 
 export class ShellManager {
   private readonly shells = new Map<string, LiveShell>();
-  /** Agent TUIs have no runner filesystem boundary. Retain uncertain descendants even after
-   * their terminal tab is forgotten; only a complete process-tree exit proof removes a writer. */
+  /** Agent TUIs have no runner filesystem boundary. Observe them without blocking reviews;
+   * retain observations of uncertain descendants after their terminal tab is forgotten. */
   private readonly agentTuiWriterTokens = new Map<string, string>();
   private readonly reviewWriters: ReviewWriterRegistry;
   /** Set by runner shutdown; ended callbacks are not reported after it. */
@@ -197,7 +197,8 @@ export class ShellManager {
   }
 
   unprotectedAgentTuiSessions(): string[] {
-    return this.reviewWriters.sessions("agent_tui");
+    return [...new Set([...this.reviewWriters.sessions("agent_tui"),
+      ...this.reviewWriters.unsandboxedSessions().filter((entry) => entry.kind === "agent_tui").map((entry) => entry.sessionId)])];
   }
 
   private retireAgentTuiWriter(shellId: string, proven: boolean): void {
@@ -258,11 +259,11 @@ export class ShellManager {
     const { command, args, pty, ttyFile } = selected;
     const launchCwd = meta?.launch?.cwd ?? cwd;
     if (meta?.kind === "agent_tui") {
-      // Publish before spawn: a crash cannot leave an agent writer with no durable admission
-      // evidence. Recovered/uncertain markers require operator reconciliation, never age out.
-      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.acquire(sessionId, "agent_tui"));
+      // No runner filesystem sandbox is applied to this launch. Provider-internal permissions
+      // do not change that boundary. Current and legacy records are diagnostics only.
+      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.observeUnsandboxed(sessionId, "agent_tui"));
     }
-    const child = process.platform === "win32" && context.kind === "native"
+    const spawn = () => process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
           args: meta?.launch?.args ?? args,
@@ -286,6 +287,8 @@ export class ShellManager {
           trackDescendants: meta?.kind === "agent_tui" || meta?.cleanupOwnsDescendants === true,
           descendantMarker: meta?.cleanupDescendantMarker,
         });
+    const group = this.reviewWriters.group(this.agentTuiWriterTokens.get(shellId));
+    const child = group ? group.run(spawn) : spawn();
     const live: LiveShell = {
       sessionId,
       root: cwd,

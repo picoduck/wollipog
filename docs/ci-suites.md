@@ -122,14 +122,18 @@ workflow routing; a PR may edit that workflow. Such an edit selects full and
 remains subject to existing review/full required CI. The advisory log cannot
 grant lighter coverage or become a security authority. Any future gating caller
 must establish a trusted workflow definition as well as trusted selector code;
-this issue does not activate that route.
+this issue does not activate that route. The [disabled merge-group gate](ci-aggregation.md#disabled-merge-group-gate)
+(#3637) is such a caller: it runs this selector from current main over the
+combined main-to-group diff, requires an unchanged workflow and enforced
+regression admission, and is inert unless `CI_MERGE_GROUP_GATE` is exactly `enabled`.
 
 Every `ci-selection-v1` record includes `suiteVersion`, `policyVersion`, `policyId`
 (trusted policy/selector/profile content), `suiteId` (group contract, allowlists,
 tested workflow/config/command inputs and test inventory), `inventoryId` (test paths/blobs/groups),
 tested revision, counts, fast/selected/deferred hashed file identities, reasons and
-`certification: none`. Changed contracts cannot reuse the same cohort; inventory
-and tested revisions remain available for compatibility review. Human-readable
+`certification: none`. Changed selection policy cannot reuse the same cohort; inventory,
+contract-input and tested revisions remain per-sample compatibility evidence (see
+[cohort keys](#cohort-keys-and-cutover)). Human-readable
 file paths stay in the local inventory, not the shadow marker.
 The record's `inventoryDomain: node-and-development-chromium` makes its file
 counts explicit: production/WebKit selections are always mandatory, are
@@ -187,11 +191,39 @@ failure prevents Node tests. Observed failures and miss candidates remain visibl
 while unknown subset outcomes are `unmeasured`, `eligible` is false and those
 observations never inflate the 30-change/five-working-day denominator.
 
-Cohorts separate exact suite/policy identities. They count distinct identified PRs
-conservatively (unidentified merge-group snapshots do not inflate the change
-denominator), distinct sampled UTC working dates, and misses. Even a cohort with
-30 changes across five working dates is not auto-certified. Investigate every
-miss and exclusion and review compatibility before any readiness decision.
+### Cohort Keys and Cutover
+
+Cohorts count distinct identified PRs conservatively (unidentified merge-group
+snapshots do not inflate the change denominator), distinct sampled UTC working
+dates, and misses. Even a cohort with 30 changes across five working dates is not
+auto-certified. Investigate every miss and exclusion, and review compatibility
+(including the cohort's contract drift), before any readiness decision.
+
+Cohort keys changed prospectively (#3786) at the documented cutover
+`2026-11-02T00:00:00Z` (`COHORT_KEY_CUTOVER` in the report). The first commit that uses
+it is the squash merge of #3795. The cutover follows that merge, so no sample recorded
+before the change existed is relabelled. Each sample's side is decided by its run's
+`createdAt`. A report never puts samples from both sides into one cohort: each cohort
+names its `cohortKeying`.
+
+| Samples | Cohort key | Why |
+| --- | --- | --- |
+| Before the cutover | `suiteId/policyId`, unchanged | Recorded cohorts stay readable and reportable under their original key. They are never relabelled or merged into later cohorts. |
+| From the cutover | `(suiteVersion, policyVersion, policyId)` | `suiteId` hashes the whole test inventory and every CI contract input. Across 170 successful merge-group trees (2026-10-20 to 2026-10-28) it took 158 distinct values, with a longest shared run of 4 groups, so a 30-change cohort could not form. `policyId` changes only with the trusted policy, selector or Node profile. |
+
+Every sample still carries `suiteId` and `inventoryId`, plus `fileIdentitySetId`: a
+digest of its selected and deferred hashed file identities. Each policy cohort's
+`compatibility` section reports contract drift without splitting the denominator:
+
+- distinct `suiteId` and `inventoryId` counts;
+- the number of transitions in each between chronologically consecutive samples;
+- every sample whose selected or deferred file identities changed from the previous sample,
+  with both identities and inventory counts.
+
+A test edit changes `suiteId` and `inventoryId`. An added, removed or renamed test also
+changes the file identities. The compatibility reviewer decides whether a drifted sample
+still belongs in the comparison. Drift neither certifies a sample nor silently drops it.
+Report output is `version: 2` with a `cohortKeyCutover` record.
 
 ## Evidence and Remaining Comparison
 
@@ -211,6 +243,14 @@ them. **Zero eligible shadow comparisons** exist in that baseline; absence is
 unmeasured, not zero misses. The proposed 5–10 minute fast-suite target is not
 demonstrated. Local/profile measurements belong in the accompanying evidence
 record, with environment and commands, without claiming CI speedup.
+
+A separately versioned, advisory successor prototype, `fast-required-v2`, narrows only
+v1's `affected` outcome with a conservative import graph. It has its own marker and identities,
+and no CI caller. See the [v2 prototype and offline evaluation](ci-suite-v2-evaluation-2026-10-28.md).
+That evaluation also measured how often v1's `suiteId` changes across merges, which led to the
+policy-identity cohort keys in [Cohort Keys and Cutover](#cohort-keys-and-cutover). A further
+shadow-only candidate, `fast-required-v3`, relaxes only low-risk fallbacks; see the
+[v3 candidate replay](ci-suite-v3-candidate-2026-10-29.md). Nothing in this section changes for v1.
 
 **Remaining:** at least 30 eligible natural changes across five working days,
 individual miss/flake/infrastructure review, actual shadow overhead/selected

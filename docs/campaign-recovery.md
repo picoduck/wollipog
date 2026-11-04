@@ -25,7 +25,17 @@ observations neither spend another attempt nor create another request or wake. R
 records retain the original ledger item's ceiling. Check repair and re-review retain a repository/PR
 ceiling across changed heads; the head remains an exact observation coordinate, not a counter reset.
 Hard denial and exhaustion stay blocked and ask
-for no override. Existing continuation transport owns its own bounded retries and ambiguous-result
+for no override. A stopped worker whose assignment is still open is classified from the stop
+provenance the server wrote, never from agent text: a recorded Stop or archive request is
+`intentional_stop`, a declined guardrail is `hard_denial`, and any other or missing provenance
+(a runner-reported end, a disconnect, a launch that never ran, a stop recorded before provenance) is
+`unverified_stop`. All three are blocked the same way: none is dispatched, replaced or restarted
+automatically, and only the explanation differs. A denied typed decision stays `hard_denial`, and a
+failed worker stays a bounded `transient_failure` replacement. A worker record keeps its work item
+across replacement workers, so its stop label only escalates (`intentional_stop`, then
+`unverified_stop`, then `hard_denial`): a later worker's denial is never hidden behind an earlier
+intentional stop, and nothing relabels a recorded denial, including one an earlier version wrote for
+a stop. Existing continuation transport owns its own bounded retries and ambiguous-result
 fence; recovery never acknowledges an unknown parent turn to create another turn.
 A dispatched wake stays in flight until its parent turn finishes. It counts as unanswered only
 when all of these hold: the runner confirmed the turn delivering that exact wake as `completed`;

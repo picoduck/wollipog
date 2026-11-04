@@ -19,11 +19,6 @@ export function resourceOwnerKey(owner: ResourceOwner): string {
     : owner.kind === "user" ? `user:${owner.userId}` : `team:${owner.teamId}`;
 }
 
-export function sameResourceScope(left: ResourceScope | undefined, right: ResourceScope | undefined): boolean {
-  return Boolean(left && right && left.organizationId === right.organizationId &&
-    resourceOwnerKey(left.owner) === resourceOwnerKey(right.owner));
-}
-
 export function scopeAudienceContainedForIdentity(
   identity: IdentityAdministrationView,
   narrower: ResourceScope,

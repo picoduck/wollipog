@@ -107,6 +107,16 @@ const TRAIN: Record<string, CampaignGitLabMergeTrainStatus> = {
   idle: "idle", stale: "stale", fresh: "fresh", merging: "merging", merged: "merged", skip_merged: "skip_merged",
 };
 
+/** A GitLab pipeline status in the collapsed vocabulary; one this server does not know is `unknown`. */
+export function gitlabPipelineStatus(raw: unknown): CampaignGitLabPipelineStatus {
+  return typeof raw === "string" && Object.hasOwn(PIPELINE, raw) ? PIPELINE[raw]! : "unknown";
+}
+
+/** A merge-train car status; one this server does not know is `unknown`. */
+export function gitlabMergeTrainStatus(raw: unknown): CampaignGitLabMergeTrainStatus {
+  return typeof raw === "string" && Object.hasOwn(TRAIN, raw) ? TRAIN[raw]! : "unknown";
+}
+
 /** Validate a merge request's detail and approvals into the wire shape (train read separately), or
  * null when anything is off. */
 export function gitlabMergeRequestObservation(
@@ -131,7 +141,7 @@ export function gitlabMergeRequestObservation(
   if (mr.head_pipeline !== null && mr.head_pipeline !== undefined) {
     const head = record(mr.head_pipeline);
     if (!head || !Number.isSafeInteger(head.id) || (head.id as number) < 1 || typeof head.status !== "string") return null;
-    pipeline = { id: head.id as number, status: PIPELINE[head.status] ?? "unknown" };
+    pipeline = { id: head.id as number, status: gitlabPipelineStatus(head.status) };
   }
   const approval = record(approvals);
   if (!approval || typeof approval.approved !== "boolean" || !Array.isArray(approval.approved_by)) return null;
@@ -232,7 +242,7 @@ class HostRead {
     }
     const carRecord = record(car.value);
     if (!carRecord || typeof carRecord.status !== "string") return { ok: false, failure: "forge_error" };
-    const status = TRAIN[carRecord.status] ?? "unknown";
+    const status = gitlabMergeTrainStatus(carRecord.status);
     let position: number | null = null;
     // A car that already left the train has no position; the order read is display only, so its
     // failure leaves the position unknown rather than failing the merge request.

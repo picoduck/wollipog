@@ -1,4 +1,4 @@
-import { isTerminal, type AgentDriverKind, type SessionStatus } from "@wollipog/protocol";
+import { isTerminal, type SessionStatus } from "@wollipog/protocol";
 
 /** How Retry Turn on a failed turn's notice (#2169) can start a new turn now, or why it cannot. */
 export type TurnRetryPlan =
@@ -8,21 +8,10 @@ export type TurnRetryPlan =
   | { kind: "restart_then_prompt" }
   | { kind: "unavailable"; reason: string };
 
-/**
- * The drivers whose explicit Restart resumes the provider conversation. It mirrors the runner's start
- * path (apps/runner/src/session-manager.ts, where a restart passes the prior agentSessionId only for
- * these drivers and keeps the "fresh-start behavior for Claude and exec Codex"). The control plane
- * exposes no capability for it, so this list changes with that rule.
- */
-export const RESTART_RESUMING_DRIVERS: ReadonlySet<AgentDriverKind> = new Set(["codex-app-server", "pi"]);
-
-export function restartResumesConversation(driver: AgentDriverKind | null | undefined): boolean {
-  return driver != null && RESTART_RESUMING_DRIVERS.has(driver);
-}
-
 export interface TurnRetryInput {
   status: SessionStatus;
-  driver: AgentDriverKind | null | undefined;
+  /** Runner-reported session capability; absent from older runners and treated as false. */
+  restartResumesConversation?: boolean;
   runnerOnline: boolean;
   /** The server's refusal of a prompt to this person (a Viewer). */
   promptRefusal: string | null;
@@ -53,6 +42,8 @@ export const TURN_RETRY_IN_FLIGHT_REASON = "Wait for Retry Turn to finish.";
  * the turns before it; the person restarts knowingly, then sends it again. */
 export const TURN_RETRY_FRESH_RESTART_REASON =
   "Restarting starts a new conversation. Restart the session, then send the message again.";
+export const TURN_RETRY_UNKNOWN_RESTART_REASON =
+  "The runner has not confirmed that restarting preserves this conversation. Update the runner, then try again.";
 
 /** The reasons follow the composer's order, so the notice and the composer never disagree about
  * why a session cannot take a turn; a terminal session whose restart resumes is the one difference. */
@@ -65,7 +56,8 @@ export function turnRetryPlan(input: TurnRetryInput): TurnRetryPlan {
   if (isTerminal(input.status)) {
     if (input.restartRefusal !== null) return unavailable(input.restartRefusal);
     if (input.stopFailed) return unavailable(TURN_RETRY_STOP_FAILED_REASON);
-    if (!restartResumesConversation(input.driver)) return unavailable(TURN_RETRY_FRESH_RESTART_REASON);
+    if (input.restartResumesConversation === false) return unavailable(TURN_RETRY_FRESH_RESTART_REASON);
+    if (input.restartResumesConversation !== true) return unavailable(TURN_RETRY_UNKNOWN_RESTART_REASON);
     return { kind: "restart_then_prompt" };
   }
   if (input.policyPaused) return unavailable("Session is paused by guardrails. Review the pending decision to continue.");

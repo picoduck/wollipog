@@ -1,9 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { existsSync, readFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
-import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderLoginView } from "@wollipog/protocol";
+import { agentContextKey, type AgentContext, type AgentDefinition, type ProviderCredentialImportCode, type ProviderCredentialImportSource, type ProviderLoginView } from "@wollipog/protocol";
+import type { CodexCredentialLayout } from "./provider-credential-import.js";
+import { LEASE_WORKER_ERRORS, ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { RunnerProviderAccount } from "./config.js";
-import { writeProviderAccountsConfig } from "./config.js";
+import { captureProviderAccountsConfigPreimage, writeProviderAccountsConfig } from "./config.js";
+import { accountConfigPublicationErrorMessage, accountConfigPublicationMayHaveOccurred } from "./provider-account-config-publication.js";
 import { codexLauncherBootstrap } from "./codex-plugins.js";
 import { runContextCommand } from "./context-command.js";
 import { supportsStructuredCodexDeviceLogin } from "./discovery/codex-app-server.js";
@@ -116,9 +119,26 @@ export interface ProviderLoginProfileOptions {
   /** Write the new HOME's first marker, identity `profileId` with this control plane's grant, under
    * the HOME's lease, and make the grant usable for this sign-in. */
   create(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void>;
-  /** The sign-in settled. Unless the account was recorded, stop using the grant and, when the HOME
-   * was kept (the provider wrote credentials into it), drop the grant from its marker. */
-  settle(input: { home: string; provider: "claude" | "codex"; profileId: string; grantId: string; recorded: boolean; homeRemoved: boolean }): Promise<void>;
+  /** The sign-in settled. Unknown recording stops local grant use while retaining its marker;
+   * definitely-unrecorded settlement also drops the marker's grant from a retained HOME. */
+  settle(input: { home: string; provider: "claude" | "codex"; profileId: string; grantId: string; recorded: boolean | "unknown"; homeRemoved: boolean }): Promise<void>;
+}
+
+/** #3719: an import's source, resolved on the runner: the HOME whose lease it takes, where Codex's
+ * credential directory sits under it, and the profile id its account recorded. */
+export interface ProviderCredentialImportSourceHome {
+  home: string;
+  layout: CodexCredentialLayout;
+  expectedProfileId?: string;
+}
+
+/** #3719: how Add Account imports an existing Codex API-key sign-in. */
+export interface ProviderCredentialImportOptions {
+  /** The runner user's own Codex HOME, or undefined when it cannot be named unambiguously. */
+  defaultCodexHome(): ProviderCredentialImportSourceHome | undefined;
+  /** Copy the source's API key into the new managed profile HOME `<root>/<profileId>` with this
+   * control plane's grant, in one lease-worker operation, and make the grant usable. */
+  copyCodex(input: { source: ProviderCredentialImportSourceHome; root: string; profileId: string; grantId: string }): Promise<void>;
 }
 
 interface ActiveLogin {
@@ -175,6 +195,8 @@ export interface ProviderLoginSupervisorOptions {
   /** #3239: managed provider profiles for accounts created with a control-plane grant. Without it a
    * grant is ignored and every new account HOME is created under `dataDir` as before. */
   profiles?: ProviderLoginProfileOptions;
+  /** #3719: importing an existing sign-in into a managed profile. Only a supported host sets it. */
+  imports?: ProviderCredentialImportOptions;
   platform?: NodeJS.Platform;
   timeoutMs?: number;
   ceremonyTimeoutMs?: number;
@@ -339,6 +361,29 @@ class ProviderLoginLeaseUnavailable extends Error {
 /** The sign-in was refused before it asked for its HOME's lease (a stopped supervisor or a duplicate). */
 class ProviderLoginNotStarted extends Error {}
 
+/** #3719: an import's refusal, with its wire code and a path-free sentence. */
+export class ProviderCredentialImportError extends Error {
+  constructor(readonly code: ProviderCredentialImportCode, message: string) { super(message); }
+}
+
+/** The lease worker's typed refusals, as the import's wire codes; the text is the worker's fixed,
+ * path-free sentence. */
+function importFailure(error: unknown): ProviderCredentialImportError {
+  if (!(error instanceof ProviderHomeLeaseError)) {
+    return new ProviderCredentialImportError("FAILED", "The sign-in could not be copied. Sign in to create the profile instead.");
+  }
+  const code: ProviderCredentialImportCode =
+    error.code === "import_source_missing" ? "SOURCE_MISSING" :
+    error.code === "import_source_unsafe" || error.code === "profile_changed" || error.code === "profile_unverifiable" ? "SOURCE_UNSAFE" :
+    error.code === "import_source_foreign" ? "SOURCE_FOREIGN" :
+    error.code === "import_source_unsupported" ? "SOURCE_UNSUPPORTED" :
+    error.code === "import_source_changed" ? "SOURCE_CHANGED" :
+    error.code === "profile_not_granted" || error.code === "profile_unsupported_control_plane" ? "SOURCE_NOT_GRANTED" :
+    error.code === "import_source_held" || error.code === "busy" || error.code === "holder_alive" || error.code === "boundary_survivor" ||
+      error.code === "process_survivor" || error.code === "foreign_owner" || error.code === "foreign_host" ? "SOURCE_IN_USE" : "FAILED";
+  return new ProviderCredentialImportError(code, error.message);
+}
+
 export class ProviderLoginSupervisor {
   private readonly active = new Map<string, ActiveLogin>();
   private readonly pending = new Map<string, { resolved: ResolvedProviderLogin; controller: AbortController }>();
@@ -346,6 +391,8 @@ export class ProviderLoginSupervisor {
    * records its pending entry, so its label is reserved here, by account id, from the duplicate-label
    * check until that entry replaces it or the start fails. */
   private readonly reserved = new Map<string, ResolvedProviderLogin>();
+  /** #3719: running imports by new account id, reserving their label and source. */
+  private readonly importing = new Map<string, { persistAccount: true; provider: "codex"; label: string; sourceKey: string }>();
   private stopped = false;
   private readonly recent = new Map<string, ProviderLoginView>();
   private readonly spawn: typeof spawnAgent;
@@ -380,28 +427,11 @@ export class ProviderLoginSupervisor {
       account = configured;
       persistAccount = false;
     } else {
-      const label = input.label.trim();
-      if (!label || label.length > 100 || /[\u0000-\u001f\u007f]/u.test(label)) {
-        throw new Error("Account label must contain 1 to 100 characters.");
-      }
-      if (this.options.accounts.length >= 32) throw new Error("This Machine already has 32 provider accounts.");
-      const comparable = comparableLabel(label);
-      if (this.options.accounts.some((candidate) =>
-        candidate.provider === input.provider && comparableLabel(candidate.label) === comparable)) {
-        throw new Error(`A ${providerName(input.provider)} account with this label is already on this Machine. ` +
-          "Use Sign In on that account to refresh its login.");
-      }
-      // Settled operations stay active until the account is recorded, which includes the identity check.
-      if ([...[...this.active.values(), ...this.pending.values()].map((operation) => operation.resolved), ...this.reserved.values()]
-        .some((running) => running.persistAccount && running.provider === input.provider && comparableLabel(running.label) === comparable)) {
-        throw new Error("A sign-in for an account with this label is already running.");
-      }
+      const label = this.newAccountLabel(input.provider, input.label);
       if (input.profileGrantId !== undefined && !isProviderProfileGrantId(input.profileGrantId)) {
         throw new Error("The profile grant is invalid.");
       }
-      let id: string;
-      do id = `${accountSlug(label)}-${randomUUID().slice(0, 8)}`;
-      while (this.options.accounts.some((candidate) => candidate.id === id));
+      const id = this.newAccountId(label);
       // #3239: with this control plane's grant the account becomes a managed profile at the
       // SSH-account-level root; markers cannot be verified on Windows, which keeps today's path.
       const profiles = (this.options.platform ?? process.platform) !== "win32" ? this.options.profiles : undefined;
@@ -466,6 +496,138 @@ export class ProviderLoginSupervisor {
     }
   }
 
+  /** A new account's trimmed label, refused when it is invalid or another account, running sign-in
+   * or import of the provider already uses it (trimmed, case-insensitive). */
+  private newAccountLabel(provider: "claude" | "codex", input: string): string {
+    const label = input.trim();
+    if (!label || label.length > 100 || /[\u0000-\u001f\u007f]/u.test(label)) {
+      throw new Error("Account label must contain 1 to 100 characters.");
+    }
+    if (this.options.accounts.length >= 32) throw new Error("This Machine already has 32 provider accounts.");
+    const comparable = comparableLabel(label);
+    if (this.options.accounts.some((candidate) =>
+      candidate.provider === provider && comparableLabel(candidate.label) === comparable)) {
+      throw new Error(`A ${providerName(provider)} account with this label is already on this Machine. ` +
+        "Use Sign In on that account to refresh its login.");
+    }
+    // Settled operations stay active until the account is recorded, which includes the identity check.
+    if ([...[...this.active.values(), ...this.pending.values()].map((operation) => operation.resolved), ...this.reserved.values(), ...this.importing.values()]
+      .some((running) => running.persistAccount && running.provider === provider && comparableLabel(running.label) === comparable)) {
+      throw new Error("A sign-in for an account with this label is already running.");
+    }
+    return label;
+  }
+
+  private newAccountId(label: string): string {
+    let id: string;
+    do id = `${accountSlug(label)}-${randomUUID().slice(0, 8)}`;
+    while (this.options.accounts.some((candidate) => candidate.id === id) || this.importing.has(id));
+    return id;
+  }
+
+  /**
+   * #3719: create a managed Codex profile from an existing API-key sign-in on this Machine instead
+   * of a new sign-in: the runner user's own Codex HOME or a configured Codex account. The lease
+   * worker copies only the API key, into a fresh record in the new profile's HOME, in one operation
+   * that refuses a source it cannot verify and leaves both HOMEs unchanged. Nothing is run against
+   * the provider: no sign-in, logout or revocation. The account is recorded as Add Account records
+   * one, with this control plane's grant; a copied key is the same account as its source by
+   * design, so the duplicate-identity check of a sign-in does not apply.
+   */
+  async importAccount(input: {
+    provider: "claude" | "codex"; label: string; source: ProviderCredentialImportSource; profileGrantId: string;
+    /** The id the control plane chose and bound the grant to; generated here when absent. */
+    accountId?: string;
+  }): Promise<{ accountId: string; profileId: string }> {
+    const imports = this.options.imports;
+    const profiles = this.options.profiles;
+    if (this.stopped) throw new ProviderCredentialImportError("FAILED", "The provider sign-in supervisor has stopped.");
+    if (input.provider !== "codex") {
+      throw new ProviderCredentialImportError("UNSUPPORTED", "Only a Codex API-key sign-in can be copied. Sign in to create the profile instead.");
+    }
+    if (!imports || !profiles || (this.options.platform ?? process.platform) === "win32") {
+      throw new ProviderCredentialImportError("UNSUPPORTED", "This Machine can't copy an existing sign-in. Sign in to create the profile instead.");
+    }
+    if (!isProviderProfileGrantId(input.profileGrantId)) throw new ProviderCredentialImportError("FAILED", "The profile grant is invalid.");
+    let source: ProviderCredentialImportSourceHome;
+    if (input.source.kind === "account") {
+      const accountId = input.source.accountId;
+      const account = this.options.accounts.find((candidate) => candidate.id === accountId);
+      if (!account) throw new ProviderCredentialImportError("SOURCE_NOT_FOUND", "The provider account is not configured on this Machine.");
+      if (account.provider !== "codex") {
+        throw new ProviderCredentialImportError("SOURCE_FOREIGN", LEASE_WORKER_ERRORS.import_source_foreign);
+      }
+      if (!providerAccountAgentContextCompatible(account, { context: { kind: "native" } }, this.options.platform)) {
+        throw new ProviderCredentialImportError("UNSUPPORTED", "This account belongs to another execution context, so its sign-in can't be copied.");
+      }
+      if ([...this.active.values(), ...this.pending.values()].some((operation) => operation.resolved.accountId === account.id)) {
+        throw new ProviderCredentialImportError("SOURCE_IN_USE", LEASE_WORKER_ERRORS.import_source_held);
+      }
+      source = { home: account.directory, layout: "codex_home", ...(account.profileId ? { expectedProfileId: account.profileId } : {}) };
+    } else {
+      if (input.source.kind !== "default_home") throw new ProviderCredentialImportError("FAILED", "The import source is invalid.");
+      const resolved = imports.defaultCodexHome();
+      if (!resolved) throw new ProviderCredentialImportError("SOURCE_NOT_FOUND", "This Machine has no single Codex sign-in of its own to copy.");
+      source = resolved;
+    }
+    const sourceKey = resolve(source.home);
+    if ([...this.importing.values()].some((running) => running.sourceKey === sourceKey)) {
+      throw new ProviderCredentialImportError("SOURCE_IN_USE", LEASE_WORKER_ERRORS.import_source_held);
+    }
+    let label: string;
+    try { label = this.newAccountLabel("codex", input.label); } catch (error) {
+      throw new ProviderCredentialImportError("LABEL_IN_USE", error instanceof Error ? error.message : "The account label is unavailable.");
+    }
+    if (input.accountId !== undefined && (!/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u.test(input.accountId) ||
+        this.options.accounts.some((candidate) => candidate.id === input.accountId) || this.importing.has(input.accountId))) {
+      throw new ProviderCredentialImportError("FAILED", "The new account's id is unavailable on this Machine.");
+    }
+    const accountId = input.accountId ?? this.newAccountId(label);
+    const profileId = randomUUID();
+    const account: RunnerProviderAccount = { id: accountId, label, provider: "codex", directory: join(profiles.root, profileId), profileId };
+    // Reserved with no await before it, so overlapping imports of one source or label are refused.
+    this.importing.set(accountId, { persistAccount: true, provider: "codex", label, sourceKey });
+    const settle = (recorded: boolean | "unknown") => profiles.settle({ home: account.directory, provider: "codex", profileId,
+      grantId: input.profileGrantId, recorded, homeRemoved: false }).catch(() => {});
+    try {
+      try {
+        await imports.copyCodex({ source, root: profiles.root, profileId, grantId: input.profileGrantId });
+      } catch (error) {
+        // A refusal created nothing. Any other failure may have created the new HOME: retain it
+        // and drop this grant from its marker, as a failed sign-in does.
+        await settle(false);
+        throw importFailure(error);
+      }
+      if (this.stopped) {
+        await settle(false);
+        throw new ProviderCredentialImportError("FAILED", "The provider sign-in supervisor has stopped.");
+      }
+      // The account is recorded through the fenced publication (#3506), exactly as Add Account
+      // records one. Only a confirmed publication is a success.
+      try {
+        const preimage = captureProviderAccountsConfigPreimage(this.options.configPath, this.options.accounts);
+        this.writeAccounts(this.options.configPath, [...this.options.accounts, account], preimage);
+      } catch (error) {
+        const copied = "The sign-in was copied, but the runner configuration could not be updated.";
+        if (accountConfigPublicationMayHaveOccurred(error)) {
+          // The account may already be in the configuration: stop using the grant here without
+          // revoking a marker grant the published account may reference, and say the outcome is
+          // unknown rather than report a success or a clean refusal.
+          await settle("unknown");
+          throw new ProviderCredentialImportError("PUBLICATION_UNKNOWN", accountConfigPublicationErrorMessage(error, copied));
+        }
+        await settle(false);
+        throw new ProviderCredentialImportError("FAILED", accountConfigPublicationErrorMessage(error, copied));
+      }
+      this.options.accounts.push(account);
+      await settle(true);
+      try { await this.options.onAccountAdded(account); } catch { /* The account is recorded; its next report carries it. */ }
+      return { accountId, profileId };
+    } finally {
+      this.importing.delete(accountId);
+    }
+  }
+
   /** Create a new managed profile HOME and its first marker before the sign-in takes its lease. */
   private async createProfileHome(resolved: ResolvedProviderLogin, profile: { id: string; grantId: string }): Promise<void> {
     const profiles = this.options.profiles!;
@@ -481,7 +643,7 @@ export class ProviderLoginSupervisor {
   }
 
   /** Report a created profile's settlement; never throws, since the sign-in already has a result. */
-  private async settleProfile(resolved: ResolvedProviderLogin, recorded: boolean): Promise<void> {
+  private async settleProfile(resolved: ResolvedProviderLogin, recorded: boolean | "unknown"): Promise<void> {
     if (!resolved.profile || !this.options.profiles) return;
     try {
       await this.options.profiles.settle({ home: resolved.directory, provider: resolved.provider, profileId: resolved.profile.id,
@@ -672,9 +834,11 @@ export class ProviderLoginSupervisor {
     const blocker = this.options.removalBlocker?.(account);
     if (blocker) throw new Error(blocker);
     try {
-      this.writeAccounts(this.options.configPath, this.options.accounts.filter((candidate) => candidate !== account));
-    } catch {
-      throw new Error("The runner configuration could not be updated.");
+      const preimage = captureProviderAccountsConfigPreimage(this.options.configPath, this.options.accounts);
+      this.writeAccounts(this.options.configPath, this.options.accounts.filter((candidate) => candidate !== account), preimage);
+    } catch (error) {
+      if (accountConfigPublicationMayHaveOccurred(error)) throw error;
+      throw new Error(accountConfigPublicationErrorMessage(error, "The runner configuration could not be updated."));
     }
     this.options.accounts.splice(this.options.accounts.indexOf(account), 1);
     if (options.retainCredentialHome !== true) {
@@ -907,11 +1071,14 @@ export class ProviderLoginSupervisor {
       });
     } else if (operation.resolved.persistAccount &&
         (duplicate = await this.existingAccountWithSameIdentity(operation.resolved))) {
+      // The code decides the dashboard's Already on This Machine ending (#3519). Keep the sentence
+      // exactly as it is: an older control plane drops the code, and older dashboards match the words.
       this.update(operation, {
         status: "failed",
         expectsCode: false,
         error: `This ${providerName(duplicate.provider)} account is already on this Machine. ` +
           "The duplicate sign-in was discarded.",
+        failureCode: "account_already_on_machine",
         verificationUrl: undefined,
         userCode: undefined,
       });
@@ -926,7 +1093,8 @@ export class ProviderLoginSupervisor {
             ...(operation.resolved.profile ? { profileId: operation.resolved.profile.id } : {}),
           };
           const next = [...this.options.accounts, account];
-          this.writeAccounts(this.options.configPath, next);
+          const preimage = captureProviderAccountsConfigPreimage(this.options.configPath, this.options.accounts);
+          this.writeAccounts(this.options.configPath, next, preimage);
           this.options.accounts.push(account);
           if (operation.resolved.profile) {
             profileSettled = true;
@@ -949,11 +1117,18 @@ export class ProviderLoginSupervisor {
           verificationUrl: undefined,
           userCode: undefined,
         });
-      } catch {
+      } catch (error) {
+        const publicationUncertain = accountConfigPublicationMayHaveOccurred(error);
+        // Drop temporary local access without falsely revoking a possibly referenced marker.
+        // Neither true settlement nor usable account admission is inferred.
+        if (publicationUncertain) {
+          profileSettled = true;
+          await this.settleProfile(operation.resolved, "unknown");
+        }
         this.update(operation, {
           status: "failed",
           expectsCode: false,
-          error: "Authentication succeeded, but the runner configuration could not be updated.",
+          error: accountConfigPublicationErrorMessage(error, "Authentication succeeded, but the runner configuration could not be updated."),
           verificationUrl: undefined,
           userCode: undefined,
         });

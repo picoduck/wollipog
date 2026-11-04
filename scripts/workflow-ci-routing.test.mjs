@@ -12,9 +12,10 @@ const job = (id) => workflow.match(new RegExp(`^  ${id}:\\n[\\s\\S]*?(?=^  [\\w-
 const expression = (text, key) => text.match(new RegExp(`^\\s+${key}: (.+)$`, "m"))?.[1];
 const shellOf = (text, name) => text.split(`      - name: ${name}\n`)[1].match(/        run: \|\n((?:          .*\n?)+)/)[1]
   .split("\n").map((line) => line.slice(10)).join("\n");
-function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize") {
+function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped") {
   const context = { github: { event_name: event, event: { action, pull_request: { draft } } },
-    vars: { CI_PR_SUITE_ROUTING: variable }, needs: { suite_plan: { outputs: { mode } } },
+    vars: { CI_PR_SUITE_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
+    needs: { suite_plan: { outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
     cancelled: () => cancelled, fromJSON: JSON.parse,
     ghaEqual: (a, b) => typeof a === "string" && typeof b === "string" ? a.toUpperCase() === b.toUpperCase() : a == b };
   // GitHub's documented ==/!= ignore string case. JS's native equality concealed a real
@@ -23,7 +24,10 @@ function evaluate(value, event, variable, mode = "", cancelled = false, draft = 
     (_, left, op, right) => `${op === "!=" ? "!" : ""}ghaEqual(${left}, ${right})`);
   return vm.runInNewContext(value.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), context, { timeout: 1000 });
 }
-const fast = expression(job("checks"), "PR_FAST");
+const fast = expression(job("unit"), "PR_FAST");
+const groupFast = expression(job("unit"), "GROUP_FAST");
+const gateEnabled = expression(job("check"), "GATE_ENABLED");
+const gateAdmission = expression(job("merge_group_gate"), "if");
 const matrix = expression(job("browser"), "shard");
 const enabled = expression(job("check"), "ROUTING_ENABLED");
 const admission = expression(job("suite_plan"), "if");
@@ -40,7 +44,7 @@ test("off switches preserve full work; case-variant plan admission cannot change
       assert.equal(evaluate(enabled, event, variable, mode), String(active));
       assert.equal(evaluate(fast, event, variable, mode), String(active && mode === "fast"));
       assert.deepEqual(Array.from(evaluate(matrix, event, variable, mode)), active && mode === "fast" ? [1] : [1, 2, 3, 4, 5]);
-      for (const id of ["checks", "browser", "win32", "webkit", "check"]) {
+      for (const id of ["checks", "unit", "browser", "win32", "webkit", "delegated_pipeline", "check"]) {
         const condition = expression(job(id), "if");
         assert.equal(evaluate(condition, event, variable, mode), true, `${event}/${variable}/${id}`);
         assert.equal(evaluate(condition, event, variable, mode, false, true), event !== "pull_request");
@@ -49,31 +53,139 @@ test("off switches preserve full work; case-variant plan admission cannot change
     }
   }
   assert.equal(expression(job("browser"), "PR_FAST"), fast);
+  assert.equal(expression(job("browser"), "GROUP_FAST"), groupFast);
   assert.ok(admission.startsWith("github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled'"));
   assert.ok(enabled.includes("github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled'"));
+});
+
+test("every gate and routing variable, mode and event keeps full coverage unless exactly one admitted fast path applies", () => {
+  for (const event of ["pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call"]) {
+    for (const gate of variables) for (const gateMode of ["", "full", "fast", "unknown"]) for (const gateResult of states) {
+      for (const variable of ["", "Enabled", "enabled"]) for (const mode of ["", "full", "fast"]) {
+        const prActive = event === "pull_request" && variable.toLowerCase() === "enabled";
+        const gateActive = event === "merge_group" && gate.toLowerCase() === "enabled";
+        const args = [event, variable, mode, false, false, "synchronize", gate, gateMode, gateResult];
+        // A failed, cancelled or skipped gate never reduces work, even if it retained a fast output.
+        const groupReduced = gateActive && gateResult === "success" && gateMode === "fast";
+        assert.equal(evaluate(gateAdmission, ...args), gateActive, `${event}/${gate}`);
+        assert.equal(evaluate(gateEnabled, ...args), String(gateActive));
+        assert.equal(evaluate(groupFast, ...args), String(groupReduced), `${event}/${gate}/${gateResult}/${gateMode}`);
+        // The PR path is unaffected by any merge-group gate value or output.
+        assert.equal(evaluate(fast, ...args), String(prActive && mode === "fast"));
+        assert.equal(evaluate(admission, ...args), prActive);
+        assert.deepEqual(Array.from(evaluate(matrix, ...args)),
+          (prActive && mode === "fast") || groupReduced ? [1] : [1, 2, 3, 4, 5], `${event}/${gate}/${gateResult}/${gateMode}`);
+        for (const id of ["checks", "unit", "browser", "win32", "webkit", "delegated_pipeline", "check"]) {
+          assert.equal(evaluate(expression(job(id), "if"), ...args), true, `${event}/${gate}/${id}`);
+        }
+      }
+    }
+  }
+  assert.ok(gateAdmission.startsWith("github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled'"));
 });
 
 test("the actual aggregate requires an active plan's success and unambiguous output", () => {
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
   for (const variable of variables) for (const plan of states) for (const mode of ["", "full", "fast", "affected", "unknown"]) {
     const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
+      GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
       ROUTING_SWITCH: variable, ROUTING_ENABLED: String(variable.toLowerCase() === "enabled"), PLAN_RESULT: plan, PLAN_MODE: mode,
-      CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
+      CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
+      DELEGATED_PIPELINE_RESULT: "success",
     } });
     assert.ifError(run.error);
     const pass = variable.toLowerCase() === "enabled" ? plan === "success" && (mode === "full" || variable === "enabled" && mode === "fast")
       : plan === "skipped" && mode === "";
     assert.equal(run.status, pass ? 0 : 1, `${variable}/${plan}/${mode}`);
   }
-  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT"]) {
+  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "UNIT_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"]) {
     for (const result of states.filter((state) => state !== "success")) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
+        GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
         ROUTING_SWITCH: "enabled", ROUTING_ENABLED: "true", PLAN_RESULT: "success", PLAN_MODE: mode,
-        CHECKS_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", [key]: result,
+        CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
+        DELEGATED_PIPELINE_RESULT: "success", [key]: result,
       } });
       assert.ifError(run.error);
       assert.equal(run.status, 1, `${mode}/${key}/${result}`);
     }
+  }
+});
+
+test("the actual aggregate requires an admitted gate's success and unambiguous output, and rejects stray gate output", () => {
+  const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
+  const work = { CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success",
+    ROUTING_SWITCH: "", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
+  for (const gate of variables) for (const admitted of [true, false]) for (const result of states) {
+    for (const mode of ["", "full", "fast", "affected", "unknown"]) {
+      const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
+        ...work, GATE_SWITCH: gate, GATE_ENABLED: String(admitted), GATE_RESULT: result, GATE_MODE: mode,
+      } });
+      assert.ifError(run.error);
+      const pass = admitted ? result === "success" && (mode === "full" || gate === "enabled" && mode === "fast")
+        : result === "skipped" && mode === "";
+      assert.equal(run.status, pass ? 0 : 1, `${gate}/${admitted}/${result}/${mode}`);
+    }
+  }
+  for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "UNIT_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"]) {
+    for (const result of states.filter((state) => state !== "success")) {
+      const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
+        ...work, GATE_SWITCH: "enabled", GATE_ENABLED: "true", GATE_RESULT: "success", GATE_MODE: mode, [key]: result,
+      } });
+      assert.ifError(run.error);
+      assert.equal(run.status, 1, `${mode}/${key}/${result}`);
+    }
+  }
+});
+
+test("the actual gate shell checks exact casing before invoking Git or the gate", (t) => {
+  const cwd = mkdtempSync(join(tmpdir(), "ci-gate-switch-"));
+  t.after(() => rmSync(cwd, { recursive: true, force: true }));
+  const shell = shellOf(job("merge_group_gate"), "Compute Trusted Merge Group Gate");
+  for (const fetches of [true, false]) for (const raw of variables) {
+    const stub = `git() { echo "git-called"; return ${fetches ? 0 : 1}; }; node() { echo "node-called"; echo mode=fast >> "$GITHUB_OUTPUT"; };\n`;
+    const output = join(cwd, "output");
+    writeFileSync(output, "");
+    const run = spawnSync("bash", ["-e", "-c", stub + shell], { encoding: "utf8", timeout: 1000, cwd: process.cwd(),
+      env: { GATE_SWITCH: raw, GITHUB_OUTPUT: output, TESTED_SHA: "fixture" } });
+    assert.ifError(run.error);
+    assert.equal(run.status, 0);
+    assert.equal(readFileSync(output, "utf8"), raw === "enabled" && fetches ? "mode=fast\n" : "mode=full\n");
+    assert.equal(run.stdout.includes("git-called"), raw === "enabled");
+    assert.equal(run.stdout.includes("node-called"), raw === "enabled" && fetches);
+  }
+  const gate = job("merge_group_gate");
+  assert.match(gate, /ref: refs\/heads\/main\n[\s\S]*persist-credentials: false/);
+  assert.doesNotMatch(gate, /continue-on-error|pnpm install|pull_request_target|permissions:|: write/);
+  assert.match(gate, /- name: Record Full Merge Group Coverage\n        if: steps.plan.outputs.mode != 'fast'\n/);
+  assert.match(gate, /- name: Record Reduced Merge Group Coverage\n        if: steps.plan.outputs.mode == 'fast'\n/);
+});
+
+test("delegated recovery admission rejects an empty filter, omitted story, skip or todo", (t) => {
+  const shell = shellOf(job("delegated_pipeline"), "Verify Recorded-Boundary Pipeline Recovery");
+  const guard = shell.match(/python3 - "\$pipeline_root\/results\.tap" <<'PY'\n([\s\S]*?)\nPY/)?.[1];
+  assert.ok(guard, "the five-pass guard lives in the actual workflow step");
+  const root = mkdtempSync(join(tmpdir(), "delegated-pipeline-counts-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const fixture = join(root, "stories.test.mjs");
+  const report = join(root, "results.tap");
+  const env = { ...process.env };
+  delete env.NODE_TEST_CONTEXT;
+  for (const [pattern, variant, passes] of [
+    ["story", "pass", true], ["renamed", "pass", false], ["story [1-4]", "pass", false],
+    ["story", "skip", false], ["story", "todo", false], ["story", "fail", false],
+  ]) {
+    writeFileSync(fixture, 'import { test } from "node:test";\n' + Array.from({ length: 5 }, (_, i) =>
+      `test("story ${i + 1}", t => { ${i === 4 && variant !== "pass"
+        ? variant === "fail" ? 'throw new Error("fixture failure");' : `t.${variant}("fixture");`
+        : ""} });`).join("\n"));
+    const run = spawnSync(process.execPath, ["--test", "--test-reporter=tap", `--test-name-pattern=${pattern}`, fixture],
+      { env, encoding: "utf8", timeout: 10_000 });
+    assert.ifError(run.error);
+    writeFileSync(report, run.stdout);
+    const admitted = spawnSync("python3", ["-", report], { input: guard, encoding: "utf8", timeout: 5_000 });
+    assert.ifError(admitted.error);
+    assert.equal(admitted.status, passes ? 0 : 1, `${pattern}/${variant}: ${admitted.stdout}${admitted.stderr}`);
   }
 });
 
@@ -98,26 +210,32 @@ test("the actual plan shell checks exact casing before invoking Git or the selec
 test("both actual execution branches preserve commands, propagate errors and never accept author arguments", () => {
   const stub = 'pnpm() { printf "pnpm %s\\n" "$*"; return "$STUB_EXIT"; }; node() { printf "node %s\\n" "$*"; return "$STUB_EXIT"; };\n';
   for (const isFast of [false, true]) for (const raw of ["enabled", "Enabled", "ENABLED", ""]) for (const exit of [0, 7]) for (const [id, name] of [
-    ["checks", "Unit Tests"], ["browser", "Remote-Instance Browser End-to-End Tests"],
-  ]) {
+    ["unit", "Unit Tests"], ["browser", "Remote-Instance Browser End-to-End Tests"],
+  ]) for (const path of ["pr", "group"]) {
     const shell = shellOf(job(id), name).replaceAll("${{ matrix.shard }}", "1");
+    const env = path === "pr" ? { ROUTING_SWITCH: raw, PR_FAST: String(isFast), GATE_SWITCH: "", GROUP_FAST: "false" }
+      : { ROUTING_SWITCH: "", PR_FAST: "false", GATE_SWITCH: raw, GROUP_FAST: String(isFast) };
     const run = spawnSync("bash", ["-e", "-c", stub + shell], { encoding: "utf8", timeout: 1000,
-      env: { ROUTING_SWITCH: raw, PR_FAST: String(isFast), STUB_EXIT: String(exit) } });
+      env: { ...env, STUB_EXIT: String(exit) } });
     assert.ifError(run.error);
     assert.equal(run.status, exit);
-    if (id === "checks") assert.equal(run.stdout.trim(), isFast && raw === "enabled"
-      ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci" : "pnpm test:ci");
+    if (id === "unit") assert.equal(run.stdout.trim(), isFast && raw === "enabled"
+      ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=1/3" : "pnpm test:ci --shard=1/3");
     else assert.equal(run.stdout.trim(), isFast && raw === "enabled"
       ? "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
       : "pnpm test:e2e --config playwright.ci.config.ts --project=shard-1");
   }
   for (const name of ["Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary", "Verify Node 23 Engine Boundary",
     "Verify Recommended Node Engine Boundary", "Verify Delegated Linux Provider Containment", "Typecheck",
-    "Validate Runner Bundle", "Validate Control-Plane Bundle"]) {
+    "Validate Web Production Build", "Validate Runner Bundle", "Validate Control-Plane Bundle"]) {
     const step = job("checks").split(`      - name: ${name}\n`)[1]?.split("      - name:")[0];
     assert.ok(step, name);
     assert.doesNotMatch(step, /\n        if:|PR_FAST|continue-on-error:/, name);
   }
+  // Since #3770 only the sharded unit job reads routing; typecheck and bundles always run whole.
+  assert.doesNotMatch(job("checks"), /PR_FAST|GROUP_FAST|matrix|Unit Tests\n/);
+  const unitStep = job("unit").split("      - name: Unit Tests\n")[1];
+  assert.doesNotMatch(unitStep, /^        (?:if|continue-on-error):/m, "every shard must run its Unit Tests step");
   assert.match(job("browser"), /name: Rendered Production Browser Smoke\n        if: matrix.shard == 1\n        run: pnpm test:e2e:production/);
   assert.match(job("webkit"), /name: WebKit Browser End-to-End Tests\n        run: pnpm test:e2e:webkit/);
   assert.doesNotMatch(job("suite_plan"), /continue-on-error|pnpm install|pull_request_target/);

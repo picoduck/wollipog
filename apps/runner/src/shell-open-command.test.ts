@@ -5,6 +5,8 @@ import type { SessionMeta } from "./session-store.js";
 import { handleShellOpenCommand, type ShellOpenCommandDependencies } from "./shell-open-command.js";
 import { PendingShellOpenCancellations } from "./pending-shell-open-cancellations.js";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
+import { providerHomeLaunchRefusal } from "./provider-home-launch-refusal.js";
+import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 
 const meta = {
   sessionId: "session-1",
@@ -372,5 +374,43 @@ test("asynchronous TUI preparation never outlives cancellation, deletion, replac
     assert.equal(state.opens, change === "none" ? 1 : 0, change);
     assert.equal(state.replies.length, 1);
     assert.equal(state.replies[0]?.ok, change === "none", change);
+  }
+});
+
+test("a TUI open its provider-HOME lease refused reports the session's typed refusal (#3338)", async () => {
+  const bound = {
+    ...meta, driver: "claude-code", providerAccountId: "work", providerAccountLabel: "Work",
+  } as SessionMeta;
+  for (const code of ["busy", "foreign_owner", "profile_not_granted"] as const) {
+    const state = harness({
+      resolveTarget: () => ({ root: "/repo", context: { kind: "native" }, meta: bound }),
+      resolveAgentTuiLaunch: () => { throw new ProviderHomeLeaseError(code); },
+      providerHomeRefusal: (error, target) => providerHomeLaunchRefusal(error, target, 7),
+    });
+    await handleShellOpenCommand(command("agent_tui"), state.dependencies);
+    assert.equal(state.opens, 0);
+    assert.deepEqual(state.replies, [{
+      type: "shell_open_result", requestId: "request-agent_tui", ok: false,
+      error: new ProviderHomeLeaseError(code).message,
+      providerHomeRefusal: {
+        code, provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 7,
+      },
+    }], code);
+  }
+
+  // Any other failure, and a peer too old to read the refusal, keep the sentence alone.
+  for (const [failure, providerHomeRefusal] of [
+    [new Error("isolation unavailable"), providerHomeLaunchRefusal],
+    [new ProviderHomeLeaseError("busy"), () => undefined],
+  ] as const) {
+    const state = harness({
+      resolveTarget: () => ({ root: "/repo", context: { kind: "native" }, meta: bound }),
+      resolveAgentTuiLaunch: () => { throw failure; },
+      providerHomeRefusal,
+    });
+    await handleShellOpenCommand(command("agent_tui"), state.dependencies);
+    assert.deepEqual(state.replies, [{
+      type: "shell_open_result", requestId: "request-agent_tui", ok: false, error: failure.message,
+    }]);
   }
 });

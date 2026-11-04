@@ -1,14 +1,13 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "./review-retirement.js";
 /**
- * A session's cross-model review of its own pull request, run by the runner outside the session's
- * sandbox (#3306). A protected native session cannot run the review controller itself: its root is
- * read-only and a reviewer sandbox cannot nest inside its user namespace. The runner runs the
- * installed controller for the session's exact pushed head, from a private snapshot, and returns
- * the controller's own summary, report and ledger.
+ * Retired native review bridge wire records. Keep these types for historical reads and terminal
+ * cancellation receipts across mixed versions. New requests use review sessions; no current
+ * runner may launch or resume the legacy controller.
  */
 
 export type SessionReviewHarness = "codex" | "claude-code";
 
-/** What the runner can run; advertised with the runner's runtime metadata. */
+/** Historical runtime metadata, retained for older peers and archived runner records. */
 export interface SessionReviewCapability {
   /** sha256 over the installed controller's files; provenance, not an allowlist. */
   controllerDigest?: string;
@@ -114,6 +113,7 @@ export const SESSION_REVIEW_SUMMARY_LIMIT_BYTES = 2 * 1024;
 export const SESSION_REVIEW_BRIEF_LIMIT_BYTES = 100 * 1024;
 
 const SESSION_REVIEW_REASONS = new Set([
+  REVIEW_JOBS_RETIRED_REASON,
   "the runner has no trusted cross-model review installation",
   "the reviewer for this session's harness is unavailable on this runner",
   "this session's harness has no cross-model reviewer",

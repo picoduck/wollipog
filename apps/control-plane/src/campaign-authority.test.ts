@@ -45,6 +45,11 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   hub.sessionChangedById = () => {};
   const sent: unknown[] = [];
   hub.sendToRunner = (_id, message) => { sent.push(message); return true; };
+  // A GitHub merge's closing-reference read (#3713): these pull requests close no issue.
+  const request = hub.requestFromRunner.bind(hub);
+  hub.requestFromRunner = async (runnerId, requestId, message, timeoutMs) => message.type === "github_merge_preflight"
+    ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } }
+    : request(runnerId, requestId, message, timeoutMs);
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const enable = (delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
     operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
@@ -58,6 +63,52 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   });
   return { db, svc, principal, sent, enable, ask, generic, snapshot, make };
 }
+
+test("#4062 a Full Control merge is the Orchestrator's only while every issue it closes is in scope, and is never assumed to close nothing", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const root = h.db.getSession("root")!, child = h.db.getSession("child")!;
+    const head = "a".repeat(40);
+    const merge = (extra: Record<string, unknown> = {}) => ({ category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 7, headSha: head,
+      reviewResult: "merge", requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] }, ...extra }) as WorkflowDecisionResourceSnapshot;
+    const evaluate = (controller: typeof root, snapshot: WorkflowDecisionResourceSnapshot, protocol = PROTOCOL_VERSION) => {
+      const { owner, reason, unscopedClosures } = evaluateCampaignAuthority(controller, child, protocol, snapshot, controller.parentControlPolicy, PROTOCOL_VERSION);
+      return { owner, reason, ...(unscopedClosures ? { unscopedClosures } : {}) };
+    };
+    const delegated = { owner: "orchestrator", reason: "authorized_operation" };
+    const unverified = { owner: "human", reason: "unverified_closures" };
+    // A current runner reads what GitHub would close, so the declared closures are exact.
+    assert.deepEqual(evaluate(root, merge()), delegated, "a Refs-only merge closes nothing");
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] })), delegated);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["other/repo#2934", "picoduck/wollipog#2934", "picoduck/wollipog#3903"] })),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["other/repo#2934", "picoduck/wollipog#3903"] });
+    // A runner older than that read (v241) proves nothing, and neither does its declaration: a pull
+    // request declaring an in-scope closure could still close an unscoped issue unread.
+    assert.deepEqual(evaluate(root, merge(), 241), unverified);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), unverified);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["picoduck/wollipog#3903"] });
+    // Nothing reads a GitLab merge's closures.
+    const gitlab = "gitlab.example.com/platform/wollipog";
+    const control = structuredClone(root.orchestratorPolicy!.control!);
+    assert.ok(control.mode === "full_control");
+    control.boundary.repository = gitlab;
+    const onGitlab = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control,
+      issueScope: { ...root.orchestratorPolicy!.issueScope!, repository: gitlab } } };
+    assert.equal(campaignBoundaryCurrent(onGitlab), true);
+    assert.deepEqual(evaluate(onGitlab, merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false })), unverified);
+    // A scope that no longer names a closing issue takes the merge back from the Orchestrator.
+    const narrowed = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, issueNumbers: [],
+      issueScope: { ...root.orchestratorPolicy!.issueScope!, issueNumbers: [] } } };
+    assert.equal(evaluate(narrowed, merge({ intendedClosures: ["picoduck/wollipog#2934"] })).reason, "outside_issue_scope");
+    assert.deepEqual(evaluate(narrowed, merge()), delegated);
+    // Custom campaigns keep their saved owner whatever the merge closes.
+    const custom = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control: undefined },
+      parentControlPolicy: { revision: 1, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const } } };
+    assert.deepEqual(evaluate(custom, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241), { owner: "orchestrator", reason: "custom_owner" });
+  } finally { h.db.close(); }
+});
 
 test("pure media authority requires both participant contract inputs and never invents missing metadata", () => {
   const h = harness(223); try {
@@ -514,7 +565,10 @@ test("pending root requests settle on human admission; unavailable delivery beco
   for (const available of [true, false]) {
     const h = harness();
     try {
-      h.generic("root", "already-parked");
+      // A verified one-time effect: the allow path a root's standing authorization still answers.
+      h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "already-parked", occurrenceId: "already-parked", requestSource: "provider_tool",
+        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
       assert.ok(h.db.getSession("root")!.pendingApproval);
       if (!available) (h.svc as unknown as { hub: Hub }).hub.sendToRunner = () => false;
       assert.ok(h.enable().ok);
@@ -533,6 +587,24 @@ test("pending root requests settle on human admission; unavailable delivery beco
       }
     } finally { h.db.close(); }
   }
+});
+
+test("a root's own pending typed decision never blocks its standing allow of a verified effect (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const own = h.ask("root", "own-decision");
+    assert.ok(own.ok, own.error ?? "own decision");
+    assert.equal(own.data!.status, "pending");
+    assert.ok(h.db.getSession("root")!.pendingRequestOwners!.requests!.some((r) => r.occurrenceId === own.data!.occurrenceId), "the root holds its own typed decision");
+    h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "root-tool", occurrenceId: "root-tool", requestSource: "provider_tool",
+      title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
+    const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ sessionId: string; requestId: string; optionId: string }>;
+    assert.deepEqual(resolved.map((m) => [m.sessionId, m.requestId, m.optionId]), [["root", "root-tool", "once"]],
+      "the parked root is allowed once instead of waiting on a request only it could answer");
+    assert.equal(h.db.workflowDecisionByOccurrence(own.data!.occurrenceId)!.status, "pending", "its own typed decision is untouched");
+  } finally { h.db.close(); }
 });
 
 test("live Human Required, deny and withdrawn asks have the same effective owner in every projection and resolution", () => {
@@ -586,7 +658,115 @@ test("ambiguous credential-value choices are declined, never answered, even on t
   } finally { h.db.close(); }
 });
 
-test("a real parked root NDJSON provider resumes after its question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
+test("a typed credential-handling design question is decided by the Orchestrator; one seeking a credential, sign-in or access is declined (#3844)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const design: WorkflowDecisionResourceSnapshot = { category: "implementation_question",
+      question: "Should importing a provider sign-in copy an API key, move an OAuth sign-in, or be unsupported?",
+      options: [{ optionId: "copy", label: "Copy the API key" }, { optionId: "move", label: "Move the OAuth sign-in" },
+        { optionId: "none", label: "Not supported" }], recommendedOptionId: "none" };
+    // The service entry point the request_workflow_decision route calls.
+    const ask = (requestId: string, resourceSnapshot: WorkflowDecisionResourceSnapshot, sessionId = "child") =>
+      h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot }, () => true);
+    // The root decides the same question through its own typed route, as its question notice says.
+    const rootAsked = await ask("root-import-design", design, "root");
+    assert.ok(rootAsked.ok, rootAsked.error ?? "root request failed");
+    assert.equal(rootAsked.data!.authorityEvaluation?.basis, "standing_authorization");
+    assert.equal(rootAsked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.ok(h.svc.resolveDescendantRequest("root", "root", rootAsked.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("root", rootAsked.data!.occurrenceId, { resourceSnapshot: design })).ok);
+    const asked = await ask("import-design", design);
+    assert.ok(asked.ok, asked.error ?? "request failed");
+    assert.equal(asked.data!.authority, "orchestrator");
+    assert.equal(asked.data!.authorityEvaluation?.basis, "campaign_delegation");
+    assert.equal(asked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", asked.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("child", asked.data!.occurrenceId, { resourceSnapshot: design });
+    assert.ok(consumed.ok, consumed.error ?? "consume failed");
+    const option = (label: string): WorkflowDecisionResourceSnapshot => ({ ...design, options: [{ optionId: "none", label: "Not supported" }, { optionId: "b", label }] });
+    for (const [requestId, snapshot] of [
+      ["key-value", { ...design, question: "What API key value should the importer use?" }],
+      ["email-value", option("Use dev@example.com for the profile")],
+      ["sign-in", option("Sign in to the provider now")],
+      ["grant", option("Grant the importer access to the provider account")],
+      ["lasting", option("Always allow the importer to read provider sign-ins")],
+      ["send-url", option("Send the API key to https://collector.example for the provider test")],
+      ["upload-token", option("Upload the token to the shared bucket")],
+      ["pr-description", option("Copy the API key into the PR description")],
+      ["public-log", option("Use the token in the public log")],
+      ["backticked-env", { ...design, question: "Should we load `.env` for the import feature?" }],
+      // CR-2.1 to CR-2.3.
+      ["tell-me", option("Tell me the API key")],
+      ["live-key", option("Copy the live API key into the profile")],
+      ["personal-key", option("Copy the personal API key into the profile")],
+      ["bare-host", option("Copy the API key to metrics.example.test")],
+      ["host-port", option("Copy the API key to metrics.example.test:9090")],
+      ["localhost-port", option("Use the API key on localhost:8080")],
+    ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const sessionId of ["child", "root"]) {
+      const declined = await ask(`${sessionId}-${requestId}`, snapshot, sessionId);
+      assert.equal(declined.ok, false, `${sessionId} ${requestId}`);
+      assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
+    }
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no declined decision is left for anyone to answer");
+    const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+    assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state]).sort(), [["child", "blocked"], ["root", "blocked"]]);
+  } finally { h.db.close(); }
+});
+
+test("questions that only mention credentials or permissions reach their owner; genuine requests are recorded as request_declined (#3913)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const declinedRecords = () => h.db.campaignProjection("root")!.recovery?.records.filter((record) => record.reason === "request_declined") ?? [];
+    const ask = (sessionId: string, requestId: string, question: string) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId,
+      resourceSnapshot: { category: "implementation_question", question, options: [{ optionId: "continue", label: "Continue" }, { optionId: "stop", label: "Stop" }] } }, () => true);
+    const provider = (sessionId: string, requestId: string, question: string) => h.svc.onSessionEvent(sessionId, { kind: "question_request", requestId,
+      occurrenceId: requestId, requestSource: "provider_question", questions: [{ id: "choice", question, options: [{ label: "Continue" }, { label: "Stop" }] }] });
+    const dismissed = (requestId: string) => h.sent.some((m) => (m as { type: string; requestId: string; action?: string }).type === "answer_question" &&
+      (m as { requestId: string }).requestId === requestId && (m as { action?: string }).action === "dismiss");
+    const mentionOnly = [
+      "Option B would widen the workflow's read-only, secret-free permissions so it can poll the GitHub Actions API. Which option should the design take?",
+      "Should the design grant its job the actions: read permission so it can poll the GitHub Actions API?",
+      "Option A would need the CI token to read the GitHub Actions API. Which design should we take?",
+      "Option B would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
+      "The child's question was refused because the campaign cannot supply credentials. Should I continue without that design input?",
+    ];
+    for (const [index, question] of mentionOnly.entries()) {
+      provider("child", `child-mention-${index}`, question);
+      const request = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.occurrenceId === `child-mention-${index}`);
+      assert.equal(request?.responseOwner, "orchestrator", question);
+      assert.equal(request?.authorityEvaluation?.disposition, undefined, `reaches the Orchestrator: ${question}`);
+      assert.ok(!dismissed(`child-mention-${index}`), question);
+      for (const sessionId of ["child", "root"]) {
+        const typed = await ask(sessionId, `${sessionId}-typed-mention-${index}`, question);
+        assert.ok(typed.ok, `${sessionId} typed: ${typed.error ?? question}`);
+        assert.equal(typed.data!.authorityEvaluation?.disposition, undefined, question);
+      }
+      provider("root", `root-mention-${index}`, question);
+      assert.ok(dismissed(`root-mention-${index}`), `a root's own question is dismissed: ${question}`);
+    }
+    assert.equal(declinedRecords().length, 0, "nothing that only mentions credentials is blocked work");
+    for (const [index, question] of ["Please paste your GitHub token here", "Grant this session wider provider access for the design.",
+      "The campaign cannot supply credentials, so paste one here for the design."].entries()) {
+      provider("child", `child-genuine-${index}`, question);
+      assert.ok(dismissed(`child-genuine-${index}`), `declined, never forwarded: ${question}`);
+      for (const sessionId of ["child", "root"]) {
+        const typed = await ask(sessionId, `${sessionId}-typed-genuine-${index}`, question);
+        assert.equal(typed.ok, false, `${sessionId} typed: ${question}`);
+        assert.equal(typed.status, 403, `${sessionId} typed: ${question}`);
+      }
+      provider("root", `root-genuine-${index}`, question);
+      assert.ok(dismissed(`root-genuine-${index}`), question);
+    }
+    assert.deepEqual(declinedRecords().map((record) => [record.resource.sessionId, record.state, record.effectiveOwner]).sort(),
+      [["child", "blocked", "orchestrator"], ["root", "blocked", "orchestrator"]], "one blocked record per session and class");
+  } finally { h.db.close(); }
+});
+
+test("a real parked root NDJSON provider resumes after its dismissed question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-root-authority-"));
   mkdirSync(join(root, "src")); writeFileSync(join(root, "src/authentication.ts"), "export const implementation = true;\n");
   const h = harness(PROTOCOL_VERSION, root, "codex-app-server");
@@ -615,7 +795,8 @@ test("a real parked root NDJSON provider resumes after its question and one-time
     assert.equal(await driver.prompt("Implement the approved authentication feature."), "end_turn", stderr.join("\n"));
     assert.ok(events.includes("Root continued autonomously."));
     assert.equal(h.db.getSession("root")!.pendingApproval, null);
-    assert.equal(h.sent.filter((m) => (m as { type: string }).type === "answer_question").length, 1);
+    assert.deepEqual(h.sent.filter((m) => (m as { type: string }).type === "answer_question").map((m) => (m as { action: string }).action), ["dismiss"],
+      "the root's own question is dismissed, never answered with its recommended option");
     assert.equal(h.sent.filter((m) => (m as { type: string }).type === "resolve_permission").length, 1);
     assert.ok(h.db.listGovernanceAudit("root").filter((a) => a.stage === "resolution").every((a) => a.actor.kind === "system"));
   } finally { driver.dispose(); h.db.close(); rmSync(root, { recursive: true, force: true }); }

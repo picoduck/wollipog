@@ -69,7 +69,7 @@ for (const width of [320, 390, 700, 1280]) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null });
     });
     for (const [state, label] of [
-      ["continuation_pending", "Continuation Pending"],
+      ["continuation_pending", "Follow-Up Pending"],
       ["orphaned", "Background Work Lost"],
       ["resumed", null],
       ["running", "Waiting on External Job"],
@@ -98,7 +98,7 @@ for (const width of [320, 390, 700, 1280]) {
     // background work is a row of the Session Status popover, and the live region keeps announcing it.
     for (const [state, label, announced] of [
       ["running", "Waiting on External Job", "Waiting on External Job"],
-      ["continuation_pending", "Continuation Pending", "Continuation Pending"],
+      ["continuation_pending", "Follow-Up Pending", "Follow-Up Pending"],
       ["orphaned", "Background Work Lost", "Lost"],
     ] as const) {
       await page.evaluate((backgroundWorkState) => {
@@ -368,14 +368,14 @@ for (const width of [320, 1280]) {
     await closePanel(panel);
 
     // A current runner: the notice and the unfinished job's page both offer Stop behind the confirmation
-    // titled with its name, and its restart reports the result to the new conversation instead (#1779).
+    // titled with its name, and its restart reports the result after relaunch instead (#1779).
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await resultBlocked(page);
     panel = await openPanel("Stop Job…");
     await expect(noticeStop).toBeEnabled();
     await notice.getByRole("button", { name: "Show Details" }).click();
     await expect(notice.locator(".facts")).toContainText("Stopping the session also ends the unfinished job but discards " +
-      "this result. Restarting the session ends every job and reports this result to the new conversation.");
+      "this result. Restarting the session ends every job and reports this result after the restart.");
     await noticeStop.click();
     const noticeConfirmation = page.getByRole("alertdialog").or(page.getByRole("dialog", { name: "Stop Monitor Job 7be210" }));
     await expect(noticeConfirmation).toContainText("Stop Monitor Job 7be210");

@@ -261,7 +261,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await expect(parent.locator(".inbox-thread-working")).toHaveText("1 Working");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { backgroundWorkState: "continuation_pending" }));
     await expect(parent.locator(".status")).toHaveText("Children Working");
-    await expect(parent.locator('.inbox-thread-dot[title$="Continuation Pending"]')).toHaveCount(1);
+    await expect(parent.locator('.inbox-thread-dot[title$="Follow-Up Pending"]')).toHaveCount(1);
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { backgroundWorkState: "resumed" }));
     await expect(parent.locator(".status")).toHaveText("Ready for Review");
     await expect(parent.locator(".inbox-thread-working")).toHaveCount(0);

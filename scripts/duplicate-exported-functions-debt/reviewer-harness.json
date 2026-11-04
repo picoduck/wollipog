@@ -1,7 +1,0 @@
-{
-  "reason": "Pre-existing other-family reviewer selection duplicated in runner review jobs and protocol; retained pending reuse of the protocol mapping.",
-  "declarations": [
-    { "path": "apps/runner/src/session-review-jobs.ts", "symbol": "reviewerForDriver" },
-    { "path": "packages/protocol/src/review-session.ts", "symbol": "reviewerHarnessFor" }
-  ]
-}

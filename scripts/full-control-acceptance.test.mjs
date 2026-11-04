@@ -37,6 +37,7 @@ test("filling JSON with fixture proof digests is still incapable of authorizing 
   assert.equal(report.liveExecutionAvailable, false);
   assert.ok(report.requiredIndependentChecks.includes("authenticated_human_envelope"));
   assert.ok(report.requiredIndependentChecks.includes("actual_media_and_cost_proof"));
+  assert.ok(report.requiredIndependentChecks.includes("review_session_plan_migration"));
 });
 
 test("native schema, image modality and added dynamic tools cannot replace an enforced media boundary", () => {

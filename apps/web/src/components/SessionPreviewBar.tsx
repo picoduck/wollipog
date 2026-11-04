@@ -7,6 +7,7 @@ import { AgentIcon } from "./AgentIcon.js";
 import { AlarmClockIcon, ArchiveIcon, BranchIcon, ComputerIcon, MoreHorizontalIcon } from "./Icons.js";
 import { DETAIL_TITLE_READABLE_PX } from "./PageHeader.js";
 import { ConditionBadge } from "./SessionStatusButton.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 
 /** Where the preview's ⋯ asks the Sessions list to open the session's context menu. */
 export type PreviewSessionMenuOpener = (anchor: { x: number; y: number }, restoreTarget: () => HTMLElement | null) => void;
@@ -88,7 +89,7 @@ export function SessionPreviewBar({
     <>
       <header className="detail-bar session-preview-bar">
         <div ref={headingRef} className="detail-bar-heading">
-          <h2 className="detail-bar-title" title={title}>{title}</h2>
+          <h2 className="detail-bar-title" title={title}><SessionTypeIcon session={session} />{title}</h2>
           <span className="detail-bar-status" title={`${primary.meta.label}${more > 0 ? ` and ${more} more` : ""}`}>
             <ConditionBadge condition={primary} />
             {more > 0 && (

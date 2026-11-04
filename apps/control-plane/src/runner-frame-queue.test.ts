@@ -290,3 +290,81 @@ test("a frame that cannot be classified is treated as runner-wide", async () => 
   assert.deepEqual(prepared, ["first", "unclassified", "after"]);
   queue.close();
 });
+
+interface RunFrame { kind: "runtime" | "other"; n: number; prepare?: boolean }
+
+/** A queue that hands consecutive runtime frames to a run handler (#2601), held at frame 0. */
+function runQueue(limit = 3) {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const handled: string[] = [];
+  const queue = new RunnerFrameQueue<RunFrame, string>(async (frame, prepared) => {
+    if (frame.n === 0) await held;
+    handled.push(`single:${frame.n}${prepared ? `:${prepared}` : ""}`);
+  }, () => assert.fail("no failure"), undefined, undefined, undefined, {
+    runnerWide: () => false,
+    prepare: (frame) => frame.prepare ? "prepared" : undefined,
+    discard: () => {},
+  }, {
+    batchable: (frame) => frame.kind === "runtime",
+    limit,
+    handle: async (frames) => { handled.push(`run:${frames.map((frame) => frame.n).join(",")}`); },
+  });
+  return { queue, release, handled };
+}
+
+test("consecutive queued runtime frames are handed over in bounded runs, in arrival order", async () => {
+  const { queue, release, handled } = runQueue(3);
+  queue.enqueue({ kind: "other", n: 0 }, 1);
+  for (let n = 1; n <= 7; n++) queue.enqueue({ kind: "runtime", n }, 1);
+  queue.enqueue({ kind: "other", n: 8 }, 1);
+  queue.enqueue({ kind: "runtime", n: 9 }, 1);
+  queue.enqueue({ kind: "runtime", n: 10 }, 1);
+  release();
+  await settle();
+  assert.deepEqual(handled, ["single:0", "run:1,2,3", "run:4,5,6", "single:7", "single:8", "run:9,10"],
+    "a run never exceeds its limit or crosses another frame; a lone frame keeps the single-frame handler");
+  queue.close();
+});
+
+test("the queue yields to the event loop between runs", async () => {
+  const { queue, release, handled } = runQueue(2);
+  queue.enqueue({ kind: "other", n: 0 }, 1);
+  for (let n = 1; n <= 6; n++) queue.enqueue({ kind: "runtime", n }, 1);
+  release();
+  // Each run is followed by a setImmediate yield, so a loop turn lands between consecutive runs.
+  const seen: string[] = [];
+  for (let n = 0; n < 6; n++) { await tick(); seen.push(handled.join("|")); }
+  assert.ok(seen.includes("single:0|run:1,2"), `a loop turn observed the first run alone: ${JSON.stringify(seen)}`);
+  assert.ok(seen.includes("single:0|run:1,2|run:3,4"));
+  await settle();
+  assert.deepEqual(handled, ["single:0", "run:1,2", "run:3,4", "run:5,6"]);
+  queue.close();
+});
+
+test("a frame carrying a prepared value never joins a run", async () => {
+  const { queue, release, handled } = runQueue(4);
+  queue.enqueue({ kind: "other", n: 0 }, 1);
+  queue.enqueue({ kind: "runtime", n: 1 }, 1);
+  queue.enqueue({ kind: "runtime", n: 2, prepare: true }, 1);
+  queue.enqueue({ kind: "runtime", n: 3 }, 1);
+  queue.enqueue({ kind: "runtime", n: 4 }, 1);
+  release();
+  await settle();
+  assert.deepEqual(handled, ["single:0", "single:1", "single:2:prepared", "run:3,4"]);
+  queue.close();
+});
+
+test("a frame whose run classification throws is handled on its own", async () => {
+  const handled: string[] = [];
+  const queue = new RunnerFrameQueue<RunFrame>(async (frame) => { handled.push(`single:${frame.n}`); },
+    () => assert.fail("no failure"), undefined, undefined, undefined, undefined, {
+      batchable: (frame) => { if (frame.n === 2) throw new TypeError("missing snapshot"); return true; },
+      limit: 8,
+      handle: async (frames) => { handled.push(`run:${frames.map((frame) => frame.n).join(",")}`); },
+    });
+  for (let n = 1; n <= 4; n++) queue.enqueue({ kind: "runtime", n }, 1);
+  await settle();
+  assert.deepEqual(handled, ["single:1", "single:2", "run:3,4"]);
+  queue.close();
+});

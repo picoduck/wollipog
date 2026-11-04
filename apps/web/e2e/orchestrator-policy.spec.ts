@@ -12,13 +12,15 @@ const PAGE = "/new-session-choices-e2e.html?defaults=orchestrator&policy=1";
 /** Normal saved defaults on a current control plane, which takes the role and launches Native TUI. */
 const PLAIN = "/new-session-choices-e2e.html?policy=1&role=1&nativeTui=1";
 
-async function openNewSession(page: Page, query = PAGE): Promise<Locator> {
+async function openNewSession(page: Page, query = PAGE, openOptions = true): Promise<Locator> {
   await page.goto(query);
   const dialog = page.getByRole("dialog", { name: "New Session" });
   await expect(dialog).toBeVisible();
   const head = dialog.getByRole("button", { name: "Options", exact: true });
-  if ((await head.getAttribute("aria-expanded")) !== "true") await head.click();
-  await expect(head).toHaveAttribute("aria-expanded", "true");
+  if (openOptions) {
+    if ((await head.getAttribute("aria-expanded")) !== "true") await head.click();
+    await expect(head).toHaveAttribute("aria-expanded", "true");
+  }
   await dialogMotionSettled(page);
   return dialog;
 }
@@ -104,8 +106,8 @@ test("at 1440px the policy is one summary row with five facts, and Customize… 
  * From the description's top to the footer's top, as the whole body would lay out unscrolled, with
  * Options open and Orchestrator chosen in Role.
  */
-async function descriptionToFooter(page: Page, query: string, chooseOrchestrator: boolean): Promise<number> {
-  const dialog = await openNewSession(page, query);
+async function descriptionToFooter(page: Page, query: string, chooseOrchestrator: boolean, openOptions = true): Promise<number> {
+  const dialog = await openNewSession(page, query, openOptions);
   if (chooseOrchestrator) {
     await dialog.getByRole("radiogroup", { name: "Role" }).getByRole("radio", { name: "Orchestrator" }).click();
   }
@@ -122,9 +124,21 @@ async function descriptionToFooter(page: Page, query: string, chooseOrchestrator
 test.describe("New Session's height with Orchestrator at 1440px (#2955)", () => {
   test.use({ viewport: { width: 1440, height: 1000 } });
 
+  // Choosing Orchestrator no longer opens Options (#3929): Role and its policy sit above it. The
+  // state a person gets from that one click is the 700px budget's; with Options opened as well,
+  // Role's own group adds one form gap and its border (8px) to #2955's 700px.
   test("Orchestrator chosen at its defaults on a current control plane with one account is at most 700px", async ({ page }, testInfo) => {
-    const height = await descriptionToFooter(page, `${PLAIN}&oneAccount=1`, true);
+    const height = await descriptionToFooter(page, `${PLAIN}&oneAccount=1`, true, false);
     testInfo.annotations.push({ type: "Orchestrator chosen, one account: description to footer (px)", description: String(height) });
+    const dialog = page.getByRole("dialog", { name: "New Session" });
+    await expect(dialog.getByRole("button", { name: "Options", exact: true })).toHaveAttribute("aria-expanded", "false");
+    await expect(summaryRow(dialog).locator(".orchestrator-policy-facts > span")).toHaveCount(5);
+    expect(height, `${height}px from the description to the footer`).toBeLessThanOrEqual(700);
+  });
+
+  test("with Options opened as well, it is at most 708px", async ({ page }, testInfo) => {
+    const height = await descriptionToFooter(page, `${PLAIN}&oneAccount=1`, true);
+    testInfo.annotations.push({ type: "Orchestrator chosen, Options open, one account: description to footer (px)", description: String(height) });
     const dialog = page.getByRole("dialog", { name: "New Session" });
     // The plain state: no Account field and no preset notice, the policy as its five facts.
     await expect(dialog.getByRole("button", { name: /^Account:/ })).toHaveCount(0);
@@ -138,7 +152,7 @@ test.describe("New Session's height with Orchestrator at 1440px (#2955)", () => 
       const box = (await seg.boundingBox())!;
       expect(box.x, `${name} sits beside its text`).toBeGreaterThan(text.x + text.width);
     }
-    expect(height, `${height}px from the description to the footer`).toBeLessThanOrEqual(700);
+    expect(height, `${height}px from the description to the footer`).toBeLessThanOrEqual(708);
   });
 
   // Recorded, not asserted: these states are over 700px by their required content (#2955's
@@ -195,7 +209,7 @@ for (const theme of ["dark", "light"] as const) {
 test("a defaults load failure is a compact danger notice with Retry, never the raw error", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 1000 });
   const dialog = await openNewSession(page, "/new-session-choices-e2e.html?defaults=orchestrator&policy=error");
-  const notice = dialog.locator(".session-options-body .notice.t-danger.compact");
+  const notice = dialog.locator(".new-session-role .notice.t-danger.compact");
   await expect(notice).toContainText("Couldn't load your Orchestrator defaults.");
   await expect(notice.getByRole("button", { name: "Retry" })).toBeVisible();
   await expect(dialog).not.toContainText("Failed to fetch");

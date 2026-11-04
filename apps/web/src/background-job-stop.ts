@@ -77,13 +77,29 @@ export function backgroundJobKind(job: Pick<ManagedBackgroundJobView, "launchTyp
   return titleCaseLabel(job.launchType === "unknown" ? "Background Job" : `${job.launchType} Job`);
 }
 
-/** The last six characters of a job's id, which tell two jobs of one kind apart in every turn (#2858). */
+/** Six characters that read as random: letters and digits only, with at least one digit. */
+const RANDOM_LOOKING_SUFFIX = /^(?=[a-z]*[0-9])[a-z0-9]{6}$/i;
+
+/**
+ * Six characters that tell two jobs of one kind apart in every turn (#2858): the id's last six when
+ * they read as random ("a1f3c9"), otherwise six hex characters of a hash of the whole id, so a short
+ * or readable id never shows a cut word ("onitor" from `job-monitor`). The same id always gets the
+ * same suffix.
+ */
 export function backgroundJobShortId(job: Pick<ManagedBackgroundJobView, "id">): string {
-  return job.id.slice(-6);
+  const tail = job.id.slice(-6);
+  if (RANDOM_LOOKING_SUFFIX.test(tail)) return tail;
+  // FNV-1a over the id's UTF-16 code units; 24 of its 32 bits are plenty to separate one session's jobs.
+  let hash = 0x811c9dc5;
+  for (let index = 0; index < job.id.length; index += 1) {
+    hash ^= job.id.charCodeAt(index);
+    hash = Math.imul(hash, 0x01000193);
+  }
+  return (hash >>> 0).toString(16).padStart(8, "0").slice(-6);
 }
 
 /**
- * A job's name everywhere it is shown (#2858): its kind and the end of its id, "Shell Job a1f3c9".
+ * A job's name everywhere it is shown (#2858): its kind and its short id, "Shell Job a1f3c9".
  * The id makes it unique across turns, so two jobs never share a name. A row sets the id in `.mono`
  * `--text-faint` from the two parts; a sentence, a page title or a dialog title uses this whole.
  */

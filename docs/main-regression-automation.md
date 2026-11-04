@@ -58,8 +58,8 @@ controller and health refs. Every claim and charged send/stop intent is durable
 unreadable state requires an operator; it never resets dedupe automatically.
 
 One investigation occupies the repository slot until an authenticated execution
-receipt settles. New snapshots coalesce into one latest pending item, with a
-15-minute observation age. Pending age does not reset on repeated observations.
+receipt settles, or a provably never-sent claim is released as described below.
+New snapshots coalesce into one latest pending item, with a 15-minute observation age. Pending age does not reset on repeated observations.
 Newer work can replace pending work; the active investigation is never cancelled
 to make room. The independently configured automation must also use concurrency
 `wait`. Do not configure a second automation for this repository.
@@ -103,7 +103,30 @@ elapsed-exhaustion or ambiguous-delivery hold. Blocked observations never consum
 If no charged send ever began, positive authoritative resolution/supersession proof
 with no remaining same-snapshot failure safely releases that never-sent claim.
 Unknown health or missing evidence retains it for fresh revalidation; absence is
-not proof of resolution. If only its comparison was withdrawn, a never-sent claim
+not proof of resolution. When authoritative evidence returns at or after the
+original 45-minute deadline and still verifies the failure, the adapter records
+`never-sent-intent-expired` and releases the claim through the same CAS state write.
+The receipt's `expired` field identifies the run, attempt, event and zero charged
+tries. It does not claim resolution of the failure. A later reconciliation may admit
+a different eligible snapshot; the original SHA/suite tombstone stays suppressed.
+Before that deadline, revalidation may send using only the original remaining
+elapsed budget. Expiry never renews its elapsed, retry, model or tool allowances.
+
+Known-never-sent means zero charged sends, zero last-send timestamp, zero stop
+requests and no invocation or execution ID. The same revalidation/release path
+recovers an older `delivery-exhausted` hold only for such an expired claim, provided
+the stored activation binding and prompt already match this adapter. No ad hoc state
+edit is needed for expiry itself under matching pins. Upgrading an already-activated
+installation still requires the reviewed prompt/pin and binding migration described
+below, including any held claim; this expiry path does not bypass that procedure.
+Unknown or incomplete evidence retains both the claim
+and any existing hold. Other holds, exhausted tombstone capacity, and any possibly
+sent delivery remain operator-controlled. `delivery-exhausted-operator-required`
+continues to mean that delivery may have begun and its occupancy is uncertain.
+Never clear that hold solely because health has turned green or history has no
+matching execution. Authenticated execution settlement remains the recovery proof.
+
+If only its comparison was withdrawn, a never-sent claim
 may drop `passing_sha` to `none` before its first send, disabling attribution while
 preserving investigation of the real failure. Once a send was charged, every
 retry preserves the exact original body. The adapter first searches authenticated execution history by its
@@ -133,6 +156,44 @@ counts and pending state. Every operational log carries `entryPoint` and
 `observationId`; active receipts also retain the content-free event, invocation and
 execution IDs for correlation with automation history. No new alert duplicates
 Main CI Health's independent incident signal.
+
+## Escalation Delivery
+
+Refs #3637. **Disabled by default.** An exhausted investigation (`delivery-exhausted` or
+`elapsed-exhausted`, reported as `*-exhausted-operator-required`) used to be visible only as
+a status plus the open **Main CI Is Failing** incident. When the repository variable
+`MAIN_REGRESSION_ESCALATION_MENTION` is set, it is delivered to a human.
+
+- **Where it runs.** `scripts/main-regression-escalation.mjs` runs as a step of Main CI
+  Health's trusted `reconcile` job, after its reconciliation. That job already owns the
+  incident with `issues: write` and runs one at a time (`concurrency: main-ci-health`). It uses
+  the same `github.token`. No credential, secret, permission or new workflow is added. The
+  automation's own job keeps only `contents: write`.
+- **What it does.**
+  1. It reads the automation's CAS state ref. An escalation exists only while the state is
+     blocked as exhausted and still holds the exact investigated run and attempt.
+  2. It finds the open incident.
+  3. It posts one comment that mentions the configured target and starts with
+     `<!-- main-regression-escalation:<run>:<attempt>:<reason> -->`.
+- **Exactly once.** Before posting, it reads the incident's comments, up to 10 pages of 100.
+  A marker counts only on comments by `github-actions[bot]`, so a pasted marker cannot
+  suppress a notification. Health reruns, repeats and later invocations find the marker and
+  do nothing. A new attempt that exhausts again, or the other exhaustion reason, is a new
+  escalation. If the listing cannot be read completely, nothing is posted
+  (`dedup-unavailable`) rather than risking a duplicate.
+- **Configuration.** The value is one to five space- or comma-separated users (`@name`) or
+  teams (`@org/team`). An absent or empty value is disabled, and a malformed value is refused
+  (`invalid-configuration`); neither makes an API call. The body contains only fixed text and
+  the validated run, attempt and reason. The step has its own 16-call budget. A failure is a
+  warning and never changes the health verdict or job result.
+- **Bound and limits.** Delivery happens on Main CI Health's next invocation, from a main
+  CI or rolling-worker completion or its best-effort schedule, not at the moment of
+  exhaustion. With no open incident, it reports `no-open-incident` and nothing is posted.
+  A mention does not prove a human read it. Clearing the block itself stays the operator
+  procedure above.
+
+Enabling it is a separate human step: set `MAIN_REGRESSION_ESCALATION_MENTION` to the
+approved target and read it back. Agents do not set it.
 
 ## Investigation Contract
 

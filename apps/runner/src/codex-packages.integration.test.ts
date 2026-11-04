@@ -15,7 +15,9 @@ const installed = process.env.CODEX_BIN ?? "codex";
 const version = spawnSync(installed, ["--version"], RUN);
 const skip = process.platform !== "linux" || process.getuid?.() === 0
   ? "requires a non-root Linux host"
-  : version.status !== 0 ? "Codex is not installed" : false;
+  : version.status !== 0 ? "Codex is not installed"
+    // Outside a runner boundary, a Codex that cannot sandbox commands refuses to launch (#3843).
+    : spawnSync(installed, ["sandbox", "--", "true"], RUN).status !== 0 ? "Codex cannot sandbox commands on this host" : false;
 
 test("a real Codex App completes turns after its standalone installer cannot write packages", { skip, timeout: 90_000 }, async (t) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-codex-update-")));

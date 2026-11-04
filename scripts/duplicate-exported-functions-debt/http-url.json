@@ -1,7 +1,0 @@
-{
-  "reason": "Pre-existing HTTP(S)-only URL sanitizer duplication awaiting a shared pure implementation; both runner forge metadata and web links must retain their current validation.",
-  "declarations": [
-    { "path": "apps/runner/src/git-ops.ts", "symbol": "safeHttpUrl" },
-    { "path": "apps/web/src/external-href.ts", "symbol": "safeExternalHref" }
-  ]
-}

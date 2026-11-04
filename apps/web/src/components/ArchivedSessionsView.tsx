@@ -1,6 +1,8 @@
 import { Fragment, useCallback, useEffect, useMemo, useRef, useState } from "react";
-import { isTerminal, type ArchiveSessionMetadata, type SessionStatus, type SessionView } from "@wollipog/protocol";
+import { isTerminal, type ArchiveSessionMetadata, type SessionView } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
+import { ApiError } from "../api.js";
+import { readArchiveBrowse, writeArchiveBrowse } from "../archive-browse-history.js";
 import { ARCHIVE_SEARCH_EVENT, pendingArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
 import { sessionUnarchiveRestarts, unarchiveAndRestartFailureMessage } from "../archive-actions.js";
 import { pendingQueuedPromptCount } from "../session-actions.js";
@@ -23,15 +25,19 @@ import { destination, viewPath } from "../navigation.js";
 import { removeFromInstanceKeySet, SESSION_PIN_KEY } from "../pins.js";
 import { useStoreActions, useStoreSelector } from "../store.js";
 import { useFeedback } from "./FeedbackProvider.js";
-import { InboxIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
+import { ArchiveIcon, BotIcon, ChevronLeftIcon, ChevronRightIcon, CloseIcon, HistoryIcon, SearchOffIcon, MoreHorizontalIcon, ProjectsIcon, SearchIcon } from "./Icons.js";
 import { useAccessibleMenu } from "./interactions.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Spinner } from "./common.js";
 import { PageHeader } from "./PageHeader.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { Notice } from "./Notice.js";
-import { State, stateVariant } from "./State.js";
-import { Select } from "./ui/ChoiceControls.js";
+import { State } from "./State.js";
+import { StaleContent } from "./StaleContent.js";
+import { Select, SegmentedControl } from "./ui/ChoiceControls.js";
+import { FilterButton } from "./FilterButton.js";
+import { Modal } from "./Modal.js";
 
 const DEFAULT_FILTERS: ArchiveBrowserFilters = {
   query: "",
@@ -51,12 +57,9 @@ function facetName(value: string): string {
   return decodeURIComponent(value.slice(FACET_VALUE_PREFIX.length));
 }
 
-function LifecycleBadge({ status }: { status: SessionStatus }) {
-  return <StatusBadge meta={statusMeta("session", status)} />;
-}
-
-function plainSnippet(snippet: string | undefined): string | null {
-  return snippet ? snippet.replace(/[⟪⟫]/g, "") : null;
+function HighlightedSnippet({ snippet }: { snippet: string }) {
+  return <>{snippet.split(/(⟪[^⟫]*⟫)/g).map((part, index) => part.startsWith("⟪")
+    ? <mark key={index}>{part.slice(1, -1)}</mark> : part)}</>;
 }
 
 function locallyMatches(
@@ -116,7 +119,7 @@ function reconcileLocally(
     : "exclude";
 }
 
-export function ArchivedSessionsView() {
+export function ArchivedSessionsView({ restoreBrowse = false, initialSearch }: { restoreBrowse?: boolean; initialSearch?: string }) {
   const api = useApi();
   const instanceScope = useInstanceScope();
   const { confirm, showToast, showUndo } = useFeedback();
@@ -140,15 +143,27 @@ export function ArchivedSessionsView() {
   const connectionLostRef = useRef(false);
   const revalidateAfterLoadRef = useRef(false);
   // A query handed over by the palette's "Search Archived Sessions" (#1978) is the first search.
-  const [filters, setFilters] = useState(() => ({ ...DEFAULT_FILTERS, query: pendingArchiveSearch() ?? "" }));
-  const [queryInput, setQueryInput] = useState(() => pendingArchiveSearch() ?? "");
-  const [page, setPage] = useState(1);
-  const [cursors, setCursors] = useState<Array<string | null>>([null]);
+  const [restored] = useState(() => restoreBrowse && initialSearch === undefined && pendingArchiveSearch() === null ? readArchiveBrowse() : null);
+  const restorePositionRef = useRef(restored);
+  const sectionRef = useRef<HTMLElement>(null);
+  const lastRowRef = useRef(restored?.rowId ?? null);
+  const [pageChanged, setPageChanged] = useState(false);
+  const [filters, setFilters] = useState(() => restored?.filters ?? { ...DEFAULT_FILTERS, query: initialSearch ?? pendingArchiveSearch() ?? "" });
+  const [queryInput, setQueryInput] = useState(() => restored?.filters.query ?? initialSearch ?? pendingArchiveSearch() ?? "");
+  const [filtersOpen, setFiltersOpen] = useState(false);
+  const searchRef = useRef<HTMLInputElement>(null);
+  const filtersDoneRef = useRef<HTMLButtonElement>(null);
+  const [page, setPage] = useState(restored?.page ?? 1);
+  const [cursors, setCursors] = useState<Array<string | null>>(restored?.cursors ?? [null]);
   const [nextCursor, setNextCursor] = useState<string | null>(null);
   const [facets, setFacets] = useState({ projects: [] as string[], locations: [] as string[], agents: [] as string[] });
   const [pageMetadata, setPageMetadata] = useState<Record<string, ArchiveSessionMetadata>>({});
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [refreshError, setRefreshError] = useState(false);
+  const [loadedKey, setLoadedKey] = useState<string | null>(null);
+  const loadedKeyRef = useRef<string | null>(null);
+  const [showSkeleton, setShowSkeleton] = useState(false);
   const [busyIds, setBusyIds] = useState(() => new Set<string>());
   const [transcriptHits, setTranscriptHits] = useState(() => new Map<string, string>());
   const locationNames = useMemo(() => new Map(
@@ -159,9 +174,13 @@ export function ArchivedSessionsView() {
 
   const catalogRef = useRef(catalog);
   catalogRef.current = catalog;
+  const requestKey = JSON.stringify([filters, page, cursors[page - 1] ?? null]);
   const refreshCatalog = useCallback(async () => {
     const requestSequence = ++requestSequenceRef.current;
+    const replacement = loadedKeyRef.current !== requestKey;
     setLoading(true);
+    setError(null);
+    setRefreshError(false);
     try {
       const response = await api.archiveSessionPage({
         cursor: cursors[page - 1] ?? undefined,
@@ -200,15 +219,65 @@ export function ArchivedSessionsView() {
       setPageMetadata(response.metadata);
       setNextCursor(response.nextCursor);
       setFacets(response.facets);
+      loadedKeyRef.current = requestKey;
+      setLoadedKey(requestKey);
       setError(null);
     } catch (cause) {
       if (requestSequence !== requestSequenceRef.current) return;
-      setError(`Could not load archived sessions: ${(cause as Error).message}`);
+      if (restorePositionRef.current && page > 1 && cause instanceof ApiError && cause.status === 400) {
+        restorePositionRef.current = null;
+        const scroller = sectionRef.current?.closest(".main-body");
+        if (scroller) scroller.scrollTop = 0;
+        setPageChanged(true);
+        setPage(1);
+        setCursors([null]);
+        setError(null);
+        return;
+      }
+      if (!replacement && catalogRef.current.size > 0) setRefreshError(true);
+      else {
+        setCatalog(new Map());
+        setNextCursor(null);
+        setError((cause as Error).message);
+      }
     } finally {
       if (requestSequence === requestSequenceRef.current) setLoading(false);
     }
-  }, [api, cursors, filters, page]);
+  }, [api, cursors, filters, page, requestKey]);
   refreshCatalogRef.current = refreshCatalog;
+
+  const saveBrowse = useCallback((rowId = lastRowRef.current) => {
+    lastRowRef.current = rowId;
+    writeArchiveBrowse({ filters, page, cursors,
+      scrollTop: sectionRef.current?.closest(".main-body")?.scrollTop ?? 0, rowId });
+  }, [filters, page, cursors]);
+  useEffect(() => {
+    if (!restorePositionRef.current) saveBrowse();
+    const scroller = sectionRef.current?.closest(".main-body");
+    let timer: number | undefined;
+    const onScroll = () => {
+      if (restorePositionRef.current) return;
+      window.clearTimeout(timer);
+      timer = window.setTimeout(() => { timer = undefined; saveBrowse(); }, 200);
+    };
+    scroller?.addEventListener("scroll", onScroll, { passive: true });
+    return () => {
+      scroller?.removeEventListener("scroll", onScroll);
+      window.clearTimeout(timer);
+    };
+  }, [saveBrowse]);
+  useEffect(() => {
+    if (loading || error || !restorePositionRef.current) return;
+    const context = restorePositionRef.current;
+    restorePositionRef.current = null;
+    const scroller = sectionRef.current?.closest(".main-body");
+    if (scroller) scroller.scrollTop = context.scrollTop;
+    const row = [...(sectionRef.current?.querySelectorAll<HTMLElement>("[data-archive-row]") ?? [])]
+      .find((node) => node.dataset.archiveRow === context.rowId);
+    row?.scrollIntoView?.({ block: "nearest" });
+    if (window.matchMedia("(min-width: 761px) and (pointer: fine)").matches) row?.focus({ preventScroll: true });
+    saveBrowse();
+  }, [loading, error, saveBrowse]);
 
   const scheduleLiveRevalidation = useCallback(() => {
     if (liveRevalidationTimerRef.current !== null) return;
@@ -224,7 +293,15 @@ export function ArchivedSessionsView() {
     takeArchiveSearch();
     const onArchiveSearch = () => {
       const query = takeArchiveSearch();
-      if (query !== null) setQueryInput(query);
+      if (query !== null) {
+        restorePositionRef.current = null;
+        lastRowRef.current = null;
+        setPageChanged(false);
+        setQueryInput(query);
+        setFilters({ ...DEFAULT_FILTERS, query });
+        setPage(1);
+        setCursors([null]);
+      }
     };
     window.addEventListener(ARCHIVE_SEARCH_EVENT, onArchiveSearch);
     return () => window.removeEventListener(ARCHIVE_SEARCH_EVENT, onArchiveSearch);
@@ -233,6 +310,7 @@ export function ArchivedSessionsView() {
   useEffect(() => {
     if (filters.query === queryInput) return;
     const timer = window.setTimeout(() => {
+      setPageChanged(false);
       setFilters((current) => ({ ...current, query: queryInput }));
       setPage(1);
       setCursors([null]);
@@ -331,14 +409,78 @@ export function ArchivedSessionsView() {
   }, [conn, loading, refreshCatalog]);
 
   const pageSessions = useMemo(() => [...catalog.values()], [catalog]);
-  const hasActiveFilters = Boolean(queryInput) || filters.project !== null || filters.location !== null ||
+  const hasActiveFilters = Boolean(queryInput.trim()) || filters.project !== null || filters.location !== null ||
     filters.agent !== null || filters.lifecycle !== "all" || filters.archive !== "archived";
+  const offline = conn === "offline" || conn === "unauthorized" || (conn === "connecting" && hasBeenOnlineRef.current);
+  // Mark rows as stale immediately, including the search debounce interval.
+  const replacing = loadedKey !== null && (loadedKey !== requestKey || queryInput !== filters.query);
+  const pending = !error && (replacing || loading && (loadedKey === null || pageSessions.length === 0));
+  const noMatches = !offline && !pending && !error && pageSessions.length === 0 && hasActiveFilters;
+  useEffect(() => {
+    setShowSkeleton(false);
+    if (!pending || pageSessions.length > 0 || offline) return;
+    const timer = window.setTimeout(() => setShowSkeleton(true), 300);
+    return () => window.clearTimeout(timer);
+  }, [pending, pageSessions.length, offline]);
 
   const changeFilter = <K extends keyof ArchiveBrowserFilters>(key: K, value: ArchiveBrowserFilters[K]) => {
+    restorePositionRef.current = null;
+    setPageChanged(false);
     setFilters((current) => ({ ...current, [key]: value }));
     setPage(1);
     setCursors([null]);
   };
+
+  const appliedFilters = [
+    { key: "project" as const, label: "Project", value: filters.project },
+    { key: "location" as const, label: "Location", value: filters.location },
+    { key: "agent" as const, label: "Agent", value: filters.agent },
+    { key: "lifecycle" as const, label: "Status", value: filters.lifecycle === "all" ? null : canonicalLifecycleLabel(filters.lifecycle) },
+    { key: "archive" as const, label: "Show", value: filters.archive === "archived" ? null : filters.archive === "all" ? "All" : "Not Archived" },
+  ].filter((filter) => filter.value !== null);
+  const clearFilters = () => {
+    restorePositionRef.current = null;
+    setPageChanged(false);
+    // The Clear Filters button disappears with the last chip; leave focus on a durable control.
+    if (filtersOpen) filtersDoneRef.current?.focus();
+    else searchRef.current?.focus();
+    setFilters((current) => ({ ...DEFAULT_FILTERS, query: current.query }));
+    setPage(1); setCursors([null]);
+  };
+  const showSegments = <SegmentedControl label="Show" value={filters.archive}
+    options={[{ value: "archived", label: "Archived" }, { value: "unarchived", label: "Not Archived" }, { value: "all", label: "All" }]}
+    onChange={(value) => changeFilter("archive", value)} />;
+  const filterFields = (toolbar: boolean) => <>
+    {(["project", "location", "agent"] as const).map((key) => {
+      const label = { project: "Project", location: "Location", agent: "Agent" }[key];
+      const values = facets[`${key}s`];
+      // Keep a selected value available even if a refreshed facet list no longer contains it.
+      const choices = filters[key] !== null && !values.includes(filters[key]) ? [filters[key], ...values] : values;
+      return <div key={key} className={toolbar ? undefined : "field"}>
+        {!toolbar && <span>{label}</span>}
+        <Select label={label} value={filters[key] === null ? "all" : facetValue(filters[key])}
+          options={[{ value: "all", label: `All ${label}s` }, ...choices.map((value) => ({ value: facetValue(value), label: value }))]}
+          searchable={values.length > 12} noun={`${key}s`}
+          triggerLabel={toolbar ? label : undefined}
+          triggerClassName={toolbar ? `filter-btn${filters[key] !== null ? " is-set" : ""}` : undefined}
+          onChange={(value) => changeFilter(key, value === "all" ? null : facetName(value))} />
+      </div>;
+    })}
+    <div className={toolbar ? undefined : "field"}>
+      {!toolbar && <span>Status</span>}
+      <Select label="Status" value={filters.lifecycle}
+        options={[{ value: "all", label: "Any Status" }, ...SESSION_LIFECYCLE_STATES.map((value) => ({ value, label: canonicalLifecycleLabel(value) }))]}
+        searchable={SESSION_LIFECYCLE_STATES.length > 12}
+        triggerLabel={toolbar ? "Status" : undefined}
+        triggerClassName={toolbar ? `filter-btn${filters.lifecycle !== "all" ? " is-set" : ""}` : undefined}
+        onChange={(value) => changeFilter("lifecycle", value)} />
+    </div>
+  </>;
+  const searchingStatus = "Searching…";
+  const reconnectingStatus = "Reconnecting…";
+  const resultSummary = offline ? (pageSessions.length > 0 ? reconnectingStatus : "") : pending ? (pageSessions.length > 0 ? searchingStatus : "") : error ? ""
+    : page > 1 || nextCursor ? `Page ${page}`
+    : `${pageSessions.length} session${pageSessions.length === 1 ? "" : "s"}${filters.query.trim() ? ` ${pageSessions.length === 1 ? "matches" : "match"} “${filters.query.trim()}”` : ""}`;
 
   const setBusy = (id: string, value: boolean) => {
     setBusyIds((current) => {
@@ -356,11 +498,14 @@ export function ArchivedSessionsView() {
       new Set(transcriptHits.keys()),
     );
     setCatalog((current) => {
+      // A mutation may finish after a replacement discarded this bounded page. Only the
+      // archive endpoint can establish membership in the new page or search.
+      if (!current.has(session.id)) return current;
       const next = mergeArchiveSessionCatalog(current, [session]);
       if (reconciliation === "exclude") next.delete(session.id);
       return next;
     });
-    if (reconciliation === "revalidate") scheduleLiveRevalidation();
+    if (catalogRef.current.has(session.id) && reconciliation === "revalidate") scheduleLiveRevalidation();
     loadSession(session);
   };
 
@@ -374,7 +519,7 @@ export function ArchivedSessionsView() {
         await refreshCatalogRef.current();
       });
     } catch (cause) {
-      showToast(`Could not unarchive session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't unarchive “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
@@ -387,10 +532,13 @@ export function ArchivedSessionsView() {
       const restarted = await api.unarchiveAndRestart(session.id);
       updateSession(restarted);
       showToast("Session restored and restarting.");
+      saveBrowse(restarted.id);
       navigate({ name: "session", id: restarted.id });
     } catch (cause) {
       const failure = unarchiveAndRestartFailureMessage(cause);
-      showToast(failure.message, { tone: "error" });
+      showToast(failure.ambiguous ? failure.message : `Couldn't unarchive “${session.title || session.id}”.`, {
+        tone: "error", detail: (cause as Error).message,
+      });
       if (failure.ambiguous) void refreshCatalogRef.current();
     } finally {
       setBusy(session.id, false);
@@ -406,19 +554,20 @@ export function ArchivedSessionsView() {
       updateSession(updated);
       showToast("Stop retry requested.");
     } catch (cause) {
-      showToast(`Could not retry stopping session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't retry the stop for “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
   };
 
-  const stop = async (session: SessionView) => {
+  const stop = async (session: SessionView, back?: ConfirmBack) => {
     // The live copy carries the runner's queue, which the archive page's REST rows can lack (a steer
     // converted to a queued prompt exists only on the runner), and it is what the session header counts.
     const queued = (liveSessionsRef.current.get(session.id) ?? session).queued;
     const approved = await confirm({
       title: "Stop Session",
-      message: stopArchivedSessionMessage(session.title, pendingQueuedPromptCount(queued)),
+      message: stopArchivedSessionMessage(session.title, pendingQueuedPromptCount(queued), session.archived),
+      back,
       confirmLabel: "Stop Session",
       tone: "danger",
     });
@@ -428,16 +577,17 @@ export function ArchivedSessionsView() {
       updateSession(await api.stop(session.id));
       showToast("Session stopped.");
     } catch (cause) {
-      showToast(`Could not stop session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't stop “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
   };
 
-  const deleteSession = async (session: SessionView) => {
+  const deleteSession = async (session: SessionView, back?: ConfirmBack) => {
     const approved = await confirm({
       title: "Delete Session",
       message: deleteSessionMessage(session.title),
+      back,
       confirmLabel: "Delete Session",
       tone: "danger",
     });
@@ -456,300 +606,203 @@ export function ArchivedSessionsView() {
       dispatch({ type: "msg", msg: { type: "session_removed", sessionId: session.id } });
       showToast("Session deleted.");
     } catch (cause) {
-      showToast(`Could not delete session: ${(cause as Error).message}`, { tone: "error" });
+      showToast(`Couldn't delete “${session.title || session.id}”.`, { tone: "error", detail: (cause as Error).message });
     } finally {
       setBusy(session.id, false);
     }
   };
 
   return (
-    <section className="page wide archive-view" aria-labelledby="page-title">
-      <PageHeader title={destination("archived").name} />
+    <section ref={sectionRef} className="page archive-view" aria-labelledby="page-title">
+      <PageHeader title={destination("archived").name} description={destination("archived").description} />
       <div className="toolbar">
-        <label className="archive-search">
-          <span>Search Sessions and Transcripts</span>
-          <div>
-            <SearchIcon size={16} aria-hidden="true" />
-            <input
-              type="search"
-              value={queryInput}
-              onChange={(event) => setQueryInput(event.target.value)}
-              placeholder="Search sessions and transcripts"
-            />
-          </div>
-        </label>
-        <fieldset className="archive-filters">
-          <legend className="sr-only">Archived Session Filters</legend>
-          <div className="archive-filter"><span className="field-label">Project</span><Select
-            label="Project"
-            value={filters.project === null ? "all" : facetValue(filters.project)}
-            options={[{ value: "all", label: "All Projects" }, ...facets.projects.map((value) => ({ value: facetValue(value), label: value }))]}
-            onChange={(value) => changeFilter("project", value === "all" ? null : facetName(value))}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Location</span><Select
-            label="Location"
-            value={filters.location === null ? "all" : facetValue(filters.location)}
-            options={[{ value: "all", label: "All Locations" }, ...facets.locations.map((value) => ({ value: facetValue(value), label: value }))]}
-            onChange={(value) => changeFilter("location", value === "all" ? null : facetName(value))}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Agent</span><Select
-            label="Agent"
-            value={filters.agent === null ? "all" : facetValue(filters.agent)}
-            options={[{ value: "all", label: "All Agents" }, ...facets.agents.map((value) => ({ value: facetValue(value), label: value }))]}
-            onChange={(value) => changeFilter("agent", value === "all" ? null : facetName(value))}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Archive State</span><Select<ArchiveBrowserFilters["archive"]>
-            label="Archive State"
-            value={filters.archive}
-            options={[
-              { value: "archived", label: "Archived" },
-              { value: "unarchived", label: "Not Archived" },
-              { value: "all", label: "All Sessions" },
-            ]}
-            onChange={(value) => changeFilter("archive", value)}
-          /></div>
-          <div className="archive-filter"><span className="field-label">Lifecycle State</span><Select<ArchiveBrowserFilters["lifecycle"]>
-            label="Lifecycle State"
-            value={filters.lifecycle}
-            options={[
-              { value: "all", label: "All Lifecycle States" },
-              ...SESSION_LIFECYCLE_STATES.map((status) => ({ value: status, label: canonicalLifecycleLabel(status) })),
-            ]}
-            onChange={(value) => changeFilter("lifecycle", value)}
-          /></div>
-          <button type="button" className="btn ghost sm" onClick={() => {
-            setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]);
-          }}>
-            Reset Filters
-          </button>
-        </fieldset>
+        <div className="archive-query">
+          <SearchIcon size={16} aria-hidden="true" />
+          <input ref={searchRef} type="search" aria-label="Search Titles and Transcripts" value={queryInput}
+            onChange={(event) => { restorePositionRef.current = null; setQueryInput(event.target.value); }} placeholder="Search titles and transcripts" />
+          {queryInput && !noMatches && <button type="button" className="icon-btn sm" aria-label="Clear Search"
+            onClick={() => { restorePositionRef.current = null; setQueryInput(""); searchRef.current?.focus(); }}><CloseIcon size={14} /></button>}
+        </div>
+        <div className="archive-show"><span className="field-label">Show:</span>{showSegments}</div>
+        <div className="archive-desktop-facets">{filterFields(true)}</div>
+        <div className="archive-sheet-trigger"><FilterButton applied={appliedFilters.length}
+          expanded={filtersOpen} onClick={() => setFiltersOpen(true)} /></div>
       </div>
+      {appliedFilters.length > 0 && <div className="chips" aria-label="Applied Filters">
+        {appliedFilters.map(({ key, label, value }) => <button type="button" className="chip" key={key}
+          aria-label={`Remove ${label}: ${value}`}
+          onClick={() => { searchRef.current?.focus(); changeFilter(key, DEFAULT_FILTERS[key]); }}>
+          {label}: {value} <CloseIcon size={14} />
+        </button>)}
+        {!noMatches && <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>}
+      </div>}
+      {filtersOpen && <Modal title="Filters" size="sm" onClose={() => setFiltersOpen(false)}
+        tertiary={appliedFilters.length > 0 ? <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button> : undefined}
+        footer={<button ref={filtersDoneRef} type="button" className="btn primary" onClick={() => setFiltersOpen(false)}>Done</button>}>
+        <p role="status" aria-live="polite" aria-atomic="true">{resultSummary}</p>
+        <div className="archive-sheet-show field"><span>Show</span>{showSegments}</div>
+        {filterFields(false)}
+      </Modal>}
 
-      <div className="archive-results-summary" role="status" aria-live="polite">
-        Showing {pageSessions.length} Session{pageSessions.length === 1 ? "" : "s"}
+      <div role={filtersOpen ? undefined : "status"} aria-live={filtersOpen ? undefined : "polite"} aria-atomic="true">
+        {resultSummary && <div className="count">{resultSummary}</div>}
       </div>
+      {pageChanged && <Notice tone="neutral" compact role="status">That page changed. Showing page 1.</Notice>}
 
-      {error && pageSessions.length > 0 && (
-        <Notice tone="danger" compact role="alert"
-          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Try Again</button>}>
-          {error}
+      {refreshError && !offline && !pending && pageSessions.length > 0 && (
+        <Notice tone="warning" compact
+          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Retry</button>}>
+          Couldn't refresh archived sessions. Showing the last results.
         </Notice>
       )}
-      {pageSessions.length === 0 && stateVariant({
-        // A cold load's first attempt is not a lost connection; a retry after one is (§12.5).
-        offline: conn === "offline" || conn === "unauthorized" || (conn === "connecting" && hasBeenOnlineRef.current),
-        loading: loading,
-        error: Boolean(error),
-      }) === "offline" ? (
+      <div role="region" aria-label="Archived Session Results" aria-busy={pending}>
+      {offline && pageSessions.length === 0 ? (
         <State variant="offline">Reconnecting…</State>
-      ) : loading && pageSessions.length === 0 ? (
-        <State variant="loading">Loading archived sessions…</State>
-      ) : error && pageSessions.length === 0 ? (
+      ) : pending && pageSessions.length === 0 ? (
+        showSkeleton && <>
+          <div className="surface skeleton archive-skeleton" aria-hidden="true">
+            {Array.from({ length: 5 }, (_, index) => <div className="row row-2 archive-skeleton-row" key={index}>
+              <span className="skeleton-bar" /><span className="skeleton-bar" />
+            </div>)}
+          </div>
+          <p role="status">Loading archived sessions…</p>
+        </>
+      ) : error ? (
         <State variant="error" title="Couldn't Load Archived Sessions"
-          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Try Again</button>}>
-          {error}
+          details={error}
+          actions={<button className="btn sm" type="button" onClick={() => void refreshCatalog()}>Retry</button>}>
+          Wollipog didn't answer. Your archived sessions are unchanged.
         </State>
       ) : pageSessions.length === 0 ? (
         <State
           variant={hasActiveFilters ? "no-results" : "empty"}
-          title={hasActiveFilters
-            ? "No Matching Sessions"
-            : `No ${destination("archived").name}`}
-          icon={<InboxIcon />}
-          actions={<button type="button" className={hasActiveFilters ? "btn sm" : "btn primary"} onClick={() => {
-            if (hasActiveFilters) { setQueryInput(""); setFilters(DEFAULT_FILTERS); setPage(1); setCursors([null]); }
-            else navigate({ name: "inbox" });
-          }}>{hasActiveFilters ? "Reset Filters" : "Go to Sessions"}</button>}
+          pageLevel={!hasActiveFilters}
+          live={false}
+          title={hasActiveFilters ? undefined : `No ${destination("archived").name}`}
+          icon={hasActiveFilters ? <SearchOffIcon /> : <ArchiveIcon />}
+          actions={hasActiveFilters ? <>
+            {queryInput.trim() && <button type="button" className="btn ghost sm" onClick={() => { restorePositionRef.current = null; setPageChanged(false); setQueryInput(""); searchRef.current?.focus(); }}>Clear Search</button>}
+            {appliedFilters.length > 0 && <button type="button" className="btn ghost sm" onClick={clearFilters}>Clear Filters</button>}
+          </> : <button type="button" className="btn sm" onClick={() => navigate({ name: "inbox" })}>Go to Sessions</button>}
         >
           {hasActiveFilters
-            ? "Try clearing search text or changing a filter."
-            : "Archived sessions will appear here with their lifecycle state and transcript."}
+            ? `No archived sessions match${queryInput.trim() ? ` “${queryInput.trim()}”` : ""}${filters.project ? ` in ${filters.project}` : ""}${filters.location ? ` at ${filters.location}` : ""}${filters.agent ? ` with ${filters.agent}` : ""}${filters.lifecycle !== "all" ? ` with status ${canonicalLifecycleLabel(filters.lifecycle)}` : ""}${filters.archive !== "archived" ? ` in ${filters.archive === "all" ? "All" : "Not Archived"}` : ""}.`
+            : "Sessions you archive are kept here with their transcripts. Open one to read it, or restore it to keep working."}
         </State>
       ) : (
-        <div className="table-wrap archive-table-wrap" role="region" aria-label="Archived Sessions Table" tabIndex={0}>
-          <table className="table archive-table">
-            <thead><tr>
-              <th scope="col">Session</th>
-              <th scope="col" className="col-state">State</th>
-              <th scope="col" className="col-project">Project</th>
-              <th scope="col" className="col-location">Location</th>
-              <th scope="col" className="col-agent">Agent</th>
-              <th scope="col" className="col-created">Created</th>
-              <th scope="col" className="col-actions actions-cell">Actions</th>
-            </tr></thead>
-            <tbody>
-              {pageSessions.map((session) => {
-                const rowMetadata = pageMetadata[session.id] ?? archiveSessionMetadata(session, locationNames);
-                const timestamp = formatRecordedTimestamp(session.createdAt);
-                const busy = busyIds.has(session.id);
-                const snippet = plainSnippet(transcriptHits.get(session.id));
-                const target = { name: "session" as const, id: session.id };
-                const stopPending = (session as SessionView & { archiveStatus?: string }).archiveStatus === "stop_pending";
-                const stopFailed = session.archiveStatus === "stop_failed";
-                const showStop = stopPending || stopFailed || !isTerminal(session.status);
-                // A row action the server would refuse this person stays listed but disabled, and
-                // the row describes why once for every such action.
-                const unarchiveRefusal = session.archived ? sessionCommandRefusal(session, "unarchive") : null;
-                const stopRefusal = showStop ? sessionCommandRefusal(session, "stop") : null;
-                const deleteRefusal = session.archived ? sessionCommandRefusal(session, "delete") : null;
-                // §14: one inline action and ⋯ for the rest; the title link is the row's open target.
-                const actions: ArchiveRowAction[] = [];
-                if (session.archived) {
-                  actions.push(sessionUnarchiveRestarts(session, unarchiveAndRestartSupported)
-                    ? { label: "Unarchive and Restart", refusal: unarchiveRefusal, run: () => void unarchiveAndRestart(session) }
-                    : { label: "Unarchive", refusal: unarchiveRefusal, run: () => void unarchive(session) });
-                }
-                if (stopPending || stopFailed) actions.push({ label: "Retry Stop", refusal: stopRefusal, run: () => void retryStop(session) });
-                else if (showStop) actions.push({ label: "Stop", refusal: stopRefusal, run: () => void stop(session) });
-                actions.push({ label: "Open", refusal: null, run: () => { loadSession(session); navigate(target); } });
-                if (session.archived) actions.push({ label: "Delete", refusal: deleteRefusal, danger: true, run: () => void deleteSession(session) });
-                return (
-                  <tr key={session.id}>
-                    <td className="archive-session-cell">
-                      <a href={viewPath(target)} onClick={(event) => {
-                        if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
-                        event.preventDefault();
-                        loadSession(session);
-                        navigate(target);
-                      }}>{session.title || session.id}</a>
-                      {/* The compact tier (§15.2) folds the Project, Location and Agent columns into
-                          this line; elsewhere it is not rendered and those columns show. */}
-                      <span className="archive-session-meta">
-                        <span><span className="sr-only">Project: </span><ProjectsIcon size={14} /> {rowMetadata.project}</span>
-                        {" · "}<span><span className="sr-only">Location: </span>{rowMetadata.location}</span>
-                        {" · "}<span><span className="sr-only">Agent: </span>{rowMetadata.agent}</span>
-                      </span>
-                      {snippet && filters.query.trim().length >= 3 && <small>{snippet}</small>}
-                    </td>
-                    <td className="cell-status"><div className="archive-state-badges">
-                      {session.archived
-                        ? <StatusBadge meta={statusMeta("session", "archived")} />
-                        : <StatusBadge tone="neutral" noDot label="Not Archived" />}
-                      <LifecycleBadge status={session.status} />
-                      {session.historyPruned && <StatusBadge tone="neutral" noDot label="History Pruned"
-                        title={historyPrunedTitle(session.historyPruned)} />}
-                      {stopFailed && <StatusBadge meta={statusMeta("session", "stop_failed")}
-                        title={session.archiveOperation?.failure?.message} />}
-                      {stopPending && <StatusBadge meta={statusMeta("session", runners.get(session.runnerId)?.status === "offline"
-                        ? "stop_waiting_for_runner"
-                        : "stop_pending")} />}
-                    </div></td>
-                    <td className="col-project cell-meta cell-fill cell-dim" title={rowMetadata.project}><span className="cell-label" aria-hidden="true"><ProjectsIcon size={14} /> </span>{rowMetadata.project}</td>
-                    <td className="col-location cell-extra cell-dim">{rowMetadata.location}</td>
-                    <td className="col-agent cell-extra cell-dim">{rowMetadata.agent}</td>
-                    <td className="cell-meta cell-dim"><span className="cell-label" aria-hidden="true">Created </span><time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time></td>
-                    <td className="actions-cell">
-                      <ArchiveRowActions sessionId={session.id} title={session.title || session.id} actions={actions} busy={busy} />
-                    </td>
-                  </tr>
-                );
-              })}
-            </tbody>
-          </table>
-        </div>
+        <StaleContent stale={offline || replacing} className="surface archive-list">
+          {pageSessions.map((session) => {
+            const metadata = pageMetadata[session.id] ?? archiveSessionMetadata(session, locationNames);
+            const title = session.title || session.id;
+            const timestamp = formatRecordedTimestamp(session.createdAt);
+            const snippet = transcriptHits.get(session.id);
+            const target = { name: "session" as const, id: session.id };
+            const openSession = () => { saveBrowse(session.id); loadSession(session); navigate(target); };
+            const stopPending = session.archiveStatus === "stop_pending";
+            const stopFailed = session.archiveStatus === "stop_failed";
+            const showStop = stopPending || stopFailed || !isTerminal(session.status);
+            const badge = stopFailed ? statusMeta("session", "stop_failed")
+              : stopPending ? statusMeta("session", runners.get(session.runnerId)?.status === "offline" ? "stop_waiting_for_runner" : "stop_pending")
+              : !session.archived ? statusMeta("session", session.status)
+              : filters.archive === "all" ? statusMeta("session", "archived") : null;
+            const restore: ArchiveRowAction | null = session.archived ? {
+              label: sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) ? "Unarchive and Restart" : "Unarchive",
+              refusal: sessionCommandRefusal(session, "unarchive"),
+              run: () => void (sessionUnarchiveRestarts(session, unarchiveAndRestartSupported) ? unarchiveAndRestart(session) : unarchive(session)),
+            } : null;
+            const retry: ArchiveRowAction = {
+              label: "Retry Stop", refusal: sessionCommandRefusal(session, "stop"),
+              description: stopFailed ? `The last stop attempt failed, so archiving is paused.${session.archiveOperation?.failure?.message ? ` ${session.archiveOperation.failure.message}` : ""}` : undefined,
+              run: () => void retryStop(session),
+            };
+            const prunedDetail = session.historyPruned ? historyPrunedTitle(session.historyPruned) : undefined;
+            const actions: ArchiveRowAction[] = [{ label: "Open Session", refusal: null, description: prunedDetail, run: openSession }];
+            if (restore) actions.push(restore);
+            if (stopPending || stopFailed) actions.push(retry);
+            else if (showStop) actions.push({ label: "Stop Session…", refusal: sessionCommandRefusal(session, "stop"), run: (back) => void stop(session, back) });
+            if (session.archived) actions.push({ label: "Delete Session…", danger: true, refusal: sessionCommandRefusal(session, "delete"), run: (back) => void deleteSession(session, back) });
+            return <div key={session.id} className={`row row-2 archive-item${snippet ? " has-snippet" : ""}`}
+              data-archive-row={session.id}
+              tabIndex={0} role="group" aria-label={title}
+              onClick={(event) => {
+                if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey || window.getSelection()?.toString()) return;
+                if (!(event.target as HTMLElement).closest("a, button")) openSession();
+              }}
+              onKeyDown={(event) => { if (event.key === "Enter" && event.target === event.currentTarget) { event.preventDefault(); openSession(); } }}>
+              <div className="archive-item-content">
+                <div className="archive-item-heading">
+                  <a id={`archive-title-${session.id}`} href={viewPath(target)} title={title} tabIndex={-1} onClick={(event) => {
+                    if (event.button !== 0 || event.metaKey || event.ctrlKey || event.shiftKey || event.altKey) return;
+                    event.preventDefault(); openSession();
+                  }}><SessionTypeIcon session={session} />{title}</a>
+                  {badge && <span className="archive-item-badge"><StatusBadge meta={badge} /></span>}
+                </div>
+                {snippet && <div className="archive-item-snippet">Transcript: <HighlightedSnippet snippet={snippet} /></div>}
+                <div className="archive-item-meta">
+                  <span className="archive-project" title={metadata.project === metadata.location ? metadata.project : `${metadata.project} › ${metadata.location}`}><ProjectsIcon size={14} /> <span>{metadata.project}{metadata.project !== metadata.location && ` › ${metadata.location}`}</span></span>
+                  <span className="archive-agent"><BotIcon size={14} />{metadata.agent}</span>
+                  {prunedDetail && <span className="archive-history" role="img" aria-label="History Pruned" title={prunedDetail}><HistoryIcon size={14} /><span>History Pruned</span></span>}
+                </div>
+              </div>
+              <time dateTime={timestamp?.dateTime} title={timestamp?.title}>{formatRecordedRelativeTime(session.createdAt)}</time>
+              <ArchiveRowActions sessionId={session.id} title={title} actions={actions} inline={stopFailed ? retry : restore} busy={busyIds.has(session.id)} />
+            </div>;
+          })}
+        </StaleContent>
       )}
+      </div>
 
-      {(pageSessions.length > 0 || page > 1) && (
-        <nav className="archive-pagination" aria-label="Archived Sessions Pagination">
-          <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => setPage((current) => current - 1)}>Previous Page</button>
+      {!error && !offline && (page > 1 || nextCursor) && (
+        <nav className="archive-pager" aria-label="Archived Sessions Pagination">
+          <button type="button" className="btn ghost sm" disabled={page <= 1 || loading} onClick={() => { setPageChanged(false); setPage((current) => current - 1); }}><ChevronLeftIcon size={14} />Previous</button>
           <span>Page {page}</span>
           <button type="button" className="btn ghost sm" disabled={!nextCursor || loading} onClick={() => {
             if (!nextCursor) return;
+            setPageChanged(false);
             setCursors((current) => [...current.slice(0, page), nextCursor]);
             setPage((current) => current + 1);
-          }}>Next Page</button>
+          }}>Next<ChevronRightIcon size={14} /></button>
         </nav>
       )}
     </section>
   );
 }
 
+type ConfirmBack = { label: string; run: () => void };
 interface ArchiveRowAction {
   label: string;
-  /** Why the server would refuse this person the action; the action stays listed but disabled. */
   refusal: string | null;
+  description?: string;
   danger?: boolean;
-  run: () => void;
+  run: (back?: ConfirmBack) => void;
 }
 
-/**
- * A table row's actions (docs/design-system.md §14): the first action inline as a small ghost
- * button, the rest in ⋯, destructive last after a separator. A refused action keeps its label and
- * carries its reason: as the inline button's description, or as the menu item's second line.
- */
-function ArchiveRowActions({ sessionId, title, actions, busy }: {
-  sessionId: string;
-  title: string;
-  actions: ArchiveRowAction[];
-  busy: boolean;
+function ArchiveRowActions({ sessionId, title, actions, inline, busy }: {
+  sessionId: string; title: string; actions: ArchiveRowAction[]; inline: ArchiveRowAction | null; busy: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "archive-row-menu");
-  const [inline, ...rest] = actions.filter((action) => !action.danger).concat(actions.filter((action) => action.danger));
-  const inlineReasonId = `archive-row-refusal-${sessionId}`;
-  const firstDanger = rest.findIndex((action) => action.danger);
+  const reasonId = `archive-refusal-${sessionId}`;
+  const firstDanger = actions.findIndex((action) => action.danger);
   const choose = (action: ArchiveRowAction) => {
     menu.close(false);
     menu.triggerRef.current?.focus();
-    action.run();
+    action.run({ label: "Back to More Actions", run: () => setOpen(true) });
   };
-  return (
-    <div className="archive-row-actions">
-      {inline && (
-        <button
-          type="button"
-          className="btn ghost sm"
-          disabled={busy || inline.refusal !== null}
-          title={inline.refusal ?? undefined}
-          aria-describedby={inline.refusal ? inlineReasonId : undefined}
-          onClick={inline.run}
-        >
-          {inline.label}
-        </button>
-      )}
-      {inline?.refusal && <span className="sr-only" id={inlineReasonId}>{inline.refusal}</span>}
-      {rest.length > 0 && (
-        <button
-          ref={menu.triggerRef}
-          type="button"
-          className="icon-btn sm"
-          disabled={busy}
-          onClick={menu.toggle}
-          onKeyDown={menu.onTriggerKeyDown}
-          title="More Actions"
-          aria-label={`More Actions for ${title}`}
-          aria-haspopup="menu"
-          aria-expanded={open}
-          aria-controls={menu.menuId}
-        >
-          <MoreHorizontalIcon />
-        </button>
-      )}
-      {open && (
-        <MenuSurface
-          surfaceRef={menu.menuRef}
-          anchor={{ trigger: menu.triggerRef }}
-          id={menu.menuId}
-          label={title}
-          align="end"
-          onDismiss={() => menu.close(true)}
-          onKeyDown={menu.onMenuKeyDown}
-        >
-          {rest.map((action, index) => (
-            <Fragment key={action.label}>
-              {index === firstDanger && index > 0 && <MenuSeparator />}
-              <MenuItem
-                danger={action.danger}
-                disabled={action.refusal !== null}
-                description={action.refusal ?? undefined}
-                onClick={() => choose(action)}
-              >
-                {action.label}
-              </MenuItem>
-            </Fragment>
-          ))}
-        </MenuSurface>
-      )}
-    </div>
-  );
+  return <div className={`archive-item-actions${inline?.label === "Retry Stop" ? " retry-visible" : ""}`} onClick={(event) => event.stopPropagation()}>
+    {inline && <button type="button" className="btn ghost sm archive-inline" disabled={busy || inline.refusal !== null} title={inline.refusal ?? undefined}
+      aria-describedby={`archive-title-${sessionId}${inline.refusal ? ` ${reasonId}` : ""}`} onClick={() => inline.run()}>{inline.label}</button>}
+    {inline?.refusal && <span id={reasonId} className="sr-only">{inline.refusal}</span>}
+    <button ref={menu.triggerRef} type="button" className="icon-btn sm" disabled={busy} onClick={menu.toggle}
+      onKeyDown={menu.onTriggerKeyDown} title="More Actions" aria-label={`More Actions for ${title}`}
+      aria-haspopup="menu" aria-expanded={open} aria-controls={menu.menuId}><MoreHorizontalIcon /></button>
+    {open && <MenuSurface surfaceRef={menu.menuRef} anchor={{ trigger: menu.triggerRef }} id={menu.menuId} label={title}
+      align="end" onDismiss={() => menu.close(true)} onKeyDown={menu.onMenuKeyDown}>
+      {actions.map((action, index) => <Fragment key={action.label}>
+        {index === firstDanger && index > 0 && <MenuSeparator />}
+        <MenuItem danger={action.danger} disabled={action.refusal !== null} description={action.refusal ?? action.description}
+          onClick={() => choose(action)}>{action.label}</MenuItem>
+      </Fragment>)}
+    </MenuSurface>}
+  </div>;
 }

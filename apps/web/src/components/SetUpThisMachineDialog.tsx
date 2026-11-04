@@ -21,9 +21,20 @@ import { StatusBadge } from "./StatusBadge.js";
 import { BusyButton } from "./ui/BusyButton.js";
 
 /**
+ * How long Setting Up waits, after the desktop bridge reports the runner started, for it to connect
+ * and report its agents (#3524). Past it the dialog stops waiting and offers a recovery action; a
+ * runner that connects later still moves the dialog on.
+ */
+export const RUNNER_CONNECT_WAIT_MS = 60_000;
+
+/** While Setting Up waits, how often it reads the bridge's status again, to notice a runner that exited. */
+export const LOCAL_RUNNER_STATUS_POLL_MS = 2_000;
+
+/**
  * Where Set Up This Machine stands. `ready-to-set-up`: the bundled runner is not set up yet (the
  * desktop bridge may already be setting it up). `setting-up`: it is set up and Wollipog waits for it
- * to start, connect and report its agents. `unavailable`: the desktop bridge has no bundled runner.
+ * to start, connect and report its agents, for up to `RUNNER_CONNECT_WAIT_MS`. `unavailable`: the
+ * desktop bridge has no bundled runner.
  */
 export type SetUpPhase =
   | "loading"
@@ -42,6 +53,8 @@ export function setUpPhase(input: {
   connecting: boolean;
   connectFailed: boolean;
   readiness: LocalRunnerReadiness["state"];
+  /** `RUNNER_CONNECT_WAIT_MS` passed since the bridge reported the runner started. */
+  waitExpired: boolean;
 }): SetUpPhase {
   const { status } = input;
   if (!input.infoLoaded) return input.loadFailed ? "load-failed" : "loading";
@@ -54,10 +67,15 @@ export function setUpPhase(input: {
   if (input.readiness === "needs-attention") return "needs-attention";
   // Not online yet: worth waiting for only while the bridge says the runner process is running.
   if (input.readiness === "starting" && !status.running) return "needs-attention";
-  return "setting-up";
+  // Not online, or online without its agents: worth waiting for only for a bounded time (#3524).
+  return input.waitExpired ? "needs-attention" : "setting-up";
 }
 
 const message = (cause: unknown) => cause instanceof Error ? cause.message : String(cause);
+
+const sameStatus = (a: LocalRunnerStatus, b: LocalRunnerStatus) => a.available === b.available
+  && a.enabled === b.enabled && a.running === b.running && a.runnerId === b.runnerId
+  && a.suggestedRunnerId === b.suggestedRunnerId;
 
 /** The agents the runner found, one row each with its one status (§5.2, §11.1). */
 function FoundAgents({ agents }: { agents: LocalRunnerAgent[] }) {
@@ -105,6 +123,9 @@ export function SetUpThisMachineDialog({
   const [rediscovering, setRediscovering] = useState(false);
   const [rediscoverError, setRediscoverError] = useState<string | null>(null);
   const [installingManually, setInstallingManually] = useState(false);
+  /** Counts the starts the bridge reported; each one begins a new bounded wait. */
+  const [waitStarts, setWaitStarts] = useState(0);
+  const [waitExpired, setWaitExpired] = useState(false);
   const autoStarted = useRef(false);
   const mounted = useRef(true);
   useEffect(() => {
@@ -147,6 +168,7 @@ export function SetUpThisMachineDialog({
     connecting: working,
     connectFailed: connectError !== null,
     readiness: readiness.state,
+    waitExpired,
   });
 
   const connect = useCallback(async () => {
@@ -155,10 +177,14 @@ export function SetUpThisMachineDialog({
     setConnecting(true);
     setConnectError(null);
     setRediscoverError(null);
+    setWaitExpired(false);
     try {
       const next = await connectLocalRunner(selectLocalRunnerId(status, info.existingRunnerIds));
       if (!mounted.current) return;
       setStatus(next);
+      // The wait starts over from this reply, even if the last one ran out while the bridge worked.
+      setWaitExpired(false);
+      setWaitStarts((count) => count + 1);
       onLocalRunnerChanged?.(next);
     } catch (cause) {
       if (mounted.current) setConnectError(message(cause));
@@ -172,6 +198,44 @@ export function SetUpThisMachineDialog({
     autoStarted.current = true;
     void connect();
   }, [connect, info, status]);
+
+  useEffect(() => {
+    if (waitStarts === 0) return;
+    const timer = setTimeout(() => setWaitExpired(true), RUNNER_CONNECT_WAIT_MS);
+    return () => clearTimeout(timer);
+  }, [waitStarts]);
+
+  // The start reply's `running` goes stale: read the bridge again while waiting, so a runner process
+  // that exits shows This Machine Isn't Connected rather than the wait.
+  const waiting = attempted && !connecting && connectError === null && status?.enabled === true
+    && (readiness.state === "starting" || readiness.state === "discovering");
+  const latest = useRef({ status, onLocalRunnerChanged });
+  latest.current = { status, onLocalRunnerChanged };
+  useEffect(() => {
+    if (!waiting) return;
+    let cancelled = false;
+    let timer: ReturnType<typeof setTimeout>;
+    const poll = () => {
+      timer = setTimeout(() => {
+        readLocalRunnerStatus()
+          .then((next) => {
+            if (cancelled || !mounted.current || !next) return;
+            const prior = latest.current.status;
+            if (prior && sameStatus(prior, next)) return;
+            setStatus(next);
+            latest.current.onLocalRunnerChanged?.(next);
+          })
+          // A read that fails keeps the last status; the next one tries again.
+          .catch(() => undefined)
+          .finally(() => { if (!cancelled) poll(); });
+      }, LOCAL_RUNNER_STATUS_POLL_MS);
+    };
+    poll();
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [waiting]);
 
   const rediscover = async () => {
     setRediscovering(true);
@@ -187,6 +251,17 @@ export function SetUpThisMachineDialog({
 
   // The runner never came online, or reconnecting it failed: Reconnect, rather than Rediscover.
   const reconnect = connectError !== null || readiness.state === "starting";
+  // Needs Attention's notice. A runner process that is running but not online, or online without
+  // its agents, gets here only once the bounded wait ran out.
+  const attention = connectError
+    ? { title: "Couldn't Reconnect This Machine", detail: "Wollipog couldn't restart its bundled runner." }
+    : readiness.state === "starting"
+      ? status?.running
+        ? { title: "This Machine Hasn't Connected", detail: "The bundled runner started, but it hasn't connected to Wollipog." }
+        : { title: "This Machine Isn't Connected", detail: "The bundled runner isn't running." }
+      : readiness.state === "discovering"
+        ? { title: "This Machine Hasn't Reported Its Agents", detail: "The bundled runner connected, but it hasn't reported its agents yet." }
+        : { title: readiness.title, detail: readiness.detail };
   const result = phase === "ready" || phase === "needs-attention";
 
   const footer = phase === "load-failed" || phase === "unavailable"
@@ -262,7 +337,7 @@ export function SetUpThisMachineDialog({
               <Notice
                 tone="warning"
                 role="status"
-                title={connectError ? "Couldn't Reconnect This Machine" : reconnect ? "This Machine Isn't Connected" : readiness.title}
+                title={attention.title}
                 actions={reconnect ? (
                   <button type="button" className="btn sm" onClick={() => void connect()}>Reconnect This Machine</button>
                 ) : (
@@ -277,9 +352,7 @@ export function SetUpThisMachineDialog({
                 )}
                 details={connectError ? <div className="code-well"><pre>{connectError}</pre></div> : undefined}
               >
-                {connectError
-                  ? "Wollipog couldn't restart its bundled runner."
-                  : reconnect ? "The bundled runner isn't running." : readiness.detail}
+                {attention.detail}
               </Notice>
             )}
 

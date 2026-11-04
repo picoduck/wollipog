@@ -1,6 +1,8 @@
 import { useEffect, useRef, useState } from "react";
 import { RIGHT_PANEL_DEFAULT_WIDTH, parseStoredRightPanelExpanded, parseStoredRightPanelMode, parseStoredRightPanelWidth, type RightPanelMode } from "../right-panel.js";
 import { loadBrowserStorageValue, saveBrowserStorageValue } from "../instance-storage.js";
+import { SESSION_TOOLS, type SessionToolId } from "../session-tools.js";
+import { matchesShortcut, type KeyboardLike } from "../shortcuts.js";
 import { requestGoToFileFocus } from "./go-to-file-focus.js";
 import { requestSideChatFocus } from "./side-chat-focus.js";
 
@@ -46,6 +48,19 @@ export interface RightPanelState {
    */
   showSubagent: (sessionId: string, eventEpoch: number, subagentId: string, options?: { request?: boolean }) => void;
   consumeSubagentFocusRequest: (sessionId: string, eventEpoch: number, request: number) => void;
+  /** An artifact the Browser was asked to open (#3924), acted on once by the session it names.
+   * Optional with the two below for hosts that never link to an artifact. */
+  artifactRequest?: BrowserArtifactRequest | null;
+  /** Open the panel on Browser → Artifacts, on one artifact when `artifactId` names it (#3924). */
+  showArtifact?: (sessionId: string, artifactId?: string) => void;
+  consumeArtifactRequest?: (request: number) => void;
+}
+
+export interface BrowserArtifactRequest {
+  sessionId: string;
+  artifactId?: string;
+  /** Distinguishes asking for the same artifact again. */
+  request: number;
 }
 
 /**
@@ -78,6 +93,52 @@ export function toggleTerminalTool(state: Pick<RightPanelState, "openMode">): vo
 /** Whether the panel is showing the Terminal tool: the toggle's pressed state in Right Panel placement. */
 export function terminalToolShowing(state: Pick<RightPanelState, "open" | "mode">): boolean {
   return state.open && state.mode === "terminal";
+}
+
+/** Tools whose chords do more than open them, so App.tsx handles each on its own: Go to File and
+ * Side Chat put focus in a field, and Terminal follows its placement. */
+const TOOLS_WITH_OWN_CHORD: ReadonlySet<SessionToolId> = new Set(["files", "sidechat", "terminal"]);
+
+/** The tool a press's chord only opens (Review, and every tool #1260 added), or null. */
+export function sessionToolForShortcut(event: KeyboardLike): SessionToolId | null {
+  const tool = SESSION_TOOLS.find((candidate) =>
+    candidate.shortcut && !TOOLS_WITH_OWN_CHORD.has(candidate.id) && matchesShortcut(event, candidate.shortcut));
+  return tool?.id ?? null;
+}
+
+/** Focus the open panel's tool switcher once it has rendered, so Escape closes the panel again and the
+ * arrow keys reach every other tool (#2843). */
+function focusToolSwitcher(): void {
+  window.requestAnimationFrame(() => {
+    document.querySelector<HTMLElement>("#right-panel .rpanel-switcher")?.focus();
+  });
+}
+
+/**
+ * The side panel's own chords on a session page (#1260), and whether this press was one of them.
+ * Ctrl/⌘+\ toggles the panel; closing keeps the tool, so it reopens on the last one. A tool's chord
+ * opens the panel on that tool, or closes the panel already showing it, as Review's always has. Each
+ * puts focus on the tool switcher when it opens or switches the panel. The caller has already
+ * checked that no dialog, menu or terminal owns the press.
+ */
+export function handleSidePanelChord(
+  event: KeyboardLike & Pick<KeyboardEvent, "preventDefault">,
+  state: Pick<RightPanelState, "open" | "mode" | "toggle" | "openMode">,
+): boolean {
+  if (matchesShortcut(event, "toggle-side-panel")) {
+    event.preventDefault();
+    const opening = !state.open;
+    state.toggle();
+    if (opening) focusToolSwitcher();
+    return true;
+  }
+  const tool = sessionToolForShortcut(event);
+  if (!tool) return false;
+  event.preventDefault();
+  const closing = state.open && state.mode === tool;
+  state.openMode(tool);
+  if (!closing) focusToolSwitcher();
+  return true;
 }
 
 export function useRightPanelState(navigationScope: string | null = null, attentionNavigation = false): RightPanelState {
@@ -113,6 +174,8 @@ export function useRightPanelState(navigationScope: string | null = null, attent
   const [dragging, setDragging] = useState(false);
   const [subagentTarget, setSubagentTarget] = useState<RightPanelState["subagentTarget"]>(null);
   const nextSubagentFocusRequest = useRef(0);
+  const [artifactRequest, setArtifactRequest] = useState<BrowserArtifactRequest | null>(null);
+  const nextArtifactRequest = useRef(0);
   const [previousNavigation, setPreviousNavigation] = useState({ scope: navigationScope, attention: attentionNavigation });
   // Adjust before children render, so navigation cannot commit an Agents panel for the new visit.
   // Other panel preferences and all session-scoped scratch stay intact.
@@ -182,6 +245,19 @@ export function useRightPanelState(navigationScope: string | null = null, attent
         const { focusRequest: _consumed, focusPendingRequest: _pendingRequest, ...target } = current;
         return target;
       });
+    },
+    artifactRequest,
+    showArtifact: (sessionId, artifactId) => {
+      setArtifactRequest({
+        sessionId,
+        ...(artifactId === undefined ? {} : { artifactId }),
+        request: ++nextArtifactRequest.current,
+      });
+      setOpen(true);
+      setMode("browser");
+    },
+    consumeArtifactRequest: (request) => {
+      setArtifactRequest((current) => current?.request === request ? null : current);
     },
   };
 }

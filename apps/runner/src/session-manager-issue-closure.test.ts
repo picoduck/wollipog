@@ -141,6 +141,7 @@ for (const change of ["unchanged", "custom", "revision", "operation", "reason", 
     const result = await f.execute(snapshot);
     assert.equal(result.ok, true, result.error ?? "Expected an inspected refusal");
     assert.equal(result.result?.outcome, change === "unchanged" ? "closed" : "refused");
+    assert.equal(result.result?.refusal?.reason, change === "unchanged" ? undefined : "mutation_fence_unavailable");
     assert.equal(f.mutations().length, change === "unchanged" ? 1 : 0);
     assert.deepEqual(f.diskMeta().githubIssueClosureAttempts,
       change === "unchanged" ? { "approved-once": digest(snapshot) } : undefined);
@@ -165,6 +166,43 @@ test("publication inspection through the runner handler binds payload across dis
   const changed=await f.manager().campaignIssueScope({type:"campaign_issue_scope",operation:"publication_inspect",sessionId,requestId:"third",...publication,labels:["bug"]});
   assert.notEqual(changed.publicationDigest,proposal.publicationDigest,"actual payload changes invalidate the exact grant");
 });
+
+for (const moved of [false, true]) {
+  test(`a bounded closure carried across an unrelated scope change executes at the synchronized revision${moved ? " and its fence refuses a later change" : ""} (#3915)`, async (t) => {
+    const f = fixture(t);
+    const original = await f.snapshot();
+    const scope = { repository: "example/project", issueNumbers: [issue], revision: 1, authorizedByUserId: "owner", authorizedAt: 1000 };
+    const control = (issueScopeRevision: number): import("@wollipog/protocol").CampaignControl => ({ mode: "full_control", boundary: {
+      version: 1, revision: 2, issueScopeRevision, repository: scope.repository, objective: "Retire scoped work",
+      authorizedByUserId: "owner", authorizedAt: 2000, operations: ["campaign_issue_scope", "issue_closure"], delegatablePolicyIds: [],
+      issueAuthority: { epics: [], relatedFollowUps: false, maxIssues: 3, closureReasons: ["not_planned"] },
+    } });
+    assert.equal((await f.scope({ operation: "synchronize", scope, control: control(1) })).ok, true);
+    const approved: GithubIssueClosureSnapshot = { ...original, scopeRevision: 1, issueAdmission: { boundaryRevision: 2, evidenceDigest: "a".repeat(64) } };
+    // An Orchestrator-approved addition of another issue, synchronized before execution.
+    const added = { ...scope, issueNumbers: [issue, 124], revision: 2 };
+    assert.equal((await f.scope({ operation: "synchronize", scope: added, control: control(2) })).ok, true);
+    const stale = await f.execute(approved, "stale-revision");
+    assert.equal(stale.ok, false, "the runner still refuses a snapshot at an older revision");
+    assert.equal(stale.failure, "campaign_authority_changed");
+    assert.equal(f.mutations().length, 0);
+
+    // The control plane proves the revisions in between left the issue alone and dispatches the
+    // closure at the revision it synchronized.
+    const dispatched: GithubIssueClosureSnapshot = { ...approved, scopeRevision: 2 };
+    if (moved) {
+      f.beforeNextInspection(() => {
+        f.store().patchMeta(sessionId, { orchestrator: { ...f.diskMeta().orchestrator!,
+          issueScope: { ...added, revision: 3 }, control: control(3) } });
+      });
+    }
+    const result = await f.execute(dispatched);
+    assert.equal(result.ok, true, result.error ?? "Expected an inspected result");
+    assert.equal(result.result?.outcome, moved ? "refused" : "closed");
+    assert.equal(result.result?.refusal?.reason, moved ? "mutation_fence_unavailable" : undefined);
+    assert.equal(f.mutations().length, moved ? 0 : 1);
+  });
+}
 
 test("bounded Full Control scope synchronization persists the advanced boundary for restart", async (t) => {
   const f=fixture(t);
@@ -270,6 +308,8 @@ for (const { name, patch, error, reason } of refusedSessions) {
       const result = operation === "inspect" ? await f.inspect() : await f.execute(snapshot);
       assert.equal(result.ok, false);
       assert.match(result.error ?? "", new RegExp(error));
+      // #4059: every refusal is classified for the decision's recorded reason.
+      assert.equal(result.failure, error.includes("outside") ? "campaign_authority_changed" : "runner_failed");
       assert.equal(f.commands.length, 0, `${operation} must refuse before external inspection or mutation`);
       assert.equal(f.diskMeta().githubIssueClosureAttempts, undefined);
     }

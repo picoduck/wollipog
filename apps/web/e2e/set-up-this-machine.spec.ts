@@ -1,4 +1,4 @@
-import { expect, test, type Page } from "@playwright/test";
+import { expect, test, type Locator, type Page } from "@playwright/test";
 
 /**
  * Set Up This Machine (#2993) in the web build with the desktop bridge mocked
@@ -18,7 +18,72 @@ const fixture = (page: Page) => ({
     page.evaluate((value) => window.__WOLLIPOG_SET_UP_MACHINE_E2E__.finishConnect(value), outcome),
   setRunner: (scenario: "discovering" | "ready" | "needs-attention" | "offline") =>
     page.evaluate((value) => window.__WOLLIPOG_SET_UP_MACHINE_E2E__.setRunner(value), scenario),
+  exitRunner: () => page.evaluate(() => window.__WOLLIPOG_SET_UP_MACHINE_E2E__.exitRunner()),
 });
+
+/** Mirrors `RUNNER_CONNECT_WAIT_MS` and `LOCAL_RUNNER_STATUS_POLL_MS` in SetUpThisMachineDialog.tsx. */
+const CONNECT_WAIT_MS = 60_000;
+const STATUS_POLL_MS = 2_000;
+
+/** The wait for a started runner is bounded (#3524), on desktop and on a phone. */
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test.describe(`a runner that started but never finishes connecting at ${viewport.width}px`, () => {
+    test.use({ viewport });
+
+    async function startedAndWaiting(page: Page) {
+      await page.clock.install();
+      const dialog = await open(page);
+      await fixture(page).finishConnect("started");
+      await expect(dialog.getByRole("heading", { name: "Connection Check" })).toBeVisible();
+      await expect(dialog.locator(".modal-foot")).toContainText("Waiting for the runner…");
+      await expect(dialog.getByRole("button", { name: "Install Manually Instead" })).toHaveCount(0);
+      return dialog;
+    }
+
+    async function expectStoppedWaiting(dialog: Locator) {
+      await expect(dialog.getByRole("heading", { name: "Connection Check" })).toHaveCount(0);
+      await expect(dialog.locator(".modal-foot")).not.toContainText("Waiting for the runner");
+      await expect(dialog.locator(".modal-foot .spinner")).toHaveCount(0);
+      await expect(dialog.getByRole("button", { name: "Done" })).toBeEnabled();
+      await expect(dialog.getByRole("button", { name: "Install Manually Instead" })).toBeVisible();
+    }
+
+    test("a runner that is not online says it hasn't connected, then moves to Ready when it connects", async ({ page }) => {
+      const dialog = await startedAndWaiting(page);
+      await page.clock.runFor(CONNECT_WAIT_MS);
+      const notice = dialog.locator(".notice.t-warning");
+      await expect(notice.locator(".notice-title")).toHaveText("This Machine Hasn't Connected");
+      await expect(notice).toContainText("The bundled runner started, but it hasn't connected to Wollipog.");
+      await expect(notice.getByRole("button", { name: "Reconnect This Machine" })).toBeVisible();
+      await expectStoppedWaiting(dialog);
+
+      await fixture(page).setRunner("ready");
+      await expect(dialog.getByText("This Machine Is Ready")).toBeVisible();
+      await expect(dialog.getByRole("button", { name: "Install Manually Instead" })).toHaveCount(0);
+    });
+
+    test("a runner still discovering its agents offers Rediscover", async ({ page }) => {
+      const dialog = await startedAndWaiting(page);
+      await fixture(page).setRunner("discovering");
+      await page.clock.runFor(CONNECT_WAIT_MS);
+      const notice = dialog.locator(".notice.t-warning");
+      await expect(notice.locator(".notice-title")).toHaveText("This Machine Hasn't Reported Its Agents");
+      await expect(notice).toContainText("The bundled runner connected, but it hasn't reported its agents yet.");
+      await expect(notice.getByRole("button", { name: "Rediscover" })).toBeVisible();
+      await expectStoppedWaiting(dialog);
+    });
+
+    test("a runner process that exits while waiting says the runner isn't running", async ({ page }) => {
+      const dialog = await startedAndWaiting(page);
+      await fixture(page).exitRunner();
+      await page.clock.runFor(STATUS_POLL_MS);
+      const notice = dialog.locator(".notice.t-warning");
+      await expect(notice.locator(".notice-title")).toHaveText("This Machine Isn't Connected");
+      await expect(notice).toContainText("The bundled runner isn't running.");
+      await expectStoppedWaiting(dialog);
+    });
+  });
+}
 
 test("the setup runs from its footer primary to the agents as rows, with one primary throughout", async ({ page }) => {
   const dialog = await open(page);

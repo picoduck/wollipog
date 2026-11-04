@@ -19,9 +19,9 @@ three times: `pnpm test:e2e`, from the repository root (the config and baseURL l
 historical flake in this repository has been e2e/browser, so a unit-only pass is structurally
 blind to the layer that actually flakes. Before each e2e run, check that port 4174 is free —
 concurrent worktree sessions run their own e2e servers; if the port is held, wait and retry
-rather than killing the other server, and stagger subsequent runs. Budget about 5 hours of wall
-clock for the unit runs and three e2e passes: the 2026-10-20 suite collected 3,415 browser cases
-and each complete pass took 87–90 minutes; the complete sweep took 4 hours 43 minutes. Record current
+rather than killing the other server, and stagger subsequent runs. Budget about 6 hours of wall
+clock for the unit runs and three e2e passes: the 2026-10-27 suite collected 3,693 browser cases
+and each complete pass took 97–108 minutes; the complete sweep took about 5 hours 30 minutes. Record current
 collection counts and actual durations rather than treating this estimate as fixed. A window that long is also why HEAD moves under the
 sweep, so the baseline-pinning rule below matters most for the e2e passes.
 
@@ -41,9 +41,9 @@ verified execution blocker. Record the exact interruption evidence and completed
 infer an automation wall-clock limit from the automatic continuation's request for a final result.
 
 Pin the baseline across the whole set of runs. Record `git rev-parse HEAD` before the first run
-and re-check it before and after every run, unit and e2e alike. Another session can fast-forward
-the primary checkout mid-sweep (the shared rule only assumes HEAD *lags* `origin/main`, not that
-it moves), and runs that straddle a pull are not comparable: a test set that grows or shrinks
+and re-check it before and after every run, unit and e2e alike. A user or another session can
+still move the primary checkout mid-sweep, regardless of the post-merge checkout policy.
+Runs that straddle a checkout update are not comparable: a test set that grows or shrinks
 between runs looks like nondeterministic collection when it is just a merged PR. If HEAD moved,
 name the runs on each baseline in the report, discount any run whose tree changed while it was in
 flight, and re-run the affected suite three times at the new HEAD before comparing failure sets.
@@ -71,6 +71,9 @@ failed runs, missing the ejection that carried the #1819 evidence. In this repos
 ejections and as browser jobs that failed once and passed on retry, which still fail the run
 because `playwright.config.ts` sets `failOnFlakyTests` under CI. A 20-run window missed the
 2026-09-22 phone-viewport flake and four merge-queue ejections entirely.
+Merge groups still run the full suite today. The fast merge-group gate (`CI_MERGE_GROUP_GATE`) is
+disabled; if it is ever activated, ordinary groups run a reduced suite and a flake in skipped work
+surfaces only in Main Rolling Validation (see `docs/fast-gate-activation-proposal.md`).
 
 ## Gate
 

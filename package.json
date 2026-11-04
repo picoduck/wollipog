@@ -1,6 +1,6 @@
 {
   "name": "wollipog",
-  "version": "0.34.0",
+  "version": "0.36.0-rc.2",
   "private": true,
   "license": "Apache-2.0",
   "repository": {
@@ -43,6 +43,9 @@
     "check:full": "node scripts/test-suites.mjs --suite=full",
     "check:selected": "node scripts/test-suites.mjs --suite=selected",
     "ci:selection": "node scripts/ci-suite-selection.mjs",
+    "ci:selection-v2": "node scripts/ci-suite-selection-v2.mjs",
+    "ci:selection-v2-evaluate": "node --import tsx scripts/ci-suite-v2-evaluate.mjs",
+    "ci:selection-v3": "node scripts/ci-suite-selection-v3.mjs",
     "ci:suite-inventory": "node --import tsx scripts/ci-suite-inventory.mjs",
     "ci:shadow-report": "node scripts/ci-suite-shadow-report.mjs",
     "test:e2e": "playwright test",
@@ -60,7 +63,9 @@
     "benchmark:workflow-event-retention": "node --import tsx apps/control-plane/scripts/workflow-event-retention-benchmark.ts",
     "benchmark:session-search-deletion": "node --import tsx apps/control-plane/scripts/session-search-deletion-benchmark.ts",
     "benchmark:inbox": "node --import tsx apps/web/scripts/inbox-cold-load-benchmark.ts",
+    "probe:claude-assumptions": "node --import tsx scripts/claude-assumptions.mjs",
     "probe:claude-mcp-image": "node --import tsx apps/runner/scripts/claude-mcp-image-probe.ts",
+    "probe:claude-mcp-wait": "node --import tsx apps/runner/scripts/claude-mcp-wait-probe.ts",
     "probe:claude-media-reviewer": "node --import tsx apps/runner/scripts/claude-media-reviewer-probe.ts",
     "probe:codex-escalation": "node --import tsx apps/runner/scripts/codex-escalation-probe.ts",
     "probe:codex-assumptions": "node --import tsx scripts/codex-assumptions.mjs",
@@ -68,6 +73,7 @@
     "probe:codex-guard-hook": "node --import tsx apps/runner/scripts/codex-guard-hook-probe.ts",
     "probe:codex-inference-transport": "node --import tsx apps/runner/scripts/codex-inference-transport-probe.ts",
     "probe:codex-mcp-wait": "node --import tsx apps/runner/scripts/codex-mcp-wait-probe.ts",
+    "probe:pi-assumptions": "node --import tsx scripts/pi-assumptions.mjs",
     "test:watch": "node --import tsx --test --test-timeout=300000 --watch \"apps/**/src/**/*.test.ts\" \"apps/**/src/**/*.test.tsx\"",
     "check:codex-schema": "node scripts/check-codex-app-server-schema.mjs",
     "generate:built-in-skills": "node scripts/generate-built-in-skills.mjs",
@@ -77,8 +83,8 @@
   "devDependencies": {
     "@playwright/test": "1.63.0",
     "@wollipog/test-support": "workspace:*",
-    "concurrently": "^10.0.5",
-    "fast-check": "^4.10.0",
+    "concurrently": "^10.0.6",
+    "fast-check": "^4.10.2",
     "semver": "7.8.5",
     "tsx": "^4.23.13",
     "typescript": "^5.7.3"

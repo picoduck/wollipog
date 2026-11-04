@@ -12,6 +12,7 @@ import { isPersonalIdentifier, maskedAccountTitles } from "../../personal-identi
 import { statusMeta, type StatusValue } from "../../status-meta.js";
 import { AccountRows, AccountsHead, type AccountRowAccount } from "../AccountChoice.js";
 import { useAccountIdentifierReveal } from "../AccountIdentifier.js";
+import { providerLoginRunning } from "../AddProviderAccountDialog.js";
 import { UserXIcon } from "../Icons.js";
 import { Modal } from "../Modal.js";
 import { Notice } from "../Notice.js";
@@ -312,9 +313,13 @@ export function ChooseAccountDialog({
   };
 
   const rows: AccountRowAccount[] = alternatives.map((account) => {
-    const meta = statusMeta("provider_account", STATUS[account.availability as keyof typeof STATUS] ?? "status_unknown");
+    const logins = accountLogins.filter((login) => login.accountId === account.id);
+    // A running sign-in is the row's state, as on Provider Accounts rows (#3520); the card under the
+    // list follows or cancels it. An ending offers Try Again itself, so Sign In waits until it is dismissed.
+    const signingIn = logins.some(providerLoginRunning);
+    const meta = statusMeta("provider_account",
+      signingIn ? "signing_in" : STATUS[account.availability as keyof typeof STATUS] ?? "status_unknown");
     const signedOut = account.availability === "sign_in_required";
-    const signingIn = accountLogins.some((login) => login.accountId === account.id);
     return {
       id: account.id,
       label: account.label,
@@ -322,13 +327,13 @@ export function ChooseAccountDialog({
       status: <StatusBadge meta={meta} inline />,
       ...(signedOut && !canStartSignIn ? { note: CHOOSE_ACCOUNT_COPY.askOwner } : {}),
       ...(rowError?.accountId === account.id ? { error: rowError.message } : {}),
-      ...(signedOut && canStartSignIn ? {
+      ...(signedOut && canStartSignIn && logins.length === 0 ? {
         action: (
           <BusyButton
             className="btn sm"
             busy={startingSignIn === account.id}
             progress="Starting the sign-in…"
-            disabled={submitting || signingIn || (startingSignIn !== null && startingSignIn !== account.id)}
+            disabled={submitting || (startingSignIn !== null && startingSignIn !== account.id)}
             aria-label={`${CHOOSE_ACCOUNT_COPY.signIn} to ${revealed ? account.label : maskedTitle(account)}`}
             onClick={() => void signIn(account.id)}
           >

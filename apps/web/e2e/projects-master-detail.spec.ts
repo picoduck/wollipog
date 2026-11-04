@@ -1,4 +1,5 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
+import { expectCenteredState } from "./page-state.js";
 
 /**
  * The Projects frame (#2957; docs/design-system.md §4.2, §5.2, §6, §6.2, §10.2, §12, §13.2), in the
@@ -144,6 +145,7 @@ test.describe("at desktop widths", () => {
     await expect(state).toContainText("A project is a repository on one or more of your machines. Sessions start inside a project.");
     await expect(page.locator(".page-header").getByRole("button", { name: "New Project" })).toHaveCount(0);
     await expect(state.getByRole("button", { name: "Connect a Machine", exact: true })).toBeVisible();
+    await expectCenteredState(state.locator(":scope > .state"));
     await state.getByRole("button", { name: "New Project", exact: true }).click();
     await expect(page.getByRole("dialog", { name: "New Project" })).toBeVisible();
   });

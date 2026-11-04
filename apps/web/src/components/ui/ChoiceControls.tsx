@@ -1815,6 +1815,8 @@ export function Select<T extends string>({
   className,
   menuWidth,
   estimatedOptionHeight,
+  triggerLabel,
+  triggerClassName,
 }: {
   options: readonly SelectOption<T>[];
   value: T | null;
@@ -1858,6 +1860,9 @@ export function Select<T extends string>({
   menuWidth?: number;
   /** Row budget for content that may wrap. The viewport remains the final height bound. */
   estimatedOptionHeight?: number;
+  /** Stable toolbar label; the accessible name still includes the selected value. */
+  triggerLabel?: string;
+  triggerClassName?: string;
 }) {
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState<PickerRow | null>(0);
@@ -2215,7 +2220,7 @@ export function Select<T extends string>({
       <button
         ref={popover.triggerRef}
         type="button"
-        className={`ui-select-trigger${leadingIcon ? " has-leading-icon" : ""}`}
+        className={`ui-select-trigger${leadingIcon ? " has-leading-icon" : ""}${triggerClassName ? ` ${triggerClassName}` : ""}`}
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={open ? listId : undefined}
@@ -2242,7 +2247,7 @@ export function Select<T extends string>({
         {leadingIcon && <LeadingIcon icon={leadingIcon} />}
         {selected?.swatch}
         <span className={`ui-select-value${selected ? "" : " is-placeholder"}`}>
-          {selected?.selectedLabel ?? selected?.label ?? placeholder}
+          {triggerLabel ?? selected?.selectedLabel ?? selected?.label ?? placeholder}
         </span>
         {selected?.status && <StatusBadge inline meta={selected.status} className="ui-select-status" />}
         <ChevronDownIcon size={14} className="ui-select-caret" />

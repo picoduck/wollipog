@@ -192,6 +192,32 @@ test("the preview bar's +N and badge count read as words, and its facts carry th
   }
 });
 
+test("the preview bar's title leads with an Orchestrator or review session's type, and an ordinary one's does not (#4076)", async () => {
+  const { container, root } = mount();
+  try {
+    const renderBar = (value: SessionView) => act(async () => root.render(
+      <SessionPreviewBar session={value} runnerOnline machineName="Mac Studio" agentLabel="Claude Code" archiveLabel="Archive" />,
+    ));
+    const title = () => container.querySelector(".session-preview-bar .detail-bar-title")!;
+    for (const [value, label] of [[session({ role: "orchestrator" }), "Orchestrator Session"],
+      [session({ kind: "review" }), "Review Session"]] as const) {
+      await renderBar(value);
+      const icon = title().firstElementChild!;
+      assert.ok(icon.classList.contains("session-type-icon"), `${label}: the mark comes before the title`);
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), label);
+      assert.equal(icon.getAttribute("title"), label);
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+      assert.equal(title().textContent, "Reconcile the Ledger");
+    }
+    await renderBar(session({ role: "normal", kind: "standard" }));
+    assertNoDomNode(title().querySelector(".session-type-icon"), "an ordinary session's title has no type mark");
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
 test("the preview bar's actions: Snooze and Archive icon buttons, ⋯ and Open Session with its Enter keycap", async () => {
   const { container, root } = mount();
   const calls: string[] = [];

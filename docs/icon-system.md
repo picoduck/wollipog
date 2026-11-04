@@ -54,6 +54,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds; the Request Card's Budget kind. |
 | `CountIcon` | Lucide | `Hash` | A whole count inside a field, such as the Guardrails tool-call and live-child limits. |
+| `IdentifierIcon` | Lucide | `FingerprintPattern` | An entity's own identifier, such as the Pinned Summary's Session ID row (#3897). |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability; a skill step in the transcript. |
 | `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
 | `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |
@@ -104,6 +105,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts: the palette action and Settings › Behavior's Show Shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
+| `KeyIcon` | Lucide | `Key` | Re-Pair… on an instance row and in its More Actions menu: replace this app's saved pairing (#3002). |
+| `ArrowLeftRightIcon` | Lucide | `ArrowLeftRight` | Switch on an instance row: make another saved instance the one this app shows (#3002). |
 | `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
 | `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email; Private to Me access. |
 | `BuildingIcon` | Lucide | `Building` | Organization-Wide access (#2960). |
@@ -139,7 +142,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `VideoIcon` | Lucide | `Film` | A video artifact's kind tile in the Browser (#2854). |
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
-| `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
 | `CodeIcon` | Lucide | `Code` | Generic code destination; Markdown's Source in a narrow Files panel (#2913). |
 | `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |
 | `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
@@ -154,8 +156,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning, and Settings › Behavior, which holds each agent's default model and effort. |
-| `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
-| `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
 | `ServerIcon` | Lucide | `Server` | A machine reached over SSH: a project location row's leading icon (#2961). |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
@@ -175,7 +175,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChildSessionRequestsIcon` | Lucide | `Network` | Who answers an Orchestrator's child session requests: the Pinned Summary's Child Session Requests row. |
 | `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row; the Request Card's Workflow Decision kind. |
 | `GuardrailsIcon` | Lucide | `Fence` | A session's limits: the + menu's Guardrails… row. `Gauge` already means the Fast service tier. |
-| `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row, and Settings › Orchestrator. `Workflow` already means workflow runs. |
+| `OrchestratorIcon` | Lucide | `Waypoints` | An Orchestrator: its parent control and workflow gates (the + menu's Orchestrator Controls… row, and Settings › Orchestrator), and an Orchestrator session's type before its title in the Sessions list, Board, session header and Archived Sessions (#4076). `Workflow` already means workflow runs. |
+| `ReviewSessionIcon` | Lucide | `ScanEye` | A review session's type, before its title wherever `OrchestratorIcon` marks an Orchestrator session (#4076). `Eye` already means show and hide. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
 | `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion, and a machine's Repair Connection… (#2988). |
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
@@ -189,6 +190,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |
 | `HistoryIcon` | Lucide | `History` | Decision History, in the Session Tools list and the tool switcher (#2844). |
 | `MessageSquareIcon` | Lucide | `MessageSquare` | Side Chat, in the Session Tools list and the tool switcher (#2844). |
+| `FindingIcon` | Lucide | `MessageSquareCode` | A review finding: the inline finding editor's caption naming its line (#2851). |
 | `FilesIcon` | Lucide | `Files` | A count of files, in a meta row. |
 | `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
 | `ReadIcon` | Lucide | `BookOpen` | A read step in the transcript. |

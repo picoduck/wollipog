@@ -81,8 +81,9 @@ process-global isolation, POSIX interruption exit status and worker reaping. TOD
 semantics and dependency-directory exclusions match the native CLI. No existing
 test assertions, OS/engine probes, sandbox availability checks, Git identity,
 timeouts, cleanup hooks or package-manager boundaries change. `test:watch` remains
-the native watch command. CI still runs all files in one full execution, so it
-does not pay a second startup for the fast partition.
+the native watch command. CI runs the full plan in one execution per unit-test
+shard (`--shard=i/n`, #3770); the shards partition the plan, so no file runs twice
+and none is left out. See [Unit-Test Shards](ci-aggregation.md#unit-test-shards-and-step-budgets).
 
 The initial fast allowlist contains 22 protocol test files with 201 tests. Their
 imports and fixtures are in-process protocol/contract checks; the TypeScript

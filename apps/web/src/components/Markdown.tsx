@@ -30,6 +30,8 @@ import { CopyButton } from "./common.js";
 import { markdownBlockStarts } from "./markdown-blocks.js";
 import { MarkdownContentCache, type MarkdownContentProfile } from "./markdown-content-cache.js";
 import { CheckIcon, ImageIcon, ImageOffIcon, WrapLinesIcon } from "./Icons.js";
+import { ARTIFACT_REFERENCE_TAG, isArtifactId, rehypeArtifactReferences } from "../artifact-references.js";
+import { ArtifactReferenceContext } from "./artifact-reference-context.js";
 
 type MarkdownComponents = NonNullable<ComponentProps<typeof ReactMarkdown>["components"]>;
 type RemarkPlugins = NonNullable<ComponentProps<typeof ReactMarkdown>["remarkPlugins"]>;
@@ -595,7 +597,23 @@ function phrasingElement(Tag: PhrasingTag) {
   };
 }
 
+/**
+ * An artifact id the reply cites (#3970), marked by `rehypeArtifactReferences`. It renders as the
+ * text it was written as unless the reply's host resolves it, and always inside a link, which can
+ * hold no control of its own.
+ */
+function MarkdownArtifactReference({ node, children }: { node?: { properties?: Record<string, unknown> }; children?: ReactNode }) {
+  const renderReference = useContext(ArtifactReferenceContext);
+  const host = useContext(MediaHostContext);
+  const id = reactNodeText(children);
+  const code = node?.properties?.dataCode === "true";
+  if (!renderReference || host === "link" || !isArtifactId(id)) return code ? <MarkdownCode>{id}</MarkdownCode> : <>{id}</>;
+  return renderReference(id, code);
+}
+
 const MARKDOWN_COMPONENTS: MarkdownComponents = {
+  // Not an HTML tag, so react-markdown's types do not list it; it renders like any other.
+  ...({ [ARTIFACT_REFERENCE_TAG]: MarkdownArtifactReference } as MarkdownComponents),
   p: MarkdownParagraph,
   em: phrasingElement("em"),
   strong: phrasingElement("strong"),
@@ -683,7 +701,7 @@ const ParsedMarkdown = memo(function ParsedMarkdown({ source, profile, admit }: 
   const plugins: RemarkPlugins = [...(profile === "inline" ? INLINE_PLUGINS : DOCUMENT_PLUGINS),
     [remarkCachedParser as unknown as RemarkPlugins[number], options] as RemarkPlugins[number]];
   return <ReactMarkdown remarkPlugins={plugins}
-    rehypePlugins={[[rehypeCachedTree, options]]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>;
+    rehypePlugins={[rehypeArtifactReferences, [rehypeCachedTree, options]]} components={MARKDOWN_COMPONENTS}>{source}</ReactMarkdown>;
 // Admission is a resource policy, not rendered content. A tail becoming stable must not parse
 // identical text again just to populate the LRU; its next natural render/remount may admit it.
 }, (previous, next) => previous.source === next.source && previous.profile === next.profile);

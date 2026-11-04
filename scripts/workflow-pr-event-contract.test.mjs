@@ -18,6 +18,7 @@ const EXPECTED_GROUP_TEMPLATE =
 const EXPECTED_JOB_GUARD =
   "github.event_name != 'pull_request' || github.event.action == 'ready_for_review' || github.event.pull_request.draft == false";
 const EXPECTED_SHADOW_GUARD = `(github.event_name == 'merge_group' || github.event_name == 'pull_request') && (${EXPECTED_JOB_GUARD})`;
+const EXPECTED_ADMISSION_SHADOW_GUARD = "${{ !cancelled() && vars.CI_REGRESSION_ADMISSION == 'dry-run' && (github.event_name == 'merge_group' || github.event_name == 'pull_request' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)) }}";
 // CI carries the required check, so its pull-request lanes are also per head and never cancel in
 // progress (#3283); pr-ci-supersede.yml stops older heads. The other PR workflows report no
 // required check and keep cancelling, but every workflow shares the same ready/draft lanes.
@@ -49,8 +50,17 @@ function workflowContract(path) {
   // Every job carries the same draft guard. The aggregator adds PR-only !cancelled()
   // admission; non-PR reporting remains unconditional, including on cancellation.
   const requiredGuards = jobGuards.filter((match, index) => {
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "regression-admission-shadow:") {
+      assert.equal(match[1].trim(), EXPECTED_ADMISSION_SHADOW_GUARD, "admission shadow remains optional, advisory and draft guarded");
+      return false;
+    }
     if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite-shadow:") {
       assert.equal(match[1].trim(), EXPECTED_SHADOW_GUARD, "advisory selection has its explicit PR/merge-group draft guard");
+      return false;
+    }
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "merge_group_gate:") {
+      // Merge-group only, so no PR draft guard applies. Disabled unless the variable is set.
+      assert.equal(match[1].trim(), "github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled'");
       return false;
     }
     if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite_plan:") {
@@ -243,14 +253,15 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["suite_plan", "checks", "browser", "win32", "webkit", "suite-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "unit", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
-  for (const id of ["checks", "browser", "webkit"]) {
+  for (const id of ["checks", "unit", "browser", "webkit", "delegated_pipeline"]) {
     assert.match(byId[id], /^    timeout-minutes: (\d+)$/m, `${id}: needs its own time budget`);
     if (id === "webkit") assert.doesNotMatch(byId[id], /^    needs:/m);
-    else assert.match(byId[id], /^    needs: suite_plan$/m, `${id}: only routing may precede parallel work`);
+    else if (id === "delegated_pipeline") assert.match(byId[id], /^    needs: suite_plan$/m, `${id}: delegated recovery only waits for routing`);
+    else assert.match(byId[id], /^    needs: \[suite_plan, merge_group_gate\]$/m, `${id}: only routing and the gate may precede parallel work`);
   }
   assert.match(byId.browser, /Remote-Instance Browser End-to-End Tests/, "the browser suite runs in its own job");
 
@@ -274,13 +285,19 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // Assert the exact new routing text before normalising to the established full shard shape.
   // workflow-ci-routing.test.mjs executes these same expressions and both actual shell branches.
   const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
-  const matrixExpression = "${{ fromJSON(github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const groupFastExpression = "${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}";
+  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const critical = "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts";
   const routedRun = [
     "          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}",
     `          PR_FAST: ${fastExpression}`,
+    "          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}",
+    `          GROUP_FAST: ${groupFastExpression}`,
     "        run: |",
     '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
-    "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts",
+    critical,
+    '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
+    critical,
     "          else",
     "            pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}",
     "          fi",
@@ -288,7 +305,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.ok(byId.browser.includes(`        shard: ${matrixExpression}\n`));
   assert.ok(byId.browser.includes(routedRun));
   const structural = byId.browser
-    .replace("    needs: suite_plan\n", "")
+    .replace("    needs: [suite_plan, merge_group_gate]\n", "")
     .replace(matrixExpression, "[1, 2, 3, 4, 5]")
     .replace(routedRun, "        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}")
     .split("\n")
@@ -342,15 +359,55 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.deepEqual(shards, [1, 2, 3, 4, 5],
     "browser: retain the five-job envelope; browser-shards.test.mjs compares all project test identities");
 
-  assert.doesNotMatch(byId.checks, /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
-    "the browser suites must not share the unit-test job's budget");
-  assert.match(byId.checks, /^      - name: Unit Tests$/m);
+  for (const id of ["checks", "unit"]) assert.doesNotMatch(byId[id], /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
+    "the browser suites must not share the unit-test jobs' budgets");
+  assert.doesNotMatch(byId.checks, /^      - name: Unit Tests$/m, "the unit tests run only in their sharded job (#3770)");
+
+  // The unit tests are sharded like the browser suite (#3770), with the same ways to run less than
+  // the whole suite while every leg reports green, so the job is pinned the same way: its exact
+  // header, no job key after `steps:`, and the exact Unit Tests step, whose `/n` denominator must
+  // equal the shard list. scripts/node-test-plan.test.mjs proves the shards partition the plan.
+  const unit = byId.unit.split("\n").filter((line) => line.trim().length > 0 && !line.trim().startsWith("#")).join("\n");
+  const unitHeader = unit.match(
+    /^  unit:\n    if: [^\n]*\n    needs: \[suite_plan, merge_group_gate\]\n    name: Unit Tests\n    runs-on: ubuntu-24\.04\n    timeout-minutes: \d+\n    strategy:\n      fail-fast: false\n      matrix:\n        shard: \[([^\]]*)\]\n    steps:$/m,
+  );
+  assert.ok(unitHeader, "unit: the job header must be exactly its guard, needs, name, runner, timeout, `fail-fast: false`, " +
+    "a single `shard:` list, and then `steps:`; `exclude`, `include`, `max-parallel` or `continue-on-error` would each run " +
+    "less than the whole suite or hide a failed shard");
+  assert.deepEqual(unit.slice(unit.indexOf("\n    steps:") + "\n    steps:".length).split("\n").filter((line) => /^    \S/.test(line)), [],
+    "unit: every line after `steps:` must belong to a step");
+  const unitShards = unitHeader[1].split(",").map((value) => Number(value.trim()));
+  assert.deepEqual(unitShards, unitShards.map((_, index) => index + 1), "unit: shards must be numbered consecutively");
+  assert.ok(unitShards.length >= 2, "unit: the suite must stay split across parallel jobs");
+  const shardArg = `--shard=\${{ matrix.shard }}/${unitShards.length}`;
+  assert.ok(unit.endsWith([
+    "      - name: Unit Tests",
+    "        timeout-minutes: 18",
+    "        env:",
+    `          ROUTING_SWITCH: \${{ vars.CI_PR_SUITE_ROUTING }}`,
+    `          PR_FAST: ${fastExpression}`,
+    `          GATE_SWITCH: \${{ vars.CI_MERGE_GROUP_GATE }}`,
+    `          GROUP_FAST: ${groupFastExpression}`,
+    "        run: |",
+    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
+    `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
+    '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
+    `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
+    "          else",
+    `            pnpm test:ci ${shardArg}`,
+    "          fi",
+  ].join("\n")), "unit: the Unit Tests step must be the job's last step, exactly as reviewed, and its denominator must equal the shard list");
+
   assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
-  assert.match(byId.check, /^    needs: \[checks, browser, win32, webkit, suite_plan\]$/m, "the aggregator must wait for every work job");
+  assert.match(byId.check, /^    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
   assert.match(byId.check, /needs\.checks\.result/, "the aggregator must inspect the checks job result");
+  assert.match(byId.check, /^          UNIT_RESULT: \$\{\{ needs\.unit\.result \}\}$/m, "the aggregator must inspect every unit shard's combined result");
+  assert.match(byId.check, /^          report "Unit Tests" "\$UNIT_RESULT"$/m, "the aggregator must fail when any unit shard did not succeed");
   assert.match(byId.check, /needs\.browser\.result/, "the aggregator must inspect the browser job result");
+  assert.match(byId.check, /needs\.delegated_pipeline\.result/, "the aggregator must inspect recorded-boundary recovery");
+  assert.match(byId.check, /^          report "Delegated Pipeline Recovery" "\$DELEGATED_PIPELINE_RESULT"$/m);
   // The win32 job is the draft guard, its name, the call and optional snapshot inputs. Its path scoping lives
   // in the called workflow, where a skip is a job the call still reports as a success; a condition
   // here would instead skip the call, which the aggregator rightly reads as a failure.
@@ -401,8 +458,14 @@ test("real WSL isolation CI keeps automatic PE/binfmt interop out of the provide
   const platform = readFileSync(resolve(process.cwd(), WORKFLOWS[2]), "utf8");
   const integration = readFileSync(resolve(process.cwd(), "apps/runner/src/wsl-bwrap-fail-closed.integration.test.ts"), "utf8");
 
-  assert.match(platform, /os: \[ubuntu-24\.04, windows-latest, windows-2025, macos-latest\]/u);
-  assert.match(platform, /Verify WSL Boundaries Stay Fail-Closed/u);
+  assert.equal(platform.match(/^        os: \[ubuntu-24\.04, windows-latest, macos-latest\]$/gmu)?.length, 2,
+    "both Platform Isolation matrices must run one Windows lane (#3785)");
+  assert.doesNotMatch(platform, /^        os: .*windows-2025/mu,
+    "windows-2025 is the same image as windows-latest, so a second lane would only repeat the shared steps");
+  assert.match(platform, /^      - name: Verify WSL Boundaries Stay Fail-Closed\r?\n        if: matrix\.os == 'windows-latest'\r?\n/mu,
+    "the WSL boundary step must run on the remaining Windows lane");
+  assert.match(platform, /^  platform-isolation:\r?\n(?: {4}.*\r?\n)*? {4}timeout-minutes: 35\r?$/mu,
+    "the merged Windows job needs the budget sized from its measured step durations");
   assert.match(platform, /WOLLIPOG_WSL_FAIL_CLOSED_DISTRO = "Ubuntu-24\.04"/u);
   assert.match(platform, /node --import tsx --test --test-reporter=tap apps\/runner\/src\/wsl-bwrap-fail-closed\.integration\.test\.ts/u,
     "the real WSL job must exercise the product's Direct bwrap alias and PE rejection");
@@ -525,7 +588,7 @@ test("CI validates production builds and caches the pinned Playwright browser", 
 
   assert.match(
     ci,
-    /^      - name: Validate Web Production Build\r?\n        run: pnpm --filter @wollipog\/web build$/m,
+    /^      - name: Validate Web Production Build\r?\n(?:        timeout-minutes: \d+\r?\n)?        run: pnpm --filter @wollipog\/web build$/m,
     "CI must exercise the web production build",
   );
   // The production pass is guarded to one shard, so the `run:` no longer follows its `name:` line
@@ -539,9 +602,13 @@ test("CI validates production builds and caches the pinned Playwright browser", 
   );
   assert.match(
     ci,
-    /^      - name: Validate Runner Bundle\r?\n        run: pnpm --filter @wollipog\/runner exec node scripts\/build-binary\.mjs --bundle-only$/m,
-    "CI must exercise the runner esbuild bundle",
+    /^      - name: Validate Runner Bundle\r?\n        timeout-minutes: 5\r?\n        env:\r?\n          TARGET_TRIPLE: x86_64-unknown-linux-gnu\r?\n        run: \|\r?\n          pnpm --filter @wollipog\/runner build:binary\r?\n          node --import tsx apps\/runner\/scripts\/verify-managed-worktree-guard-binary\.mjs apps\/runner\/dist-bin\/wollipog-runner-x86_64-unknown-linux-gnu$/m,
+    "required CI must build the real runner SEA and exercise its guard without ignoring failures",
   );
+  const platform = readFileSync(resolve(process.cwd(), ".github/workflows/platform-isolation.yml"), "utf8");
+  assert.match(platform,
+    /- name: Verify Windows Release CLI Dispatch[\s\S]*?pnpm --filter @wollipog\/runner build:binary[\s\S]*?- name: Verify Windows Packaged Guard\r?\n        if: matrix\.os == 'windows-latest'\r?\n        timeout-minutes: 1\r?\n        shell: pwsh\r?\n        run: \|\r?\n          node --import tsx apps\/runner\/scripts\/verify-managed-worktree-guard-binary\.mjs apps\/runner\/dist-bin\/wollipog-runner-x86_64-pc-windows-msvc\.exe\r?\n          if \(\$LASTEXITCODE -ne 0\) \{ exit \$LASTEXITCODE \}/,
+    "Windows CI must exercise the built SEA and propagate native verifier failure");
   assert.match(
     ci,
     /^      - name: Resolve Playwright Version\r?\n        id: playwright-version\r?\n        run: \|\r?\n          playwright_version="\$\(pnpm exec playwright --version\)"\r?\n          echo "version=\$\{playwright_version#Version \}" >> "\$GITHUB_OUTPUT"$/m,
@@ -676,7 +743,7 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
   // longer follows its attempt, swallows its own failure or skips clearing the first attempt's
   // processes, or a lost error naming the install all fail here.
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
-  const job = ci.slice(ci.indexOf("\n  checks:\n"), ci.indexOf("\n  browser:\n"));
+  const job = ci.slice(ci.indexOf("\n  unit:\n"), ci.indexOf("\n  delegated_pipeline:\n"));
   const steps = job.split(/^      - name: /m).slice(1)
     .map((step) => step.replace(/(?:\n *(?:#[^\n]*)?)+$/, ""));
   const name = "Install Isolated Video Decoder for Unit Tests";
@@ -796,16 +863,37 @@ test("the unit-test job's video decoder install is cached, retries once, and eve
     `          key: ${key}`,
   ].join("\n"), `${names[6]}: must save only a complete collection under the restored key, and never fail the job`);
 
-  // Everything else in the job took at most 771 seconds over 615 successful jobs (2026-09-28 to
-  // 2026-10-01). Every decoder step running to its bound, including both install attempts, must
-  // still leave that much, or a stall the retry recovers from cancels the unit tests anyway, which
-  // is the failure #2328 removed.
-  const SLOWEST_REMAINDER_SECONDS = 771;
-  const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
-  const decoderMinutes = bounds.reduce((sum, minutes) => sum + minutes, 0);
-  assert.ok((budget - decoderMinutes) * 60 >= SLOWEST_REMAINDER_SECONDS,
-    `checks: timeout-minutes ${budget} must cover every video decoder step at its bound (${bounds.join(" + ")} minutes) ` +
-    `plus the slowest measured remainder of the job (${SLOWEST_REMAINDER_SECONDS} seconds)`);
+  // Every decoder step running to its bound, including both install attempts, must still leave the
+  // Unit Tests step its whole bound, or a stall the retry recovers from cancels the unit tests anyway,
+  // which is the failure #2328 removed. The next test checks that, with every other step's bound too.
+});
+
+test("the unit and checks jobs name the step that exceeds its budget (#3770)", () => {
+  // A job budget that runs out cancels the job and names no step: #3770's merge groups were cancelled
+  // during the web build after every unit test had passed. So every `run:` step in these two jobs
+  // carries its own timeout-minutes, and the job budget covers all of those bounds at once (both
+  // video decoder attempts included) plus a fixed allowance for the pinned setup actions, which
+  // take well under a minute. Whichever step overruns then fails under its own name first, unless
+  // a setup action itself stalls past the allowance.
+  const SETUP_ACTION_ALLOWANCE_MINUTES = 5;
+  const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8").replace(/\r\n/g, "\n");
+  for (const [id, next] of [["checks", "unit"], ["unit", "delegated_pipeline"]]) {
+    const job = ci.slice(ci.indexOf(`\n  ${id}:\n`), ci.indexOf(`\n  ${next}:\n`));
+    const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]);
+    const steps = job.split(/^      - /m).slice(1);
+    assert.ok(steps.length > 5, `${id}: steps must be readable`);
+    let bounded = 0;
+    for (const step of steps) {
+      const name = step.match(/^(?:name: )?([^\n]*)/)[1];
+      const bound = Number(step.match(/^        timeout-minutes: (\d+)$/m)?.[1] ?? 0);
+      if (/^        run: /m.test(step)) assert.ok(bound > 0, `${id}: ${name} needs its own timeout-minutes`);
+      else assert.match(step, /^ *(?:- )?uses: [^\s@]+@[0-9a-f]{40}/m, `${id}: ${name}: a step is a run step or a pinned action`);
+      bounded += bound;
+    }
+    assert.ok(bounded + SETUP_ACTION_ALLOWANCE_MINUTES <= budget,
+      `${id}: timeout-minutes ${budget} must cover every step's own bound (${bounded} minutes) plus ` +
+      `${SETUP_ACTION_ALLOWANCE_MINUTES} minutes for the setup actions, so a timeout names its step`);
+  }
 });
 
 test("PR workflow expressions satisfy the complete event matrix", () => {
@@ -834,7 +922,7 @@ test("every CI Node setup retries once with the same pinned action and version",
   const ci = readFileSync(resolve(process.cwd(), WORKFLOWS[0]), "utf8");
   const steps = ci.split(/^      - name: /m).slice(1);
   const setupSteps = steps.filter((step) => /^        uses: actions\/setup-node@/m.test(step));
-  assert.equal(setupSteps.length, 14, "seven Node setups each need one retry");
+  assert.equal(setupSteps.length, 18, "nine Node setups each need one retry");
 
   const versions = [];
   for (const [index, step] of steps.entries()) {
@@ -867,6 +955,8 @@ test("every CI Node setup retries once with the same pinned action and version",
     "node-version: 23.2.0",
     "node-version: 23.4.0",
     "node-version-file: .nvmrc",
+    "node-version-file: .nvmrc\n          cache: pnpm",
+    "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
     "node-version-file: .nvmrc\n          cache: pnpm",
   ]);
@@ -930,8 +1020,9 @@ test("every workflow job bounds its own runtime", () => {
 
       assert.ok(timeout, `${path}: job "${heading[1]}" must set timeout-minutes`);
       // #3649 adds 8m of bounded cache/verification phases plus 75s enforcement to
-      // the measured Chromium model. Only this job may exceed the general ceiling.
-      const maximum = path === WORKFLOWS[0] && heading[1] === "browser" ? 68 : MAX_TIMEOUT_MINUTES;
+      // the measured Chromium model; #3628's 2453s natural remainder derives a 75m cap.
+      // Only this job may exceed the general ceiling (see workflow-browser-budget.test.mjs).
+      const maximum = path === WORKFLOWS[0] && heading[1] === "browser" ? 75 : MAX_TIMEOUT_MINUTES;
       assert.ok(
         Number(timeout[1]) <= maximum,
         `${path}: job "${heading[1]}" timeout-minutes ${timeout[1]} exceeds ${maximum}`,

@@ -73,7 +73,31 @@ The runner SEA embeds fixed skill-adoption helpers compiled on the build host. m
 snapshot helper with `/usr/bin/clang`. Linux legs compile the no-replace rename helper
 (`apps/runner/native/linux-skill-rename.c`) with `/usr/bin/cc -static`, which needs a C compiler and
 the static C library; the `build-essential` packages the Linux legs install provide both. CI's
-`--bundle-only` runner check compiles the same static helper on every pull request.
+packaged runner check compiles the same static helper on every pull request.
+
+The **Validate Runner Bundle** step in `ci.yml` builds the complete unsigned Linux x64
+runner SEA (including injection), then runs the provisioning self-test against that executable.
+It also invokes `--managed-worktree-guard` from a foreign working directory and requires a real
+deny document for destructive worktree removal, exit code 2 for malformed input, and an ordinary
+command to pass. Missing output, crashes and timeouts fail the step. This runs in **Typecheck &
+Bundles**, a dependency of the required **Typecheck, Test & Sidecar Bundle** aggregator, on PRs,
+merge groups and rolling main validation; it is not an advisory Platform Isolation check.
+To repeat locally after `pnpm --filter @wollipog/runner build:binary`, run
+`node --import tsx apps/runner/scripts/verify-managed-worktree-guard-binary.mjs <absolute-runner-binary>`.
+The same guard smoke also runs in **Verify Windows Packaged Guard** in `platform-isolation.yml`,
+reusing the Windows x64 SEA built by **Verify Windows Release CLI Dispatch**. That workflow is
+advisory, so its Windows result must be checked separately before claiming Windows verification.
+The six native release legs still build their own artifacts and run their existing entry-point checks.
+The step retains its established name for health and release evidence consumers. The portable
+local suite in `scripts/test-suites.mjs` intentionally keeps its faster bundle-only check; run
+the full build and packaged verifier above to reproduce this additional required CI coverage.
+
+The Windows v0.27.0 report in #1338 described guard re-entry starting the daemon and looking for
+`runner.config.json` in the probe directory. PR #1883 (commit `662d40fa535823b747f2dcc995aa8fe4f07c4243`,
+for #1339) corrected the shared `resolveRunnerEntry` dispatcher to read application arguments at
+`argv[2]`, including in SEA binaries where `argv[1]` repeats the executable. That dispatcher includes
+`--managed-worktree-guard`, so the source fix covers this mode too. The packaged Windows smoke
+checks this path directly; source inspection alone does not prove a particular released asset works.
 
 Each matrix job also publishes the **headless control plane**: the exact injected and signed
 sidecar bytes are copied to `apps/control-plane/dist-bin/wollipog-control-plane-<triple>[.exe]`,
@@ -311,17 +335,31 @@ including the unique tag used by a manual test release.
 
 ## Cut a release
 
+Stable releases require [exact full-regression certification](release-automation.md#exact-full-regression-certification)
+of the actual merged release commit. A green PR, merge group or ancestor is insufficient. This
+stays true if the disabled fast merge-group gate is ever activated
+([proposal](fast-gate-activation-proposal.md)): a reduced group never certifies a release. Use
+resumable supervision for checkpoint recovery and fresh certification immediately before
+publication. An intermediate candidate skipped by rolling main can request the bounded candidate
+lane; wait for that exact SHA's complete compatible suite before tagging.
+
 ```bash
 # 1. Bump the six version fields above to the new X.Y.Z, commit, merge to main.
-# 2. Tag the release commit and push the tag:
-git tag vX.Y.Z
+# 2. Verify the actual merged release SHA, with explicit tagging/publication authority:
+node scripts/release-certification.mjs --repository picoduck/wollipog --target-sha FULL_MERGED_RELEASE_SHA
+# 3. Tag that exact commit and push the tag:
+git tag vX.Y.Z FULL_MERGED_RELEASE_SHA
 git push origin vX.Y.Z
 ```
 
 The push triggers the workflow. When all six matrix jobs and the final runner-release verification are green, open the draft release on
 GitHub, replace the generic draft body with release notes, review upgrade behavior and known
-limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and
-**Publish**. Publishing is also what makes the release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
+limitations, sanity-check the exact 47-asset inventory, `SHA256SUMS`, and `latest.json`, and reconcile
+fresh exact-candidate certification immediately before an authorized **Publish**. Prefer
+`pnpm release resume` for this final gate and accepted-publication recovery. A pending rerun,
+failed/incomplete validation, incompatible suite or expired evidence blocks stable publication;
+a previously green workflow or checkpoint does not waive it. Publishing is also what makes the
+release visible to installed apps. A pre-release suffix (`vX.Y.Z-rc.1`) is marked
 as a GitHub pre-release automatically.
 
 After publishing, reconcile the repository's security advisories with the release. For every

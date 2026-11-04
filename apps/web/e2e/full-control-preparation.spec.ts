@@ -1,6 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
-import { CONTROLLED_REVIEW_PROFILE, DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION,
-  type FullControlLaunchRequest, type OrchestratorCampaignPolicy, type RunnerView } from "@wollipog/protocol";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, CONTROLLED_REVIEW_PROFILE, DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION,
+  type CampaignLaunchInspectionFailure, type FullControlLaunchRequest, type OrchestratorCampaignPolicy, type RunnerView } from "@wollipog/protocol";
 import { execFileSync } from "node:child_process";
 import { campaignLaunchPreflight } from "../../control-plane/src/campaign-launch-admission.js";
 
@@ -13,9 +13,10 @@ const themes = ["dark", "light"];
  * server-derived text. The runner fixtures differ only in what the runner reports: bwrap isolation
  * without the controlled reviewer, or provider isolation with the audited reviewer profile, and
  * whether its origin verified. Enabling an existing campaign uses its own Human-established scope. */
-function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean, existingCampaign = false, storedChildren = 3, verified = true) {
+function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean, existingCampaign = false, storedChildren = 3, verified = true,
+  failure: CampaignLaunchInspectionFailure = "not_repository") {
   const runner = { runnerId: "runner-1", connectedAt: 1, protocolVersion: PROTOCOL_VERSION, agents: [], workspaces: [],
-    runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 2 },
+    runtime: { dataDir: "/fixture", worktreeRoot: "/fixture/worktrees", maxConcurrentSessions: 4, campaignLaunchInspection: { version: 3 },
       executionIsolation: runnerReady ? { mode: "provider", network: "inherit" } : { mode: "bwrap", network: "deny" },
       ...(runnerReady ? { campaignReview: { profile: CONTROLLED_REVIEW_PROFILE, controllerSha256: "c".repeat(64), executableSha256: "e".repeat(64),
         cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" } } : {}) },
@@ -35,7 +36,7 @@ function serverPreflight(launch: FullControlLaunchRequest, runnerReady: boolean,
       ? { campaignScope: { repository: "example/full-control-fixture", issueNumbers: [12], authorizedByCaller: true } }
       : { inspection: verified ? { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: true,
         repository: "example/full-control-fixture", issueNumbers, digest: "d".repeat(64) }
-        : { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: false } }),
+        : { type: "campaign_launch_inspection_result" as const, requestId: "fixture", workspaceId: launch.workspaceId, ok: false, failure } }),
     accountingError: () => null, dailyLimit: false, invalidPolicyIds: [], imageReview: { effectiveOwner: "orchestrator" }, humanRequiredRules: false,
     pacedVideoPeer: false, disclosuresAvailable: true, savedBudget: null }).preflight;
 }
@@ -62,10 +63,11 @@ const settle = (page: Page) => page.evaluate(() => Promise.all(document.getAnima
   .map((animation) => animation.finished))
   .then(() => new Promise<void>((resolve) => requestAnimationFrame(() => requestAnimationFrame(() => resolve())))));
 /** Under Full Control the dialog shows only its mode, its line and its action (#2940): the boundary
- * owns every gate, so no Custom owner, request choice, evidence note or stored behavior is shown. */
-async function expectFullControlOnly(page: Page) {
+ * owns every gate, so no Custom owner, request choice or evidence note is shown. Once Full Control is
+ * in effect Campaign Behavior stays, since it governs every child the campaign creates (#3580). */
+async function expectFullControlOnly(page: Page, { inEffect }: { inEffect: boolean }) {
   const dialog = page.getByRole("dialog", { name: "Orchestrator Controls" });
-  await expect(dialog.locator(".section-title")).toHaveText(["Orchestrator Control"]);
+  await expect(dialog.locator(".section-title")).toHaveText(inEffect ? ["Orchestrator Control", "Campaign Behavior"] : ["Orchestrator Control"]);
   await expect(dialog.getByRole("radiogroup", { name: "PR Merge Approval", exact: true })).toHaveCount(0);
   await expect(dialog.getByRole("radiogroup", { name: "Child Session Requests", exact: true })).toHaveCount(0);
   await expect(dialog.getByText("The Orchestrator runs this campaign end to end.").first()).toBeVisible();
@@ -104,7 +106,7 @@ async function editSessionPolicy(page: Page, tab: "Behavior" | "Decisions", edit
 
 /** Full Control adds nothing to fill in or review (#2940): no task, issues, limits, readiness or summary. */
 async function expectNoFullControlForm(page: Page) {
-  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Accepted Follow-Ups", "Maximum Issues"]) {
+  for (const label of ["Task", "Issue Numbers", "Cost Limit (USD)", "Tool Call Limit", "Follow-Ups Without Approval", "Maximum Issues"]) {
     await expect(page.getByLabel(label, { exact: true })).toHaveCount(0);
   }
   for (const copy of [/Authorize and Start/, /Describe the task/, /Ready to (?:Authorize|Enable)/, /Can't (?:Start|Enable) Yet/, /Campaign Limits/, /No Limit/]) {
@@ -178,29 +180,31 @@ for (const viewport of viewports) {
       expect(admissions[0]!.requestId).toMatch(/^[a-f0-9]{32}$/);
     });
 
-    test(`launch blocked ${viewport.name} ${theme}: a genuine impossibility is one inline error where launch errors appear`, async ({ page }) => {
-      await page.setViewportSize(viewport);
-      await routeSettings(page, []);
-      const admissions: unknown[] = [];
-      await page.route("**/api/full-control-campaigns/preflight", async (route) => {
-        await route.fulfill({ json: { preflight: serverPreflight(route.request().postDataJSON() as FullControlLaunchRequest, true, false, 3, false) } });
+    for (const failure of ["not_repository", "unsupported_origin"] as const) {
+      test(`launch blocked ${viewport.name} ${theme} ${failure}: a genuine impossibility is one inline error where launch errors appear`, async ({ page }) => {
+        await page.setViewportSize(viewport);
+        await routeSettings(page, []);
+        const admissions: unknown[] = [];
+        await page.route("**/api/full-control-campaigns/preflight", async (route) => {
+          await route.fulfill({ json: { preflight: serverPreflight(route.request().postDataJSON() as FullControlLaunchRequest, true, false, 3, false, failure) } });
+        });
+        await page.route("**/api/full-control-campaigns", async (route) => {
+          admissions.push(route.request().postDataJSON());
+          await route.fulfill({ status: 201, json: { id: "never" } });
+        });
+        await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=${theme}`);
+        await openSessionOptions(page);
+        await editSessionPolicy(page, "Decisions", (policy) =>
+          policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
+        await page.getByRole("button", { name: "Create Session", exact: true }).click();
+        const alert = page.getByRole("alert").filter({ hasText: "Couldn't Start the Session" });
+        await expect(alert).toHaveCount(1);
+        await expect(alert).toContainText(CAMPAIGN_LAUNCH_INSPECTION_ERRORS[failure]);
+        await expectNoFullControlForm(page);
+        expect(admissions).toHaveLength(0);
+        await shoot(page, alert, `${captures}/launch-${viewport.name}-${theme}-${failure}-blocked.png`);
       });
-      await page.route("**/api/full-control-campaigns", async (route) => {
-        admissions.push(route.request().postDataJSON());
-        await route.fulfill({ status: 201, json: { id: "never" } });
-      });
-      await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=${theme}`);
-      await openSessionOptions(page);
-      await editSessionPolicy(page, "Decisions", (policy) =>
-        policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click());
-      await page.getByRole("button", { name: "Create Session", exact: true }).click();
-      const alert = page.getByRole("alert").filter({ hasText: "Couldn't Start the Session" });
-      await expect(alert).toHaveCount(1);
-      await expect(alert).toContainText("The registered workspace's origin could not be verified; check that it is a github.com repository.");
-      await expectNoFullControlForm(page);
-      expect(admissions).toHaveLength(0);
-      await shoot(page, alert, `${captures}/launch-${viewport.name}-${theme}-blocked.png`);
-    });
+    }
 
     test(`defaults ${viewport.name} ${theme}: Full Control saves a preference and a campaign budget, never authority`, async ({ page }) => {
       await page.setViewportSize(viewport);
@@ -250,7 +254,7 @@ for (const viewport of viewports) {
       await page.getByRole("radio", { name: "Full Control", exact: true }).click();
       await expect(page.getByText(FULL_CONTROL_LINE)).toBeVisible();
       await expectNoFullControlForm(page);
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: false });
       const enable = page.getByRole("button", { name: "Enable Full Control", exact: true });
       const footer = page.locator(".modal-foot");
       await expect(footer.getByRole("button")).toHaveText(["Done", "Enable Full Control"]);
@@ -261,7 +265,7 @@ for (const viewport of viewports) {
       await enable.click();
       await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
       await expect(page.getByRole("button", { name: "Revoke Full Control", exact: true })).toBeVisible();
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: true });
       await expect(footer.getByRole("button")).toHaveText(["Done"]);
       await shoot(page, heading, `${prefix}-enabled.png`);
       expect(bodies).toEqual([{}]);
@@ -285,7 +289,7 @@ for (const viewport of viewports) {
       await expect(alert).toContainText("This campaign pauses new children; raise Live Child Limit in Guardrails to enable Full Control.");
       await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
       await expectNoFullControlForm(page);
-      await expectFullControlOnly(page);
+      await expectFullControlOnly(page, { inEffect: false });
       await expect(enable).toBeInViewport();
       await shoot(page, alert, `${captures}/paused-${viewport.name}-${theme}-blocked.png`);
     });
@@ -301,7 +305,7 @@ for (const viewport of viewports) {
     await page.getByRole("menuitem", { name: "Orchestrator Controls…" }).click();
     const heading = page.getByRole("heading", { name: "Orchestrator Control", exact: true });
     await expect(page.getByText(/Effective Mode: Full Control/)).toBeVisible();
-    await expectFullControlOnly(page);
+    await expectFullControlOnly(page, { inEffect: true });
     await shoot(page, heading, `${captures}/revoke-${viewport.name}-${theme}-full.png`);
     await page.getByRole("button", { name: "Revoke Full Control", exact: true }).click();
     await expect(page.getByText(/Effective Mode: Custom/)).toBeVisible();
@@ -410,3 +414,38 @@ test.describe("limit entry lifecycle", () => {
     await expect(cost).toHaveValue("40");
   });
 });
+
+/** #3580 with #3826: the follow-up limit is an approval threshold, so wherever Follow-Ups is chosen
+ * under Full Control it is named Follow-Ups Without Approval and explained, and the launch still adds
+ * no follow-up field to fill in (the old "Accepted Follow-Ups" field left with #3590). */
+for (const viewport of viewports) {
+  test(`follow-ups ${viewport.name}: under Full Control, Execute Approved explains Follow-Ups Without Approval`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    const prefix = `${captures}/follow-ups-${viewport.name}`;
+    await routeSettings(page, []);
+    await page.goto(`/new-session-choices-e2e.html?defaults=orchestrator&openedView=1&theme=dark`);
+    await openSessionOptions(page);
+    await page.getByRole("button", { name: "Customize…" }).click();
+    const policy = page.getByRole("dialog", { name: "Orchestrator Policy" });
+    await policy.getByRole("tab", { name: /^Decisions/ }).click();
+    await policy.getByRole("radiogroup", { name: "Orchestrator Control" }).getByRole("radio", { name: "Full Control", exact: true }).click();
+    await policy.getByRole("tab", { name: /^Behavior/ }).click();
+    await policy.locator('[aria-label^="Follow-Ups:"]').click();
+    await page.getByRole("option", { name: /^Execute Approved/ }).click();
+    const note = policy.getByText(/Under Full Control, follow-ups up to Follow-Ups Without Approval start on their own\. Past that limit, each waits for your approval\. Change the limit in Campaign Status\./);
+    await expect(note).toBeVisible();
+    await expect(policy).not.toContainText("Accepted Follow-Ups");
+    await note.scrollIntoViewIfNeeded();
+    await page.mouse.move(0, 0);
+    await settle(page);
+    await page.screenshot({ path: `${prefix}-policy.png` });
+
+    await policy.getByRole("button", { name: "Apply Policy" }).click();
+    await expect(policy).toHaveCount(0);
+    const control = page.locator(".orchestrator-policy-summary");
+    await expect(control).toContainText("Full Control");
+    await expect(control).toContainText("Executes Approved Follow-Ups");
+    await expectNoFullControlForm(page);
+    await shoot(page, control, `${prefix}-launch.png`);
+  });
+}

@@ -35,7 +35,7 @@ for (const [name, value] of Object.entries({
 const tick = () => new Promise<void>((resolve) => domWindow.setTimeout(resolve, 0));
 
 afterEach(() => {
-  for (const requestId of ["ask-single", "ask-flow", "ask-choices", "ask-replacement", "ask-context", "ask-steps", "ask-busy"]) {
+  for (const requestId of ["ask-single", "ask-flow", "ask-choices", "ask-replacement", "ask-context", "ask-steps", "ask-busy", "ask-many"]) {
     clearQuestionDrafts("session-1", requestId);
   }
 });
@@ -380,6 +380,98 @@ test("several questions step with Back from question 2, and a masked secret surv
     assert.deepEqual(calls, [{
       requestId: "ask-flow",
       answers: { target: "Production", region: "East", token: "page-only-secret" },
+      action: "submit",
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("secret answers never reach the DOM while typed, across steps or after a failed submit (#3814)", async () => {
+  const { container, root } = mount();
+  let attempts = 0;
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, body: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      attempts += 1;
+      if (attempts === 1) throw new Error("The runner went offline.");
+      calls.push(structuredClone(body));
+      return { id: "session-1" } as SessionView;
+    },
+  } as ApiClient;
+  const questions: AgentQuestion[] = [
+    { id: "user", question: "Enter the user", options: [], allowOther: true },
+    { id: "first", question: "Enter the first token", options: [], allowOther: true, secret: true },
+    { id: "second", question: "Enter the second token", options: [], allowOther: true, secret: true },
+  ];
+  const html = () => container.innerHTML;
+  try {
+    await act(async () => root.render(<Harness client={client} questions={questions} requestId="ask-secrets" />));
+    await act(async () => setInputValue(answerInput(container), "plain-user"));
+    await act(async () => press(answerInput(container), "Enter"));
+    assert.equal(answerInput(container).type, "password");
+    await act(async () => setInputValue(answerInput(container), "first-secret-answer"));
+    assert.doesNotMatch(html(), /first-secret-answer/, "a typed secret is not mirrored into a value attribute");
+    await act(async () => press(answerInput(container), "Enter"));
+    assert.equal(answerInput(container).value, "", "the next secret starts empty");
+    await act(async () => setInputValue(answerInput(container), "second-secret-answer"));
+    await act(async () => { buttonNamed(container, "Back").click(); });
+    assert.equal(answerInput(container).value, "first-secret-answer", "Back brings the first secret back to its field");
+    await act(async () => { buttonNamed(container, "Back").click(); });
+    assert.equal(answerInput(container).type, "text");
+    assert.equal(answerInput(container).value, "plain-user", "a plain answer is still a controlled field");
+    await act(async () => press(answerInput(container), "Enter"));
+    await act(async () => press(answerInput(container), "Enter"));
+    assert.equal(answerInput(container).value, "second-secret-answer");
+    assert.doesNotMatch(html(), /first-secret-answer|second-secret-answer/);
+
+    await act(async () => {
+      press(answerInput(container), "Enter");
+      await tick();
+    });
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /\S/, "the failure is shown");
+    assert.equal(answerInput(container).value, "second-secret-answer", "a failed submit keeps the answer");
+    assert.doesNotMatch(html(), /first-secret-answer|second-secret-answer/, "nor are secrets in the DOM after it");
+
+    await act(async () => {
+      press(answerInput(container), "Enter");
+      await tick();
+    });
+    assert.deepEqual(calls, [{
+      requestId: "ask-secrets",
+      answers: { user: "plain-user", first: "first-secret-answer", second: "second-secret-answer" },
+      action: "submit",
+    }]);
+  } finally {
+    await act(async () => root.unmount());
+    container.remove();
+  }
+});
+
+test("a Codex async card with the runner's maximum of 20 questions steps through and submits every answer (#3724)", async () => {
+  const { container, root } = mount();
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  // The runner's normalized Codex async shape: index ids, string-only choices, free text allowed.
+  const questions: AgentQuestion[] = Array.from({ length: 20 }, (_, index) => ({
+    id: String(index), question: `Authorize decision ${index + 1}?`,
+    options: [{ label: "Approve" }, { label: "Hold" }],
+    allowOther: true, inputFormat: "text", maxLength: 4000,
+  }));
+  try {
+    await act(async () => root.render(<Harness client={recordingClient(calls)} questions={questions} requestId="ask-many" />));
+    for (let index = 0; index < questions.length; index++) {
+      assert.equal(container.querySelector(".answer-step")?.textContent, `Question ${index + 1} of 20`);
+      await act(async () => { row(container, index % 2 ? "Hold" : "Approve").click(); });
+      await act(async () => {
+        press(answerInput(container), "Enter");
+        await tick();
+      });
+    }
+    assert.deepEqual(calls, [{
+      requestId: "ask-many",
+      answers: Object.fromEntries(questions.map((question, index) => [question.id, index % 2 ? "Hold" : "Approve"])),
       action: "submit",
     }]);
   } finally {

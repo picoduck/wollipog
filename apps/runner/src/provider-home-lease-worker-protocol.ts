@@ -40,6 +40,15 @@ export type LeaseWorkerOperation =
    * `profileId`, sent for a managed profile HOME, is the identity its account recorded: a marker
    * holding any other identity, or none, keeps the HOME and is not changed. */
   | { method: "profile_retire"; home: string; provider: "claude" | "codex"; profileId?: string }
+  /** #3719: copy the Codex API-key sign-in of the existing source HOME `home` into a new managed
+   * profile HOME `<destinationRoot>/<profileId>` whose first marker records `grantId`, in one
+   * operation. `layout` says where the credential sits under `home`. The source is never created,
+   * is refused while this runner holds or acquires it, and is leased exclusively with its own
+   * dispatch-time profile context; the destination is created only after the source is admitted.
+   * With `layout: "user_home"` the credential directory `home/.codex` is leased too, exclusively,
+   * with its own context `credentialProfile`, since an account may name that directory itself. */
+  | { method: "profile_import"; home: string; provider: "codex"; layout: "codex_home" | "user_home"; destinationRoot: string; profileId: string; grantId: string;
+    profile?: LeaseWorkerProfileAccess; credentialProfile?: LeaseWorkerProfileAccess }
   /** #3241 part 2: read the HOME's lease journal without creating anything; the reply carries
    * `inspection`. */
   | { method: "lease_inspect"; home: string; profile?: LeaseWorkerProfileAccess }
@@ -50,13 +59,14 @@ export function isLeaseWorkerAcquisition(method: LeaseWorkerOperation["method"])
   return method === "acquire" || method === "acquire_reference";
 }
 /** Operations that carry the dispatch-time provider-profile context. */
-export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" | "lease_inspect" | "lease_recover" {
-  return isLeaseWorkerAcquisition(method) || method === "lease_inspect" || method === "lease_recover";
+export function leaseWorkerOperationTakesProfile(method: LeaseWorkerOperation["method"]): method is "acquire" | "acquire_reference" | "lease_inspect" | "lease_recover" | "profile_import" {
+  return isLeaseWorkerAcquisition(method) || method === "lease_inspect" || method === "lease_recover" || method === "profile_import";
 }
 export type LeaseWorkerError = "busy" | "unavailable" | "foreign_owner" | "foreign_host" | "refusal" | "cancelled" | "cancel_release_failed" | "expired" |
   "holder_alive" | "boundary_survivor" | "process_survivor" | "boundary_unverifiable" | "process_uninspectable" | "process_uninspectable_not_delegated" | "invalid_journal" |
   "profile_unsupported_control_plane" | "profile_unverifiable" | "profile_not_granted" | "profile_changed" | "profile_grant_limit" |
-  "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed";
+  "stale_tip_changed" | "no_reboot_proof" | "recovery_unconfirmed" |
+  "import_source_missing" | "import_source_held" | "import_source_unsafe" | "import_source_foreign" | "import_source_unsupported" | "import_source_changed";
 /** #3241 part 2: a HOME's lease state, as an Owner or Admin sees it before authorizing a recovery. */
 export interface LeaseWorkerInspection {
   state: "none" | "released" | "held" | "stale" | "unverifiable";
@@ -70,13 +80,13 @@ export interface LeaseWorkerInspection {
 }
 /** Fixed, path-free texts: only the code crosses the worker boundary, never the registry's message. */
 export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
-  holder_alive: "Provider HOME's recorded runner is still alive; ownership is retained while that runner is alive. Preserve the lease journal.",
-  boundary_survivor: "A provider or helper, including a detached provider review controller, survives in the recorded provider-HOME boundary; ownership is retained until the recorded boundary is empty. Wait for that work to finish before retrying. Preserve the boundary and journal.",
-  process_survivor: "A process launched by the recorded provider-HOME runner survives; ownership is retained until its process boundary is empty and every potentially related process is inspectable. Preserve the lease journal.",
-  boundary_unverifiable: "Provider HOME's recorded cgroup path and inode could not be verified, or its recorded enclosing delegated unit has not retired. Preserve the boundary and journal. Lifecycle proof does not cover deliberate same-user cgroup migration by provider code.",
-  process_uninspectable: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable (legacy lease or unavailable containment); every potentially related process must be inspectable. Launch future runners in a delegated Linux cgroup v2 unit; preserve the journal.",
-  process_uninspectable_not_delegated: "Provider HOME has an uninspectable process on the fallback recovery path. Boundary proof was unavailable because the runner's systemd unit is not delegated. An operator must launch future runners in a Delegate=yes unit; existing leases still require the process scan. Preserve the journal.",
-  invalid_journal: "Provider HOME's lease journal is invalid or cannot be verified; preserve all records and restore inspectability before retrying. Do not remove individual records.",
+  holder_alive: "Another Wollipog runner is using this account. Wait for its work to finish, then try again, or choose another account.",
+  boundary_survivor: "A program from an earlier session is still using this account. Wait for that work to finish, then try again, or choose another account.",
+  process_survivor: "A program started by an earlier Wollipog runner is still using this account. Wait for that work to finish, then try again, or choose another account.",
+  boundary_unverifiable: "Wollipog can't confirm that an earlier session has finished using this account. Choose another account for now, or ask the person who manages this machine to check it.",
+  process_uninspectable: "Wollipog can't check whether another program is still using this account. Choose another account for now, or save your work and restart the machine before trying again.",
+  process_uninspectable_not_delegated: "Wollipog can't safely unlock this account because it can't check a running program. Choose another account for now, or save your work and restart the machine before trying again.",
+  invalid_journal: "Wollipog can't read or verify this account's recovery records. Choose another account and ask the person who manages this machine to check the recovery details.",
   busy: "Provider HOME is already in use; retry after the current owner or publication finishes.",
   unavailable: "Provider-HOME lease helper unavailable; preserve all evidence and restore the fixed helper and executable staging directory before retrying.",
   foreign_owner: "Provider HOME has a stale lease from another runner or control plane whose recorded process has exited; Wollipog does not take over another owner's lease automatically. Use a separate provider account HOME for this runner, or quarantine the entire provider-home-leases-v1 directory only after proving no provider process or runner uses this HOME, and do not remove individual records.",
@@ -85,14 +95,20 @@ export const LEASE_WORKER_ERRORS: Record<LeaseWorkerError, string> = {
   cancelled: "Provider-HOME lease acquisition was cancelled.",
   cancel_release_failed: "Cancelled provider-HOME acquisition could not be exactly released; preserve all evidence and restart only after proving the HOME unused.",
   expired: "Provider-HOME lease operation exceeded its finite deadline; preserve all evidence.",
-  profile_unsupported_control_plane: "This provider profile needs a newer control plane. Update the control plane, then retry.",
+  profile_unsupported_control_plane: "This version of Wollipog can't approve access to this account. Update the Wollipog server, then try again.",
   profile_unverifiable: "This provider profile's identity marker is unreadable or uses a newer format, so it was not used. Update the runner, or ask an Owner or Admin to check the profile.",
   profile_not_granted: "This provider profile is not granted to this control plane. An Owner or Admin must grant access on this Machine before it can be used.",
   profile_changed: "This provider HOME no longer holds the profile that this account or session recorded, so it was not used. Restore the original directory or adopt the replacement explicitly.",
-  profile_grant_limit: "This provider profile already records the maximum number of control-plane grants. Revoke an unused grant before granting another control plane.",
+  profile_grant_limit: "Too many Wollipog servers already have access to this account. An Owner or Admin needs to remove an unused server's access before adding this one.",
   stale_tip_changed: "This provider HOME's lease is no longer the stale lease that was authorized for recovery. Inspect it again before authorizing a recovery.",
-  no_reboot_proof: "This stale provider HOME lease was written during the current boot and records no process evidence, so it can be recovered only after the host restarts.",
+  no_reboot_proof: "Wollipog can't safely unlock this account until this machine has restarted. Save your work, restart the machine, then recover the account in Connections.",
   recovery_unconfirmed: "The provider HOME lease recovery may have been recorded but could not be confirmed. Inspect the lease again before retrying.",
+  import_source_missing: "There's no Codex sign-in to copy there. Sign in to create the profile instead.",
+  import_source_held: "This sign-in is in use by a session, sign-in or Agent TUI on this Machine. Try again once it's free, or sign in instead.",
+  import_source_unsafe: "Wollipog can't verify this sign-in's files: they must be private regular files and directories owned by the runner's user, without links. Sign in instead.",
+  import_source_foreign: "This HOME belongs to another provider's profile, so its sign-in can't be copied. Sign in instead.",
+  import_source_unsupported: "Only a Codex sign-in that uses an API key stored in auth.json can be copied. A ChatGPT sign-in, or one kept in the keyring, can't be shared safely; sign in instead.",
+  import_source_changed: "This sign-in changed while it was being copied, so nothing was used. Try again.",
 };
 /** A worker refusal with its typed code, so callers can choose a recovery action without parsing text. */
 export class ProviderHomeLeaseError extends Error {
@@ -162,6 +178,15 @@ export function validLeaseWorkerOperation(value: unknown): value is LeaseWorkerO
   }
   const profiled = Object.hasOwn(v, "profile");
   if (profiled && !validLeaseWorkerProfileAccess(v.profile)) return false;
+  if (v.method === "profile_import") {
+    const credentialProfiled = Object.hasOwn(v, "credentialProfile");
+    if (credentialProfiled && (v.layout !== "user_home" || !validLeaseWorkerProfileAccess(v.credentialProfile))) return false;
+    return v.provider === "codex" && (v.layout === "codex_home" || v.layout === "user_home") &&
+      typeof v.destinationRoot === "string" && v.destinationRoot.startsWith("/") && !v.destinationRoot.includes("\0") &&
+      Buffer.byteLength(v.destinationRoot) <= 32768 && typeof v.profileId === "string" && PROFILE_ID.test(v.profileId) &&
+      typeof v.grantId === "string" && GRANT_ID.test(v.grantId) &&
+      Object.keys(v).length === 7 + (profiled ? 1 : 0) + (credentialProfiled ? 1 : 0);
+  }
   if (v.method === "lease_inspect") return Object.keys(v).length === (profiled ? 3 : 2);
   const provider = typeof v.provider === "string" && /^[a-z0-9][a-z0-9-]{0,63}$/u.test(v.provider);
   if (v.method === "lease_recover") {

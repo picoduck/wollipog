@@ -10,6 +10,14 @@ export const PI_AGENT_CONTROL_PROBE_NONCE_ENV = "WOLLIPOG_PI_AGENT_CONTROL_PROBE
 export const PI_SECURITY_REQUEST_TITLE = "Wollipog Security Approval";
 export const PI_SECURITY_REQUEST_PREFIX = "wollipog-security-v1:";
 export const PI_SECURITY_REQUEST_NONCE_ENV = "WOLLIPOG_PI_SECURITY_REQUEST_NONCE";
+/** Reported once per launch at session_start as `<launch nonce>.<state>.<base64url cwd>`, where the
+ * nonce is minted by the driver for that one process. `declined` means Pi dispatched project_trust
+ * for that canonical cwd and the extension declined it without remembering; `not_requested` means
+ * Pi never asked (no protected project resources, or a command-line override). */
+export const PI_PROJECT_TRUST_STATUS_KEY = "wollipog-project-trust";
+export const PI_PROJECT_TRUST_NONCE_ENV = "WOLLIPOG_PI_PROJECT_TRUST_NONCE";
+export const PI_PROJECT_TRUST_DECLINED = "declined";
+export const PI_PROJECT_TRUST_NOT_REQUESTED = "not_requested";
 
 /** Set only by the coupled Orchestrator preset, which launches Pi with `--exclude-tools bash,edit,write`
  * and the discovery flags off, and therefore restores its own read-only inspection surface. The
@@ -24,6 +32,7 @@ export const PI_AGENT_CONTROL_ENV_KEYS = [
   "WOLLIPOG_PI_AGENT_CONTROL_ARGS",
   "WOLLIPOG_PI_AGENT_CONTROL_READY_NONCE",
   PI_SECURITY_REQUEST_NONCE_ENV,
+  PI_PROJECT_TRUST_NONCE_ENV,
   PI_ORCHESTRATOR_PRESET_TOOLS_ENV,
 ] as const;
 
@@ -73,6 +82,7 @@ const HANDSHAKE_TIMEOUT_MS = 35_000;
 const STATUS_KEY = ${JSON.stringify(PI_AGENT_CONTROL_STATUS_KEY)};
 const SECURITY_TITLE = ${JSON.stringify(PI_SECURITY_REQUEST_TITLE)};
 const SECURITY_PREFIX = ${JSON.stringify(PI_SECURITY_REQUEST_PREFIX)};
+const PROJECT_TRUST_STATUS_KEY = ${JSON.stringify(PI_PROJECT_TRUST_STATUS_KEY)};
 const APPROVAL_INPUT_LIMIT = 16000;
 const APPROVAL_INPUT_TRUNCATED = "\\n… [truncated by Wollipog]";
 
@@ -88,13 +98,6 @@ async function securityApproval(ctx, payload) {
   if (!nonce || !ctx?.hasUI || typeof ctx.ui?.confirm !== "function") return undefined;
   const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
   return ctx.ui.confirm(SECURITY_TITLE, SECURITY_PREFIX + nonce + "." + encoded);
-}
-
-async function securityChoice(ctx, payload, options) {
-  const nonce = process.env.${PI_SECURITY_REQUEST_NONCE_ENV};
-  if (!nonce || !ctx?.hasUI || typeof ctx.ui?.select !== "function") return undefined;
-  const encoded = Buffer.from(JSON.stringify(payload), "utf8").toString("base64url");
-  return ctx.ui.select(SECURITY_TITLE + "\\n" + SECURITY_PREFIX + nonce + "." + encoded, options);
 }
 
 function text(message) {
@@ -150,18 +153,15 @@ export default function (pi) {
   let nextId = 1;
   let buffer = "";
   let starting;
+  let declinedProjectCwd;
   const pending = new Map();
 
-  // This CLI-supplied extension loads before project-local code. Pi persists the returned
-  // canonical-directory decision in its own trust store, while Wollipog presents the decision as
-  // a security approval instead of an ordinary extension question.
-  pi.on("project_trust", async (event, ctx) => {
-    const choice = await securityChoice(ctx, {
-      kind: "project_trust",
-      cwd: typeof event?.cwd === "string" ? event.cwd.slice(0, 4096) : "",
-    }, ["Trust This Project", "Skip Project Resources"]);
-    if (choice === "Trust This Project") return { trusted: "yes", remember: true };
-    if (choice === "Skip Project Resources") return { trusted: "no", remember: true };
+  // This CLI-supplied extension loads before project-local code. Pi resolves project_trust while it
+  // builds the runtime, before RPC mode reads stdin, so no client UI can answer here. Always decline
+  // without remembering and report the decline at session_start; the driver asks the user and
+  // relaunches with --approve only after an explicit Trust.
+  pi.on("project_trust", async (event) => {
+    declinedProjectCwd = typeof event?.cwd === "string" ? event.cwd.slice(0, 4096) : "";
     return { trusted: "no" };
   });
 
@@ -299,7 +299,17 @@ export default function (pi) {
     return starting;
   };
 
-  pi.on("session_start", async (_event, ctx) => { await start(ctx); });
+  pi.on("session_start", async (_event, ctx) => {
+    const launchNonce = process.env.${PI_PROJECT_TRUST_NONCE_ENV};
+    if (launchNonce) {
+      const state = declinedProjectCwd === undefined
+        ? ${JSON.stringify(PI_PROJECT_TRUST_NOT_REQUESTED)}
+        : ${JSON.stringify(PI_PROJECT_TRUST_DECLINED)};
+      ctx.ui.setStatus(PROJECT_TRUST_STATUS_KEY, launchNonce + "." + state + "." +
+        Buffer.from(declinedProjectCwd ?? "", "utf8").toString("base64url"));
+    }
+    await start(ctx);
+  });
   pi.on("session_shutdown", async () => {
     failPending(new Error("Pi session closed"));
     child?.kill();

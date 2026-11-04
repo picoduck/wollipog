@@ -1,8 +1,9 @@
 import assert from "node:assert/strict";
+import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
 import {
-  applyTimingContext, attemptRecord, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
+  applyTimingContext, attemptRecord, dependencyCandidates, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
   AGGREGATOR, compareReports, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
 } from "./merge-queue-wait-report.mjs";
 
@@ -95,6 +96,9 @@ test("routing is sequential execution and advisory shadow work cannot become a r
     job("PR Suite Routing", 0, 2, 4),
     job("Browser End-to-End Tests (1)", 4, 7, 20),
     job("Suite Selection Shadow (Advisory)", 0, 19, 20.5),
+    // The admission observer can finish within the dependency timestamp slack,
+    // beside the aggregator. It must never become a required dependency.
+    job("Regression Admission Shadow (Advisory)", 20, 20, 20.05),
     job(AGGREGATOR, 20, 20, 21),
   ]);
   assert.equal(metrics.criticalExecutionMinutes, 16);
@@ -106,6 +110,20 @@ test("routing is sequential execution and advisory shadow work cannot become a r
     job(AGGREGATOR, 13, 13, 14),
   ]);
   assert.equal(nested.criticalExecutionMinutes, 14, "Windows remains independent of routing");
+});
+
+test("delegated pipeline recovery includes its successful or skipped routing dependency on the critical path", () => {
+  for (const skipped of [false, true]) {
+    const metrics = runMetrics(run(11, 1, 14), [
+      job("PR Suite Routing", 0, 1, 4, skipped ? "skipped" : "success"),
+      job("Browser End-to-End Tests (1)", 4, 4, 9),
+      job("Delegated Pipeline Recovery", 4, 6, 12),
+      job(AGGREGATOR, 12, 13, 14),
+    ]);
+    assert.equal(metrics.criticalExecutionMinutes, skipped ? 7 : 10);
+    assert.equal(metrics.criticalWaitMinutes, skipped ? 7 : 4);
+    assert.equal(summarize([metrics], [], 120).criticalPathUnmeasured, 0);
+  }
 });
 
 test("skipped routing anchors delayed full work without counting its API start placeholder as execution", () => {
@@ -132,12 +150,92 @@ test("skipped routing anchors delayed full work without counting its API start p
   assert.equal(collected.jobs[0].executionMinutes, null, "anchor is never charged runner minutes");
 });
 
+test("the split checks job and each unit shard wait for routing like the job they replaced (#3770)", () => {
+  const work = (checks) => [job(checks, 1, 2, 6), job("Unit Tests (2)", 1, 3, 15), job("Browser End-to-End Tests (1)", 1, 2, 9),
+    job(AGGREGATOR, 15, 15, 16)];
+  const routing = job("PR Suite Routing", 0, 0, 1, "skipped");
+  for (const name of ["Typecheck & Bundles", "Typecheck, Unit Tests & Bundles"]) {
+    const metrics = runMetrics(run(10, 1, 16), [routing, ...work(name)]);
+    assert.equal(metrics.criticalExecutionMinutes, 13, `${name}: 12 unit-shard + 1 aggregate`);
+    assert.equal(metrics.criticalWaitMinutes, 3);
+  }
+  for (const name of ["Typecheck & Bundles", "Unit Tests (1)", "Unit Tests (3)", "Typecheck, Unit Tests & Bundles"])
+    assert.deepEqual(dependencyCandidates({ name }, [routing, { name: "Merge Group Gate" }], null).map((item) => item.name),
+      ["PR Suite Routing", "Merge Group Gate"], name);
+});
+
+test("an executed merge-group gate is critical-path execution, not waiting (#3637)", () => {
+  const work = [job("Typecheck, Unit Tests & Bundles", 2, 2, 10), job("Browser End-to-End Tests (1)", 2, 3, 9),
+    job(AGGREGATOR, 10, 10, 11)];
+  const routing = job("PR Suite Routing", 0, 0, 0.01, "skipped");
+  // The gate waited one minute for a runner, then executed for one; checks/browser follow it.
+  const metrics = runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 0, 1, 2), ...work]);
+  assert.equal(metrics.criticalExecutionMinutes, 10, "1 gate + 8 checks + 1 aggregate");
+  assert.equal(metrics.criticalWaitMinutes, 1, "only the gate's runner wait is waiting");
+  assert.equal(metrics.longestJobWaitMinutes, 1);
+  const collected = attemptRecord(repository, run(11, 1, 11), [{ ...routing, status: "completed", steps: [] },
+    ...[job("Merge Group Gate", 0, 1, 2), ...work].map((item) => ({ ...item, status: "completed", steps: [{ name: "Executed Work",
+      conclusion: "success", started_at: item.started_at, completed_at: item.completed_at }] }))], {});
+  assert.equal(collected.metrics.criticalExecutionMinutes, 10, "attempt collection keeps the executed gate");
+  assert.equal(collected.metrics.criticalWaitMinutes, 1);
+  // A failed gate still precedes the full fallback; its execution is still not waiting.
+  assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 0, 1, 2, "failure"), ...work]).criticalWaitMinutes, 1);
+  // The gate itself is created with the run; it never depends on other work.
+  assert.equal(runMetrics(run(11, 1, 11), [routing, job("Merge Group Gate", 3, 3, 4), ...work.slice(2)]).criticalExecutionMinutes, null);
+});
+
+test("delegated recovery waits for routing without counting an independent gate as its dependency", () => {
+  const routing = job("PR Suite Routing", 0, 0, 0.01, "skipped");
+  // Delayed job creation must not turn a completed independent gate into a prerequisite.
+  const gate = job("Merge Group Gate", 0, 0.01, 2);
+  const recovery = job("Delegated Pipeline Recovery", 2, 3, 10);
+  const metrics = runMetrics(run(11, 1, 11), [routing, gate, recovery, job(AGGREGATOR, 10, 10, 11)]);
+  assert.equal(metrics.criticalExecutionMinutes, 8, "seven recovery minutes plus one aggregate minute");
+  assert.equal(metrics.criticalWaitMinutes, 3, "the independent gate is not charged to this path");
+});
+
+test("a skipped merge-group gate leaves every disabled-gate measurement byte-for-byte unchanged", () => {
+  const shapes = [
+    [job("Typecheck, Unit Tests & Bundles", 0, 2, 20), job("Browser End-to-End Tests (3)", 0, 40, 58), job(AGGREGATOR, 58, 62, 63)],
+    [job("PR Suite Routing", 0, 0, 0.01, "skipped"), job("Typecheck, Unit Tests & Bundles", 0.02, 2, 9),
+      job("Browser End-to-End Tests (1)", 0.02, 3, 15), job(AGGREGATOR, 15, 15, 16)],
+    [job("PR Suite Routing", 0, null, 1, "skipped"), job("Typecheck, Unit Tests & Bundles", 1, 2, 9),
+      job("Browser End-to-End Tests (1)", 1, 3, 15), job(AGGREGATOR, 15, 15, 16)],
+    [job("Typecheck, Unit Tests & Bundles", 10, 12, 28), job(AGGREGATOR, 28, 29, 30)],
+  ];
+  for (const [index, jobs] of shapes.entries()) {
+    for (const placeholder of [null, 0, 0.01]) {
+      const gate = job("Merge Group Gate", 0, placeholder, 0.01, "skipped");
+      assert.deepEqual(runMetrics(run(12, 1, 63), [gate, ...jobs]), runMetrics(run(12, 1, 63), jobs), `shape ${index}`);
+      const record = (items) => attemptRecord(repository, run(12, 1, 63), items.map((item) => ({ ...item, status: "completed",
+        steps: item.conclusion === "skipped" ? [] : [{ name: "Executed Work", conclusion: "success", started_at: item.started_at,
+          completed_at: item.completed_at }] })), {});
+      const [withGate, without] = [record([gate, ...jobs]), record(jobs)];
+      assert.deepEqual(withGate.metrics, without.metrics, `shape ${index} attempt metrics`);
+    }
+  }
+  // Offline recomputation of the committed baseline is unchanged (pinned at the pre-#3637 report).
+  const outputs = [];
+  return Promise.all([["--json"], []].map(async (flags) => {
+    const lines = [];
+    assert.equal(await main(["--input", "docs/ci-baseline-2026-10-22.json", ...flags], { out: (line) => lines.push(line) }), 0);
+    outputs.push(createHash("sha256").update(lines.join("\n") + "\n").digest("hex"));
+  })).then(() => assert.deepEqual(outputs.sort(), ["370a9e29dcf50f05510a7214a4aee0e961d3d677f0b753eff930b209aaaa2f46",
+    "e5858c017efe0d2fe7f41f8698351ba4bf7713c26207be6ea51478c9d8bb65c0"].sort()));
+});
+
 test("the assumed dependency structure matches the CI workflow files", () => {
-  // Checks/browser wait for optional PR routing. Windows/WebKit stay independent, and only the
-  // aggregator consumes all required work. The advisory shadow never supplies a required result.
+  // Checks/browser wait for PR routing and the disabled merge-group gate; delegated recovery
+  // waits only for routing. Skipped plans consume no runner time. Executed gates contribute
+  // critical-path execution (see the gate tests above), including after a gate failure.
+  // Windows/WebKit stay independent, and only the aggregator consumes every required work
+  // result. Advisory shadows never supply one.
   const ci = readFileSync(".github/workflows/ci.yml", "utf8");
-  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: suite_plan", "needs: suite_plan", "needs: [checks, browser, win32, webkit, suite_plan]"]);
-  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, browser, win32, webkit, suite_plan\]\n/);
+  assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
+    "needs: [suite_plan, merge_group_gate]", "needs: suite_plan", "needs: [suite_plan, merge_group_gate]",
+    "needs: [checks, unit, browser, win32, webkit]",
+    "needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
+  assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
   const win32 = readFileSync(".github/workflows/settings-rows-win32.yml", "utf8");
   assert.deepEqual(win32.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: scope"]);

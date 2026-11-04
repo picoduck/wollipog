@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type OrchestratorSettingsView } from "@wollipog/protocol";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION, type OrchestratorSettingsView, type RunnerView } from "@wollipog/protocol";
 import {
+  childModelDisplayName,
   changesLabel,
   evaluateOrchestratorPolicy,
   policyDraftFromDefaults,
@@ -98,4 +99,36 @@ test("the summary states five facts and counts changes in words", () => {
   assert.equal(policySummaryFacts(paused, evaluateOrchestratorPolicy(context(settings), paused))[0]?.label, "New Children Paused");
   assert.equal(changesLabel(1), "1 change");
   assert.equal(changesLabel(3), "3 changes");
+});
+
+test("review policy fields track overrides, reset individually, and validate only on capable control planes", () => {
+  const settings = view();
+  settings.reviewPolicySupported = true;
+  settings.capabilities.reviewers = [{ harness: "codex", name: "Codex", runnerId: "r", agentId: "codex",
+    capabilities: { models: [{ id: "gpt-review", default: true }], effortLevels: ["high"], slashCommands: [], supportsImages: false, supportsApprovals: true } }];
+  const original = policyDraftFromDefaults(settings.defaults);
+  const draft = { ...original, values: { ...original.values, behavior: { ...original.values.behavior,
+    reviewHarness: "codex" as const, reviewModel: "gpt-review", reviewEffort: "high", reviewRoundBudget: 2 } } };
+  assert.deepEqual([...policyOverrides(draft, settings.defaults)], ["behavior.reviewHarness", "behavior.reviewModel", "behavior.reviewEffort", "behavior.reviewRoundBudget"]);
+  assert.equal(evaluateOrchestratorPolicy(context(settings), draft).problems.some(p => p.path === "behavior.reviewHarness"), false);
+  const missing = { ...draft, values: { ...draft.values, behavior: { ...draft.values.behavior, reviewModel: "missing" } } };
+  assert.equal(evaluateOrchestratorPolicy(context(settings), missing).problems.some(p => p.path === "behavior.reviewHarness"), true);
+  delete settings.reviewPolicySupported;
+  assert.equal(evaluateOrchestratorPolicy(context(settings), missing).problems.some(p => p.path === "behavior.reviewHarness"), false);
+  assert.equal(resetField(draft, settings.defaults, "behavior.reviewRoundBudget").values.behavior.reviewRoundBudget, null);
+});
+
+test("a child model reads as the selector names it, preferring the fixed harness, and its id only when nothing names it (#3580)", () => {
+  const agent = (driver: "claude-code" | "codex-app-server", id: string, displayName?: string) => ({ id: driver, name: driver, command: driver,
+    args: [], env: {}, driver, available: true, capabilities: { models: [{ id, ...(displayName ? { displayName } : {}) }], effortLevels: [],
+      slashCommands: [], supportsImages: false, supportsApprovals: true } });
+  const runners = [
+    { runnerId: "a", agents: [agent("codex-app-server", "shared", "Shared via Codex"), agent("claude-code", "unnamed")] },
+    { runnerId: "b", agents: [agent("claude-code", "shared", "Shared via Claude"), agent("claude-code", "claude-opus-5-5", "Claude Opus 5.5")] },
+  ] as unknown as RunnerView[];
+  assert.equal(childModelDisplayName(runners, "claude-opus-5-5"), "Claude Opus 5.5");
+  assert.equal(childModelDisplayName(runners, "shared", { driver: "claude-code" }), "Shared via Claude", "the fixed harness's own name wins");
+  assert.equal(childModelDisplayName(runners, "shared", { driver: "pi" }), "Shared via Codex", "another harness's name beats the raw id");
+  assert.equal(childModelDisplayName(runners, "unnamed"), "unnamed");
+  assert.equal(childModelDisplayName(runners, "gpt-6.1-sol"), "gpt-6.1-sol");
 });

@@ -66,6 +66,27 @@ test("the head, vote and findings must agree with the contract", () => {
   }), { ...context, scopeFiles: [...context.scopeFiles, "gone.ts"] }), []);
 });
 
+test("finding anchors accept deleted scope and PR context paths in a delta round", () => {
+  const delta = { headSha: HEAD, scopeFiles: ["notes.md"], contextFiles: ["gone.ts"], isTracked: () => false };
+  const value = report({
+    vote: "DOWNVOTE", findings: [{ ...blocker, file: "gone.ts", line: null }],
+    examined_changed_files: ["notes.md"], not_examined_changed_files: [], context_files_examined: ["gone.ts"],
+  });
+  assert.deepEqual(validateReviewReport(value, delta), []);
+  assert.deepEqual(validateReviewReport(value, { ...delta, scopeFiles: ["notes.md", "gone.ts"], contextFiles: [] }),
+    ['changed-file coverage mismatch; missing=["gone.ts"], extra=[]']);
+  assert.deepEqual(validateReviewReport({ ...value, examined_changed_files: ["notes.md", "gone.ts"] }, {
+    ...delta, scopeFiles: ["notes.md", "gone.ts"], contextFiles: [],
+  }), []);
+  assert.deepEqual(validateReviewReport({ ...value, context_files_examined: [] }, { ...delta, contextFiles: [] }),
+    ["findings[0].file is not a repository path"]);
+  for (const path of ["/gone.ts", "../gone.ts", "./gone.ts", "src/../gone.ts"]) {
+    assert.deepEqual(validateReviewReport({
+      ...value, findings: [{ ...blocker, file: path, line: null }], context_files_examined: [],
+    }, { ...delta, contextFiles: [path] }), ["findings[0].file is not a repository path"], path);
+  }
+});
+
 test("coverage classifies every in-scope file exactly once, compared exactly", () => {
   assert.match(validateReviewReport(report({ not_examined_changed_files: [] }), context)[0]!, /missing=\["src\/b\.ts"\], extra=\[\]/u);
   assert.match(validateReviewReport(report({ examined_changed_files: ["src/a.ts", "./src/x.ts"] }), context).join("; "),
@@ -79,6 +100,21 @@ test("coverage classifies every in-scope file exactly once, compared exactly", (
   ] }), context).includes("a review with no findings must examine at least one changed file"));
   assert.match(validateReviewReport(report({ context_files_examined: ["/etc/passwd", "docs/x.md"] }), context).join(),
     /context_files_examined has non-repository paths: \["\/etc\/passwd","docs\/x\.md"\]/u);
+});
+
+test("deleted context paths must belong to the scope or runner-provided PR context", () => {
+  const deleted = "gone.ts";
+  const value = report({ context_files_examined: [deleted] });
+  assert.deepEqual(validateReviewReport(value, { ...context, contextFiles: [deleted] }), []);
+  assert.deepEqual(validateReviewReport(report({
+    context_files_examined: [deleted], examined_changed_files: ["src/a.ts", deleted],
+  }), { ...context, scopeFiles: [...context.scopeFiles, deleted] }), []);
+  assert.match(validateReviewReport(value, context).join(), /non-repository paths/u);
+  for (const path of ["/etc/passwd", "../gone.ts", "./gone.ts"]) {
+    assert.match(validateReviewReport(report({ context_files_examined: [path] }), {
+      ...context, contextFiles: [path],
+    }).join(), /non-repository paths/u, "allowlisting cannot bypass canonical paths");
+  }
 });
 
 test("evaluation precedence: timeout, fatal, missing report, model, contract; snapshot overrides all", () => {

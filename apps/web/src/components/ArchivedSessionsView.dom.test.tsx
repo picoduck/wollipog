@@ -8,13 +8,15 @@ import type { ControlPlaneToUi, SessionCommandPermissions, SessionView, UiSnapsh
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { requestArchiveSearch, takeArchiveSearch } from "../archive-search-handoff.js";
+import { writeArchiveBrowse } from "../archive-browse-history.js";
 import { deleteSessionMessage, stopArchivedSessionMessage } from "../session-confirmation-copy.js";
-import type { View, ViewNavigation } from "../navigation.js";
+import { viewPath, type View, type ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { ArchivedSessionsView } from "./ArchivedSessionsView.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/archived" });
 installDomTestCleanup(domWindow);
@@ -124,7 +126,7 @@ let sequence = 0;
 async function mount(
   sessions: SessionView[],
   overrides: Partial<ApiClient> = {},
-  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean } = {},
+  options: { initialConnection?: "online" | "unauthorized"; unarchiveAndRestart?: boolean; restoreBrowse?: boolean } = {},
 ) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -196,7 +198,7 @@ async function mount(
       <ApiProvider client={client}>
         <FeedbackProvider>
           <StoreProvider connection={connection} navigation={navigation}>
-            <ArchivedSessionsView />
+            <ArchivedSessionsView restoreBrowse={options.restoreBrowse} />
           </StoreProvider>
         </FeedbackProvider>
       </ApiProvider>,
@@ -251,8 +253,8 @@ async function eachRowAction(
   container: HTMLElement,
   visit: (action: HTMLButtonElement, label: string, inMenu: boolean) => Promise<void> | void,
 ): Promise<void> {
-  for (const row of container.querySelectorAll("tbody tr")) {
-    for (const inline of row.querySelectorAll<HTMLButtonElement>(".archive-row-actions > .btn")) {
+  for (const row of container.querySelectorAll(".archive-item")) {
+    for (const inline of row.querySelectorAll<HTMLButtonElement>(".archive-item-actions > .btn")) {
       await visit(inline, inline.textContent!.trim(), false);
     }
     const trigger = row.querySelector<HTMLButtonElement>('button[aria-label^="More Actions for"]');
@@ -267,7 +269,7 @@ async function eachRowAction(
 
 /** The row action with this label, inline or in ⋯; a menu item is returned with its menu open. */
 async function rowAction(container: HTMLElement, label: string): Promise<HTMLButtonElement> {
-  const inline = [...container.querySelectorAll<HTMLButtonElement>(".archive-row-actions > .btn")]
+  const inline = [...container.querySelectorAll<HTMLButtonElement>(".archive-item-actions > .btn")]
     .find((candidate) => candidate.textContent?.trim() === label);
   if (inline) return inline;
   for (const trigger of container.querySelectorAll<HTMLButtonElement>('button[aria-label^="More Actions for"]')) {
@@ -280,13 +282,176 @@ async function rowAction(container: HTMLElement, label: string): Promise<HTMLBut
   assert.fail(`${label} row action exists`);
 }
 
+function deferredPage() {
+  let resolve!: (value: ReturnType<typeof archiveResponse>) => void;
+  let reject!: (error: Error) => void;
+  const promise = new Promise<ReturnType<typeof archiveResponse>>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+
+async function searchFor(container: HTMLElement, query: string) {
+  const input = container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => { input.value = query; fireDomEvent.change(input); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 240)); });
+}
+
+test("replacement search marks old rows busy and stale, announces one count, and replaces them", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await searchFor(fixture.container, "terraform");
+  const region = fixture.container.querySelector('[aria-label="Archived Session Results"]')!;
+  assert.equal(region.getAttribute("aria-busy"), "true");
+  assert.ok(region.querySelector(".is-stale .archive-item"));
+  assert.equal(fixture.container.querySelector(".count")?.textContent, "Searching…");
+  const status = fixture.container.querySelector('[role="status"]')!;
+  assert.equal(status.textContent, "Searching…");
+  await act(async () => { request.resolve(archiveResponse([session(2, { title: "terraform" })])); });
+  assert.equal(region.getAttribute("aria-busy"), "false");
+  assertNoDomNode(region.querySelector(".is-stale"), "new rows are current");
+  assert.equal(region.querySelectorAll(".archive-item").length, 1);
+  assert.match(region.textContent!, /terraform/);
+  assert.doesNotMatch(region.textContent!, /Archived Session 1/);
+  assert.match(status.textContent!, /^1 session/);
+  await fixture.unmount();
+});
+
+test("replacement failure removes old rows and count, offers Retry and hides raw detail", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await searchFor(fixture.container, "terraform");
+  await act(async () => { request.reject(new Error("raw backend failure")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0);
+  assertNoDomNode(fixture.container.querySelector(".count"), "error hides count");
+  assert.match(fixture.container.textContent!, /Couldn't Load Archived Sessions/);
+  assert.doesNotMatch(fixture.container.textContent!, /raw backend failure/);
+  assert.ok(button(fixture.container, "Retry"));
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Show Details")); });
+  assert.match(fixture.container.textContent!, /raw backend failure/);
+  await fixture.unmount();
+});
+
+test("unchanged revalidation preserves the count and does not announce a replacement search", async () => {
+  const request = deferredPage();
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => ++calls === 1 ? archiveResponse([session(1)]) : request.promise });
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  assert.equal(fixture.container.querySelector(".count")?.textContent, "1 session");
+  assert.equal(fixture.container.querySelector('[aria-label="Archived Session Results"]')?.getAttribute("aria-busy"), "false");
+  assertNoDomNode(fixture.container.querySelector(".is-stale"), "unchanged refresh keeps current rows");
+  await act(async () => { request.resolve(archiveResponse([session(1)])); });
+  await fixture.unmount();
+});
+
+test("search counts use singular and plural grammar in the same visible live announcement", async () => {
+  for (const count of [1, 2]) {
+    const rows = Array.from({ length: count }, (_, index) => session(index, { title: `Usage ${index}` }));
+    const fixture = await mount(rows);
+    await searchFor(fixture.container, "Usage");
+    const expected = count === 1 ? "1 session matches “Usage”" : "2 sessions match “Usage”";
+    assert.equal(fixture.container.querySelector(".count")?.textContent, expected);
+    assert.equal(fixture.container.querySelector('[role="status"]')?.textContent, expected);
+    await fixture.unmount();
+  }
+});
+
+test("spaces-only search keeps the empty state and its clear control", async () => {
+  const fixture = await mount([]);
+  await searchFor(fixture.container, "   ");
+  assert.match(fixture.container.textContent!, /No Archived Sessions/);
+  assert.ok(fixture.container.querySelector('button[aria-label="Clear Search"]'));
+  assert.ok(button(fixture.container, "Go to Sessions"));
+  await fixture.unmount();
+});
+
+test("failed unchanged revalidation keeps rows and offers a compact refresh notice", async () => {
+  let calls = 0;
+  const fixture = await mount([], { archiveSessionPage: async () => {
+    if (++calls > 1) throw new Error("refresh unavailable");
+    return archiveResponse([session(1)]);
+  } });
+  await act(async () => { domWindow.document.dispatchEvent(new domWindow.Event("visibilitychange")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 1);
+  assert.match(fixture.container.querySelector(".notice")?.textContent!, /Couldn't refresh archived sessions. Showing the last results./);
+  assert.ok(button(fixture.container, "Retry"));
+  await fixture.unmount();
+});
+
+test("a late row action cannot show old matches after a replacement search fails", async () => {
+  const row = session(1, { archiveStatus: "stop_failed" });
+  let finishStop!: (value: SessionView) => void;
+  const stopResult = new Promise<SessionView>((resolve) => { finishStop = resolve; });
+  const retry = deferredPage();
+  let calls = 0;
+  const fixture = await mount([row], {
+    archiveSessionPage: async (input) => {
+      if (++calls > 2) return retry.promise;
+      if (input.q) throw new Error("replacement failed");
+      return archiveResponse([row]);
+    },
+    retryStop: () => stopResult,
+  });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); });
+  await searchFor(fixture.container, "terraform");
+  await act(async () => { finishStop({ ...row, updatedAt: row.updatedAt + 1 }); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0);
+  assert.match(fixture.container.textContent!, /Couldn't Load Archived Sessions/);
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Retry")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 0, "Retry cannot show a late action's old match");
+  await act(async () => { retry.resolve(archiveResponse([])); });
+  await fixture.unmount();
+});
+
+test("first load waits 300ms then shows five skeleton rows and no count", async () => {
+  const request = deferredPage();
+  const fixture = await mount([], { archiveSessionPage: () => request.promise });
+  assertNoDomNode(fixture.container.querySelector(".archive-skeleton"), "skeleton is delayed");
+  assertNoDomNode(fixture.container.querySelector(".count"), "initial loading hides count");
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 320)); });
+  assert.equal(fixture.container.querySelectorAll(".archive-skeleton-row").length, 5);
+  assert.match(fixture.container.textContent!, /Loading archived sessions…/);
+  await act(async () => { request.resolve(archiveResponse([])); });
+  assertNoDomNode(fixture.container.querySelector(".archive-skeleton"), "success removes skeleton");
+  assert.ok(button(fixture.container, "Go to Sessions"));
+  await fixture.unmount();
+});
+
+test("offline retains loaded rows dimmed under Reconnecting", async () => {
+  const fixture = await mount([session(1)]);
+  await act(async () => { fixture.socket.onclose?.({ code: 1006 }); });
+  assert.ok(fixture.container.querySelector(".is-stale .archive-item"));
+  assert.match(fixture.container.textContent!, /Reconnecting…/);
+  await fixture.unmount();
+});
+
+test("no matches names query and project and offers separate clearing actions once", async () => {
+  const fixture = await mount([session(1)]);
+  const project = fixture.container.querySelector<HTMLButtonElement>('button[aria-label="Project: All Projects"]')!;
+  await act(async () => { fireDomEvent.click(project); });
+  const option = [...fixture.container.querySelectorAll<HTMLElement>('[role="option"]')].find((item) => item.textContent === "Wollipog")!;
+  await act(async () => { fireDomEvent.click(option); });
+  await searchFor(fixture.container, "terraform");
+  assert.match(fixture.container.textContent!, /No archived sessions match “terraform” in Wollipog\./);
+  const actions = [...fixture.container.querySelectorAll("button")];
+  for (const label of ["Clear Search", "Clear Filters"]) {
+    assert.equal(actions.filter((item) => (item.getAttribute("aria-label") ?? item.textContent?.trim()) === label).length, 1);
+  }
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search")); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 240)); });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog");
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 1);
+  await fixture.unmount();
+});
+
 test("empty archives expose labelled choice filters and a screen-reader status", async () => {
   const fixture = await mount([]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
-  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "Showing 0 Sessions");
-  assert.ok([...fixture.container.querySelectorAll("label")]
-    .some((label) => label.textContent?.trim().startsWith("Search Sessions and Transcripts")));
-  for (const expected of ["Project", "Location", "Agent", "Archive State", "Lifecycle State"]) {
+  assert.equal(fixture.container.querySelector('[role="status"]')?.textContent?.trim(), "0 sessions");
+  assert.ok(fixture.container.querySelector('input[aria-label="Search Titles and Transcripts"]'));
+  assert.ok(fixture.container.querySelector('[role="radiogroup"][aria-label="Show"]'));
+  assertNoDomNode(fixture.container.querySelector('[aria-label="Archived Sessions Pagination"]'), "single-page archives have no pager");
+  for (const expected of ["Project", "Location", "Agent", "Status"]) {
     assert.ok(fixture.container.querySelector(`button[aria-label^="${expected}:"]`), `${expected} labels its control`);
   }
   assert.equal(fixture.container.querySelectorAll("select").length, 0);
@@ -296,41 +461,98 @@ test("empty archives expose labelled choice filters and a screen-reader status",
 test("large archives paginate, deep-link, filter, and accept live lifecycle updates", async () => {
   const sessions = Array.from({ length: 55 }, (_, index) => session(index));
   const fixture = await mount(sessions);
-  assert.equal(fixture.container.querySelectorAll("tbody tr").length, 50);
-  assert.match(fixture.container.textContent ?? "", /Archived.*Awaiting Prompt/s,
-    "archive and canonical lifecycle labels are both text-backed");
-  assert.equal(fixture.container.querySelector('nav[aria-label="Archived Sessions Pagination"]')?.textContent?.includes("Page 1"), true);
-  assert.ok(await rowAction(fixture.container, "Stop"), "ordinary nonterminal archived sessions retain the Stop action");
-  const tableRegion = fixture.container.querySelector<HTMLElement>('[role="region"][aria-label="Archived Sessions Table"]');
-  assert.equal(tableRegion?.tabIndex, 0, "the horizontally scrolling table is keyboard reachable");
-  assert.equal(fixture.container.querySelectorAll('th[scope="col"]').length, 7,
-    "every table header declares its column scope");
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 50);
+  assert.equal(fixture.container.querySelectorAll(".status").length, 0, "ordinary archived rows need no badge");
+  assert.ok(await rowAction(fixture.container, "Stop Session…"));
+  assert.equal(fixture.container.querySelector('[role="region"][aria-label="Archived Session Results"]')?.hasAttribute("tabindex"), false);
+  assert.equal(fixture.container.querySelectorAll('.archive-item[tabindex="0"]').length, 50);
 
-  const firstLink = fixture.container.querySelector<HTMLAnchorElement>('tbody a[href^="/sessions/"]');
+  const firstLink = fixture.container.querySelector<HTMLAnchorElement>('a[href^="/sessions/"]');
   assert.ok(firstLink, "session titles are direct links");
   await act(async () => { fireDomEvent.click(firstLink!, { button: 0 }); });
   assert.equal(fixture.navigated.at(-1)?.name, "session");
 
-  await act(async () => { fireDomEvent.click(button(fixture.container, "Next Page")); });
-  assert.equal(fixture.container.querySelectorAll("tbody tr").length, 5);
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Next")); });
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 5);
   assert.match(fixture.container.textContent ?? "", /Page 2/);
 
-  const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Lifecycle State:"]');
+  const lifecycle = fixture.container.querySelector<HTMLButtonElement>('button[aria-label^="Status:"]');
   assert.ok(lifecycle);
   await act(async () => { lifecycle.click(); });
   const inputRequired = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')]
     .find((option) => option.textContent?.trim() === "Awaiting Input");
   assert.ok(inputRequired);
   await act(async () => { inputRequired.click(); });
-  assert.equal(fixture.container.querySelectorAll("tbody tr").length, 1);
+  assert.equal(fixture.container.querySelectorAll(".archive-item").length, 1);
   assert.match(fixture.container.textContent ?? "", /Awaiting Input/);
 
   await act(async () => {
     fixture.socket.push({ type: "session_upsert", session: session(0, { status: "stopped", updatedAt: 100 }) });
     await Promise.resolve();
   });
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/,
     "a second client's lifecycle change immediately re-evaluates the active filter");
+  await fixture.unmount();
+});
+
+test("chips remove one filter and Clear Filters preserves search; Clear Search preserves filters", async () => {
+  const fixture = await mount([session(0), session(1)]);
+  const search = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+  await act(async () => { search.value = "Archived"; fireDomEvent.change(search); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  const choose = async (label: string, option: string) => {
+    await act(async () => { fireDomEvent.click(fixture.container.querySelector<HTMLButtonElement>(`button[aria-label^="${label}:"]`)!); });
+    const item = [...fixture.container.querySelectorAll<HTMLButtonElement>('[role="option"]')].find((node) => node.textContent?.trim() === option)!;
+    await act(async () => { fireDomEvent.click(item); });
+  };
+  await choose("Project", "Wollipog");
+  await choose("Agent", "Codex App Server");
+  assert.equal(fixture.container.querySelectorAll(".chip").length, 2);
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector<HTMLButtonElement>('[aria-label="Remove Project: Wollipog"]')!); });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, undefined);
+  assert.equal(fixture.archiveInputs.at(-1)?.agent, "Codex App Server");
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Filters")); });
+  assert.equal(search.value, "Archived");
+  assert.equal(fixture.archiveInputs.at(-1)?.agent, undefined);
+  assertNoDomNode(fixture.container.querySelector(".chips"), "cleared filters have no chips");
+  await choose("Project", "Wollipog");
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector<HTMLButtonElement>('[aria-label="Clear Search"]')!); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.equal(search.value, "");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog");
+  assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
+  await act(async () => { search.value = "No Such Session"; fireDomEvent.change(search); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Search")); });
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Wollipog", "clearing a no-match search preserves its filter");
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Clear Filters")); });
+  assert.equal(search.value, "");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, undefined);
+  assert.equal(fixture.archiveInputs.at(-1)?.q, undefined);
+  await fixture.unmount();
+});
+
+test("Filters applies choices immediately, includes searchable long facets, and returns focus on Done", async () => {
+  const fixture = await mount(Array.from({ length: 13 }, (_, i) => session(i, { projectName: `Project ${i}` })));
+  const trigger = button(fixture.container, "Filters");
+  trigger.focus();
+  await act(async () => { fireDomEvent.click(trigger); });
+  const dialog = fixture.container.querySelector<HTMLElement>('[role="dialog"]')!;
+  assert.ok(dialog);
+  await act(async () => { fireDomEvent.click(dialog.querySelector<HTMLButtonElement>('[aria-label="Project: All Projects"]')!); });
+  const filter = dialog.querySelector<HTMLInputElement>('[role="combobox"][aria-label="Search Project Options"]')!;
+  assert.ok(filter, "long facets expose a filter field");
+  await act(async () => { filter.value = "Project 12"; fireDomEvent.change(filter); });
+  const options = dialog.querySelectorAll<HTMLButtonElement>('[role="option"]');
+  assert.equal(options.length, 1);
+  await act(async () => { fireDomEvent.click(options[0]!); });
+  assert.equal(dialog.querySelector('[role="status"]')?.textContent, "1 session");
+  assert.equal(fixture.archiveInputs.at(-1)?.project, "Project 12");
+  await act(async () => { fireDomEvent.click(button(dialog, "Done")); });
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  assertNoDomNode(fixture.container.querySelector('[role="dialog"]'), "Done dismisses Filters");
+  assert.equal((domWindow.document as unknown as Document).activeElement === trigger, true);
   await fixture.unmount();
 });
 
@@ -340,7 +562,7 @@ test("search input debounces to one request and preserves server row order", asy
     session(2, { id: "newer", title: "Newer", createdAt: 2, updatedAt: 1 }),
   ]);
   const initialCalls = fixture.archivePageCalls();
-  const links = [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")];
+  const links = [...fixture.container.querySelectorAll<HTMLAnchorElement>(".archive-item-heading a")];
   assert.deepEqual(links.map((link) => link.textContent), ["Newer", "Older"],
     "the browser preserves the server's immutable createdAt cursor order");
   const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
@@ -390,7 +612,7 @@ test("a Project literally named all is encoded distinctly from All Projects", as
     fixture.socket.push({ type: "session_upsert", session: updated });
     await Promise.resolve();
   });
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/,
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/,
     "literal all remains an active facet during live reconciliation");
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
@@ -410,6 +632,29 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   assert.deepEqual(calls, [[archived.id, false]]);
   assert.match(fixture.container.textContent ?? "", /No Archived Sessions/);
   await fixture.unmount();
+});
+
+test("an archived Orchestrator or review session's title leads with its type, and an ordinary one's does not (#4076)", async () => {
+  const fixture = await mount([
+    session(1, { role: "orchestrator" }),
+    session(2, { kind: "review" }),
+    session(3, { role: "normal", kind: "standard" }),
+  ]);
+  try {
+    const title = (index: number) => fixture.container.querySelector(`#archive-title-session-${index}`)!;
+    for (const [index, label] of [[1, "Orchestrator Session"], [2, "Review Session"]] as const) {
+      const icon = title(index).firstElementChild!;
+      assert.ok(icon.classList.contains("session-type-icon"), `${label}: the mark comes before the title`);
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), label);
+      assert.equal(icon.getAttribute("title"), label);
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+      assert.equal(title(index).textContent, `Archived Session ${index}`);
+    }
+    assertNoDomNode(title(3).querySelector(".session-type-icon"), "an ordinary session's title has no type mark");
+  } finally {
+    await fixture.unmount();
+  }
 });
 
 function hasButton(container: HTMLElement, label: string): boolean {
@@ -460,8 +705,7 @@ test("an Unarchive and Restart preflight refusal keeps the row archived with an 
     await Promise.resolve();
   });
 
-  assert.match(fixture.container.textContent ?? "",
-    /Could not unarchive and restart session: runner is offline\. The session is still archived\./);
+  assert.match(fixture.container.querySelector(".toast")?.textContent ?? "", /Couldn't unarchive “Archived Session 1”\..*runner is offline/s);
   assert.equal(button(fixture.container, "Unarchive and Restart").disabled, false, "the action can be retried");
   assert.deepEqual(fixture.navigated, []);
   assert.equal(fixture.archivePageCalls(), loadsBefore, "a definite refusal needs no reconciliation");
@@ -483,7 +727,18 @@ test("an ambiguous Unarchive and Restart failure reconciles the row against the 
   });
 
   assert.match(fixture.container.textContent ?? "", /Could not confirm Unarchive and Restart: Failed to fetch\./);
+  assert.doesNotMatch(fixture.container.querySelector(".toast-message")?.textContent ?? "", /Couldn't unarchive/);
   assert.ok(fixture.archivePageCalls() > loadsBefore, "delivery uncertainty is resolved from the server");
+  await fixture.unmount();
+});
+
+test("an already-restored receipt does not claim that Unarchive failed", async () => {
+  const fixture = await mount([session(1, { status: "completed" })], {
+    unarchiveAndRestart: async () => { throw new ApiError("already restored", 409, undefined, { archived: false }); },
+  }, { unarchiveAndRestart: true });
+  await act(async () => { fireDomEvent.click(button(fixture.container, "Unarchive and Restart")); await Promise.resolve(); });
+  assert.match(fixture.container.querySelector(".toast-message")?.textContent ?? "", /^This session was already restored\./);
+  assert.equal(fixture.container.querySelector(".toast-detail")?.textContent, "already restored");
   await fixture.unmount();
 });
 
@@ -523,7 +778,7 @@ test("Stopping sessions keep their Stop recovery path instead of Unarchive and R
   const fixture = await mount([pending], {}, { unarchiveAndRestart: true });
 
   assert.equal(hasButton(fixture.container, "Unarchive and Restart"), false);
-  assert.ok(button(fixture.container, "Retry Stop"));
+  assert.ok(await rowAction(fixture.container, "Retry Stop"));
   await fixture.unmount();
 });
 
@@ -546,8 +801,8 @@ test("Stopping sessions fall back to the legacy idempotent archive mutation", as
 
   // The Stop is still being delivered to a connected runner, so it reads Stop Pending (#208).
   assert.match(fixture.container.textContent ?? "", /Stop Pending/);
-  const retry = button(fixture.container, "Retry Stop");
-  assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop"), false,
+  const retry = await rowAction(fixture.container, "Retry Stop");
+  assert.equal([...fixture.container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === "Stop Session…"), false,
     "pending recovery replaces the ordinary Stop action even for a terminal lifecycle");
   await act(async () => { fireDomEvent.click(retry); await Promise.resolve(); });
 
@@ -584,31 +839,53 @@ test("Stop Failed sessions disclose bounded failure detail and expose Retry Stop
     },
   });
 
-  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".archive-state-badges .status")]
+  const badge = [...fixture.container.querySelectorAll<HTMLElement>(".status")]
     .find((candidate) => candidate.textContent?.trim() === "Stop Failed");
-  assert.equal(badge?.title, "Automatic retries were exhausted.");
+  assert.equal(badge?.hasAttribute("title"), false);
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector('button[aria-label^="More Actions"]')!); });
+  assert.match(domWindow.document.querySelector('[role="menu"]')?.textContent ?? "", /The last stop attempt failed, so archiving is paused.*Automatic retries were exhausted/s);
+  await act(async () => { fireDomEvent.click(fixture.container.querySelector('button[aria-label^="More Actions"]')!); });
   await act(async () => { fireDomEvent.click(button(fixture.container, "Retry Stop")); await Promise.resolve(); });
   assert.deepEqual(calls, [failed.id]);
   await fixture.unmount();
 });
 
-test("a pruned session keeps its row and says its history was pruned, when and by which policy (#2777)", async () => {
+test("a pruned session stays openable without adding an extra row badge", async () => {
   const prunedAt = Date.UTC(2026, 9, 15, 12);
   const pruned = session(4, { archived: true, status: "completed",
     historyPruned: { prunedAt, eventCount: 2_400, retentionDays: 90 } });
   const kept = session(5, { archived: true, status: "completed" });
   const fixture = await mount([pruned, kept]);
   const badges = (title: string) => {
-    const row = [...fixture.container.querySelectorAll<HTMLTableRowElement>("tbody tr")]
-      .find((candidate) => candidate.querySelector(".archive-session-cell a")?.textContent === title)!;
-    return [...row.querySelectorAll<HTMLElement>(".archive-state-badges .status")];
+    const row = [...fixture.container.querySelectorAll<HTMLTableRowElement>(".archive-item")]
+      .find((candidate) => candidate.querySelector(".archive-item-heading a")?.textContent === title)!;
+    return [...row.querySelectorAll<HTMLElement>(".status")];
   };
-  const badge = badges(pruned.title).find((candidate) => candidate.textContent?.trim() === "History Pruned");
-  assert.ok(badge, "the pruned row carries History Pruned beside its lifecycle");
-  assert.match(badge.title, /^Pruned .* by the 90-day retention policy$/);
-  assert.equal(badges(kept.title).some((candidate) => candidate.textContent?.trim() === "History Pruned"), false);
+  assert.equal(badges(pruned.title).length, 0, "history metadata does not add a second status badge");
+  assert.equal(badges(kept.title).length, 0);
+  const history = fixture.container.querySelector<HTMLElement>(".archive-history")!;
+  assert.equal(history.textContent, "History Pruned");
+  assert.match(history.title, /^Pruned .* by the 90-day retention policy$/);
+  await act(async () => { fireDomEvent.click(history.closest(".archive-item")!.querySelector('button[aria-label^="More Actions"]')!); });
+  assert.match(domWindow.document.querySelector('[role="menuitem"] .menu-desc')?.textContent ?? "", /^Pruned .* by the 90-day retention policy$/);
   assert.ok(hasButton(fixture.container, "Unarchive") || buttons(fixture.container, "Unarchive and Restart").length > 0,
     "a pruned session can still be unarchived");
+  await fixture.unmount();
+});
+
+test("rows open on click and Enter while inline actions describe their session", async () => {
+  const target = session(7, { title: "Fix the Half-Cent Rounding Bug" });
+  const fixture = await mount([target]);
+  const row = fixture.container.querySelector<HTMLElement>(".archive-item")!;
+  const restore = row.querySelector<HTMLButtonElement>(".archive-inline")!;
+  assert.equal(domWindow.document.getElementById(restore.getAttribute("aria-describedby")!)?.textContent, target.title);
+  await act(async () => { row.dispatchEvent(new domWindow.MouseEvent("click", { bubbles: true, ctrlKey: true }) as unknown as MouseEvent); });
+  assert.equal(fixture.navigated.length, 0, "a modified row click does not replace the current tab");
+  await act(async () => { fireDomEvent.keyDown(row, { key: "Enter" }); });
+  assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id });
+  await act(async () => { fireDomEvent.click(row); });
+  assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id });
+  assert.equal(row.querySelector("a")?.getAttribute("href"), viewPath({ name: "session", id: target.id }));
   await fixture.unmount();
 });
 
@@ -619,12 +896,12 @@ test("a successful deletion cannot be resurrected by the live session overlay", 
     deleteSession: async (id) => { deleted.push(id); },
   });
 
-  const open = await rowAction(fixture.container, "Open");
+  const open = await rowAction(fixture.container, "Open Session");
   await act(async () => {
     fireDomEvent.click(open);
     await Promise.resolve();
   });
-  const remove = await rowAction(fixture.container, "Delete");
+  const remove = await rowAction(fixture.container, "Delete Session…");
   await act(async () => {
     fireDomEvent.click(remove);
     await Promise.resolve();
@@ -669,7 +946,7 @@ const MULTI_LINE_TITLE = "Fix the half-cent rounding bug\nRequirements:\n- keep 
 test("Delete Session names the session by its one-line title in the session header's words (#2278)", async () => {
   const fixture = await mount([session(6, { title: MULTI_LINE_TITLE, status: "stopped" })]);
 
-  const body = await confirmationBody(fixture.container, "Delete");
+  const body = await confirmationBody(fixture.container, "Delete Session…");
   assert.equal(body, deleteSessionMessage(MULTI_LINE_TITLE));
   assert.equal(body, "“Fix the half-cent rounding bug” and its history are removed from Wollipog. This can't be undone.");
   assert.ok(!body.includes("\n") && !body.includes("Requirements"), "only the title's first line is quoted");
@@ -689,7 +966,7 @@ test("Stop Session names the session by its one-line title and mentions queued m
       ...(count ? { queued: queued(count) } : {}),
     })]);
 
-    const body = await confirmationBody(fixture.container, "Stop");
+    const body = await confirmationBody(fixture.container, "Stop Session…");
     assert.equal(body, expected);
     assert.equal(body, stopArchivedSessionMessage(MULTI_LINE_TITLE, count));
     assert.ok(!body.includes("\n") && !body.includes("Requirements"), "only the title's first line is quoted");
@@ -709,7 +986,7 @@ test("Stop Session counts only queued messages still waiting, not settled delive
     ],
   })]);
 
-  const body = await confirmationBody(fixture.container, "Stop");
+  const body = await confirmationBody(fixture.container, "Stop Session…");
   assert.equal(body, "“Settled Receipts” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript.");
   await fixture.unmount();
 });
@@ -724,7 +1001,7 @@ test("Stop Session counts the live queue the session header counts, even when th
     await Promise.resolve();
   });
 
-  const body = await confirmationBody(fixture.container, "Stop");
+  const body = await confirmationBody(fixture.container, "Stop Session…");
   assert.equal(body, "“Runner Queue” stops now and its 1 queued message is discarded. It stays in Archived Sessions with its transcript.");
   await fixture.unmount();
 });
@@ -743,7 +1020,7 @@ test("paged search failures expose a retryable load error", async () => {
   await act(async () => { await Promise.resolve(); });
   assert.match(
     fixture.container.textContent ?? "",
-    /Could not load archived sessions: search unavailable/,
+    /Couldn't Load Archived Sessions/,
   );
   await fixture.unmount();
 });
@@ -833,7 +1110,7 @@ test("a live title update removes a row that no longer matches the active query"
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/);
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
   await fixture.unmount();
 });
@@ -861,7 +1138,7 @@ test("a live Project update removes a row that no longer matches the active face
   });
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/);
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
   await fixture.unmount();
 });
@@ -974,11 +1251,11 @@ test("Undo restores an unarchived row in server cursor order", async () => {
       return updated;
     },
   });
-  const rowTitles = () => [...fixture.container.querySelectorAll<HTMLAnchorElement>("tbody a")]
+  const rowTitles = () => [...fixture.container.querySelectorAll<HTMLAnchorElement>(".archive-item-heading a")]
     .map((link) => link.textContent);
   assert.deepEqual(rowTitles(), ["Newest", "Middle", "Oldest"]);
 
-  const newestRow = [...fixture.container.querySelectorAll<HTMLElement>("tbody tr")]
+  const newestRow = [...fixture.container.querySelectorAll<HTMLElement>(".archive-item")]
     .find((row) => row.textContent?.includes("Newest"));
   assert.ok(newestRow);
   await act(async () => {
@@ -1095,7 +1372,7 @@ test("a REST mutation preserves an unreproducible server search match until boun
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 250)); });
   const callsBeforeMutation = calls;
 
-  const stopAction = await rowAction(fixture.container, "Stop");
+  const stopAction = await rowAction(fixture.container, "Stop Session…");
   await act(async () => { fireDomEvent.click(stopAction); });
   await act(async () => {
     fireDomEvent.click(button(fixture.container, "Stop Session"));
@@ -1202,7 +1479,7 @@ test("bursty live filter misses coalesce into one bounded revalidation", async (
   await act(async () => { await new Promise((resolve) => setTimeout(resolve, 80)); });
 
   assert.equal(fixture.archivePageCalls(), callsBeforeUpdate + 1);
-  assert.match(fixture.container.textContent ?? "", /No Matching Sessions/);
+  assert.match(fixture.container.textContent ?? "", /No archived sessions match/);
   await fixture.unmount();
 });
 
@@ -1285,7 +1562,7 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
       const restore = unarchiveAndRestart ? "Unarchive and Restart" : "Unarchive";
       const refused: string[] = [];
       await eachRowAction(fixture.container, async (action, label, inMenu) => {
-        if (label === "Open") {
+        if (label === "Open Session") {
           assert.equal(action.disabled, false, "Open still works");
           return;
         }
@@ -1296,11 +1573,11 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
         else assert.equal(action.title, VIEWER, `${label} states the reason on hover`);
         const describedBy = action.getAttribute("aria-describedby");
         assert.ok(describedBy, `${label} is described by its reason`);
-        assert.equal(domWindow.document.getElementById(describedBy)?.textContent, VIEWER);
+        assert.ok(describedBy.split(" ").some((id) => domWindow.document.getElementById(id)?.textContent === VIEWER));
         await act(async () => { fireDomEvent.click(action); await Promise.resolve(); });
       });
       assert.deepEqual(refused.sort(),
-        [restore, restore, "Delete", "Delete", "Retry Stop", "Stop"].sort(), "every refused action stays listed");
+        [restore, restore, restore, restore, "Delete Session…", "Delete Session…", "Retry Stop", "Retry Stop", "Stop Session…"].sort(), "every refused action stays listed");
       assert.deepEqual(calls, [], "nothing is sent");
       assert.doesNotMatch(domWindow.document.body.textContent ?? "", /Stop this session\?|Delete this session\?/u,
         "no confirmation opens");
@@ -1313,7 +1590,7 @@ test("a Viewer sees every refused row action disabled with its reason, and nothi
 test("each row has one inline action and ⋯ for the rest, with Delete last after a separator (§14)", async () => {
   const fixture = await mount([session(7, { title: "Archived Running", status: "running" })]);
   try {
-    const cell = fixture.container.querySelector("tbody tr .actions-cell")!;
+    const cell = fixture.container.querySelector(".archive-item-actions")!;
     assert.deepEqual([...cell.querySelectorAll(".btn")].map((candidate) => candidate.textContent?.trim()), ["Unarchive"],
       "one small ghost button, never a row of text buttons");
     const trigger = cell.querySelector<HTMLButtonElement>('button[aria-label="More Actions for Archived Running"]');
@@ -1322,7 +1599,7 @@ test("each row has one inline action and ⋯ for the rest, with Delete last afte
     const doc = domWindow.document as unknown as Document;
     const menu = doc.querySelector('[role="menu"]')!;
     assert.deepEqual([...menu.querySelectorAll('[role="menuitem"], [role="separator"]')]
-      .map((node) => node.getAttribute("role") === "separator" ? "—" : itemLabel(node)), ["Stop", "Open", "—", "Delete"]);
+      .map((node) => node.getAttribute("role") === "separator" ? "—" : itemLabel(node)), ["Open Session", "Unarchive", "Stop Session…", "—", "Delete Session…"]);
     assert.ok(menu.querySelector('[role="menuitem"]:last-of-type')?.classList.contains("danger"));
     await act(async () => { fireDomEvent.keyDown(menu.querySelector('[role="menuitem"]')!, { key: "Escape" }); });
     // The trigger takes focus back on the next task, after the menu has unmounted.
@@ -1355,11 +1632,11 @@ test("every row action behind ⋯ is reachable from the keyboard: Stop, Open, th
     };
 
     await openMenu();
-    assert.equal(focused(), "Stop", "ArrowDown on ⋯ opens it on its first item");
+    assert.equal(focused(), "Open Session", "ArrowDown on ⋯ opens it on its first item");
     await key("ArrowDown");
-    assert.equal(focused(), "Open");
+    assert.equal(focused(), "Unarchive");
     await key("End");
-    assert.equal(focused(), "Delete", "Delete is last");
+    assert.equal(focused(), "Delete Session…", "Delete is last");
     const items = [...doc.querySelectorAll('[role="menu"] [role="menuitem"], [role="menu"] [role="separator"]')];
     assert.equal(items.at(-2)?.getAttribute("role"), "separator", "after a separator");
 
@@ -1372,8 +1649,7 @@ test("every row action behind ⋯ is reachable from the keyboard: Stop, Open, th
     await settle();
 
     await openMenu();
-    await key("ArrowDown");
-    assert.equal(focused(), "Open");
+    assert.equal(focused(), "Open Session");
     await act(async () => { (doc.activeElement as HTMLButtonElement).click(); await Promise.resolve(); });
     assert.deepEqual(fixture.navigated.at(-1), { name: "session", id: target.id }, "Open opens the session");
   } finally {
@@ -1393,7 +1669,7 @@ test("a person the server allows keeps every row action as before", async () => 
     try {
       await eachRowAction(fixture.container, (action, label) => {
         assert.equal(action.disabled, false, `${label} stays enabled`);
-        assert.equal(action.getAttribute("aria-describedby"), null);
+        if (action.classList.contains("archive-inline")) assert.ok(action.getAttribute("aria-describedby")?.includes("archive-title-"));
       });
       await act(async () => { fireDomEvent.click(buttons(fixture.container, "Retry Stop")[0]!); await Promise.resolve(); });
       assert.deepEqual(calls, ["retry-stop:viewer-stop-failed"]);
@@ -1418,4 +1694,50 @@ test("an empty archive stays offline through a reconnect retry instead of claimi
   assert.match(fixture.container.textContent ?? "", /Reconnecting…/, "a retry in progress is still offline");
   assert.doesNotMatch(fixture.container.textContent ?? "", /No Archived Sessions/);
   await fixture.unmount();
+});
+
+test("history restore requests the stored page once without disclosing transcript search in the URL", async () => {
+  const beforeUrl = domWindow.location.href;
+  writeArchiveBrowse({ filters: { query: "private transcript words", project: "Wollipog", location: "Local Checkout",
+    agent: "Codex App Server", lifecycle: "completed", archive: "all" }, page: 2, cursors: [null, "50"], scrollTop: 120, rowId: "session-65" });
+  const fixture = await mount([], {}, { restoreBrowse: true });
+  try {
+    assert.equal(fixture.archiveInputs.length, 1);
+    assert.equal(fixture.archiveInputs[0]?.cursor, "50");
+    assert.equal(fixture.archiveInputs[0]?.q, "private transcript words");
+    assert.equal(fixture.archiveInputs[0]?.project, "Wollipog");
+    assert.equal(fixture.archiveInputs[0]?.location, "Local Checkout");
+    assert.equal(fixture.archiveInputs[0]?.agent, "Codex App Server");
+    assert.equal(fixture.archiveInputs[0]?.lifecycle, "completed");
+    assert.equal(fixture.archiveInputs[0]?.archive, "all");
+    assert.equal(domWindow.location.href, beforeUrl);
+  } finally { await fixture.unmount(); }
+});
+
+test("typing during a slow restore cancels its later focus rescue", async () => {
+  writeArchiveBrowse({ filters: { query: "", project: null, location: null, agent: null,
+    lifecycle: "all", archive: "archived" }, page: 2, cursors: [null, "50"], scrollTop: 0, rowId: "session-1" });
+  const pending: Array<(value: ReturnType<typeof archiveResponse>) => void> = [];
+  const originalMatchMedia = domWindow.matchMedia.bind(domWindow);
+  domWindow.matchMedia = ((query: string) => {
+    const result = originalMatchMedia(query);
+    if (query.includes("pointer: fine")) Object.defineProperty(result, "matches", { value: true });
+    return result;
+  }) as typeof domWindow.matchMedia;
+  const fixture = await mount([], { archiveSessionPage: () => new Promise((resolve) => pending.push(resolve)) }, { restoreBrowse: true });
+  try {
+    const input = fixture.container.querySelector<HTMLInputElement>('input[type="search"]')!;
+    input.id = "slow-restore-search";
+    await act(async () => {
+      input.focus();
+      input.value = "Archived";
+      fireDomEvent.change(input);
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    });
+    await act(async () => {
+      for (const resolve of pending) resolve(archiveResponse([session(1)]));
+      await Promise.resolve();
+    });
+    assert.equal(domWindow.document.activeElement?.id, input.id, "a late response must not take focus from the new search");
+  } finally { await fixture.unmount(); domWindow.matchMedia = originalMatchMedia; }
 });

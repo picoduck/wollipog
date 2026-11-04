@@ -12,15 +12,15 @@ import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import {
+  ArtifactPageActions,
   ArtifactPreviewBody,
   ArtifactPreviewDialog,
-  ArtifactPreviewBar,
   ArtifactPreviewMeta,
   DOWNLOAD_WARNING,
   useArtifactPreview,
 } from "./ArtifactPreview.js";
 
-const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
+const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
   localStorage: domWindow.localStorage, Element: domWindow.Element, HTMLElement: domWindow.HTMLElement,
@@ -45,12 +45,13 @@ function artifact(kind: WorkflowArtifactKind, name: string, body: string | Uint8
 
 const viewer: ViewerIdentity = { userId: "usr_8f2c41", shared: false, names: new Map() };
 
-/** The Browser's anatomy without the panel: the bar, the meta line and the body over one load. */
+/** The Browser's anatomy without the panel: the header's actions (in a stand-in for its action
+ * slot), the meta line and the body over one load. */
 function Preview({ item }: { item: WorkflowArtifactView }) {
   const model = useArtifactPreview(item);
   return (
     <div className="art-view">
-      <ArtifactPreviewBar model={model} />
+      <div className="rpanel-actions"><ArtifactPageActions model={model} /></div>
       <ArtifactPreviewMeta model={model} />
       <ArtifactPreviewBody model={model} />
     </div>
@@ -102,17 +103,24 @@ const buttonNamed = (scope: ParentNode, name: string) =>
     .find((button) => (button.getAttribute("aria-label") ?? button.textContent?.trim()) === name) ?? null;
 
 describe("the artifact preview's header and meta line (#2855)", () => {
-  test("one bar of Enlarge and Download, with no back and no title of its own (#2914)", async () => {
+  test("Download is a header icon button that opens its menu, with no bar, back or title of its own (#2914, #3036)", async () => {
     const item = artifact("test_log", "web unit suite.log", "ok 1\n");
     const container = await render(<Preview item={item} />, exporting(item, "ok 1\n"));
     await settle(ready(container), "the log");
-    const bar = container.querySelector(".art-bar")!;
-    assert.ok(bar.classList.contains("toolbar"));
+    assertNoDomNode(container.querySelector(".toolbar"), "the page draws no bar of its own");
+    const slot = container.querySelector(".rpanel-actions")!;
     // Download's progress line is a visually hidden sibling, not a control; a log has no Enlarge.
-    const controls = [...bar.querySelectorAll(":scope > button, :scope > h2")]
+    const controls = [...slot.querySelectorAll(":scope > button, :scope > h2")]
       .map((child) => child.getAttribute("aria-label") ?? child.textContent?.trim());
-    assert.deepEqual(controls, ["Download"], "the panel header carries Back and the title, so the bar has neither");
-    assertNoDomNode(bar.querySelector("h2"), "the title is shown once, in the panel header");
+    assert.deepEqual(controls, ["Download"], "the panel header carries Back and the title, so the actions are neither");
+    const download = buttonNamed(slot, "Download")!;
+    assert.ok(download.classList.contains("icon-btn"), "the slot's 32px icon button, 44px on touch");
+    assert.equal(download.classList.contains("btn"), false);
+    assert.equal(download.getAttribute("title"), "Download");
+    assert.equal(download.textContent, "", "no visible label or caret");
+    assert.ok(download.querySelector("svg"), "the Download icon");
+    // It opens the same menu (see the Download menu's tests below).
+    assert.equal(download.getAttribute("aria-haspopup"), "menu");
     assert.doesNotMatch(container.textContent ?? "", /‹/u, "no text-glyph back");
   });
 
@@ -332,7 +340,7 @@ describe("the artifact preview's bodies (#2855)", () => {
     assert.equal(frame.getAttribute("referrerpolicy"), "no-referrer");
     assert.match(frame.getAttribute("srcdoc") ?? "", /Content-Security-Policy/u);
     assert.equal(container.querySelector("figcaption")?.textContent, "Sandboxed: scripts, forms and links are turned off.");
-    assert.ok(buttonNamed(container.querySelector(".art-bar")!, "Enlarge"), "HTML can be enlarged");
+    assert.ok(buttonNamed(container.querySelector(".rpanel-actions")!, "Enlarge"), "HTML can be enlarged");
   });
 
   test("Enlarge opens an image in a full dialog, and Done returns focus to Enlarge", async () => {
@@ -346,7 +354,7 @@ describe("the artifact preview's bodies (#2855)", () => {
       const container = await render(<Preview item={item} />, exporting(item, bytes));
       await settle(ready(container), "the screenshot");
       assert.ok(container.querySelector(".art-checker img.art-image"), "the image sits on a checkerboard well");
-      const enlarge = buttonNamed(container.querySelector(".art-bar")!, "Enlarge")!;
+      const enlarge = buttonNamed(container.querySelector(".rpanel-actions")!, "Enlarge")!;
       enlarge.focus();
       await act(async () => enlarge.click());
       const dialog = document.querySelector('[role="dialog"].art-enlarged')!;

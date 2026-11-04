@@ -23,7 +23,7 @@ export class AcpDriver implements Driver {
   /** The agent process. It is spawned without a descendant owner, so its boundary terminates
    * survivors when it closes and the ledger proves it individually. Terminals are proven by the
    * client's terminal service. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   private readonly proofs = new Map<boolean, Promise<boolean>>();
 
   constructor(
@@ -31,6 +31,7 @@ export class AcpDriver implements Driver {
     cb: DriverCallbacks,
     deps: { spawn?: typeof spawnAgent; kill?: typeof killTree } = {},
   ) {
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
     this.orchestrator = opts.config.permissionMode === "orchestrator";
     // The coupled preset above is only one way to hold the Orchestrator role; runner-owned role
     // metadata is another, and it survives a session that does not carry the preset literal. The
@@ -49,6 +50,7 @@ export class AcpDriver implements Driver {
         sessionContext: opts.acpSessionContext,
         artifactGuidance: opts.artifactGuidance,
         isolation: opts.isolation,
+        reviewWriterCgroup: opts.reviewWriterCgroup,
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         orchestrator: this.orchestrator,
@@ -59,7 +61,7 @@ export class AcpDriver implements Driver {
       {
         spawn: (spawnOptions) => {
           this.processes.assertOpen();
-          return this.processes.record((deps.spawn ?? spawnAgent)(spawnOptions));
+          return this.processes.launch(deps.spawn ?? spawnAgent, spawnOptions);
         },
         kill: deps.kill ?? killTree,
       },

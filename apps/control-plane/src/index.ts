@@ -1,6 +1,8 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
+import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
 import { AutomationCreationService } from "./automation-creation.js";
@@ -10,12 +12,13 @@ import { AutomationCreationService } from "./automation-creation.js";
  */
 
 import os from "node:os";
-import { handoffDestinationError, sessionRole, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest } from "@wollipog/protocol";
+import { handoffDestinationError, sessionRole, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
 import Fastify, { type FastifyReply, type FastifyRequest } from "fastify";
 import websocket from "@fastify/websocket";
+import { isSqliteBusy, withRunnerPersistenceRetry } from "./runner-persistence.js";
 import cors from "@fastify/cors";
 import { canMutateQuestionPolicy } from "./question-policy.js";
 import { automaticAccountSwitchForRunner } from "./automatic-account-switch-compatibility.js";
@@ -59,7 +62,10 @@ import {
   runnerCapabilityRequirementError,
   runnerCapabilityRequirementWithAlternative,
   type RunnerCapabilityRequirementDetails,
+  type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
+  workspaceRemovalBlockedMessage,
+  validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
   isWorkspaceReference,
@@ -90,11 +96,16 @@ import {
   type DescendantRequestResolution,
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
+  type WithdrawWorkflowDecisionRequest,
+  type ExecuteWorkflowDecisionRequest,
+  type CreateOwnerDecisionRequest,
+  type HandWorkflowDecisionToOwnerRequest,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
   type GetCampaignWorkItemsRequest,
   type RecordCampaignPlanRequest,
   type UpdateCampaignWorkItemRequest,
+  type RecordCampaignWorkItemDeliveryRequest,
   type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
@@ -122,7 +133,6 @@ import {
   type RunnerToControlPlane,
   type RunnerProtocolCapability,
   type ResolveWorkflowGateRequest,
-  type SetArchivedRequest,
   type SetSessionReminderRequest,
   type SetColumnRequest,
   type SessionProviderAccountOptionsResponse,
@@ -133,6 +143,7 @@ import {
   type UpdatePodMemberRequest,
   type UpdatePodOrchestrationRequest,
   type UpdateAutomationRequest,
+  type CampaignPullRequestRef,
 } from "@wollipog/protocol";
 import { SESSION_ARTIFACT_RETENTION_MS } from "./workflow-artifacts.js";
 import { OutboundEventsService } from "./outbound-events.js";
@@ -176,6 +187,7 @@ import {
 import { RemoteAccess } from "./remote-access.js";
 import { registerRemoteAccessRoutes } from "./remote-access-route.js";
 import { probePublicOriginWithFetch, registerHostAdminRoute, runnerHarnessReadiness } from "./host-admin-route.js";
+import { finishControlPlaneShutdown } from "./control-plane-shutdown.js";
 import { PUBLIC_ORIGIN_ENV, resolvePublicOrigin } from "./public-origin.js";
 import { defaultArtifactBlobRoot } from "./artifact-blob-store.js";
 import { BoxOrchestrator, makeBinaryResolver, managedBoxRunnerDataDir } from "./box-orchestrator.js";
@@ -202,7 +214,8 @@ import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { APP_RELEASE_VERSION, RUNNER_RELEASE_TAG } from "./release-version.js";
 import { ProviderPublicationUnavailable, type PublicationObservation } from "./provider-profile-publication-store.js";
 import { readSshConfigHosts } from "./ssh-config.js";
-import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS } from "./db.js";
+import { ControlPlaneDb, GOVERNANCE_AUDIT_RETENTION_MS, TeamMemberContainmentError } from "./db.js";
+import { registerIdentityTeamRoutes, TEAM_NAME_TAKEN } from "./identity-team-route.js";
 import { logWalCheckpointerEvent } from "./wal-checkpointer.js";
 import { registerSessionLookupRoute } from "./session-lookup-route.js";
 import { registerSideChatRoutes } from "./side-chat-routes.js";
@@ -222,6 +235,7 @@ import { registerSessionNamingRoutes } from "./session-naming-route.js";
 import { WorkflowEventRetention } from "./workflow-event-retention.js";
 import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
+import { registerSessionArchiveRoute } from "./session-archive-route.js";
 import { MutationAuditArchiveRetention } from "./mutation-audit-archive-retention.js";
 import { IncrementalVacuum, INCREMENTAL_VACUUM_ENV, parseIncrementalVacuum } from "./incremental-vacuum.js";
 import { registerArchivedHistoryRetentionRoutes } from "./archived-history-retention-route.js";
@@ -230,6 +244,8 @@ import { registerAgentHarnessDefaultsRoutes } from "./agent-harness-defaults-rou
 import { OrchestratorSettings, childHarnessAgents, childModelMachines } from "./orchestrator-settings.js";
 import { registerArtifactUploadSettingsRoutes } from "./artifact-upload-settings-route.js";
 import { registerOrchestratorSettingsRoutes } from "./orchestrator-settings-route.js";
+import { registerReviewSettingsRoutes } from "./review-settings-route.js";
+import { ReviewSettingsService } from "./review-settings.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
 import { composeHostingVideoEvidence, registerHostingVideoEvidenceRoutes } from "./hosting-video-evidence.js";
@@ -266,6 +282,7 @@ import {
   tailnetIpv4,
 } from "./net.js";
 import {
+  RUNTIME_UPDATE_RUN_LIMIT,
   SESSION_COMMAND_INVOCATION_RETENTION_MS,
   sessionBlocksConversationFork,
   SessionsService,
@@ -274,6 +291,7 @@ import {
 import { videoFrameValidationSessionId } from "./video-frame-validation.js";
 import { ShellRegistry } from "./shell-registry.js";
 import { CORS_METHODS, registerAuthGate } from "./http-auth.js";
+import { sessionCredentialRefusal } from "./session-credential-refusal.js";
 import { pushDecision } from "./push-decision.js";
 import { automationPushMessage } from "./automation-push-decision.js";
 import { validateSubscription, WebPushSender } from "./web-push.js";
@@ -347,6 +365,7 @@ import {
   PERSONAL_ORGANIZATION_ID,
   mutationAuthorizationError,
   orchestratorSelfWorktreeAuthorizationError,
+  worktreeRequestedBySession,
   type AuthPrincipal,
   type HumanPrincipal,
   workflowActorForPrincipal,
@@ -373,7 +392,7 @@ function parseUiProtocolVersion(query: unknown): number | null {
 }
 const HEARTBEAT_INTERVAL_MS = Number(process.env.CONTROL_PLANE_HEARTBEAT_MS ?? 10_000);
 const RUNNER_PRE_AUTH_TIMEOUT_MS = runnerAuthTimeoutMs(process.env.CONTROL_PLANE_RUNNER_AUTH_TIMEOUT_MS);
-// Heartbeats refresh durable last_seen; accepted traffic and replay progress also keep it active.
+// Heartbeats refresh last_seen (committed without a flush, #3874); accepted traffic and replay progress also keep it active.
 // If neither arrives within three intervals the socket is presumed half-open (sleep / NAT rebind leaves it
 // readyState=OPEN with no FIN/RST): the liveness sweep terminates it so the normal onGone cleanup
 // runs, instead of keeping the runner "online" with lost prompts until the OS TCP timeout fires.
@@ -627,7 +646,9 @@ function authedApiPrincipal(
   const agentControl = authedAgentControl(req);
   const mediaPurpose = agentControl ? svc.mediaSessionPurposes.owns(agentControl.id) : false;
   if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose)) {
+  // A delegated image reviewer's credential reaches only its own review routes (#4074).
+  const imageReviewer = agentControl ? db.delegatedImageReviews.isReviewer(agentControl.id) : false;
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose, imageReviewer)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -787,6 +808,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
   const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? params.id : null;
   if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
+  if (typeof mediaTarget === "string" && db.delegatedImageReviews.isReviewer(mediaTarget) &&
+      !delegatedImageReviewerMutationAllowed(req.method, routePath)) return DELEGATED_IMAGE_REVIEWER_ERROR;
   const runnerId = typeof params.runnerId === "string" ? params.runnerId
     : typeof params.id === "string" && routePath.startsWith("/api/runners/") ? params.id : null;
   if (runnerId) {
@@ -847,6 +870,11 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
 // http-auth.ts so it can be regression-tested with app.inject against real Fastify routing.
 registerAuthGate(app, {
   authenticate: authedApiPrincipal,
+  authenticationRefusal: (req) => {
+    const refusal = sessionCredentialRefusal(req.headers, db);
+    if (refusal) app.log.warn({ reason: refusal.reason }, "session agent credential refused");
+    return refusal?.error;
+  },
   isAllowedOrigin,
   authorize: authorizeApiRequest,
 });
@@ -1024,7 +1052,8 @@ const svc = new SessionsService(
 videoEvidence.attach(svc, hub);
 db.setCampaignVideoReviewSource((root, uiEvidenceOwner) => svc.campaignVideoReview(root, uiEvidenceOwner));
 const roleConversions = new SessionRoleConversions(db, hub, (event, fields) =>
-  app.log.info({ event, ...fields }, "session role conversion"));
+  app.log.info({ event, ...fields }, "session role conversion"), () => svc.expireAutomationCreationDecisions());
+svc.expireAutomationCreationDecisions();
 if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
   app.log.warn({ controllingSessionId: VIDEO_FRAME_VALIDATION_SESSION_ID },
     "experimental video-frame review validation is enabled for one controlling Session");
@@ -1039,6 +1068,7 @@ const workflowEventRetention = new WorkflowEventRetention(db, { env: process.env
 registerWorkflowEventRetentionRoutes(app, workflowEventRetention, requestPrincipal);
 registerAgentHarnessDefaultsRoutes(app, agentHarnessDefaultsSettings, requestPrincipal);
 registerOrchestratorSettingsRoutes(app, orchestratorSettings, requestPrincipal);
+registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipal);
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });
@@ -1065,7 +1095,8 @@ const campaignForgeObserver = new CampaignForgeObserver({
   },
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
   store: db.campaignForgeObservations,
-  backgroundTargets: (include) => db.campaignWorkLedger.forgeBackgroundTargets(include),
+  // Unfinished items' pull requests, and merged campaign pull requests whose branch is pending (#4067).
+  backgroundTargets: (include) => [...db.campaignWorkLedger.forgeBackgroundTargets(include), ...db.campaignMergedBranchTargets(include)],
   changed: (campaignId) => campaignWorkObservations.forgeChanged(campaignId),
   warn: (message) => app.log.warn(message),
   newRequestId: () => `campaign_forge_${randomUUID()}`,
@@ -1073,17 +1104,20 @@ const campaignForgeObserver = new CampaignForgeObserver({
 campaignForgeObserver.start();
 /** An on-demand read waits at most this long before the route answers with what is stored. */
 const CAMPAIGN_FORGE_REFRESH_WAIT_MS = 20_000;
+const refreshCampaignForge = (campaignId: string, refs: readonly CampaignPullRequestRef[]) => new Promise<void>((resolve) => {
+  const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
+  timer.unref?.();
+  void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
+    clearTimeout(timer);
+    resolve();
+  });
+});
+svc.campaignForgeRefresh = refreshCampaignForge;
+svc.campaignForgeReadNow = (campaignId, refs) => campaignForgeObserver.readNow(campaignId, refs);
 registerCampaignStatusRoutes(app, {
   db,
   requestPrincipal,
-  refreshForge: (campaignId, refs) => new Promise<void>((resolve) => {
-    const timer = setTimeout(resolve, CAMPAIGN_FORGE_REFRESH_WAIT_MS);
-    timer.unref?.();
-    void campaignForgeObserver.refresh(campaignId, refs).finally(() => {
-      clearTimeout(timer);
-      resolve();
-    });
-  }),
+  refreshForge: refreshCampaignForge,
 });
 hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
@@ -1203,7 +1237,7 @@ app.addHook("preSerialization", (req, _reply, payload, done) => {
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
-  done(null, projectBackgroundRetryExhaustionForUi(payload, protocol));
+  done(null, projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
 });
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
@@ -1269,12 +1303,17 @@ app.register(async (instance) => {
     await svc.flushRunnerAttention(runnerId, currentSocket);
     runtimeAttentionBatch = undefined;
   };
-  const handleRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
+  const handleRunnerFrame = (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) =>
+    withRunnerPersistenceRetry(() => applyRunnerFrame(msg, prepared), (retries, exhausted) => {
+      app.log.warn({ event: "runner_persistence_contention", entryPoint: "runner_socket", runnerId,
+        messageType: msg.type, retries, exhausted }, "runner frame encountered database lock contention");
+    });
+  const applyRunnerFrame = async (msg: RunnerToControlPlane, prepared?: PreparedLiveSessionEvent) => {
     // A malformed frame (missing/mistyped fields survive the cast-only parseMessage) or a
     // transient persistence error must not escape this listener: an uncaught throw here becomes a
     // fatal uncaughtException that drops EVERY runner/session/dashboard connection. Isolate the
-    // failure to the offending socket — log it, then close only this runner (the `register` case
-    // already handles its own rejections and returns, so it never reaches this catch).
+    // failure to the offending socket. Registration handles credential rejections locally, but
+    // snapshot hydration and later registration work also reach this catch.
     try {
     // Nothing but `register` is accepted until this socket has authenticated — an
     // unregistered client must not be able to inject events, queue overlays, or
@@ -1306,6 +1345,17 @@ app.register(async (instance) => {
     }
 
     switch (msg.type) {
+      case "runner_processing_barrier": {
+        if (!runnerId || !runnerSupportsProtocol(db.getRunner(runnerId)?.protocolVersion, "runnerProcessingBarriers") ||
+            !Number.isSafeInteger(msg.barrierId) || msg.barrierId < 1) {
+          socket.close(1008, "invalid runner processing barrier");
+          return;
+        }
+        // This handler is reached through the state FIFO, after preceding frame application and
+        // attention publication. Reading the barrier, or answering a ping, cannot acknowledge it.
+        send(socket, { type: "runner_processing_ack", barrierId: msg.barrierId });
+        break;
+      }
       case "register": {
         if (runnerId) {
           send(socket, { type: "register_rejected", reason: "socket is already registered" });
@@ -1321,6 +1371,7 @@ app.register(async (instance) => {
             msg.protocolVersion ?? null,
           );
         } catch (error) {
+          if (isSqliteBusy(error)) throw error;
           app.log.warn({ err: error, runnerId: msg.runner.runnerId }, "runner registration persistence failed");
           send(socket, { type: "register_rejected", reason: "registration failed" });
           socket.close(1008, "registration failed");
@@ -1430,6 +1481,8 @@ app.register(async (instance) => {
         svc.recoverCampaignReviewJobs(runnerId);
         svc.recoverSessionReviewJobs(runnerId);
         svc.recoverReviewSessions(runnerId);
+        // Every merge-queue watch on this runner resumes, or is reported lost to its session (#4071).
+        svc.recoverPullRequestWatches(runnerId);
         // Media reviewers live outside the Session inventory; read back their durable outcomes.
         videoEvidence.delegated.readback(runnerId);
         automations.tick(Date.now());
@@ -1468,6 +1521,7 @@ app.register(async (instance) => {
           msg.controlPlaneLaunchId,
           msg.capacityWait,
           msg.campaignBudgetCheckpoint,
+          msg.launchFailure,
         );
         break;
       case "stop_session_result":
@@ -1493,6 +1547,9 @@ app.register(async (instance) => {
         break;
       case "review_session_update":
         if (runnerId) svc.onReviewSessionUpdate(runnerId, msg);
+        break;
+      case "pull_request_watch_update":
+        if (runnerId) svc.onPullRequestWatchUpdate(runnerId, msg);
         break;
       case "policy_hook_credential":
         {
@@ -1522,6 +1579,9 @@ app.register(async (instance) => {
         break;
       case "campaign_issue_scope_result":
       case "campaign_launch_inspection_result":
+      case "gitlab_merge_preflight_result":
+      case "github_merge_preflight_result":
+      case "forge_decision_action_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
@@ -1608,6 +1668,7 @@ app.register(async (instance) => {
       case "agents_updated":
         if (runnerId === msg.runnerId) {
           db.updateRunnerAgents(msg.runnerId, msg.agents, Date.now(), msg.editors, msg.providerAccounts, msg.executionTargets);
+          orchestrator.onRunnerAgentsUpdated(msg.runnerId);
           // The review-session capability follows the agents it was derived from (#3369).
           if (msg.reviewSession !== undefined && runnerSupportsProtocol(db.getRunner(msg.runnerId)?.protocolVersion, "reviewSession")) {
             db.updateRunnerReviewSessionCapability(msg.runnerId, msg.reviewSession);
@@ -1817,11 +1878,14 @@ app.register(async (instance) => {
       case "host_action_result":
       case "interrupt_turn_result":
       case "stop_background_job_result":
+      case "release_queue_hold_result":
       case "read_queued_prompt_result":
       case "edit_queued_prompt_result":
       case "provider_login_result":
       case "remove_provider_account_result":
+      case "remove_workspace_result":
       case "adopt_provider_profile_result":
+      case "import_provider_credential_result":
       case "revoke_provider_profile_grant_result":
       case "inspect_provider_home_lease_result":
       case "recover_provider_home_lease_result":
@@ -1918,6 +1982,12 @@ app.register(async (instance) => {
       }
     }
     } catch (error) {
+      if (isSqliteBusy(error)) {
+        app.log.error({ event: "runner_persistence_exhausted", entryPoint: "runner_socket", runnerId,
+          messageType: msg.type }, "runner persistence retries exhausted");
+        try { socket.close(1011, "runner persistence unavailable"); } catch { /* tearing down */ }
+        return;
+      }
       app.log.error(
         { err: error, runnerId, messageType: msg.type },
         "runner frame handler threw — closing offending runner socket",
@@ -1932,7 +2002,70 @@ app.register(async (instance) => {
     }
   };
 
+  // A run of consecutive queued runtime updates shares one durable commit (#2601). Each frame gets
+  // the same authority checks, activity refresh and attention batching as in handleRunnerFrame.
+  const handleRuntimeUpdateRun = (messages: RunnerToControlPlane[]) =>
+    withRunnerPersistenceRetry(() => applyRuntimeUpdateRun(messages), (retries, exhausted) => {
+      app.log.warn({ event: "runner_persistence_contention", entryPoint: "runner_socket", runnerId,
+        messageType: "session_runtime_updated", retries, exhausted }, "runner frame encountered database lock contention");
+    });
+  const applyRuntimeUpdateRun = async (messages: RunnerToControlPlane[]) => {
+    const updates = messages as Array<Extract<RunnerToControlPlane, { type: "session_runtime_updated" }>>;
+    try {
+      if (!runnerId || !hub.isCurrentRunnerSocket(runnerId, runnerClient)) return;
+      if (!credentialId || !db.isRunnerCredentialActive(runnerId, credentialId)) {
+        socket.close(1008, "runner credential is no longer active");
+        return;
+      }
+      if (runtimeAttentionBatch && (runtimeAttentionFrames >= 1024 || performance.now() - runtimeAttentionStarted >= 1000)) {
+        await flushRuntimeAttention();
+        // The socket may have been replaced while its campaign publications yielded.
+        if (!currentSocket()) return;
+      }
+      const owner = runnerId!;
+      hub.noteRunnerFrameActivity(owner, runnerClient, Date.now());
+      const startedAt = performance.now();
+      if (!runtimeAttentionBatch) {
+        runtimeAttentionBatch = svc.beginRunnerAttentionBatch(owner);
+        runtimeAttentionFrames = 0;
+        runtimeAttentionStarted = performance.now();
+      }
+      runtimeAttentionFrames += updates.length;
+      svc.applySessionRuntimeUpdates(owner, updates.map((msg) => msg.snapshot), runtimeAttentionBatch,
+        (snapshot) => roleConversions.reconcile(owner, snapshot));
+      const durationMs = performance.now() - startedAt;
+      if (durationMs >= 250) {
+        app.log.warn({
+          event: "session_runtime_update_slow",
+          entryPoint: "runner_socket",
+          runnerId: owner,
+          frameCount: updates.length,
+          durationMs: Math.round(durationMs),
+        }, "session runtime update blocked the control plane");
+      }
+    } catch (error) {
+      if (isSqliteBusy(error)) {
+        app.log.error({ event: "runner_persistence_exhausted", entryPoint: "runner_socket", runnerId,
+          messageType: "session_runtime_updated" }, "runner persistence retries exhausted");
+        try { socket.close(1011, "runner persistence unavailable"); } catch { /* tearing down */ }
+        return;
+      }
+      app.log.error(
+        { err: error, runnerId, messageType: "session_runtime_updated", frameCount: updates.length },
+        "runner frame handler threw — closing offending runner socket",
+      );
+      try {
+        socket.close(1008, "malformed runner frame");
+      } catch {
+        /* socket already tearing down */
+      }
+    }
+  };
+
   type Staging = Promise<StagedSessionEventPayload | null>;
+  let receivePressureStarted: number | undefined;
+  let receivePressureWarningAt = -Infinity;
+  let receivePressureWarned = false;
   const frameQueue = new RunnerFrameQueue<RunnerToControlPlane, Staging>(async (msg, staging) => {
     try {
       // Frames stay in arrival order: a large event waits here for its durable payload, and the
@@ -1951,7 +2084,18 @@ app.register(async (instance) => {
     socket.terminate();
   }, undefined, flushRuntimeAttention, (paused) => {
     if (!setRunnerReceivePressure(socket, paused)) return;
-    app.log.debug({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused },
+    const now = performance.now();
+    const durationMs = paused || receivePressureStarted === undefined ? 0 : Math.round(now - receivePressureStarted);
+    receivePressureStarted = paused ? now : undefined;
+    // Warn for at most one pause/resume pair per 30 seconds per connection. Keep every transition
+    // available at debug level for detailed flow-control diagnosis without flooding normal logs.
+    const warn = paused ? now - receivePressureWarningAt >= 30_000 : receivePressureWarned;
+    if (paused) {
+      receivePressureWarned = warn;
+      if (warn) receivePressureWarningAt = now;
+    }
+    app.log[warn ? "warn" : "debug"]({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused,
+      durationMs, queuedBytes: frameQueue.pressureStats.bytes, queuedFrames: frameQueue.pressureStats.frames },
       "runner receive flow control changed");
   }, {
     // A large event payload starts becoming durable off the event loop as soon as it is queued,
@@ -1961,6 +2105,11 @@ app.register(async (instance) => {
       ? svc.stageLiveSessionEventPayload(msg.sessionId, msg.payload, msg.ts, runnerId ?? undefined)
       : undefined,
     discard: (staging) => svc.discardStagedLiveSessionEvent(staging),
+  }, {
+    // A malformed frame is never batched: it reaches handleRunnerFrame and is rejected there.
+    batchable: (msg) => msg.type === "session_runtime_updated" && typeof msg.snapshot?.id === "string",
+    limit: RUNTIME_UPDATE_RUN_LIMIT,
+    handle: handleRuntimeUpdateRun,
   });
   socket.on("message", (raw: Buffer) => {
     const msg = parseMessage<RunnerToControlPlane>(raw.toString());
@@ -2805,10 +2954,10 @@ app.post("/api/identity/users", async (req, reply) => {
       role,
       now: Date.now(),
     });
-    // A new member makes the organization's sessions shared: reconnecting clients reload the
-    // directory, so a transcript stops attributing the new member's answers to "you" (#2527).
-    // Nobody's access changed, so this is an ordinary reconnect rather than a 1008.
-    hub.closeOrganizationUiClients(principal.organizationId, 1000, "organization directory changed");
+    // A new member makes the organization's sessions shared: open dashboards reload the directory,
+    // so a transcript stops attributing the new member's answers to "you" (#2527). Nobody's access
+    // changed, so they refresh in place rather than reconnecting (#2606).
+    hub.identityDirectoryChanged(principal.organizationId);
     return reply.code(201).send({ membership });
   } catch {
     return reply.code(409).send({ error: "could not create organization member" });
@@ -2842,11 +2991,22 @@ app.patch("/api/identity/users/:userId", async (req, reply) => {
       displayName,
       role,
       status,
+      // Saving your own name, even unchanged, or giving someone a new one ends the default name
+      // (#3001). Another person's unchanged name riding along with an access change does not.
+      nameSaved: typeof body.displayName === "string" &&
+        (userId === principal.userId || displayName !== existing.userName),
       now: Date.now(),
     });
     if (!membership) return reply.code(404).send({ error: "member not found" });
     for (const deviceId of deviceIds) hub.closeUiClientsForDevice(deviceId);
-    hub.closeOrganizationUiClients(principal.organizationId);
+    // A role or status change alters only this member's own access (#2606): close their sockets so
+    // no cached privilege outlives it. A rename, and everyone else's view of either change, reaches
+    // open dashboards as an in-place refresh.
+    if (role !== existing.role || status !== existing.userStatus ||
+      membership.role !== existing.role || membership.userStatus !== existing.userStatus) {
+      hub.closeUserUiClients(userId);
+    }
+    hub.identityDirectoryChanged(principal.organizationId);
     return { membership };
   } catch (error) {
     return reply.code(409).send({ error: error instanceof Error ? error.message : "member update failed" });
@@ -2861,6 +3021,9 @@ app.post("/api/identity/teams", async (req, reply) => {
     ? [...new Set(body.memberUserIds as string[])] : null;
   if (!name || name.length > 80) return reply.code(400).send({ error: "team name must be 1-80 characters" });
   if (!memberUserIds || memberUserIds.length > 100) return reply.code(400).send({ error: "memberUserIds must contain at most 100 unique user ids" });
+  if (db.identityTeamNameTaken(principal.organizationId, name)) {
+    return reply.code(409).send({ error: "another team in this organization already has this name", code: TEAM_NAME_TAKEN });
+  }
   try {
     const team = db.createIdentityTeam({
       teamId: `team_${randomUUID().replace(/-/g, "").slice(0, 16)}`,
@@ -2894,9 +3057,14 @@ app.put("/api/identity/teams/:teamId/members", async (req, reply) => {
     hub.closeScopedUiClients();
     return { team };
   } catch (error) {
-    return reply.code(409).send({ error: error instanceof Error ? error.message : "team update failed" });
+    return reply.code(409).send({
+      error: error instanceof Error ? error.message : "team update failed",
+      ...(error instanceof TeamMemberContainmentError ? { code: "team_member_containment" } : {}),
+    });
   }
 });
+
+registerIdentityTeamRoutes(app, { db, requestHuman });
 
 app.delete("/api/identity/teams/:teamId", async (req, reply) => {
   const principal = requestHuman(req)!;
@@ -3475,9 +3643,18 @@ app.put("/api/runners/:id/provider-account-defaults/:provider", async (req, repl
       runner.protocolVersion, "providerAccounts", "default provider account changes",
     ));
   }
-  if (body.accountId !== null && !runner.providerAccounts?.some((account) =>
-    account.provider === provider && account.id === body.accountId)) {
+  const chosen = body.accountId === null ? undefined : runner.providerAccounts?.find((account) =>
+    account.provider === provider && account.id === body.accountId);
+  if (body.accountId !== null && !chosen) {
     return reply.code(409).send({ error: "The provider account is not available on this Machine." });
+  }
+  // A profile only other control planes may use would refuse every session that takes the default
+  // (#3240); adopting it first grants this control plane access.
+  if (chosen?.profile?.access === "not_granted") {
+    return reply.code(409).send({
+      error: "This account's provider profile isn't granted to this control plane. Adopt it as a profile first.",
+      code: "PROVIDER_PROFILE_NOT_GRANTED",
+    });
   }
   const changed = db.setMachineProviderAccountDefault(
     id, provider, body.accountId as string | null, body.expectedRevision as number, Date.now(),
@@ -3565,11 +3742,14 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
 
 app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const q = req.query as { q?: unknown };
+  const q = req.query as { q?: unknown; match?: unknown };
   if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
-  const r = await svc.searchWorkspaceReferences(id, q.q);
+  if (q.match !== undefined && q.match !== "fuzzy") {
+    return reply.code(400).send({ error: "match must be fuzzy when given" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q, q.match);
   if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
@@ -3747,6 +3927,8 @@ type OpenSessionShellResult =
       capabilityRequirement?: RunnerCapabilityRequirementDetails;
       /** False when a runner timeout/disconnect leaves process creation unknown. */
       definitive?: boolean;
+      /** The Agent TUI's provider-HOME lease refused the open (#3338). */
+      providerHomeRefusal?: ProviderHomeLaunchRefusalView;
     };
 
 async function openSessionShell(
@@ -3812,7 +3994,14 @@ async function openSessionShell(
       // The runner answered definitively that no process was opened. A tombstone is needed only
       // for ambiguous outcomes where a late snapshot could otherwise resurrect a live process.
       shellRegistry.discardUnopened(shellId, session.runnerId);
-      return { ok: false, status: 502, error: res.error ?? "could not open a shell" };
+      // #3338: the TUI's account lease refused it; the client offers the session's recovery for it.
+      // A malformed refusal falls back to the text.
+      const providerHomeRefusal = kind === "agent_tui" && res.providerHomeRefusal !== undefined
+        ? validProviderHomeLaunchRefusal(res.providerHomeRefusal) : null;
+      return {
+        ok: false, status: 502, error: res.error ?? "could not open a shell",
+        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
+      };
     }
     const shell = shellRegistry.setPty(shellId, Boolean(res.pty), Date.now());
     if (!shell) {
@@ -3838,7 +4027,10 @@ app.post("/api/sessions/:id/shells", async (req, reply) => {
   );
   return result.ok
     ? reply.code(result.status).send({ shell: result.shell })
-    : reply.code(result.status).send(failureBody(result));
+    : reply.code(result.status).send({
+      ...failureBody(result),
+      ...(result.providerHomeRefusal ? { providerHomeRefusal: result.providerHomeRefusal } : {}),
+    });
 });
 
 // Best-effort PTY resize (fire-and-forget, like input — pipe shells ignore it).
@@ -4077,8 +4269,9 @@ app.get("/api/sessions", async (req,reply) => {
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
   const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
+  const supportsHandoffs = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "campaignHandoffs");
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,supportsHandoffs)
     : '{"sessions":[]}');
 });
 
@@ -4157,11 +4350,38 @@ app.post("/api/sessions/:id/parent-control-policy", async (req, reply) => {
   ));
 });
 
+// A running campaign's Child Harness, Model, Effort, Follow-Ups and Completion (#3580): a person's
+// compare-and-set on the campaign's own behavior revision. No agent allowlist entry exists for these
+// endpoints, so neither the Orchestrator nor any child can read the form or change the values.
+app.get("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.campaignBehaviorView(id, (behavior, exactRow) => orchestratorSettings.campaignCapabilities(human, behavior, exactRow)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/behavior", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const human = requestHuman(req);
+  if (!human) return reply.code(403).send({ error: "only an authenticated human may change campaign behavior" });
+  if (!db.canAccessSession(human, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.setCampaignBehavior(id, req.body, { kind: "human", id: humanActorId(req) },
+    (behavior, exactRow) => orchestratorSettings.campaignBehaviorError(human, behavior, exactRow)));
+});
+
 app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  // #4067: a pending merged branch is read again (rate-limited, bounded wait) so a deletion shows.
+  const campaignId = db.resolvedCampaignSessionId(id);
+  const pendingBranches = campaignId ? db.campaignMergedBranches(campaignId).filter((row) => row.state === "pending") : [];
+  if (campaignId && pendingBranches.length) {
+    await refreshCampaignForge(campaignId, pendingBranches.map((row) => ({ repository: row.repository, number: row.pullRequest })));
   }
   const projection = await svc.campaignProjectionWithHistory(id);
   const policy = db.getSession(id)?.orchestratorPolicy;
@@ -4312,6 +4532,13 @@ app.post("/api/sessions/:id/review-sessions", async (req, reply) => {
   return respond(reply, svc.requestReviewSession(id, req.body as ReviewSessionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
+// Merge-queue watches (#4071): only the session's own credential parks it on its own pull request.
+app.post("/api/sessions/:id/pull-request-watch", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.requestPullRequestWatch(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
 app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
@@ -4343,6 +4570,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/control", async (req, reply) =
   const body = req.body as { proposal?: Parameters<SessionsService["setCampaignControl"]>[1]; expectedRevision?: number } | null;
   if (!body?.proposal || !Number.isSafeInteger(body.expectedRevision)) return reply.code(400).send({ error: "proposal and expectedRevision are required" });
   return respond(reply, svc.setCampaignControl(id, body.proposal, body.expectedRevision!, principal));
+});
+
+// The follow-up approval limit (#2940): the same human-only compare-and-set, re-minting the boundary.
+// No agent allowlist entry exists for this endpoint either.
+app.post("/api/sessions/:id/orchestrator-campaign/follow-up-limit", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  return respond(reply, svc.setCampaignFollowUpLimit(id, req.body as SetCampaignFollowUpLimitRequest, principal));
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {
@@ -4384,6 +4620,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (re
   if (!principal) return reply;
   return respond(reply, svc.updateCampaignWorkItem(id,
     { ...(req.body as Omit<UpdateCampaignWorkItemRequest, "workItemId">), workItemId: itemId },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery", async (req, reply) => {
+  const { id, itemId } = req.params as { id: string; itemId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, await svc.recordCampaignWorkItemDelivery(id,
+    { ...(req.body as Omit<RecordCampaignWorkItemDeliveryRequest, "workItemId">), workItemId: itemId },
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
@@ -4511,6 +4756,82 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
   ));
 });
 
+// #4067: Wollipog performs the requester's own approved branch deletion or armed enqueue itself.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/execute", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, await svc.executeWorkflowDecision(
+    id,
+    occurrenceId,
+    req.body as ExecuteWorkflowDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+// #3917: `:id` is always the caller's own credential session, as for consume. The body names the
+// requesting session when the caller is its controlling Orchestrator; the service checks that
+// relationship and the decision's owner, and a withdrawal never approves or consumes anything.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/withdraw", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<WithdrawWorkflowDecisionRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  if (body?.sessionId !== undefined && body.sessionId !== id && principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "only an Orchestrator can withdraw another session's workflow decision" });
+  }
+  return respond(reply, svc.withdrawWorkflowDecision(
+    id,
+    occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
+// credential session; the service checks that it is the campaign's root and that only a person
+// can answer.
+app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// #4064: the root hands one of its pending Orchestrator-owned decisions to the campaign's owner.
+// `:id` is the caller's own credential session; the body names the requester when it is a child.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<HandWorkflowDecisionToOwnerRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  return respond(reply, svc.handWorkflowDecisionToOwner(id, occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
 app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   const principal = requestPrincipal(req);
@@ -4549,6 +4870,8 @@ app.post("/api/sessions/:id/descendant-requests/resolve", async (req, reply) => 
   }
   const resolution = body.resolution;
   const valid = resolution.action === "dismiss" ||
+    (resolution.action === "withdraw_workflow_decision" && typeof resolution.reason === "string" &&
+      Boolean(resolution.reason.trim())) ||
     (resolution.action === "answer" && resolution.answers && typeof resolution.answers === "object" && !Array.isArray(resolution.answers)) ||
     ((resolution.action === "approve" || resolution.action === "deny") && typeof resolution.optionId === "string" && resolution.optionId) ||
     (resolution.action === "resolve_workflow_decision" &&
@@ -4601,6 +4924,78 @@ app.post("/api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",
     return reply.code(400).send({ error: "receiptId and sha256 are required" });
   }
   return respond(reply, svc.acknowledgeDescendantUiEvidence(id, body.receiptId, body.sha256));
+});
+
+// Delegated image review (#4074). The controlling Orchestrator hands a decision's images to a
+// server-created reviewer Session and later reads its verdict; it never receives the images here.
+app.post("/api/sessions/:id/descendant-requests/delegated-image-review", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { sessionId?: unknown; occurrenceId?: unknown; brief?: unknown };
+  if (!validParentControlCoordinate(body?.sessionId) || !validParentControlCoordinate(body.occurrenceId) ||
+      typeof body.brief !== "string") {
+    return reply.code(400).send({ error: "sessionId, occurrenceId, and brief are required" });
+  }
+  return respond(reply, svc.prepareDescendantImageEvidenceReview(
+    id, body.sessionId, body.occurrenceId, body.brief, (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+app.post("/api/sessions/:id/descendant-requests/delegated-image-review/get", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { reviewId?: unknown };
+  if (!validParentControlCoordinate(body?.reviewId)) return reply.code(400).send({ error: "reviewId is required" });
+  return respond(reply, svc.delegatedImageReviewForOrchestrator(id, body.reviewId, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// The reviewer's own credential only: the review it belongs to is the one its Session was created
+// for, so it names no review, decision or child. Evidence bytes are never logged.
+app.post("/api/sessions/:id/delegated-image-review/image", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { evidenceId?: unknown };
+  if (typeof body?.evidenceId !== "string" || !body.evidenceId || body.evidenceId.length > 256) {
+    return reply.code(400).send({ error: "evidenceId is required" });
+  }
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.reviewDelegatedImageEvidence(id, body.evidenceId, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/delegated-image-review/acknowledge", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { receiptId?: unknown; sha256?: unknown };
+  if (!validParentControlCoordinate(body?.receiptId) ||
+      typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(body.sha256)) {
+    return reply.code(400).send({ error: "receiptId and sha256 are required" });
+  }
+  return respond(reply, svc.acknowledgeDelegatedImageEvidence(id, body.receiptId, body.sha256,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { report?: unknown };
+  return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
@@ -5046,7 +5441,8 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
   const target = db.getSession(id);
   const holdReader = target ? sessionHoldReaderFor(db, principal, target) : undefined;
-  const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader);
+  const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader,
+    principal?.kind === "agent" ? principal : undefined);
   return respond(reply, result.ok && result.data
     ? { ...result, data: withSessionHoldAdviceFor(db, principal, result.data, holdReader) }
     : result);
@@ -5175,9 +5571,18 @@ app.post("/api/sessions/:id/cancel", async (req, reply) =>
   respond(reply, await svc.cancelTurn((req.params as { id: string }).id)),
 );
 
-app.post("/api/sessions/:id/restart", async (req, reply) =>
-  respond(reply, svc.restart((req.params as { id: string }).id)),
-);
+app.post("/api/sessions/:id/restart", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  // #3240: `waitForProviderHome` asks the runner to wait for a busy provider account.
+  const body = (req.body ?? {}) as { waitForProviderHome?: unknown };
+  if (body.waitForProviderHome !== undefined && typeof body.waitForProviderHome !== "boolean") {
+    return reply.code(400).send({ error: "waitForProviderHome must be a boolean" });
+  }
+  // A person restarting a Full Control campaign restores or explains its stale boundary (#2940).
+  const human = requestHuman(req);
+  return respond(reply, (human && svc.restoreHumanCampaignAuthority(human, id)) ??
+    svc.restart(id, body.waitForProviderHome ? { waitForProviderHome: true } : {}));
+});
 
 // #1780: end one managed background job without ending the session. The auth gate has already
 // confined an agent credential to its descendants; only the direct parent Orchestrator remains.
@@ -5191,6 +5596,24 @@ app.post("/api/sessions/:id/background-jobs/:jobId/stop", async (req, reply) => 
   if (refusal) return reply.code(403).send({ error: refusal });
   if (!validParentControlCoordinate(jobId)) return reply.code(400).send({ error: "invalid background job id" });
   return respond(reply, await svc.stopBackgroundJob(id, jobId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
+});
+
+// #3752: release a worktree or provider-account handoff hold now (Proceed Now). It ends every
+// unfinished background job, so it takes exactly the authority of stopping one (#1780).
+app.post("/api/sessions/:id/queue-hold/release", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
+  const session = db.getSession(id);
+  if (!principal || !session) return reply.code(404).send({ error: "session not found" });
+  const refusal = backgroundJobStopAuthorizationError(principal, session,
+    principal.kind === "human" && db.isSessionOwner(principal, id));
+  if (refusal) return reply.code(403).send({ error: refusal });
+  const body = req.body;
+  const holdId = body && typeof body === "object" && !Array.isArray(body)
+    ? (body as { holdId?: unknown }).holdId
+    : undefined;
+  if (!validParentControlCoordinate(holdId)) return reply.code(400).send({ error: "holdId must be a non-empty hold id" });
+  return respond(reply, await svc.releaseQueueHold(id, holdId, backgroundJobStopActor(principal, db.localIdentityContext().userId)));
 });
 
 app.get("/api/sessions/:id/provider-accounts", async (req, reply) => {
@@ -5470,6 +5893,13 @@ async function runSessionWorktreeRequest(
   const reconciliationBlock = svc.podReconciliationMutationError(sessionId);
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   if (!hub.isRunnerOnline(session.runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  // Only the session's own switch may continue by itself after its relaunch (#3810). A pre-v255
+  // runner gets no flag and keeps going idle once the relaunch has run.
+  const selfRequest = (request.operation === "create" || request.operation === "attach" || request.operation === "select") &&
+      worktreeRequestedBySession(principal, sessionId) &&
+      runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "worktreeSwitchContinuation")
+    ? { requestedBySession: true }
+    : {};
   if (request.operation === "create" && request.progress === true && runnerSupportsProtocol(
     db.getRunner(session.runnerId)?.protocolVersion,
     "progressAwareSessionWorktrees",
@@ -5484,7 +5914,7 @@ async function runSessionWorktreeRequest(
       const res = await hub.requestFromRunner(
         session.runnerId,
         requestId,
-        { ...request, type: "session_worktree", requestId, sessionId, progress: true },
+        { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId, progress: true },
         SESSION_WORKTREE_CREATE_RUNNER_TIMEOUT_MS,
       );
       if (res.type !== "session_worktree_result") throw new Error("unexpected runner reply");
@@ -5493,7 +5923,7 @@ async function runSessionWorktreeRequest(
       }
       if (!res.ok || !res.snapshot) throw new Error(res.error ?? "worktree operation failed");
       db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
-      return { snapshot: res.snapshot, worktree: res.worktree };
+      return { snapshot: res.snapshot, worktree: res.worktree, ...(res.isolation ? { isolation: res.isolation } : {}) };
     });
     if (operation.status === "in_progress") {
       return reply.code(202).send({ operation });
@@ -5506,6 +5936,7 @@ async function runSessionWorktreeRequest(
       operation: { id: operation.id, status: operation.status },
       worktree: operation.worktree,
       session: db.getSession(sessionId),
+      ...(operation.isolation ? { isolation: operation.isolation } : {}),
     };
   }
   const requestId = `worktree_${randomUUID().slice(0, 8)}`;
@@ -5513,7 +5944,7 @@ async function runSessionWorktreeRequest(
     const res = await hub.requestFromRunner(
       session.runnerId,
       requestId,
-      { ...request, type: "session_worktree", requestId, sessionId },
+      { ...request, ...selfRequest, type: "session_worktree", requestId, sessionId },
       request.operation === "create"
         ? 65 * 60_000
         : request.operation === "retry_setup" ? 65 * 60_000 : 150_000,
@@ -5687,6 +6118,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
   if (reconciliationBlock) return reply.code(409).send({ error: reconciliationBlock });
   const turn = Number((req.body as { turn?: number })?.turn);
   if (!Number.isInteger(turn) || turn < 1) return reply.code(400).send({ error: "turn must be a positive integer" });
+  const forkingHuman = requestHuman(req);
   const source = db.getSession(sourceId);
   if (!source) return reply.code(404).send({ error: "session not found" });
   const sourceScope = db.sessionScope(sourceId);
@@ -5765,11 +6197,18 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       65 * 60_000,
     );
     if (res.type !== "fork_result") return reply.code(502).send({ error: "unexpected runner reply" });
-    if (!res.ok || !res.snapshot) return reply.code(409).send({
-      error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
-        ? "Update the runner to support handoffs from in-place sessions."
-        : res.error ?? "conversation fork failed",
-    });
+    if (!res.ok || !res.snapshot) {
+      // #3240: the fork's provider launch was refused at the account's lease; the client shows the
+      // same state a refused session launch does. A malformed refusal falls back to the text.
+      const providerHomeRefusal = res.providerHomeRefusal === undefined ? null
+        : validProviderHomeLaunchRefusal(res.providerHomeRefusal);
+      return reply.code(409).send({
+        error: handoff && !source.worktreePath && res.error === "conversation fork requires a worktree session"
+          ? "Update the runner to support handoffs from in-place sessions."
+          : res.error ?? "conversation fork failed",
+        ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
+      });
+    }
     const snapshotIdError = providerForkSnapshotIdError(targetSessionId, res.snapshot.id);
     if (snapshotIdError) {
       forkCreatedOnRunner = true;
@@ -5793,7 +6232,7 @@ app.post("/api/sessions/:id/fork", async (req, reply) => {
       now,
       sourceScope,
       inheritedProject,
-      { sourceSessionId: sourceId, sourceTurn: turn },
+      { sourceSessionId: sourceId, sourceTurn: turn, ...(forkingHuman ? { launcherUserId: forkingHuman.userId } : {}) },
     );
     let highWater = 0;
     for (const event of deferHistory ? [] : (res.events ?? [])) {
@@ -6130,6 +6569,68 @@ app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
   }
 });
 
+// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
+// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
+// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
+// which keeps it removed across restarts, and older runners are refused with an update hint.
+app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  // A person removes a workspace, never an agent credential, and only one they may manage.
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  const runner = db.getRunner(runnerId);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  const source = db.workspaceSource(runnerId, workspaceId);
+  if (!source) return reply.code(404).send({ error: "workspace not found" });
+  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (source === "configured") {
+    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
+  }
+  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
+  // workspace while its runner is asked; a managed workspace is gone at this point.
+  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
+  if (!started) return reply.code(404).send({ error: "workspace not found" });
+  if (!started.ok) {
+    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
+  }
+  hub.runnerChanged(runnerId);
+  if (started.source === "managed") return { removed: true };
+  const requestId = `workspace_remove_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(runnerId, requestId, {
+      type: "remove_workspace",
+      requestId,
+      runnerId,
+      workspaceId,
+      path: started.path,
+    });
+    if (result.type !== "remove_workspace_result" || !result.ok) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return result.type === "remove_workspace_result"
+        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
+        : reply.code(502).send({ error: "unexpected runner reply" });
+    }
+  } catch (error) {
+    if (isRunnerRequestNotSentError(error)) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return reply.code(409).send({ error: "runner is offline" });
+    }
+    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
+    // restores it if the runner still has it.
+    return reply.code(504).send({
+      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
+    });
+  }
+  db.finishWorkspaceRemoval(runnerId, workspaceId);
+  return { removed: true };
+});
+
 app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {
   const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
   const body = (req.body ?? {}) as { name?: unknown };
@@ -6258,15 +6759,7 @@ app.delete("/api/sessions/:id/reminder", async (req, reply) => {
   return respond(reply, svc.removeReminder(id, human.userId, revision, rawReminderId));
 });
 
-app.post("/api/sessions/:id/archive", async (req, reply) => {
-  const id = (req.params as { id: string }).id;
-  const body = (req.body ?? {}) as SetArchivedRequest;
-  if (typeof body.archived !== "boolean") return reply.code(400).send({ error: "archived must be a boolean" });
-  if (requestPrincipal(req)?.kind === "agent" && !body.archived) {
-    return reply.code(403).send({ error: AGENT_UNARCHIVE_ERROR });
-  }
-  return respond(reply, svc.setArchived(id, body.archived));
-});
+registerSessionArchiveRoute(app, { db, svc, requestPrincipal });
 
 // One server-owned restore: restart preflight runs before the archive flag changes, so no client
 // ever composes unarchive + restart and observes a half-applied result. Session credentials never
@@ -6373,7 +6866,8 @@ app.post("/api/runs", async (req, reply) => {
     return reply.code(404).send({ error: "project not found" });
   }
   return respond(reply, svc.createRun(body,
-    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
+      : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
 });
 
 app.get("/api/pods", async () => ({ pods: db.listPods() }));
@@ -6478,7 +6972,8 @@ app.post("/api/workflow-runs", async (req, reply) => {
     return reply.code(404).send({ error: "project not found" });
   }
   return respond(reply, svc.createWorkflowRun(body, workflowActor(req), undefined,
-    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId } : undefined));
+    principal?.kind === "agent" ? { parentSessionId: principal.credentialSessionId }
+      : principal?.kind === "human" ? { launcherUserId: principal.userId } : undefined));
 });
 
 app.get("/api/automations", async () => automations.list());
@@ -6891,7 +7386,7 @@ app.addHook("onClose", async () => {
   try {
     await outboundEvents.close();
   } finally {
-    orchestrator.shutdown();
+    await orchestrator.shutdown();
     // One last checkpoint pass, which flushes the log whenever it has frames to copy.
     db.stopWalCheckpoints();
   }
@@ -6910,11 +7405,7 @@ function gracefulShutdown(exitCode: number, reason: string): void {
   // app.close() fires the onClose hook, which runs orchestrator.shutdown() to kill the box SSH
   // children — the same path SIGINT/SIGTERM use. Force-exit on a bounded failsafe so a hung close
   // (possible after an uncaughtException left state corrupt) can never wedge the process forever.
-  const failsafe = setTimeout(() => process.exit(exitCode), 5_000);
-  void app.close().finally(() => {
-    clearTimeout(failsafe);
-    process.exit(exitCode);
-  });
+  finishControlPlaneShutdown(orchestrator.shutdown(), () => app.close(), () => process.exit(exitCode));
 }
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.once(sig, () => gracefulShutdown(0, sig));

@@ -53,7 +53,7 @@ function allowance(view: CampaignBudgetView): string {
 test("a campaign authorized without a ceiling says No limit, and a single ceiling is shown alone", () => {
   const unbounded = budget({ authority: { version: 1, accounting: "managed_workers_only", unpriced: "stop", concurrency: 4, acceptedFollowUps: 0 },
     remaining: { costUsd: null, toolCalls: null } });
-  assert.equal(allowance(unbounded), "No limit, 4 concurrent workers, 0 accepted follow-ups");
+  assert.equal(allowance(unbounded), "No limit, 4 concurrent workers");
   assert.equal(recordedSpend(unbounded), "$4.25, 12 tool calls", "usage is still metered and shown");
   assert.equal(allowance(budget()), "$10.00");
   const policy = (view: CampaignBudgetView) => renderToStaticMarkup(<CampaignBudgetFacts budget={view} />);

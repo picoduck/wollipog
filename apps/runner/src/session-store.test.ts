@@ -690,6 +690,23 @@ test("isAdoptedSession: explicit flag wins; legacy adopt signature is the fallba
   assert.equal(isAdoptedSession(meta({ adopted: undefined, agentId: "codex-native", agentSessionId: "t1" })), false);
 });
 
+test("unlisted first observations survive refreshes and retire with pending ids (#3894)", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta());
+    const starts = store.patchMeta("s_abc", { pendingBackgroundTaskIds: ["unlisted", "__proto__"] })!.unlistedBackgroundTaskStarts!;
+    assert.equal(typeof starts.unlisted, "number");
+    assert.equal(typeof starts["__proto__"], "number");
+    store.patchMeta("s_abc", { pendingBackgroundTaskIds: ["unlisted", "new"] });
+    assert.equal(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts!.unlisted, starts.unlisted);
+    assert.equal(Object.hasOwn(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts!, "__proto__"), false);
+    store.flushAll();
+    assert.equal(new SessionStore(root).readMeta("s_abc")!.unlistedBackgroundTaskStarts!.unlisted, starts.unlisted);
+    store.patchMeta("s_abc", { pendingBackgroundTaskIds: [] });
+    assert.deepEqual(store.readMeta("s_abc")!.unlistedBackgroundTaskStarts, {});
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("patchMeta merges + bumps updatedAt, keeps sessionId", () => {
   const { store, root } = tmpStore();
   try {
@@ -812,6 +829,36 @@ test("rate-priced usage rides registration and v219 snapshots but never an older
   assert.equal("ratePricedUsage" in metaToSnapshot(meta({ ratePricedUsage }), 218), false);
   assert.equal("ratePricedUsage" in metaToSnapshot(meta({ ratePricedUsage: null }), null), false, "an overflowed session reports none");
   assert.equal("ratePricedUsage" in metaToSnapshot(meta(), 219), false);
+});
+
+test("restart capability describes the retained provider coordinate without exposing it", () => {
+  for (const driver of ["claude-code", "codex-app-server", "pi", "codex", "acp"] as const) {
+    for (const agentSessionId of [null, "", "established-conversation"]) {
+      const stored = meta({ driver, agentSessionId });
+      const expected = !!agentSessionId && ["claude-code", "codex-app-server", "pi"].includes(driver);
+      const snap = metaToSnapshot(stored, 263);
+      assert.equal(snap.agentCapabilities?.restartResumesConversation, expected, `${driver} ${agentSessionId}`);
+      assert.equal((snap as unknown as Record<string, unknown>).agentSessionId, undefined);
+      for (const version of [null, 260, 261, 262]) {
+        assert.equal(metaToSnapshot(stored, version).agentCapabilities?.restartResumesConversation, undefined);
+      }
+    }
+  }
+});
+
+test("registration withholds restart continuity until a supported peer negotiates", () => {
+  const { store, root } = tmpStore();
+  try {
+    store.create(meta({ driver: "claude-code", agentSessionId: "established-conversation" }));
+    assert.equal(store.registrationSnapshots()[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(260)[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(262)[0]?.agentCapabilities?.restartResumesConversation, undefined);
+    assert.equal(store.snapshots(263)[0]?.agentCapabilities?.restartResumesConversation, true);
+    assert.equal(store.registrationSnapshots()[0]?.agentCapabilities?.restartResumesConversation, undefined,
+      "a reconnect must negotiate again rather than reuse the previous peer version");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("metaToSnapshot omits runner-only fields (agentSessionId, repoPath, command provenance)", () => {

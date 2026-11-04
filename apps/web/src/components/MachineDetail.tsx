@@ -1,4 +1,4 @@
-import React, { useState, type ReactNode } from "react";
+import React, { useRef, useState, type ReactNode } from "react";
 import { runnerCapabilityRequirement, runnerSupportsProtocol, type BoxView, type RunnerView } from "@wollipog/protocol";
 import type { RunnerCapacityDimensions } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
@@ -150,7 +150,53 @@ export function confirmDeleteMachine(
 }
 
 /** A lifecycle request in flight on one machine. */
-type MachineOperation = "rediscover" | "reconnect" | "update" | "adopt";
+export type MachineOperation = "rediscover" | "reconnect" | "update" | "adopt";
+
+/**
+ * The machines' lifecycle requests in flight, keyed by machine, and the one Reconnect for an SSH
+ * machine (#3525). The All Machines overview and the machine detail share it, so a Reconnect
+ * started from either shows as running in both, and its confirmation and failure read the same.
+ */
+export interface MachineOperations {
+  operations: Readonly<Record<string, MachineOperation>>;
+  /** Runs one request on a machine; while another is still running there, does nothing. */
+  run: (runnerId: string, kind: MachineOperation, task: () => Promise<void>) => Promise<void>;
+  /** Reconnects an SSH machine, asking first when that interrupts its sessions; failures are toasts. */
+  reconnect: (entry: MachineListEntry, back?: ConfirmationOptions["back"]) => void;
+}
+
+export function useMachineOperations(): MachineOperations {
+  const api = useApi();
+  const { confirm, showToast } = useFeedback();
+  const [operations, setOperations] = useState<Record<string, MachineOperation>>({});
+  // State lags a render behind, so a second press before it lands is refused here.
+  const running = useRef(new Set<string>());
+  const run = async (runnerId: string, kind: MachineOperation, task: () => Promise<void>) => {
+    if (running.current.has(runnerId)) return;
+    running.current.add(runnerId);
+    setOperations((current) => ({ ...current, [runnerId]: kind }));
+    try {
+      await task();
+    } finally {
+      running.current.delete(runnerId);
+      setOperations(({ [runnerId]: _done, ...rest }) => rest);
+    }
+  };
+  const reconnect = ({ runnerId, box, name }: MachineListEntry, back?: ConfirmationOptions["back"]) => {
+    if (!box) return;
+    void run(runnerId, "reconnect", async () => {
+      try {
+        await withSessionInterruption(confirm, "reconnect", (force) => api.reconnectBox(box.boxId, force), back);
+      } catch (error) {
+        showToast(`Couldn't reconnect ${name}.`, {
+          tone: "error",
+          detail: describeSshFailure((error as Error).message, box.sshTarget, { status: error instanceof ApiError ? error.status : null }),
+        });
+      }
+    });
+  };
+  return { operations, run, reconnect };
+}
 
 /** Everything the detail and the phone's detail bar draw from one machine's actions. */
 export interface MachineActions {
@@ -165,32 +211,24 @@ export interface MachineActions {
 }
 
 /**
- * The selected machine's actions. State is keyed by the machine, so a request still running on
- * one machine never shows as running on the next one selected. Results are toasts (§13.1).
+ * The selected machine's actions. Requests in flight are the shared `machines` state, keyed by the
+ * machine, so a request still running on one machine never shows as running on the next one
+ * selected, and one started from the overview shows here. Results are toasts (§13.1).
  */
 export function useMachineActions(entry: MachineListEntry | null, access: MachineAccess, handlers: {
   onSettings: (runnerId: string) => void;
   onRepair: (runnerId: string) => void;
-}): MachineActions {
+}, machines: MachineOperations): MachineActions {
   const api = useApi();
   const { confirm, showToast } = useFeedback();
-  const [operations, setOperations] = useState<Record<string, MachineOperation>>({});
   const [connectionDetailsFor, setConnectionDetailsFor] = useState<string | null>(null);
   const [findingSessionsFor, setFindingSessionsFor] = useState<string | null>(null);
   if (!entry) return { settings: null, menu: [], notice: null, dialogs: null };
 
   const { runnerId, runner, box, name } = entry;
-  const operation = operations[runnerId];
-  const run = async (kind: MachineOperation, task: () => Promise<void>) => {
-    setOperations((current) => ({ ...current, [runnerId]: kind }));
-    try {
-      await task();
-    } finally {
-      setOperations(({ [runnerId]: _done, ...rest }) => rest);
-    }
-  };
+  const operation = machines.operations[runnerId];
+  const run = (kind: MachineOperation, task: () => Promise<void>) => machines.run(runnerId, kind, task);
   const backTo = (choice?: ActionsMenuChoice) => choice ? { label: BACK_TO_MORE_ACTIONS, run: choice.reopen } : undefined;
-  const target = box?.sshTarget ?? name;
 
   const rediscover = () => void run("rediscover", async () => {
     try {
@@ -202,19 +240,7 @@ export function useMachineActions(entry: MachineListEntry | null, access: Machin
       showToast(`Couldn't rediscover agents on ${name}.`, { tone: "error", detail: (error as Error).message });
     }
   });
-  const reconnect = (choice?: ActionsMenuChoice) => {
-    if (!box) return;
-    void run("reconnect", async () => {
-      try {
-        await withSessionInterruption(confirm, "reconnect", (force) => api.reconnectBox(box.boxId, force), backTo(choice));
-      } catch (error) {
-        showToast(`Couldn't reconnect ${name}.`, {
-          tone: "error",
-          detail: describeSshFailure((error as Error).message, target, { status: error instanceof ApiError ? error.status : null }),
-        });
-      }
-    });
-  };
+  const reconnect = (choice?: ActionsMenuChoice) => machines.reconnect(entry, backTo(choice));
   const updateRunner = () => {
     if (!box) return;
     void run("update", async () => {

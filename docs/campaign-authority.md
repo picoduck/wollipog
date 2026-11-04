@@ -100,11 +100,43 @@ snapshot digest, current revision, supersession, stop/restart revocation and one
 remain enforced.
 
 Synchronous root provider requests cannot wait for the parked root model to answer itself. The
-server resolves eligible one-time repository operations from the standing authorization and
-answers verified root choice forms using the root's recommended choice (or first offered
-assumption). It records a system resolution, rather than an agent-created grant. Root forms with
-no bounded suggested answer, ambiguous recommendations or invalid cardinality are dismissed (class
-`root_forms_without_suggested_answers`). A real NDJSON fixture verifies that both callbacks settle and the provider
+server resolves eligible one-time repository operations from the standing authorization. It
+records a system resolution, rather than an agent-created grant. A root's own questions (class
+`root_questions`) are dismissed at once, whatever options they offer: the root is the campaign's
+only owner, so nobody else can answer them, and applying one of the root's options would record a
+decision no person made. A live root once asked the person to confirm "Approved in Wollipog" for a
+closure it owned itself. After the root's first dismissal in a policy revision, the server queues
+one notice to the root (the `FULL_CONTROL_ROOT_QUESTION_MESSAGE` constant). It says nobody sees the
+root's questions, and that the root decides Orchestrator-owned matters with the typed tools,
+approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
+session ID. Later questions in the same revision are still dismissed but wake the root with no
+further notice, so a root that answers each notice with another question cannot loop; the bound is
+the durable decline ledger's first-for-class record. The dismissal is not blocked work. A root
+whose runner supports owner decisions (v281) receives `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`
+instead, which also names the route for a decision the campaign's owner kept. Since v282 that
+owner-route guidance also rides on every dismissal itself where the provider result can carry text
+(see [Full Control Response Text](#full-control-response-text)); the notice remains as the wake-up
+and for runners and providers that cannot.
+
+Owner decisions (#4064) are that route. `request_owner_decision` creates an `owner_decision`
+workflow decision: a question with explicit options and decision material that the evaluator makes
+human-owned (`owner_kept`) in every mode, under any boundary or grant. Only the campaign's owner
+resolves it, through the same human approval route as other human-owned requests; the root, its
+children and any other person are refused. Its card on the root is non-blocking (`async`): it
+neither sets the root `input_required` nor holds prompts, PR-watch wakes or campaign
+continuations, while Campaign Status counts it as waiting on the owner and lists it under Waiting
+for You (`ownerDecisions`). The owner's choice returns as the decision's resume prompt. The root may
+withdraw its own pending owner decision. `hand_workflow_decision_to_owner` moves one pending,
+unarmed Orchestrator-owned occurrence to the owner, one way: it records `ownerHandoff`, the owner
+alone resolves it, and every later request in the campaign for the same resource (its category
+and key, or the pull request, branch, issue or recommendation it names) is human-owned too, so a
+withdrawal and a new request cannot move it back; an Orchestrator-owned twin requested before the
+handoff is revoked when anyone tries to use it. Both routes need a v281 root runner and control
+plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
+Custom campaigns are unchanged.
+
+The root's own pending typed workflow decisions never park its provider, so they never stop a
+standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
 Human mode admission also attempts existing eligible parked root occurrences. If delivering a
 standing response fails, the exact request carries `standingAdmissionFailure` and is disclosed as
@@ -145,7 +177,7 @@ root standing response the runner could not receive (`provider_delivery_unavaila
 | Any tool effect not attested inside the session's own worktree (a target or cwd outside it, an escaping symlink, globs, scripts, interpreters, Git, partial or pre-v230 evidence) | Declined | Declined |
 | `external_elicitation` and other forms | Orchestrator decides once | Declined |
 | `unverified_tool_effects`, `script_execution_without_bounded_effect_proof` with every target inside the worktree | Orchestrator decides once | Declined |
-| `root_forms_without_suggested_answers` | Not applicable | Dismissed |
+| `root_questions` (every question the root asks) | Not applicable | Dismissed, with guidance in the result and a notice |
 | `undelegated_policy_asks` (every target inside the worktree) | Orchestrator decides once | Declined |
 | `human_required_rules` (marked Human Required, or built in) | Human | Human |
 
@@ -154,6 +186,82 @@ The server answers it itself with its one-time reject, or a dismissal for a ques
 card; the Orchestrator may decline it too, but no one acting for the campaign can approve or answer
 it. A credential question asked as a typed implementation question creates no decision at all. A
 request offering no one-time allow is never converted into anything else: it is declined.
+
+### Full Control Response Text
+
+A bare dismissal reads as a person's choice, and agents once told the owner "you dismissed my
+question" and saved that as memory (#4063). So when the server's Full Control policy dismisses a
+question or declines a tool call, for a root or a child, the control plane sends
+`automaticResponse: { policy: "full_control", basis? }` with that exact `answer_question` or
+`resolve_permission`. It sends the field only to a runner with capability
+`fullControlResponseAttribution` (v282), only with a dismissal or reject, and never with a person's
+answer or decision, which still read "The user dismissed the question." and "The user declined
+this tool call." The Orchestrator's own choice among a child's options carries no field either. Its
+forced decline of an occurrence the policy already declines does carry it, because the policy
+decided that.
+
+The runner accepts the field only in its exact shape and drops it beside a person's name. The
+Claude Code driver then replaces the person-worded deny text with
+`fullControlAutomaticResponseText`. It says that Wollipog dismissed or declined the request
+automatically under the campaign's Full Control policy, that no person saw it, that no option was
+chosen or nothing was approved, and what to do instead. A root question's text carries the same
+guidance as `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`, including the owner-decision route
+(a v282 runner always has those v281 tools), on every dismissal and not only the first in a
+revision. An
+unresolved-effect decline says to retry with explicit worktree paths.
+
+`basis` names a class only when that is safe: `root_questions`, `external_elicitation`, the
+unverified tool-effect classes, `undelegated_policy_asks` and `unresolved_effects`. The text shows
+the class's label. A credential, sign-in, provider-access or lasting-grant decline carries no
+basis and gets the generic policy sentence, so the result never describes what the request filter
+withheld. No text repeats the request.
+
+An older runner is never sent the field. It keeps today's fixed text, and the server still sends
+the existing notices: the root-question notice and the unresolved-effect notice, each once per
+policy revision. The protocol cannot carry text for Codex App Server: a declined approval is a bare
+`decline` decision, a dismissed question an empty answer set and a declined elicitation a bare
+`decline`. Codex therefore keeps those shapes, which never name a person, and relies on the same
+notices. ACP and other drivers ignore the field likewise. A Full Control decline of a server-minted
+policy hook ask still returns the hook's own reason ("Denied by a manager approval."), which names
+no person.
+
+A design question about credential handling is not a credential question (#3844). A typed
+implementation question's approval selects one offered option id, so it can carry no value back;
+there a question such as whether importing a provider sign-in should copy an API key, move an OAuth
+sign-in or be unsupported is decided like any other, for a child or the root. The same screen
+classifies a root's own question, which is dismissed without applying any answer: a design question
+becomes `root_questions`, whose notice names the typed route, rather than credential blocked work.
+A design form is declined when any of three screens declines it:
+- the ordinary question screen, unchanged;
+- the round-1 design screen of #3844, which declines asking for a credential, an identity, a
+  sign-in or access;
+- a stricter disclosure and destination screen.
+
+The stricter screen declines:
+- disclosing, collecting or transferring any credential, a bare token, key or sign-in included
+  (tell, give, reveal, show, print, display, read out, dictate, send, upload, post, publish,
+  forward, share, export, leak, dump, hand over, ask for, prompt for, sync and others);
+- a qualified credential (my, our, your, their, real, prod, company, team, shared, admin, live,
+  personal, the maintainer's or user's, and others);
+- handling any credential near a destination:
+  - a URL, a `www.` host, any dotted host or IP with or without a port, `localhost` or a name:port,
+    or an email;
+  - a public or shared sink: third-party, external, remote, server, endpoint, webhook, collector,
+    log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord, email,
+    vendor, someone, cloud, ticket, wiki, README, commit, bug report, screenshot, repository, SSH,
+    another device, plain text and others;
+- an email value, and signing in;
+- an option granting access, wider provider access or a lasting permission;
+- a credential-store path named in the form.
+
+The only excusal is an ordinary-screen match whose sole verb is a local "copy" or "use", and only
+when neither of the other two screens matches and no destination is named. A decline that proves
+unnecessary is acceptable; an admission that should have been declined is not.
+
+Quotes and backticks are removed before these checks. For paths, every character that cannot be
+part of a path separates words, so `(.netrc)`, `«.netrc»` or a quoted `.netrc` is still seen. A secret
+or email field always fails closed. A child's provider question can be answered with free text, so
+it keeps the ordinary screen without the excusal.
 
 The worktree allowlist decides whether a tool effect can be approved at all. No denylist can name
 every credential store, and no runner isolation mode hides those stores from a child: bwrap binds

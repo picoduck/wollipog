@@ -81,7 +81,7 @@ export class DurableCommandStore {
   private readonly maxReceipts: number;
   private readonly ownerStaleMs: number;
   private readonly key: Buffer;
-  private readonly activeHandles = new Set<string>();
+  private readonly activeHandles = new Map<string, DurableCommandHandle>();
   private readonly heartbeatTimer?: ReturnType<typeof setInterval>;
 
   constructor(private readonly root: string, options: DurableCommandStoreOptions = {}) {
@@ -299,17 +299,17 @@ export class DurableCommandStore {
       // Publish and flush queued even when the first write left the old revision intact. Only a
       // successful durable reset permits the caller to put the answer back in its FIFO.
       const recovered = this.transitionLocked(current, "queued", { steeringPending: false });
-      this.activateHandle(prior.commandId);
       return recovered;
     });
   }
 
-  activateHandle(commandId: string): void {
-    this.activeHandles.add(commandId);
+  activateHandle(commandId: string, handle: DurableCommandHandle): void {
+    this.activeHandles.set(commandId, handle);
   }
 
-  releaseHandle(commandId: string): void {
-    this.activeHandles.delete(commandId);
+  releaseHandle(commandId: string, handle: DurableCommandHandle): void {
+    // Stale callbacks may fail after a sender retry has already reclaimed this command.
+    if (this.activeHandles.get(commandId) === handle) this.activeHandles.delete(commandId);
   }
 
   private transitionLocked(
@@ -506,7 +506,7 @@ export class DurableCommandStore {
 
 export class DurableCommandHandle {
   constructor(private readonly store: DurableCommandStore, private record: DurableCommandRecord) {
-    this.store.activateHandle(record.commandId);
+    this.store.activateHandle(record.commandId, this);
   }
 
   get commandId(): string { return this.record.commandId; }
@@ -531,6 +531,7 @@ export class DurableCommandHandle {
       try { recovered = this.store.recoverUnsubmittedSteering(this.record); } catch { /* remain fail-closed */ }
       if (!recovered) throw error;
       this.record = recovered;
+      this.store.activateHandle(this.record.commandId, this);
       return false;
     }
   }
@@ -564,7 +565,7 @@ export class DurableCommandHandle {
     } catch (error) {
       // The caller may have already removed this command from its in-memory queue. Relinquish the
       // local handle so a sender retry can safely reclaim accepted/queued work in this process.
-      this.store.releaseHandle(this.record.commandId);
+      this.store.releaseHandle(this.record.commandId, this);
       throw error;
     }
   }
@@ -574,7 +575,7 @@ export class DurableCommandHandle {
       this.record = run();
       return this.current;
     } finally {
-      this.store.releaseHandle(this.record.commandId);
+      this.store.releaseHandle(this.record.commandId, this);
     }
   }
 }
@@ -690,6 +691,7 @@ export function isDurableSessionCommandMessage(value: unknown): value is Durable
       (command.images === undefined || (Array.isArray(command.images) && validatePromptImageInputs(command.images as never[]).ok)) &&
       (command.slashCommand === undefined || typeof command.slashCommand === "string") &&
       (command.config === undefined || isObject(command.config)) &&
+      (command.reviewContinuation === undefined || command.reviewContinuation === true) &&
       (continuation === undefined || (
         isObject(continuation) && Object.keys(continuation).every((key) => [
           "campaignSessionId", "continuationId", "eventFromSeq", "eventThroughSeq",

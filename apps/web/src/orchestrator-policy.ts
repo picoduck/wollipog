@@ -1,3 +1,4 @@
+import { ORCHESTRATOR_REVIEW_POLICY_KEYS, orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import {
   MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
@@ -10,6 +11,7 @@ import {
   type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type ParentControlMode,
+  type RunnerView,
 } from "@wollipog/protocol";
 import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "./agent-presentation.js";
 import { SKILLS_UNAVAILABLE_ON_TARGET } from "./components/SkillsUnavailableNotice.js";
@@ -148,6 +150,9 @@ export function policyOverrides(draft: OrchestratorPolicyDraft, defaults: Orches
   const overrides = new Set<OrchestratorPolicyPath>();
   const { behavior, delegation, execution } = draft.values;
   if (harnessKey(behavior.childHarness) !== harnessKey(defaults.behavior.childHarness)) overrides.add("behavior.childHarness");
+  for (const key of ORCHESTRATOR_REVIEW_POLICY_KEYS) {
+    if ((behavior[key] ?? null) !== (defaults.behavior[key] ?? null)) overrides.add(`behavior.${key}`);
+  }
   if (behavior.childModel !== defaults.behavior.childModel) overrides.add("behavior.childModel");
   if (behavior.childEffort !== defaults.behavior.childEffort) overrides.add("behavior.childEffort");
   // An unreadable entry is a change too: it can never equal the default, and it blocks the launch.
@@ -449,6 +454,8 @@ export function evaluateOrchestratorPolicy(context: OrchestratorPolicyContext, d
 
   // Problems, in the order Create Session reports them.
   const problems: PolicyProblem[] = [];
+  const reviewProblem = context.view.reviewPolicySupported ? orchestratorReviewPolicyProblem(behavior, capabilities?.reviewers ?? []) : null;
+  if (reviewProblem) problems.push({ tab: "behavior", path: "behavior.reviewHarness", message: reviewProblem });
   if (fixedChildHarness && !fixedHarnessSupported) {
     problems.push({ tab: "behavior", path: "behavior.childHarness", message: update("choose a fixed Child Harness") });
   } else if (!fixedHarnessAvailable) {
@@ -586,6 +593,32 @@ export function policySummaryFacts(draft: OrchestratorPolicyDraft, evaluation: O
       : delegated === 0 ? "No Decisions Delegated" : `${delegated} ${delegated === 1 ? "Decision" : "Decisions"} Delegated` },
   ];
 }
+
+/** A child model's name as the Child Model selector shows it (#3580): the display name the first
+ * connected installation advertises, preferring one of the campaign's fixed Child Harness. The id
+ * stands in only when no installation names the model. */
+export function childModelDisplayName(
+  runners: Iterable<RunnerView>,
+  modelId: string,
+  harness?: { driver: AgentDriverKind } | null,
+): string {
+  let other: string | undefined;
+  for (const runner of runners) {
+    for (const agent of runner.agents) {
+      const name = agent.capabilities?.models.find((model) => model.id === modelId)?.displayName;
+      if (!name) continue;
+      if (!harness || agent.driver === harness.driver) return name;
+      other ??= name;
+    }
+  }
+  return other ?? modelId;
+}
+
+/** Under Full Control, what Execute Approved means against the follow-up limit #3826 made an
+ * approval threshold, wherever Follow-Ups is chosen: the limit counts follow-ups that start without
+ * approval. */
+export const FULL_CONTROL_FOLLOW_UPS_NOTE = "Under Full Control, follow-ups up to Follow-Ups Without Approval start " +
+  "on their own. Past that limit, each waits for your approval. Change the limit in Campaign Status.";
 
 /** "1 change", "3 changes": the summary's count of what differs from the defaults. */
 export function changesLabel(count: number): string {

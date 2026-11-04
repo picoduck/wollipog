@@ -67,12 +67,12 @@ for (const pointer of ["fine", "coarse"] as const) {
 test.describe("at 1440px", () => {
   test.use({ viewport: { width: 1440, height: 900 } });
 
-  test("the Archive State column shows every badge whole", async ({ page }) => {
-    await page.goto(shell("/archived"));
-    await expect(page.locator(".archive-state-badges .status").first()).toBeVisible();
-    const clipped = await page.locator(".archive-state-badges .status").evaluateAll((badges) => badges
+  test("archive rows show their one exception badge whole", async ({ page }) => {
+    await page.goto("/archived-sessions-e2e.html?rows=1");
+    await expect(page.locator(".archive-item .status").first()).toBeVisible();
+    const clipped = await page.locator(".archive-item .status").evaluateAll((badges) => badges
       .filter((badge) => {
-        const cell = badge.closest("td")!.getBoundingClientRect();
+        const cell = badge.closest(".archive-item")!.getBoundingClientRect();
         const box = badge.getBoundingClientRect();
         return badge.scrollWidth > badge.clientWidth + 0.5 || box.right > cell.right + 0.5 || box.left < cell.left - 0.5;
       })
@@ -139,66 +139,57 @@ test("a required finding shows a neutral Required badge beside its severity", as
 test.describe("at 390px", () => {
   test.use({ viewport: { width: 390, height: 844 }, hasTouch: true, isMobile: true });
 
-  test("an Archive row's inline action and ⋯ are separate 44px touch targets", async ({ page }) => {
+  test("an Archive row keeps only More Actions as a 44px phone target", async ({ page }) => {
     await page.goto(shell("/archived"));
-    const actions = page.locator(".archive-row-actions").first();
+    const actions = page.locator(".archive-item-actions").first();
     await expect(actions).toBeVisible();
-    const hits = await actions.evaluate((element) => {
-      const [inline, more] = [...element.querySelectorAll<HTMLElement>("button")];
-      const a = inline!.getBoundingClientRect();
-      const b = more!.getBoundingClientRect();
-      const y = a.top + a.height / 2;
-      const at = (x: number, yy: number) => document.elementFromPoint(x, yy);
-      return {
-        gap: b.left - a.right,
-        // 3px past each visible edge, inside its own borrowed area and not the neighbour's.
-        inlineRight: inline!.contains(at(a.right + 3, y)),
-        moreLeft: more!.contains(at(b.left - 3, y)),
-        // The borrowed area above and below is not clipped by the actions container.
-        inlineAbove: inline!.contains(at(a.left + a.width / 2, a.top - 3)),
-        moreBelow: more!.contains(at(b.left + b.width / 2, b.bottom + 3)),
-      };
+    await expect(actions.locator(".archive-inline")).toBeHidden();
+    const more = actions.getByRole("button", { name: /More Actions/ });
+    await expect(more).toBeVisible();
+    await more.scrollIntoViewIfNeeded();
+    const hit = await more.evaluate((button) => {
+      const box = button.getBoundingClientRect();
+      const x = box.left + box.width / 2;
+      const y = box.top + box.height / 2;
+      return [-21, 21].every((offset) => button.contains(document.elementFromPoint(x + offset, y)) &&
+        button.contains(document.elementFromPoint(x, y + offset)));
     });
-    expect(hits.gap, "neighbours sit at least 8px apart (§2.8)").toBeGreaterThanOrEqual(8);
-    expect(hits).toMatchObject({ inlineRight: true, moreLeft: true, inlineAbove: true, moreBelow: true });
+    expect(hit, "the full 44px target is reachable without clipping").toBe(true);
+    await more.click();
+    await expect(page.getByRole("menuitem", { name: "Unarchive", exact: true })).toBeVisible();
   });
 
-  test("the Usage breakdown keeps every driver's value on a phone, each named", async ({ page }) => {
-    // No detail view holds the per-driver split, so the two-line row shows it on line 2 rather
-    // than hiding it with the other extra columns.
+  test("the Usage breakdown hides the per-agent columns on a phone and names every figure it shows", async ({ page }) => {
+    // A phone row is the period and its total, then the next figure (#3013): the per-agent split
+    // is the chart's to show, so its columns are hidden here like any other extra column.
     await page.goto("/usage-view-e2e.html");
-    const table = page.locator(".usage-breakdown-section table").first();
+    const table = page.locator(".usage-tables-section table").first();
     await expect(table).toBeVisible();
     const drivers = await table.evaluate((element) => {
-      const headers = [...element.querySelectorAll("thead th")].map((th) => th.textContent?.trim() ?? "");
       const cells = [...element.querySelectorAll<HTMLElement>("tbody tr:first-child td[data-driver]")];
-      return {
-        count: cells.length,
-        visible: cells.every((cell) => cell.getBoundingClientRect().height > 0 && getComputedStyle(cell).display !== "none"),
-        named: cells.every((cell) => {
-          const label = cell.querySelector(".cell-label");
-          return !!label && getComputedStyle(label).display !== "none"
-            && headers.some((header) => header && label.textContent?.startsWith(header));
-        }),
-      };
+      return { count: cells.length, hidden: cells.every((cell) => getComputedStyle(cell).display === "none") };
     });
     expect(drivers.count, "the fixture has a per-driver split").toBeGreaterThan(0);
-    expect(drivers).toMatchObject({ visible: true, named: true });
+    expect(drivers.hidden, "the per-agent columns are hidden on a phone").toBe(true);
 
-    // The headers are off screen here, so every figure on a meta line carries its own name: the
-    // period breakdown and Cost by User as the view opens, then the Model breakdown.
+    // The headers are off screen here, so every figure on a meta line names itself, by a label
+    // before it or a unit after it ("3.25M tokens"), on every Breakdown tab.
     const unnamed = () => page.locator(".usage-table tbody td.cell-meta").evaluateAll((cells) => cells
       .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
       .filter((cell) => {
+        const shown = (node: Element | null) => !!node && getComputedStyle(node).display !== "none";
         const label = cell.querySelector(".cell-label");
-        // A word or a 14px icon (§5.2) names it.
-          return !label || getComputedStyle(label).display === "none" || !(label.textContent?.trim() || label.querySelector("svg"));
+        const unit = cell.querySelector(".usage-cell-unit");
+        // A word or a 14px icon (§5.2) names it, or the unit that follows the figure.
+        return !((shown(label) && (label!.textContent?.trim() || label!.querySelector("svg"))) || (shown(unit) && unit!.textContent?.trim()));
       })
-      .map((cell) => `${cell.closest("table")?.querySelector("caption")?.textContent}: ${cell.textContent}`));
-    expect(await unnamed(), "no unlabelled figure on a phone").toEqual([]);
-    await page.getByRole("radiogroup", { name: "Usage Breakdown" }).getByRole("radio", { name: "Model" }).click();
-    await expect(page.locator(".usage-breakdown-section caption")).toHaveText("Usage by Model");
-    expect(await unnamed(), "nor in the Model breakdown").toEqual([]);
+      .map((cell) => `${cell.closest("table")?.getAttribute("aria-labelledby")}: ${cell.textContent}`));
+    const tabs = page.getByRole("tablist", { name: "Breakdown" });
+    for (const tab of ["By Day", "By Model", "By Agent", "By Machine", "By Person"]) {
+      await tabs.getByRole("tab", { name: tab }).click();
+      await expect(page.locator(".usage-table tbody tr").first()).toBeVisible();
+      expect(await unnamed(), `no unlabelled figure on a phone in ${tab}`).toEqual([]);
+    }
   });
 
   test("a long trailing value gives way to the row's title", async ({ page }) => {
@@ -220,6 +211,14 @@ test.describe("at 390px", () => {
   for (const [url, title, exact] of [[shell("/archived"), "Archived Sessions", true], ["/usage-view-e2e.html", "Usage and Cost", false]] as const) {
     test(`${title} tables become stacked rows without sideways scroll`, async ({ page }) => {
       await page.goto(url);
+      if (exact) {
+        const rows = page.locator(".archive-item");
+        await expect(rows.first()).toBeVisible();
+        expect(await rows.evaluateAll((items) => items.every((row) => row.getBoundingClientRect().height === 56 && row.scrollWidth <= row.clientWidth))).toBe(true);
+        await expect(rows.first().locator(".archive-item-meta")).toBeVisible();
+        await expect(page.locator(".archive-table")).toHaveCount(0);
+        return;
+      }
       const row = page.locator(".table tbody tr").first();
       await expect(row).toBeVisible();
       const layout = await page.evaluate(() => {
@@ -269,9 +268,11 @@ test.describe("at 390px", () => {
       const unnamed = await page.locator(".table tbody td.cell-meta").evaluateAll((cells) => cells
         .filter((cell) => getComputedStyle(cell).display !== "none" && cell.getBoundingClientRect().height > 0)
         .filter((cell) => {
+          const shown = (node: Element | null) => !!node && getComputedStyle(node).display !== "none";
           const label = cell.querySelector(".cell-label");
-          // A word or a 14px icon (§5.2) names it.
-          return !label || getComputedStyle(label).display === "none" || !(label.textContent?.trim() || label.querySelector("svg"));
+          const unit = cell.querySelector(".usage-cell-unit");
+          // A word or a 14px icon (§5.2) names it, or the unit that follows the figure.
+          return !((shown(label) && (label!.textContent?.trim() || label!.querySelector("svg"))) || (shown(unit) && unit!.textContent?.trim()));
         })
         .map((cell) => cell.textContent));
       expect(unnamed, "no unlabelled figure on a phone").toEqual([]);

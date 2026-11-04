@@ -8,7 +8,7 @@ import {
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { backgroundJobCurrentState } from "../background-job-stop.js";
-import { workspaceFolderName } from "../files-panel.js";
+import { sessionRootName } from "../files-panel.js";
 import { runnerDisplay } from "../runners.js";
 import { shortcutDisplay } from "../shortcuts.js";
 import { useOptionalStoreSelector } from "../store.js";
@@ -54,6 +54,7 @@ import {
   MessageSquareIcon,
 } from "./Icons.js";
 import { Notice } from "./Notice.js";
+import { commitsAheadFact } from "./ReviewSummary.js";
 import { StatusBadge } from "./StatusBadge.js";
 import type { DescendantRequestStatus } from "./SessionRequestPanel.js";
 import type { GitStatus } from "./useGitStatus.js";
@@ -280,13 +281,18 @@ function SessionToolsListView({
 
   const waitingForYou = descendantRequests.filter((request) => request.responseOwner === "human").length;
 
+  // Review opens on Branch when a worktree session has nothing uncommitted and its branch is ahead
+  // (ReviewPanel's opening scope, #2846), so the row then names the branch's commits (#3035).
   const changes = git.status
-    ? { files: git.status.files.length, truncated: git.status.filesTruncated === true, staged: git.status.stagedCount ?? 0 }
+    ? {
+        files: git.status.files.length, truncated: git.status.filesTruncated === true, staged: git.status.stagedCount ?? 0,
+        branch: session.useWorktree === true ? commitsAheadFact(git.status) : null,
+      }
     : git.busy ? "checking" as const : "unknown" as const;
   const fact = (id: SessionToolId): RowFact => {
     switch (id) {
       case "review": return { text: reviewFact(changes, requiredFindings) };
-      case "files": return { text: filesFact(workspaceFolderName(session.worktreePath, session.workspaceName)) };
+      case "files": return { text: filesFact(sessionRootName(session)) };
       case "browser": return { text: browserFact(artifacts) };
       case "terminal": return { text: terminal };
       case "subagents": return { text: agentsFact(subagents.length, registry?.nextAfter != null), badge: agentsBadge };

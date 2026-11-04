@@ -1,5 +1,6 @@
 import { expect, test, type Page } from "@playwright/test";
 import { join } from "node:path";
+import { expectCenteredState } from "./page-state.js";
 
 /**
  * The Automations list (#2969; docs/design-system.md §5.2, §10.1, §12, §15.1), measured in a real
@@ -196,6 +197,7 @@ for (const { label, viewport } of [
     test("Empty", async ({ page }) => {
       await open(page, theme, "list-empty");
       await expect(page.locator(".automation-list .state")).toContainText("No Automations Yet");
+      await expectCenteredState(page.locator(".automation-list .state"));
       await expect(page.getByRole("button", { name: "New Automation" })).toHaveCount(1);
       await capture(page, `automations-list-empty-${label}-${theme}`);
     });

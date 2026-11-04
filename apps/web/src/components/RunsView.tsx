@@ -232,10 +232,11 @@ export function RunsView({ onNewRun }: { onNewRun: () => void }) {
   if (list.length === 0 && !empty) {
     // An empty map proves nothing before the first snapshot or while disconnected (§12.5).
     const placeholder = listPlaceholder("runs", conn);
-    body = <State variant={placeholder.variant} icon={<RunsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
+    body = <State variant={placeholder.variant} pageLevel icon={<RunsIcon />} title={placeholder.title}>{placeholder.hint}</State>;
   } else if (empty) {
     body = (
       <State
+        pageLevel
         icon={<RunsIcon />}
         title={`No ${runsDestination.name} Yet`}
         actions={<button type="button" className="btn primary" onClick={onNewRun}>New Run</button>}
@@ -611,6 +612,7 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
         <DetailBar title={viewTitle({ name: "run", id: runId })} backLabel={backLabel("runs")} onBack={back} />
         <State
           variant={placeholder.variant}
+          pageLevel
           title={placeholder.title}
           actions={placeholder.actions.includes("back") && (
             <button type="button" className="btn primary" onClick={back}>{backLabel("runs")}</button>

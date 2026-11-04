@@ -1,7 +1,0 @@
-{
-  "reason": "The web managed-skills preflight deliberately mirrors runner Claude user-command discovery because container/cloud targets cannot see the Machine's host home. Preserve this mirror pending a shared host-home visibility predicate.",
-  "declarations": [
-    { "path": "apps/runner/src/discovery/claude-commands.ts", "symbol": "includeClaudeUserCommandsForTarget" },
-    { "path": "apps/web/src/components/SkillsUnavailableNotice.tsx", "symbol": "managedSkillsAvailableForTarget" }
-  ]
-}

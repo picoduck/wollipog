@@ -77,7 +77,8 @@ import {
 } from "../managed-worktree-protection.js";
 import { codexGuardActiveInArgs } from "../codex-managed-worktree-guard.js";
 import { managedWorktreeGitWritableRoots, ownedWorktreeWritableRoots } from "../managed-worktree-sandbox.js";
-import { CODEX_REVIEW_THREAD_PARAMS, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
+import { classifyCodexSandboxProbe, CODEX_SANDBOX_PROBE_ENV, codexSandboxProbeCommand, probeExecutableWritable } from "../codex-sandbox-probe-command.js";
+import { codexReviewThreadParams, prepareCodexReviewWorkingDirectory, CODEX_REVIEW_TURN_PARAMS } from "../review-sessions.js";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
 type Json = any;
@@ -242,6 +243,54 @@ function approvalCommand(value: Json): string | null {
   return value.map((part) => `'${part.replaceAll("'", `'\\''`)}'`).join(" ");
 }
 
+/** The runner's bwrap boundary around a Codex process, as the turn policy needs it (#3843). */
+export interface CodexOuterSandbox {
+  network: "inherit" | "deny";
+}
+
+/** Codex's "already in an external sandbox" policy. Measured against codex-cli 0.165.0, it runs
+ * commands with no sandbox of Codex's own and does NOT enforce `networkAccess: "restricted"`; the
+ * value only tells the model what to expect. A boundary that denies the network enforces it with
+ * `--unshare-net`, and one that inherits the network allows it, so the value mirrors that. */
+function externalSandboxPolicy(outer: CodexOuterSandbox): Json {
+  return { type: "externalSandbox", networkAccess: outer.network === "deny" ? "restricted" : "enabled" };
+}
+
+/** Launch-probe result: whether Codex could run the trusted probe command under the sandbox a turn
+ * would use. */
+export type CodexCommandSandboxProbe =
+  | { outcome: "started" }
+  /** `namespaceDenied`: bubblewrap itself refused to create a user namespace before the command
+   * started, the one failure a runner bwrap boundary is known to stand in for. */
+  | { outcome: "failed"; reason: string; namespaceDenied: boolean }
+  | { outcome: "inconclusive" };
+
+/** Classify a `command/exec` response to the trusted probe (#3843; see
+ * `codex-sandbox-probe-command.ts`). The reason is a fixed sentence: provider stderr can carry
+ * paths and is never repeated. Exported for tests. */
+export function codexCommandSandboxProbe(response: Json): CodexCommandSandboxProbe {
+  const classified = classifyCodexSandboxProbe(response?.exitCode, response?.stdout, response?.stderr);
+  if (classified.outcome !== "failed") return classified;
+  return {
+    outcome: "failed",
+    namespaceDenied: classified.namespaceDenied,
+    reason: classified.namespaceDenied
+      ? "Codex's command sandbox cannot start here because this host does not let unprivileged processes create user namespaces"
+      : `Codex's command sandbox could not run a command here (exit ${classified.exitCode})`,
+  };
+}
+
+/** Codex's command sandbox cannot start, and no runner boundary encloses the process to stand in
+ * for it (#3843). Every command would need an approval to run outside any sandbox, so the launch
+ * fails instead, with a typed reason the control plane reports. */
+export class CodexCommandSandboxUnavailableError extends Error {
+  readonly launchFailure = "codex_sandbox_unavailable" as const;
+  constructor(reason: string) {
+    super(`${reason}, and no runner sandbox encloses this session to stand in for it`);
+    this.name = "CodexCommandSandboxUnavailableError";
+  }
+}
+
 /**
  * Build the turn/start params for a permission mode. Exported for tests.
  * - default / "auto-review": on-request + approvalsReviewer=auto_review (Guardian model review).
@@ -284,6 +333,14 @@ export function buildCodexTurnParams(
    */
   ownedWorktrees: readonly { path: string; gitAdmin: string }[] = [],
   projectSharedWritableRoots: readonly string[] = [],
+  /**
+   * The runner's bwrap boundary that encloses this process, set only once the launch probe has
+   * shown that Codex's own workspace sandbox cannot start inside it (#3843). That boundary already
+   * confines writes to the same roots, so it becomes the single sandbox: a workspace-write turn
+   * runs under `externalSandbox` with the boundary's network policy. A read-only turn keeps its
+   * policy, because the boundary would let it write.
+   */
+  outerSandbox: CodexOuterSandbox | null = null,
 ): Json {
   const protectManagedWorktrees = managedWorktreeProtections.length > 0;
   const selectedGitRoots = managedWorktreeGitWritableRoots(cwd, managedWorktreeProtections);
@@ -304,7 +361,7 @@ export function buildCodexTurnParams(
       rules: false,
       sandbox_approval: false,
       skill_approval: false,
-    } }, approvalsReviewer: "auto_review", sandboxPolicy: {
+    } }, approvalsReviewer: "auto_review", sandboxPolicy: outerSandbox ? externalSandboxPolicy(outerSandbox) : {
       type: "workspaceWrite", writableRoots: [cwd, ...gitWritableRoots], networkAccess: true,
       excludeTmpdirEnvVar: true, excludeSlashTmp: true,
     }, cwd,
@@ -332,11 +389,13 @@ export function buildCodexTurnParams(
       ? { writableRoots: [cwd, ...gitWritableRoots, ...projectSharedWritableRoots] }
       : {}),
   };
+  // A profile carried by the launch cannot express the outer boundary, so this turn sends it.
+  const outerPolicy = outerSandbox && sandboxType === "workspaceWrite" ? externalSandboxPolicy(outerSandbox) : null;
   const params: Json = {
     threadId,
     input,
     approvalPolicy: autoReview ? "on-request" : askMode ?? "never",
-    ...(carriedByProfile ? {} : { sandboxPolicy }),
+    ...(outerPolicy ? { sandboxPolicy: outerPolicy } : carriedByProfile ? {} : { sandboxPolicy }),
     cwd,
   };
   // Guardian owns ordinary automatic review, but it cannot know which host paths belong to the
@@ -447,6 +506,8 @@ function resumeError(threadId: string, err: Json): CodexAppServerResumeError {
  * Starting forever, holding every prompt admitted meanwhile. A discarded oversized record fails the
  * pending request at once instead of waiting for the bound. */
 export const CODEX_INITIALIZATION_REQUEST_TIMEOUT_MS = 120_000;
+/** Codex's own bound on the launch probe's `true` (#3843); the request gets five seconds more. */
+const CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS = 10_000;
 
 /** A launch handshake request that will not settle. The message names only the method, never
  * provider payload, so it is safe to surface as the session's launch error. */
@@ -597,7 +658,7 @@ export class CodexAppServerDriver implements Driver {
   private readonly kill: typeof killTree;
   private readonly readRolloutProof: typeof readCodexRolloutCompletedCommand;
   /** Every process this instance starts; its owner is each spawn's descendantOwner. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   private readonly deps: { permissionProfile: typeof decideCodexPermissionProfile };
   private readonly initializationRequestTimeoutMs: number;
   private readonly forkRequestTimeoutMs: number;
@@ -613,6 +674,13 @@ export class CodexAppServerDriver implements Driver {
    * resume or a transport restart spawns again from args this driver was handed (#1499).
    */
   private managedWorktreeGuardActive = false;
+  /**
+   * The runner's bwrap boundary, once the launch probe found that Codex's own sandbox cannot start
+   * inside it (#3843); null while Codex sandboxes its own commands. Re-probed at every launch.
+   */
+  private outerSandbox: CodexOuterSandbox | null = null;
+  /** The trusted probe argv, or null when this host has none (#3843). */
+  private readonly sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
   /**
    * Whether a legacy `sandboxPolicy` has already been sent on the CURRENT thread.
    *
@@ -639,9 +707,12 @@ export class CodexAppServerDriver implements Driver {
       initializationRequestTimeoutMs: number;
       forkRequestTimeoutMs: number;
       archiveRequestTimeoutMs: number;
+      sandboxProbeCommand: () => { argv: string[]; visited: string[] } | null;
     }> = {},
   ) {
-    this.cwd = opts.cwd;
+    this.sandboxProbeCommand = deps.sandboxProbeCommand ?? (() => codexSandboxProbeCommand());
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
+    this.cwd = opts.review ? prepareCodexReviewWorkingDirectory(opts.cwd) : opts.cwd;
     this.config = opts.config;
     this.spawn = deps.spawn ?? spawnAgent;
     this.kill = deps.kill ?? killTree;
@@ -719,7 +790,9 @@ export class CodexAppServerDriver implements Driver {
         if (read?.thread?.id === this.threadId && Array.isArray(read?.thread?.turns)) {
           const matches: CompletedCommandReconciliationProof[] = [];
           const successfulExactCommands: { turnId: string; itemId: string }[] = [];
+          const timeline: ProviderEnqueueEvent[] = [];
           let liveSawExactCommand = false;
+          let liveSawUnfinishedExactCommand = false;
           let liveSawAdmissionCandidate = false;
           for (const turn of read.thread.turns as Json[]) {
             if (!Array.isArray(turn?.items)) continue;
@@ -728,13 +801,31 @@ export class CodexAppServerDriver implements Driver {
               candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
               candidate?.tool === "consume_workflow_decision");
             for (const [index, item] of items.entries()) {
+              if (workflowActionAdmissionBoundary(item, command)) {
+                if (completedWorkflowActionAdmission(item, occurrenceId, command)) {
+                  timeline.push({ kind: "admission", own: true, turnId: turn?.id, itemId: item?.id });
+                } else if (item?.arguments?.occurrenceId !== occurrenceId) {
+                  timeline.push({ kind: "admission", own: false, turnId: turn?.id, itemId: item?.id });
+                }
+                continue;
+              }
               if (item?.type !== "commandExecution" || typeof item?.command !== "string") continue;
               const logicalCommand = codexProviderShellScript(item.command) ?? item.command;
               if (logicalCommand !== command) continue;
               liveSawExactCommand = true;
-              if (!boundedProviderCorrelationId(turn?.id) || turn?.status !== "completed" ||
-                  (turn?.itemsView != null && turn.itemsView !== "full") || item?.status !== "completed" ||
-                  item?.exitCode !== 0 || !boundedProviderCorrelationId(item?.id)) continue;
+              if (item.status === "inProgress") liveSawUnfinishedExactCommand = true;
+              // The provider owns this item and its terminal exit status. The surrounding turn
+              // may still be waiting for reconciliation; requiring it to finish creates a cycle.
+              // Failed/interrupted/unknown turns remain ineligible, as do nonterminal items.
+              const eligible = boundedProviderCorrelationId(turn?.id) &&
+                (turn?.status === "completed" || turn?.status === "inProgress") &&
+                (turn?.itemsView == null || turn.itemsView === "full") && item?.status === "completed" &&
+                item?.exitCode === 0 && boundedProviderCorrelationId(item?.id);
+              // An ineligible command that still exited 0 may have enqueued, so ordering counts it.
+              if (item?.status === "completed" && item?.exitCode === 0) {
+                timeline.push({ kind: "command", eligible, turnId: turn?.id, itemId: item?.id });
+              }
+              if (!eligible) continue;
               successfulExactCommands.push({ turnId: turn.id, itemId: item.id });
               const admissionCandidates = items.slice(0, index).filter((candidate) =>
                 candidate?.type === "mcpToolCall" && candidate?.server === "wollipog" &&
@@ -752,8 +843,20 @@ export class CodexAppServerDriver implements Driver {
               });
             }
           }
+          // An additional invocation can still become a second success. Do not select a
+          // completed proof while that duplicate is unfinished, including via a receipt fence.
+          if (liveSawUnfinishedExactCommand) return null;
           if (matches.length !== 0) {
-            return matches.length === 1 && successfulExactCommands.length === 1 ? matches[0]! : null;
+            // A same-head re-enqueue leaves an earlier successful command behind its own admission
+            // (#3991), so a count cannot decide; provider order ties the landed command to this one.
+            const landed = landedCommandForAdmission(timeline);
+            const match = landed && matches.find((candidate) =>
+              candidate.providerTurnId === landed.turnId && candidate.providerItemId === landed.itemId);
+            if (!match || (fence && (fence.providerThreadId !== this.threadId ||
+                fence.providerTurnId !== match.providerTurnId || fence.providerItemId !== match.providerItemId))) {
+              return null;
+            }
+            return match;
           }
           if (fence && fence.providerThreadId === this.threadId &&
               boundedProviderCorrelationId(fence.providerTurnId) &&
@@ -918,7 +1021,7 @@ export class CodexAppServerDriver implements Driver {
     const launchArgs = profile?.active ? profile.args : [...this.opts.args, ...isolationArgs];
     this.managedWorktreeGuardActive = codexGuardActiveInArgs(launchArgs);
     this.processes.assertOpen();
-    const child = this.processes.record(this.spawn({
+    const child = this.processes.launch(this.spawn, {
       command: this.opts.command,
       args: codexAppServerArgs(launchArgs, enableDefaultModeQuestions),
       cwd: this.cwd,
@@ -932,7 +1035,7 @@ export class CodexAppServerDriver implements Driver {
       cloudAgentLaunch: true,
       descendantOwner: this.processes.owner,
       descendantMarker: this.opts.descendantMarker,
-    }));
+    });
     this.child = child;
     const peer = new JsonRpcPeer(child.stdin, child.stdout, (err) => this.emitProviderStderr(`transport: ${err.message}`));
     this.peer = peer;
@@ -1082,11 +1185,77 @@ export class CodexAppServerDriver implements Driver {
     }
   }
 
+  /**
+   * Prove, before any thread exists, that Codex can sandbox a command the way this session's
+   * turns will ask it to (#3843). Inside the runner's own bwrap boundary, a host that restricts
+   * unprivileged user namespaces stops Codex's nested bubblewrap, and every command would then
+   * fail and escalate. There the boundary is already the sandbox, so turns hand it the job.
+   * Anywhere else the launch fails with a typed reason. Native Linux only: the nested case is
+   * bubblewrap's, and other contexts keep their behavior.
+   */
+  private async probeCommandSandbox(peer: JsonRpcPeer): Promise<void> {
+    this.outerSandbox = null;
+    if (process.platform !== "linux" || this.opts.context.kind !== "native" || this.opts.review) return;
+    const isolation = this.opts.isolation;
+    const bwrap = isolation?.backend === "bwrap" ? isolation : undefined;
+    const turn = buildCodexTurnParams(this.config, null, this.cwd, [], this.opts.capabilities,
+      this.opts.managedWorktreeProtections?.() ?? [], this.permissionProfileBase, this.managedWorktreeGuardActive,
+      bwrap?.protectedWorktree?.ownedWorktrees, bwrap?.projectSharedWritableRoots);
+    const policy = turn.sandboxPolicy;
+    // No sandbox of Codex's own to start; omitting the policy probes the profile the launch carries.
+    if (policy?.type === "dangerFullAccess") return;
+    // Nothing the session can write may decide the outcome: the probe is a root-owned system
+    // program by absolute path, outside every root this boundary makes writable, run with a fixed
+    // PATH and no loader overrides. Without one the probe does not run, and nothing changes.
+    const command = this.sandboxProbeCommand();
+    const writableRoots = bwrap ? [this.cwd, ...(bwrap.writableBinds ?? []).map((bind) => bind.target),
+      ...(bwrap.protectedWorktree ? [bwrap.protectedWorktree.path, ...bwrap.protectedWorktree.gitWritableRoots,
+        ...(bwrap.protectedWorktree.ownedWorktrees ?? []).flatMap((owned) => [owned.path, owned.gitAdmin])] : []),
+      ...(bwrap.projectSharedWritableRoots ?? [])] : [this.cwd];
+    // A host with no trusted `printf` (such as a runner inside a user namespace, where root's files
+    // read as unmapped) is a host property and stays quiet; a boundary that makes it writable is not.
+    if (!command) return;
+    if (command.visited.some((path) => probeExecutableWritable(path, writableRoots))) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "probe_command_writable" }));
+      return;
+    }
+    let probe: CodexCommandSandboxProbe;
+    try {
+      probe = codexCommandSandboxProbe(await peer.request<Json>("command/exec", {
+        command: command.argv, cwd: this.cwd, env: { ...CODEX_SANDBOX_PROBE_ENV }, timeoutMs: CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS,
+        ...(policy ? { sandboxPolicy: policy } : {}),
+      }, { deadlineAt: Date.now() + CODEX_COMMAND_SANDBOX_PROBE_TIMEOUT_MS + 5_000 }));
+    } catch (error) {
+      if (this.disposed) throw error;
+      // An App Server without `command/exec`, or one that stalls on it, proves nothing either way:
+      // the session keeps the behavior it had before this probe existed. Only a stall is unusual.
+      if ((error as RpcError | undefined)?.requestTimeout) {
+        this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_probe_inconclusive", reason: "timeout" }));
+      }
+      return;
+    }
+    if (probe.outcome !== "failed") return;
+    // Any other failure is neither one the boundary is known to stand in for nor proof that the
+    // sandbox cannot start (the probe command itself could misbehave on an unusual host, CR-2.1), so
+    // the turns keep Codex's own policy, as before this probe existed, and it is only reported.
+    if (!probe.namespaceDenied) {
+      this.cb.onStderr(JSON.stringify({ event: "codex_command_sandbox_unavailable", reason: probe.reason }));
+      return;
+    }
+    if (!bwrap) throw new CodexCommandSandboxUnavailableError(probe.reason);
+    this.outerSandbox = { network: bwrap.network };
+    // A security-relevant downgrade of Codex's own sandbox, so it is always reported.
+    this.cb.onStderr(JSON.stringify({
+      event: "codex_command_sandbox_outer_boundary", reason: probe.reason, network: bwrap.network,
+    }));
+  }
+
   async newSession(cwd: string): Promise<string> {
-    this.cwd = cwd;
+    this.cwd = this.opts.review ? prepareCodexReviewWorkingDirectory(cwd) : cwd;
     await this.reconcilePlugins("session_start");
     if (this.disposed || !this.peer) throw new Error("codex app-server is not running");
     const peer = this.peer;
+    await this.probeCommandSandbox(peer);
     const resumeId = this.opts.resumeId;
     // Keep mutable upload authorization in each current turn, never in persisted developer
     // instructions. Codex may replay stale developer text after a cold resume/fork (#19045).
@@ -1119,9 +1288,9 @@ export class CodexAppServerDriver implements Driver {
         });
       } else {
         res = await this.initializationRequest<Json>(peer, "thread/start", {
-          cwd,
+          cwd: this.cwd,
           ...configuredServiceTier(this.config, this.opts.capabilities),
-          ...(this.opts.review ? CODEX_REVIEW_THREAD_PARAMS : {}),
+          ...(this.opts.review ? codexReviewThreadParams(cwd) : {}),
         });
       }
     } catch (caught) {
@@ -1410,6 +1579,7 @@ export class CodexAppServerDriver implements Driver {
         this.managedWorktreeGuardActive,
         this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.protectedWorktree?.ownedWorktrees : undefined,
         this.opts.isolation?.backend === "bwrap" ? this.opts.isolation.projectSharedWritableRoots : undefined,
+        this.outerSandbox,
       );
       if (this.opts.review) {
         // A review turn is read-only with network access off, never asks, and must return the
@@ -1536,6 +1706,36 @@ export class CodexAppServerDriver implements Driver {
       this.releaseDefiniteSteer(submissionId);
       return { outcome: "rejected", reason: rpc.message ?? String(error) };
     }
+  }
+
+  /** A rejected async question is not a failed turn (#3806): the turn runs on, so report it as a
+   * non-fatal problem. A root agent whose turn is still open is told through a steer, because it
+   * otherwise believes its card is showing; a subagent's turn is not this driver's to steer. The
+   * notice waits for the steer's outcome so it only says the agent was told when Codex accepted it. */
+  private async reportRejectedAsyncQuestion(itemId: string, reason: string, rootThread: boolean): Promise<void> {
+    let told = false;
+    if (rootThread && this.promptBusy && this.turnId) {
+      const result = await this.steer({
+        submissionId: `wollipog-async-question-rejected:${itemId}`,
+        text: "Wollipog could not show your async question to the user as an answer card " +
+          `(reason: ${reason}), so the user has not seen it as a question. If you still need an answer, ` +
+          "ask it again in a normal message.",
+        deadlineAt: Date.now() + ASYNC_QUESTION_REJECTION_STEER_MS,
+      });
+      told = result.outcome === "accepted";
+      if (!told) {
+        this.cb.onStderr(`could not tell Codex its async question was not shown item=${diagnosticValue(itemId)} ` +
+          `outcome=${result.outcome}`);
+      }
+    }
+    if (this.disposed) return;
+    this.cb.onEvent({
+      kind: "error",
+      nonFatal: true,
+      message: told
+        ? "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message."
+        : "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message.",
+    });
   }
 
   /** A definitely-refused steer will never be echoed or settled by Codex, so drop its echo filter
@@ -2503,12 +2703,14 @@ export class CodexAppServerDriver implements Driver {
           if (this.seenAsyncQuestionItems.size > 256) {
             this.seenAsyncQuestionItems.delete(this.seenAsyncQuestionItems.values().next().value!);
           }
-          const questions = item.delivery === "async" && !parentToolUseId
-            ? normalizeCodexAsyncQuestions(item.questions) : null;
-          if (questions) {
-            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions, async: true });
+          const normalized: CodexAsyncQuestions = parentToolUseId ? { rejected: "subagent" }
+            : item.delivery !== "async" ? { rejected: `delivery=${diagnosticValue(item.delivery)}` }
+            : normalizeCodexAsyncQuestions(item.questions);
+          if ("questions" in normalized) {
+            this.cb.onEvent({ kind: "question_request", requestId: `codex-async:${id}`, questions: normalized.questions, async: true });
           } else {
-            this.cb.onEvent({ kind: "error", message: "Codex sent an async question format this Wollipog version cannot safely answer. Ask the agent to repeat the question in a normal message." });
+            this.cb.onStderr(`unsupported Codex async question item=${diagnosticValue(id)} reason=${normalized.rejected} — reporting a compatibility error`);
+            void this.reportRejectedAsyncQuestion(id, normalized.rejected, !parentToolUseId);
           }
         }
         break;
@@ -2768,6 +2970,43 @@ function boundedProviderCorrelationId(value: unknown): value is string {
     !/[\x00-\x1f\x7f]/u.test(value);
 }
 
+type ProviderEnqueueEvent =
+  | { kind: "admission"; own: boolean; turnId: unknown; itemId: unknown }
+  | { kind: "command"; eligible: boolean; turnId: unknown; itemId: unknown };
+
+/** A consume call that may have armed this exact enqueue: one naming the command, or one whose
+ * arguments cannot be read. Its occurrence and outcome do not matter; an unreadable call is
+ * counted rather than assumed harmless. */
+function workflowActionAdmissionBoundary(item: Json, command: string): boolean {
+  if (item?.type !== "mcpToolCall" || item?.server !== "wollipog" || item?.tool !== "consume_workflow_decision") return false;
+  const args = item?.arguments;
+  if (!args || typeof args !== "object" || Array.isArray(args)) return true;
+  return (args as Json)?.action?.command === command;
+}
+
+/** The successful command this occurrence's admission landed, by provider order (#3991): its one
+ * completed admission, then exactly one exact command that exited 0 before any other occurrence's
+ * admission of that command, eligible and in the admission's turn, and no exact command that
+ * exited 0 after it, even in a turn that cannot prove anything itself. Another call for this same
+ * occurrence never arms a second grant, so it neither ends the window nor counts. Anything else,
+ * including interleaved admissions, two commands after one admission, or a later command, is
+ * ambiguous and yields null. */
+function landedCommandForAdmission(timeline: ProviderEnqueueEvent[]): { turnId: string; itemId: string } | null {
+  const own = timeline.flatMap((event, index) => event.kind === "admission" && event.own ? [index] : []);
+  if (own.length !== 1) return null;
+  const admission = timeline[own[0]!]!;
+  if (!boundedProviderCorrelationId(admission.turnId) || !boundedProviderCorrelationId(admission.itemId)) return null;
+  const after = timeline.slice(own[0]! + 1);
+  const end = after.findIndex((event) => event.kind === "admission" && !event.own);
+  const window = (end === -1 ? after : after.slice(0, end)).filter((event) => event.kind === "command");
+  const commands = timeline.filter((event) => event.kind === "command");
+  const landed = window.length === 1 ? window[0]! : null;
+  return landed?.kind === "command" && landed.eligible && commands.at(-1) === landed &&
+      boundedProviderCorrelationId(landed.turnId) && boundedProviderCorrelationId(landed.itemId) &&
+      landed.turnId === admission.turnId
+    ? { turnId: landed.turnId, itemId: landed.itemId } : null;
+}
+
 /** The historical provider transcript is the durable causal fence when the bounded runner event
  * tail no longer contains the old command. Require the exact Wollipog admission call, its armed
  * response, and the successful command later in the same completed turn. */
@@ -3022,6 +3261,9 @@ interface NormalizedQuestionRequest {
 
 type McpElicitationAction = "accept" | "decline" | "cancel";
 const MAX_STRUCTURED_QUESTIONS = 20;
+/** How long the rejected-async-question steer may wait for Codex before the notice asks the user to
+ * prompt the agent instead. */
+const ASYNC_QUESTION_REJECTION_STEER_MS = 5_000;
 const MAX_QUESTION_OPTIONS = 20;
 const MAX_QUESTION_ID = 256;
 const MAX_QUESTION_HEADER = 80;
@@ -3071,25 +3313,36 @@ function normalizedOptions(raw: unknown): AgentQuestion["options"] | null {
   return new Set(valid.map((option) => option.label)).size === valid.length ? valid : null;
 }
 
+/** A rejection names the failing rule with bounded values so the runner log explains the
+ * compatibility error without recording provider-controlled text. */
+export type CodexAsyncQuestions = { questions: AgentQuestion[] } | { rejected: string };
+
 /** App Server agentMessage.questions uses titles and plain string choices, not the blocking
- * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response. */
-export function normalizeCodexAsyncQuestions(raw: unknown): AgentQuestion[] | null {
-  if (!Array.isArray(raw) || raw.length === 0 || raw.length > 3) return null;
+ * requestUserInput shape. Its answer is a later user turn, never a JSON-RPC request response.
+ * Codex documents no upper bound on the count ("one or more questions"), unlike requestUserInput's
+ * three (#3724); MAX_STRUCTURED_QUESTIONS is only a defensive cap on one event's size. */
+export function normalizeCodexAsyncQuestions(raw: unknown): CodexAsyncQuestions {
+  if (!Array.isArray(raw)) return { rejected: "questions_shape" };
+  if (raw.length === 0 || raw.length > MAX_STRUCTURED_QUESTIONS) return { rejected: `question_count count=${raw.length}` };
   const questions: AgentQuestion[] = [];
   for (let index = 0; index < raw.length; index++) {
     const entry = raw[index];
     const title = boundedString(entry?.title, MAX_ASYNC_QUESTION_TEXT);
-    if (!title || (entry.options != null && !Array.isArray(entry.options))) return null;
+    if (!title) {
+      return { rejected: `${typeof entry?.title === "string" ? "title_length" : "title_shape"} index=${index}` };
+    }
+    if (entry.options != null && !Array.isArray(entry.options)) return { rejected: `option_shape index=${index}` };
     const options = entry.options == null ? [] : entry.options.map((value: unknown) => boundedString(value, MAX_QUESTION_ID));
-    if (options.length > MAX_QUESTION_OPTIONS || options.some((value: string | null) => !value) ||
-        new Set(options).size !== options.length) return null;
+    if (options.length > MAX_QUESTION_OPTIONS) return { rejected: `option_count index=${index} count=${options.length}` };
+    if (options.some((value: string | null) => !value)) return { rejected: `option_shape index=${index}` };
+    if (new Set(options).size !== options.length) return { rejected: `duplicate_options index=${index}` };
     questions.push({
       id: String(index), question: title,
       options: options.map((label: string) => ({ label })),
       allowOther: true, inputFormat: "text", maxLength: MAX_FREE_TEXT,
     });
   }
-  return questions;
+  return { questions };
 }
 
 /** Normalize Codex's item/tool/requestUserInput request without synthesizing a user message. */

@@ -8,6 +8,7 @@ import { OneLineCodeWell } from "../components/OneLineCodeWell.js";
 import { Notice } from "../components/Notice.js";
 import { DetailBar } from "../components/PageHeader.js";
 import { SaveBar } from "../components/SaveBar.js";
+import { TranscriptHistoryNotice } from "../components/TranscriptReadingStates.js";
 import "../styles.css";
 
 /**
@@ -33,6 +34,11 @@ import "../styles.css";
  * `?view=notices` shows instead the notice action row's shapes (#3511, §13.2): Show Details as the
  * only action, untitled and titled; a row led by a bordered Retry; and a compact notice, whose row
  * sits beside its sentence. Each is a `.notice` whose `data-state` names its shape.
+ * `?view=compact-notices` shows instead compact notices that wrap and ones that fit on one line
+ * (#3522, §13.2): titled with a dismiss button (Provider Accounts' Couldn't Remove) and with Retry
+ * (Campaign Status's Couldn't Refresh), an untitled sentence that wraps beside its dismiss button,
+ * one-line sentences with and without Retry, and the transcript's history error. Each is a
+ * `.notice` whose `data-state` names its shape.
  * `?theme=light` switches theme.
  */
 
@@ -192,6 +198,35 @@ function NoticeRows() {
   );
 }
 
+function CompactNoticeRows() {
+  return (
+    <div style={{ display: "grid", gap: 16, maxWidth: 560, margin: "0 auto" }}>
+      <Notice tone="danger" compact dataState="titled-dismiss" title="Couldn't Remove Work Account"
+        onDismiss={() => undefined}>
+        Build Box refused to remove it because an agent there uses it as its default account. Choose
+        another default account for that agent first.
+      </Notice>
+      <Notice tone="danger" compact dataState="titled-retry" title="Couldn't Refresh Work Items"
+        actions={<button type="button" className="btn sm">Retry</button>}>
+        The request timed out.
+      </Notice>
+      <Notice tone="warning" compact dataState="untitled-wrap" onDismiss={() => undefined}>
+        Skills on this machine are read-only because its container mounts them from the image, so
+        changes here are lost when it restarts.
+      </Notice>
+      <Notice tone="danger" compact dataState="one-line"
+        actions={<button type="button" className="btn sm">Retry</button>}>
+        Couldn't save the draft.
+      </Notice>
+      <Notice tone="neutral" compact dataState="one-line-text">Saved on this device only.</Notice>
+      <div style={{ maxWidth: 320 }}>
+        <TranscriptHistoryNotice kind="error" error="HTTP 502" loaded={40} total={120} machine="Build Box"
+          canRetry onRetry={() => undefined} />
+      </div>
+    </div>
+  );
+}
+
 function Harness() {
   const params = new URLSearchParams(window.location.search);
   document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -208,6 +243,13 @@ function Harness() {
     return (
       <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>
         <NoticeRows />
+      </div>
+    );
+  }
+  if (params.get("view") === "compact-notices") {
+    return (
+      <div style={{ minHeight: "100vh", padding: 24, background: "var(--bg)" }}>
+        <CompactNoticeRows />
       </div>
     );
   }

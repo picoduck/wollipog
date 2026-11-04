@@ -10,19 +10,29 @@ import { createHash, randomUUID } from "node:crypto";
 import { join, sep } from "node:path";
 import {
   MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS,
+  fuzzyPathNeedle,
+  fuzzyPathScore,
   type AgentContext,
   type CreateWorkspaceReferenceRequest,
   type GitDiffInfo,
   type SessionFileEntry,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
+  type WorkspaceReferenceSearchLimit,
+  type WorkspaceReferenceSearchMatch,
 } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
 
 /** Cap on returned file content — enough for any source/doc file the viewer should render. */
 export const READ_FILE_CAP = 512 * 1024;
 const WORKSPACE_SEARCH_VISIT_CAP = 20_000;
+/** Installed dependencies, which would otherwise spend the visit cap before the project's own
+ * files (#4095). Searches skip a directory with this name at any depth; the folder view still
+ * lists it. The WSL `find` script names it too. */
+const WORKSPACE_SEARCH_SKIPPED_DIRECTORY = "node_modules";
 const WORKSPACE_DIRECTORY_ENTRY_CAP = 2_000;
+/** Full fuzzy alignment work one search may spend, in cells; past it, paths are placed greedily. */
+export const WORKSPACE_FUZZY_ALIGNMENT_BUDGET = 4_000_000;
 
 export interface SessionFileListing {
   path: string;
@@ -39,6 +49,14 @@ export interface SessionFileContent {
 
 export interface WorkspaceReferenceSearch {
   results: WorkspaceReferenceCandidate[];
+  truncated: boolean;
+  match?: WorkspaceReferenceSearchMatch;
+  limit?: WorkspaceReferenceSearchLimit;
+}
+
+/** Entries a search walked, in traversal order, and whether the visit cap stopped the walk. */
+export interface WorkspaceVisit {
+  entries: WorkspaceReferenceCandidate[];
   truncated: boolean;
 }
 
@@ -87,15 +105,22 @@ export async function readSessionFile(context: AgentContext, root: string, rel: 
   return context.kind === "wsl" ? wslRead(context.distro, root, norm) : nativeRead(root, norm);
 }
 
-/** Search names only, bounded by both visited entries and returned matches. */
+/** Search names only, bounded by both visited entries and returned matches. A fuzzy search (#1263)
+ * scores every file within the visit cap and returns the best, so the result cap keeps the matches
+ * Go to File ranks highest rather than the first ones found. */
 export async function searchWorkspaceReferences(
   context: AgentContext,
   root: string,
   query: string,
+  match?: WorkspaceReferenceSearchMatch,
 ): Promise<WorkspaceReferenceSearch> {
   const normalized = query.trim().toLocaleLowerCase();
   if (!normalized || normalized.length > 256 || /[\0\r\n]/.test(normalized)) {
     throw new Error("enter 1-256 searchable characters");
+  }
+  if (match === "fuzzy") {
+    const visit = context.kind === "wsl" ? await wslVisit(context.distro, root) : nativeWorkspaceVisit(root);
+    return bestFuzzyFiles(visit, fuzzyPathNeedle(query));
   }
   return context.kind === "wsl"
     ? wslSearch(context.distro, root, normalized)
@@ -416,24 +441,27 @@ function nativeRead(root: string, rel: string): SessionFileContent {
   }
 }
 
-function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
+/** Every entry under the canonical root, breadth first, until the visit cap. `.git` and symlinks
+ * count toward the cap but are neither returned nor entered. A `node_modules` directory is skipped
+ * without counting, so dependencies never truncate the search. Exported for cap tests. */
+export function nativeWorkspaceVisit(root: string, visitCap = WORKSPACE_SEARCH_VISIT_CAP): WorkspaceVisit {
   const canonicalRoot = canonicalNativeTarget(root).root;
   const pending = [""];
-  const results: WorkspaceReferenceCandidate[] = [];
+  const entries: WorkspaceReferenceCandidate[] = [];
   let visited = 0;
-  let resultOverflow = false;
   let visitOverflow = false;
-  while (pending.length && !resultOverflow && !visitOverflow) {
+  while (pending.length && !visitOverflow) {
     const rel = pending.shift()!;
     const abs = rel ? join(canonicalRoot, ...rel.split("/")) : canonicalRoot;
-    let entries;
+    let listed;
     try {
-      entries = readdirSync(abs, { withFileTypes: true });
+      listed = readdirSync(abs, { withFileTypes: true });
     } catch {
       continue;
     }
-    for (const entry of entries) {
-      if (visited >= WORKSPACE_SEARCH_VISIT_CAP) {
+    for (const entry of listed) {
+      if (entry.name === WORKSPACE_SEARCH_SKIPPED_DIRECTORY && entry.isDirectory()) continue;
+      if (visited >= visitCap) {
         visitOverflow = true;
         break;
       }
@@ -441,17 +469,49 @@ function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
       if (entry.name === ".git" || entry.isSymbolicLink()) continue;
       const path = rel ? `${rel}/${entry.name}` : entry.name;
       const isDirectory = entry.isDirectory();
-      if (entry.name.toLocaleLowerCase().includes(query) || path.toLocaleLowerCase().includes(query)) {
-        if (results.length >= MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS) {
-          resultOverflow = true;
-          break;
-        }
-        results.push({ path, isDirectory });
-      }
+      entries.push({ path, isDirectory });
       if (isDirectory) pending.push(path);
     }
   }
-  return { results, truncated: resultOverflow || visitOverflow || pending.length > 0 };
+  return { entries, truncated: visitOverflow };
+}
+
+function nativeSearch(root: string, query: string): WorkspaceReferenceSearch {
+  return containingQuery(nativeWorkspaceVisit(root), query);
+}
+
+/** Files and folders whose path contains the lower-cased query, the first ones visited. */
+function containingQuery(visit: WorkspaceVisit, query: string): WorkspaceReferenceSearch {
+  const matches = visit.entries.filter((candidate) => candidate.path.toLocaleLowerCase().includes(query));
+  return {
+    results: matches.slice(0, MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS),
+    truncated: visit.truncated || matches.length > MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS,
+  };
+}
+
+/** Files only, best score first, then the shorter path; remaining ties keep the visit order. */
+export function bestFuzzyFiles(
+  visit: WorkspaceVisit,
+  needle: string,
+  alignmentBudget = WORKSPACE_FUZZY_ALIGNMENT_BUDGET,
+): WorkspaceReferenceSearch {
+  const scored: { candidate: WorkspaceReferenceCandidate; score: number; order: number }[] = [];
+  const budget = { cells: alignmentBudget };
+  visit.entries.forEach((candidate, order) => {
+    if (candidate.isDirectory) return;
+    const score = fuzzyPathScore(candidate.path, needle, budget);
+    if (score !== null) scored.push({ candidate, score, order });
+  });
+  scored.sort((a, b) => b.score - a.score || a.candidate.path.length - b.candidate.path.length || a.order - b.order);
+  const limit: WorkspaceReferenceSearchLimit | undefined = visit.truncated
+    ? "entries"
+    : scored.length > MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS ? "results" : undefined;
+  return {
+    results: scored.slice(0, MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS).map(({ candidate }) => candidate),
+    truncated: limit !== undefined,
+    match: "fuzzy",
+    ...(limit ? { limit } : {}),
+  };
 }
 
 /* ---------------------------------- WSL ----------------------------------- */
@@ -477,20 +537,39 @@ export function wslReadArgs(distro: string, root: string, rel: string, cap: numb
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, rel, String(cap)];
 }
 
+/** wsl.exe argv for the one bounded search traversal. Pruned entries print nothing, so a
+ * `node_modules` directory, like `.git`, never reaches the `head` that bounds the visit; nor does
+ * the root itself (`-mindepth 1`), which would otherwise take one of its rows. */
 export function wslSearchArgs(distro: string, root: string, visitCap: number): string[] {
   const script =
     'r=$(readlink -f -- "$1") || exit 3; cd "$r" || exit 3; ' +
-    'find . -path ./.git -prune -o -type l -prune -o \\( -type f -o -type d \\) -printf "%y\\t%P\\n" 2>/dev/null | head -n "$2"';
+    'find . -mindepth 1 \\( -path ./.git -o -type d -name node_modules \\) -prune -o -type l -prune -o \\( -type f -o -type d \\) -printf "%y\\t%P\\n" 2>/dev/null | head -n "$2"';
   return ["-d", distro, "--exec", "sh", "-c", script, "sh", root, String(visitCap + 1)];
 }
 
-async function wslSearch(distro: string, root: string, query: string): Promise<WorkspaceReferenceSearch> {
+async function wslVisit(distro: string, root: string): Promise<WorkspaceVisit> {
   const r = await run("wsl.exe", wslSearchArgs(distro, root, WORKSPACE_SEARCH_VISIT_CAP), {
     timeoutMs: 15_000,
     maxBuffer: 2 * 1024 * 1024,
   });
   if (r.code !== 0) throw new Error(`cannot search the workspace in ${distro}`);
-  return parseWslWorkspaceReferenceSearch(r.stdout, query);
+  return parseWslWorkspaceVisit(r.stdout);
+}
+
+async function wslSearch(distro: string, root: string, query: string): Promise<WorkspaceReferenceSearch> {
+  return containingQuery(await wslVisit(distro, root), query);
+}
+
+/** The bounded `find` listing as visited entries: at most `visitCap` of them, truncated past it. */
+export function parseWslWorkspaceVisit(output: string, visitCap = WORKSPACE_SEARCH_VISIT_CAP): WorkspaceVisit {
+  const rows = output.split("\n").filter(Boolean);
+  const entries: WorkspaceReferenceCandidate[] = [];
+  for (const raw of rows.slice(0, visitCap)) {
+    const [type, ...pathParts] = raw.replace(/\r$/, "").split("\t");
+    const path = pathParts.join("\t");
+    if (path) entries.push({ path, isDirectory: type === "d" });
+  }
+  return { entries, truncated: rows.length > visitCap };
 }
 
 export function parseWslWorkspaceReferenceSearch(
@@ -498,18 +577,7 @@ export function parseWslWorkspaceReferenceSearch(
   query: string,
   visitCap = WORKSPACE_SEARCH_VISIT_CAP,
 ): WorkspaceReferenceSearch {
-  const matches: WorkspaceReferenceCandidate[] = [];
-  const rows = output.split("\n").filter(Boolean);
-  for (const raw of rows.slice(0, visitCap)) {
-    const [type, ...pathParts] = raw.replace(/\r$/, "").split("\t");
-    const path = pathParts.join("\t");
-    if (!path || !path.toLocaleLowerCase().includes(query)) continue;
-    matches.push({ path, isDirectory: type === "d" });
-  }
-  return {
-    results: matches.slice(0, MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS),
-    truncated: rows.length > visitCap || matches.length > MAX_WORKSPACE_REFERENCE_SEARCH_RESULTS,
-  };
+  return containingQuery(parseWslWorkspaceVisit(output, visitCap), query);
 }
 
 async function wslRootFingerprint(distro: string, root: string): Promise<string> {

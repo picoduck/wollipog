@@ -9,7 +9,6 @@ import {
   CommandLineIcon,
   CursorEditorIcon,
   DevinDesktopIcon,
-  GitHubIcon,
   GridIcon,
   ICON_SIZES,
   InfoIcon,
@@ -110,7 +109,7 @@ test("explicit accessibility and styling overrides remain available", () => {
   assert.equal(svg.getAttribute("stroke"), "rebeccapurple");
 });
 
-test("intentional filled and brand marks keep their distinct rendered contracts", () => {
+test("intentional filled marks keep their distinct rendered contracts", () => {
   const shield = renderedSvg(renderToStaticMarkup(<ShieldIcon size={14} />));
   assert.equal(shield.getAttribute("fill"), "currentColor");
   assert.equal(shield.getAttribute("stroke"), "none");
@@ -126,13 +125,6 @@ test("intentional filled and brand marks keep their distinct rendered contracts"
   assert.equal(styledStop.style.transform, "scale(0.67)");
   assert.equal(styledStop.style.transformOrigin, "center");
   assert.equal(styledStop.style.opacity, "0.6");
-
-  const github = renderedSvg(renderToStaticMarkup(<GitHubIcon size={14} />));
-  assert.equal(github.getAttribute("viewBox"), "0 0 16 16");
-  assert.equal(github.getAttribute("fill"), "currentColor");
-  assert.equal(github.getAttribute("aria-hidden"), "true");
-  assert.equal(github.getAttribute("focusable"), "false");
-  assert.ok(github.classList.contains("app-icon"));
 });
 
 test("Cursor and Zed render their pinned Simple Icons product marks", () => {

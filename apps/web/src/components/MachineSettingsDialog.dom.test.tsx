@@ -387,6 +387,32 @@ test("Default Accounts read Signed In, Sign-In Required or Status Unknown, and N
   assert.doesNotMatch(body.textContent ?? "", /Logged In|Login Required|Login Unknown/u);
 });
 
+test("Default Accounts leave out a profile only other control planes may use, unless it is the saved one (#3240)", async () => {
+  const theirs = { id: "theirs", label: "Theirs", provider: "claude" as const, authStatus: "authenticated" as const,
+    profile: { id: "p-theirs", access: "not_granted" as const } };
+  const accounts = [
+    { id: "work", label: "Work", provider: "claude" as const, authStatus: "authenticated" as const },
+    theirs,
+  ];
+  const offered = async (overrides: Parameters<typeof machine>[0]) => {
+    const view = await mount(machine(overrides));
+    await press(view.dialog()!.querySelector<HTMLButtonElement>('[aria-label^="Default Claude Account"]')!);
+    const options = [...body.querySelectorAll<HTMLElement>('[role="listbox"] [role="option"]')].map((option) => option.textContent);
+    await view.unmount();
+    return options;
+  };
+  assert.deepEqual(await offered({ providerAccounts: accounts }), [
+    "No DefaultUses the agent's configured account, or the first one available.",
+    "WorkSigned In",
+  ]);
+  assert.deepEqual(await offered({ providerAccounts: accounts,
+    providerAccountDefaults: [{ provider: "claude", accountId: "theirs", revision: 2 }] }), [
+    "No DefaultUses the agent's configured account, or the first one available.",
+    "WorkSigned In",
+    "TheirsIts provider profile isn't granted to this control plane.",
+  ]);
+});
+
 test("a saved default account the machine no longer lists keeps its not-found option", async () => {
   const view = await mount(machine({ providerAccountDefaults: [{ provider: "claude", accountId: "removed", revision: 3 }] }));
   const claude = view.dialog()!.querySelector<HTMLButtonElement>('[aria-label^="Default Claude Account"]')!;

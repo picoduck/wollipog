@@ -15,6 +15,8 @@
 import { browserRandomUUID } from "./browser-crypto.js";
 
 const ENTRY_KEY = "wollipogEntry";
+/** View context belongs to one entry; it must not follow the position metadata onto new entries. */
+export const ARCHIVE_BROWSE_HISTORY_KEY = "wollipogArchiveBrowse";
 
 interface EntryPosition {
   run: string;
@@ -63,13 +65,15 @@ function stamp(history: PositionedHistory): EntryPosition {
 }
 
 /**
- * Pushes `path` one position past the current entry, keeping the rest of the current state as every
- * push here always has. Anything that pushes an entry the app's own navigation can arrive at uses
+ * Pushes `path` one position past the current entry, preserving unrelated state but leaving browse
+ * context on its owning entry. Anything that pushes an entry the app's navigation can arrive at uses
  * this, or the distances counted across that entry are wrong.
  */
 export function pushPositionedEntry(history: PositionedHistory, path: string): void {
   const here = positionOf(history.state);
-  history.pushState(withPosition(history.state, here ? { run: here.run, index: here.index + 1 } : newRun()), "", path);
+  const state = { ...(history.state && typeof history.state === "object" ? history.state : {}) };
+  delete (state as Record<string, unknown>)[ARCHIVE_BROWSE_HISTORY_KEY];
+  history.pushState(withPosition(state, here ? { run: here.run, index: here.index + 1 } : newRun()), "", path);
 }
 
 /**

@@ -5,7 +5,7 @@ import base from "./playwright.config.ts";
 // Linux), and the one whose spin buttons #3185 had to remove. The rest of the suite encodes
 // Chromium-measured geometry, so WebKit runs only the specs listed here (#3214). A spec opts in by
 // being added to this list; apps/web/e2e/README.md names the covered specs.
-export const WEBKIT_SPECS = ["number-fields.spec.ts"];
+export const WEBKIT_SPECS = ["number-fields.spec.ts", "compact-notice-icon-alignment.spec.ts"];
 
 export default defineConfig({
   ...base,

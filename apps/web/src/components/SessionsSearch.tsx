@@ -57,6 +57,7 @@ export function SessionsNoMatches({
   return (
     <State
       variant="no-results"
+      pageLevel
       icon={<SearchOffIcon />}
       title="No Matches"
       actions={(

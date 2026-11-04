@@ -164,6 +164,98 @@ test("an ended side chat says how it ended in one sentence, and where its transc
   assert.equal(sideChatEndedSentence("stopped"), "This side chat was stopped. Its transcript stays here and in Sessions.");
   assert.match(sideChatEndedSentence("failed"), /^This side chat failed\./);
   assert.match(sideChatEndedSentence("completed"), /^This side chat has finished\./);
+  // With no messages there is no transcript to point to (#3037).
+  assert.equal(sideChatEndedSentence("stopped", false), "This side chat was stopped before any reply.");
+  assert.equal(sideChatEndedSentence("failed", false), "This side chat failed before any reply.");
+  assert.equal(sideChatEndedSentence("completed", false), "This side chat finished before any reply.");
+});
+
+type EventPage = Awaited<ReturnType<typeof api.getSessionEventPage>>;
+
+/** An ended side chat mounted with the given transcript, for its body and its ended sentence. A
+ * list of pages answers one poll each, the last repeating. */
+async function mountEnded(events: SessionEvent[] | EventPage[]) {
+  const originals = {
+    sideChat: api.sideChat,
+    session: api.session,
+    getSessionEventPage: api.getSessionEventPage,
+  };
+  const ended = { ...child, status: "stopped" } as SessionView;
+  api.sideChat = async () => ({ sideChat: { ...relation, session: ended } });
+  api.session = async () => ({ session: ended });
+  const pages: EventPage[] = events.length && "events" in events[0]!
+    ? events as EventPage[]
+    : [{ events: events as SessionEvent[], eventEpoch: 0, nextAfter: events.length, cacheComplete: true }];
+  let served = 0;
+  api.getSessionEventPage = async () => pages[Math.min(served++, pages.length - 1)]!;
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  await act(async () => {
+    root.render(mount(<SideChatPanel session={parent} runnerOnline onInsertDraft={() => {}} />, []));
+    await new Promise((resolve) => setTimeout(resolve, 25));
+  });
+  return {
+    container,
+    dispose: async () => {
+      await act(async () => { root.unmount(); });
+      Object.assign(api, originals);
+      container.remove();
+    },
+  };
+}
+
+test("an ended side chat with no messages says so, and promises no transcript (#3037)", async () => {
+  const mounted = await mountEnded([]);
+  try {
+    const empty = mounted.container.querySelector(".sc-transcript .sc-empty");
+    assert.equal(empty?.textContent, "No messages were sent in this side chat.");
+    assert.equal(mounted.container.querySelector(".sc-ended-text")?.textContent, "This side chat was stopped before any reply.");
+    assert.doesNotMatch(mounted.container.textContent ?? "", /Its transcript stays here/);
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("an ended side chat whose history is still hydrating is not called empty (#3037)", async () => {
+  // The control plane answers from its cache before hydration completes: a cold first page is empty.
+  const mounted = await mountEnded([
+    { events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: false },
+    { events: [responseEvent], eventEpoch: 0, nextAfter: 1, cacheComplete: true },
+  ]);
+  try {
+    assertNoDomNode(mounted.container.querySelector(".sc-empty"), "no empty sentence while history is incomplete");
+    assert.equal(mounted.container.querySelector(".sc-ended-text")?.textContent,
+      "This side chat was stopped. Its transcript stays here and in Sessions.");
+    await act(async () => { await new Promise((resolve) => setTimeout(resolve, 1_800)); });
+    assert.match(mounted.container.querySelector(".sc-transcript")?.textContent ?? "", /Selected side-chat answer/);
+    assertNoDomNode(mounted.container.querySelector(".sc-empty"));
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("more cached pages keep an ended side chat from reading as empty (#3037)", async () => {
+  const mounted = await mountEnded([{ events: [], eventEpoch: 0, nextAfter: 0, cacheComplete: true, hasMoreCached: true }]);
+  try {
+    assertNoDomNode(mounted.container.querySelector(".sc-empty"));
+    assert.doesNotMatch(mounted.container.querySelector(".sc-ended-text")?.textContent ?? "", /before any reply/);
+  } finally {
+    await mounted.dispose();
+  }
+});
+
+test("an ended side chat with messages shows them and the whole ended sentence (#3037)", async () => {
+  const mounted = await mountEnded([responseEvent]);
+  try {
+    assert.match(mounted.container.querySelector(".sc-transcript")?.textContent ?? "", /Selected side-chat answer/);
+    assertNoDomNode(mounted.container.querySelector(".sc-empty"), "no empty sentence beside the transcript");
+    assert.equal(mounted.container.querySelector(".sc-ended-text")?.textContent,
+      "This side chat was stopped. Its transcript stays here and in Sessions.");
+  } finally {
+    await mounted.dispose();
+  }
 });
 
 test("the context line's badge uses the session words, Unverified while the machine is offline (#2863)", () => {
@@ -225,8 +317,8 @@ test("a terminal side chat offers a working replacement and a link to the ended 
     // One sentence and one primary: no dead textarea, no second primary (#2863).
     assertNoDomNode(container.querySelector("textarea"), "an ended side chat renders no textarea");
     assert.equal(container.querySelectorAll(".btn.primary, .icon-btn.primary").length, 1, "exactly one primary button");
-    assert.equal(container.querySelector(".sc-ended-text")?.textContent,
-      "This side chat was stopped. Its transcript stays here and in Sessions.");
+    // It ended before anyone wrote in it, so it promises no transcript (#3037).
+    assert.equal(container.querySelector(".sc-ended-text")?.textContent, "This side chat was stopped before any reply.");
     assert.doesNotMatch(container.textContent ?? "", /No messages yet/, "an ended chat is not an empty invitation");
 
     const link = container.querySelector<HTMLAnchorElement>("a.sidechat-open-session")!;
@@ -276,7 +368,7 @@ test("a terminal side chat cannot be replaced while the runner is offline", asyn
     assert.equal(restart.disabled, true);
     const reason = container.querySelector(`#${restart.getAttribute("aria-describedby")}`);
     assert.equal(reason?.textContent, "runner-1 is offline.", "the disabled button's reason is visible text beside it");
-    assert.match(container.textContent ?? "", /This side chat failed\./,
+    assert.match(container.textContent ?? "", /This side chat failed before any reply\./,
       "both closures are reported, because they have different remedies");
     assertNoDomNode(container.querySelector("textarea"));
   } finally {

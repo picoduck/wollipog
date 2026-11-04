@@ -27,6 +27,7 @@ export type ComposerAction =
   | "editInFork"
   | "recoverConversation"
   | "restart"
+  | "stopWaiting"
   | "retrySetup"
   | "restartAfterSetup"
   | "addReference"
@@ -60,6 +61,7 @@ const ACTION_COPY: Record<ComposerAction, ActionCopy> = {
     failed: "Couldn't start a new conversation from the last checkpoint.",
   },
   restart: { title: "Session Not Restarted", failed: "Couldn't restart this session." },
+  stopWaiting: { title: "Still Waiting", failed: "Couldn't stop waiting for the account.", next: "Try again or use Stop Session." },
   retrySetup: { title: "Setup Not Retried", failed: "Couldn't retry worktree setup." },
   restartAfterSetup: {
     title: "Session Not Restarted",

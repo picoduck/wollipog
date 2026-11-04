@@ -117,11 +117,11 @@ test(`${width}px ${theme}: Usage and authentication recovery show emails by defa
   const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
   const usage = await context.newPage();
   await usage.setViewportSize({ width, height: 1000 });
-  await usage.goto("/usage-view-e2e.html?subscriptions=1");
+  await usage.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
   await usage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
-  const account = usage.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-account");
+  const account = usage.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-plan-head");
   await expect(account).toContainText("codex@example.com");
-  await expect(account.getByRole("button")).toHaveCount(0);
+  await expect(account.getByRole("button", { name: /Account Email/ })).toHaveCount(0);
   const auth = await context.newPage();
   await auth.setViewportSize({ width, height: 1000 });
   await auth.goto("/authentication-recovery-e2e.html");

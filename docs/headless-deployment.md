@@ -155,6 +155,18 @@ there with `wollipog admin runner-credential issue --output`, place it at the to
 `controlPlaneUrl` in `runner.config.json`. Install never changes the permissions of directories
 that already exist, so using your home as the default workspace keeps it private.
 
+Owners and admins can remove a workspace from the machine's detail (Remove…). Removal only
+unregisters it. A workspace from `runner.config.json`, `--workspace` or `RUNNER_WORKSPACES` is
+recorded in `workspace-removals.json` in the runner's data directory, and the runner leaves it out
+from then on. The configuration file itself is not edited. To restore the workspace, delete its
+entry from that file and restart the runner. Configuring a different folder under the same id
+brings the workspace back without that step.
+
+Removal stops new use, but it cannot undo what earlier sessions may have written. When the runner
+decides which reviewer programs to trust, a stored session that ran in the removed workspace keeps
+its project directory and that workspace's directory grants as writable until the session is
+deleted (see `docs/review-writer-recovery.md`).
+
 ## Operate
 
 ```bash

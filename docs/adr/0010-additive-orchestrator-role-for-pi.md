@@ -67,6 +67,12 @@ is not that flag at all (it falls through to the unknown-flag branch and is hand
 The resume strip therefore matches only the space-separated form carrying the runner's own
 instructions prefix, so it can never delete a user argument Pi reads as something else.
 
+Re-measured against pi 1.4.0 on 2026-10-30 ([Pi Assumption Probes](../pi-assumption-probes.md)):
+repeated values still reach the system prompt in order, separated by one blank line, and an explicit
+`-e` extension still loads under `--no-extensions` while user and built-in extensions do not. The
+`=` form changed: Pi now exits 1 with `Unknown option: --append-system-prompt` instead of passing it
+to extensions. It still never appends, so the resume strip's reasoning above is unaffected.
+
 ### The role is advertised separately from the preset
 
 Review round 1 found additive Pi unreachable under the default runner configuration, from a single

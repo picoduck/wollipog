@@ -8,6 +8,7 @@ import { capabilitiesFor } from "../catalog.js";
 import {
   applyAgentModelDiscovery,
   commandDirectoriesForDriver,
+  applyCodexAgentEnvironment,
   codexAgentDefinitions,
   nativeDiscoveredDefinitions,
   mergeAgents,
@@ -23,6 +24,7 @@ import {
   unavailableClaudeAgentDefinition,
 } from "./discover.js";
 import { resolvedLaunchIdentity } from "./resolve.js";
+import { applyCodexCommandSandboxProbe } from "./codex-app-server.js";
 import { ProviderHomeLeaseError } from "../provider-home-lease-worker-protocol.js";
 
 const testAdmission = { authorize: async () => ({ settle: async (proofs: Promise<boolean>[]) => { await Promise.all(proofs); } }) };
@@ -30,6 +32,20 @@ const probeConfiguredAcpAgent: typeof realProbeConfiguredAcpAgent = (agent, env,
   realProbeConfiguredAcpAgent(agent, env, { ...testAdmission, ...options });
 const probeConfiguredPiAgents: typeof realProbeConfiguredPiAgents = (agents, env, options) =>
   realProbeConfiguredPiAgents(agents, env, { ...testAdmission, ...options });
+
+test("configured Pi executes in the environment admitted by discovery ownership", async () => {
+  const agent = cfg({ id: "pi-isolated", driver: "pi", command: "fixture-pi", source: "config" });
+  let observed = false;
+  await probeConfiguredPiAgents([agent], () => ({}), {
+    authorize: async () => ({ env: { HOME: "/isolated-probe" }, settle: async () => {} }),
+    probe: async (_launch, _context, options) => {
+      observed = true;
+      assert.deepEqual(options?.env, { HOME: "/isolated-probe" });
+      return { available: true, authStatus: "unknown", capabilities: capabilitiesFor("pi")! };
+    },
+  });
+  assert.equal(observed, true);
+});
 
 const ACP_INITIALIZE_FIXTURE = [
   'let input="";',
@@ -118,7 +134,7 @@ test("installed native harnesses retain an ownership probe failure instead of re
     assert.equal(agent.available, false, "ownership refusal must not admit execution");
     assert.equal(probe?.status, "unsupported", "the executable exists but its probe could not run");
     assert.equal(probe?.failure?.code, "probe_failed");
-    assert.match(probe.failure.message, /uninspectable process/);
+    assert.match(probe.failure.message, /can't check whether another program/);
     assert.doesNotMatch(probe.failure.message, /not installed|not found/);
   }
   assert.throws(() => readFileSync(marker), { code: "ENOENT" });
@@ -403,6 +419,22 @@ test("supported Codex discovery emits only its App Server row (#3259)", () => {
   assert.deepEqual(wsl.map((agent) => [agent.id, agent.driver]), [["codex-wsl-Ubuntu", "codex-app-server"]]);
 });
 
+test("a Codex whose command sandbox cannot start on its host is unavailable with the host fix (#3843)", () => {
+  const blocked = applyCodexCommandSandboxProbe(SUPPORTED_APP_SERVER, {
+    code: 1, stdout: "", stderr: "bwrap: No permissions to create new namespace, likely because the kernel does not allow non-privileged user namespaces.\n",
+  });
+  const [agent] = codexAgentDefinitions(
+    cfg({ id: "codex", name: "Codex", driver: "codex", bin: "codex", version: "0.165.0", source: "discovered", authStatus: "authenticated" }),
+    blocked,
+    [],
+  );
+  assert.equal(agent!.available, false);
+  assert.equal(agent!.codexAppServer?.failure?.code, "codex_sandbox_unavailable");
+  assert.match(agent!.unavailableReason ?? "", /unprivileged processes create user namespaces/);
+  // An explicit API-key setup recomputes availability from the App Server row, which stays blocked.
+  assert.equal(applyCodexAgentEnvironment(agent!).available, false);
+});
+
 test("a Codex replacement during discovery keeps the primary driver and rediscovery guidance", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-codex-discovery-replacement-"));
   const command = join(root, "codex");
@@ -462,6 +494,7 @@ test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing a
   // A key-less config row must not resurrect a gated discovery result.
   const plain = mergeAgents([cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server" })], discovered)[0]!;
   assert.equal(plain.available, false);
+  assert.equal(plain.authStatus, "unauthenticated");
 });
 
 test("a failed or timed-out auth-file probe reports unknown, not signed-out", () => {

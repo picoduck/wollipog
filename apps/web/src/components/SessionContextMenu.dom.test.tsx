@@ -31,6 +31,9 @@ interface Log {
   toggledPin: string[];
   snoozed: string[];
   dismissed: string[];
+  copied: string[];
+  /** Whether what opened the menu held focus when Copy Session ID ran, so its toast reports there. */
+  copyFocus: boolean[];
   archived: string[];
   replied: string[];
   setUnread: Array<[string, boolean]>;
@@ -65,7 +68,8 @@ async function mount(overrides: {
   archiveRefusal?: string | null;
 } = {}): Promise<{ root: Root; log: Log; menu: HTMLElement }> {
   const log: Log = {
-    closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], archived: [], replied: [],
+    closed: 0, restored: 0, renamed: [], toggledPin: [], snoozed: [], dismissed: [], copied: [], copyFocus: [],
+    archived: [], replied: [],
     setUnread: [], forked: [], forkFocus: [],
   };
   const restoreHost = domWindow.document.createElement("button") as unknown as HTMLElement;
@@ -102,6 +106,10 @@ async function mount(overrides: {
         onTogglePin={(id) => log.toggledPin.push(id)}
         onSnooze={(id) => log.snoozed.push(id)}
         onDismissReminder={(id) => log.dismissed.push(id)}
+        onCopyId={(id) => {
+          log.copied.push(id);
+          log.copyFocus.push((domWindow.document.activeElement as unknown) === restoreHost);
+        }}
         onArchive={(id) => log.archived.push(id)}
         renameRefusal={overrides.renameRefusal ?? null}
         archiveRefusal={overrides.archiveRefusal ?? null}
@@ -122,7 +130,8 @@ test("the menu names its session, offers its actions, and takes initial focus", 
   const { root, menu } = await mount();
   try {
     assert.equal(menu.getAttribute("aria-label"), "Session Actions for Fix the Parser");
-    assert.deepEqual(labels(menu), ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Snooze…", "Archive"]);
+    assert.deepEqual(labels(menu),
+      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Snooze…", "Copy Session ID", "Archive"]);
     assert.equal(domWindow.document.activeElement?.textContent, "Reply",
       "the virtualized collections never focus rows, so the menu takes focus itself");
     assert.ok(menu.querySelector(".menu-item.danger .menu-text")?.textContent === "Archive");
@@ -146,7 +155,7 @@ test("returned reminders expose Snooze Again and direct dismissal", async () => 
   const { root, log, menu } = await mount({ reminder: fired });
   try {
     assert.deepEqual(labels(menu),
-      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Snooze Again…", "Dismiss Reminder", "Archive"]);
+      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Snooze Again…", "Dismiss Reminder", "Copy Session ID", "Archive"]);
     await act(async () => { item(menu, "Dismiss Reminder").click(); });
     assert.deepEqual(log.dismissed, ["s-1"]);
     assert.equal(log.restored, 1);
@@ -158,7 +167,7 @@ test("returned reminders expose Snooze Again and direct dismissal", async () => 
 test("snooze is omitted when reminders are unsupported", async () => {
   const { root, menu } = await mount({ snoozeAvailable: false });
   try {
-    assert.deepEqual(labels(menu), ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Archive"]);
+    assert.deepEqual(labels(menu), ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Copy Session ID", "Archive"]);
   } finally {
     await unmount(root);
   }
@@ -242,6 +251,22 @@ test("a Viewer's Rename and Archive stay listed, disabled and described by the r
     assert.deepEqual(log.archived, []);
     await act(async () => { item(menu, "Pin Session").click(); });
     assert.deepEqual(log.toggledPin, ["s-1"], "per-person Pin still works");
+    assert.equal(item(menu, "Copy Session ID").disabled, false);
+    await act(async () => { item(menu, "Copy Session ID").click(); });
+    assert.deepEqual(log.copied, ["s-1"], "a Viewer can copy the session's ID (#3897)");
+  } finally {
+    await unmount(root);
+  }
+});
+
+test("Copy Session ID copies the menu's target and hands focus back to what opened the menu first (#3897)", async () => {
+  const { root, log, menu } = await mount();
+  try {
+    await act(async () => { item(menu, "Copy Session ID").click(); });
+    assert.deepEqual(log.copied, ["s-1"], "the action keeps the menu target identity");
+    assert.equal(log.closed, 1);
+    assert.equal(log.restored, 1, "copying opens no dialog, so keyboard position returns");
+    assert.deepEqual(log.copyFocus, [true], "focus is back before the copy captures where to report");
   } finally {
     await unmount(root);
   }
@@ -314,18 +339,20 @@ test("a release onto the phone sheet's title row spends the grace, so the next i
   }
 });
 
-test("every item of a forkable session, in order, with its icon and one separator before the archive item (#2214)", async () => {
+test("every item of a forkable session, in order, with its icon and Copy Session ID and the archive item each after a separator (#2214, #3897)", async () => {
   const { root, log, menu } = await mount({ forkAvailability: { available: true, forkTurn: 3 } });
   try {
     assert.deepEqual(labels(menu),
-      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Archive"]);
+      ["Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Copy Session ID", "Archive"]);
     for (const menuItem of menu.querySelectorAll('[role="menuitem"]')) {
       assert.ok(menuItem.querySelector(".menu-icon svg"), `${menuItem.textContent} leads with its icon`);
     }
     const children = [...menu.children];
     const separators = children.filter((child) => child.getAttribute("role") === "separator");
-    assert.equal(separators.length, 1, "one separator");
-    assert.equal(children[children.indexOf(separators[0]!) + 1], item(menu, "Archive"), "it comes right before Archive");
+    assert.equal(separators.length, 2, "two separators");
+    assert.ok(children[children.indexOf(separators[0]!) + 1] === item(menu, "Copy Session ID"),
+      "the first comes right before Copy Session ID");
+    assert.ok(children[children.indexOf(separators[1]!) + 1] === item(menu, "Archive"), "the second right before Archive");
     await act(async () => { item(menu, "Fork Conversation…").click(); });
     assert.deepEqual(log.forked, ["s-1"]);
     assert.deepEqual(log.forkFocus, [true],
@@ -413,6 +440,7 @@ test("items with a Sessions list key show its keycap only where the key acts on 
       "Mark Unread": "U",
       "Fork Conversation…": "F",
       "Snooze…": "H",
+      "Copy Session ID": null,
       "Archive": "E",
     });
     assert.equal(item(menu, "Archive").getAttribute("aria-keyshortcuts"), "E");

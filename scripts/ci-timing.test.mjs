@@ -83,5 +83,5 @@ test("CI Node command uses full discovery and the safe timing reporter", () => {
   const { scripts } = JSON.parse(readFileSync("package.json", "utf8"));
   assert.equal(scripts["test:ci"], scripts["test:full"] + " --ci");
   assert.match(scripts["test:ci"], /--suite full --test-timeout=300000 --ci$/);
-  assert.match(readFileSync(".github/workflows/ci.yml", "utf8"), /name: Unit Tests\n[\s\S]*?else\n\s+pnpm test:ci\n\s+fi/);
+  assert.match(readFileSync(".github/workflows/ci.yml", "utf8"), /name: Unit Tests\n[\s\S]*?else\n\s+pnpm test:ci --shard=\$\{\{ matrix\.shard \}\}\/3\n\s+fi/);
 });

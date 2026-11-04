@@ -34,7 +34,7 @@ export function OfflineBanner({
     if (onRetryNow()) setRequested(true);
   };
   return (
-    <Notice pageBanner tone="warning" role="status" className="offline-banner" actions={(
+    <Notice pageBanner tone="warning" role="status" actions={(
       // aria-disabled rather than disabled keeps keyboard focus on the button through the attempt.
       <button
         type="button"

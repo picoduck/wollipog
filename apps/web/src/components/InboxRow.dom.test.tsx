@@ -148,7 +148,7 @@ test("a running row with background work shows Running and the strip", async () 
 test("an idle row with running background work shows Waiting on External Job", async () => {
   for (const [state, label] of [
     ["running", "Waiting on External Job"],
-    ["continuation_pending", "Continuation Pending"],
+    ["continuation_pending", "Follow-Up Pending"],
     ["orphaned", "Background Work Lost"],
   ] as const) {
     await withRow(baseSession({ backgroundWorkState: state }), (container) => {
@@ -490,8 +490,28 @@ test("a parent row carries the chevron and family chip, and a child row its thre
       threeRow={false} threadDepth={1} threadLast
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
+    assert.doesNotMatch(container.querySelector(".inbox-row-shell")!.className, /thread-depth-2|thread-outer/);
     assertNoDomNode(container.querySelector(".inbox-thread-toggle"));
     assertNoDomNode(container.querySelector(".inbox-thread-family"));
+
+    // A review under a child (#4077): one step deeper, carrying the child's spine on to a later sibling.
+    const review = { ...child, id: "r1", title: "Review", parentSessionId: "c1", kind: "review" } as SessionView;
+    await act(async () => root.render(<InboxRow optionId="row" session={review} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={3} stalled={false} activityNow={0}
+      threeRow={false} threadDepth={2} threadLast threadOuterSpine
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-depth-2 thread-last thread-outer/);
+
+    // A child whose only descendant is its review names it as a review.
+    await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"
+      selected={false} unread={false} pinned={false} rowIndex={2} stalled={false} activityNow={0}
+      threeRow={false} threadDepth={1}
+      threadChildren={JSON.stringify({ count: 1, reviews: 1, visibleCount: 1, waiting: 0, working: 0,
+        children: [{ id: "r1", title: "Review", state: "idle" }] })}
+      onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
+    assert.equal(container.querySelector(".inbox-thread-family-text")?.textContent, "1 Review");
+    assert.equal(container.querySelector(".inbox-thread-family")?.getAttribute("aria-label"), "1 Review");
+    assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-label"), "Collapse Thread");
   } finally {
     await act(async () => root.unmount());
     container.remove();
@@ -556,4 +576,37 @@ test("a filtered family keeps its active chip without an empty expand control (#
     assert.match(container.querySelector(".inbox-thread-family")!.getAttribute("aria-label")!, /1 Working/);
   }, { threadChildren: JSON.stringify({ count: 1, visibleCount: 0, working: 1, hasActiveWork: true, waiting: 0,
     children: [{ id: "child", title: "Child", state: "running" }] }) });
+});
+
+test("a row marks an Orchestrator or review session before its title in both shapes, follows a role change, and leaves an ordinary row bare (#4076)", async () => {
+  const typeIcon = (container: Element) => {
+    const title = container.querySelector(".inbox-row-title")!;
+    const icon = title.querySelector(".session-type-icon");
+    if (icon) assert.equal(title.firstElementChild, icon, "the mark comes before the title text");
+    return icon;
+  };
+  for (const threeRow of [false, true]) {
+    await withRow(baseSession({ role: "orchestrator", title: "Coordinate the campaign" }), async (container, rerender) => {
+      const icon = typeIcon(container)!;
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), "Orchestrator Session");
+      assert.equal(icon.getAttribute("title"), "Orchestrator Session");
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+      assert.equal(container.querySelector(".inbox-row-title")!.textContent, "Coordinate the campaign");
+
+      // A completed conversion back to a normal session takes the mark away without a remount.
+      await rerender({ session: baseSession({ role: "normal", title: "Coordinate the campaign" }) } as RowOptions);
+      assertNoDomNode(typeIcon(container), "a converted session draws no type mark");
+      await rerender({ session: baseSession({ role: "orchestrator", title: "Coordinate the campaign" }) } as RowOptions);
+      assert.equal(typeIcon(container)?.getAttribute("aria-label"), "Orchestrator Session");
+
+      await rerender({ session: baseSession({ kind: "review", title: "Review pull request 12" }) } as RowOptions);
+      assert.equal(typeIcon(container)?.getAttribute("aria-label"), "Review Session");
+      assert.equal(typeIcon(container)?.getAttribute("title"), "Review Session");
+
+      // An older control plane omits `kind` and `role`: the row is ordinary, as it was before.
+      await rerender({ session: baseSession({ title: "Fix the build" }) } as RowOptions);
+      assertNoDomNode(typeIcon(container), "an ordinary session draws no type mark");
+    }, { threeRow });
+  }
 });

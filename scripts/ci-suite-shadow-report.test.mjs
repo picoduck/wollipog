@@ -3,7 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { FAST_API_FILES, FAST_PROSE_FILES, CRITICAL_BROWSER_FILES } from "./ci-suite-policy.mjs";
 import { makeSelection, hash, SELECTION_MARKER } from "./ci-suite-selection.mjs";
-import { shadowReport } from "./ci-suite-shadow-report.mjs";
+import { COHORT_KEY_CUTOVER, shadowCohorts, shadowReport } from "./ci-suite-shadow-report.mjs";
 import { readTimingLog } from "./merge-queue-wait-report.mjs";
 
 const testedSha = "b".repeat(40), baseSha = "a".repeat(40);
@@ -14,11 +14,15 @@ const plan = () => makeSelection({ tree, fastFiles: [], diff: { entries: [{ path
     runId: "101", attempt: 1, event: "merge_group", diffKind: "combined-merge-group" } });
 const summary = (suite) => ({ version: 1, suite, count: 3, failed: 0, skipped: 0, cancelled: 0, unmeasured: 0, retryOnly: 0, truncated: false,
   context: { runId: "101", attempt: 1, testedSha, workflowSha: testedSha }, slowestFiles: [], slowestTests: [], reliability: { tests: [], truncated: false } });
-function input() {
-  const names = ["Typecheck, Unit Tests & Bundles", ...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`), "WebKit End-to-End Tests"];
+// Runs before #3770 had one Node job; later runs have a test-free checks job and three Node shards.
+function input({ split = false } = {}) {
+  const node = split ? ["Unit Tests (1)", "Unit Tests (2)", "Unit Tests (3)"] : ["Typecheck, Unit Tests & Bundles"];
+  const names = [...(split ? ["Typecheck & Bundles"] : []), ...node, ...[1, 2, 3, 4, 5].map((n) => `Browser End-to-End Tests (${n})`),
+    "WebKit End-to-End Tests"];
   const jobs = names.map((name, index) => ({ id: 1010 + index, name, state: "passing", steps: [],
-    testTiming: { state: "measured", summaries: name.endsWith("(1)") ? [summary("browser"), summary("browser")]
-      : [summary(index === 0 ? "node" : "browser")] } }));
+    testTiming: { state: "measured", summaries: name === "Typecheck & Bundles" ? []
+      : name === "Browser End-to-End Tests (1)" ? [summary("browser"), summary("browser")]
+        : [summary(node.includes(name) ? "node" : "browser")] } }));
   jobs.push({ id: 1020, name: "Settings-Rows win32 Baselines / Detect Settings-Rows Changes", state: "passing", steps: [] },
     { id: 1021, name: "Settings-Rows win32 Baselines / Compare win32 Settings-Rows Baselines", state: "skipped", steps: [] },
     { id: 1022, name: "Suite Selection Shadow (Advisory)", state: "passing", testTiming: { summaries: [], selections: [plan()] } });
@@ -42,6 +46,26 @@ test("full passing results yield explicitly inferred samples with actual full ru
   assert.equal(report.comparisons[0].selectedRuntimeMs, null);
   assert.equal(report.cohorts[0].sampleThresholdMet, false);
   assert.equal(report.certification, "none");
+});
+
+test("from #3770, a run is read as a test-free checks job and three Node shards, each one required", () => {
+  const split = shadowReport(input({ split: true }));
+  assert.deepEqual(split.gaps, []);
+  assert.equal(split.comparisons.length, 1);
+  assert.equal(split.comparisons[0].eligible, true);
+  assert.equal(split.comparisons[0].projectedSelectedOutcome, "passing");
+  const missing = input({ split: true });
+  missing.records[0].jobs = missing.records[0].jobs.filter((job) => job.name !== "Unit Tests (2)");
+  assert.equal(shadowReport(missing).gaps[0].reason, "missing-or-duplicate-full-job");
+  const unmeasured = input({ split: true });
+  unmeasured.records[0].jobs.find((job) => job.name === "Unit Tests (3)").testTiming.summaries = [];
+  assert.equal(shadowReport(unmeasured).comparisons.length, 0, "a shard without its Node projection is incomplete");
+  const browserLabel = input({ split: true });
+  browserLabel.records[0].jobs.find((job) => job.name === "Unit Tests (1)").testTiming.summaries = [summary("browser")];
+  assert.equal(shadowReport(browserLabel).comparisons.length, 0, "a shard must report the Node suite");
+  const extra = input({ split: true });
+  extra.records[0].jobs.find((job) => job.name === "Typecheck & Bundles").testTiming.summaries = [summary("node")];
+  assert.equal(shadowReport(extra).comparisons.length, 0, "the checks job runs no test suite");
 });
 
 test("known selected failures and missed-failure candidates remain individual exact identities", () => {
@@ -139,6 +163,91 @@ test("reruns cannot inflate changes and suite/policy identities never share a co
   assert.equal(shadowReport(rerun).exclusions[0].reason, "rerun-not-an-independent-change");
 });
 
+// Independent natural samples: one PR per record, each with its own plan over `sampleTree`.
+function samples(specs) {
+  const data = input(), original = data.records[0];
+  data.windows = [{ since: "2026-10-19T00:00:00Z", until: "2026-11-14T00:00:00Z" }];
+  data.records = specs.map(({ createdAt, sampleTree = tree, policyId = hash("policy-fixture") }, index) => {
+    const record = structuredClone(original), sha = (index + 2000).toString(16).padStart(40, "0");
+    record.runId = 301 + index; record.pullRequest = 400 + index; record.sha = sha; record.testedSha = sha; record.createdAt = createdAt;
+    for (const job of record.jobs) {
+      job.id += index * 100;
+      for (const summary of job.testTiming?.summaries ?? []) { summary.context.runId = String(record.runId); summary.context.testedSha = sha; }
+    }
+    record.jobs.at(-1).testTiming.selections = [makeSelection({ tree: sampleTree, fastFiles: [], policyId,
+      diff: { entries: [{ path: FAST_PROSE_FILES[0], status: "M" }] },
+      context: { baseSha, diffBaseSha: baseSha, testedSha: sha, changeHeadSha: sha, trustedPolicySha: baseSha,
+        runId: String(record.runId), attempt: 1, event: "merge_group", diffKind: "combined-merge-group" } })];
+    return record;
+  });
+  return data;
+}
+const edited = tree.map((row) => row.path === "apps/web/e2e/deferred.spec.ts" ? { ...row, oid: "c".repeat(40) } : row);
+const added = [...tree, { path: "apps/web/e2e/added.spec.ts", oid: baseSha }];
+const after = (day) => `2026-11-${String(day).padStart(2, "0")}T01:00:00.000Z`;
+
+test("from the cutover, samples with different suite identities but one policy identity share a cohort", () => {
+  assert.equal(COHORT_KEY_CUTOVER, "2026-11-02T00:00:00.000Z");
+  const report = shadowReport(samples([{ createdAt: after(2) }, { createdAt: after(3), sampleTree: edited }, { createdAt: after(4), sampleTree: added }]));
+  assert.equal(new Set(report.comparisons.map((row) => row.suiteId)).size, 3);
+  assert.equal(report.cohorts.length, 1);
+  const [cohort] = report.cohorts;
+  assert.equal(cohort.cohortKeying, "suiteVersion/policyVersion/policyId");
+  assert.equal(cohort.cohortKey, `fast-required-v1/1/${hash("policy-fixture")}`);
+  assert.equal(cohort.suiteId, undefined);
+  assert.equal(cohort.projectedSamples, 3);
+  assert.equal(cohort.distinctIdentifiedChanges, 3);
+  for (const row of report.comparisons) assert.ok(row.suiteId && row.inventoryId && row.fileIdentitySetId);
+  // Drift stays visible: an edited test changes identities only; an added test changes file identities.
+  assert.deepEqual({ ...cohort.compatibility, fileIdentityChangedSamples: cohort.compatibility.fileIdentityChangedSamples.map((row) => row.runId) },
+    { distinctSuiteIds: 3, distinctInventoryIds: 3, suiteIdTransitions: 2, inventoryIdTransitions: 2, fileIdentityChanges: 1,
+      fileIdentityChangedSamples: [303], review: "contract-drift-visible-requires-compatibility-review" });
+  const changed = cohort.compatibility.fileIdentityChangedSamples[0];
+  assert.equal(changed.previousRunId, 302);
+  assert.equal(changed.inventoryCount, changed.previousInventoryCount + 1);
+});
+
+test("a policy identity change starts a new cohort after the cutover", () => {
+  const report = shadowReport(samples([{ createdAt: after(2) }, { createdAt: after(3), policyId: hash("policy-fixture-2") }, { createdAt: after(4) }]));
+  assert.deepEqual(report.cohorts.map((cohort) => cohort.projectedSamples), [2, 1]);
+  assert.deepEqual(report.cohorts.map((cohort) => cohort.policyId), [hash("policy-fixture"), hash("policy-fixture-2")]);
+});
+
+test("records from different suite versions never share a cohort", () => {
+  const [row] = shadowReport(samples([{ createdAt: after(2) }])).comparisons;
+  const cohorts = shadowCohorts([row, { ...row, runId: 999, suiteVersion: "fast-required-v2" }]);
+  assert.deepEqual(cohorts.map((cohort) => cohort.suiteVersion), ["fast-required-v1", "fast-required-v2"]);
+  // The v1 report also refuses another suite version's record outright.
+  const data = samples([{ createdAt: after(2) }]);
+  data.records[0].jobs.at(-1).testTiming.selections[0].suiteVersion = "fast-required-v2";
+  assert.equal(shadowReport(data).comparisons.length, 0);
+  assert.equal(shadowReport(data).gaps.length, 1);
+});
+
+test("samples before the cutover keep their original suite/policy cohorts and never join a later cohort", () => {
+  const report = shadowReport(samples([{ createdAt: "2026-10-30T01:00:00.000Z" }, { createdAt: "2026-10-30T02:00:00.000Z", sampleTree: edited },
+    { createdAt: "2026-11-01T23:59:59.999Z" }, { createdAt: COHORT_KEY_CUTOVER }, { createdAt: after(3), sampleTree: edited }]));
+  assert.equal(report.version, 2);
+  assert.deepEqual(report.cohortKeyCutover, { at: COHORT_KEY_CUTOVER, before: "suiteId/policyId", from: "suiteVersion/policyVersion/policyId" });
+  const [first, second, policy] = report.cohorts, [one, two, three, four, five] = report.comparisons;
+  // Legacy cohorts keep their exact suiteId/policyId key and pre-#3786 fields, and are never merged.
+  const { cohortKeying, cohortKey, ...legacyFields } = first;
+  assert.deepEqual(legacyFields, { suiteId: one.suiteId, policyId: one.policyId, projectedSamples: 2, partialFailureObservations: 0,
+    distinctIdentifiedChanges: 2, distinctWorkingDatesUTC: 1, missedFailureCandidates: 0, fastMissedFailureCandidates: 0, sampleThresholdMet: false,
+    readiness: "not-certified-requires-miss-investigation-and-reviewed-comparison" });
+  assert.equal(cohortKeying, "suiteId/policyId");
+  assert.equal(cohortKey, `${one.suiteId}/${one.policyId}`);
+  assert.equal(three.cohortKey, cohortKey);
+  assert.equal(second.cohortKey, `${two.suiteId}/${two.policyId}`);
+  assert.equal(second.projectedSamples, 1);
+  // The same suite identities from the cutover onward start the policy cohort instead of joining a legacy one.
+  assert.equal(four.suiteId, one.suiteId);
+  assert.equal(five.suiteId, two.suiteId);
+  assert.equal(policy.cohortKeying, "suiteVersion/policyVersion/policyId");
+  assert.equal(policy.projectedSamples, 2);
+  assert.equal(report.cohorts.length, 3);
+});
+
 test("the long-window threshold requires 30 independent identified changes across five working dates", () => {
   const data = input(), original = data.records[0];
   data.windows = [{ since: "2026-10-19T00:00:00Z", until: "2026-10-24T00:00:00Z" }];
@@ -229,5 +338,5 @@ test("shadow workflow is advisory, draft guarded and runs base-revision code wit
   assert.match(shadow, /ref: \$\{\{ github\.event\.merge_group\.base_sha \|\| github\.event\.pull_request\.base\.sha \}\}/);
   assert.match(shadow, /--change-head "\$CHANGE_HEAD_SHA"/);
   assert.doesNotMatch(shadow, /pnpm install|pnpm test|pull_request_target/);
-  assert.match(workflow, /needs: \[checks, browser, win32, webkit, suite_plan\]/);
+  assert.match(workflow, /needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]/);
 });

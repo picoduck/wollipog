@@ -146,7 +146,7 @@ Protocol v81 distinguishes managed external-job waits from continuation delivery
 persists structured Claude job identity and parent-turn barriers before detachment, resumes a parent
 when its barrier becomes terminal, and retains an accepted-but-undelivered continuation as visibly
 pending instead of replaying it. Update runner and control plane together before relying on the
-**Waiting on External Job** or **Continuation Pending** states. Provider-opaque detached processes
+**Waiting on External Job** or **Follow-Up Pending** states. Provider-opaque detached processes
 remain untracked and carry no automatic-resume promise.
 
 Protocol v82 adds projection-safe managed-job inventories and a structured continuation-delivery
@@ -196,6 +196,7 @@ bounded privacy-safe inventory through the authorized single-session projection.
 | Inspect the bounded managed background-job inventory | 82 |
 | Classify provider background-work tracking explicitly | 83 |
 | Discover and safely adopt external Pi sessions | 156 |
+| Remove a workspace set in the runner's configuration | 279 |
 
 A missing protocol version is treated as **unknown**, not optimistically supported. Protocol
 metadata itself arrived in v15, so the dashboard cannot prove which earlier commands such a runner
@@ -302,7 +303,12 @@ snapshot-based recovery are acceptable.
 
 If candidate resolution fails, the request returns the exact error and the box keeps its current
 runner — nothing is marked failed. A `started` response means deployment has begun; the card's
-connection status, runner version, and protocol are the completion signal.
+connection status, runner version, protocol, and fresh harness discovery are the completion signal.
+An SSH runner stays deploying until discovery completes. A new ownership block, a previously ready
+harness becoming unavailable, or a previously authenticated account losing readiness marks the
+Machine failed with recovery guidance while leaving the connected runner available for inspection.
+See [Linux Delegation and Update Readiness](./ssh-runner-lifecycle.md#linux-delegation-and-update-readiness)
+for containment, shutdown acknowledgment, unsupported hosts, and historical-lease limitations.
 
 For a private repository, launch the control plane with `GH_TOKEN` or `GITHUB_TOKEN` scoped to
 `Contents: read`. The token is used only against `api.github.com`, is stripped before asset-CDN

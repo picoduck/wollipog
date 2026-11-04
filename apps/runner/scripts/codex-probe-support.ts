@@ -1,5 +1,18 @@
 import { mkdirSync } from "node:fs";
 import type { ChildProcess } from "node:child_process";
+import type { IncomingHttpHeaders } from "node:http";
+
+/**
+ * Whether a request to a scripted model server is Codex's own Guardian (auto-review) asking for a
+ * verdict, rather than the agent's turn. codex-cli 0.155.1 sends it as model `codex-auto-review`;
+ * 0.166.0, with a custom provider, sends it under the session's configured model. Both mark it with
+ * `x-openai-subagent: guardian`. A Guardian request the fixture misreads gets an agent answer,
+ * which Guardian rejects as invalid JSON and Codex treats as a denial, so cases that route through
+ * Guardian must also count that the fixture recognised it.
+ */
+export function isGuardianRequest(headers: IncomingHttpHeaders, body: Record<string, unknown>): boolean {
+  return headers["x-openai-subagent"] === "guardian" || String(body.model ?? "").startsWith("codex-auto-review");
+}
 
 const owned = new Map<ChildProcess, boolean>();
 let cancelled = false;

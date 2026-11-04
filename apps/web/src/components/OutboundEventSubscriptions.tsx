@@ -454,6 +454,7 @@ export function OutboundEventSubscriptions({
   } else if (empty) {
     body = (
       <State
+        pageLevel
         icon={<ShareIcon />}
         title="No Outbound Events Yet"
         headingLevel={3}

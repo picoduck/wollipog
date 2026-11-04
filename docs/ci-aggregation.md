@@ -1,8 +1,10 @@
 # Required CI Aggregation
 
 `Typecheck, Test & Sidecar Bundle` is the protected required context in
-`.github/workflows/ci.yml`. Its `check` job waits for `checks`, `browser`, the
-`win32` reusable workflow, `webkit`, and the optional PR `suite_plan`. The four
+`.github/workflows/ci.yml`. Its `check` job waits for `checks`, the sharded
+[`unit`](#unit-test-shards-and-step-budgets) job, `browser`, the `win32` reusable
+workflow, `webkit`, `delegated_pipeline`, the optional PR `suite_plan`, and the
+[disabled merge-group gate](#disabled-merge-group-gate) `merge_group_gate`. The six
 work results must be `success`. With the routing variable absent or ordinarily off,
 the plan must be `skipped` with no output; an activated PR requires a successful
 plan with an explicit `full` or `fast` output. Failure, cancellation, missing or
@@ -14,7 +16,8 @@ GitHub's case-insensitive expression matching admits a plan for case variants of
 fast aggregate. The absent/ordinary off state still adds no executed jobs.
 
 Full coverage remains five browser shards on every event while routing is off,
-and always on merge groups, main, manual dispatch and reusable rolling validation.
+and always on main, manual dispatch and reusable rolling validation. Merge groups
+stay full unless the disabled merge-group gate below is separately activated.
 Only an activated, trusted allowlisted prose fast PR uses one critical Chromium
 job and the fast Node group. All other coverage stays mandatory. Checks/browser
 wait for optional routing and use `!cancelled()` plus the same draft guard so an
@@ -41,6 +44,42 @@ validation now uses the separate rolling worker's native active/pending lane; it
 reusable CI call does not share ordinary CI's concurrency group.
 Merge-group runs retain the same cancellation admission, dependency checks and required name.
 The separate obsolete-merge-group monitor and CI permissions are unchanged.
+
+## Unit-Test Shards and Step Budgets
+
+Refs #3770. The full Node suite grew to 1,816–1,896 seconds by 2026-10-30, inside the
+35-minute `Typecheck, Unit Tests & Bundles` job. Merge groups were cancelled during the web
+build after every test had passed, and a cancelled job names no step. The work is now split:
+
+- `checks` (**Typecheck & Bundles**) keeps typecheck, the Node engine boundaries, delegated
+  containment and the bundles, about five minutes.
+- `unit` (**Unit Tests (1)**, **(2)**, **(3)**) runs one shard each of the same planned
+  suite. `scripts/node-test-plan.mjs` deals the cost-ordered plan back and forth across the
+  shards, so every discovered file runs in exactly one shard and the measured long files
+  spread evenly. Each shard installs the video decoder it needs; `fail-fast` is off.
+
+Coverage is unchanged: each shard runs the same discovery and plan as `pnpm test:ci`, and
+`scripts/node-test-plan.test.mjs` proves the shards are disjoint and their union is the
+plan, for every suite and shard count. The PR fast path and the disabled merge-group gate
+shard their `node-fast` selection the same way. The `unit` job uses the same guard and
+`needs` as `checks`, and the aggregator requires `needs.unit.result` to be `success`: one
+failed, cancelled or skipped shard fails the required check under the name **Unit Tests**.
+Main-push validation reuses this workflow, so the rolling inventory, release
+certification, main health and the restoration verifier require all three shard jobs and
+their `Unit Tests` steps.
+
+Every `run:` step in these two jobs has its own `timeout-minutes`, and the job budget
+covers all of those bounds at once, both decoder install attempts included, plus five
+minutes for the pinned setup actions. A step that overruns therefore fails under its own
+name before the job budget can cancel the job. The **Unit Tests** step allows 18 minutes
+against about eleven expected; the jobs allow 50 and 35 minutes. To add a shard, extend
+the matrix list and the `/3` denominators together. The workflow contract test requires
+them to agree, and pins each job's shape as it does the browser shards.
+
+Merge groups run the workflow file from the group's own merge commit, so a pull request
+changing this layout is validated by its own new jobs in the queue. Main-health and
+certification records from before the split lack the shard jobs and stay unverified;
+the first rolling run after the merge provides new full evidence.
 
 ## Same-Head Runs
 
@@ -92,6 +131,119 @@ Use `scripts/merge-queue-wait-report.mjs` for merge-group runner wait over the
 same window (see [Merge-Queue Wait](merge-queue-wait.md)). Collect natural
 post-merge traffic; do not manufacture runs or cancellations to measure this change.
 
+## Disabled Merge-Group Gate
+
+Refs #3637 under #3625. **Nothing is activated.** Today every merge group runs full
+regression; `CI_PR_SUITE_ROUTING` only ever reduces ready pull-request runs. The
+merge-group gate is prepared, inert machinery for a later, separately approved cutover.
+
+| Repository Variable `CI_MERGE_GROUP_GATE` | Behavior |
+| --- | --- |
+| Absent, empty, `disabled` (the rollback value) or any other ordinary value | `Merge Group Gate` is skipped and consumes no runner. Merge groups run today's full validation; the aggregator requires the gate to be `skipped` with no output. |
+| Case variants such as `Enabled` | GitHub's case-insensitive `==` admits the gate job (one five-minute runner, no API or Git work), whose exact shell check selects `full`. Coverage is unchanged; the aggregator requires the job's success and rejects a `fast` output. |
+| Exactly `enabled` | The gate evaluates every precondition below. Any unmet or unavailable precondition selects `full`. |
+
+The gate checks out current `refs/heads/main` with non-persisted credentials and runs
+`scripts/ci-merge-group-gate.mjs` from it, never the group's code. It reduces work only
+when **all** of these hold:
+
+1. The event is `merge_group` and the raw variable is exactly `enabled`.
+2. **Regression admission is actually enforced** per [#3633's contract](main-merge-admission.md):
+   one read of the active `main` branch rules must show the merge queue, the unchanged
+   `Typecheck, Test & Sidecar Bundle` context, and the `Regression Admission` context
+   pinned to a specific app issuer (`integration_id`). The dry-run shadow
+   (`CI_REGRESSION_ADMISSION=dry-run`) changes no ruleset and never satisfies this.
+3. `.github/workflows/ci.yml` is identical at trusted main and the group head.
+4. [#3629's trusted selector](ci-suites.md) run from trusted main over the **combined**
+   diff from current main to the group head (every queued change ahead of main, not
+   only the last PR) returns `fast` with no reasons and only ordinary risk, with an
+   exact context binding trusted main, the tested group SHA and `combined-merge-group`.
+   A group that does not descend from current main, and every affected, full,
+   high-risk or uncertain selection, stays full.
+
+A `fast` decision applies exactly the PR fast reduction: the `node-fast` group and one
+critical Chromium leg. Typecheck, engine boundaries, delegated containment, bundles,
+production smoke, WebKit and Windows comparison stay mandatory. The gate job records
+the decision as job-level evidence: exactly one of **Record Full Merge Group Coverage**
+or **Record Reduced Merge Group Coverage** runs.
+
+Checks and browser work consume a `fast` output only from a gate whose result is
+`success`; a failed, cancelled or skipped gate that retained an output still runs the
+full suite set. The aggregator keeps its name and every existing requirement. With the gate admitted
+it also requires the gate's `success` and an explicit `full` or `fast` output; failure,
+cancellation, a missing or unknown mode, or `fast` without the exact lowercase value
+fails the required check. Without admission, any gate result other than `skipped`, or
+any gate output, fails it. The PR path is unchanged: the PR expressions and shells only
+gain a separate merge-group branch that is false for every non-merge-group event.
+
+Evaluate a proposed configuration offline (one local JSON file, no API or Git reads):
+
+```sh
+node scripts/ci-merge-group-gate.mjs evaluate --config proposal.json
+# proposal.json: {"gate","event","trustedMainSha","testedSha","workflowMatches","selection","rules"}
+```
+
+`rules` is the branch-rules response; enforcement is always derived from it.
+
+### Rollback and Restoration Proof
+
+Roll back by deleting `CI_MERGE_GROUP_GATE` or setting it to `disabled`. Per
+[#3633's mandatory order](main-merge-recovery.md#operator-activation-and-rollback),
+full queue validation must be restored **and independently verified before any
+admission hold is removed**. `scripts/ci-merge-group-restoration.mjs` is that read-only
+verifier:
+
+```sh
+GITHUB_TOKEN=<read token> node scripts/ci-merge-group-restoration.mjs \
+  --repository picoduck/wollipog --since <switch-back UTC time> \
+  --trusted-ref <reviewed full-coverage commit SHA> [--runs 1-3]
+node scripts/ci-merge-group-restoration.mjs --repository ... --since ... --trusted-ref ... --fixture runs.json
+```
+
+Job and step names prove nothing about a workflow that a merge group may have edited.
+`--trusted-ref` is therefore mandatory: a reviewed commit whose `ci.yml` and
+`settings-rows-win32.yml` define full coverage with the gate disabled. Every selected
+run must have executed exactly those two Git blobs; any difference, including an
+edited Unit Tests command under the same step name, is a refusal.
+
+It reads the run listing, the trusted commit's `.github/workflows` listing, then one
+job listing and one workflow listing per selected run (at most eight GET requests,
+four for the default single run), never dispatches or writes, and exits 0 only when
+the newest `--runs` completed merge-group runs created after the switch-back each
+prove full coverage on their exact attempt: the trusted workflow blobs; a successful
+queue run of `ci.yml`; the rolling full
+inventory (`Typecheck & Bundles` with every engine, containment and bundle step, the
+three `Unit Tests (n)` shards each with its `Unit Tests` step, all five browser shards and no extra leg, shard 1's production smoke,
+WebKit, the win32 change detection, the aggregator); the path-scoped win32 comparison
+succeeded or was skipped; and `Merge Group Gate` absent or skipped with no reduced-coverage
+record. A failing, in-progress, partial or gate-active run is a refusal, not a pass. The
+JSON output is the `fullQueueProof` that `planRollback` requires (`workflowSha` is the
+trusted commit, with its `workflowBlobs`); it still needs separate operator hold-removal
+approval. The jobs API cannot show which shell branch a step took: Node coverage rests
+on the verified definition plus the skipped gate, which make the reduced branch unreachable.
+
+### Readiness, Rollback Triggers and Activation Proposal
+
+Three inert companions prepare a later, separately approved cutover; none changes a
+setting or reads GitHub:
+
+- `scripts/fast-gate-rollback.mjs` defines the rollback triggers and proposed thresholds
+  (`approved: false`; unapproved thresholds always evaluate to rollback). Its rehearsal
+  drives each trigger from an active fast gate to `CI_MERGE_GROUP_GATE=disabled`, this
+  verifier's proof and `planRollback`, and checks that hold removal is refused without
+  a verified proof. `plan --proof restoration.json` runs `planRollback` offline.
+- `scripts/fast-gate-readiness-report.mjs` generates the dated
+  [readiness report](fast-gate-readiness-2026-10-28.md). It separates criteria that are
+  met from observation, approval and code gaps, and reports too little data as incomplete.
+  `--check` fails when the committed report drifts.
+- The [activation proposal](fast-gate-activation-proposal.md) lists the exact variable
+  values, the ruleset body, the status-writing identity, the thresholds and their basis,
+  the bounded rollout, the measurement plan, rollback commands with read-back, and the
+  guidance text to apply at activation.
+
+Merge-queue wait measurement models an executed `Merge Group Gate` as critical-path
+execution ([Merge-Queue Wait](merge-queue-wait.md)).
+
 ## Bounds and Evidence Limits
 
 The aggregator owns one shell step and retains a five-minute job budget, measured
@@ -120,7 +272,9 @@ Run the dedicated source contract and aggregation fixtures:
 
 ```sh
 node --import tsx --test scripts/workflow-pr-event-contract.test.mjs scripts/workflow-ci-aggregation.test.mjs \
-  scripts/workflow-ci-routing.test.mjs scripts/pr-ci-supersede.test.mjs
+  scripts/workflow-ci-routing.test.mjs scripts/pr-ci-supersede.test.mjs \
+  scripts/ci-merge-group-gate.test.mjs scripts/ci-merge-group-restoration.test.mjs \
+  scripts/fast-gate-rollback.test.mjs scripts/fast-gate-readiness-report.test.mjs
 ```
 
 The aggregation fixtures evaluate the actual job condition using inert status

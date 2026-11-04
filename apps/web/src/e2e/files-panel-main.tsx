@@ -2,6 +2,8 @@ import React, { useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
 import {
   PROTOCOL_VERSION,
+  fuzzyPathNeedle,
+  fuzzyPathScore,
   type ControlPlaneToUi,
   type GitStatusInfo,
   type SessionFileEntry,
@@ -25,6 +27,8 @@ import "../styles.css";
  * changed files. Go to File searches a fixed set of paths. `?theme=light` switches the theme;
  * `?listing=loading` holds every listing; `?offline=1` takes the machine offline once the first
  * listing has landed; `?truncated=1` makes every search report more matches than it returned.
+ * The session works directly in `/workspace/wollipog`; `?worktree=managed` puts it in a managed
+ * worktree of the "acme-storefront" workspace instead, whose folder is named after the session.
  *
  * The viewer (#2853): `?open=<path>` opens a file, with `&line=` or `&symbol=` as its target;
  * `?panel=<px>` sets the desktop panel's width; `?editors=1` gives the machine two editors;
@@ -35,10 +39,13 @@ import "../styles.css";
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
 
+const managedWorktree = params.get("worktree") === "managed";
 const session: SessionView = {
-  id: "files-panel-e2e", runnerId: "runner-1", workspaceId: "workspace-1", workspaceName: "Wollipog",
+  id: "files-panel-e2e", runnerId: "runner-1", workspaceId: "workspace-1",
+  workspaceName: managedWorktree ? "acme-storefront" : "Wollipog",
   projectId: null, agentId: "claude", agentName: "Claude", title: "Browse the Worktree", status: "idle",
-  column: "review", runId: null, useWorktree: true, worktreePath: "/workspace/wollipog",
+  column: "review", runId: null, useWorktree: managedWorktree,
+  worktreePath: managedWorktree ? "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_8c41d2" : "/workspace/wollipog",
   archived: false, createdAt: 1, updatedAt: 1, lastEventAt: 1, messageCount: 1, eventEpoch: 0,
   preview: null, pendingApproval: null, driver: "claude-code", model: null, effort: null,
   permissionMode: null, tokensIn: 0, tokensOut: 0, costUsd: 0, adopted: false,
@@ -68,7 +75,7 @@ const searchable = [
   "apps/web", "apps/runner", "docs/design-system.md", "docs/logo.png", "packages/protocol",
   "apps/web/src", "apps/runner/src/session-checks.ts", "apps/runner/src/checkout.ts",
   "apps/web/src/checklist.tsx", "apps/web/src/components", "apps/web/src/components/CheckBadge.tsx",
-  "packages/protocol/src/health-check.ts",
+  "packages/protocol/src/health-check.ts", "apps/web/src/components/SessionDetail.tsx",
 ];
 const directories = new Set(["apps", "docs", "packages", "apps/web", "apps/runner", "packages/protocol", "apps/web/src", "apps/web/src/components"]);
 
@@ -140,7 +147,25 @@ const client: ApiClient = {
     if (params.get("reading") === "hold") return new Promise(() => undefined);
     return readFixture(path);
   },
-  searchWorkspaceReferences: async (_sessionId, query) => {
+  searchWorkspaceReferences: async (_sessionId, query, match) => {
+    // A current runner matches fuzzily and answers best first (#1263); `?runner=old` predates that.
+    if (match === "fuzzy" && params.get("runner") !== "old") {
+      const fuzzy = fuzzyPathNeedle(query);
+      const limit = params.get("truncated") === "entries" ? "entries" : params.get("truncated") === "1" ? "results" : undefined;
+      return {
+        results: searchable
+          .filter((path) => !directories.has(path))
+          .flatMap((path) => {
+            const score = fuzzyPathScore(path, fuzzy);
+            return score === null ? [] : [{ path, score }];
+          })
+          .sort((a, b) => b.score - a.score)
+          .map(({ path }) => ({ path, isDirectory: false })),
+        truncated: limit !== undefined,
+        match,
+        ...(limit ? { limit } : {}),
+      };
+    }
     const needle = query.toLocaleLowerCase();
     return {
       results: searchable

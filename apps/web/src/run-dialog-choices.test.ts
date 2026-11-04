@@ -11,9 +11,33 @@ import {
   workflowRoleFields,
   type NewRunBlockInput,
 } from "./run-dialog-choices.js";
+import { bindableAgents, defaultAgentId, installationFor } from "./automation-installations.js";
 
 const agent = (id: string, driver: AgentDefinition["driver"], overrides: Partial<AgentDefinition> = {}): AgentDefinition => ({
   id, name: id, command: id, args: [], env: {}, driver, available: true, ...overrides,
+});
+
+test("automatic run and automation choices use the effective default without selecting ready B implicitly", () => {
+  const a = agent("claude", "claude-code", { authStatus: "authenticated", defaultProviderAccountId: "a",
+    installation: { id: "cli", path: "/fixture/claude", via: "path" },
+    providerAccountReadiness: { defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"] } });
+  const runner = { agents: [a], protocolVersion: 283 } as RunnerView;
+  assert.deepEqual(defaultRunAgentIds([a]), []);
+  assert.equal(defaultAgentId([a]), "");
+  assert.deepEqual(bindableAgents(runner), []);
+  assert.equal(installationFor(runner, a.id), null);
+  const defaults = [{ provider: "claude" as const, accountId: "b", revision: 1 }];
+  runner.providerAccountDefaults = defaults;
+  assert.deepEqual(defaultRunAgentIds([a], defaults), [a.id]);
+  assert.equal(defaultAgentId([a], defaults), a.id);
+  assert.equal(bindableAgents(runner).length, 1);
+  assert.equal(installationFor(runner, a.id)?.installationId, "cli");
+  assert.equal(a.defaultProviderAccountId, "a");
+  const implicit = { ...a, defaultProviderAccountId: undefined, providerAccountReadiness: {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated" as const, readyAccountIds: ["b"],
+  } };
+  assert.deepEqual(defaultRunAgentIds([implicit]), [implicit.id], "the first granted implicit account can run");
+  assert.equal(defaultAgentId([implicit]), implicit.id);
 });
 
 test("defaultRunAgentIds picks at most three, one per driver before a second of any", () => {
@@ -40,6 +64,17 @@ test("a signed-out or unavailable agent is never chosen, nor selectable", () => 
   ];
   assert.deepEqual(selectableRunAgentIds(agents), ["opencode"]);
   assert.deepEqual(defaultRunAgentIds(agents), ["opencode"]);
+});
+
+test("an unverified agent is never selectable, and an available native harness replaces its ACP duplicate", () => {
+  assert.deepEqual(selectableRunAgentIds([
+    agent("claude", "claude-code"),
+    agent("config", "acp", { name: "Config agent", available: undefined }),
+  ]), ["claude"]);
+  assert.deepEqual(selectableRunAgentIds([
+    agent("claude-acp", "acp", { name: "Claude Code (ACP)" }),
+    agent("claude-native", "claude-code", { name: "Claude Code" }),
+  ]), ["claude-native"]);
 });
 
 const definition = (nodes: WorkflowDefinition["nodes"]): WorkflowDefinition => ({

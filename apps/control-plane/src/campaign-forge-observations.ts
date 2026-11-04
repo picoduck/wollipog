@@ -12,6 +12,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   CAMPAIGN_FORGE_OBSERVATION,
   campaignRepositoryLocation,
+  forgeActionBranchName,
   runnerSupportsProtocol,
   type CampaignForgeObservationFailure,
   type CampaignForgeObserveMessage,
@@ -42,6 +43,8 @@ CREATE TABLE IF NOT EXISTS campaign_forge_observations (
 
 export type ForgeFact = CampaignObservedFact<CampaignForgeChangeRequestObservation>;
 export type ForgeFactEntry = { ref: CampaignPullRequestRef; fact: ForgeFact };
+/** One validated answer for one ref: an observation or a recognized failure. */
+export type ForgeReadResult = { ref: CampaignPullRequestRef; observation?: CampaignForgeChangeRequestObservation; failure?: CampaignForgeObservationFailure };
 
 /** How the runner hosting the campaign stands right now. */
 export type ForgeObserverState = "online" | "offline" | "unsupported";
@@ -158,15 +161,20 @@ export class CampaignForgeObservationStore {
 
   /** For the background pass: when each ref was last read, successfully or not (a failed read waits
    * the same interval as a successful one), and whether its last value is a finished pull request
-   * (merged or closed) with no failure since. */
+   * (merged or closed) with no failure since. A merged pull request whose head branch is still on
+   * the remote is not finished: its cleanup is still owed (#4067). */
   readState(campaignId: string, refs: readonly CampaignPullRequestRef[]): Map<string, { readAt: number; finished: boolean }> {
     return new Map(refs.flatMap((ref) => {
       const row = this.row(campaignId, ref);
       if (!row) return [];
-      const state = row.value_json ? (JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation).state : null;
+      const value = row.value_json ? JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation : null;
+      // A merged branch still on the remote, or a same-repository one the forge did not name usably,
+      // is cleanup still owed: keep reading it.
+      const branchRemains = value?.forge === undefined && value?.state === "merged" &&
+        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch && value.crossRepository === false));
       return [[forgeRefKey(ref), {
         readAt: Math.max(row.observed_at ?? 0, row.failed_at ?? 0),
-        finished: !row.failure_reason && (state === "merged" || state === "closed"),
+        finished: !row.failure_reason && (value?.state === "merged" || value?.state === "closed") && !branchRemains,
       }]];
     }));
   }
@@ -238,7 +246,7 @@ export class CampaignForgeObserver {
       if (this.queue.length >= MAX_QUEUED_READS) break;
       const keys = batch.map((ref) => `${campaignId}|${forgeRefKey(ref)}`);
       for (const key of keys) this.lastRead.set(key, now);
-      const read = this.limited(() => this.read(campaignId, runner.runnerId, batch)).finally(() => {
+      const read = this.limited(async () => { await this.read(campaignId, runner.runnerId, batch); }).finally(() => {
         // The interval runs from when the read finished, whatever it learned: a read that waited in
         // the queue or timed out is not repeated at once, by a caller or by the background pass.
         const finished = this.now();
@@ -251,6 +259,25 @@ export class CampaignForgeObserver {
       waits.push(read);
     }
     await Promise.all(waits);
+  }
+
+  /** One authoritative read of these refs now, for proof that must not rest on an earlier answer
+   * (#2940 closure execution). It skips the rate limit, the stored facts and any read already in
+   * flight, which may predate a change, but keeps the shared concurrency limit, the bounded queue
+   * and the runner's per-request limit. Resolves to one result per ref in order, or null when the
+   * runner cannot be asked, the queue is full, or any batch was not answered; never rejects. */
+  async readNow(campaignId: string, refs: readonly CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
+    const runner = this.deps.observingRunner(campaignId);
+    if (!refs.length || !runner || !runner.online || !runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus")) return null;
+    const batches: CampaignPullRequestRef[][] = [];
+    for (let start = 0; start < refs.length; start += CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) {
+      batches.push(refs.slice(start, start + CAMPAIGN_FORGE_OBSERVATION.refsPerRequest));
+    }
+    if (this.queue.length + batches.length > MAX_QUEUED_READS) return null;
+    const answers = await Promise.all(batches.map((batch) => new Promise<ForgeReadResult[] | null>((resolve) => {
+      void this.limited(async () => resolve(await this.read(campaignId, runner.runnerId, batch))).finally(() => resolve(null));
+    })));
+    return answers.every((answer): answer is ForgeReadResult[] => answer !== null) ? answers.flat() : null;
   }
 
   /** One background pass: unfinished items' pull requests not read for `backgroundIntervalMs`,
@@ -318,7 +345,7 @@ export class CampaignForgeObserver {
     });
   }
 
-  private async read(campaignId: string, runnerId: string, refs: CampaignPullRequestRef[]): Promise<void> {
+  private async read(campaignId: string, runnerId: string, refs: CampaignPullRequestRef[]): Promise<ForgeReadResult[] | null> {
     const requestId = this.deps.newRequestId();
     let response: unknown;
     try {
@@ -334,24 +361,26 @@ export class CampaignForgeObserver {
       // Disconnected or timed out: nothing was learned. The facts keep their last state, a missing
       // one reads `runner_disconnected` while the runner is gone, and every value ages into stale.
       this.deps.warn(`campaign forge read for ${campaignId} did not complete: ${String(error)}`);
-      return;
+      return null;
     }
     try {
       // Validation itself must not throw past here: a malformed answer only stores nothing.
-      const results = validResults(response, campaignId, refs);
+      const results = validForgeResults(response, campaignId, refs);
       if (!results) {
         this.deps.warn(`campaign forge read for ${campaignId} returned a malformed answer`);
-        return;
+        return null;
       }
       if (this.deps.store.record(campaignId, runnerId, results, this.now())) this.deps.changed(campaignId);
+      return results;
     } catch (error) {
       this.deps.warn(`campaign forge observation for ${campaignId} could not be stored: ${String(error)}`);
+      return null;
     }
   }
 }
 
 /** Accept only an answer for exactly the refs asked, in order, with recognized failures. */
-function validResults(
+function validForgeResults(
   response: unknown,
   campaignId: string,
   refs: readonly CampaignPullRequestRef[],
@@ -446,7 +475,18 @@ function validObservation(value: unknown): value is CampaignForgePullRequestObse
     validRollup(pr.checks) && validRollup(pr.requiredChecks) &&
     (queue === null || (typeof queue === "object" && QUEUE_STATES.has(queue.state as string) &&
       (queue.position === null || (Number.isSafeInteger(queue.position) && (queue.position as number) >= 0)))) &&
-    (pr.mergeCommitSha === null || (typeof pr.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(pr.mergeCommitSha)));
+    (pr.mergeCommitSha === null || (typeof pr.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(pr.mergeCommitSha))) &&
+    (pr.defaultBranch === undefined ||
+      (typeof pr.defaultBranch === "string" && pr.defaultBranch.length > 0 && pr.defaultBranch.length <= 256)) &&
+    (pr.headBranch === undefined || validHeadBranch(pr.headBranch)) &&
+    (pr.crossRepository === undefined || typeof pr.crossRepository === "boolean");
+}
+
+/** v284 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
+function validHeadBranch(value: unknown): boolean {
+  const branch = value as Record<string, unknown> | null;
+  return Boolean(branch) && typeof branch === "object" && forgeActionBranchName(branch!.name) &&
+    (branch!.tipSha === null || (typeof branch!.tipSha === "string" && /^[0-9a-f]{40}$/u.test(branch!.tipSha)));
 }
 
 /** Store exactly the wire fields of a validated observation. */
@@ -463,5 +503,8 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     requiredChecks: rollup(pr.requiredChecks),
     mergeQueue: pr.mergeQueue ? { state: pr.mergeQueue.state, position: pr.mergeQueue.position } : null,
     mergeCommitSha: pr.mergeCommitSha,
+    ...(pr.defaultBranch !== undefined ? { defaultBranch: pr.defaultBranch } : {}),
+    ...(pr.headBranch !== undefined ? { headBranch: { name: pr.headBranch.name, tipSha: pr.headBranch.tipSha } } : {}),
+    ...(pr.crossRepository !== undefined ? { crossRepository: pr.crossRepository } : {}),
   };
 }

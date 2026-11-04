@@ -36,13 +36,8 @@ export const LABEL_SWAP = new RegExp(
 /** The inventory, exact: production file → label-swapping sites it still has. */
 const BASELINE: Readonly<Record<string, number>> = {
   "components/Board.tsx": 1,
-  "components/InstancesPanel.tsx": 1,
   "components/OfflineBanner.tsx": 1,
-  // Moved with the pairing banner from App.tsx (#2303), which kept its behaviour as it was.
-  "components/PairingBanner.tsx": 2,
   "components/PendingPromptBubbles.tsx": 3,
-  "components/PeopleDevicesPanel.tsx": 4,
-  "components/UsageView.tsx": 4,
 };
 
 function sourceFiles(dir: string, out: string[] = []): string[] {

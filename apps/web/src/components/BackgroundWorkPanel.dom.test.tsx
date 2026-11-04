@@ -779,7 +779,7 @@ test("receipt-only turns list one Result Receipt row per receipt with its stage 
     assert.deepEqual(receipts.map((row) => [row.tagName, row.querySelector(".row-title")?.textContent,
       row.querySelector(".status")?.textContent, row.querySelector(".row-sub")?.textContent]), [
       ["DIV", "Result Receipt", "Result Returned", "3 of 3 jobs finished"],
-      ["DIV", "Result Receipt", "Returning Result", "1 of 1 job finished"],
+      ["DIV", "Result Receipt", "Follow-Up Pending", "1 of 1 job finished"],
     ], "a receipt is not a job, so it opens no page");
     assert.doesNotMatch(panel.container.textContent ?? "", /Running|Completed|Failed|Killed|Lost|private-continuation|retained-parent/u);
   } finally {
@@ -1141,7 +1141,7 @@ test("Result Blocked offers Stop <job name>… behind the Job Detail confirmatio
     assert.equal(notice().querySelector(".background-recovery-note[role='status']")?.textContent,
       "Stopped. Its status updates here shortly.");
     await act(async () => notice().querySelector<HTMLButtonElement>(".notice-details-toggle")!.click());
-    assert.match(notice().querySelector(".facts")?.textContent ?? "", /Other Ways.*Restarting the session ends every job and reports this result to the new conversation\./su);
+    assert.match(notice().querySelector(".facts")?.textContent ?? "", /Other Ways.*Restarting the session ends every job and reports this result after the restart\./su);
 
     // An older runner: the action stays, disabled, described by its reason on screen.
     await render(blockedSession("session-blocked-old-runner"), 189);
@@ -1199,7 +1199,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) test(`historical ${paren
     assert.match(notice.textContent!, /will not resubmit them automatically/);
     assert.match(notice.textContent!, /Open More Actions and choose Restart Session/);
     assert.doesNotMatch(notice.textContent!, /Returning .* to this conversation/);
-    assert.doesNotMatch(panel.container.textContent!, /Returning Result/,
+    assert.doesNotMatch(panel.container.textContent!, /Follow-Up Pending/,
       "the group badge must not contradict its explicit historical recovery notice");
   } finally { await panel.dispose(); }
 });
@@ -1801,4 +1801,103 @@ test("after a blocked result's Acknowledge, its Acknowledged entry takes the slo
   } finally {
     await panel.dispose();
   }
+});
+
+test("a handoff hold waiting on work no row shows is named in a notice, with Proceed Now only for whoever may take it (#3752)", async () => {
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:1", since: Date.now() - 41 * MINUTE, target: "/w/issue-3752",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 2, canRelease: true as const,
+    unlistedJobs: [{ id: "b5p3g2lyb", kind: "unregistered" as const }, { id: "tool:toolu_watch", kind: "provisional" as const }],
+  };
+  const owner = { stop: { allowed: true }, restart: { allowed: true }, stopBackgroundJob: { allowed: true } };
+  const viewer = { ...owner, stopBackgroundJob: { allowed: false, reason: "Only the session owner can do this." } };
+  const unlistedNotice = (container: HTMLElement) => [...container.querySelectorAll<HTMLElement>(".notice")]
+    .find((notice) => notice.querySelector(".notice-title")?.textContent === "Handoff Waiting on Unlisted Work");
+  const panel = await mountBackgroundWork({
+    session: managedSession({ status: "queued", queueHold, commandPermissions: owner } as Partial<SessionView>),
+  });
+  try {
+    const notice = unlistedNotice(panel.container)!;
+    assert.ok(notice.classList.contains("t-warning"));
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "The move to worktree /w/issue-3752 waits for 2 tasks that have no job in this list. " +
+      "Proceed Now in the queued messages ends it with the rest of this session's background work.");
+    await act(async () => notice.querySelector<HTMLButtonElement>(".notice-details-toggle")!.click());
+    assert.deepEqual([...notice.querySelectorAll(".facts > div")].map((pair) =>
+      [pair.querySelector("dt")?.textContent, pair.querySelector("dd")?.textContent]),
+    [["Unregistered Task", "b5p3g2lyb"], ["Unconfirmed Launch", "tool:toolu_watch"]]);
+
+    await panel.render({ session: managedSession({ status: "queued", queueHold: { ...queueHold, endsAt: Date.now() + 19 * MINUTE },
+      commandPermissions: viewer } as Partial<SessionView>) });
+    assert.match(unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "",
+      /It ends when the provider reports it finished, or when the hold's deadline passes\.$/u);
+    // A hold with no deadline (its bound disabled, or an older runner) promises none.
+    await panel.render({ session: managedSession({ status: "queued", queueHold, commandPermissions: viewer } as Partial<SessionView>) });
+    const noDeadline = unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(noDeadline, /It ends when the provider reports it finished\.$/u);
+    assert.doesNotMatch(noDeadline, /deadline/u);
+
+    const account = { ...queueHold, kind: "provider_account_switch" as const, holdId: "provider-account-switch:1",
+      target: "dev@example.com", unfinishedBackgroundJobs: 1, unlistedJobs: [queueHold.unlistedJobs[1]!] };
+    await panel.render({ session: managedSession({ status: "queued", queueHold: account, commandPermissions: owner } as Partial<SessionView>) });
+    const accountBody = unlistedNotice(panel.container)?.querySelector(".notice-body")?.textContent ?? "";
+    assert.match(accountBody, /^The switch to the selected provider account waits for a task that has no job in this list\./u);
+    assert.doesNotMatch(panel.container.textContent ?? "", /dev@example\.com/u);
+
+    await panel.render({ session: managedSession({ status: "running", queueHold: undefined, commandPermissions: owner } as Partial<SessionView>) });
+    assert.equal(unlistedNotice(panel.container), undefined, "no notice once the hold clears");
+  } finally {
+    await panel.dispose();
+  }
+});
+
+test("unlisted-only hold timestamps update while the panel stays open (#3894)", async (t) => {
+  const startedAt = Date.now() - 2 * MINUTE;
+  t.mock.timers.enable({ apis: ["Date", "setInterval"], now: Date.now() });
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobs: [], backgroundDeliveries: [],
+    queueHold: { kind: "worktree_rebind", holdId: "clock", since: startedAt, target: "/worktree",
+      queuedPrompts: 1, unfinishedBackgroundJobs: 1, unlistedJobCount: 1,
+      oldestUnfinishedJob: { launchType: "provisional", startedAt },
+      unlistedJobs: [{ id: "pending", kind: "provisional", startedAt }] } }) });
+  try {
+    const notice = panel.container.querySelector('[data-state="unlisted-hold"]')!;
+    const before = notice.querySelector("time")!.textContent;
+    await act(async () => { t.mock.timers.tick(2 * MINUTE); });
+    assert.notEqual(notice.querySelector("time")!.textContent, before);
+  } finally { await panel.dispose(); t.mock.timers.reset(); }
+});
+
+test("older holds with truncated ledgers show a lower bound rather than invent an unlisted count (#3894)", async () => {
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", backgroundJobsTruncated: true,
+    queueHold: { kind: "worktree_rebind", holdId: "legacy", since: 1, target: "/worktree",
+      queuedPrompts: 1, unfinishedBackgroundJobs: 30, unlistedJobs: [{ id: "pending", kind: "unregistered" }] } }) });
+  try {
+    const notice = panel.container.querySelector('[data-state="unlisted-hold"]')!;
+    assert.match(notice.textContent ?? "", /waits for at least 1 task that has no job in this list/u);
+    assert.doesNotMatch(notice.textContent ?? "", /Showing/u);
+  } finally { await panel.dispose(); }
+});
+
+for (const count of [1, 25]) test(`unlisted-only hold shows timestamps, oldest item and full ${count}-id count (#3894)`, async () => {
+  const startedAt = Date.UTC(2026, 9, 30, 12);
+  const queueHold = {
+    kind: "worktree_rebind" as const, holdId: "hold-times", since: startedAt + 60_000,
+    target: "/worktree", queuedPrompts: 1, unfinishedBackgroundJobs: count, unlistedJobCount: count,
+    oldestUnfinishedJob: { launchType: "unregistered" as const, startedAt },
+    unlistedJobs: Array.from({ length: Math.min(count, 20) }, (_, i) => ({
+      id: `pending-${i}`, kind: "unregistered" as const, startedAt: startedAt + i * 1000,
+    })),
+  };
+  const panel = await mountBackgroundWork({ session: managedSession({ status: "queued", queueHold, backgroundJobs: [] }) });
+  try {
+    const notice = panel.container.querySelector<HTMLElement>('[data-state="unlisted-hold"]')!;
+    assert.ok(notice);
+    assert.match(notice.textContent ?? "", /The oldest blocking item, an unregistered task, started/u);
+    assert.equal(notice.querySelector("time")?.getAttribute("datetime"), new Date(startedAt).toISOString());
+    if (count > 20) assert.match(notice.textContent ?? "", /waits for 25 tasks.*Showing 20 of 25/u);
+    await act(async () => notice.querySelector<HTMLButtonElement>(".notice-details-toggle")!.click());
+    const times = [...notice.querySelectorAll(".facts time")];
+    assert.equal(times.length, Math.min(count, 20));
+    times.forEach((time, i) => assert.equal(time.getAttribute("datetime"), new Date(startedAt + i * 1000).toISOString()));
+  } finally { await panel.dispose(); }
 });

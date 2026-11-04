@@ -52,7 +52,7 @@ export async function codexOffersSelfUpdate(
   binary: ResolvedBinary,
   context: AgentContext,
   execute: typeof run = run,
-  observer: CodexProbeObserver = {},
+  observer: CodexProbeObserver & { env?: Record<string, string> } = {},
 ): Promise<boolean> {
   const command = context.kind === "wsl" ? "wsl.exe" : binary.launch.command;
   const args = context.kind === "wsl"
@@ -148,7 +148,7 @@ export async function checkHarnessUpdate(
   context: AgentContext,
   installedVersion: string | undefined,
   installedCompatible: boolean,
-  observer: CodexProbeObserver = {},
+  observer: CodexProbeObserver & { env?: Record<string, string> } = {},
 ): Promise<HarnessUpdateAssessment> {
   const checkedAt = Date.now();
   const packageName = npmPackageForInstallation(harness, binary);

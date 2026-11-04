@@ -25,11 +25,11 @@ export function rootHelp(): string {
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  automation          Propose, inspect, and create an automation with human approval",
-    "  decision            Request, read, consume, and reconcile typed workflow decisions for this session",
+    "  decision            Request, read, consume, execute, reconcile, and withdraw typed workflow decisions",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  pr                  Wait for a pull request's required checks or merge-queue outcome",
-    "  review              Run the cross-model review of this session's own pull request through the runner",
+    "  review              Start or inspect a review session for your own pushed pull request",
     "  admin               Administer a control plane from its host",
     "  service             Manage a headless Linux systemd deployment",
     "  help [topic]        Show root or topic-specific help",
@@ -84,15 +84,16 @@ export function sessionHelp(): string {
     "  session steering-get <session-id> <submission-id> [--json]",
     "  session resolve-steering <session-id> <submission-id> <queue_again|dismiss> [--json]",
     "  session handoff-result <session-id> --revision <result-revision> [--json]",
-    "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
+    "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--full] [--json]",
     "  session stop <session-id> [--json]",
     "  session stop-job <session-id> <job-id> [--json]",
+    "  session release-hold <session-id> <hold-id> [--json]",
     "  session restart <session-id> [--json]",
     "  session archive <session-id> [--json]",
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",
     "                     [--max-child-sessions <count>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "session wait --for defaults to input_required,completed,failed,stopped and accepts queued, starting, running, input_required, idle, completed, failed, and stopped; any other state is refused at once. --timeout defaults to 60000, up to 3600000. It prints outcome \"reached\" or, when the timeout elapses first, outcome \"timeout\" with the session's last-read metadata. Exit status: 0 reached; 124 timeout; 1 unknown state, missing session, or control-plane failure.",
+    "session wait --for defaults to input_required,completed,failed,stopped and accepts queued, starting, running, input_required, idle, completed, failed, and stopped; any other state is refused at once. --timeout defaults to 60000, up to 3600000. It prints outcome \"reached\" or, when the timeout elapses first, outcome \"timeout\" with a compact last-read status (id, status, attentionRevision, pendingRequestCount, lastActivityAt); --full returns the full metadata instead. Exit status: 0 reached; 124 timeout; 1 unknown state, missing session, or control-plane failure.",
     "session events without --after returns the newest events. With --after it pages forward from that seq; pass the returned lastSeq as the next --after, and eventEpoch as --event-epoch, while hasMore is true.",
     "For uncertain steering delivery, inspect the exact submission before resolving it. A pending resolution is not confirmed; read it before retrying the identical action. These commands use the same descendant scope as session prompt.",
   ].join("\n");
@@ -134,8 +135,10 @@ The proposal requires requestId, issue, reason (completed or not_planned), expla
 evidence, and an optional exact comment. Repository and current work conflicts are derived
 by the runner and control plane. Only an injected root Orchestrator with protocol v194+
 may close a campaign-scoped issue. Approval expires after 30 minutes; changed evidence
-requires renewed human review. Read issueClosureResult to verify completion. If the
-result is uncertain, inspect GitHub and never replay the action or substitute a shell command.
+requires renewed human review. Read issueClosureResult to verify completion. A refused
+result wrote nothing; its refusal.reason and refusal.summary say why, and a new request is
+needed. If the result is uncertain, inspect GitHub and never replay the action or substitute
+a shell command.
 
 Issue scope: issue-scope get [--epic <number>]; issue-scope request --proposal <json>.
 Tools: get_campaign_issue_scope, request_campaign_issue_scope_change, request_github_issue_closure, close_github_issue; recover with decision get.
@@ -147,17 +150,15 @@ export function campaignHelp(): string {
 
 Commands:
   plan --input '<json>'                          Upsert work items by key: {items[], planComplete}
-  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, or endAttempt
+  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, handoff, or endAttempt
+  deliver <work-item-id> --input '<json>'        Record delivery from checked evidence (protocol v275+):
+                                                 {pullRequests?, report?: {childSessionId,
+                                                 reportEventSeq}, note?}
   assign <work-item-id> <child-session-id>       Record that a descendant now works on the item
   adjudicate <recommendation-id> --input '<json>'
                                                  Record {disposition, reason, resultingWorkItemKey?,
                                                  resultingIssue?, publicationRequired?}
   allocate --input '<json>'                      Reserve a managed worker's allowance (protocol v218+)
-  review --input '<json>'                        Dispatch/read a bounded controlled native review job
-  review-job <job-id>                            Read a review receipt without new spending
-  review-jobs [--limit <n>] [--cursor <job-id>] [--item <work-item-id>]
-                                                 Read active and terminal recovery metadata
-  review-report <job-id>                         Read a validated report separately for adjudication
   work-items [--item <id>] [--state <state>] [--origin original|follow_up]
              [--sort queue|activity|elapsed|cost] [--limit <n>] [--cursor <cursor>]
              [--recommendations]                 Read the summary and one page or one item
@@ -165,10 +166,12 @@ Commands:
 Only an injected Orchestrator session with control plane protocol v196+ may use these. Every
 record lands in the root campaign's ledger. Records grant no authority: they never dispatch,
 publish, merge, or resolve a decision. Record delivery with verify_campaign_child and its
-workItem; a reported merged stage does not mark an item delivered.
+workItem, or with deliver when merged pull requests or an earlier exact report prove it; a
+reported merged stage does not mark an item delivered. Hand an item whose next step belongs to a
+person to them with update-item's handoff.
 
 Tools: record_campaign_plan, update_campaign_work_item, assign_campaign_work_item,
-adjudicate_campaign_recommendation, get_campaign_work_items.
+record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items.
 `;
 }
 
@@ -180,11 +183,18 @@ export function decisionHelp(): string {
     "  decision list [--session <id>] [--limit <1-100>] [--cursor <occurrence-id>] [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
     "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
+    "  decision execute <occurrence-id> --resource-digest <sha256> [--json]",
+    "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",
+    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
+    "  decision hand-to-owner <occurrence-id> --reason <text> [--session <id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "Reads may target an accessible descendant with --session for an Orchestrator; request, consume, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, reconcile_workflow_decision.",
+    "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, execute, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, execute_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
+    "Execute has Wollipog perform one approved forge action itself through this session's forge login: a merged_branch_deletion naming pullRequest and headSha (compare-and-delete pinned to that head), or an armed GitHub pr_merge (the canonical pinned enqueue). Use it when your provider refuses the approved command; never retry that command another way. Read forgeAction for the outcome. Requires control plane protocol v284.",
     "Descendant reads and lists require control plane v214. Follow nextCursor until absent. Older runners can use an updated CLI or GET /api/sessions/:id/workflow-decisions[/<occurrence-id>] against v214 where a session token is provisioned. Provider-isolated sessions have only a relay key: upgrade the runner/CLI instead of seeking a bearer token. Older control planes expose pending requests only through list_descendant_requests. A 404 or missing list entry never proves consumption.",
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
+    "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
+    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their choice comes back to you. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }
@@ -215,9 +225,14 @@ export function pullRequestHelp(): string {
   return [
     "Usage: wollipog pr wait <number|owner/name#number|url> [--repo <owner/name>] [--head <sha>]",
     "                        [--timeout <ms>] [--interval <ms>] [--any-failure] [--json]",
+    "       wollipog pr closures <number|owner/name#number|url> [--repo <owner/name>] [--intended <issue>]... [--json]",
+    "       wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... [--json]",
     "Block until the pull request's required checks pass or fail, GitHub marks its merge-queue entry",
     "UNMERGEABLE or it leaves the queue, it merges or closes, its head moves, or the timeout expires.",
     "A failed merge-group check alone does not end the wait: GitHub may rebuild the group and merge it.",
+    "queue_ejected also covers an entry GitHub removed before the call started: when the latest",
+    "merge-queue event removed the current head and the pull request is still open, mergeQueueRemoval",
+    "gives GitHub's reason (for example checks_timed_out, failed_checks, manual) and time. It never re-enqueues.",
     "It then prints one bounded summary: head SHA, each required check, merge-queue position and state,",
     "failed jobs with run links, and whether it merged. Nothing calls a model while it waits.",
     "Required checks come from the base branch's rulesets and branch protection. One GitHub has not",
@@ -228,26 +243,31 @@ export function pullRequestHelp(): string {
     "--timeout defaults to 240000 (4 minutes), up to 10800000; a slow GitHub read can add at most 20 seconds.",
     "--interval defaults to 30000, 10000-600000.",
     "--any-failure also returns when a check outside the required set fails on the head.",
-    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, queue_failed,",
-    "queue_ejected, closed, or head_changed; 124 timeout; 1 GitHub could not be read; 2 usage.",
+    "A GitLab merge request (its URL, or <gitlab-host>/group/project!<iid>, or a bare IID with",
+    "--repo <gitlab-host>/group/project) is read with this machine's `glab` login instead. It returns when",
+    "the head pipeline or merge-train pipeline finishes, it leaves the train, merges, closes, or its head",
+    "moves. Only a successful pipeline passes; a skipped or manual one returns checks_blocked.",
+    "Exit status: 0 checks_passed, merged, or no_required_checks; 3 checks_failed, checks_blocked,",
+    "queue_failed, queue_ejected, closed, or head_changed; 124 timeout; 1 the forge could not be read;",
+    "2 usage.",
+    "",
+    "pr closures lists every issue merging a GitHub pull request would close: a closing keyword (close,",
+    "fix or resolve, in any tense) directly before an issue reference in its description closes it even in",
+    "a negated or hyphenated phrase such as \"does not close #N\" or \"auto-close #N\", and so does an issue",
+    "linked on GitHub. Code spans, code blocks and HTML comments do not close. --file reads a draft",
+    "description instead, before it is published. Pass each issue the merge should close with --intended",
+    "(#N, owner/name#N, or an issue URL), and write \"Refs #N\" for one that must stay open. It reads locally",
+    "with this machine's `gh` login, like pr wait. A GitHub pr_merge decision makes the same read and is",
+    "refused unless its intendedClosures match.",
+    "Exit status: 0 the closures are exactly the intended ones; 3 they differ (see undeclared and unmade);",
+    "1 GitHub or the file could not be read; 2 usage.",
   ].join("\n");
 }
 
 export function reviewHelp(): string {
   return [
-    "Usage: wollipog review <command> [options]",
-    "  review run --repo <owner/name> --pr <number> --head <sha> [--brief-file <path>]",
-    "             [--scope delta|full] [--full-reason <text>] [--json]",
-    "  review get <job-id> [--json]",
-    "  review list [--limit <1-100>] [--cursor <job-id>] [--json]",
-    "  review cancel <job-id> [--json]",
-    "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "The runner runs the installed cross-model review controller for this session's own open pull request at its pushed head, outside the session's sandbox, with the other model family as a read-only reviewer. It reviews a runner-private snapshot and never writes to the session's worktree.",
-    "Push first: --head must be the pull request's current head. The first round of a pull request needs --brief-file (intent, acceptance criteria, verification); later rounds reuse it and review only the changes since the last valid round unless --scope full is given with --full-reason.",
-    "review run returns a job id at once. Poll review get until terminal is true; it then prints the controller's summary, report and the runner-owned ledger. One review runs per session at a time.",
-    "Sessions in a campaign with an allowance are refused; their Orchestrator runs the campaign's controlled review job. Tools: request_cross_model_review, get_cross_model_review, list_cross_model_reviews, cancel_cross_model_review.",
-    "",
-    "  review session run --repo <owner/name> --pr <number> --head <sha> --brief-file <path>",
+    "Usage: wollipog review session <command> [options]",
+    "  review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path>",
     "                     [--full-reason <text>] [--json]",
     "  review session get <review-session-id> [--json]",
     "  review session list [--limit <1-100>] [--cursor <review-session-id>] [--json]",
@@ -319,7 +339,7 @@ export function resolveHelp(args: string[]): HelpResponse | null {
   const helpAt = (index: number) => args[index] === "--help" || args[index] === "-h";
   const aliasHelpFlag = (["init", "update", "doctor"].includes(args[0] ?? "") && helpAt(1))
     || (args[0] === "pair" && (helpAt(1) || (["create", "list", "revoke", "url"].includes(args[1] ?? "") && helpAt(2))))
-    || (args[0] === "pr" && (helpAt(1) || (args[1] === "wait" && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
+    || (args[0] === "pr" && (helpAt(1) || (["wait", "closures"].includes(args[1] ?? "") && args.slice(2).some((arg) => arg === "--help" || arg === "-h"))));
   if (!helpCommand && !rootHelpFlag && !aliasHelpFlag) return null;
 
   const topic = helpCommand

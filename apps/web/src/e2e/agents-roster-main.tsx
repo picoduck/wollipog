@@ -51,8 +51,11 @@ let pods: PodView[] = [];
 
 if (scene === "pod") {
   sessions = [
-    member("grammar", "Grammar Worker", { status: "running", preview: "Rewriting the expression grammar so precedence climbing handles unary minus." }),
-    member("tests", "Test Writer", { status: "idle", preview: "Added 14 parser tests for chained comparisons." }),
+    // 3h 20m in, and a member idle for 16 days, whose time reads in days (#3037).
+    member("grammar", "Grammar Worker", { status: "running", createdAt: minutes(200),
+      preview: "Rewriting the expression grammar so precedence climbing handles unary minus." }),
+    member("tests", "Test Writer", { status: "idle", createdAt: minutes(16 * 24 * 60),
+      preview: "Added 14 parser tests for chained comparisons." }),
     member("review", "Parser Reviewer", { status: "input_required", pendingApproval: {
       requestId: "lint", title: "Bash: npm run lint -- --fix", options: [{ optionId: "yes", name: "Allow", kind: "allow_once" }] } }),
   ];

@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { spawn, type ChildProcess } from "node:child_process";
-import { interceptSpawnSyncForTest, spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { execFileSync, interceptSpawnSyncForTest, spawnSync } from "@wollipog/test-support/bounded-child-process";
 import { EventEmitter } from "node:events";
 import { mkdtempSync, readFileSync, renameSync, rmSync } from "node:fs";
 import fs from "node:fs";
@@ -14,8 +14,11 @@ import { cgroupDelegationDirectory, currentCgroupDirectory, LinuxCgroupBoundary,
 import { linuxCgroupHelper, stageLinuxCgroupHelper } from "./linux-cgroup-helper.js";
 import { PosixProcessBoundary, terminatePosixProcessBoundaries } from "./posix-process-tree.js";
 import { provenProcessTreeExit, ProviderProcessLedger, spawnAgent, waitForPendingKills } from "./spawn.js";
+import { ReviewWriterRegistry } from "./review-writers.js";
+import { linuxLeaseProcessProbe } from "./provider-home-lease-evidence.js";
 
 const identity = Object.freeze({ kind: "linux-cgroup-v2" as const, bootId: "boot", mountRoot: "/", cgroupPath: "test/leaf", inode: "42" });
+
 
 function controlledBoundary() {
   const state = { populated: true, terms: 0, kills: 0, closed: 0, removed: 0, reads: 0, now: 0, unreadable: false, killFails: false, stuck: false };
@@ -257,6 +260,77 @@ test("user-manager native validation exercises the real query even if a delegati
   }
 });
 
+test("real writer parents contain async probes and retire on live exit and runner replacement without a host scan", { skip: process.platform !== "linux" }, async (t) => {
+  if (!requireContainment(t)) return;
+  const directory = mkdtempSync(join(tmpdir(), "wollipog-contained-writer-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const view = linuxLeaseProcessProbe()!;
+  view.scan = () => { throw new Error("unrelated processes are unreadable"); };
+  const registry = new ReviewWriterRegistry(directory, view);
+  const token = registry.acquire("s_live", "provider"), group = registry.group(token)!;
+  const ledger = new ProviderProcessLedger({ cgroup: group });
+  const member = await ledger.observe(async ({ onProcess }) => {
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const child = spawnAgent({ command: process.execPath,
+      args: ["-e", "process.stdout.write(require('node:fs').readFileSync('/proc/self/cgroup','utf8'))"],
+      cwd: directory });
+    const closed = new Promise<void>((resolve, reject) => { child.once("close", () => resolve()); child.once("error", reject); });
+    onProcess(closed.then(() => provenProcessTreeExit(child)));
+    let output = ""; child.stdout.on("data", (chunk) => { output += String(chunk); });
+    await closed;
+    return output;
+  });
+  assert.ok(member.includes(`/${group.identity.cgroupPath}/provider-`));
+  assert.equal(registry.retire(token, await ledger.prove({ terminate: true })), true);
+  assert.deepEqual(registry.sessions(), []);
+
+  const writerModule = new URL("./review-writers.ts", import.meta.url).href;
+  const spawnModule = new URL("./spawn.ts", import.meta.url).href;
+  execFileSync(process.execPath, ["--import", "tsx", "--input-type=module", "-e", `
+    import { ReviewWriterRegistry } from ${JSON.stringify(writerModule)};
+    import { ProviderProcessLedger, spawnAgent } from ${JSON.stringify(spawnModule)};
+    const registry = new ReviewWriterRegistry(${JSON.stringify(directory)});
+    const token = registry.acquire('s_recovered', 'provider');
+    const ledger = new ProviderProcessLedger({cgroup: registry.group(token)});
+    const child = ledger.launch(spawnAgent, {command: process.execPath, args:['-e',''], cwd:${JSON.stringify(directory)}, descendantOwner:ledger.owner});
+    await new Promise((resolve, reject) => {child.once('close', resolve);child.once('error', reject);});
+    if (!await ledger.prove({terminate:true})) throw new Error('fixture tree exit unproved');
+  `], { timeout: 15_000 });
+  const record = JSON.parse(readFileSync(join(directory, fs.readdirSync(directory)[0]!), "utf8"));
+  assert.equal(record.process.containment.kind, "linux-cgroup-v2");
+  assert.deepEqual(new ReviewWriterRegistry(directory, view).sessions(), []);
+  // The read-only recovery retires the record; the enclosing test unit owns empty-directory cleanup.
+});
+
+for (const retireFirst of [false, true]) test(`writer callbacks do not lend ${retireFirst ? "retired" : "live"} cgroup context to unrelated sessions`, { skip: process.platform !== "linux" }, async (t) => {
+  if (!requireContainment(t)) return;
+  const directory = mkdtempSync(join(tmpdir(), "wollipog-writer-context-"));
+  t.after(() => rmSync(directory, { recursive: true, force: true }));
+  const registry = new ReviewWriterRegistry(directory), token = registry.acquire("s_a", "provider");
+  const group = registry.group(token)!, ledger = new ProviderProcessLedger({ cgroup: group });
+  const child = ledger.launch(spawnAgent, { command: process.execPath, args: ["-e", ""], cwd: directory, descendantOwner: ledger.owner });
+  const member = await new Promise<string>((resolve, reject) => {
+    child.once("error", reject);
+    child.once("exit", async () => {
+      try {
+        if (retireFirst) {
+          assert.equal(await ledger.prove({ terminate: true }), true);
+          assert.equal(registry.retire(token, true), true);
+        }
+        const unrelated = new ProviderProcessLedger();
+        const other = unrelated.launch(spawnAgent, { command: process.execPath,
+          args: ["-e", "process.stdout.write(require('node:fs').readFileSync('/proc/self/cgroup','utf8'))"], cwd: directory });
+        let output = ""; other.stdout.on("data", (chunk) => { output += String(chunk); });
+        other.once("error", reject);
+        other.once("close", () => { void unrelated.prove({ terminate: true }).then(() => resolve(output), reject); });
+      } catch (error) { reject(error); }
+    });
+  });
+  assert.equal(await ledger.prove({ terminate: true }), true);
+  assert.equal(registry.retire(token, true), true);
+  assert.ok(!member.includes(`/${group.identity.cgroupPath}/`), member);
+});
+
 test("successful preparation clears a transient boundary-creation failure", { skip: process.platform !== "linux" }, (t) => {
   if (!requireContainment(t)) return;
   const original = fs.mkdirSync;
@@ -313,9 +387,23 @@ function helperState(pid: number): HelperState | undefined {
   }
 }
 
+// exit_notify() publishes EXIT_ZOMBIE (Z), and reaping moves it to EXIT_DEAD (X) before procfs
+// drops the entry. Neither state can return to user code.
+function helperExited(snapshot: HelperState | undefined): boolean {
+  return snapshot === undefined || snapshot.state === "Z" || snapshot.state === "X";
+}
+
 function alive(pid: number): boolean {
-  const snapshot = helperState(pid);
-  return snapshot !== undefined && snapshot.state !== "Z";
+  return !helperExited(helperState(pid));
+}
+
+function describeHelper(snapshot: HelperState | undefined): string {
+  if (snapshot === undefined) return "procfs entry gone";
+  return `state=${snapshot.state} flags=0x${snapshot.flags.toString(16)} PF_EXITING=${(snapshot.flags & 0x4n) !== 0n}`;
+}
+
+function assertHelperExited(snapshot: HelperState | undefined): void {
+  assert.ok(helperExited(snapshot), `proof cannot precede the helper's death (${describeHelper(snapshot)})`);
 }
 
 async function waitForHelperExit(readState: () => HelperState | undefined): Promise<void> {
@@ -326,7 +414,7 @@ async function waitForHelperExit(readState: () => HelperState | undefined): Prom
   await waitUntil(() => {
     const snapshot = readState();
     if (snapshot === undefined || snapshot.state === "Z") return true;
-    assert.notEqual(snapshot.flags & 0x4n, 0n, "proof cannot precede the helper's death"); // PF_EXITING
+    assert.notEqual(snapshot.flags & 0x4n /* PF_EXITING */, 0n, `proof cannot precede the helper's death (${describeHelper(snapshot)})`);
     return false;
   });
 }
@@ -337,7 +425,7 @@ for (const state of ["R", "S", "D", "T"]) {
     await assert.rejects(waitForHelperExit(() => {
       reads++;
       return reads === 1 ? { state, flags: 0n } : undefined;
-    }), /proof cannot precede the helper's death/u);
+    }), new RegExp(`proof cannot precede the helper's death \\(state=${state} flags=0x0 PF_EXITING=false\\)`, "u"));
     assert.equal(reads, 1, "a task that could still execute must fail immediately, even if it later exits");
   });
 }
@@ -351,6 +439,29 @@ for (const state of ["R", "X"]) for (const finalState of ["zombie", "disappeared
       return finalState === "zombie" ? { state: "Z", flags: 0x4n } : undefined;
     });
     assert.ok(reads >= 3, "the pre-zombie exit window must reach an exit-complete observation");
+  });
+}
+
+for (const finalState of ["dead", "disappeared"] as const) {
+  test(`a helper the exit wait saw as a zombie stays exited once it is ${finalState}`, async () => {
+    // Reaping can move the zombie to EXIT_DEAD (X) between the wait's read and the final check.
+    const reads = [{ state: "Z", flags: 0x4n }, finalState === "dead" ? { state: "X", flags: 0x4n } : undefined];
+    let index = 0;
+    const readState = () => reads[index++];
+    await waitForHelperExit(readState);
+    assert.equal(index, 1, "the wait returns on its first zombie observation");
+    assertHelperExited(readState());
+    assert.equal(index, 2);
+  });
+}
+
+// The final check follows a zombie or disappearance observation, and exit_state never reverts.
+// Any other state, even with PF_EXITING, is not the helper that was proven exited.
+for (const [state, flags] of [["R", 0x400100n], ["S", 0x400100n], ["D", 0x400100n], ["T", 0x400100n], ["R", 0x400104n]] as const) {
+  test(`the final exit check rejects state ${state} with flags 0x${flags.toString(16)} and reports its procfs evidence`, () => {
+    const exiting = (flags & 0x4n) !== 0n;
+    assert.throws(() => assertHelperExited({ state, flags }),
+      new RegExp(`proof cannot precede the helper's death \\(state=${state} flags=0x${flags.toString(16)} PF_EXITING=${exiting}\\)`, "u"));
   });
 }
 
@@ -459,7 +570,7 @@ for (const mode of ["detached", "nondumpable", "term", "delayed-admission"]) {
     if (mode === "detached") assert.equal(await provenProcessTreeExit(child), true, "early per-process proof reaps the same boundary");
     else assert.deepEqual(await Promise.all(terminatePosixProcessBoundaries(ledger.owner)), [true], "shutdown uses the same boundary proof");
     await waitForHelperExit(() => helperState(pid));
-    assert.equal(alive(pid), false, "proof cannot precede the helper's death");
+    assertHelperExited(helperState(pid));
     if (mode === "term") assert.equal(readFileSync(pidfile + ".term", "utf8"), "term", "a retained setsid descendant receives TERM before forced cleanup");
     assert.equal(await ledger.prove({ terminate: true }), true);
     assert.equal(unrelated.exitCode, null, "unrelated same-user processes are untouched");

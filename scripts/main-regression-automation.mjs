@@ -294,7 +294,12 @@ export async function reconcile(repository, { api, control, config, now = Date.n
   }
   const triggers = await control(`/api/automations/${config.automationId}/triggers`);
   validateAutomation(payload, triggers, config);
-  if (state.blocked) return report(state.blocked);
+  // Old adapters used the delivery-exhausted hold even when no send was charged.
+  // Only that provably never-sent, elapsed claim may re-enter evidence validation.
+  const neverSent = a.tries === 0 && a.lastSentAt === 0 && a.stopTries === 0 &&
+    a.invocationId === null && a.executionId === null;
+  const expiredNeverSent = neverSent && now() - a.createdAt >= LIMITS.elapsedMs;
+  if (state.blocked && !(state.blocked === 'delivery-exhausted' && expiredNeverSent)) return report(state.blocked);
   let verified = null;
   if (a.tries === 0) {
     verified = await verifyIntent(repository, a, health, api);
@@ -310,8 +315,19 @@ export async function reconcile(repository, { api, control, config, now = Date.n
         !health.unresolvedFailures.some(r => r.testedSha === a.testedSha && r.suiteVersion === a.suiteVersion);
       if (!resolved) return report('dispatch-evidence-unavailable-operator-required');
       // Positive authoritative resolution plus no charged send proves safe release.
-      state.active = null; await save(); return report('stale-never-sent-intent-released');
+      if (!neverSent) return report('dispatch-evidence-unavailable-operator-required');
+      state.active = null;
+      if (state.blocked === 'delivery-exhausted') state.blocked = null;
+      await save(); return report('stale-never-sent-intent-released');
     }
+  }
+  if (neverSent && now() - a.createdAt >= LIMITS.elapsedMs) {
+    // The original budget expires permanently; its tombstone cannot buy a fresh claim.
+    state.active = null;
+    if (state.blocked === 'delivery-exhausted') state.blocked = null;
+    await save();
+    return { ...report('never-sent-intent-expired'), expired: {
+      runId: a.runId, attempt: a.attempt, eventId: `main-regression:${a.runId}:${a.attempt}`, tries: 0 } };
   }
   if (a.tries >= LIMITS.deliveryAttempts || now() - a.createdAt >= LIMITS.elapsedMs) {
     state.blocked = 'delivery-exhausted'; await save(); return report('delivery-exhausted-operator-required');

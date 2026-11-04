@@ -5,10 +5,10 @@ for (const width of [1280, 390]) {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/artifact-uploads-e2e.html");
     const discovery = page.getByRole("note", { name: "Private Artifact Uploads" });
-    await expect(discovery).toContainText("Uploads are manual by default");
-    await expect(page.getByRole("link", { name: "Artifact Upload Settings" })).toHaveAttribute("href", "/settings/behavior");
+    await expect(discovery).toContainText("Artifacts can be stored privately.");
+    await expect(page.getByRole("link", { name: "Upload Settings" })).toHaveAttribute("href", "/settings/behavior");
     await page.screenshot({ path: testInfo.outputPath(`artifact-discovery-${width}.png`), fullPage: true });
-    await page.getByRole("link", { name: "Artifact Upload Settings" }).click();
+    await page.getByRole("link", { name: "Upload Settings" }).click();
     await expect(page.locator("#settings-panel-heading")).toHaveText("Behavior");
     const picker = page.getByRole("button", { name: /^Artifact Uploads:/ });
     await expect(picker).toHaveAccessibleName("Artifact Uploads: Manual");

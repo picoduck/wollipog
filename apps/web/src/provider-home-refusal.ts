@@ -1,8 +1,19 @@
-import type { ProviderHomeBlockingProcess, ProviderHomeLaunchRefusalCode, ProviderHomeLaunchRefusalView, ProviderHomeRecoveryCause } from "@wollipog/protocol";
+import type { ProviderHomeBlockingProcess, ProviderHomeLaunchRefusalCode, ProviderHomeLaunchRefusalView, ProviderHomeRecoveryCause, ProviderHomeWaitView } from "@wollipog/protocol";
 
-/** What a launch refusal's notice offers (#3240): restart the session, switch its account, or open
- * the Machine's accounts, where an Owner or Admin adopts a profile or recovers a lease. */
-export type ProviderHomeRefusalAction = "restart" | "switch_account" | "open_accounts";
+/** What a launch refusal's notice offers (#3240): restart the session waiting for a busy account,
+ * restart it, switch its account, open the Machine's accounts, set up a managed profile there (Add
+ * Account for this control plane), or recover the existing one (Adopt as Profile, then Recover
+ * Account, for an Owner or Admin). */
+export type ProviderHomeRefusalAction = "wait" | "restart" | "switch_account" | "open_accounts" | "set_up_profile" | "recover_profile";
+
+export interface ProviderHomeRefusalOptions {
+  /** The runner can wait for a busy account (protocol v248): a busy refusal offers Wait for Account. */
+  canWait?: boolean;
+  /** What the lease refused: a session's launch (the default), a conversation fork's, or an Agent
+   * TUI's open (#3338). A fork's or Agent TUI's copy offers no restart, since the session itself is
+   * unaffected: it is simply tried again. */
+  launch?: "session" | "fork" | "agent_tui";
+}
 
 export interface ProviderHomeRefusalCopy {
   title: string;
@@ -14,19 +25,20 @@ export interface ProviderHomeRefusalCopy {
 
 const PROVIDER_NAMES: Record<ProviderHomeLaunchRefusalView["provider"], string> = { claude: "Claude", codex: "Codex" };
 
-/** Shared with authorized account inspection; every cause keeps the journal intact. */
+/** Plain-language guidance shared by session notices and account recovery. Technical diagnostics
+ * belong in the authorized recovery details, not the primary message. */
 export function providerHomeRecoveryCauseCopy(cause: ProviderHomeRecoveryCause, subject: string): Omit<ProviderHomeRefusalCopy, "actions"> {
   const copy: Record<ProviderHomeRecoveryCause, { title: string; body: string }> = {
-    holder_alive: { title: "Account Held by a Live Runner", body: `The recorded runner still holds ${subject}. Wait for its work to finish, preserve the lease journal, then retry.` },
-    boundary_survivor: { title: "Provider Work Still Running", body: `A provider or helper still runs in the recorded boundary for ${subject}. Ownership is retained until the recorded boundary is empty; wait for that work to finish and preserve the boundary and lease journal.` },
-    process_survivor: { title: "Provider Descendant Still Running", body: `A process launched by the recorded runner still uses ${subject}. Wait for that work to finish and preserve the lease journal before retrying.` },
-    boundary_unverifiable: { title: "Account Boundary Can't Be Verified", body: `The recorded boundary for ${subject} can't be verified, or its enclosing unit hasn't retired. Ask an operator to inspect ownership and preserve the boundary and lease journal.` },
-    process_uninspectable: { title: "Account Ownership Can't Be Verified", body: `A process can't be inspected, so ownership of ${subject} can't be proved on the fallback recovery path. Preserve the lease journal and ask an operator to restore inspectability; unrelated processes must be left alone.` },
-    process_uninspectable_not_delegated: { title: "Account Recovery Needs Delegation", body: `Ownership of ${subject} can't be proved because a process can't be inspected and the runner's systemd unit is not delegated. Ask an operator to use Delegate=yes for future leases and restore inspectability for this lease; preserve the journal.` },
-    invalid_journal: { title: "Account Journal Can't Be Verified", body: `The lease journal for ${subject} is invalid or unreadable. Preserve all journal records and ask an operator to restore access or inspect the records before retrying.` },
-    profile_unsupported_control_plane: { title: "Account Needs a Newer Control Plane", body: `The control plane can't authorize the profile for ${subject}. Update the control plane before retrying and preserve the lease journal.` },
-    profile_grant_limit: { title: "Account Profile Grant Limit Reached", body: `The profile for ${subject} has reached its grant limit. An Owner or Admin must review unused grants before granting access; preserve the lease journal.` },
-    no_reboot_proof: { title: "Account Recovery Needs Reboot Proof", body: `The lease for ${subject} has no process evidence and was recorded during this boot. Recovery requires a later host boot; preserve the lease journal and coordinate with an operator.` },
+    holder_alive: { title: "Account in Use", body: `Another Wollipog runner is using ${subject}. Wait for its work to finish, then try again, or choose another account.` },
+    boundary_survivor: { title: "Account Still in Use", body: `A program from an earlier session is still using ${subject}. Wait for that work to finish, then try again, or choose another account.` },
+    process_survivor: { title: "Earlier Session Still Running", body: `A program started by an earlier Wollipog runner is still using ${subject}. Wait for that work to finish, then try again, or choose another account.` },
+    boundary_unverifiable: { title: "Account Access Can't Be Checked", body: `Wollipog can't confirm that an earlier session has finished using ${subject}. Choose another account for now, or ask the person who manages this machine to check it.` },
+    process_uninspectable: { title: "Account Is Locked", body: `Wollipog can't check whether another program is still using ${subject}. Choose another account for now, or save your work and restart the machine before trying again.` },
+    process_uninspectable_not_delegated: { title: "Account Recovery Is Blocked", body: `Wollipog can't safely unlock ${subject} because it can't check a running program. Choose another account for now, or save your work and restart the machine before trying again.` },
+    invalid_journal: { title: "Account Recovery Records Can't Be Read", body: `Wollipog can't read or verify the records that protect ${subject} from being used by two runners at once. Choose another account and ask the person who manages this machine to check the recovery details.` },
+    profile_unsupported_control_plane: { title: "Wollipog Update Required", body: `This version of Wollipog can't approve access to ${subject}. Update the Wollipog server, then try again, or choose another account.` },
+    profile_grant_limit: { title: "Account Access Limit Reached", body: `Too many Wollipog servers already have access to ${subject}. An Owner or Admin needs to remove an unused server's access before adding this one, or you can choose another account.` },
+    no_reboot_proof: { title: "Machine Restart Needed", body: `Wollipog can't safely unlock ${subject} until this machine has restarted. Choose another account for now, or save your work, restart the machine, then recover the account in Connections.` },
   };
   return copy[cause];
 }
@@ -46,55 +58,74 @@ export function providerHomeBlockingProcessCopy(process: ProviderHomeBlockingPro
 export function providerHomeRefusalCopy(
   refusal: Pick<ProviderHomeLaunchRefusalView, "code" | "provider" | "cause">,
   account: string | undefined,
+  options: ProviderHomeRefusalOptions = {},
 ): ProviderHomeRefusalCopy {
   const provider = PROVIDER_NAMES[refusal.provider];
   // The runner's own HOME is not an account: no switch target names it, and nothing is adopted.
   const subject = account ?? `this Machine's ${provider} sign-in`;
+  const fork = options.launch === "fork";
+  const tui = options.launch === "agent_tui";
+  // A fork or Agent TUI is tried again; only a session's own launch is restarted or waited for.
+  const retried = fork || tui;
+  const refused = fork ? "the fork didn't start" : tui ? "the Agent TUI didn't open" : "this session didn't start";
+  // Only a busy HOME frees itself, so only it can be waited for; a fork is simply tried again. Wait
+  // for Account replaces Restart Session: its launch starts at once when the account is already
+  // free, so a restart would add nothing but a second refusal.
+  const restart: ProviderHomeRefusalAction = options.canWait && !retried && refusal.code === "busy" ? "wait" : "restart";
   if (refusal.cause) {
     const contention = ["holder_alive", "boundary_survivor", "process_survivor"].includes(refusal.cause);
     return {
       ...providerHomeRecoveryCauseCopy(refusal.cause, subject),
-      actions: account ? contention ? ["restart", "switch_account"] : ["open_accounts", "switch_account"] : contention ? ["restart"] : ["open_accounts"],
+      // The Machine's own HOME is shared by every control plane on the account; a managed profile
+      // gives this one its own.
+      actions: account ? contention ? [restart, "switch_account"] : ["switch_account", "open_accounts"]
+        : contention ? [restart, "set_up_profile"] : ["set_up_profile"],
     };
   }
   const builders: Record<ProviderHomeLaunchRefusalCode, () => ProviderHomeRefusalCopy> = {
     busy: () => ({
       title: "Account in Use",
-      body: `Another runner, provider, helper, or lease publication is using ${subject}, so this session didn't start. ` +
-        (account ? "Restart the session once it's free, or switch to another account." : "Restart the session once it's free."),
-      actions: account ? ["restart", "switch_account"] : ["restart"],
+      body: `Another runner, provider, helper, or lease publication is using ${subject}, so ${refused}. ` +
+        (retried
+          ? account ? "Try again once it's free, or switch the session to another account." : "Try again once it's free."
+          : restart === "wait"
+            ? account ? "Wait for the account to start the session as soon as it's free, or switch to another account."
+              : "Wait for it to start the session as soon as it's free, or set up a managed profile for this control plane's new sessions."
+            : account ? "Restart the session once it's free, or switch to another account."
+              : "Restart the session once it's free, or set up a managed profile for this control plane's new sessions."),
+      actions: account ? [restart, "switch_account"] : [restart, "set_up_profile"],
     }),
     foreign_owner: () => ({
       title: "Account Locked by Another Runner",
       body: account
-        ? `A runner or control plane that stopped left ${account} locked. An Owner or Admin can recover the lease from the Machine's accounts, or you can switch to another account.`
-        : `A runner or control plane that stopped left ${subject} locked. Add an account for this control plane in the Machine's accounts.`,
-      actions: account ? ["open_accounts", "switch_account"] : ["open_accounts"],
+        ? `A runner or control plane that stopped left ${account} locked. An Owner or Admin can unlock it with Recover Existing Profile, or you can switch to another account.`
+        : `A runner or control plane that stopped left ${subject} locked. Set up a managed profile for this control plane's new sessions.`,
+      actions: account ? ["recover_profile", "switch_account"] : ["set_up_profile"],
     }),
     foreign_host: () => ({
       title: "Account in Use on Another Host",
       body: account
-        ? `A runner on another host uses ${account}, so this Machine can't share it. Switch to another account, or add one for this Machine.`
-        : `A runner on another host uses ${subject}. Add an account for this control plane in the Machine's accounts.`,
-      actions: account ? ["switch_account", "open_accounts"] : ["open_accounts"],
+        ? `A runner on another host uses ${account}, so this Machine can't share it. Switch to another account, or set up a managed profile for this Machine.`
+        : `A runner on another host uses ${subject}. Set up a managed profile for this control plane's new sessions.`,
+      actions: account ? ["switch_account", "set_up_profile"] : ["set_up_profile"],
     }),
     unavailable: () => ({
       title: "Lease Helper Unavailable",
       body: `The runner's lease helper isn't available, so it couldn't check that ${subject} is free. ` +
-        "Update or restart the runner, then restart the session.",
+        (retried ? "Update or restart the runner, then try again." : "Update or restart the runner, then restart the session."),
       actions: ["restart"],
     }),
     unverifiable: () => ({
       title: "Lease Can't Be Verified",
-      body: `The runner couldn't verify the lease records of ${subject}, so it didn't start the session. ` +
+      body: `The runner couldn't verify the lease records of ${subject}, so ${tui ? "the Agent TUI didn't open" : `it didn't start the ${fork ? "fork" : "session"}`}. ` +
         "Someone with access to the Machine must check them before it can be used.",
       actions: account ? ["switch_account"] : [],
     }),
     profile_not_granted: () => ({
       title: "Profile Not Granted",
       body: `The provider profile of ${subject} isn't granted to this control plane. ` +
-        "An Owner or Admin can grant it with Adopt as Profile in the Machine's accounts.",
-      actions: account ? ["open_accounts", "switch_account"] : ["open_accounts"],
+        "An Owner or Admin can grant it with Recover Existing Profile.",
+      actions: account ? ["recover_profile", "switch_account"] : ["open_accounts"],
     }),
     profile_changed: () => ({
       title: "Profile Changed",
@@ -110,4 +141,39 @@ export function providerHomeRefusalCopy(
     }),
   };
   return builders[refusal.code]();
+}
+
+/**
+ * The actions this viewer can complete (#3240). Set Up Managed Profile needs manage rights on the
+ * Machine; Recover Existing Profile needs an Owner or Admin of the personal organization as well.
+ * Either one that isn't available falls back to Open Machine Accounts, which explains why there.
+ */
+export function availableProviderHomeRefusalActions(
+  actions: readonly ProviderHomeRefusalAction[],
+  viewer: { canSetUpProfile: boolean; canRecoverProfile: boolean },
+): ProviderHomeRefusalAction[] {
+  const available = actions.map((action): ProviderHomeRefusalAction =>
+    action === "set_up_profile" && !viewer.canSetUpProfile ? "open_accounts"
+      : action === "recover_profile" && !viewer.canRecoverProfile ? "open_accounts"
+        : action);
+  return [...new Set(available)];
+}
+
+/** What a starting session shows while its launch waits for a busy account (#3240). `account` is
+ * named as for a refusal. */
+export function providerHomeWaitCopy(
+  wait: Pick<ProviderHomeWaitView, "provider" | "cause" | "waitingSince" | "waitUntil">,
+  account: string | undefined,
+): { title: string; body: string } {
+  const subject = account ?? `this Machine's ${PROVIDER_NAMES[wait.provider]} sign-in`;
+  const holder = wait.cause === "holder_alive" ? `Another Wollipog runner is using ${subject}.`
+    : wait.cause === "boundary_survivor" ? `A program from an earlier session is still using ${subject}.`
+      : wait.cause === "process_survivor" ? `A program started by an earlier Wollipog runner is still using ${subject}.`
+        : `Another runner, provider, helper, or lease publication is using ${subject}.`;
+  const hours = Math.max(1, Math.round((wait.waitUntil - wait.waitingSince) / 3_600_000));
+  return {
+    title: "Waiting for Account",
+    body: `${holder} This session starts as soon as it's free. If it's still in use after ${hours} ${hours === 1 ? "hour" : "hours"}, ` +
+      "the session stops waiting and doesn't start.",
+  };
 }

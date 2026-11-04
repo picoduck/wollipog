@@ -16,6 +16,8 @@ import {
   resolveSourceTarget,
   sourceLines,
   unquotePorcelainPath,
+  inManagedWorktree,
+  sessionRootName,
   workspaceFolderName,
 } from "./files-panel.js";
 
@@ -136,6 +138,28 @@ test("the root is named by its working folder, POSIX or Windows, else the worksp
   assert.equal(baseName("a/b/c.ts"), "c.ts");
 });
 
+test("a managed worktree is named by its workspace, a folder of its own by the folder (#2852)", () => {
+  const managedPath = "/home/me/.wollipog/worktrees/acme-storefront-1f2e/s_4de7e8705433";
+  // Launched in a worktree, with no worktree records from an older control plane.
+  const launched = { useWorktree: true, worktreePath: managedPath, workspaceName: "acme-storefront" };
+  assert.equal(inManagedWorktree(launched), true);
+  assert.equal(sessionRootName(launched), "acme-storefront");
+  // The selected worktree's record decides: one Wollipog created is managed, an attached one is not.
+  const created = { ...launched, useWorktree: false,
+    worktrees: [{ id: "s_4de7e8705433", path: managedPath, branch: "agent/s_4de7e8705433", source: "created" as const }] };
+  assert.equal(sessionRootName(created), "acme-storefront");
+  const attached = { ...launched, worktreePath: "/home/me/src/storefront-checkout",
+    worktrees: [{ id: "checkout", path: "/home/me/src/storefront-checkout", branch: "checkout", source: "attached" as const }] };
+  assert.equal(inManagedWorktree(attached), false);
+  assert.equal(sessionRootName(attached), "storefront-checkout");
+  // A session working directly in its folder keeps the folder's name.
+  const direct = { useWorktree: false, worktreePath: "/home/me/src/storefront", workspaceName: "acme-storefront" };
+  assert.equal(sessionRootName(direct), "storefront");
+  // With no workspace name to use, the folder's name stays.
+  assert.equal(sessionRootName({ ...launched, workspaceName: "  " }), "s_4de7e8705433");
+  assert.equal(sessionRootName({ useWorktree: true, worktreePath: null, workspaceName: "acme-storefront" }), "acme-storefront");
+});
+
 test("rows name their icon by kind, never by emoji", () => {
   assert.equal(fileIconKind("src", true), "folder");
   assert.equal(fileIconKind("index.TSX", false), "code");
@@ -183,26 +207,66 @@ test("git markers: untracked U, added or renamed A, everything else changed M, d
   assert.equal(unquotePorcelainPath("\"\\357\\273\\277check.ts\""), "\u{FEFF}check.ts");
 });
 
-test("Go to File: files only, changed or recent first, then name matches before path matches", () => {
+test("Go to File: files only, changed or recent first, then the best fuzzy match (#1263)", () => {
   const ranked = rankGoToFileResults([
     { path: "checks", isDirectory: true },
     { path: "checks/run.ts", isDirectory: false },
     { path: "src/checkout.ts", isDirectory: false },
     { path: "docs/check-list.md", isDirectory: false },
     { path: "src/precheck.ts", isDirectory: false },
-  ], "Check", (path) => path === "src/precheck.ts");
+    { path: "src/unrelated.ts", isDirectory: false },
+  ], "Check", new Set(["src/precheck.ts"]));
   assert.deepEqual(ranked.map((match) => match.path), [
     "src/precheck.ts",
     "src/checkout.ts",
     "docs/check-list.md",
     "checks/run.ts",
-  ]);
+  ], "a file that does not match is dropped, even from an older runner's answer");
   assert.deepEqual(ranked[0], {
-    path: "src/precheck.ts", name: "precheck.ts", folder: "src", matchIn: "name", range: { start: 3, end: 8 },
+    path: "src/precheck.ts", name: "precheck.ts", folder: "src", nameRanges: [{ start: 3, end: 8 }], folderRanges: [],
   });
   assert.deepEqual(ranked[3], {
-    path: "checks/run.ts", name: "run.ts", folder: "checks", matchIn: "folder", range: { start: 0, end: 5 },
+    path: "checks/run.ts", name: "run.ts", folder: "checks", nameRanges: [], folderRanges: [{ start: 0, end: 5 }],
   });
-  // A match across the folder and the name underlines nothing rather than the wrong letters.
-  assert.equal(rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "src/se", () => false)[0]?.matchIn, "path");
+  // Scattered letters underline each run; a match across the folder and the name underlines both.
+  assert.deepEqual(rankGoToFileResults([{ path: "apps/web/SessionDetail.tsx", isDirectory: false }], "sdtsx", new Set()), [{
+    path: "apps/web/SessionDetail.tsx",
+    name: "SessionDetail.tsx",
+    folder: "apps/web",
+    nameRanges: [{ start: 0, end: 1 }, { start: 7, end: 8 }, { start: 14, end: 17 }],
+    folderRanges: [],
+  }]);
+  const across = rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "src/se", new Set())[0];
+  assert.deepEqual([across?.folderRanges, across?.nameRanges], [[{ start: 0, end: 3 }], [{ start: 0, end: 2 }]]);
+});
+
+test("Go to File lifts a changed file only on a clean match: a scatter never tops a strong name match", () => {
+  const results = [
+    { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+    { path: "src/unrelated.ts", isDirectory: false },
+  ];
+  const changed = new Set(["apps/web/src/components/CheckBadge.tsx"]);
+  assert.deepEqual(rankGoToFileResults(results, "sdtsx", changed).map((match) => match.path), [
+    "apps/web/src/components/SessionDetail.tsx",
+    "apps/web/src/components/CheckBadge.tsx",
+  ], "the changed file's scattered s…d…tsx ranks by score, below the word-start name match");
+  assert.equal(rankGoToFileResults(results, "check", changed)[0]?.path, "apps/web/src/components/CheckBadge.tsx",
+    "on a clean match the changed file still leads");
+  assert.deepEqual(
+    rankGoToFileResults([{ path: "src/session.ts", isDirectory: false }], "sdtsx", changed, true).map((match) => match.path),
+    [],
+    "a cut answer does not gain a priority file on a scattered match",
+  );
+});
+
+test("Go to File adds matching priority files only when the runner's answer was cut short", () => {
+  const results = [{ path: "src/session-list.ts", isDirectory: false }];
+  const priority = new Set(["deep/nested/session-store.ts", "README.md", "untracked-dir/"]);
+  assert.deepEqual(rankGoToFileResults(results, "session", priority).map((match) => match.path), ["src/session-list.ts"],
+    "a complete answer without it means the file is gone");
+  assert.deepEqual(rankGoToFileResults(results, "session", priority, true).map((match) => match.path), [
+    "deep/nested/session-store.ts",
+    "src/session-list.ts",
+  ], "a cut answer gains the changed or recent file that matches, first; folders and non-matches stay out");
 });

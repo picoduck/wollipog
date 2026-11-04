@@ -7,7 +7,7 @@ import { once } from "node:events";
 import { pathToFileURL } from "node:url";
 import test from "node:test";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { discoverNodeTests, nodeTestInventory, planNodeTests, profile, NODE_TEST_GLOBS } from "./node-test-plan.mjs";
+import { discoverNodeTests, nodeTestInventory, planNodeTests, profile, shardNodeTests, NODE_TEST_GLOBS } from "./node-test-plan.mjs";
 import { parseTiming } from "./ci-timing.mjs";
 
 test("partition union equals independent root discovery with no overlap or lost new files", async (t) => {
@@ -46,6 +46,26 @@ test("the largest measured costs run first without changing membership or worker
   assert.deepEqual(ordered.sort(), files);
   assert.equal(new Set(profile.fastFiles).size, profile.fastFiles.length);
   for (const file of profile.fastFiles) assert.ok(files.includes(file), `stale fast-file entry: ${file}`);
+});
+
+test("CI shards partition the planned suite exactly and spread the measured long files (#3770)", async () => {
+  const files = await discoverNodeTests();
+  for (const suite of ["full", "fast", "remaining"]) for (const total of [1, 2, 3, 4, 5]) {
+    const planned = planNodeTests(files, suite);
+    const shards = Array.from({ length: total }, (_, index) => shardNodeTests(planned, `${index + 1}/${total}`));
+    // Coverage parity: every planned file runs in exactly one shard, in the plan's order.
+    assert.deepEqual(shards.flat().sort(), [...planned].sort(), `${suite} ${total}: union must equal the plan`);
+    assert.equal(new Set(shards.flat()).size, planned.length, `${suite} ${total}: shards must be disjoint`);
+    for (const shard of shards) assert.deepEqual(shard, planned.filter((file) => shard.includes(file)));
+    const sizes = shards.map((shard) => shard.length);
+    assert.ok(Math.max(...sizes) - Math.min(...sizes) <= 1, `${suite} ${total}: file counts must stay balanced`);
+  }
+  // Dealt back and forth, the measured files of each round of 2n alternate direction.
+  const measured = profile.slowestFiles.map((row) => row.file);
+  assert.deepEqual(shardNodeTests(measured, "1/3"), measured.filter((_, i) => [0, 5].includes(i % 6)));
+  assert.deepEqual(shardNodeTests(measured, "3/3"), measured.filter((_, i) => [2, 3].includes(i % 6)));
+  for (const shard of [undefined, "", "0/3", "4/3", "1/0", "1", "-1/3", "1/3/3", "a/3", "01/3"])
+    assert.throws(() => shardNodeTests(measured, shard), /Invalid Node test shard/, String(shard));
 });
 
 const runner = pathToFileURL(resolve("scripts/test-node.mjs")).href;

@@ -92,7 +92,7 @@ try {
         kind: "tool_call_update",
         toolCallId: `${prefix}${i}`,
         status: "completed",
-        content: [{ type: "content", content: { type: "text", text: "output line\n".repeat(20) } }],
+        text: "output line\n".repeat(20),
       });
     }
   };

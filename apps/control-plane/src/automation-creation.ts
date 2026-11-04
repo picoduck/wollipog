@@ -8,9 +8,8 @@ import type { Hub } from "./hub.js";
 import { automationCapabilityError, pinAutomationSpec, validateAutomationSpec } from "./automations.js";
 import { nextCronFire } from "@wollipog/protocol/cron-schedule";
 import { auditDigest, capabilityConfigError, claudeModelConfigForValidation, defaultPermissionModeForNewSession, resolveEffectiveModelEffort, type ServiceResult, type SessionsService } from "./sessions.js";
+import { AUTOMATION_PROPOSAL_TTL_MS, AUTOMATION_APPROVAL_TTL_MS } from "./automation-creation-lifecycle.js";
 
-const PROPOSAL_TTL_MS = 24 * 60 * 60_000;
-const APPROVAL_TTL_MS = 30 * 60_000;
 const fail = <T>(error: string, status = 409): ServiceResult<T> => ({ ok: false, status, error });
 const ok = <T>(data: T, status = 200): ServiceResult<T> => ({ ok: true, status, data });
 const identifier = (v: unknown, max: number): v is string => typeof v === "string" &&
@@ -130,6 +129,7 @@ export class AutomationCreationService {
   request(sessionId: string, input: AutomationCreationRequest, principal: AgentPrincipal, now = Date.now()): ServiceResult<WorkflowDecisionView> {
     const refused = this.requester(principal, sessionId);
     if (refused) return fail(refused, 403);
+    this.sessions.expireAutomationCreationDecisions(now, sessionId);
     if (!identifier(input?.requestId, 256) || !identifier(input?.resourceKey, 512)) return fail("requestId and resourceKey are required", 400);
     const requestedSpecDigest = auditDigest(input.spec);
     const existing = this.db.workflowDecisionByRequestId(sessionId, input.requestId);
@@ -145,26 +145,27 @@ export class AutomationCreationService {
     try { nextFireAt = nextCronFire(prepared.data!.spec.cron, prepared.data!.spec.timezone, now); }
     catch (error) { return fail((error as Error).message, 400); }
     const snapshot: AutomationCreationSnapshot = { category: "automation_creation", ...prepared.data!, nextFireAt,
-      requestedSpecDigest: requestedSpecDigest!, expiresAt: now + PROPOSAL_TTL_MS };
+      requestedSpecDigest: requestedSpecDigest!, expiresAt: now + AUTOMATION_PROPOSAL_TTL_MS };
     return this.sessions.createWorkflowDecision(sessionId, { requestId: input.requestId, resourceKey: input.resourceKey,
       resourceSnapshot: snapshot }, (id) => this.db.canAccessSession(principal, id), { trustedAutomationCreation: true });
   }
 
-  get(sessionId: string, occurrenceId: string, principal: AgentPrincipal): ServiceResult<WorkflowDecisionView> {
+  get(sessionId: string, occurrenceId: string, principal: AgentPrincipal, now = Date.now()): ServiceResult<WorkflowDecisionView> {
     if (principal.credentialSessionId !== sessionId || !this.db.canAccessSession(principal, sessionId)) return fail("session not found", 404);
+    this.sessions.expireAutomationCreationDecisions(now, sessionId);
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     return decision?.sessionId === sessionId && decision.category === "automation_creation" ? ok(decision) : fail("Automation proposal not found", 404);
   }
 
   execute(sessionId: string, occurrenceId: string, digest: string, principal: AgentPrincipal, now = Date.now()): ServiceResult<WorkflowDecisionView> {
-    const read = this.get(sessionId, occurrenceId, principal);
+    const read = this.get(sessionId, occurrenceId, principal, now);
     if (!read.ok) return read;
     const decision = read.data!;
     if (decision.resourceDigest !== digest) return fail("Automation proposal digest does not match");
     if (decision.status === "consumed" && decision.automationCreationResult) return ok(decision);
     const snapshot = decision.resourceSnapshot;
     if (snapshot.category !== "automation_creation" || decision.status !== "approved" || decision.authority !== "human" ||
-        !decision.resolvedAt || now >= snapshot.expiresAt || now >= decision.resolvedAt + APPROVAL_TTL_MS) return fail("Automation proposal needs current human approval");
+        !decision.resolvedAt || now >= snapshot.expiresAt || now >= decision.resolvedAt + AUTOMATION_APPROVAL_TTL_MS) return fail("Automation proposal needs current human approval");
     const refused = this.requester(principal, sessionId);
     if (refused) return fail(refused, 403);
     const scope = this.db.sessionScope(sessionId);

@@ -45,7 +45,7 @@ test("Result Blocked says a restart reports the result only where the runner's r
     "a v190 runner's restart still discards the result");
   assert.equal(blockedResultSessionAlternative(true),
     "Stopping the session also ends the unfinished job but discards this result. Restarting the session ends every " +
-    "job and reports this result to the new conversation.");
+    "job and reports this result after the restart.");
   assert.doesNotMatch(BACKGROUND_DELIVERY_STATUS.continuation_blocked.action, /discard/u,
     "the shared copy, read without knowing the runner, claims nothing a restart may not do");
 });

@@ -69,6 +69,36 @@ test("at 390px the slot stays under 180px and the transcript keeps half the chat
   expect(more.bottom).toBeLessThanOrEqual(body.top + 1);
 });
 
+// #2157: the slot's own width, not the viewport's, decides whether the resolving action fills the
+// row. A phone held upright (a slot at most 480px wide) fills it; a phone on its side or a small
+// tablet keeps the actions at their own width, left-aligned, as on desktop, at the same height.
+for (const width of [390, 500, 520, 600, 760]) {
+  test(`the resolving action fills the row only in a narrow slot, at ${width}px`, async ({ page }) => {
+    await openSession(page, width, 844);
+    const slot = page.locator(".session-notice-slot");
+    const slotWidth = await slot.evaluate((element) => {
+      const style = getComputedStyle(element);
+      return element.clientWidth - parseFloat(style.paddingLeft) - parseFloat(style.paddingRight);
+    });
+    const narrow = width <= 500;
+    expect(slotWidth <= 480).toBe(narrow);
+
+    const recover = await box(slot.getByRole("button", { name: "Recover Session" }));
+    const details = await box(slot.getByRole("button", { name: "Show Details" }));
+    const row = await box(slot.locator(".notice-actions"));
+    expect(Math.abs(recover.top - details.top)).toBeLessThanOrEqual(1);
+    expect(recover.left).toBeCloseTo(row.left, 0);
+    expect(details.height).toBeCloseTo(recover.height, 0);
+    if (narrow) {
+      expect(details.right).toBeCloseTo(row.right, 0);
+    } else {
+      // Natural width: Show Details follows Recover Session one gap later, and the row's end is empty.
+      expect(details.left - recover.right).toBeLessThanOrEqual(9);
+      expect(row.right - details.right).toBeGreaterThan(100);
+    }
+  });
+}
+
 for (const hide of [false, true]) {
   test(`+2 More lists the others and shows the chosen one with account hiding ${hide ? "on" : "off"}`, async ({ page }) => {
     await openSession(page, 1440, 900, hide);

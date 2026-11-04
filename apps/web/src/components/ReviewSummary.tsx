@@ -16,6 +16,16 @@ function baseName(ref: string | null | undefined): string | null {
 }
 
 /**
+ * How far the branch is ahead of its base ("3 commits ahead of main"), or null when it is not. The
+ * one wording for it: Session Tools' Review row reads it too, so the row and this summary agree.
+ */
+export function commitsAheadFact(status: Pick<GitStatusInfo, "ahead" | "baseRef" | "upstreamBranch">): string | null {
+  if (status.ahead <= 0) return null;
+  const base = baseName(status.baseRef ?? status.upstreamBranch);
+  return `${status.ahead} commit${status.ahead === 1 ? "" : "s"} ahead${base ? ` of ${base}` : ""}`;
+}
+
+/**
  * The summary's meta facts (§11.3), in sentence case: how much of the uncommitted change is staged,
  * and how far the branch is ahead of its base. Each fact is its own item; the stylesheet sets them
  * 12px apart, with no middle dots (§5.2).
@@ -28,10 +38,8 @@ export function reviewSummaryFacts(status: GitStatusInfo | null): string[] {
   const staged = status.stagedCount ?? 0;
   if (staged > 0) facts.push(`${staged} of ${count} file${files === 1 ? "" : "s"} staged`);
   else if (files > 0) facts.push(`${count} uncommitted file${files === 1 ? "" : "s"}`);
-  if (status.ahead > 0) {
-    const base = baseName(status.baseRef ?? status.upstreamBranch);
-    facts.push(`${status.ahead} commit${status.ahead === 1 ? "" : "s"} ahead${base ? ` of ${base}` : ""}`);
-  }
+  const ahead = commitsAheadFact(status);
+  if (ahead) facts.push(ahead);
   return facts;
 }
 

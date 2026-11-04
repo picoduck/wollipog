@@ -84,6 +84,38 @@ export function usePersonalIdentifierReveal(key: string): [revealed: boolean, to
 }
 
 /**
+ * A masked identifier's words without its reveal control: the lead and the mask, or the revealed
+ * value. For a place where the control cannot sit beside the words, such as a row whose name is
+ * inside the button that opens it (#2997): the caller renders `PersonalIdentifierRevealButton`
+ * outside that button, with the same `usePersonalIdentifierReveal` state.
+ */
+export function PersonalIdentifierText({
+  value,
+  revealed,
+  kind = "email",
+  lead,
+}: {
+  value: string;
+  revealed: boolean;
+  kind?: PersonalIdentifierKind;
+  lead?: string;
+}) {
+  return (
+    <>
+      {lead && <span className="pid-lead">{lead}</span>}
+      {revealed
+        ? (
+          <span className="pid-shown">
+            <PersonalIdentifierIcon kind={kind} />
+            <span className="pid-value">{value}</span>
+          </span>
+        )
+        : <PersonalIdentifierMask kind={kind} />}
+    </>
+  );
+}
+
+/**
  * A structured personal identifier, masked until the person explicitly reveals it.
  *
  * While masked the value is absent from the DOM entirely — not in text, a tooltip, an accessible
@@ -129,15 +161,7 @@ export function PersonalIdentifier({
   const shownKind = kind ?? (sensitive ? "other" : "email");
   return (
     <span className={`pid${className ? ` ${className}` : ""}`} data-revealed={revealed}>
-      {lead && <span className="pid-lead">{lead}</span>}
-      {revealed
-        ? (
-          <span className="pid-shown">
-            <PersonalIdentifierIcon kind={shownKind} />
-            <span className="pid-value">{value}</span>
-          </span>
-        )
-        : <PersonalIdentifierMask kind={shownKind} />}
+      <PersonalIdentifierText value={value} revealed={revealed} kind={shownKind} lead={lead} />
       <PersonalIdentifierRevealButton
         label={label}
         revealed={revealed}

@@ -5,6 +5,7 @@ import { adoptProviderProfileMarker, createProviderProfileMarker, revokeProvider
 import { isLeaseRunnerMarker } from "./provider-home-lease-evidence.js";
 import { isLeaseContainmentEvidence } from "./provider-home-lease-containment.js";
 import { LeaseIoError } from "./provider-home-lease-io.js";
+import { ProviderCredentialImportRefusal } from "./provider-credential-import.js";
 import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_CLOCK, LEASE_WORKER_LIMITS, LEASE_WORKER_REFERENCE_LIMIT, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept, type LeaseWorkerError, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** Only the fixed source/SEA entry starts this worker; there is no public RPC/CLI entry. */
@@ -53,6 +54,7 @@ export function runProviderHomeLeaseWorker(): void {
     kind === "profile_unverifiable" || kind === "profile_not_granted" || kind === "profile_changed" || kind === "profile_grant_limit" ||
     kind === "stale_tip_changed" || kind === "no_reboot_proof" || kind === "recovery_unconfirmed" ? kind : undefined;
   const fail = (error: unknown): LeaseWorkerError => {
+    if (error instanceof ProviderCredentialImportRefusal) return error.code;
     const known = code(providerHomeLeaseRefusalKind(error));
     if (known) return known;
     if (error instanceof LeaseIoError) return error.kind === "refusal" ? "invalid_journal" : error.kind;
@@ -101,6 +103,14 @@ export function runProviderHomeLeaseWorker(): void {
             reply.value = registry.changeProfileMarkerWhileHeld(op.home, op.provider, read =>
               revokeProviderProfileMarkerGrant(read, { profileId: op.profileId, controlPlaneInstanceId, grantId: op.grantId })).changed;
           }
+        } else if (op.method === "profile_import") {
+          const controlPlaneInstanceId = options.controlPlaneInstanceId;
+          if (!controlPlaneInstanceId) throw new Error("provider profile changes require an attested control-plane instance");
+          registry.importCodexCredentialWhileHeld({ sourceHome: op.home, layout: op.layout,
+            ...(op.profile ? { sourceProfile: op.profile } : {}), ...(op.credentialProfile ? { credentialProfile: op.credentialProfile } : {}),
+            destinationRoot: op.destinationRoot, profileId: op.profileId,
+            grant: { controlPlaneInstanceId, grantId: op.grantId, grantedAt: new Date().toISOString() } });
+          reply.value = true;
         } else if (op.method === "lease_inspect") {
           const found = registry.inspectHome(op.home, op.profile);
           reply.value = true;

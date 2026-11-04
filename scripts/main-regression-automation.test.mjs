@@ -126,8 +126,8 @@ test('serialized state cannot authorize a send without exact live forge revalida
   assert.equal(f.receipts.length, 0);
 });
 
-test('a never-sent stale intent releases safely even after its elapsed deadline', async () => {
-  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+for (const blocked of [null, 'delivery-exhausted']) test(`positive resolution releases an expired never-sent intent (${blocked ?? 'no hold'})`, async () => {
+  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1; s.blocked = blocked;
   const f = fixture(s); f.time = instant + LIMITS.elapsedMs;
   f.observation = health({ status: 'passing', unresolvedFailures: [], evidence: [], resolvedRunIds: [10] });
   assert.equal((await f.run()).status, 'stale-never-sent-intent-released');
@@ -141,8 +141,90 @@ test('unknown health retains a never-sent intent for fresh revalidation rather t
   f.observation = health({ status: 'unknown', unresolvedFailures: [], evidence: [], reasons: ['main-moved'] });
   assert.equal((await f.run()).status, 'dispatch-evidence-unavailable-operator-required');
   assert.ok(f.state.active); assert.equal(f.state.active.tries, 0); assert.equal(f.receipts.length, 0);
-  f.observation = health();
+  f.time = instant + LIMITS.elapsedMs - 1; f.observation = health();
   assert.equal((await f.run()).status, 'delivery-dispatched'); assert.equal(f.receipts.length, 1);
+  assert.equal(f.state.active.createdAt, instant); assert.equal(f.state.active.tries, 1);
+});
+
+for (const legacyHold of [false, true]) test(`expired never-sent intent releases after revalidation (${legacyHold ? 'existing hold' : 'fresh expiry'})`, async () => {
+  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+  if (legacyHold) s.blocked = 'delivery-exhausted';
+  const f = fixture(s), original = f.state.active;
+  f.time = instant + LIMITS.elapsedMs;
+  f.observation = health({ status: 'unknown', unresolvedFailures: [], evidence: [], reasons: ['main-moved'] });
+  assert.equal((await f.run()).status, 'dispatch-evidence-unavailable-operator-required');
+  assert.deepEqual(f.state.active, original); assert.equal(f.receipts.length, 0);
+  f.observation = health({ unresolvedFailures: [], evidence: [] });
+  assert.equal((await f.run()).status, 'dispatch-evidence-unavailable-operator-required');
+  assert.deepEqual(f.state.active, original);
+  f.observation = health();
+  const result = await f.run();
+  assert.equal(result.status, 'never-sent-intent-expired');
+  assert.deepEqual(result.expired, { runId: 10, attempt: 1, eventId: 'main-regression:10:1', tries: 0 });
+  assert.equal(f.state.active, null); assert.equal(f.state.blocked, null);
+  assert.deepEqual(f.state.seen, s.seen); assert.equal(f.receipts.length, 0);
+  assert.equal((await f.run()).status, 'duplicate-or-rerun-suppressed');
+  assert.equal(f.receipts.length, 0);
+  const newer = failure({ runId: 12, testedSha: 'd'.repeat(40) });
+  f.observation = health({ unresolvedFailures: [newer], evidence: [...health().evidence, newer] });
+  assert.equal((await f.run()).status, 'delivery-dispatched');
+  assert.equal(f.state.active.runId, 12); assert.equal(f.state.active.createdAt, instant + LIMITS.elapsedMs);
+  assert.equal(f.state.active.tries, 1); assert.equal(f.receipts.length, 1);
+  assert.deepEqual(f.state.seen, [...s.seen, `${newer.testedSha}:${suite}`]);
+});
+
+test('never-sent recovery cannot clear other holds or inconsistent delivery provenance', async () => {
+  for (const extra of [{ blocked: 'ledger-exhausted' }, { blocked: 'delivery-rejected' },
+    { active: { lastSentAt: instant } }, { active: { stopTries: 1 } }, { active: { invocationId: 'ati_1' } }]) {
+    const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1; s.blocked = 'delivery-exhausted';
+    if (extra.active) Object.assign(s.active, extra.active); else s.blocked = extra.blocked;
+    const f = fixture(s); f.time = instant + LIMITS.elapsedMs;
+    assert.equal((await f.run()).status, s.blocked);
+    assert.deepEqual(f.state.active, s.active); assert.equal(f.state.blocked, s.blocked);
+    assert.deepEqual(f.state.seen, s.seen); assert.equal(f.receipts.length, 0);
+  }
+});
+
+test('positive resolution cannot release inconsistent never-sent provenance without a hold', async () => {
+  for (const extra of [{ lastSentAt: instant }, { stopTries: 1 }, { invocationId: 'ati_1' }]) {
+    const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+    Object.assign(s.active, extra);
+    const f = fixture(s); f.time = instant + LIMITS.elapsedMs;
+    f.observation = health({ status: 'passing', unresolvedFailures: [], evidence: [], resolvedRunIds: [10] });
+    assert.equal((await f.run()).status, 'dispatch-evidence-unavailable-operator-required');
+    assert.deepEqual(f.state.active, s.active); assert.equal(f.state.blocked, null);
+    assert.deepEqual(f.state.seen, s.seen); assert.equal(f.receipts.length, 0);
+  }
+});
+
+test('deadline crossed during evidence validation expires without charging a send', async () => {
+  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+  const f = fixture(s); let time = instant + LIMITS.elapsedMs - 1, comparisons = 0;
+  const api = async (path, options) => {
+    // Candidate selection is the first comparison; intent validation is the second.
+    if (path.includes('/compare/') && ++comparisons === 2) time++;
+    return f.api(path, options);
+  };
+  assert.equal((await f.run({ api, now: () => time })).status, 'never-sent-intent-expired');
+  assert.equal(f.state.active, null); assert.equal(f.state.blocked, null); assert.equal(f.receipts.length, 0);
+});
+
+test('expired never-sent release is CAS protected and preserves the finite suppression capacity', async () => {
+  const s = plan(emptyState(repository), candidate(), instant).next; s.sequence = 1;
+  s.seen.push(...Array.from({ length: LIMITS.ledgerEntries - 1 }, (_, i) => `${i.toString(16).padStart(40, '0')}:${suite}`));
+  const f = fixture(s); f.time = instant + LIMITS.elapsedMs;
+  // Persist the activation binding before failing only the release CAS.
+  f.observation = health({ status: 'unknown', unresolvedFailures: [], evidence: [] }); await f.run();
+  f.observation = health();
+  const api = (path, options) => path === '/graphql' ? { errors: [{ message: 'conflict' }] } : f.api(path, options);
+  await assert.rejects(f.run({ api }), /state-conflict/);
+  assert.ok(f.state.active); assert.equal(f.receipts.length, 0);
+  assert.equal((await f.run()).status, 'never-sent-intent-expired');
+  const newer = failure({ runId: 12, testedSha: 'd'.repeat(40) });
+  f.observation = health({ unresolvedFailures: [newer], evidence: [...health().evidence, newer] });
+  assert.equal((await f.run()).status, 'ledger-exhausted');
+  assert.equal(f.state.active, null); assert.equal(f.state.seen.length, LIMITS.ledgerEntries);
+  assert.equal(f.receipts.length, 0);
 });
 
 test('a withdrawn comparison is safely removed before the first send while preserving the real failure', async () => {
@@ -297,6 +379,23 @@ test('authenticated history recovers an unknown send without replaying withdrawn
   f.time = instant + LIMITS.deliveryBackoffMs;
   assert.equal((await f.run()).status, 'investigation-active'); assert.equal(f.state.active.executionId, 'axe_1');
   assert.equal(f.receipts.length, 1);
+});
+
+test('one ambiguous charged send stays fenced past expiry until authenticated settlement', async () => {
+  const f = fixture(); f.deliveryError = new Error('lost receipt'); await f.run();
+  const original = f.state.active, body = f.receipts[0].body;
+  f.time = instant + LIMITS.elapsedMs;
+  f.observation = health({ status: 'unknown', unresolvedFailures: [], evidence: [] });
+  assert.equal((await f.run()).status, 'delivery-exhausted-operator-required');
+  assert.deepEqual(f.state.active, original); assert.equal(f.state.blocked, 'delivery-exhausted');
+  f.observation = health({ status: 'passing', unresolvedFailures: [], evidence: [], resolvedRunIds: [10] });
+  assert.equal((await f.run()).status, 'delivery-exhausted');
+  assert.deepEqual(f.state.active, original); assert.equal(f.receipts.length, 1);
+  assert.equal(deliveryBody(repository, f.state.active), body);
+  f.payload = { ...automation(), executions: [{ executionId: 'axe_1', automationId: 'auto_1', automationRevision: 2,
+    actionKind: 'create_session', idempotencyKey: 'trigger:atr_1:main-regression:10:1', status: 'expired' }] };
+  assert.equal((await f.run()).status, 'investigation-expired');
+  assert.equal(f.state.active, null); assert.equal(f.state.blocked, null); assert.equal(f.receipts.length, 1);
 });
 
 test('a late authenticated terminal receipt clears an exhausted ambiguous-delivery hold', async () => {

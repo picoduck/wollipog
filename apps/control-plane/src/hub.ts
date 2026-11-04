@@ -1,4 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
 /**
  * Connection hub. Two responsibilities:
  *  1. Track live runner websockets so the control plane can ROUTE commands
@@ -25,6 +26,7 @@ import type {
   HostActionResultMessage,
   InterruptTurnResultMessage,
   StopBackgroundJobResultMessage,
+  ReleaseQueueHoldResultMessage,
   ListDirectoryResultMessage,
   ListExternalSessionsResultMessage,
   ListSessionFilesResultMessage,
@@ -58,6 +60,8 @@ import type {
   ProviderLoginResultMessage,
   RemoveProviderAccountResultMessage,
   WorkflowActionAdmissionRecordedMessage,
+  GitLabMergePreflightResultMessage,
+  GithubMergePreflightResultMessage,
   WorkflowActionReconciliationResultMessage,
   GithubIssueClosureResultMessage,
   CampaignForgeObserveResultMessage,
@@ -83,7 +87,9 @@ export function reminderWakeReasonForEvent(
   if (payload.kind === "permission_request" ||
       (payload.kind === "status" && payload.status === "input_required")) return "approval";
   if (payload.kind === "question_request") return "question";
-  if (payload.kind === "error" || (payload.kind === "status" && payload.status === "failed")) return "failure";
+  // A non-fatal driver problem (#3806) leaves the turn running, so it is no failure to wake for.
+  if ((payload.kind === "error" && !payload.nonFatal) ||
+      (payload.kind === "status" && payload.status === "failed")) return "failure";
   if (payload.kind === "background_continuation_delivered") return "background_job";
   if (payload.kind === "agent_response_completed" ||
       (payload.kind === "agent_message" && payload.final === true)) return "agent_response";
@@ -369,6 +375,7 @@ export type RunnerRequestResult =
   | HostActionResultMessage
   | InterruptTurnResultMessage
   | StopBackgroundJobResultMessage
+  | ReleaseQueueHoldResultMessage
   | ResolveSteeringAttemptResultMessage
   | ReadQueuedPromptResultMessage
   | EditQueuedPromptResultMessage
@@ -380,13 +387,18 @@ export type RunnerRequestResult =
   | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage
   | WorkflowActionAdmissionRecordedMessage
+  | GitLabMergePreflightResultMessage
+  | GithubMergePreflightResultMessage
+  | import("@wollipog/protocol").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | import("@wollipog/protocol").CampaignIssueScopeResultMessage
   | GithubIssueClosureResultMessage
   | CampaignForgeObserveResultMessage
   | ProviderLoginResultMessage
   | RemoveProviderAccountResultMessage
+  | import("@wollipog/protocol").RemoveWorkspaceResultMessage
   | import("@wollipog/protocol").AdoptProviderProfileResultMessage
+  | import("@wollipog/protocol").ImportProviderCredentialResultMessage
   | import("@wollipog/protocol").RevokeProviderProfileGrantResultMessage
   | import("@wollipog/protocol").InspectProviderHomeLeaseResultMessage
   | import("@wollipog/protocol").RecoverProviderHomeLeaseResultMessage;
@@ -602,20 +614,19 @@ export class Hub {
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(runnerId), "artifactSessionGuidance")) return msg;
     const session = this.db.getSession(sessionId);
     if (!session || session.runnerId !== runnerId) return msg;
-    const owner = this.db.sessionOwnerUser(sessionId);
-    const artifactUploads = this.db.artifactUploadPreference(owner?.userId);
+    const artifactUploads = this.db.artifactUploadPreference(this.db.artifactUploadPreferenceUser(sessionId));
     if (msg.type === "durable_session_command") return { ...msg, artifactUploads };
     if (msg.type === "start_session") return { ...msg, spec: { ...msg.spec, artifactUploads } };
     if (msg.type === "prompt_session") return { ...msg, artifactUploads };
     return msg;
   }
 
-  private syncSessionArtifactUploads(session: SessionView, userId?: string): void {
-    const owner = this.db.sessionOwnerUser(session.id);
-    if (userId && owner?.userId !== userId) return;
+  private syncSessionArtifactUploads(session: Pick<SessionView, "id" | "runnerId">, userId?: string): void {
+    const owner = this.db.artifactUploadPreferenceUser(session.id);
+    if (userId && owner !== userId) return;
     if (!runnerSupportsProtocol(this.runnerProtocolVersion(session.runnerId), "artifactSessionGuidance")) return;
     this.sendToRunner(session.runnerId, { type: "set_session_artifact_uploads", sessionId: session.id,
-      preference: this.db.artifactUploadPreference(owner?.userId) });
+      preference: this.db.artifactUploadPreference(owner) });
   }
 
   syncArtifactUploads(userId?: string, runnerId?: string): void {
@@ -910,7 +921,7 @@ export class Hub {
       .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
       .map((reminder) => reminder.sessionId));
     const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id))
-      .map((session) => projectBackgroundRetryExhaustionForUi(session, info.uiProtocolVersion));
+      .map((session) => projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(session, info.uiProtocolVersion), info.uiProtocolVersion));
     const reminders = supportsIndefiniteReminders
       ? allReminders
       : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
@@ -1249,6 +1260,32 @@ export class Hub {
     }
   }
 
+  /** A member's own role or status changed (#2606). Close every socket that member opened, in any
+   * organization and on any device, with the authorization close (1008), so no cached pre-change
+   * privilege survives until reconnect. Status belongs to the user rather than one membership. */
+  closeUserUiClients(userId: string): void {
+    for (const [client, info] of this.uiClients) {
+      if (info.principal?.kind !== "human" || info.principal.userId !== userId) continue;
+      try {
+        info.close();
+      } catch {
+        /* already closing */
+      }
+      this.removeUiClient(client);
+    }
+  }
+
+  /** The organization's member directory changed without changing any connected principal's own
+   * access (#2606), so its dashboards refetch their identity in place instead of reconnecting.
+   * Callers close the sockets of a member whose own access changed first. The command-permission
+   * verdicts already sent are rechecked too, so a verdict that reads another member's facts cannot
+   * go stale on a socket that stays open. */
+  identityDirectoryChanged(organizationId: string): void {
+    this.broadcast({ type: "identity_directory_changed" },
+      (principal) => principal?.organizationId === organizationId);
+    this.refreshSessionCommandPermissions();
+  }
+
   /* --------------------------- Broadcasts -------------------------------- */
 
   runnerChanged(runnerId: string): void {
@@ -1392,7 +1429,7 @@ export class Hub {
     this.broadcast({ type: "project_upsert", project });
   }
 
-  private syncSessionProjectMemory(session: SessionView): void {
+  private syncSessionProjectMemory(session: Pick<SessionView, "id" | "runnerId" | "projectId">): void {
     if ((this.runnerProtocolVersion(session.runnerId) ?? 0) < PROJECT_MEMORY_MIN_PROTOCOL) return;
     this.sendToRunner(session.runnerId, { type: "set_session_project_memory", sessionId: session.id,
       projectMemory: { projectId: session.projectId ?? null,
@@ -1400,10 +1437,11 @@ export class Hub {
   }
 
   syncProjectMemory(projectId?: string, runnerId?: string): void {
-    for (const session of this.db.listSessions({ includeArchived: true })) {
-      if (runnerId && session.runnerId !== runnerId) continue;
-      // Reconnect already hydrates every retained session; share that scan so artifact metadata
-      // does not add another synchronous full inventory before credential handshakes can run.
+    // Reconnect runs this before credential handshakes can be answered: read only this runner's
+    // routing fields, never a full view of every retained session (#2601). Artifact metadata
+    // shares the same pass instead of adding another inventory.
+    const sessions = runnerId ? this.db.runnerSessionInventory(runnerId) : this.db.listSessions({ includeArchived: true });
+    for (const session of sessions) {
       if (runnerId) this.syncSessionArtifactUploads(session);
       if (projectId && session.projectId !== projectId) continue;
       this.syncSessionProjectMemory(session);
@@ -1693,6 +1731,9 @@ export class Hub {
         return false;
       case "session_subscriptions_applied":
         return true;
+      // Scoped to one organization by identityDirectoryChanged's own predicate.
+      case "identity_directory_changed":
+        return false;
     }
   }
 
@@ -1730,7 +1771,7 @@ export class Hub {
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
       for (const compatible of projectedMessages) {
-        const projected = projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion);
+        const projected = projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion), info.uiProtocolVersion);
         let clientData = projected === msg ? data : JSON.stringify(projected);
         if (projected.type === "runner_upsert" && info.principal !== undefined) {
           const runner = this.db.listRunnersForPrincipal(info.principal)
@@ -1823,7 +1864,8 @@ export class Hub {
   }
 
   private safeSend(client: Socket, msg: ControlPlaneToUi): void {
-    const projected = projectBackgroundRetryExhaustionForUi(msg, this.uiClients.get(client)?.uiProtocolVersion);
+    const uiProtocolVersion = this.uiClients.get(client)?.uiProtocolVersion;
+    const projected = projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(msg, uiProtocolVersion), uiProtocolVersion);
     this.sendRaw(client, JSON.stringify(projected), this.coalesceKey(projected));
   }
 

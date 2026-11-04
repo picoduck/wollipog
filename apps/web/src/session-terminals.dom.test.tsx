@@ -14,7 +14,7 @@ import {
   type SessionView,
   type ShellView,
 } from "@wollipog/protocol";
-import { api, type ApiClient } from "./api.js";
+import { api, ApiError, type ApiClient } from "./api.js";
 import { ApiProvider } from "./api-context.js";
 import { StoreProvider } from "./store.js";
 import type { ViewNavigation } from "./navigation.js";
@@ -474,6 +474,32 @@ function gate(): { wait: () => Promise<void>; open: () => void } {
   const opened = new Promise<void>((resolve) => { open = resolve; });
   return { wait: () => opened, open };
 }
+
+test("an Agent TUI open its account's lease refused keeps the typed refusal until the next action (#3338)", async () => {
+  const refusal = { code: "busy", provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 7 };
+  let failure: Error = new ApiError("provider home is busy", 502, undefined, { providerHomeRefusal: refusal });
+  const { terminals } = storeOver([], { openShell: () => Promise.reject(failure) });
+  try {
+    await terminals.newShell("agent_tui");
+    assert.equal(terminals.getSnapshot().error, "provider home is busy");
+    assert.deepEqual(terminals.getSnapshot().errorRefusal, refusal);
+    terminals.dismissError();
+    assert.equal(terminals.getSnapshot().errorRefusal, null, "dismissing the notice drops the refusal with it");
+
+    // A plain shell, a malformed refusal and any other failure keep the server's words alone.
+    await terminals.newShell("shell");
+    assert.equal(terminals.getSnapshot().errorRefusal, null);
+    failure = new ApiError("provider home is busy", 502, undefined, { providerHomeRefusal: { ...refusal, homePath: "/x" } });
+    await terminals.newShell("agent_tui");
+    assert.equal(terminals.getSnapshot().errorRefusal, null);
+    failure = new Error("machine went away");
+    await terminals.newShell("agent_tui");
+    assert.equal(terminals.getSnapshot().error, "machine went away");
+    assert.equal(terminals.getSnapshot().errorRefusal, null);
+  } finally {
+    terminals.dispose();
+  }
+});
 
 test("history read before a reconnect does not count as loaded once it lands", async () => {
   let hold: ReturnType<typeof gate> | null = gate();

@@ -1,6 +1,7 @@
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   MANAGED_BACKGROUND_JOB_VIEW_LIMIT,
+  backgroundLaunchTypeNoun,
   runnerSupportsProtocol,
   type BackgroundDeliveryView,
   type BackgroundDeliveryWatchdogState,
@@ -8,6 +9,7 @@ import {
   type SessionView,
 } from "@wollipog/protocol";
 import { formatDuration, formatRecordedRelativeTime } from "../format.js";
+import { sessionCommandRefusal } from "../session-command-permissions.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import {
   BACKGROUND_DELIVERY_STATUS,
@@ -44,7 +46,7 @@ import {
   type BackgroundParentTurn,
 } from "../background-work.js";
 import { useApi } from "../api-context.js";
-import { statusMeta } from "../status-meta.js";
+import { backgroundWorkCondition, statusMeta } from "../status-meta.js";
 import { driverLabel } from "../usage-view-model.js";
 import { BackgroundRecoveryNotice, RecordedTime, backgroundRecoveryNoticeTone } from "./BackgroundRecoveryNotice.js";
 import { ChevronRightIcon } from "./Icons.js";
@@ -225,7 +227,9 @@ export function BackgroundWorkPanel({
   const groups = useMemo(() => groupBackgroundHistory(jobs, deliveries), [deliveries, jobs]);
   const highlightedWatchdogDelivery = shownWatchdogDelivery(deliveries);
   // Every visible relative timestamp ages, including settled history left open for inspection.
-  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0);
+  const now = useTimelineClock(jobs.length > 0 || deliveries.length > 0 || session.backgroundFollowUp != null ||
+    (session.status === "queued" && !session.capacityWait && !!session.queueHold?.unlistedJobs?.length));
+  const followUp = session.backgroundWorkState === "continuation_pending" ? backgroundWorkCondition(session, runnerOnline) : null;
   const aggregateState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
   const inventoryPending = session.backgroundJobsAvailable === true && session.backgroundJobs === undefined;
   const inventoryProjectionUnknown = session.backgroundJobsAvailable === undefined &&
@@ -350,6 +354,51 @@ export function BackgroundWorkPanel({
             </dl>
           )}>
           {backgroundLostSentence(machine, lostJobs)}
+        </Notice>
+      ),
+    });
+  }
+
+  // A handoff hold waiting on work no row below shows (#3752): name it here, where people look.
+  const unlistedHold = session.status === "queued" && !session.capacityWait ? session.queueHold : undefined;
+  if (unlistedHold?.unlistedJobs?.length) {
+    const unlisted = unlistedHold.unlistedJobs;
+    // Older runners omit the full count; the total minus visible unfinished rows is a safe fallback.
+    const countIsLowerBound = unlistedHold.unlistedJobCount === undefined && session.backgroundJobsTruncated === true;
+    const unlistedCount = unlistedHold.unlistedJobCount ?? (countIsLowerBound ? unlisted.length : Math.max(unlisted.length,
+      unlistedHold.unfinishedBackgroundJobs - (session.backgroundJobs ?? []).filter((job) => !job.terminalStatus).length));
+    const oldest = unlistedHold.oldestUnfinishedJob;
+    const title = "Handoff Waiting on Unlisted Work";
+    // An account label may be an email address (§11.8), so the account is not named.
+    const handoff = unlistedHold.kind === "worktree_rebind"
+      ? `The move to worktree ${unlistedHold.target}`
+      : "The switch to the selected provider account";
+    const canRelease = unlistedHold.canRelease === true && sessionCommandRefusal(session, "stopBackgroundJob") === null;
+    notices.push({
+      key: "background-work-unlisted-hold",
+      severity: "warning",
+      rank: PANEL_NOTICE_RANK.backgroundWorkUnlisted,
+      title,
+      render: ({ trailing }) => (
+        <Notice tone="warning" title={title} trailing={trailing} dataState="unlisted-hold"
+          details={(
+            <dl className="facts">
+              {unlisted.map((job) => (
+                <div key={job.id}>
+                  <dt>{job.kind === "provisional" ? "Unconfirmed Launch" : "Unregistered Task"}</dt>
+                  <dd><code>{job.id}</code>{job.startedAt !== undefined && <> — Started <RecordedTime at={job.startedAt} now={now} /></>}</dd>
+                </div>
+              ))}
+            </dl>
+          )}>
+          {`${handoff} waits for ${countIsLowerBound ? `at least ${unlistedCount} ${unlistedCount === 1 ? "task that has" : "tasks that have"}` : unlistedCount === 1 ? "a task that has" : `${unlistedCount} tasks that have`} no job in this list. `}
+          {unlistedCount > unlisted.length && `Showing ${unlisted.length} of ${unlistedCount}. `}
+          {oldest && <>The oldest blocking item, {backgroundLaunchTypeNoun(oldest.launchType)}, started <RecordedTime at={oldest.startedAt} now={now} />. </>}
+          {canRelease
+            ? "Proceed Now in the queued messages ends it with the rest of this session's background work."
+            : unlistedHold.endsAt !== undefined
+              ? "It ends when the provider reports it finished, or when the hold's deadline passes."
+              : "It ends when the provider reports it finished."}
         </Notice>
       ),
     });
@@ -590,6 +639,10 @@ export function BackgroundWorkPanel({
   ) : aggregateState === "orphaned" ? (
     // The Lost notice in the panel's slot says it all.
     null
+  ) : aggregateState === "continuation_pending" ? (
+    <State compact title="Follow-Up Pending">
+      Background jobs finished, but their follow-up details aren't available yet.
+    </State>
   ) : aggregateState ? (
     <State compact title="Background Work Running">
       A background job is running, but its details aren't available yet.
@@ -616,7 +669,18 @@ export function BackgroundWorkPanel({
       </PanelHeaderActions>
       <PanelNoticeSlot sessionId={session.id} entries={notices} claimRemovedFocus={claimRemovedFocus} />
       {/* The list stays mounted under a page, so its rows and scroll are there on Back. */}
-      <div className="background-work-panel" hidden={pageJobId !== null}>{body}</div>
+      <div className="background-work-panel" hidden={pageJobId !== null}>
+        {followUp && (
+          <section aria-label="Automatic Follow-Up">
+            <StatusBadge meta={followUp.meta} />
+            <p>{followUp.description}</p>
+            {session.backgroundFollowUp?.queuedAt != null && (
+              <p>Queued <RecordedTime at={session.backgroundFollowUp.queuedAt} now={now} />.</p>
+            )}
+          </section>
+        )}
+        {body}
+      </div>
       {pageJobId !== null && (
         <div className="background-work-page" key={pageJobId}>
           <PanelPageTitle>{pageJob ? backgroundJobLabel(pageJob) : "Background Job"}</PanelPageTitle>

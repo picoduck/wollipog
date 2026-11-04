@@ -13,6 +13,7 @@ import {
   type SessionView,
   type SourceLocation,
   type WorkspaceReferenceCandidate,
+  type WorkspaceReferenceSearchLimit,
 } from "@wollipog/protocol";
 import { useApi } from "../api-context.js";
 import { writeClipboardText } from "../clipboard.js";
@@ -34,10 +35,11 @@ import {
   rankGoToFileResults,
   resolveSourceTarget,
   sourceLines,
-  workspaceFolderName,
+  sessionRootName,
   type GitMarker,
   type GoToFileMatch,
   type ResolvedSourceTarget,
+  type TextRange,
 } from "../files-panel.js";
 import { relativeTime } from "../format.js";
 import { absoluteViewUrl } from "../navigation.js";
@@ -262,9 +264,15 @@ function GitMarkerBadge({ marker }: { marker: GitMarker }) {
 }
 
 /** The matched letters of a Go to File result, underlined. */
-function Highlighted({ text, range }: { text: string; range?: { start: number; end: number } }) {
-  if (!range) return <>{text}</>;
-  return <>{text.slice(0, range.start)}<span className="files-goto-match">{text.slice(range.start, range.end)}</span>{text.slice(range.end)}</>;
+function Highlighted({ text, ranges }: { text: string; ranges: readonly TextRange[] }) {
+  const parts: ReactNode[] = [];
+  let at = 0;
+  for (const range of ranges) {
+    parts.push(text.slice(at, range.start), <span key={range.start} className="files-goto-match">{text.slice(range.start, range.end)}</span>);
+    at = range.end;
+  }
+  parts.push(text.slice(at));
+  return <>{parts}</>;
 }
 
 /** Dense skeleton rows while a folder's first listing loads (§12.3). */
@@ -370,11 +378,18 @@ export function FilesBrowser({
     session.runnerId,
   ).name);
   const machineName = runnerName || "The machine";
-  const rootName = workspaceFolderName(session.worktreePath, session.workspaceName);
+  const rootName = sessionRootName(session);
 
   // Go to File (#2852): the query, the runner's last answer for it, and the active result.
   const [query, setQuery] = useState("");
-  const [search, setSearch] = useState<{ query: string; results: WorkspaceReferenceCandidate[]; truncated: boolean } | null>(null);
+  const [search, setSearch] = useState<{
+    query: string;
+    results: WorkspaceReferenceCandidate[];
+    truncated: boolean;
+    /** The runner ranked fuzzy matches best first (#1263); an older one returns the first found. */
+    fuzzy: boolean;
+    limit?: WorkspaceReferenceSearchLimit;
+  } | null>(null);
   const [searchError, setSearchError] = useState<string | null>(null);
   const [active, setActive] = useState(0);
   // Enter pressed before the answer for what is typed arrived: open its first match when it does.
@@ -487,9 +502,15 @@ export function FilesBrowser({
       return;
     }
     const timer = window.setTimeout(() => {
-      api.searchWorkspaceReferences(session.id, trimmedQuery).then((result) => {
+      api.searchWorkspaceReferences(session.id, trimmedQuery, "fuzzy").then((result) => {
         if (searchRef.current !== id) return;
-        setSearch({ query: trimmedQuery, results: result.results, truncated: result.truncated });
+        setSearch({
+          query: trimmedQuery,
+          results: result.results,
+          truncated: result.truncated,
+          fuzzy: result.match === "fuzzy",
+          limit: result.limit,
+        });
         setActive(0);
       }, (cause: unknown) => {
         if (searchRef.current !== id) return;
@@ -505,8 +526,8 @@ export function FilesBrowser({
   const markers = useMemo(() => gitMarkers(git?.status?.files), [git?.status?.files]);
   const matches = useMemo<GoToFileMatch[]>(() => {
     if (!search) return [];
-    const recent = new Set(recentFiles.get(session.id) ?? []);
-    return rankGoToFileResults(search.results, search.query, (candidate) => markers.has(candidate) || recent.has(candidate));
+    const priority = new Set([...markers.keys(), ...(recentFiles.get(session.id) ?? [])]);
+    return rankGoToFileResults(search.results, search.query, priority, search.truncated);
   }, [markers, search, session.id]);
   const activeIndex = answered && matches.length ? Math.min(active, matches.length - 1) : -1;
   const listShown = searching && search !== null && searchError === null && matches.length > 0;
@@ -694,6 +715,8 @@ export function FilesBrowser({
   const shownPath = opening ?? shownFile?.path ?? null;
   const folder = shownPath !== null ? parentPath(shownPath) : path;
   const crumbs = crumbsFor(folder, rootName);
+  // The root crumb's tooltip is the folder's full path, which its name may not tell (#2852).
+  const rootTitle = session.worktreePath ?? undefined;
   const disabled = !runnerOnline || busy;
   const atRoot = shownPath === null && path === "";
 
@@ -801,7 +824,13 @@ export function FilesBrowser({
     ) : (
       <div className="files-content">
         <p className="files-goto-count" role="status">
-          {search.truncated ? "Showing the first matches only. Type more to narrow them." : matchCount}
+          {!search.truncated
+            ? matchCount
+            : !search.fuzzy
+              ? "Showing the first matches only. Type more to narrow them."
+              : search.limit === "entries"
+                ? "The workspace is too large to search in full, so some files may be missing."
+                : "Showing the best matches only. Type more to narrow them."}
         </p>
         {/* Options are not tab stops: the field keeps focus and names the active one (§16.2). */}
         <ul className="files-list" role="listbox" id={`${goToFileId}-results`} aria-label="Matching Files" aria-busy={!answered || undefined}>
@@ -821,11 +850,11 @@ export function FilesBrowser({
             >
               <EntryIcon name={match.name} isDir={false} />
               <span className="row-title files-goto-name">
-                <Highlighted text={match.name} range={match.matchIn === "name" ? match.range : undefined} />
+                <Highlighted text={match.name} ranges={match.nameRanges} />
               </span>
               {match.folder && (
                 <span className="files-goto-folder">
-                  <Highlighted text={match.folder} range={match.matchIn === "folder" ? match.range : undefined} />
+                  <Highlighted text={match.folder} ranges={match.folderRanges} />
                 </span>
               )}
               {markers.has(match.path) && <GitMarkerBadge marker={markers.get(match.path)!} />}
@@ -853,9 +882,10 @@ export function FilesBrowser({
           <span key={c.path}>
             {i > 0 && <span className="crumb-sep" aria-hidden="true">/</span>}
             {shownPath === null && i === crumbs.length - 1 ? (
-              <span className="crumb is-current" aria-current="location">{c.name}</span>
+              <span className="crumb is-current" aria-current="location" title={i === 0 ? rootTitle : undefined}>{c.name}</span>
             ) : (
-              <button className="crumb" type="button" disabled={disabled && shownPath === null} onClick={() => showFolder(c.path)}>
+              <button className="crumb" type="button" title={i === 0 ? rootTitle : undefined}
+                disabled={disabled && shownPath === null} onClick={() => showFolder(c.path)}>
                 {c.name}
               </button>
             )}

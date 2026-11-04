@@ -5,6 +5,8 @@ export interface CampaignBudgetAuthority {
   costUsd?: number;
   toolCalls?: number;
   concurrency?: number;
+  /** How many follow-ups the Orchestrator accepts without approval (#2940); each one past it is a
+   * Human decision. Omitted: no limit. */
   acceptedFollowUps?: number;
   /** Checkpoints are preauthorized notifications, never permission to exceed the envelope. */
   checkpointsUsd?: number[];
@@ -42,6 +44,9 @@ export interface CampaignBudgetView {
   remaining: { costUsd: number | null; toolCalls: number | null };
   occupied: number;
   acceptedFollowUps: number;
+  /** Follow-ups past `authority.acceptedFollowUps` (#2940): Human decisions still pending, and how
+   * many the Human approved. Absent where the allowance does not govern the campaign. */
+  followUpApprovals?: { pending: Array<{ occurrenceId: string; title: string }>; approved: number };
   reachedCheckpointsUsd: number[];
   /** Provider cancellation is asynchronous; this is an admission envelope, not a billing cap. */
   enforcement: "admission_and_best_effort_cancellation";

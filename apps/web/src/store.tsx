@@ -349,6 +349,9 @@ export interface State {
   sessionSummarySnapshots: boolean;
   /** Monotonic reconnect generation used to revalidate REST-only routed resources. */
   snapshotRevision: number;
+  /** Advanced each time the control plane reports a member directory change that left this
+   * viewer's access alone (#2606), so the viewer's identity reloads without a reconnect. */
+  identityDirectoryRevision: number;
   /** Session ids received in this connection's incomplete initial inventory. */
   pendingSnapshotSessionIds?: Set<string>;
   /** True only when the connected control plane advertises an authoritative Project inventory.
@@ -1704,6 +1707,8 @@ function reducer(state: State, action: Action): State {
           podContext.set(msg.entry.podId, mergePodContext(podContext.get(msg.entry.podId), [msg.entry]));
           return { ...state, podContext };
         }
+        case "identity_directory_changed":
+          return { ...state, identityDirectoryRevision: state.identityDirectoryRevision + 1 };
       }
       return state;
     }
@@ -1722,6 +1727,7 @@ function initialState(
     currentTurnOpeningSupported: false,
     sessionSummarySnapshots: false,
     snapshotRevision: 0,
+    identityDirectoryRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
     projectCreationRetrySupported: false,
@@ -2255,23 +2261,32 @@ export class Store {
   reconnectNow = (): boolean => this.reconnectHandler?.() ?? false;
 
   /**
-   * A view that asks for something to be focused — a session's attention target, or a Settings
-   * control a redirect lands on (#3023) — is an activation: each arrival gets a fresh id, so arriving
-   * again on the same address focuses it again rather than being dropped as the same view.
+   * A view that asks for something to be focused — a session's attention target, a Settings
+   * control a redirect lands on (#3023), or a Machine accounts action (#3240) — is an activation:
+   * each arrival gets a fresh id, so arriving again on the same address focuses it again rather
+   * than being dropped as the same view.
    */
   private activate(view: View): { view: View; activation: boolean } {
     if (view.name === "session" && view.attention) {
       return { view: { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }, activation: true };
     }
+    // An artifact link opens the Browser on its artifact each time it is followed (#3924).
+    if (view.name === "session" && view.artifacts) {
+      return { view: { ...view, artifacts: { ...view.artifacts, activationId: ++this.attentionActivation } }, activation: true };
+    }
     if (view.name === "settings" && view.focus) {
       return { view: { ...view, focus: { ...view.focus, activationId: ++this.attentionActivation } }, activation: true };
+    }
+    if (view.name === "runners" && view.accounts) {
+      return { view: { ...view, accounts: { ...view.accounts, activationId: ++this.attentionActivation } }, activation: true };
     }
     return { view, activation: false };
   }
   navigate = (view: View, options?: NavigateOptions): void => {
+    if (view.name === "archived") view = { ...view, browseVisit: { restore: false, activationId: ++this.attentionActivation } };
     const { view: activated, activation } = this.activate(view);
     if (sameView(this.state.view, activated)) {
-      if (activation) this.dispatch({ type: "navigate", view: activated });
+      if (activation || activated.name === "archived") this.dispatch({ type: "navigate", view: activated });
       return;
     }
     // An editor with unsaved changes asks first (leave-guard.ts), and navigates here itself if the
@@ -2281,6 +2296,7 @@ export class Store {
     this.onNavigate?.(activated, options);
   };
   navigateFromHistory = (view: View, traversal?: HistoryTraversal): void => {
+    if (view.name === "archived") view = { name: "archived", browseVisit: { restore: true, activationId: ++this.attentionActivation } };
     const { view: activated, activation } = this.activate(view);
     const leaving = !sameView(this.state.view, activated);
     // An editor with unsaved changes asks first, as in-app navigation does (#3218): the move is

@@ -171,6 +171,48 @@ test("the batch is bounded and the query inlines only validated values", async (
   assert.match(query, /r0: repository\(owner:"picoduck",name:"wollipog"\)/u);
   assert.match(query, /isRequired\(pullRequestNumber:7\)/u);
   assert.match(query, /mergeQueueEntry\{position state\}/u);
+  assert.match(query, /defaultBranchRef\{name\}/u);
+});
+
+test("an observation carries the repository's default branch when GitHub reports a usable one (#4070)", async () => {
+  const read = async (repository: Record<string, unknown>) => {
+    const outcome = await observeForgeStatus([REF], stub(answer({ r0: { ...repository, pullRequest: pr({ state: "MERGED", mergeCommit: { oid: MERGE } }) } })));
+    assert.ok(outcome.ok && outcome.results[0]!.ok);
+    return outcome.results[0]!.ok ? outcome.results[0]!.observation as CampaignForgePullRequestObservation : null;
+  };
+  assert.equal((await read({ defaultBranchRef: { name: "main" } }))?.defaultBranch, "main");
+  for (const repository of [{}, { defaultBranchRef: null }, { defaultBranchRef: { name: "" } }, { defaultBranchRef: { name: 7 } }]) {
+    const observation = await read(repository);
+    assert.ok(observation, "a missing default branch never fails the observation");
+    assert.equal("defaultBranch" in observation, false);
+  }
+});
+
+test("an observation carries its own repository's head branch and tip, null once deleted (#4067)", async () => {
+  assert.match(forgeStatusQuery([{ owner: "picoduck", name: "wollipog", number: 7 }]), /headRefName isCrossRepository headRef\{target\{oid\}\}/u);
+  const read = async (fields: Record<string, unknown>) => {
+    const outcome = await observeForgeStatus([REF], stub(answer({ r0: { pullRequest: pr({ state: "MERGED", mergeCommit: { oid: MERGE }, ...fields }) } })));
+    assert.ok(outcome.ok && outcome.results[0]!.ok);
+    return outcome.results[0]!.ok ? outcome.results[0]!.observation as CampaignForgePullRequestObservation : null;
+  };
+  const tip = "e".repeat(40);
+  assert.deepEqual((await read({ headRefName: "agent/s_1", isCrossRepository: false, headRef: { target: { oid: tip } } }))?.headBranch,
+    { name: "agent/s_1", tipSha: tip });
+  assert.deepEqual((await read({ headRefName: "agent/s_1", isCrossRepository: false, headRef: null }))?.headBranch,
+    { name: "agent/s_1", tipSha: null });
+  // Any branch name Git accepts is reported, so its cleanup is tracked.
+  for (const name of ["feature/foo+bar", "fix/issue#4067"]) {
+    assert.deepEqual((await read({ headRefName: name, isCrossRepository: false, headRef: { target: { oid: tip } } }))?.headBranch,
+      { name, tipSha: tip }, name);
+  }
+  for (const fields of [{}, { headRefName: "agent/s_1", isCrossRepository: true, headRef: null },
+    { headRefName: "-x", isCrossRepository: false, headRef: null }, { headRefName: "agent/s_1", isCrossRepository: false, headRef: { target: {} } }]) {
+    const observation = await read(fields);
+    assert.ok(observation, "an untracked head branch never fails the observation");
+    assert.equal("headBranch" in observation, false, JSON.stringify(fields));
+    // Whether it is a fork is reported on its own, so an unusable same-repository name stays owed.
+    assert.equal(observation.crossRepository, "isCrossRepository" in fields ? fields.isCrossRepository : undefined, JSON.stringify(fields));
+  }
 });
 
 test("required checks read passing only when GitHub's merge state confirms none is still missing", async () => {

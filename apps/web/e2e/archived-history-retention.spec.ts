@@ -44,15 +44,15 @@ test("a member who is not an owner or admin reads Storage without changing it", 
   await expect(page.getByText("Only an organization owner or admin can change this.", { exact: true })).toBeVisible();
 });
 
-test("the archive marks pruned sessions and keeps them openable", async ({ page }) => {
+test("the archive keeps pruned sessions openable without adding status badges", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/archived-sessions-e2e.html");
-  const row = page.getByRole("row", { name: /Migrate the Usage Dashboard to Daily Buckets/ });
-  const badge = row.locator(".archive-state-badges .status", { hasText: "History Pruned" });
-  await expect(badge).toBeVisible();
-  await expect(badge).toHaveAttribute("title", /^Pruned .* by the 90-day retention policy$/);
-  await expect(page.getByRole("row", { name: /Add Keyboard Shortcuts to the Board/ })
-    .locator(".archive-state-badges .status", { hasText: "History Pruned" })).toHaveCount(0);
+  const row = page.getByRole("group", { name: "Migrate the Usage Dashboard to Daily Buckets", exact: true });
+  await expect(row.getByRole("link")).toHaveAttribute("href", /sessions/);
+  await expect(row.locator(".status")).toHaveCount(0);
+  await expect(row.locator(".archive-history")).toHaveText("History Pruned");
+  await row.getByRole("button", { name: /More Actions/ }).click();
+  await expect(page.getByRole("menuitem", { name: /Open Session/ })).toContainText("90-day retention policy");
 });
 
 for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {

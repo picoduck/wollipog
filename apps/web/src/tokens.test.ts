@@ -184,29 +184,10 @@ test("every compact-tier query ends where useIsCompact() does", () => {
   assert.match(listPane!.params, /^app\s*\(/, "the list pane queries the main column's `app` container");
 });
 
-test("the Archived Sessions table folds until its full layout leaves the Session column 200px (§14)", () => {
-  // The fold is not a tier: it ends where the six declared columns, 200px for the title, the
-  // wrapper's 1px borders and the page's gutters fit the main column (#2114). It answers to the
-  // column, so the labelled rail and a docked panel count, and a phone (no `app` container) keeps
-  // its rows.
-  const width = (selectors: string) => {
-    const values = topLevelRule(css, selectors).nodes.flatMap((node) =>
-      node.type === "decl" && node.prop === "width" ? [node.value] : []);
-    assert.equal(values.length, 1, `${selectors} declares one width`);
-    assert.match(values[0]!, /^\d+px$/, `${selectors} declares its width in px`);
-    return Number.parseInt(values[0]!, 10);
-  };
-  const columns = width(".archive-table .col-state") + 2 * width(".archive-table .col-project, .archive-table .col-location")
-    + width(".archive-table .col-agent") + width(".archive-table .col-created") + width(".archive-table .col-actions");
-  const gutter = only(scope(TOKENS), "--page-gutter", "the token block");
-  assert.match(gutter, /^\d+px$/);
-  const fits = columns + 200 + 2 + 2 * Number.parseInt(gutter, 10);
-  const folds = [...mediaBlocks(css), ...containerBlocks(css)].filter((block) =>
-    block.declarationsForSelector(".archive-session-meta").get("display")?.includes("block"));
-  assert.equal(folds.length, 1, "one rule folds the table");
-  assert.match(folds[0]!.params, /^app\s*\(/, "the fold queries the main column's `app` container");
-  assert.deepEqual(folds[0]!.maxWidths, [fits - 1], `the fold ends where the full layout fits, at ${fits}px`);
-  assert.ok(fits - 1 >= COMPACT_BREAKPOINT_PX - 1, "the fold still covers the whole compact tier");
+test("Archived Sessions uses rows and a fixed action slot", () => {
+  assert.equal(topLevelRule(css, ".archive-list .archive-item").nodes.some((node) => node.type === "decl" && node.prop === "height" && node.value === "56px"), true);
+  assert.equal(topLevelRule(css, ".archive-item-actions").nodes.some((node) => node.type === "decl" && node.prop === "width" && node.value === "180px"), true);
+  assert.doesNotMatch(css, /archive-table/);
 });
 
 test("the main column is the `app` size container from the compact tier up (§2.10)", () => {

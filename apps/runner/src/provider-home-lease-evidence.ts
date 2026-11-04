@@ -34,6 +34,13 @@ export type LeaseAbandonmentResult =
   | { proven: true; proof: LeaseAbandonmentProof }
   | { proven: false; reason: "runner_alive" | "marked_process" | "uninspectable" | "boundary_populated" | "boundary_unverifiable"; blockingProcess?: ProviderHomeBlockingProcess };
 
+export interface LeaseScanBlocker {
+  pid: number;
+  startTime?: string;
+  command?: string;
+  reason: "marked" | "uninspectable";
+}
+
 /** The process view a proof is made from. Injected in tests. */
 export interface LeaseProcessProbe {
   bootId(): string;
@@ -43,7 +50,7 @@ export interface LeaseProcessProbe {
    * Every process of this user carrying `marker`, and every process of this user that cannot be
    * inspected and might descend from the runner that started at `runnerStartTime` in this boot.
    */
-  scan(marker: string, runnerStartTime: string, diagnostics?: boolean): { marked: number[]; uninspectable: number[]; blockingProcess?: ProviderHomeBlockingProcess };
+  scan(marker: string, runnerStartTime: string, diagnostics?: boolean, detailed?: boolean): { marked: number[]; uninspectable: number[]; blockingProcess?: ProviderHomeBlockingProcess; blockers?: LeaseScanBlocker[] };
   boundaryMember?(identity: LeaseCgroupEvidence): ProviderHomeBlockingProcess | undefined;
   membership?(pid: number, startTime: string, identity: LeaseCgroupEvidence): ProviderHomeBlockingProcess["cgroupMembership"];
   containment?(identity: LeaseCgroupEvidence): LeaseContainmentResult;
@@ -149,7 +156,7 @@ export function linuxLeaseProcessProbe(
       try { return statStartTime(readFileSync(join(root, String(pid), "stat"), "utf8")); }
       catch (error) { if (gone(error)) return null; throw error; }
     },
-    scan: (marker, runnerStartTime, diagnostics) => {
+    scan: (marker, runnerStartTime, diagnostics, detailed) => {
       const entry = Buffer.from(`${PROVIDER_HOME_RUNNER_MARKER_ENV}=${marker}`);
       // A read either succeeds, proves the process gone (ENOENT/ESRCH), or fails; only the second
       // ever excuses a process from inspection.
@@ -197,6 +204,10 @@ export function linuxLeaseProcessProbe(
         // Another user's process cannot have been launched by this user's runner, except through a
         // set-id program: its real uid is still ours, and it is treated as uninspectable below.
         if (real !== uid && effective !== uid) return "clear";
+        // Exited processes cannot write. Inspect their surviving children separately. This also
+        // applies to readable empty zombie environments and set-id processes.
+        const own = fields(pid);
+        if (typeof own !== "string" && (own[0] === "Z" || own[0] === "X")) return "clear";
         if (effective !== uid) return cannotDescend(pid) ? "clear" : "uninspectable";
         const environ = read(pid, "environ");
         if (environ === "gone") return "clear";
@@ -218,9 +229,18 @@ export function linuxLeaseProcessProbe(
       const verdicts = new Map<string, { pid: number; verdict: Verdict; startTime?: string }>();
       const diagnostic = () => {
         if (!diagnostics) return {};
+        const blockers: LeaseScanBlocker[] = !detailed ? [] : [...verdicts.values()]
+          .filter((item) => item.verdict !== "clear")
+          .map((item) => {
+            const raw = read(item.pid, "stat");
+            const stable = Buffer.isBuffer(raw) && statStartTime(raw.toString("utf8")) === item.startTime;
+            const command = stable ? /\((.*)\)/u.exec(raw.toString("utf8"))?.[1] : undefined;
+            return { pid: item.pid, ...(stable && item.startTime ? { startTime: item.startTime } : {}),
+              ...(command ? { command: command.slice(0, 128) } : {}), reason: item.verdict as "marked" | "uninspectable" };
+          });
         const item = [...verdicts.values()].find(item => item.verdict === "marked") ??
           [...verdicts.values()].find(item => item.verdict === "uninspectable");
-        if (!item) return {};
+        if (!item) return detailed ? { blockers } : {};
         let startTime: string | undefined;
         if (item.startTime) {
           testHooks?.afterInspection?.(item.pid);
@@ -231,7 +251,7 @@ export function linuxLeaseProcessProbe(
           pid: item.pid, ...(startTime ? { startTime } : {}),
           kind: item.verdict === "marked" ? "provider_descendant" : "uninspectable", cgroupMembership: "unavailable",
         };
-        return { blockingProcess };
+        return { blockingProcess, ...(detailed ? { blockers } : {}) };
       };
       const of = (verdict: Verdict) => [...verdicts.values()].filter((item) => item.verdict === verdict).map((item) => item.pid);
       for (let round = 0; round < MAX_SCAN_ROUNDS; round++) {

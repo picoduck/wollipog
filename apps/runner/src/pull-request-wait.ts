@@ -6,10 +6,15 @@
  * required checks (rulesets plus classic branch protection) and one GraphQL query per poll reads
  * the pull request. Nothing here merges, enqueues, retries, or writes anything.
  *
+ * The same query reads the pull request's latest merge-queue timeline events, so a call that starts
+ * after GitHub removed the current head's entry reports that removal (#3712) rather than the head's
+ * own passing checks.
+ *
  * Which checks are required comes from the base branch's rules, never from the job list: a
  * required check GitHub has not reported yet has no node at all, so it reads `pending`
  * (`reported: false`), never passing. A base with no required checks returns at once.
  */
+import { campaignRepositoryLocation } from "@wollipog/protocol";
 import { classifyGhFailure, githubRepository, type GhOutcome, type GhRunner } from "./campaign-forge-status.js";
 
 export const PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS = 240_000;
@@ -97,6 +102,9 @@ export interface PullRequestWaitSummary {
     enqueuedAt: string | null;
     checks: CommitChecksSummary | null;
   };
+  /** GitHub's latest removal of the current head from the merge queue, when no entry has replaced
+   * it: `reason` is GitHub's own (for example `checks_timed_out`, `failed_checks`, `manual`). */
+  mergeQueueRemoval: null | { reason: string | null; removedAt: string };
   waitedMs: number;
   polls: number;
 }
@@ -156,24 +164,30 @@ export function parsePullRequestRef(
     const text = pullRequest.trim();
     const url = /^https:\/\/github\.com\/([^/\s]+\/[^/\s]+)\/pull\/(\d+)(?:[/?#].*)?$/u.exec(text);
     const short = /^([^/\s#]+\/[^/\s#]+)#(\d+)$/u.exec(text);
-    const match = url ?? short;
+    // GitLab (#3602): a merge request URL, or `<host>/group[/subgroup…]/project!<iid>`.
+    const gitlabUrl = /^https:\/\/([^/\s?#@]+\/[^\s?#]+?)\/-\/merge_requests\/(\d+)(?:[/?#].*)?$/u.exec(text);
+    const gitlabShort = /^([^/\s!]+(?:\/[^/\s!]+){2,})!(\d+)$/u.exec(text);
+    const match = url ?? short ?? gitlabUrl ?? gitlabShort;
     if (match) {
       if (repo && repo.toLowerCase() !== match[1]!.toLowerCase()) {
         return { error: `pull request ${text} is not in repository ${repo}` };
       }
       repo = match[1]!;
       number = Number(match[2]);
-    } else if (/^#?\d+$/u.test(text)) {
-      number = Number(text.replace(/^#/u, ""));
+    } else if (/^[#!]?\d+$/u.test(text)) {
+      number = Number(text.replace(/^[#!]/u, ""));
     } else {
-      return { error: "pullRequest must be a number, owner/name#number, or a github.com pull request URL" };
+      return { error: "pullRequest must be a number, owner/name#number, a github.com pull request URL, " +
+        "a GitLab merge request URL, or <gitlab-host>/group/project!number" };
     }
   } else {
     return { error: "pullRequest is required" };
   }
   if (!Number.isSafeInteger(number) || number! < 1) return { error: "pullRequest number must be a positive integer" };
-  if (!repo) return { error: "repository (owner/name) is required when pullRequest is a bare number" };
-  if (!githubRepository({ repository: repo, number: number! })) return { error: `invalid GitHub repository: ${repo}` };
+  if (!repo) return { error: "repository (owner/name, or <gitlab-host>/group/project) is required when pullRequest is a bare number" };
+  if (!githubRepository({ repository: repo, number: number! }) && campaignRepositoryLocation(repo)?.forge !== "gitlab") {
+    return { error: `invalid repository: ${repo} (a GitHub owner/name, or a GitLab project with its host)` };
+  }
   return { repository: repo, number: number! };
 }
 
@@ -264,7 +278,7 @@ export async function requiredCheckNames(
 
 const contextFields = (after: string) => `contexts(first:${CONTEXTS_PER_COMMIT}${after}){pageInfo{hasNextPage endCursor} nodes{
   __typename
-  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId}} isRequired(pullRequestNumber:$number)}
+  ... on CheckRun{databaseId name status conclusion startedAt detailsUrl checkSuite{app{databaseId} branch{name} createdAt} isRequired(pullRequestNumber:$number)}
   ... on StatusContext{context state createdAt targetUrl isRequired(pullRequestNumber:$number)}
 }}`;
 const CONTEXT_FIELDS = contextFields("");
@@ -273,8 +287,12 @@ export const PULL_REQUEST_WAIT_QUERY = `query($owner:String!,$name:String!,$numb
   repository(owner:$owner,name:$name){
     defaultBranchRef{name}
     pullRequest(number:$number){
-      url state isDraft headRefOid baseRefName mergeStateStatus createdAt
+      url state isDraft headRefOid headRefName baseRefName mergeStateStatus createdAt
       timelineItems(last:1,itemTypes:[READY_FOR_REVIEW_EVENT]){nodes{... on ReadyForReviewEvent{createdAt}}}
+      queueEvents:timelineItems(last:1,itemTypes:[ADDED_TO_MERGE_QUEUE_EVENT,REMOVED_FROM_MERGE_QUEUE_EVENT]){nodes{
+        __typename ... on AddedToMergeQueueEvent{createdAt} ... on RemovedFromMergeQueueEvent{createdAt reason}
+      }}
+      forcePushes:timelineItems(last:1,itemTypes:[HEAD_REF_FORCE_PUSHED_EVENT]){nodes{... on HeadRefForcePushedEvent{createdAt afterCommit{oid}}}}
       mergeCommit{oid}
       mergeQueueEntry{position state enqueuedAt headCommit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}
       commits(last:1){nodes{commit{oid statusCheckRollup{${CONTEXT_FIELDS}}}}}
@@ -300,6 +318,10 @@ interface CheckNode {
   at: string;
   /** The GitHub App that reported a check run. */
   appId?: number;
+  /** The branch a check run's suite was created for, and when: the push or event that created it.
+   * A re-run or a delayed start keeps its suite's time. */
+  branch?: string;
+  suiteCreatedAt?: string;
   url?: string;
   isRequired: boolean;
 }
@@ -321,6 +343,8 @@ function checkNode(raw: unknown): CheckNode | null {
     const completed = node.status === "COMPLETED";
     const conclusion = typeof node.conclusion === "string" ? node.conclusion : "";
     const appId = record(record(node.checkSuite)?.app)?.databaseId;
+    const branch = record(record(node.checkSuite)?.branch)?.name;
+    const suiteCreatedAt = record(node.checkSuite)?.createdAt;
     return {
       kind: "CheckRun",
       name: node.name,
@@ -329,6 +353,8 @@ function checkNode(raw: unknown): CheckNode | null {
       ...(Number.isSafeInteger(node.databaseId) ? { id: node.databaseId as number } : {}),
       at: typeof node.startedAt === "string" ? node.startedAt : "",
       ...(Number.isSafeInteger(appId) ? { appId: appId as number } : {}),
+      ...(typeof branch === "string" && branch ? { branch } : {}),
+      ...(typeof suiteCreatedAt === "string" ? { suiteCreatedAt } : {}),
       url: httpsUrl(node.detailsUrl),
       isRequired: node.isRequired === true,
     };
@@ -477,6 +503,58 @@ interface Observation {
   /** Latest ready event, or creation for a PR with a known empty ready-event timeline. */
   admittedAfter: number | null;
   admittedSkippedRuns?: ReadonlySet<number>;
+  /** The pull request's head branch, which check suites name. */
+  headRef: string | null;
+  /** The latest merge-queue event, when it is a removal no force push has followed. */
+  lastRemoval: null | {
+    reason: string | null; removedAt: string; at: number;
+    /** The latest force push before the removal, and the commit it left as head. */
+    forcePushedAt: number | null; forcePushedTo: string | null;
+  };
+  /** `lastRemoval`, once the current head is shown to have been the pull request's head then. */
+  removal?: { reason: string | null; removedAt: string };
+}
+
+/** The latest merge-queue event, when it is a removal. Null for a pull request never enqueued, one
+ * queued again since, one force-pushed at or after the removal (a push may be what removed it), or
+ * a timeline it cannot read. */
+function lastQueueRemoval(events: unknown, forcePushes: unknown): Observation["lastRemoval"] {
+  const latest = record((record(events)?.nodes as unknown[] | undefined)?.at(-1));
+  const at = timestamp(latest?.createdAt);
+  if (latest?.__typename !== "RemovedFromMergeQueueEvent" || at === null) return null;
+  const pushes = record(forcePushes)?.nodes;
+  if (!Array.isArray(pushes)) return null;
+  const push = record(pushes.at(-1));
+  const pushed = pushes.length === 0 ? null : timestamp(push?.createdAt);
+  if (pushes.length > 0 && (pushed === null || pushed >= at)) return null;
+  const to = record(push?.afterCommit)?.oid;
+  const reason = typeof latest.reason === "string" && latest.reason ? clip(latest.reason, MAX_NAME) : null;
+  return {
+    reason, removedAt: latest.createdAt as string, at,
+    forcePushedAt: pushed, forcePushedTo: typeof to === "string" && SHA.test(to) ? to : null,
+  };
+}
+
+/** The removal belongs to the current head only when that commit was already this pull request's
+ * head before it: a check suite created for the pull request's own head branch after the latest
+ * force push (or in its second, when that push left this very commit) and before the removal. A fast-forward creates no force-push event, but a head
+ * pushed afterwards gets its suites later; suites a commit got on another branch, or on this branch
+ * before a force push replaced it, do not count. A suite's time is its creating push or event, so a
+ * delayed job or a re-run cannot move it. */
+function headRemoval(seen: Observation): Observation["removal"] {
+  const removal = seen.lastRemoval;
+  if (!removal || seen.queue || !seen.headRef || seen.rollupSha !== seen.headSha) return undefined;
+  const contexts = record(record(seen.rollup)?.contexts);
+  const nodes = Array.isArray(contexts?.nodes) ? contexts.nodes : [];
+  const before = nodes.some((raw) => {
+    const node = checkNode(raw);
+    const at = timestamp(node?.suiteCreatedAt);
+    return node?.kind === "CheckRun" && node.branch === seen.headRef && at !== null && at < removal.at &&
+      (removal.forcePushedAt === null || at > removal.forcePushedAt ||
+        // A rebase's own suites often share its second; a suite of the commit it replaced may too.
+        (at === removal.forcePushedAt && removal.forcePushedTo === seen.headSha));
+  });
+  return before ? { reason: removal.reason, removedAt: removal.removedAt } : undefined;
 }
 
 function observation(data: unknown): Observation | null {
@@ -499,6 +577,7 @@ function observation(data: unknown): Observation | null {
     state,
     isDraft: pr.isDraft === true,
     headSha: pr.headRefOid,
+    headRef: typeof pr.headRefName === "string" && pr.headRefName ? pr.headRefName : null,
     baseRef: pr.baseRefName,
     defaultBranch: typeof defaultBranch === "string" ? clip(defaultBranch, MAX_NAME) : null,
     mergeStateStatus: typeof pr.mergeStateStatus === "string" ? pr.mergeStateStatus : null,
@@ -515,6 +594,7 @@ function observation(data: unknown): Observation | null {
     rollup: commit?.statusCheckRollup ?? null,
     rollupSha: typeof commit?.oid === "string" && SHA.test(commit.oid) ? commit.oid : null,
     admittedAfter,
+    lastRemoval: lastQueueRemoval(pr.queueEvents, pr.forcePushes),
   };
 }
 
@@ -625,7 +705,7 @@ function clampInteger(value: unknown, fallback: number, min: number, max: number
   return Math.min(max, Math.max(min, typeof value === "number" && Number.isFinite(value) ? Math.floor(value) : fallback));
 }
 
-async function cancellableSleep(deps: PullRequestWaitDeps, milliseconds: number): Promise<boolean> {
+export async function cancellableSleep(deps: Pick<PullRequestWaitDeps, "sleep" | "signal">, milliseconds: number): Promise<boolean> {
   const sleep = deps.sleep ?? ((duration: number) => new Promise<void>((resolve) => setTimeout(resolve, duration)));
   const signal = deps.signal;
   if (!signal) {
@@ -664,6 +744,8 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
   let sawQueue = false;
   /** When the queue entry was first seen missing without a merge; null while it is present. */
   let vanishedAt: number | null = null;
+  /** The removal `vanishedAt` is confirming; a different one restarts the interval. */
+  let confirming: string | null = null;
   let transientFailures = 0;
   let polls = 0;
 
@@ -692,6 +774,7 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
             : null,
         }
       : null,
+    mergeQueueRemoval: seen.removal ?? null,
     waitedMs: Math.max(0, now() - started),
     polls,
   });
@@ -804,16 +887,24 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
     transientFailures = 0;
     last = seen;
 
+    seen.removal = headRemoval(seen);
     if (seen.queue) {
       sawQueue = true;
       vanishedAt = null;
+      confirming = null;
       // A failed merge-group check is not GitHub's verdict: when an entry ahead caused it, GitHub
       // drops that entry and rebuilds this one's group on a new commit. Only GitHub giving up ends
       // the wait: the entry reads UNMERGEABLE, or it leaves the queue unmerged (confirmed below).
       if (seen.queue.state === "UNMERGEABLE") return { ok: true, summary: summarize("queue_failed", seen) };
-    } else if (sawQueue) {
+    } else if (sawQueue || seen.removal) {
       // GitHub can drop the entry a moment before the pull request reads MERGED, so an ejection
-      // stands only once the entry has stayed missing for the whole confirmation interval.
+      // stands only once the entry has stayed missing for the whole confirmation interval. A removal
+      // this call did not see happen (#3712) is confirmed the same way, from its first observation.
+      // Another removal (the entry was queued again and left again) gets its own whole interval. Its
+      // identity is the timeline's own, whether or not it could be tied to this head.
+      const removedAt = seen.lastRemoval?.removedAt ?? null;
+      if (removedAt !== null && confirming !== null && removedAt !== confirming) vanishedAt = null;
+      confirming = removedAt ?? confirming;
       vanishedAt ??= now();
       const missingFor = now() - vanishedAt;
       if (missingFor >= EJECTION_CONFIRM_MS) return { ok: true, summary: summarize("queue_ejected", seen) };
@@ -822,6 +913,8 @@ export async function waitForPullRequest(input: PullRequestWaitInput, deps: Pull
       if (!await pause(EJECTION_CONFIRM_MS - missingFor)) return { ok: false, error: "request cancelled" };
       continue;
     } else {
+      vanishedAt = null;
+      confirming = null;
       const initial = evaluateCommitChecks(seen.headSha, seen.rollup, required.names, required.apps, seen.mergeStateStatus);
       if (initial.requiredState === "pending" && initial.complete &&
           !(input.returnOnAnyFailure && initial.summary.failedJobs.length > 0)) {

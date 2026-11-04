@@ -100,7 +100,7 @@ const TABLE: readonly Row[] = [
   // Background Work turn group (#2858); Waiting and Finished carry their counts in the label
   ["jobGroup", "waiting", "Waiting for Jobs", "info"],
   ["jobGroup", "finished", "Finished", "neutral"],
-  ["jobGroup", "returning", "Returning Result", "info"],
+  ["jobGroup", "returning", "Follow-Up Pending", "neutral"],
   ["jobGroup", "returned", "Result Returned", "success"],
   ["jobGroup", "result_missing", "Result Missing", "warning"],
   ["jobGroup", "missing_acknowledged", "Missing Result Acknowledged", "neutral"],
@@ -185,7 +185,7 @@ const TABLE: readonly Row[] = [
   ["run", "running", "Running", "info"],
   ["run", "failed", "Failed", "danger"],
   ["member", "active", "Active", "success"],
-  ["member", "suspended", "Suspended", "danger"],
+  ["member", "suspended", "Suspended", "neutral"],
   ["provider_account", "signed_in", "Signed In", "success"],
   ["provider_account", "sign_in_required", "Sign-In Required", "warning"],
   ["provider_account", "signing_in", "Signing In", "info"],
@@ -203,6 +203,7 @@ const TABLE: readonly Row[] = [
   ["usage", "available", "Available", "success"],
   ["usage", "approaching_limit", "Approaching Limit", "warning"],
   ["usage", "temporarily_unavailable", "Temporarily Unavailable", "danger"],
+  ["usageBudget", "reached", "Budget Reached", "warning"],
   // Agent on a machine
   ["agent", "ready", "Ready", "success"],
   ["agent", "not_installed", "Not Installed", "neutral"],
@@ -269,7 +270,7 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
   for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "automation_run", "automation_step", "subscription", "outbound_delivery", "tool", "family",
     "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "workflowNode", "run", "pod", "podMerge", "member", "provider_account",
-    "shell", "share", "usage", "agent"] as const) {
+    "shell", "share", "usage", "usageBudget", "agent"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);
       for (const text of [label]) {

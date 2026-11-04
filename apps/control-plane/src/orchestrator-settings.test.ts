@@ -89,6 +89,22 @@ function defaults(overrides: Partial<OrchestratorDefaults["behavior"]> = {}): Or
   };
 }
 
+test("child model selection checks the effective default instead of aggregate account readiness", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const metadata = runner("runner-a", "sol", ["high"]);
+    metadata.agents[0]!.providerAccountReadiness = {
+      defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+    };
+    db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    const policy = resolveOrchestratorCampaignPolicy(defaults({ childModel: "sol" }), "user_default");
+    assert.equal(childModelMachines(policy, db.listRunners())?.[0]?.supported, false);
+    db.setMachineProviderAccountDefault("runner-a", "codex", "b", 0, Date.now());
+    assert.equal(childModelMachines(policy, db.listRunners())?.[0]?.supported, true);
+    assert.equal(db.getRunner("runner-a")?.agents[0]?.providerAccountReadiness?.defaultAccountId, "a");
+  } finally { db.close(); }
+});
+
 test("Orchestrator defaults persist per authenticated user and preserve capability drift", () => {
   const db = ControlPlaneDb.open(":memory:");
   try {
@@ -105,7 +121,7 @@ test("Orchestrator defaults persist per authenticated user and preserve capabili
       "the same signed-in user sees persisted defaults on another device");
 
     const local = db.localIdentityContext();
-    db.raw().prepare("INSERT INTO identity_users VALUES (?, ?, 'active', ?, ?)")
+    db.raw().prepare("INSERT INTO identity_users (user_id, display_name, status, created_at, updated_at) VALUES (?, ?, 'active', ?, ?)")
       .run("other-user", "Other User", 3, 3);
     db.raw().prepare("INSERT INTO identity_memberships VALUES (?, ?, 'viewer', ?, ?)")
       .run(local.organizationId, "other-user", 3, 3);
@@ -602,4 +618,33 @@ test("Orchestrator settings reasons name machines and Connections, never install
     await app.close();
     db.close();
   }
+});
+
+test("review policy defaults persist, older clients preserve them, and discovery rejects missing choices", () => {
+  const db = ControlPlaneDb.open(":memory:");
+  try {
+    const principal = human(db);
+    const metadata = runner("review-host", "gpt-review", ["medium", "high"]);
+    metadata.runtime = { dataDir: "/runner", worktreeRoot: "/worktrees", maxConcurrentSessions: 4,
+      reviewSession: { configuration: true, reviewers: [{ harness: "codex", agentId: "codex" }] } };
+    db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    const settings = new OrchestratorSettings(db);
+    const saved = defaults({ reviewHarness: "codex", reviewModel: "gpt-review", reviewEffort: "medium", reviewRoundBudget: 7 });
+    assert.equal(settings.update(principal, { defaults: saved }).defaults.behavior.reviewRoundBudget, 7);
+    assert.equal(new OrchestratorSettings(db).view(principal).defaults.behavior.reviewModel, "gpt-review");
+    const legacy = defaults({ maximumConcurrentChildren: 3 });
+    for (const key of ["reviewHarness", "reviewModel", "reviewEffort", "reviewRoundBudget"] as const) delete legacy.behavior[key];
+    const result = settings.update(principal, { defaults: legacy });
+    assert.equal(result.defaults.behavior.reviewRoundBudget, 7);
+    assert.equal(result.defaults.behavior.maximumConcurrentChildren, 3);
+    assert.throws(() => settings.update(principal, { defaults: defaults({ ...saved.behavior, reviewModel: "missing" }) }), /codex.*missing.*unavailable/u);
+    assert.throws(() => settings.update(principal, { defaults: defaults({ ...saved.behavior, reviewEffort: "ultra" }) }), /ultra.*unavailable/u);
+    assert.equal(parseOrchestratorDefaults({ ...saved, behavior: { ...saved.behavior, reviewRoundBudget: 33 } }), null);
+    assert.equal(parseOrchestratorOverrides({ behavior: { reviewHarness: "shell-command" } }), null);
+    const policy = resolveOrchestratorCampaignPolicy(saved, "user_default", { behavior: { reviewRoundBudget: 2 } });
+    assert.equal(policy.reviewPolicySnapshotVersion, 1);
+    assert.equal(policy.behavior.reviewRoundBudget, 2);
+    assert.equal(policy.sources.behavior.reviewRoundBudget, "session_override");
+    assert.equal(policy.sources.behavior.reviewModel, "user_default");
+  } finally { db.close(); }
 });

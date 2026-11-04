@@ -1,6 +1,7 @@
 /** Context-native, externally stored per-session git worktrees. */
 
 import { createHash, randomUUID } from "node:crypto";
+import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { homedir } from "node:os";
 import { performance } from "node:perf_hooks";
 import { basename, dirname, join, resolve, sep } from "node:path";
@@ -171,6 +172,9 @@ export interface WorktreeCleanupRecord {
   completedAt?: number;
   /** Forge-verified head used only for safe cleanup when the branch upstream disappeared. */
   verifiedMergedHead?: string;
+  /** Forge-verified head of a merged pull request whose history contains the tip (#4068). Safe
+   * cleanup re-proves that containment against the tree's current head before removing anything. */
+  containingMergedHead?: string;
 }
 
 export type RetainedWorktreeRefReason =
@@ -229,6 +233,8 @@ export interface RetainedWorktreeRefRecord {
   reasons: RetainedWorktreeRefReason[];
   /** Exact merged-head proof already accepted by worktree cleanup, when one exists. */
   verifiedMergedHead?: string;
+  /** Merged pull request head whose history contained this ref when cleanup accepted it (#4068). */
+  containingMergedHead?: string;
   state: "pending" | "completed" | "retained";
   pendingReason?: RetainedWorktreeRefPendingReason;
   terminalReason?: RetainedWorktreeRefTerminalReason;
@@ -249,6 +255,7 @@ export interface RetainedWorktreeRefCandidate {
   identityProof: RetainedWorktreeRefIdentityProof;
   reasons: RetainedWorktreeRefReason[];
   verifiedMergedHead?: string;
+  containingMergedHead?: string;
 }
 
 export interface RetainedWorktreeRefDiagnostic {
@@ -664,6 +671,21 @@ function repoKey(repoPath: string): string {
 
 async function command(context: AgentContext, cwd: string, args: string[], timeoutMs = 30_000): Promise<string> {
   return (await runContextCommand(context, "git", args, { cwd, timeoutMs })).stdout;
+}
+
+async function dirtyWorktreeReason(context: AgentContext, cwd: string): Promise<string | null> {
+  const porcelain = await command(context, cwd, ["status", "--porcelain=v1", "-z", "--untracked-files=all"]);
+  if (!porcelain) return null;
+  const records = porcelain.split("\0");
+  const paths: string[] = [];
+  for (let i = 0; i < records.length; i++) {
+    const record = records[i]!;
+    if (!record) continue;
+    paths.push(record.slice(3));
+    // Porcelain -z rename/copy entries have a second, NUL-separated source path.
+    if (/[RC]/u.test(record.slice(0, 2))) i++;
+  }
+  return worktreeDirtyPaths(paths.length, paths);
 }
 
 async function wslHome(context: Extract<AgentContext, { kind: "wsl" }>): Promise<string> {
@@ -1472,6 +1494,9 @@ export interface MergedWorktreePullRequestDiscoveryOptions extends WorktreeOptio
   /** Also probe a branch whose upstream tracking ref still exists. Archive retirement needs
    * delivery proof even when publication is already proven by a live upstream. */
   includeLiveUpstream?: boolean;
+  /** Accept only a same-repository change request whose source branch is this local branch or its
+   * configured upstream branch (#3981). Discovery otherwise ignores the source branch name. */
+  requireHeadBranch?: boolean;
 }
 type LinkedChangeRequest = {
   provider: ForgeProvider;
@@ -1479,6 +1504,21 @@ type LinkedChangeRequest = {
   project: string;
   number: number;
 };
+
+/** Which forge a change-request URL names (a GitLab `/-/merge_requests/N` URL, or GitHub), for
+ * reads that must pick `glab` or `gh` from the URL alone (#3602). */
+export function changeRequestProvider(url: string): ForgeProvider {
+  return linkedChangeRequest(url)?.provider ?? "github";
+}
+
+/** Whether two change-request URLs name the same forge project, so a pull request found by head
+ * search can be tied to the repository an earlier recorded link already proved (#3981). */
+export function sameChangeRequestProject(left: string, right: string): boolean {
+  const a = linkedChangeRequest(left);
+  const b = linkedChangeRequest(right);
+  return !!a && !!b && a.provider === b.provider && a.host === b.host &&
+    a.project.toLowerCase() === b.project.toLowerCase();
+}
 
 function linkedChangeRequest(value: string): LinkedChangeRequest | null {
   try {
@@ -1535,6 +1575,8 @@ export function parseWorktreePullRequestState(
 export function parseMergedWorktreePullRequestForHead(
   raw: string,
   expectedHead: string,
+  /** When given, also require a same-repository pull request from one of these branches. */
+  headBranches?: readonly string[],
 ): DiscoveredMergedPullRequest | null {
   if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
   try {
@@ -1546,6 +1588,8 @@ export function parseMergedWorktreePullRequestForHead(
       if (item.state !== "MERGED" ||
           typeof item.headRefOid !== "string" || item.headRefOid.toLowerCase() !== expectedHead.toLowerCase() ||
           typeof item.url !== "string") continue;
+      if (headBranches && (item.isCrossRepository !== false || typeof item.headRefName !== "string" ||
+          !headBranches.includes(item.headRefName))) continue;
       const request = linkedChangeRequest(item.url);
       if (request?.provider !== "github") continue;
       return {
@@ -1570,6 +1614,8 @@ export function parseMergedGitLabMergeRequestForHead(
   raw: string,
   expectedHead: string,
   host: string,
+  /** When given, also require a same-project merge request from one of these branches. */
+  headBranches?: readonly string[],
 ): DiscoveredMergedPullRequest | null {
   if (!/^[a-f0-9]{40,64}$/iu.test(expectedHead)) return null;
   try {
@@ -1581,6 +1627,9 @@ export function parseMergedGitLabMergeRequestForHead(
       if (item.state !== "merged" ||
           typeof item.sha !== "string" || item.sha.toLowerCase() !== expectedHead.toLowerCase() ||
           typeof item.web_url !== "string") continue;
+      if (headBranches && (typeof item.source_project_id !== "number" ||
+          item.source_project_id !== item.target_project_id || typeof item.source_branch !== "string" ||
+          !headBranches.includes(item.source_branch))) continue;
       const request = linkedChangeRequest(item.web_url);
       if (request?.provider !== "gitlab" || request.host !== host.toLowerCase()) continue;
       return {
@@ -1634,7 +1683,7 @@ export async function mergedHeadForge(
 export async function worktreePullRequestState(
   worktreePath: string,
   pullRequestUrl: string,
-  options: WorktreeOptions & { provider?: ForgeProvider } = {},
+  options: WorktreeOptions & { provider?: ForgeProvider; env?: Record<string, string> } = {},
 ): Promise<PullRequestLifecycleProof | null> {
   const request = linkedChangeRequest(pullRequestUrl);
   if (!request || (request.provider === "gitlab" && options.provider !== "gitlab")) return null;
@@ -1648,7 +1697,7 @@ export async function worktreePullRequestState(
           "api", `projects/${encodeURIComponent(request.project)}/merge_requests/${request.number}`,
           "--hostname", request.host,
         ],
-      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024, ...(options.env ? { env: options.env } : {}) },
     );
     return parseWorktreePullRequestState(result.stdout, pullRequestUrl);
   } catch {
@@ -1723,6 +1772,9 @@ export async function mergedWorktreePullRequestForBranch(
       return null;
     }
     if (options.onForgeAttempt && !options.onForgeAttempt(identity)) return null;
+    const headBranches = options.requireHeadBranch
+      ? [...new Set([branch, ...(merge ? [merge.replace(/^refs\/heads\//u, "")] : [])])]
+      : undefined;
     try {
       if (forge.provider === "gitlab") {
         const result = await run(
@@ -1734,18 +1786,18 @@ export async function mergedWorktreePullRequestForBranch(
           ],
           { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
         );
-        return parseMergedGitLabMergeRequestForHead(result.stdout, head, forge.host);
+        return parseMergedGitLabMergeRequestForHead(result.stdout, head, forge.host, headBranches);
       }
       const result = await run(
         context,
         "gh",
         [
           "pr", "list", "--search", head, "--state", "merged", "--limit", "100",
-          "--json", "url,state,headRefOid",
+          "--json", headBranches ? "url,state,headRefOid,headRefName,isCrossRepository" : "url,state,headRefOid",
         ],
         { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
       );
-      return parseMergedWorktreePullRequestForHead(result.stdout, head);
+      return parseMergedWorktreePullRequestForHead(result.stdout, head, headBranches);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code === "ENOENT") options.onIneligible?.();
       else options.onForgeUnavailable?.();
@@ -1759,6 +1811,176 @@ export async function mergedWorktreePullRequestForBranch(
   }
 }
 
+/** Candidate merged pull requests checked per containment proof; each one costs a forge fetch. */
+const CONTAINING_PULL_REQUEST_CANDIDATES = 5;
+
+/** Configuration for the anonymous containment fetch (#4068). Repository configuration may be
+ * session-written, so nothing it names runs: hooks and fsmonitor are off, HTTPS is the only
+ * transport (no configured SSH command), and no credential helper or askpass program runs. Extra
+ * headers configured for any host or for github.com are cleared, and the environment below skips
+ * system and global configuration, so no runner credential is sent and a configured proxy or CA has
+ * nothing to capture. A head that needs credentials is therefore unavailable proof. */
+export const CONTAINMENT_FETCH_GIT_CONFIG: readonly string[] = [
+  "-c", "core.fsmonitor=false", "-c", "core.hooksPath=/dev/null",
+  "-c", "protocol.allow=never", "-c", "protocol.https.allow=always",
+  "-c", "http.sslVerify=true", "-c", "http.extraHeader=", "-c", "http.https://github.com/.extraHeader=",
+  "-c", "credential.helper=", "-c", "credential.interactive=false", "-c", "core.askPass=",
+];
+export const CONTAINMENT_FETCH_GIT_ENV: Readonly<Record<string, string>> = {
+  GIT_TERMINAL_PROMPT: "0", GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null",
+};
+
+/** Whether every commit reachable from `tip` is reachable from `mergedHead`, read from the commits
+ * themselves (#4068). Replacement refs, a graft file and the commit-graph cache can each rewrite
+ * parents, so none of them is consulted. Throws when either commit is unavailable. */
+async function historyContains(
+  context: AgentContext,
+  cwd: string,
+  mergedHead: string,
+  tip: string,
+): Promise<boolean> {
+  const outside = (await runContextCommand(
+    context,
+    "git",
+    ["--no-replace-objects", "-c", "core.commitGraph=false", "rev-list", "--count", `${mergedHead}..${tip}`],
+    { cwd, timeoutMs: 30_000, env: { GIT_GRAFT_FILE: "/dev/null" } },
+  )).stdout.trim();
+  if (!/^\d+$/u.test(outside)) throw new Error("unexpected commit count");
+  return outside === "0";
+}
+
+export type MergedPullRequestContainment =
+  | { state: "contained"; url: string; headOid: string }
+  /** The forge answered and no merged pull request it listed contains the tip. */
+  | { state: "not_contained" }
+  /** The forge or a fetch of a candidate head failed, so containment is unknown. */
+  | { state: "unavailable" }
+  /** A live upstream governs this branch, or no supported forge can be asked. */
+  | { state: "ineligible" };
+
+/** Prove that every commit of a branch without a live upstream was delivered by a merged GitHub
+ * pull request, when no merged pull request's head is exactly the tip (#4068): a child pushes an
+ * earlier head of a pull request that later receives more commits elsewhere and is squash-merged.
+ *
+ * Candidates are the merged pull requests the forge lists for the tip, plus a forge-verified merged
+ * link, restricted to the repository the branch's remote is configured for (the configured URL,
+ * before any transport rewrite). For each, the runner fetches `refs/pull/<n>/head` itself from that
+ * repository's GitHub endpoint, rebuilt from the validated identity, and accepts the tip only when it
+ * is an ancestor of the head commit the forge reported. Commits are content-addressed, so the server
+ * a fetch reaches cannot change what the ancestry check proves. A
+ * local ref is never the comparison target, and a head the fetch cannot provide is unavailable proof
+ * even when the object already exists locally. An open pull request, or one whose head shares only
+ * a base with the tip, proves nothing. */
+export async function mergedPullRequestContainingHead(
+  worktreePath: string,
+  branch: string,
+  options: WorktreeOptions & {
+    /** Test-only subprocess seam for the forge CLI. Git always runs for real. */
+    runForgeCommand?: typeof runContextCommand;
+    /** Test-only local repository standing in for the forge's Git endpoint. */
+    forgeFetchRepository?: string;
+    /** A merged link whose head the forge already verified; checked before searching. */
+    linkedPullRequest?: { url: string; headOid: string };
+  } = {},
+): Promise<MergedPullRequestContainment> {
+  const context = options.context ?? nativeContext;
+  let head: string;
+  let fetchUrl: string;
+  let project: string;
+  try {
+    const remote = (await command(
+      context, worktreePath, ["config", "--get", "--default", "", `branch.${branch}.remote`],
+    )).trim();
+    const merge = (await command(
+      context, worktreePath, ["config", "--get", "--default", "", `branch.${branch}.merge`],
+    )).trim();
+    if (remote || merge) {
+      if (!remote || remote === "." || !/^refs\/heads\/./u.test(merge)) return { state: "ineligible" };
+      try {
+        await command(context, worktreePath, ["rev-parse", "--verify", `${branch}@{upstream}`]);
+        return { state: "ineligible" };
+      } catch {
+        // A configured upstream whose tracking ref vanished is no usable upstream.
+      }
+    }
+    head = (await command(context, worktreePath, ["rev-parse", "--verify", "HEAD"])).trim();
+    if (!/^[a-f0-9]{40,64}$/u.test(head)) return { state: "unavailable" };
+    const remoteUrl = (await command(
+      context, worktreePath, ["config", "--get", "--default", "", `remote.${remote || "origin"}.url`],
+    )).trim();
+    const parsed = parseForgeRemote(remoteUrl);
+    if (parsed?.provider !== "github" || parsed.host !== "github.com" ||
+        !/^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u.test(parsed.project) || parsed.project.startsWith("-")) {
+      return { state: "ineligible" };
+    }
+    project = parsed.project;
+    // Rebuild the endpoint from the validated identity: neither the configured remote name nor its
+    // raw URL ever reaches Git's argument list, so session-written configuration cannot add options.
+    fetchUrl = options.forgeFetchRepository ?? `https://github.com/${project}.git`;
+  } catch {
+    return { state: "unavailable" };
+  }
+
+  const candidates = new Map<string, { number: number; url: string; headOid: string }>();
+  const admit = (url: unknown, headOid: unknown) => {
+    if (typeof url !== "string" || typeof headOid !== "string" || !/^[a-f0-9]{40,64}$/iu.test(headOid)) return;
+    const request = linkedChangeRequest(url);
+    if (request?.provider !== "github" || request.project.toLowerCase() !== project.toLowerCase()) return;
+    if (candidates.size < CONTAINING_PULL_REQUEST_CANDIDATES && !candidates.has(url)) {
+      candidates.set(url, { number: request.number, url, headOid: headOid.toLowerCase() });
+    }
+  };
+  if (options.linkedPullRequest) admit(options.linkedPullRequest.url, options.linkedPullRequest.headOid);
+  let incomplete = false;
+  try {
+    const result = await (options.runForgeCommand ?? runContextCommand)(
+      context,
+      "gh",
+      [
+        "pr", "list", "--repo", `github.com/${project}`, "--search", head, "--state", "merged",
+        "--limit", "20", "--json", "url,state,headRefOid",
+      ],
+      { cwd: worktreePath, timeoutMs: 30_000, maxBuffer: 1024 * 1024 },
+    );
+    const listed = JSON.parse(result.stdout) as unknown;
+    if (!Array.isArray(listed)) throw new Error("unexpected pull request listing");
+    for (const value of listed) {
+      if (!value || typeof value !== "object") continue;
+      const item = value as Record<string, unknown>;
+      if (item.state === "MERGED") admit(item.url, item.headRefOid);
+    }
+  } catch (error) {
+    if (!candidates.size) {
+      return { state: (error as NodeJS.ErrnoException).code === "ENOENT" ? "ineligible" : "unavailable" };
+    }
+    incomplete = true;
+  }
+
+  for (const candidate of candidates.values()) {
+    try {
+      // No destination ref: the objects land in the shared store and only this worktree's private
+      // FETCH_HEAD is written, so nothing a session could later move records the result.
+      await runContextCommand(
+        context,
+        "git",
+        [
+          ...CONTAINMENT_FETCH_GIT_CONFIG,
+          ...(options.forgeFetchRepository ? ["-c", "protocol.file.allow=always"] : []),
+          "fetch", "--no-tags", "--no-recurse-submodules", "--quiet", "--",
+          fetchUrl, `refs/pull/${candidate.number}/head`,
+        ],
+        { cwd: worktreePath, timeoutMs: 60_000, env: { ...CONTAINMENT_FETCH_GIT_ENV } },
+      );
+      if (await historyContains(context, worktreePath, candidate.headOid, head)) {
+        return { state: "contained", url: candidate.url, headOid: candidate.headOid };
+      }
+    } catch {
+      incomplete = true;
+    }
+  }
+  return { state: incomplete ? "unavailable" : "not_contained" };
+}
+
 export type SafeWorktreeDiscardResult =
   | { removed: true }
   | {
@@ -1769,6 +1991,7 @@ export type SafeWorktreeDiscardResult =
   | {
       removed: false;
       reason: "detached_head" | "not_runner_owned" | "dirty" | "no_upstream" | "unpushed" | "not_delivered" | "unavailable";
+      dirtyPathsReason?: string;
     };
 
 export type RetainedWorktreeRefReclaimResult =
@@ -1872,6 +2095,13 @@ async function retainedRefDeliveryProven(
   defaultBranch: string,
 ): Promise<boolean> {
   if (record.verifiedMergedHead === record.expectedOid) return true;
+  if (record.containingMergedHead && /^[a-f0-9]{40,64}$/u.test(record.containingMergedHead)) {
+    try {
+      if (await historyContains(context, record.repoPath, record.containingMergedHead, record.expectedOid)) return true;
+    } catch {
+      // A head object that is no longer available cannot prove delivery; try the other proofs.
+    }
+  }
   try {
     await command(context, record.repoPath, ["rev-parse", "--verify", `${record.branch}@{upstream}`]);
     const ahead = (await command(
@@ -2032,6 +2262,8 @@ export async function discardWorktreeIfSafe(
   handle: WorktreeHandle & { source: "legacy" | "created" },
   options: WorktreeOptions & {
     verifiedMergedHead?: string;
+    /** A merged pull request head that may contain a tip without an upstream (#4068). */
+    containingMergedHead?: string;
     requireDelivered?: boolean;
     beforeRemove?: () => Promise<void>;
     /** Fault-injection boundary after Git removes the worktree but before branch cleanup. */
@@ -2098,8 +2330,9 @@ export async function discardWorktreeIfSafe(
     const initialPathIdentity = await removalPathIdentity(context, handle.path);
     if (!initialPathIdentity) return { removed: false, reason: "unavailable" };
 
-    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-      return { removed: false, reason: "dirty" };
+    const initialDirty = await dirtyWorktreeReason(context, handle.path);
+    if (initialDirty) {
+      return { removed: false, reason: "dirty", dirtyPathsReason: initialDirty };
     }
     const head = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (!/^[a-f0-9]{40,64}$/u.test(head)) return { removed: false, reason: "unavailable" };
@@ -2112,6 +2345,7 @@ export async function discardWorktreeIfSafe(
       ? ["shared_checkout"]
       : [];
     let checkedOutVerifiedMergedHead: string | undefined;
+    let checkedOutContainingMergedHead: string | undefined;
     if (branchChanged) {
       // A pushed-but-unmerged replacement is not enough: unlike the recorded branch, its upstream
       // was never part of the ownership record. Require delivery proof or no work beyond default.
@@ -2182,6 +2416,18 @@ export async function discardWorktreeIfSafe(
             // Missing or unreadable default-branch state cannot replace upstream or merge proof.
           }
         }
+        const containingHead = options.containingMergedHead;
+        if (!safeUntrackedHead && typeof containingHead === "string" && /^[a-f0-9]{40,64}$/u.test(containingHead)) {
+          // Every commit of this exact head must be in the merged pull request's history (#4068).
+          try {
+            if (await historyContains(context, repoPath, containingHead, head)) {
+              safeUntrackedHead = true;
+              checkedOutContainingMergedHead = containingHead;
+            }
+          } catch {
+            // An unavailable head object cannot prove containment.
+          }
+        }
         if (!safeUntrackedHead) {
           return { removed: false, reason: validMergedHead ? "unpushed" : "no_upstream" };
         }
@@ -2194,7 +2440,7 @@ export async function discardWorktreeIfSafe(
       }
     }
 
-    if (options.requireDelivered && options.verifiedMergedHead !== head) {
+    if (options.requireDelivered && options.verifiedMergedHead !== head && !checkedOutContainingMergedHead) {
       const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
       let delivered = false;
       if (defaultBranch) {
@@ -2233,6 +2479,7 @@ export async function discardWorktreeIfSafe(
       identityProof: checkedOutIdentity.identityProof,
       reasons: preserveCheckedOutRef ? checkedOutRefReasons : ["deletion_intent"],
       ...(checkedOutVerifiedMergedHead ? { verifiedMergedHead: checkedOutVerifiedMergedHead } : {}),
+      ...(checkedOutContainingMergedHead ? { containingMergedHead: checkedOutContainingMergedHead } : {}),
     };
     retainedRefs.push(checkedOutCandidate);
     if (retainedRefs.length) await options.retainRefs?.(retainedRefs);
@@ -2243,8 +2490,9 @@ export async function discardWorktreeIfSafe(
 
     // Close the widest observable race before the non-force removal. Git independently rejects
     // a dirty tree, and update-ref below rejects a branch that advanced after this comparison.
-    if (await command(context, handle.path, ["status", "--porcelain=v1", "-z", "--untracked-files=all"])) {
-      return { removed: false, reason: "dirty" };
+    const finalDirty = await dirtyWorktreeReason(context, handle.path);
+    if (finalDirty) {
+      return { removed: false, reason: "dirty", dirtyPathsReason: finalDirty };
     }
     const finalHead = (await command(context, handle.path, ["rev-parse", "--verify", "HEAD"])).trim();
     if (finalHead !== head) return { removed: false, reason: "unpushed" };
@@ -2288,6 +2536,9 @@ export async function discardWorktreeIfSafe(
         reasons: checkedOutCandidate.reasons,
         ...(checkedOutCandidate.verifiedMergedHead
           ? { verifiedMergedHead: checkedOutCandidate.verifiedMergedHead }
+          : {}),
+        ...(checkedOutCandidate.containingMergedHead
+          ? { containingMergedHead: checkedOutCandidate.containingMergedHead }
           : {}),
         state: "pending",
         armedAt: Date.now(),
