@@ -318,6 +318,7 @@ test("reads only the npm entry's schedule and refuses schedules it cannot place 
     timezone: "America/Chicago",
   });
   assert.equal(parseNpmSchedule(NPM_SCHEDULE.replace('"weekly"', '"daily"')), null);
+  assert.equal(parseNpmSchedule(NPM_SCHEDULE.replace("America/Chicago", "Not/AZone")), null);
   assert.equal(parseNpmSchedule(""), null);
 });
 

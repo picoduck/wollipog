@@ -82,7 +82,13 @@ export function parseNpmSchedule(config) {
   const day = WEEKDAYS.indexOf(fields.day);
   const time = fields.time?.match(/^(\d{2}):(\d{2})$/u);
   if (fields.interval !== "weekly" || day < 0 || !time) return null;
-  return { day, hour: Number(time[1]), minute: Number(time[2]), timezone: fields.timezone ?? "UTC" };
+  const timezone = fields.timezone ?? "UTC";
+  try {
+    new Intl.DateTimeFormat("en-US", { timeZone: timezone });
+  } catch {
+    return null;
+  }
+  return { day, hour: Number(time[1]), minute: Number(time[2]), timezone };
 }
 
 function zonedWallClock(ms, timeZone) {
