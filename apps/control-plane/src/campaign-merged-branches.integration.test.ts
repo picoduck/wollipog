@@ -106,6 +106,35 @@ test("a campaign whose merged branch still exists on origin is not verified comp
   } finally { h.db.close(); }
 });
 
+test("a merge Wollipog performed stays tracked whatever its occurrence's status became while it ran (#4067)", () => {
+  // The occurrence was superseded by a new request or revoked while the runner ran its enqueue, so
+  // it was never consumed. What Wollipog performed is on it, and that alone keeps the merge owed.
+  for (const [status, outcome, tracked] of [
+    ["superseded", "enqueued", true], ["revoked", "already_queued", true], ["superseded", "uncertain", true],
+    ["approved", "in_progress", true], ["superseded", "refused", false],
+  ] as const) {
+    const h = fixture();
+    try {
+      h.db.raw().prepare("UPDATE workflow_decisions SET status=?, consumed_at=NULL, forge_action=? WHERE occurrence_id='merge-4100'")
+        .run(status, JSON.stringify({ kind: "pr_merge_enqueue", attempts: 1, outcome, updatedAt: 6,
+          ...(outcome === "refused" ? { refusal: { reason: "forge_refused", summary: "Nothing was enqueued." } } : {}) }));
+      observe(h, observed("a".repeat(40)), 100);
+      const projection = h.db.campaignProjection("root")!;
+      if (!tracked) {
+        // A refusal follows only refusals: nothing was ever enqueued, so there is no merge to clean up.
+        assert.equal(projection.mergedBranches, undefined, `${status}/${outcome}`);
+        assert.equal(projection.status, "verified_complete", `${status}/${outcome}`);
+        continue;
+      }
+      assert.equal(projection.status, "active", `${status}/${outcome}: its remote branch keeps the campaign going`);
+      assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.sessionId, row.branch, row.state]),
+        [["child", "agent/child", "pending"]], `${status}/${outcome}`);
+      observe(h, observed(null), 200);
+      assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", `${status}/${outcome}`);
+    } finally { h.db.close(); }
+  }
+});
+
 test("a merged branch retained with a reason finishes the campaign with handoffs, not blocked forever (#4067)", () => {
   const h = fixture();
   try {

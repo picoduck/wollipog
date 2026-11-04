@@ -134,3 +134,21 @@ test("an enqueue already in effect is reported, and a stale or refused one runs 
   const limited = answer({}, failed("GraphQL: API rate limit exceeded"));
   assert.equal((await executePullRequestEnqueue(enqueue, limited.gh)).refusal?.reason, "forge_unavailable");
 });
+
+test("a reconciliation read reports the merge and never enqueues (#4067)", async () => {
+  const read = (pr: Record<string, unknown>) => {
+    const calls: string[][] = [];
+    return { calls, gh: async (args: string[]) => { calls.push(args); return args[0] === "api" ? ok(pullRequest(pr)) : ok(); } };
+  };
+  const observe = { ...enqueue, observeOnly: true as const };
+  const merged = read({ state: "MERGED" });
+  assert.deepEqual(await executePullRequestEnqueue(observe, merged.gh), { outcome: "already_merged" });
+  const otherHead = read({ state: "MERGED", headRefOid: "f".repeat(40) });
+  assert.equal((await executePullRequestEnqueue(observe, otherHead.gh)).refusal?.reason, "pull_request_mismatch",
+    "only the exact approved head counts as merged");
+  const open = read({});
+  assert.equal((await executePullRequestEnqueue(observe, open.gh)).refusal?.reason, "pull_request_mismatch");
+  for (const { calls } of [merged, otherHead, open]) {
+    assert.deepEqual(calls.map((args) => args[0]), ["api"], "one read, and no gh pr merge");
+  }
+});

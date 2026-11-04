@@ -2239,12 +2239,17 @@ A refusal proving the snapshot stale (`tip_moved`, `dependent_pull_request_open`
 `pull_request_mismatch`, `closure_mismatch`) revokes the approval. Any other refusal changed
 nothing and leaves the approval in place, armed for a merge, so it can be retried or reconciled, up
 to five attempts. An uncertain enqueue is never replayed; reconcile it once the forge reads MERGED.
+An enqueue Wollipog ran left no provider receipt in any harness, so for every harness, Codex App
+Server included, reconciliation and a lifecycle end settle it from the forge alone. The runner
+reads the pull request (`observeOnly`, from the filesystem root) and never enqueues.
 An uncertain deletion may be executed again, because a compare-and-delete pinned to the approved
 head cannot do more than the approval allowed. The consume result for a merge or deletion names
 this fallback (`forgeActionFallback`).
 
 `get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
-child merged through a consumed `pr_merge`, it gives the head branch the forge last reported as
+child merged through a consumed `pr_merge`, or through one whose enqueue Wollipog performed (a
+success or an uncertain attempt, even if a new request superseded or a revocation ended that
+occurrence while it ran), it gives the head branch the forge last reported as
 `deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
 or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
 too, and a handoff retains it even before the first read. A pending branch keeps

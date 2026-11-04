@@ -7217,6 +7217,9 @@ export class ControlPlaneDb {
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND status='consumed'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_deletions
       ON workflow_decisions(controlling_session_id) WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL`);
+    // An enqueue Wollipog performed is a merge whatever its occurrence's status became meanwhile.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_merges
+      ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
     admitChildBlockedCampaignEvents(db);
     preserveCampaignFollowUpOrigins(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
@@ -21298,18 +21301,25 @@ export class ControlPlaneDb {
       .filter((target) => target.refs.length > 0);
   }
 
-  /** The controlling sessions whose consumed `pr_merge` decisions belong to this campaign (#4067):
-   * the root and any session below it, keyed on the decision's controlling session whoever resolved
-   * it (a person, an Orchestrator, or forge reconciliation). Membership is plain ancestry, never a
-   * role, so a nested controller is never dropped. Read through the consumed-merge index, so a
-   * campaign without any costs one probe however many children it has. */
+  /** The controlling sessions whose merges belong to this campaign (#4067): the root and any session
+   * below it, keyed on the decision's controlling session whoever resolved it (a person, an
+   * Orchestrator, or forge reconciliation). A merge is a consumed `pr_merge`, or one whose enqueue
+   * Wollipog performed, whatever its status became while that ran (superseded or revoked in
+   * flight). Membership is plain ancestry, never a role, so a nested controller is never dropped.
+   * Read through the two merge indexes, so a campaign without any costs two probes however many
+   * children it has. */
   private campaignMergeControllers(campaignId: string): string[] {
     const ids = (this.stmt(
-      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+      `SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
        JOIN sessions controller ON controller.id=decision.controlling_session_id
        WHERE decision.category='pr_merge' AND decision.status='consumed'
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)
+       UNION
+       SELECT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='pr_merge' AND decision.forge_action IS NOT NULL
          AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
-    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    ).all(campaignId, campaignId) as Array<{ id: string }>).map((row) => row.id);
     return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
   }
 
@@ -21345,7 +21355,8 @@ export class ControlPlaneDb {
 
   /**
    * The head branches of the campaign's merged pull requests (#4067): every GitHub pull request a
-   * campaign child merged through a consumed `pr_merge` decision, with the forge's last word on its
+   * campaign child merged through a consumed `pr_merge` decision, or through one whose enqueue
+   * Wollipog performed (whatever that occurrence's status became meanwhile), with the forge's last word on its
    * branch. `deleted` once the forge reports the branch gone, or once Wollipog deleted it after that
    * report; `retained` while the work item naming the pull request is handed to a person or an
    * outside party, with the handoff's reason; otherwise `pending`, including a pull request the
@@ -21361,11 +21372,15 @@ export class ControlPlaneDb {
     // rebuilt as children change, and a campaign without a consumed merge costs one indexed probe.
     const controllers = this.campaignMergeControllers(campaignId);
     if (!controllers.length) return [];
+    // An enqueue Wollipog dispatched counts unless its latest attempt was refused (refusals follow
+    // only refusals, which changed nothing): a success or an uncertain one stays a merge even if a
+    // new request superseded, or a revocation ended, its occurrence while it ran.
     const merges = this.stmt(
       `SELECT session_id, resource_snapshot FROM workflow_decisions
-       WHERE category='pr_merge' AND status='consumed' AND session_id<>?
+       WHERE category='pr_merge' AND session_id<>?
+         AND (status='consumed' OR (forge_action IS NOT NULL AND json_extract(forge_action, '$.outcome')<>'refused'))
          AND controlling_session_id IN (SELECT value FROM json_each(?))
-       ORDER BY consumed_at, occurrence_id`,
+       ORDER BY COALESCE(consumed_at, json_extract(forge_action, '$.updatedAt'), created_at), occurrence_id`,
     ).all(campaignId, JSON.stringify(controllers)) as Array<{ session_id: string; resource_snapshot: string }>;
     const latest = new Map<string, { sessionId: string; repository: string; pullRequest: number; headSha: string }>();
     for (const row of merges) {

@@ -12896,7 +12896,8 @@ export class SessionsService {
         admission.armedAt < 1) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    if (child.driver === "claude-code") {
+    // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
+    if (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
       const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
@@ -14641,11 +14642,12 @@ export class SessionsService {
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
-   * mode, so a lifecycle end would leave a merge that already landed revoked. The grant is still
-   * revoked first, so a relaunched provider can never reuse it and a crash leaves it terminal; the
-   * forge then moves it to consumed only when it reports the approved head merged. */
+   * mode, and neither does one Wollipog ran itself in any harness (#4067), so a lifecycle end would
+   * leave a merge that already landed revoked. The grant is still revoked first, so a relaunched
+   * provider can never reuse it and a crash leaves it terminal; the forge then moves it to consumed
+   * only when it reports the approved head merged. */
   private forgeSettlesArmedMerge(child: SessionView, decision: WorkflowDecisionView): boolean {
-    return child.driver === "claude-code" && decision.status === "approved" &&
+    return (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) && decision.status === "approved" &&
       decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue" &&
       !this.capabilityFailure(
         child.runnerId,
@@ -14677,6 +14679,17 @@ export class SessionsService {
     }
   }
 
+  /** Whether Wollipog itself may have run this armed enqueue (#4067): its own record shows an
+   * attempt in flight, uncertain, enqueued or already queued. Such an enqueue left no provider
+   * receipt in any harness, so only the forge can settle it. Nothing else qualifies: no record (the
+   * child ran the command itself), only refusals (nothing ran), or `already_merged` (Wollipog found
+   * it merged and enqueued nothing) keeps the harness's own proof, a provider receipt for Codex. */
+  private wollipogMayHaveEnqueued(decision: WorkflowDecisionView): boolean {
+    const outcome = decision.forgeAction?.kind === "pr_merge_enqueue" ? decision.forgeAction.outcome : undefined;
+    return decision.category === "pr_merge" &&
+      (outcome === "in_progress" || outcome === "uncertain" || outcome === "enqueued" || outcome === "already_queued");
+  }
+
   /** Ask the child's runner whether the forge merged the exact approved head. The runner never runs
    * the enqueue; it only reads the pull request. */
   private async forgeAttestedMergeProof(
@@ -14689,6 +14702,31 @@ export class SessionsService {
     if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    }
+    // Claude Code's proof below reads the forge alone. Another harness's proof is a provider receipt
+    // that an enqueue Wollipog ran never produced, so that one is read the same way Wollipog ran it:
+    // from the filesystem root through the session's own login, read only, never enqueuing.
+    if (child.driver !== "claude-code" && this.wollipogMayHaveEnqueued(decision)) {
+      const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
+      if (unsupported) return failAs(unsupported);
+      const requestId = `forge_decision_action_${randomUUID()}`;
+      let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
+      try {
+        answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "forge_decision_action", requestId, sessionId: child.id, occurrenceId: decision.occurrenceId,
+          action: { kind: "pr_merge_enqueue", repository: snapshot.repository, pullRequest: snapshot.pullRequest,
+            headSha: snapshot.headSha, observeOnly: true },
+        }, 45_000) as unknown as Partial<ForgeDecisionActionResultMessage>;
+      } catch (error) {
+        return fail(isRunnerRequestTimeoutError(error) ? "workflow action reconciliation timed out"
+          : isRunnerRequestNotSentError(error) ? "runner is offline" : "workflow action reconciliation failed", 409);
+      }
+      // The runner reports already_merged only when GitHub merged exactly the approved head.
+      if (answer?.type !== "forge_decision_action_result" || answer.sessionId !== child.id ||
+          answer.occurrenceId !== decision.occurrenceId || answer.outcome !== "already_merged") {
+        return fail("forge did not prove the exact approved head was merged", 409);
+      }
+      return ok({ forgeHeadSha: snapshot.headSha });
     }
     const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
@@ -14760,7 +14798,7 @@ export class SessionsService {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const policy = parent?.parentControlPolicy;
-    if (!child || !parent || !policy || child.driver !== "claude-code" ||
+    if (!child || !parent || !policy || (child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||

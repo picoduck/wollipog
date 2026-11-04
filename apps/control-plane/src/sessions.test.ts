@@ -7353,6 +7353,115 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
     } finally { db.close(); }
   });
 
+  await t.test("an enqueue superseded after Wollipog dispatched it keeps the record of what it performed (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup(AGENT_ID);
+    try {
+      for (const [pullRequest, outcome] of [[4076, "enqueued"], [4077, "uncertain"]] as const) {
+        const armed = await arm(pullRequest);
+        let answer!: () => void;
+        const answered = new Promise<void>((resolve) => { answer = resolve; });
+        let asked!: () => void;
+        const dispatched = new Promise<void>((resolve) => { asked = resolve; });
+        hub.requestHandler = async (message) => {
+          asked();
+          await answered;
+          return forgeAction(child, () => ({ outcome }))(message);
+        };
+        const executing = svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+          { resourceDigest: armed.decision.resourceDigest });
+        await dispatched;
+        // The runner is already running the enqueue when a new request supersedes the occurrence.
+        const replacement = svc.createWorkflowDecision(child.id, { requestId: `replacement-${pullRequest}`,
+          resourceKey: `picoduck/wollipog#${pullRequest}`, resourceSnapshot: armed.snapshot });
+        assert.ok(replacement.ok, replacement.error);
+        answer();
+        const result = await executing;
+        assert.ok(result.ok, result.error);
+        assert.equal(result.data?.status, "superseded", "supersession only ends its authority");
+        assert.equal(result.data?.forgeAction?.outcome, outcome,
+          "what Wollipog performed stays on the occurrence, which keeps the merge tracked (campaign-merged-branches)");
+      }
+    } finally { db.close(); }
+  });
+
+  await t.test("a Codex child's uncertain Wollipog enqueue is reconciled by the forge alone, never replayed (#4067)", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    const admit = hub.requestHandler;
+    try {
+      const armed = await arm(4078);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      const unknown = await svc.executeWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceDigest: armed.decision.resourceDigest });
+      assert.equal(unknown.data?.forgeAction?.outcome, "uncertain", unknown.error);
+      assert.equal(unknown.data?.status, "approved");
+
+      // Not merged yet: the read refuses and nothing is consumed or enqueued.
+      const seen: ForgeDecisionActionMessage[] = [];
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "pull_request_mismatch", summary: "The pull request has not merged; nothing was enqueued." } }), seen);
+      const early = await svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+      assert.equal(early.status, 409);
+      assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+
+      // The forge reads the approved head MERGED. No provider receipt exists, and none is asked for:
+      // the runner only reads the pull request (forgeAction throws on any other request).
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_merged" }), seen);
+      const reconciled = await svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+        { resourceSnapshot: armed.snapshot }, () => true);
+      assert.equal(reconciled.data?.status, "consumed", reconciled.error);
+      assert.equal(seen.length, 2);
+      assert.ok(seen.every((message) => message.action.kind === "pr_merge_enqueue" && message.action.observeOnly === true &&
+        message.action.headSha === armed.snapshot.headSha), "a read-only check of exactly the approved head");
+      assert.ok(svc.governanceAudit(child.id).some((entry) => entry.requestId === armed.decision.occurrenceId &&
+        entry.outcome === "consumed" && entry.actor.id === "workflow-decision-forge-reconciliation"));
+
+      // Stopping a Codex child settles its uncertain Wollipog enqueue from the forge as well.
+      hub.requestHandler = admit;
+      const stopped = await arm(4079);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "uncertain" }));
+      await svc.executeWorkflowDecision(child.id, stopped.decision.occurrenceId, { resourceDigest: stopped.decision.resourceDigest });
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "already_merged" }));
+      assert.ok(svc.stop(child.id).ok);
+      assert.equal(await settled(db, stopped.decision.occurrenceId, "revoked"), "consumed");
+    } finally { db.close(); }
+  });
+
+  await t.test("a merged pull request alone never settles a Codex merge Wollipog did not enqueue (#4067)", async () => {
+    const { db, hub, svc, child, arm, receipt } = setup();
+    const admit = hub.requestHandler;
+    try {
+      // No forgeAction (the child ran the command itself), and only a refused attempt (nothing ran).
+      const own = await arm(4080);
+      hub.requestHandler = admit;
+      const refusedOnly = await arm(4081);
+      hub.requestHandler = forgeAction(child, () => ({ outcome: "refused",
+        refusal: { reason: "forge_refused", summary: "GitHub refused the enqueue; nothing was enqueued." } }));
+      await svc.executeWorkflowDecision(child.id, refusedOnly.decision.occurrenceId,
+        { resourceDigest: refusedOnly.decision.resourceDigest });
+      assert.equal(db.workflowDecisionByOccurrence(refusedOnly.decision.occurrenceId)?.forgeAction?.outcome, "refused");
+      for (const armed of [own, refusedOnly]) {
+        // The forge reads the approved head MERGED, but no provider receipt exists.
+        const asked: string[] = [];
+        const proof = forgeProof(child, armed);
+        hub.requestHandler = (message) => {
+          asked.push(message.type);
+          if (message.type === "forge_decision_action") throw new Error("a forge-only read was attempted");
+          return proof(message);
+        };
+        const result = await svc.reconcileWorkflowDecision(child.id, armed.decision.occurrenceId,
+          { resourceSnapshot: armed.snapshot }, () => true);
+        assert.equal(result.status, 409, "the forge's merged head alone is not a Codex receipt");
+        assert.deepEqual(asked, ["reconcile_workflow_action"], "the provider-receipt path, exactly as before");
+        assert.equal(db.workflowDecisionByOccurrence(armed.decision.occurrenceId)?.status, "approved");
+      }
+      // The child's own receipt still consumes it, as today.
+      hub.requestHandler = admit;
+      svc.onSessionEvent(child.id, receipt(own.command));
+      assert.equal(db.workflowDecisionByOccurrence(own.decision.occurrenceId)?.status, "consumed");
+    } finally { db.close(); }
+  });
+
   await t.test("an uncited merge whose review run moves during the closure read never dispatches (#4067)", async () => {
     const { db, hub, svc, child, arm } = setup(AGENT_ID);
     try {

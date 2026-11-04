@@ -172,7 +172,9 @@ export async function executePullRequestEnqueue(
   if (pr.state === "MERGED") return { outcome: "already_merged" };
   if (pr.state !== "OPEN") return refused("pull_request_mismatch", "The pull request is closed.");
   if (record(pr.mergeQueueEntry)) return { outcome: "already_queued" };
-  const url = `https://github.com/${action.repository}/pull/${action.pullRequest}`;
+  // A reconciliation read: whatever the field holds, its presence alone means never write.
+  if ("observeOnly" in action) return refused("pull_request_mismatch", "The pull request has not merged; nothing was enqueued.");
+  const url =`https://github.com/${action.repository}/pull/${action.pullRequest}`;
   // The canonical approved command: pinned to the head, never --delete-branch.
   const merged = await gh(["pr", "merge", url, "--squash", "--match-head-commit", action.headSha]);
   if (merged.code === null) return { outcome: "enqueued" };
