@@ -97,6 +97,7 @@ import {
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
+  type ExecuteWorkflowDecisionRequest,
   type CreateOwnerDecisionRequest,
   type HandWorkflowDecisionToOwnerRequest,
   type RecordOrchestratorFollowUpRequest,
@@ -1094,7 +1095,8 @@ const campaignForgeObserver = new CampaignForgeObserver({
   },
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
   store: db.campaignForgeObservations,
-  backgroundTargets: (include) => db.campaignWorkLedger.forgeBackgroundTargets(include),
+  // Unfinished items' pull requests, and merged campaign pull requests whose branch is pending (#4067).
+  backgroundTargets: (include) => [...db.campaignWorkLedger.forgeBackgroundTargets(include), ...db.campaignMergedBranchTargets(include)],
   changed: (campaignId) => campaignWorkObservations.forgeChanged(campaignId),
   warn: (message) => app.log.warn(message),
   newRequestId: () => `campaign_forge_${randomUUID()}`,
@@ -1579,6 +1581,7 @@ app.register(async (instance) => {
       case "campaign_launch_inspection_result":
       case "gitlab_merge_preflight_result":
       case "github_merge_preflight_result":
+      case "forge_decision_action_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
@@ -4374,6 +4377,12 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
   }
+  // #4067: a pending merged branch is read again (rate-limited, bounded wait) so a deletion shows.
+  const campaignId = db.resolvedCampaignSessionId(id);
+  const pendingBranches = campaignId ? db.campaignMergedBranches(campaignId).filter((row) => row.state === "pending") : [];
+  if (campaignId && pendingBranches.length) {
+    await refreshCampaignForge(campaignId, pendingBranches.map((row) => ({ repository: row.repository, number: row.pullRequest })));
+  }
   const projection = await svc.campaignProjectionWithHistory(id);
   const policy = db.getSession(id)?.orchestratorPolicy;
   const runners = policy ? db.listRunnersForPrincipal(principal) : [];
@@ -4743,6 +4752,23 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
     id,
     occurrenceId,
     req.body as Pick<ConsumeWorkflowDecisionRequest, "resourceSnapshot">,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+// #4067: Wollipog performs the requester's own approved branch deletion or armed enqueue itself.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/execute", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, await svc.executeWorkflowDecision(
+    id,
+    occurrenceId,
+    req.body as ExecuteWorkflowDecisionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
 });
