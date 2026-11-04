@@ -1,1 +1,0 @@
-|.project-manager-search|border-radius|8

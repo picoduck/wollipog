@@ -125,10 +125,13 @@ export class LeaseHelperArtifact {
     } finally { closeSync(fd); }
   }
 
-  capture(): { sha256: string; dev: bigint; ino: bigint } {
+  capture(expectedSha256?: string): { sha256: string; dev: bigint; ino: bigint } {
     const file = this.bytes();
+    const hash = digest(file.bytes);
+    // A mismatch never establishes proof, so cleanup must retain the unproven evidence.
+    if (expectedSha256 !== undefined && hash !== expectedSha256) throw new Error("fixed helper does not match the embedded asset");
     this.fileIdentity = file.identity;
-    this.hash = digest(file.bytes);
+    this.hash = hash;
     return { sha256: this.hash, dev: file.identity.dev, ino: file.identity.ino };
   }
 

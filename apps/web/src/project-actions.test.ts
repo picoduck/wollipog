@@ -5,6 +5,10 @@ import {
   projectArchiveMessage,
   projectArchiveResultMessage,
   projectArchiveResultTone,
+  projectNoLocationsLeftNote,
+  projectDeleteMessage,
+  projectRemoveLocationMessage,
+  sessionCountLabel,
 } from "./project-actions.js";
 
 test("durable Project archive offers exact undo only for sessions changed by the server", async () => {
@@ -136,4 +140,23 @@ test("Project Archive and Stop confirmations say queued messages are canceled, w
   // Without a stop the copy is unchanged.
   assert.equal(message(3, false, false), "All 3 sessions in “Alpha” move to Archived Sessions. Any that are still running are stopped first.");
   assert.equal(message(1, false, true), "The unarchived session in “Alpha” moves to Archived Sessions. The Project and its Locations remain.");
+});
+
+test("a Project archive's title counts the sessions (#2964)", () => {
+  assert.equal(sessionCountLabel(11), "11 Sessions");
+  assert.equal(sessionCountLabel(1), "1 Session");
+});
+
+test("Delete Project's message says what goes for good and what is kept, by session count (#2964)", () => {
+  assert.equal(projectDeleteMessage("Acme", 11),
+    "“Acme” is deleted for good, and its 11 sessions move to No Project. The sessions, their files and the location folders are kept.");
+  assert.equal(projectDeleteMessage("Acme", 1),
+    "“Acme” is deleted for good, and its 1 session moves to No Project. The session, its files and the location folders are kept.");
+  assert.equal(projectDeleteMessage("Acme", 0), "“Acme” is deleted for good. Its location folders are kept.");
+});
+
+test("Remove Location's message keeps the path out of the sentence and warns when no location is left (#2964)", () => {
+  assert.equal(projectRemoveLocationMessage("Acme", "Build Machine"),
+    "New sessions in “Acme” stop using this folder on Build Machine. The folder, its sessions and other projects aren't affected.");
+  assert.equal(projectNoLocationsLeftNote("Acme"), "“Acme” will have no locations left, so it can't start sessions until you add one.");
 });

@@ -15,6 +15,18 @@ function flush(): Promise<void> {
   return new Promise((resolve) => setImmediate(resolve));
 }
 
+test("a create's isolation notice reaches the poller that collects it, not the session summary (#3810)", async () => {
+  const coordinator = new WorktreeCreateCoordinator(60_000, () => "worktree_notice");
+  const isolation = { writableNow: false, writableAtNextLaunch: true, continuesAfterRelaunch: true };
+  coordinator.startOrJoin(coordinates, async () => ({ snapshot, isolation }));
+  await flush();
+  const terminal = coordinator.startOrJoin(coordinates, async () => ({ snapshot }));
+  assert.equal(terminal.status, "completed");
+  assert.deepEqual(terminal.status === "completed" ? terminal.isolation : undefined, isolation);
+  assert.deepEqual(coordinator.listForSession("session-1").map((operation) => Object.keys(operation).sort()),
+    [["baseRef", "branch", "id", "status"]]);
+});
+
 test("exact retries join one operation and terminal polling releases it", async () => {
   let starts = 0;
   let complete!: (value: { snapshot: SessionSnapshot }) => void;

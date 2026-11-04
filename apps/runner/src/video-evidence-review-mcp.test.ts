@@ -73,7 +73,7 @@ test("actual stdio endpoint serializes media calls and drains the final request 
   let release!: () => void; const waiting = new Promise<void>((r) => { release = r; });
   let requests = 0;
   const grant = { reviewerSessionId: "media", expiresAt: 10_000, sourceSha256: "a".repeat(64),
-    manifestSha256: "a".repeat(64), bindingSha256: "a".repeat(64), criteriaSha256: "a".repeat(64),
+    manifestSha256: "a".repeat(64), bindingSha256: "a".repeat(64), criteriaSha256: "a".repeat(64), deliveryPlanSha256: "a".repeat(64),
     frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: "a".repeat(64), sizeBytes: 1 }] } as PacedVideoTransportGrant;
   const transport: VideoReviewTransport = { grant, now: () => 1,
     request: async () => { requests++; await waiting; throw new Error("PRIVATE_NETWORK_SENTINEL"); } };
@@ -111,7 +111,7 @@ test("media admission remains busy while the model-facing output is backpressure
   let requests = 0;
   const transport: VideoReviewTransport = { now: () => 1,
     grant: { reviewerSessionId: "media", expiresAt: 10_000, sourceSha256: "a".repeat(64),
-      manifestSha256: "a".repeat(64), bindingSha256: "a".repeat(64), criteriaSha256: "a".repeat(64),
+      manifestSha256: "a".repeat(64), bindingSha256: "a".repeat(64), criteriaSha256: "a".repeat(64), deliveryPlanSha256: "a".repeat(64),
       frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: "a".repeat(64), sizeBytes: 1 }] } as PacedVideoTransportGrant,
     request: async () => { requests++; throw new Error("No actual media in this endpoint test."); } };
   serveScopedVideoReviewMcp(input, output, { transport, actualSessionId: "media", current: () => true });

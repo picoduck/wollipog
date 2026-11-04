@@ -1,6 +1,6 @@
 import type { AgentDriverKind, SessionUsageResponse, SessionView } from "@wollipog/protocol";
 import { safeExternalHref } from "./external-href.js";
-import { formatCost } from "./format.js";
+import { formatCost, formatTokens } from "./format.js";
 
 /** What the always-visible session-cost control shows. */
 export interface SessionCostLabel {
@@ -38,15 +38,12 @@ export const RUNNING_COUNTERS_BASIS_NOTE: Record<InputTokenBasis, string> = {
   includesCached: "Until the breakdown loads, Input includes cached tokens.",
 };
 
-/** Stands in for an amount we cannot state. Never render a priced-looking `$0.00` instead. */
-const UNKNOWN_COST = "$—";
-
 /**
  * The cost the status strip shows for a session.
  *
  * A session that has processed nothing renders no control at all. A session whose tokens are
  * known but whose cost is not — an unpriced model, a runner that reports no cost, a rate table
- * that never loaded — says so rather than claiming it was free.
+ * that never loaded — says so rather than claiming it was free: it shows its token count instead.
  *
  * Zero is not automatically "unknown". `priceUsage` keeps a provider-reported cost of exactly 0 as
  * `providerReported`, so a genuinely free session has a real amount and must be allowed to say
@@ -61,22 +58,32 @@ export function sessionCostLabel(
   const live = session.liveUsage;
   const cost = formatCost(Math.max(session.costUsd, breakdown?.totals.costUsd ?? 0) + (live?.costUsd ?? 0));
   if (cost) return { text: cost, priced: true, ariaLabel: `Session Usage: ${cost}` };
+  const counters = session.tokensIn + session.tokensOut;
+  // Callers normally reject stale detail wholesale, but keep this shared formatter safe on its
+  // own: provenance from a ledger behind the session's live counters cannot price newer usage.
+  const detailIsCurrent = breakdown !== null && breakdown.totals.processedTokens >= counters;
+  const settled = detailIsCurrent ? breakdown.totals.processedTokens : counters;
   if (live && live.tokensIn + live.tokensOut > 0) {
     // A live estimate of zero means the running turn's model has no rate yet, not that it is free.
-    return { text: UNKNOWN_COST, priced: false, ariaLabel: "Session Usage: Cost Unavailable" };
+    return unpricedLabel(settled + live.tokensIn + live.tokensOut);
   }
-  if (session.tokensIn + session.tokensOut > 0) {
-    // Callers normally reject stale detail wholesale, but keep this shared formatter safe on its
-    // own: provenance from a ledger behind the session's live counters cannot price newer usage.
-    const detailIsCurrent = breakdown &&
-      breakdown.totals.processedTokens >= session.tokensIn + session.tokensOut;
+  if (counters > 0) {
     const source = detailIsCurrent ? breakdown.totals.costSource : session.costSource;
     if (source && source !== "unpriced") {
       return { text: "$0.00", priced: true, ariaLabel: "Session Usage: $0.00" };
     }
-    return { text: UNKNOWN_COST, priced: false, ariaLabel: "Session Usage: Cost Unavailable" };
+    return unpricedLabel(settled);
   }
   return null;
+}
+
+/**
+ * Usage nobody could price reads as its exact token count, named Unpriced, never as a
+ * priced-looking `$0.00` or a placeholder glyph (#3017).
+ */
+function unpricedLabel(processedTokens: number): SessionCostLabel {
+  const text = `${formatTokens(processedTokens)} Tokens`;
+  return { text, priced: false, ariaLabel: `Session Usage: ${text}, Unpriced` };
 }
 
 /** Cumulative token buckets for the Session Usage popover, with progressive-disclosure rows

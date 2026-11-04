@@ -24,6 +24,7 @@ const LEGACY_OWNER_FILE = ".wollipog-runner-owner-v1.json";
 const OWNER_FILE = ".wollipog-runner-owner-v2.json";
 const LEASE_FILE = ".wollipog-runner-active-v1.lock";
 const RECOVERY_DIR = ".wollipog-runner-lease-recovery-v1";
+const MANAGED_PROFILE_ROOT = "profiles";
 const MAX_METADATA_BYTES = 4_096;
 const LEGACY_CREDENTIAL = join("credentials", "active-runner-token");
 const SHA256_HEX = /^[a-f0-9]{64}$/u;
@@ -417,8 +418,11 @@ function acquireRunnerDataDirLeaseAt(
   const isProcessAlive = options.isProcessAlive ?? defaultProcessAlive;
   const leaseId = randomUUID();
   const ownerExistedAtClaim = existsSync(ownerPath) || existsSync(legacyOwnerPath);
+  // `profiles` is the SSH-account-level managed provider profile root (#3239), shared by every
+  // runner on this OS account when the data directory is the default `~/.agent-manager`. No
+  // pre-upgrade runner wrote it, so it is never legacy runner state.
   const legacyMigrationRequired = !ownerExistedAtClaim && readdirSync(dataDir).some(
-    (entry) => entry !== LEASE_FILE && entry !== RECOVERY_DIR,
+    (entry) => entry !== LEASE_FILE && entry !== RECOVERY_DIR && entry !== MANAGED_PROFILE_ROOT,
   );
   let rollbackOwnerHash = legacyOwnerHash;
   let explicitlyAdoptingLegacyEndpoint = false;

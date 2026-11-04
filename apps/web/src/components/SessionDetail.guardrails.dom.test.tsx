@@ -665,6 +665,7 @@ test("the + menu offers one Orchestrator Controls row, only on an Orchestrator s
         merged_branch_deletion: "human",
         follow_up_issue_publication: "orchestrator",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     }, costBudgetUsd: null, costCheckpointsUsd: null, maxToolCalls: null } as SessionView}
     planActive={false}
@@ -687,7 +688,7 @@ test("the + menu offers one Orchestrator Controls row, only on an Orchestrator s
     await act(async () => render("orchestrator"));
     const controls = row();
     assert.ok(controls, "an Orchestrator session has the row");
-    assert.equal(controls.querySelector(".menu-desc")?.textContent, "3 of 5 decisions stay with a person.",
+    assert.equal(controls.querySelector(".menu-desc")?.textContent, "4 of 6 decisions stay with a person.",
       "its second line summarizes the gates");
     const menu = controls.closest<HTMLElement>(".menu")!;
     assertNoDomNode(menu.querySelector("dl, .ui-select, [role='listbox'], [aria-label^='Parent Control']"),

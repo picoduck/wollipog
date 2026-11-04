@@ -193,7 +193,7 @@ test("same-owner handle loss makes a started command uncertain instead of replay
     assert.equal(first.kind, "new");
     if (first.kind !== "new") return;
     assert.equal(first.handle.started(7).state, "started");
-    store.releaseHandle("cmd_test");
+    store.releaseHandle("cmd_test", first.handle);
 
     const retried = store.claim(message());
     assert.equal(retried.kind, "duplicate");
@@ -385,6 +385,24 @@ test("malformed durable envelopes fail closed without throwing", () => {
   }
 });
 
+test("review continuation marker is validated and included in the durable identity (#3938)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-command-review-continuation-"));
+  try {
+    const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+    const command: DurableSessionCommand = {
+      type: "prompt_session", sessionId: "s1", text: "Review completed", reviewContinuation: true,
+    };
+    assert.equal(store.claim(message(command, { commandId: "review_valid" })).kind, "new");
+    for (const value of [false, "true", {}, 1]) {
+      const invalid = { ...command, reviewContinuation: value } as DurableSessionCommand;
+      const result = store.claim(message(invalid, { commandId: `review_invalid_${typeof value}` }));
+      assert.notEqual(result.kind, "busy");
+      if (result.kind !== "busy") assert.equal(result.receipt.code, "INVALID_COMMAND");
+    }
+    assert.notEqual(durableCommandPayloadDigest(command), durableCommandPayloadDigest({ ...command, reviewContinuation: undefined }));
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("campaign continuation metadata is bounded and bound to its exact session and event range", () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-command-campaign-continuation-"));
   try {
@@ -528,8 +546,8 @@ test("a truncated final receipt is never overwritten or retried as new", () => {
   }
 });
 
-for (const changed of ["owner", "revision", "delivery", "identity", "payload", "rollback"] as const) {
-  test(`a failed answer fence does not recover with ${changed} uncertainty`, (t) => {
+for (const published of [false, true]) for (const changed of ["owner", "revision", "delivery", "identity", "payload", "rollback"] as const) {
+  test(`a failed ${published ? "published" : "unpublished"} answer fence does not recover with ${changed} uncertainty`, (t) => {
     const root = mkdtempSync(join(tmpdir(), "wollipog-answer-fence-guard-"));
     let now = 1;
     try {
@@ -546,7 +564,7 @@ for (const changed of ["owner", "revision", "delivery", "identity", "payload", "
       let recordFile = "";
       t.mock.method(store as any, "writeAtomic", (file: string, record: any) => {
         if (record.state === "started" && record.steeringPending) {
-          const adjusted = { ...record };
+          const adjusted = { ...(published ? record : store.read("cmd_test")) };
           if (changed === "owner") adjusted.ownerId = "owner-b";
           if (changed === "revision") adjusted.revision += 1;
           if (changed === "delivery") adjusted.userEventSeq = 7;
@@ -563,7 +581,7 @@ for (const changed of ["owner", "revision", "delivery", "identity", "payload", "
       assert.throws(() => claim.handle.beginSteering(), /synthetic fence publication failure/u);
       assert.equal(readFileSync(recordFile, "utf8"), diskBeforeRecovery,
         "recovery must not overwrite uncertain state or another command/owner");
-      if (changed === "rollback") {
+      if (changed === "rollback" && published) {
         now = 20;
         const restarted = new DurableCommandStore(root, { ownerId: "owner-c", now: () => now, ownerStaleMs: 10 });
         const replay = restarted.claim(message(command));
@@ -612,6 +630,42 @@ for (const published of [false, true]) {
       replay.handle.started(7);
       replay.handle.completed();
       assert.equal(restarted.claim(message(command)).kind, "duplicate");
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
+for (const staleCallback of ["completed", "failed", "uncertain", "queued", "started"] as const) {
+  test(`stale ${staleCallback} cleanup preserves a reclaimed handle`, (t) => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-stale-command-handle-"));
+    try {
+      const store = new DurableCommandStore(root, { ownerId: "owner-a", now: () => 1 });
+      const envelope = message();
+      const first = store.claim(envelope);
+      if (first.kind !== "new") return assert.fail("command was not claimed");
+      first.handle.queued();
+      const callback = () => {
+        if (staleCallback === "failed") return first.handle.failed("stale failure");
+        if (staleCallback === "uncertain") return first.handle.uncertain("stale uncertainty");
+        return first.handle[staleCallback]();
+      };
+      // A real transition failure must relinquish its own marker for a safe sender retry.
+      const fault = t.mock.method(store as any, "writeAtomic", () => { throw new Error("synthetic write failure"); });
+      assert.throws(callback, /synthetic write failure/u);
+      fault.mock.restore();
+      const retry = store.claim(envelope);
+      if (retry.kind !== "reclaimed") return assert.fail("failed persistence did not release ownership");
+      retry.handle.queued();
+      const before = store.read(envelope.commandId);
+      assert.throws(callback, /changed concurrently/u);
+      assert.deepEqual(store.read(envelope.commandId), before, "stale callbacks must not change the receipt");
+      assert.equal(store.claim(envelope).kind, "duplicate", "the newer handle must retain its marker");
+      retry.handle.started(7);
+      retry.handle.completed();
+      const duplicate = store.claim(envelope);
+      assert.equal(duplicate.kind, "duplicate");
+      if (duplicate.kind === "duplicate") assert.equal(duplicate.receipt.state, "completed");
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

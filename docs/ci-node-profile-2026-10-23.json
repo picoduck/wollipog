@@ -1,0 +1,447 @@
+{
+  "version": 1,
+  "source": {
+    "repository": "picoduck/wollipog",
+    "runId": 39896139030,
+    "attempt": 1,
+    "jobId": 120226938449,
+    "testedSha": "b1a90aad1d7fd4a7a4891abb45eeb93bbcdaeb46",
+    "window": [
+      {
+        "since": "2026-10-23T03:39:00.000Z",
+        "until": "2026-10-23T03:40:00.000Z"
+      }
+    ],
+    "collectedAt": "2026-10-23T04:34:49.888Z",
+    "jobExecutionMinutes": 30.266666666666666,
+    "runnerWaitMinutes": 0.03333333333333333,
+    "nodeStepMinutes": 26.516666666666666,
+    "runMetrics": {
+      "requiredMinutes": 36.733333333333334,
+      "criticalWaitMinutes": 0.06666666666666998,
+      "criticalExecutionMinutes": 36.666666666666664,
+      "longestJobWaitMinutes": 0.05,
+      "aggregatorWaitMinutes": 0.03333333333333333,
+      "longestExecutionMinutes": 36.61666666666667,
+      "wallMinutes": 36.733333333333334,
+      "measuredRunnerMinutes": 187.71666666666667,
+      "consumedRunnerMinutes": 187.71666666666667,
+      "missingJobTiming": 0,
+      "nonTestOverheadMinutes": 16.78333333333334,
+      "browserShardImbalance": {
+        "observed": 5,
+        "expected": 5,
+        "complete": true,
+        "maxMinusMinMinutes": 9.5,
+        "maxOverMin": 1.3503380454824832
+      }
+    }
+  },
+  "summary": {
+    "version": 1,
+    "suite": "node",
+    "count": 16194,
+    "failed": 0,
+    "skipped": 122,
+    "cancelled": 0,
+    "unmeasured": 0,
+    "retryOnly": 0,
+    "truncated": false,
+    "context": {
+      "runId": "39896139030",
+      "attempt": 1,
+      "testedSha": "b1a90aad1d7fd4a7a4891abb45eeb93bbcdaeb46",
+      "workflowSha": "b1a90aad1d7fd4a7a4891abb45eeb93bbcdaeb46"
+    },
+    "slowestFiles": [
+      {
+        "fileId": "bc10fd99a0ff618ae211991efdff808824a7b5b151889288dd95701f21852ccb",
+        "durationMs": 383520.03222600016,
+        "count": 54
+      },
+      {
+        "fileId": "f7e52b91682046a89b31e5ba81dddc416045b99d7b11f776dba25d23546f47af",
+        "durationMs": 254106.600861,
+        "count": 714
+      },
+      {
+        "fileId": "5b0584ea06fff5ebcd046b5450e960add7d18b96a8c02f153dfb254470f58f98",
+        "durationMs": 218432.96503700005,
+        "count": 97
+      },
+      {
+        "fileId": "23b327de51d65ec00574aaa25554ba3a64ad70cb613f1534741e9f17d2249206",
+        "durationMs": 197951.2616910001,
+        "count": 34
+      },
+      {
+        "fileId": "6fc160886e32791038f167b44eb57a41e432413b5948bd463435d22da764cfef",
+        "durationMs": 92776.671407,
+        "count": 275
+      },
+      {
+        "fileId": "958afa1d03f0792218ceddc5c10bc35f2401f54d58adc846c5a8f93e4fdef7a7",
+        "durationMs": 91123.76415900001,
+        "count": 18
+      },
+      {
+        "fileId": "8c473e6d5f0ab1a63eee51a9c3056a94b6b51200ad3045bc9be9aeb9f40a5ca4",
+        "durationMs": 71107.202839,
+        "count": 5
+      },
+      {
+        "fileId": "a427f8d64b95079bf7bc20c672ad740b6f17dc29cb54488ea82184d34040f315",
+        "durationMs": 68690.101036,
+        "count": 1
+      },
+      {
+        "fileId": "7acfc57e24e01648170b6f895b73259582b0daf075ff62335e15d31239187736",
+        "durationMs": 63928.128527,
+        "count": 143
+      },
+      {
+        "fileId": "3e162a6130cd8a46c90514d0f3aa1db7dd8e0967776b608580b679b21a71cb19",
+        "durationMs": 59880.272654999986,
+        "count": 59
+      },
+      {
+        "fileId": "fb654cb57b719d6414523c15248e3ac668204ababeb4ed6b92d5d2f88c7c3d9e",
+        "durationMs": 58682.827491000004,
+        "count": 11
+      },
+      {
+        "fileId": "b4475991bf6db4e8119a762ecc013384167fda803204cb83294e5923fcd58cdd",
+        "durationMs": 52035.518253999995,
+        "count": 8
+      },
+      {
+        "fileId": "cdbb2898dd5e94c0ec82eb09d6d78f668c218d4655e3953faa6504409bf1c0ff",
+        "durationMs": 49298.212950999994,
+        "count": 154
+      },
+      {
+        "fileId": "efc1a2521bd1cf73932273406b4c33461bb866131a2e75c87d91314eda80b9ae",
+        "durationMs": 47123.302416000006,
+        "count": 7
+      },
+      {
+        "fileId": "0997d8dad1c652b0a432d558b09746f1654e0d5adfae47135c31d0420fde8299",
+        "durationMs": 46253.178846,
+        "count": 16
+      },
+      {
+        "fileId": "2e9eb56bc14c4f6cdeb42ddef2d2da5d1458774d09f2d2c08fdd89d13671b736",
+        "durationMs": 44900.821923999996,
+        "count": 36
+      },
+      {
+        "fileId": "2daf3daa0ff1f2fc5602459210b6c7a452783f028312f43d4fcc022cfd07c602",
+        "durationMs": 40716.333645,
+        "count": 6
+      },
+      {
+        "fileId": "66f568bb3fe74d3232fcb9d05a8bd7366197022846290ad5f24f0c36408e28ea",
+        "durationMs": 39962.21127000001,
+        "count": 4
+      },
+      {
+        "fileId": "4a3470eb4dd5efd59ae7fc42ecce5f68016143beb8994188faf463de6b33349e",
+        "durationMs": 39621.529887,
+        "count": 100
+      },
+      {
+        "fileId": "57d3ea131c9259c4487fd4080d1bd673cc75ab1a862995bd192d8059e14aa3f1",
+        "durationMs": 32527.749620000002,
+        "count": 23
+      }
+    ],
+    "slowestTests": [
+      {
+        "fileId": "958afa1d03f0792218ceddc5c10bc35f2401f54d58adc846c5a8f93e4fdef7a7",
+        "testId": "09dbb3de7c243cb27330a476c970f4a107f1a76fb8714652c12523d34baa2d77",
+        "durationMs": 83902.833849,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "a427f8d64b95079bf7bc20c672ad740b6f17dc29cb54488ea82184d34040f315",
+        "testId": "be86b79e0832d21f614ca931b305e013a3218723a4ec1756a10831aea822e149",
+        "durationMs": 68690.101036,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "23b327de51d65ec00574aaa25554ba3a64ad70cb613f1534741e9f17d2249206",
+        "testId": "877dfe796894802f0fcfdd2dbb3f25dfef95c4eef4d6056eda38498f8b878b3e",
+        "durationMs": 50847.229413,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "8c473e6d5f0ab1a63eee51a9c3056a94b6b51200ad3045bc9be9aeb9f40a5ca4",
+        "testId": "cea243f5264117042101e898d69da31cec2b801cb25a33f926a5e27e59a20e40",
+        "durationMs": 50434.298884,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "5b0584ea06fff5ebcd046b5450e960add7d18b96a8c02f153dfb254470f58f98",
+        "testId": "ad250965eba8b156c504e46b66584ba1551bf247626be3c54d9ff8e820f247cb",
+        "durationMs": 45959.625447,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "66f568bb3fe74d3232fcb9d05a8bd7366197022846290ad5f24f0c36408e28ea",
+        "testId": "9231be6ec823bcfa93a6c2599fcf7f51ff84a80914082b94a4c42928e4f99065",
+        "durationMs": 38833.864386,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "fb654cb57b719d6414523c15248e3ac668204ababeb4ed6b92d5d2f88c7c3d9e",
+        "testId": "d13e340b015ac4f4714d495adbdee47beb8514303cd66806dd5473269997cfb0",
+        "durationMs": 37900.746727,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "23b327de51d65ec00574aaa25554ba3a64ad70cb613f1534741e9f17d2249206",
+        "testId": "bfe993648a88946811cd762687ef53c47c14719e1afc8344961aa994ea2cc187",
+        "durationMs": 34541.702951,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "bc10fd99a0ff618ae211991efdff808824a7b5b151889288dd95701f21852ccb",
+        "testId": "9994fdb5d33806c4256c348730c9ab2d9f64c8c8f5b217369004752bc10c1b47",
+        "durationMs": 27975.731944,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "57d3ea131c9259c4487fd4080d1bd673cc75ab1a862995bd192d8059e14aa3f1",
+        "testId": "9452cb3e458759ff35f873052b6de66c0e9e8bc22d7df7ee266e099abdafda31",
+        "durationMs": 25281.678538,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "23b327de51d65ec00574aaa25554ba3a64ad70cb613f1534741e9f17d2249206",
+        "testId": "9d2385bd7660a0575c953eaea9d09169109cf02c0dc9f6c9e68b6a5a845e8b48",
+        "durationMs": 24333.251648,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "bc10fd99a0ff618ae211991efdff808824a7b5b151889288dd95701f21852ccb",
+        "testId": "ebdda644f84abefc1111ff2763a4d03425ca2376f3b912390a34af7ba668a04b",
+        "durationMs": 21588.449059,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "2daf3daa0ff1f2fc5602459210b6c7a452783f028312f43d4fcc022cfd07c602",
+        "testId": "00aa6ae6f9c3294f465a880061f744645b1f70bac6828b83cd58f9e05cae794f",
+        "durationMs": 21325.09257,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "8c54233246bf8c70a9316e9c3119e9e2aacd99257ec2d70ed5b82a8ba50c7d5a",
+        "testId": "d79ebec7c1b24a188f899149a71dc96dd6104bdfbaa08aaeaab04d1a9763fc6c",
+        "durationMs": 20966.717274,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "f7e52b91682046a89b31e5ba81dddc416045b99d7b11f776dba25d23546f47af",
+        "testId": "41dc9fa06d3af1088d89652892a053eee3dbae8843563c70cb8b825f371c38cb",
+        "durationMs": 19231.817341,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "0997d8dad1c652b0a432d558b09746f1654e0d5adfae47135c31d0420fde8299",
+        "testId": "e51c21687c2e446ff235971d4535b634a86e1bbbd38bba1eca6b3c5a780e4e87",
+        "durationMs": 16696.316088,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "5b0584ea06fff5ebcd046b5450e960add7d18b96a8c02f153dfb254470f58f98",
+        "testId": "c0781dd1c58ab6d501831e6fec821813e09db93215de801bf1b1fd635eed50ba",
+        "durationMs": 16530.653532,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "8c473e6d5f0ab1a63eee51a9c3056a94b6b51200ad3045bc9be9aeb9f40a5ca4",
+        "testId": "d8babd08aa31705f6ae9a96cf14ccf671a50d9ef185437172605a2f98ed1c528",
+        "durationMs": 16412.429644,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "23b327de51d65ec00574aaa25554ba3a64ad70cb613f1534741e9f17d2249206",
+        "testId": "eb1e41f6fe61413c96b54b9e18edf1f0594c848ca7147ca560f18366d1d83b30",
+        "durationMs": 15787.376927,
+        "state": "passing",
+        "retry": 0
+      },
+      {
+        "fileId": "efc1a2521bd1cf73932273406b4c33461bb866131a2e75c87d91314eda80b9ae",
+        "testId": "7ad11dfcd814c3889d8a99118eda8733d86181055c8eaffd70fdd0238f033c33",
+        "durationMs": 15542.274266,
+        "state": "passing",
+        "retry": 0
+      }
+    ]
+  },
+  "slowestFiles": [
+    {
+      "fileId": "bc10fd99a0ff618ae211991efdff808824a7b5b151889288dd95701f21852ccb",
+      "durationMs": 383520.03222600016,
+      "count": 54,
+      "file": "apps/control-plane/src/prepared-media-session-delegated.integration.test.ts"
+    },
+    {
+      "fileId": "f7e52b91682046a89b31e5ba81dddc416045b99d7b11f776dba25d23546f47af",
+      "durationMs": 254106.600861,
+      "count": 714,
+      "file": "apps/control-plane/src/sessions.test.ts"
+    },
+    {
+      "fileId": "5b0584ea06fff5ebcd046b5450e960add7d18b96a8c02f153dfb254470f58f98",
+      "durationMs": 218432.96503700005,
+      "count": 97,
+      "file": "apps/control-plane/src/prepared-media-session-integration.test.ts"
+    },
+    {
+      "fileId": "23b327de51d65ec00574aaa25554ba3a64ad70cb613f1534741e9f17d2249206",
+      "durationMs": 197951.2616910001,
+      "count": 34,
+      "file": "apps/runner/src/provider-home-lease-checkpoint.test.ts"
+    },
+    {
+      "fileId": "6fc160886e32791038f167b44eb57a41e432413b5948bd463435d22da764cfef",
+      "durationMs": 92776.671407,
+      "count": 275,
+      "file": "apps/control-plane/src/db.test.ts"
+    },
+    {
+      "fileId": "958afa1d03f0792218ceddc5c10bc35f2401f54d58adc846c5a8f93e4fdef7a7",
+      "durationMs": 91123.76415900001,
+      "count": 18,
+      "file": "apps/runner/src/provider-home-retirement-state.test.ts"
+    },
+    {
+      "fileId": "8c473e6d5f0ab1a63eee51a9c3056a94b6b51200ad3045bc9be9aeb9f40a5ca4",
+      "durationMs": 71107.202839,
+      "count": 5,
+      "file": "apps/control-plane/src/runner-channel.integration.test.ts"
+    },
+    {
+      "fileId": "a427f8d64b95079bf7bc20c672ad740b6f17dc29cb54488ea82184d34040f315",
+      "durationMs": 68690.101036,
+      "count": 1,
+      "file": "apps/control-plane/src/archived-history-retention.size.test.ts"
+    },
+    {
+      "fileId": "7acfc57e24e01648170b6f895b73259582b0daf075ff62335e15d31239187736",
+      "durationMs": 63928.128527,
+      "count": 143,
+      "file": "apps/runner/src/worktree.test.ts"
+    },
+    {
+      "fileId": "3e162a6130cd8a46c90514d0f3aa1db7dd8e0967776b608580b679b21a71cb19",
+      "durationMs": 59880.272654999986,
+      "count": 59,
+      "file": "apps/runner/src/provider-home-lease.test.ts"
+    },
+    {
+      "fileId": "fb654cb57b719d6414523c15248e3ac668204ababeb4ed6b92d5d2f88c7c3d9e",
+      "durationMs": 58682.827491000004,
+      "count": 11,
+      "file": "apps/control-plane/src/video-evidence-preparation.test.ts"
+    },
+    {
+      "fileId": "b4475991bf6db4e8119a762ecc013384167fda803204cb83294e5923fcd58cdd",
+      "durationMs": 52035.518253999995,
+      "count": 8,
+      "file": "apps/runner/src/policy-hook-mode-switch.integration.test.ts"
+    },
+    {
+      "fileId": "cdbb2898dd5e94c0ec82eb09d6d78f668c218d4655e3953faa6504409bf1c0ff",
+      "durationMs": 49298.212950999994,
+      "count": 154,
+      "file": "apps/web/src/components/SessionDetail.composer-focus.dom.test.tsx"
+    },
+    {
+      "fileId": "efc1a2521bd1cf73932273406b4c33461bb866131a2e75c87d91314eda80b9ae",
+      "durationMs": 47123.302416000006,
+      "count": 7,
+      "file": "apps/runner/src/provider-home-lease-portable.test.ts"
+    },
+    {
+      "fileId": "0997d8dad1c652b0a432d558b09746f1654e0d5adfae47135c31d0420fde8299",
+      "durationMs": 46253.178846,
+      "count": 16,
+      "file": "apps/runner/src/provider-home-lease-async.test.ts"
+    },
+    {
+      "fileId": "2e9eb56bc14c4f6cdeb42ddef2d2da5d1458774d09f2d2c08fdd89d13671b736",
+      "durationMs": 44900.821923999996,
+      "count": 36,
+      "file": "apps/control-plane/src/registration-reconciliation.test.ts"
+    },
+    {
+      "fileId": "2daf3daa0ff1f2fc5602459210b6c7a452783f028312f43d4fcc022cfd07c602",
+      "durationMs": 40716.333645,
+      "count": 6,
+      "file": "apps/runner/src/provider-home-lease-heartbeat.test.ts"
+    },
+    {
+      "fileId": "66f568bb3fe74d3232fcb9d05a8bd7366197022846290ad5f24f0c36408e28ea",
+      "durationMs": 39962.21127000001,
+      "count": 4,
+      "file": "apps/control-plane/src/session-tool-call-counter.test.ts"
+    },
+    {
+      "fileId": "4a3470eb4dd5efd59ae7fc42ecce5f68016143beb8994188faf463de6b33349e",
+      "durationMs": 39621.529887,
+      "count": 100,
+      "file": "apps/web/src/components/SessionDetail.transcript-recovery.dom.test.tsx"
+    },
+    {
+      "fileId": "57d3ea131c9259c4487fd4080d1bd673cc75ab1a862995bd192d8059e14aa3f1",
+      "durationMs": 32527.749620000002,
+      "count": 23,
+      "file": "apps/control-plane/src/claude-cost-recovery.test.ts"
+    }
+  ],
+  "fastFiles": [
+    "packages/protocol/src/automation-messages.test.ts",
+    "packages/protocol/src/campaign-authority.test.ts",
+    "packages/protocol/src/campaign-issue-scope.test.ts",
+    "packages/protocol/src/campaign-work-ledger.test.ts",
+    "packages/protocol/src/conversation-handoff.test.ts",
+    "packages/protocol/src/cron-schedule.test.ts",
+    "packages/protocol/src/event-payloads.test.ts",
+    "packages/protocol/src/in-place-handoff.test.ts",
+    "packages/protocol/src/index.test.ts",
+    "packages/protocol/src/media-active-stop.test.ts",
+    "packages/protocol/src/paced-video-review-windows.test.ts",
+    "packages/protocol/src/plain-text-preview.test.ts",
+    "packages/protocol/src/prompt-images.test.ts",
+    "packages/protocol/src/provider-home-recovery.test.ts",
+    "packages/protocol/src/rate-priced-usage.test.ts",
+    "packages/protocol/src/review-contract.test.ts",
+    "packages/protocol/src/review-run.test.ts",
+    "packages/protocol/src/review-worktree-reasons.test.ts",
+    "packages/protocol/src/session-title.test.ts",
+    "packages/protocol/src/skills.test.ts",
+    "packages/protocol/src/slash-command-name.test.ts",
+    "packages/protocol/src/worker-attention.test.ts"
+  ]
+}

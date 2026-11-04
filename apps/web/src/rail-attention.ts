@@ -17,19 +17,44 @@ export interface MachineAttention {
 
 export const NO_MACHINE_ATTENTION: MachineAttention = { offlineWithActiveSessions: 0, updateRequired: 0 };
 
+/** Why one machine counts toward `MachineAttention`, or null when it is normal. */
+export type MachineAttentionReason = "offline_with_active_sessions" | "update_required";
+
+/** How many unarchived sessions with work in flight each runner holds, by runner id. */
+export function activeSessionCounts(
+  sessions: Iterable<Pick<SessionView, "runnerId" | "status" | "archived">>,
+): Map<string, number> {
+  const counts = new Map<string, number>();
+  for (const session of sessions) {
+    if (!session.archived && WORK_IN_FLIGHT[session.status]) counts.set(session.runnerId, (counts.get(session.runnerId) ?? 0) + 1);
+  }
+  return counts;
+}
+
+/**
+ * The one reason a machine counts, the more urgent first. The rail's Connections dot sums these and
+ * the All Machines overview's Needs Attention (#2986) gives each its own row, so the two agree.
+ */
+export function machineAttentionReason(
+  runner: Pick<RunnerView, "runnerId" | "status" | "protocolVersion">,
+  activeSessions: ReadonlyMap<string, number>,
+): MachineAttentionReason | null {
+  if (runner.status !== "online" && (activeSessions.get(runner.runnerId) ?? 0) > 0) return "offline_with_active_sessions";
+  if (runnerOutdated(runner.protocolVersion)) return "update_required";
+  return null;
+}
+
 export function machineAttention(
   runners: Iterable<Pick<RunnerView, "runnerId" | "status" | "protocolVersion">>,
   sessions: Iterable<Pick<SessionView, "runnerId" | "status" | "archived">>,
 ): MachineAttention {
-  const busy = new Set<string>();
-  for (const session of sessions) {
-    if (!session.archived && WORK_IN_FLIGHT[session.status]) busy.add(session.runnerId);
-  }
+  const active = activeSessionCounts(sessions);
   let offlineWithActiveSessions = 0;
   let updateRequired = 0;
   for (const runner of runners) {
-    if (runner.status !== "online" && busy.has(runner.runnerId)) offlineWithActiveSessions += 1;
-    else if (runnerOutdated(runner.protocolVersion)) updateRequired += 1;
+    const reason = machineAttentionReason(runner, active);
+    if (reason === "offline_with_active_sessions") offlineWithActiveSessions += 1;
+    else if (reason === "update_required") updateRequired += 1;
   }
   return { offlineWithActiveSessions, updateRequired };
 }

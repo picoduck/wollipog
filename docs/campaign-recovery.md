@@ -25,8 +25,31 @@ observations neither spend another attempt nor create another request or wake. R
 records retain the original ledger item's ceiling. Check repair and re-review retain a repository/PR
 ceiling across changed heads; the head remains an exact observation coordinate, not a counter reset.
 Hard denial and exhaustion stay blocked and ask
-for no override. Existing continuation transport owns its own bounded retries and ambiguous-result
+for no override. A stopped worker whose assignment is still open is classified from the stop
+provenance the server wrote, never from agent text: a recorded Stop or archive request is
+`intentional_stop`, a declined guardrail is `hard_denial`, and any other or missing provenance
+(a runner-reported end, a disconnect, a launch that never ran, a stop recorded before provenance) is
+`unverified_stop`. All three are blocked the same way: none is dispatched, replaced or restarted
+automatically, and only the explanation differs. A denied typed decision stays `hard_denial`, and a
+failed worker stays a bounded `transient_failure` replacement. A worker record keeps its work item
+across replacement workers, so its stop label only escalates (`intentional_stop`, then
+`unverified_stop`, then `hard_denial`): a later worker's denial is never hidden behind an earlier
+intentional stop, and nothing relabels a recorded denial, including one an earlier version wrote for
+a stop. Existing continuation transport owns its own bounded retries and ambiguous-result
 fence; recovery never acknowledges an unknown parent turn to create another turn.
+A dispatched wake stays in flight until its parent turn finishes. It counts as unanswered only
+when all of these hold: the runner confirmed the turn delivering that exact wake as `completed`;
+the root is idle with nothing pending; neither the root nor any live descendant is queued,
+starting, running, waiting for a pending Stop or still returning background work; and the
+observation's signal is unchanged. Unanswered for 2, 4, 8 or 16 minutes after its first to fourth
+wake (capped at 30), the same record and occurrence is woken again under a new attempt identity
+through the same single-flight reservation. A failed, missing or acknowledged-unknown turn never
+counts as answered, so an unknown outcome is not a reason to wake again. Once the four-attempt
+ceiling is spent, an unanswered record becomes an `attempts_exhausted` blocked exception: it no
+longer counts as automatic, `unattendedReady` turns false, and no override is requested.
+A human-owned recovery record waiting for a person (an uncertain consumed closure, for example)
+makes a Full Control campaign's status Waiting for a Person even when no request is pending, so
+detail and summary rows never present such a campaign as Campaign Active.
 Denied operations stop being live exceptions when their subject's exact terminal report is
 authoritatively verified; their original decision remains denied. Status, archive and an ended
 attempt alone do not establish completed delivery. Durable retirement binds the exact denied
@@ -82,7 +105,9 @@ Recovery metadata grants no authority. Every effect still passes the existing ex
 provider permissions, policy rules, scope, budget, fixed-worker configuration and evidence contracts.
 The recovery layer cannot enlarge scope, reset budgets, acquire credentials, change preferences or
 override Human Required rules. Missing human information/access, boundary enlargement, protected
-rules and unsupported capabilities each expose an actionable exception. Stale forge data is retained
+rules and unsupported capabilities each expose an actionable exception; under Full Control a declined
+credential, sign-in, access or lasting-grant request is instead blocked work (`request_declined`) that
+asks nobody and is never dispatched. Stale forge data is retained
 as unresolved until the background reader obtains a fresh fact; it cannot prove repair, passing
 checks or merge. Routine stale/transient reads do not wake the parent or spend recovery attempts.
 Actual access/capability failures still expose human exceptions.

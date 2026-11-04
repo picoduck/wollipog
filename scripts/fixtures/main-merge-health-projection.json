@@ -1,0 +1,58 @@
+{
+  "source": {
+    "classification": "historical live-health projection; not fresh proof",
+    "originalReportDigest": "bceec599469d54bebe838cd5f7dc397c112ff6d9788cb4620fbdd414a436ac2e"
+  },
+  "health": {
+    "schema": "main-ci-health-v1",
+    "repository": "picoduck/wollipog",
+    "observedAt": "2026-10-26T01:00:10.276Z",
+    "currentMainSha": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+    "status": "passing",
+    "reasons": [],
+    "unresolvedFailures": [],
+    "backlog": {
+      "commits": 0,
+      "merges": 0,
+      "mergeCommits": 0,
+      "oldestUnvalidatedAt": null,
+      "oldestUnvalidatedAgeSeconds": 0,
+      "clock": "forge-landing-time",
+      "landingEvidence": []
+    },
+    "latestPassingSnapshot": {
+      "repository": "picoduck/wollipog",
+      "testedSha": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+      "targetSha": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+      "certification": "full",
+      "coverageVersion": "rolling-full-v1",
+      "result": "passing",
+      "runId": 40229673312,
+      "attempt": 1,
+      "checkoutVerified": true,
+      "targetAncestryVerified": true,
+      "workflowAncestryVerified": true,
+      "workflowRevision": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+      "suiteVersion": "6f90c7f874312be09cfae284acf0f5886bb88f791a28c7253532a8d8d7601504",
+      "claimId": "c8961a2b-5d80-4ce5-ad2c-2051e59d77ee",
+      "completedAt": "2026-10-25T20:46:12Z"
+    },
+    "fullCertification": {
+      "repository": "picoduck/wollipog",
+      "testedSha": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+      "targetSha": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+      "certification": "full",
+      "coverageVersion": "rolling-full-v1",
+      "result": "passing",
+      "runId": 40229673312,
+      "attempt": 1,
+      "checkoutVerified": true,
+      "targetAncestryVerified": true,
+      "workflowAncestryVerified": true,
+      "workflowRevision": "b0b1313e420df3f537c4abf5a080ff978f6b65f6",
+      "suiteVersion": "6f90c7f874312be09cfae284acf0f5886bb88f791a28c7253532a8d8d7601504",
+      "claimId": "c8961a2b-5d80-4ce5-ad2c-2051e59d77ee",
+      "completedAt": "2026-10-25T20:46:12Z"
+    }
+  }
+}

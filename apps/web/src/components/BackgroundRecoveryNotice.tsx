@@ -1,6 +1,7 @@
 import { useId, type ReactNode } from "react";
 import type { BackgroundDeliveryWatchdogState, ManagedBackgroundJobView } from "@wollipog/protocol";
 import {
+  ACKNOWLEDGE_BLOCKED_RESULT_EFFECT,
   ACKNOWLEDGE_MISSING_RESULT_EFFECT,
   BACKGROUND_DELIVERY_STATUS,
   backgroundRecoverySentence,
@@ -45,6 +46,12 @@ export interface BlockedResultStopTarget {
 export interface BackgroundRecoveryNoticeProps {
   sessionId: string;
   state: BackgroundDeliveryWatchdogState;
+  /** Title Case, naming the state and its turn: "Result Missing in Turn 4". */
+  title: string;
+  /** The panel notice slot's "+N More", for the title row. */
+  trailing?: ReactNode;
+  /** The slot's dismissal, which only an info notice has. */
+  onDismiss?: () => void;
   subject: BackgroundRecoverySubject;
   /** When the job, or the last of the jobs, finished. */
   finishedAt: number | undefined;
@@ -52,6 +59,8 @@ export interface BackgroundRecoveryNoticeProps {
   /** Result Missing: when the result was found missing, and Acknowledge where it applies. */
   missingSince?: number;
   acknowledgement?: MissingResultAcknowledgement | null;
+  /** Acknowledges the currently reported blocked snapshots without stopping their jobs. */
+  blockedAcknowledgement?: { busy: boolean; onAcknowledge: () => void } | null;
   /** Result Blocked: whether Stop Job applies here (`null`: it does not, so nothing is offered). */
   jobStop?: BackgroundJobStopAvailability | null;
   stopTarget?: BlockedResultStopTarget | null;
@@ -66,33 +75,43 @@ export interface BackgroundRecoveryNoticeProps {
   historicalRecovery?: boolean;
 }
 
+/** The tone of the notice `BackgroundRecoveryNotice` shows, which is its notice slot severity too:
+ * a result that needs the person is a warning, one still on its way is info. */
+export function backgroundRecoveryNoticeTone(state: BackgroundDeliveryWatchdogState, historicalRecovery = false): "warning" | "info" {
+  const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
+  return severity === "missing" || severity === "blocked" || (historicalRecovery && state === "terminal_without_continuation")
+    ? "warning"
+    : "info";
+}
+
 /**
- * One recovery delivery as one notice at the top of its turn group (docs/design-system.md §4.10,
- * §13.2; #2859). Result Missing is a warning with one sentence, Acknowledge and Show Details; Result
- * Blocked a warning with Stop <job name>… or why it can't be offered; Result Pending, Transcript
- * Delayed and Notification Pending one compact info line with no action.
+ * One recovery delivery as one entry of Background Work's panel notice slot (docs/design-system.md
+ * §4.10, §13.2; #2859, #2871), titled with its state and its turn. Result Missing is a warning with
+ * one sentence, Acknowledge and Show Details; Result Blocked a warning with Stop <job name>… or why it
+ * can't be offered; Result Pending, Transcript Delayed and Notification Pending one compact, titled
+ * info line with no action but the slot's Dismiss.
  */
 export function BackgroundRecoveryNotice(props: BackgroundRecoveryNoticeProps) {
-  const { state, subject } = props;
-  const severity = BACKGROUND_DELIVERY_STATUS[state].severity;
-  if (severity === "missing" || state === "capacity_retry_exhausted") return <ResultMissingNotice {...props} />;
-  if (severity === "blocked") return <ResultBlockedNotice {...props} />;
-  if (props.historicalRecovery && state === "terminal_without_continuation") {
-    return <ResultBlockedNotice {...props} />;
+  const { state, subject, title, trailing, onDismiss } = props;
+  if (backgroundRecoveryNoticeTone(state, props.historicalRecovery) === "warning") {
+    return BACKGROUND_DELIVERY_STATUS[state].severity === "missing" || state === "capacity_retry_exhausted"
+      ? <ResultMissingNotice {...props} />
+      : <ResultBlockedNotice {...props} />;
   }
   return (
-    <Notice tone="info" compact role="status" className="background-recovery-notice" dataState={state}>
+    <Notice tone="info" compact role="status" title={title} trailing={trailing} onDismiss={onDismiss}
+      dataState={state}>
       {backgroundRecoverySentence(state, subject)}
     </Notice>
   );
 }
 
-function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, acknowledgement }: BackgroundRecoveryNoticeProps) {
+function ResultMissingNotice({ state, title, trailing, subject, finishedAt, now, missingSince, acknowledgement }: BackgroundRecoveryNoticeProps) {
   return (
     <Notice
       tone="warning"
-      title={BACKGROUND_DELIVERY_STATUS[state].label}
-      className="background-recovery-notice"
+      title={title}
+      trailing={trailing}
       dataState={state}
       actions={acknowledgement && (
         <>
@@ -120,6 +139,8 @@ function ResultMissingNotice({ state, subject, finishedAt, now, missingSince, ac
 function ResultBlockedNotice({
   sessionId,
   state,
+  title,
+  trailing,
   subject,
   finishedAt,
   now,
@@ -131,6 +152,7 @@ function ResultBlockedNotice({
   unknownParentTurn = false,
   unverifiedUnfinished = false,
   historicalRecovery = false,
+  blockedAcknowledgement,
 }: BackgroundRecoveryNoticeProps) {
   const reasonId = useId();
   // Called with no target too, so the hooks run in the same order whatever the notice offers.
@@ -149,7 +171,7 @@ function ResultBlockedNotice({
     reason = (state === "continuation_blocked"
       ? "These historical job records have no confirmed end. Wollipog cannot verify that the jobs are still running. "
       : "These historical results have no recorded return step. Wollipog will not resubmit them automatically. ") +
-      "Review the conversation before recovering. Open More Actions and choose Restart Session to recover in a new conversation. " +
+      "Review the conversation before recovering. Open More Actions and choose Restart Session to relaunch the agent. " +
       (restartReportsResult
         ? "Restart ends every job and reports held results; it does not rerun their original commands."
         : "Restart ends every job and discards held results; it does not rerun their original commands.");
@@ -175,10 +197,14 @@ function ResultBlockedNotice({
   return (
     <Notice
       tone="warning"
-      title={BACKGROUND_DELIVERY_STATUS[state].label}
-      className="background-recovery-notice"
+      title={title}
+      trailing={trailing}
       dataState={state}
-      actions={(button || outcome) && <>{button}{outcome}</>}
+      actions={(blockedAcknowledgement || button || outcome) && <>
+        {blockedAcknowledgement && <BusyButton className="btn sm" busy={blockedAcknowledgement.busy}
+          progress="Acknowledging blocked results…" onClick={blockedAcknowledgement.onAcknowledge}>Acknowledge</BusyButton>}
+        {button}{outcome}
+      </>}
       details={(
         <dl className="facts">
           <div><dt>Finished</dt><dd><RecordedTime at={finishedAt} now={now} /></dd></div>
@@ -194,6 +220,7 @@ function ResultBlockedNotice({
         : unverifiedUnfinished
           ? "Finished background results are held because another job has no confirmed end."
           : backgroundRecoverySentence(state, subject)}</p>
+      {blockedAcknowledgement && <p>{ACKNOWLEDGE_BLOCKED_RESULT_EFFECT}</p>}
       {reason && <p id={reasonId}>{reason}</p>}
     </Notice>
   );

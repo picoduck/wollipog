@@ -1,3 +1,5 @@
+import { OrchestratorReviewFields } from "./OrchestratorReviewFields.js";
+import { orchestratorReviewPolicyProblem } from "@wollipog/protocol";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import {
   MAX_LIVE_CHILD_LIMIT,
@@ -10,6 +12,15 @@ import {
 import { agentHarnessMachinesDescription, agentHarnessOptionLabel, modelDriftText, pinnedModelChoices } from "../agent-presentation.js";
 import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
+import {
+  COMPLETION_OPTIONS,
+  FOLLOW_UP_OPTIONS,
+  HUMAN_ONLY_DECISIONS,
+  INTEGRATION_ISOLATION_OPTIONS,
+  ORCHESTRATOR_DECISION_LABELS as DECISION_LABELS,
+  PARENT_CONTROL_OPTIONS,
+  STRICT_ISOLATION_OPTIONS,
+} from "../orchestrator-policy.js";
 import { effortLabel } from "../format.js";
 import { useLeaveGuard } from "../leave-guard.js";
 import { viewPath } from "../navigation.js";
@@ -28,58 +39,11 @@ import { Notice } from "./Notice.js";
 import { SkeletonRows } from "./QuestionPoliciesPanel.js";
 import { SaveBar } from "./SaveBar.js";
 import { useSettingsPanelHead } from "./SettingsView.js";
-import type { SelectOption } from "./ui/ChoiceControls.js";
 import { NumberRow, SegmentedRow, SelectRow, SettingsGroup } from "./ui/SettingsRows.js";
-import { FullControlModeChoice, FullControlPreparation } from "./FullControlPreparation.js";
+import { FullControlModeChoice, readLimitText } from "./FullControlPreparation.js";
+import { VideoReviewStatusGroup } from "./VideoReviewStatusGroup.js";
 
 const AUTO = "__automatic__";
-const DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge Approval",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-};
-/*
- * A listbox rather than pills, by SettingsRows' own split: these options each need a sentence to
- * choose between, and "Questions and Approvals" is no short label. As three equal pills in the old
- * 260px value column they were 83px each, so that label drew over its neighbour at every width
- * (#2413). New Session offers the same choice as a Select.
- */
-const PARENT_CONTROL_OPTIONS: SelectOption<OrchestratorDefaults["delegation"]["parentControl"]>[] = [
-  { value: "off", label: "Human", description: "Keep descendant questions and ordinary approvals human-owned." },
-  { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions." },
-  { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals." },
-];
-
-/**
- * Follow-Ups, as a Select for the same reason: in the 240px control column two equal pills are
- * 116px each, and "Execute Approved" measured 118.5px in the widest verified face, so it drew past
- * its pill at 900px and wider (#3019's check). Session Role Settings offers the same choice as a
- * Select.
- */
-const FOLLOW_UP_OPTIONS: SelectOption<OrchestratorDefaults["behavior"]["followUps"]>[] = [
-  { value: "recommend_only", label: "Recommend Only", description: "Report justified follow-ups and wait for approval." },
-  { value: "execute_approved", label: "Execute Approved", description: "Continue with follow-ups after their required approval." },
-];
-
-/*
- * Off | On rather than a switch: this is a draft that saves from the save bar, and a switch means
- * "applies now" (§8.4, §8.6). The same two pills as New Session's Orchestrator Policy dialog.
- *
- * Both policies bound the Orchestrator session itself, not its children: the control plane attaches
- * them to the Orchestrator's launch only, and children keep their own permissions and integrations.
- * The sentences say so rather than promising a boundary children do not have.
- */
-const STRICT_ISOLATION_OPTIONS = [
-  { value: "off", label: "Off", description: "The Orchestrator uses its agent's own permissions and governance." },
-  { value: "on", label: "On", description: "The Orchestrator can't write to the project. Needs a supported sandbox." },
-];
-const INTEGRATION_ISOLATION_OPTIONS = [
-  { value: "off", label: "Off", description: "The Orchestrator loads the same integrations as any other session." },
-  { value: "on", label: "On", description: "The Orchestrator gets Wollipog's management tools and no other integration." },
-];
-
 const PANEL_DESCRIPTION = "Defaults for new campaigns. Running campaigns keep their own.";
 const SKELETON_DELAY_MS = 300;
 const HARNESS_UNSUPPORTED = "Update Wollipog on a machine to choose a fixed Child Harness.";
@@ -101,12 +65,36 @@ function saveFailure(caught: unknown): string {
     : "Couldn't reach Wollipog to save your defaults.";
 }
 
+/** What the Full Control budget fields show. Maximum Concurrent Children stays a native number
+ * field held in the draft: "" there is already invalid, so text it cannot read is an error too. */
+interface LimitEntryText { cost: string; tools: string }
+
+function entryFromDefaults(defaults: OrchestratorDefaults): LimitEntryText {
+  return {
+    // Plain decimals: `String` writes a tiny saved cost as `1e-7`, which the field would then reject.
+    cost: defaults.campaignBudget
+      ? defaults.campaignBudget.costUsd.toLocaleString("en-US", { useGrouping: false, maximumFractionDigits: 20 }) : "",
+    tools: defaults.campaignBudget ? String(defaults.campaignBudget.toolCalls) : "",
+  };
+}
+
+/** The budget pair is saved whole or cleared whole; anything else is an entry error. */
+function readBudgetText(text: LimitEntryText):
+  { state: "empty" } | { state: "complete"; value: { costUsd: number; toolCalls: number } } | { state: "invalid" } {
+  if (!text.cost.trim() && !text.tools.trim()) return { state: "empty" };
+  const costUsd = readLimitText(text.cost, "decimal"), toolCalls = readLimitText(text.tools, "whole");
+  return costUsd !== null && costUsd > 0 && costUsd <= 1_000_000 &&
+    toolCalls !== null && Number.isSafeInteger(toolCalls) && toolCalls > 0 && toolCalls <= 10_000_000
+    ? { state: "complete", value: { costUsd, toolCalls } } : { state: "invalid" };
+}
+
 function cloneDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
   return {
     ...(defaults.controlMode === undefined ? {} : { controlMode: defaults.controlMode }),
     behavior: { ...defaults.behavior },
     delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
     execution: { ...defaults.execution },
+    ...(defaults.campaignBudget === undefined ? {} : { campaignBudget: defaults.campaignBudget ? { ...defaults.campaignBudget } : null }),
   };
 }
 
@@ -139,7 +127,19 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const [saveError, setSaveError] = useState<string | null>(null);
   const generation = useRef(0);
 
-  const dirty = !!draft && !!view && canonical(draft) !== canonical(view.defaults);
+  // The budget fields' typed text is the only state they have: each is a text entry, every error is
+  // derived from this text on render, and nothing mirrors browser validity. The text is replaced
+  // only where the draft is (adopt: load into a clean editor, save, Discard), so a discovery refresh
+  // or a field that unmounts and mounts again never changes what was typed, and typed text counts
+  // as an unsaved change.
+  const [entryText, setEntryText] = useState<LimitEntryText>({ cost: "", tools: "" });
+  const adopt = (defaults: OrchestratorDefaults) => {
+    setDraft(cloneDefaults(defaults));
+    setEntryText(entryFromDefaults(defaults));
+  };
+  const savedEntryText = view ? entryFromDefaults(view.defaults) : entryText;
+  const entryTextDirty = (Object.keys(entryText) as Array<keyof LimitEntryText>).some((key) => entryText[key] !== savedEntryText[key]);
+  const dirty = !!draft && !!view && (canonical(draft) !== canonical(view.defaults) || entryTextDirty);
   // Read by a refresh that lands later: discovery brings new capabilities, never a lost draft.
   const dirtyRef = useRef(dirty);
   dirtyRef.current = dirty;
@@ -151,7 +151,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       const next = await api.orchestratorSettings();
       if (generation.current !== current) return;
       setView(next);
-      if (!dirtyRef.current) setDraft(cloneDefaults(next.defaults));
+      if (!dirtyRef.current) adopt(next.defaults);
     } catch (caught) {
       // A refresh that fails keeps the loaded editor; only a first load has nothing else to show.
       if (generation.current === current) setFailure(loadFailure(caught));
@@ -393,7 +393,22 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
   const pairFallbackError = !fixedPairValid && !harnessError && !modelError && !effortError && selectedHarness
     ? "Choose another Child Harness, or Automatic." : null;
   const limitError = limitValid ? null : LIMIT_ERROR;
-  const invalidCount = [harnessError ?? pairFallbackError, modelError, effortError, limitError].filter(Boolean).length;
+  const budget = readBudgetText(entryText);
+  const budgetError = budget.state === "invalid" ? "Enter both a cost limit and a whole number of tool calls, or clear both." : null;
+  const changeEntry = (next: LimitEntryText) => {
+    setEntryText(next);
+    // The draft follows the text only while the text is valid; an error blocks saving meanwhile.
+    const typedBudget = readBudgetText(next);
+    if (typedBudget.state === "invalid") return;
+    setDraft((current) => {
+      if (!current) return current;
+      const { campaignBudget: _previous, ...rest } = current;
+      return typedBudget.state === "complete" ? { ...rest, campaignBudget: typedBudget.value }
+        : view?.defaults.campaignBudget !== undefined ? { ...rest, campaignBudget: null } : rest;
+    });
+  };
+  const reviewError = view?.reviewPolicySupported && draft ? orchestratorReviewPolicyProblem(draft.behavior, view.capabilities.reviewers ?? []) : null;
+  const invalidCount = [reviewError, harnessError ?? pairFallbackError, modelError, effortError, limitError, budgetError].filter(Boolean).length;
 
   // No connected machine reports child capabilities at all: the group says so once, at its top, and
   // a model or effort left on Automatic has nothing else to offer until one does.
@@ -436,7 +451,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     try {
       const next = await api.updateOrchestratorSettings({ defaults: draft });
       setView(next);
-      setDraft(cloneDefaults(next.defaults));
+      adopt(next.defaults);
       saved = true;
     } catch (caught) {
       // The draft stays as typed, and the bar offers Try Again (§8.6).
@@ -453,7 +468,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
     }
   };
   const discard = () => {
-    if (view) setDraft(cloneDefaults(view.defaults));
+    if (view) adopt(view.defaults);
     setSaveError(null);
   };
 
@@ -489,8 +504,32 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
 
   const limit = draft.behavior.maximumConcurrentChildren;
   return <>
-    <FullControlPreparation surface="defaults" defaults={draft} mode={controlMode}
-      onChange={changeControlMode} disabled={busy} preferenceSupported={view.controlModeSupported} />
+    {controlMode === "full_control" && <SettingsGroup
+      title="Full Control"
+      intro="Proposed whenever you start a Full Control campaign. Each campaign still needs your authorization, and you can change its limits before you start."
+    >
+      <NumberRow
+        title="Campaign Cost Limit"
+        description="The most one campaign may spend, in USD."
+        inputId="orchestrator-campaign-cost"
+        min={0}
+        step={0.01}
+        textEntry
+        value={entryText.cost}
+        error={budgetError}
+        onChange={(cost) => changeEntry({ ...entryText, cost })}
+      />
+      <NumberRow
+        title="Campaign Tool Call Limit"
+        description="The most tool calls one campaign may use."
+        inputId="orchestrator-campaign-tools"
+        min={1}
+        step={1}
+        textEntry
+        value={entryText.tools}
+        onChange={(tools) => changeEntry({ ...entryText, tools })}
+      />
+    </SettingsGroup>}
     <SettingsGroup
       title="Children"
       action={!hasPanelHead ? <FullControlModeChoice mode={controlMode} onChange={changeControlMode}
@@ -567,13 +606,16 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
         error={effortError}
         onChange={(value) => updateBehavior("childEffort", value === AUTO ? null : value)}
       />
+      {view.reviewPolicySupported && <OrchestratorReviewFields value={draft.behavior} reviewers={view.capabilities.reviewers ?? []}
+        problem={reviewError} onChange={patch => setDraft(current => current ? { ...current, behavior: { ...current.behavior, ...patch } } : current)} />}
       <NumberRow
         title="Maximum Concurrent Children"
         description={`0 pauses new children. Up to ${MAX_LIVE_CHILD_LIMIT}.`}
         inputId="orchestrator-max-children"
         min={0}
         max={MAX_LIVE_CHILD_LIMIT}
-        // An emptied field is NaN in the draft, so it is invalid rather than a silent 0.
+        // An emptied field is NaN in the draft, so it is invalid rather than a silent 0. A number
+        // field reports text it cannot read as "", so that is invalid too.
         value={Number.isNaN(limit) ? "" : limit}
         error={limitError}
         onChange={(value) => updateBehavior("maximumConcurrentChildren", value.trim() === "" ? Number.NaN : Number(value))}
@@ -588,10 +630,7 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />
       <SegmentedRow
         title="Completion"
-        options={[
-          { value: "retain", label: "Retain", description: "Leave verified finished child sessions available for inspection." },
-          { value: "stop_and_archive", label: "Stop and Archive", description: "Stop and archive children only after verified completion." },
-        ]}
+        options={COMPLETION_OPTIONS}
         value={draft.behavior.completion}
         onChange={(value) => updateBehavior("completion", value as OrchestratorDefaults["behavior"]["completion"])}
       />
@@ -646,16 +685,16 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
           <div className="disclosure-body">
             <p>
               The Orchestrator resolves this gate only when its runner, harness, and model can inspect images and the
-              evidence is attached as a Session artifact. Video normally routes to a human; an operator may enable one
-              short-frame validation campaign. Externally stored evidence and unsupported clients route to a human, and
-              the campaign shows why.
+              evidence is attached as a Session artifact. Video routes to a human unless a Full Control campaign's
+              certified media-only reviewer is available; an operator may also enable one short-frame validation campaign.
+              Externally stored evidence and unsupported clients route to a human, and the campaign shows why.
             </p>
             <p>{DELEGATED_UI_EVIDENCE_RETENTION_DISCLOSURE}</p>
           </div>
         </details>
         <p className="orchestrator-human-only">
           <LockIcon size={14} aria-hidden="true" />
-          Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you.
+          {HUMAN_ONLY_DECISIONS}
         </p>
       </>}
     >
@@ -692,12 +731,14 @@ export function OrchestratorSettingsPanel({ discoveryRevision }: { discoveryRevi
       />)}
     </SettingsGroup>
 
+    <VideoReviewStatusGroup />
+
     <SaveBar
       dirty={dirty}
       busy={busy}
       error={saveError}
       saveLabel="Save Defaults"
-      blockedReason={controlPreview === "full_control" && !view.controlModeSupported ? "Full Control activation is unavailable. Choose Custom to save defaults."
+      blockedReason={controlPreview === "full_control" && !view.controlModeSupported ? "This version can't save Full Control as a default. Choose Custom to save."
         : invalidCount > 0 ? `Fix ${invalidCount} setting${invalidCount === 1 ? "" : "s"} to save` : null}
       onDiscard={discard}
       onSave={() => void save()}

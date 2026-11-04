@@ -61,7 +61,7 @@ function campaign(heldChildren: OrchestratorCampaignProjection["heldChildren"], 
     policyRevision: 1,
     decisionOwners: {
       implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "human",
     },
     limits: { maximumConcurrentChildren: 4, occupied: 2, remaining: 2, costBudgetUsd: null, maxToolCalls: null },
     uiEvidenceReview: { status: "available", effectiveOwner: "human" },

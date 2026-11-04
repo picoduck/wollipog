@@ -5,8 +5,6 @@ import {
   deriveSubagentLifecycle,
   filterSubagentTimeline,
   IncrementalSubagentProjector,
-  selectedSubagentId,
-  subagentTokenTotal,
 } from "./subagents.js";
 import { subagentName } from "./work-steps.js";
 import {
@@ -61,8 +59,8 @@ test("descriptor projection derives nested identity, activity, direct usage, and
     { id: "inner", parentId: "outer", depth: 1, lifecycle: "completed" },
   ]);
   assert.equal(descriptors[0]!.lastActivityAt, 170, "nested activity advances the parent descriptor");
-  assert.equal(subagentTokenTotal(descriptors[0]!.directUsage), 12);
-  assert.equal(subagentTokenTotal(descriptors[0]!.inclusiveUsage), 17);
+  assert.deepEqual(descriptors[0]!.directUsage, { inputTokens: 10, outputTokens: 2 });
+  assert.deepEqual(descriptors[0]!.inclusiveUsage, { inputTokens: 14, outputTokens: 3 });
   assert.equal(descriptors[1]!.lastActivityAt, 170);
   assert.equal(descriptors[0]!.toolCount, 2, "direct tools include the nested agent launch without flattening its own work");
   assert.deepEqual(descriptors[0]!.latestTool, { title: "Agent: Inspect Parser", active: false });
@@ -220,29 +218,6 @@ test("selected output contains the selected subtree and excludes parent and sibl
   const descriptors = deriveSubagentDescriptors(items, context);
   assert.deepEqual(filterSubagentTimeline(items, descriptors, "outer").map((item) => item.id), [2, 3, 4]);
   assert.deepEqual(filterSubagentTimeline(items, descriptors, "inner").map((item) => item.id), [4]);
-});
-
-test("selection retains a valid request, then prefers active, failed, and recent recorded work", () => {
-  const base = (id: string, status: string, at: number): TimelineItem =>
-    ({ kind: "tool_call", id: at, toolCallId: id, title: id, text: "", toolKind: "agent", status, startedAt: at });
-  const descriptors = deriveSubagentDescriptors([
-    base("old-complete", "completed", 10),
-    base("failed", "failed", 20),
-    base("active", "in_progress", 30),
-  ], context);
-  assert.equal(selectedSubagentId(descriptors, "old-complete"), "old-complete");
-  assert.equal(selectedSubagentId(descriptors, "missing"), null, "an invalid explicit request never falls through");
-  assert.equal(selectedSubagentId(descriptors, null, "old-complete"), "old-complete",
-    "an automatic selection remains stable while a newer active agent changes");
-  const terminal = deriveSubagentDescriptors([base("complete", "completed", 10), base("failed", "failed", 20)], context);
-  assert.equal(selectedSubagentId(terminal), "failed");
-  const completed = deriveSubagentDescriptors([base("old", "completed", 10), base("new", "completed", 20)], context);
-  assert.equal(selectedSubagentId(completed), "new");
-  const waiting = deriveSubagentDescriptors([base("failed-newer", "failed", 40), {
-    ...base("waiting", "in_progress", 30),
-    subagentLifecycle: "waiting",
-  }], context);
-  assert.equal(selectedSubagentId(waiting), "waiting", "waiting remains an active selection candidate");
 });
 
 test("incremental projection inspects only changed timeline slots and preserves unrelated output", () => {
@@ -635,10 +610,4 @@ test("filtered snapshot metadata keeps a multi-text settlement batch incremental
   assert.equal(boundary.incremental, true);
   assert.equal(boundary.processedItems, 4);
   assert.equal(boundary.rows[0], historicalRow, "unchanged selected history retains row identity");
-});
-
-test("known zero token usage remains distinct from unavailable usage", () => {
-  assert.equal(subagentTokenTotal(undefined), undefined);
-  assert.equal(subagentTokenTotal({}), undefined);
-  assert.equal(subagentTokenTotal({ inputTokens: 0, outputTokens: 0 }), 0);
 });

@@ -8,6 +8,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough } from "node:stream";
 import type { GhRunner } from "./campaign-forge-status.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
+import { CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS } from "./claude-wollipog-mcp.js";
 import {
   attachWslAgentControlBroker,
   validateWslAgentControlCliArgs,
@@ -217,6 +219,42 @@ test("Direct WSL pull request waits read GitHub with the session's gh, through M
   dispose();
 });
 
+test("a bridged GitLab merge request wait reads with the distro's own glab through both CLI and MCP (#3602)", async () => {
+  const project = "gitlab.example.com/group/project";
+  const glabCalls: string[][] = [];
+  const glab: GlabRunner = async (args) => {
+    glabCalls.push(args);
+    return { stdout: JSON.stringify({ iid: 1, state: "merged", draft: false, sha: "44579c6c25235598f1a28f8ccb0449cb8dbbc810",
+      target_branch: "main", merge_commit_sha: "a".repeat(40), web_url: `https://${project}/-/merge_requests/1` }),
+    stderr: "", code: null, timedOut: false };
+  };
+  const gh: GhRunner = async () => { throw new Error("a GitLab merge request never reaches gh"); };
+  const f = fixture();
+  const dispose = attachWslAgentControlBroker(f.fromHelper, f.toHelper, f.config, async () => {
+    throw new Error("a merge request wait never contacts the control plane");
+  }, gh, glab);
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "cli", v: 1, kind: "cli",
+    sessionId: f.config.sessionId, token: f.config.token, args: ["pr", "wait", `${project}!1`, "--json"] })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.some((line) => JSON.parse(line).exit !== undefined); attempt++) await tick();
+  const cli = f.lines.map((line) => JSON.parse(line));
+  assert.equal(cli.find((message) => message.exit !== undefined)?.exit, 0);
+  assert.equal(JSON.parse(cli.filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join("")).outcome, "merged");
+
+  f.fromHelper.write(`${JSON.stringify({ type: "open", id: "mcp", v: 1, kind: "mcp", sessionId: f.config.sessionId, token: f.config.token })}\n`);
+  await tick();
+  const call = `${JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/call",
+    params: { name: "wait_pull_request", arguments: { pullRequest: `https://${project}/-/merge_requests/1` } } })}\n`;
+  const before = f.lines.length;
+  f.fromHelper.write(`${JSON.stringify({ type: "data", id: "mcp", data: Buffer.from(call).toString("base64") })}\n`);
+  for (let attempt = 0; attempt < 50 && !f.lines.slice(before).some((line) => JSON.parse(line).data); attempt++) await tick();
+  const response = JSON.parse(f.lines.slice(before).map((line) => JSON.parse(line)).filter((message) => message.data)
+    .map((message) => Buffer.from(message.data, "base64").toString()).join("").trim());
+  assert.equal(JSON.parse(response.result.content[0].text).outcome, "merged");
+  assert.equal(glabCalls.length, 2, "both routes used the distro's glab");
+  dispose();
+});
+
 test("closing a bridged pull request wait cancels it before any further GitHub read", async () => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });
@@ -278,8 +316,12 @@ test("broker authenticates exact MCP session and exposes only the Orchestrator t
   assert.equal(bootstrap.runtime, f.config.nodeRuntime);
   assert.equal(bootstrap.helper, f.config.helperPath);
   assert.equal(Buffer.from(bootstrap.token, "base64").toString(), f.config.token);
-  assert.equal(JSON.parse(Buffer.from(bootstrap.mcp, "base64").toString()).mcpServers.wollipog.env.WOLLIPOG_AGENT_CONTROL_SOCKET,
+  const wslMcp = JSON.parse(Buffer.from(bootstrap.mcp, "base64").toString());
+  assert.equal(wslMcp.mcpServers.wollipog.env.WOLLIPOG_AGENT_CONTROL_SOCKET,
     "/tmp/wollipog-agent-control/control.sock");
+  // The same per-server limit as a native launch's entry (#4072), and still the only server.
+  assert.deepEqual(Object.keys(wslMcp.mcpServers), ["wollipog"]);
+  assert.equal(wslMcp.mcpServers.wollipog.timeout, CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS);
   assert.doesNotMatch(f.lines[0]!, /wollipoga_/u, "credential bytes are never sent as plaintext framing");
   f.fromHelper.write(`${JSON.stringify({ type: "open", id: "mcp", v: 1, kind: "mcp", sessionId: f.config.sessionId, token: f.config.token })}\n`);
   await tick();

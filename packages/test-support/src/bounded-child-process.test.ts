@@ -119,6 +119,36 @@ function callWithoutTimeout(wrapper: "spawnSync" | "execFileSync", childCode: st
   `;
 }
 
+test("native spawn interception bounds real forwards, normalizes overloads and restores builtin bindings", () => {
+  assert.equal(probe(`
+    const { default: cp, spawnSync: before } = await import('node:child_process');
+    const assert = (await import('node:assert/strict')).default;
+    const synthetic = {pid:0,output:[null,'mock',''],stdout:'mock',stderr:'',status:0,signal:null};
+    let intercepted = 0;
+    const restore = M.interceptSpawnSyncForTest((file,args,options) => {
+      assert.equal(options.killSignal,'SIGKILL');
+      if (file !== 'mock-delegation') return undefined;
+      intercepted++;
+      assert.deepEqual(args,[]);
+      assert.equal(options.timeout,intercepted === 1 ? 400 : 1234);
+      return synthetic;
+    });
+    try {
+      const builtin = await import('node:child_process');
+      assert.notEqual(builtin.spawnSync,before);
+      assert.equal(builtin.spawnSync('mock-delegation',{encoding:'utf8'}),synthetic);
+      assert.equal(cp.spawnSync('mock-delegation',[],{timeout:1234}),synthetic);
+      const result = builtin.spawnSync(process.execPath,['-e',${JSON.stringify(IGNORES_SIGTERM)}]);
+      assert.equal(result.error?.code,'ETIMEDOUT');
+      assert.equal(result.signal,'SIGKILL');
+    } finally { restore(); }
+    assert.equal(cp.spawnSync,before);
+    assert.equal((await import('node:child_process')).spawnSync,before);
+    assert.equal(intercepted,2);
+    console.log('bounded and restored');
+  `, 400), "bounded and restored");
+});
+
 test("the defaults are applied, and an explicit value always wins", () => {
   assert.equal(withDefaultTimeout(undefined).timeout, TEST_CHILD_TIMEOUT_MS);
   assert.equal(withDefaultTimeout({}).timeout, TEST_CHILD_TIMEOUT_MS);

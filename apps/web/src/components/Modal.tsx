@@ -127,9 +127,11 @@ export function Modal({
   describedBy,
   className,
   returnFocusRef,
+  initialFocusRef,
   onKeyDown,
   headerActions,
   back,
+  grows = false,
 }: {
   title: string;
   /** Optional one-line description under the title, in `--text-dim` (§7.2). Phrasing content only:
@@ -157,6 +159,9 @@ export function Modal({
    * was focused at open — which fails when the opener was a menu item removed in the same
    * commit that opened the dialog (the menu closes as the dialog mounts). */
   returnFocusRef?: { current: HTMLElement | null };
+  /** The element that takes focus on open instead of the first field, such as the section a
+   * dialog was opened at; focusing it also brings it into view. Ignored when it is not inside. */
+  initialFocusRef?: { current: HTMLElement | null };
   /** Optional dialog-scoped keyboard contract; runs after the shared focus trap. */
   onKeyDown?: (event: ReactKeyboardEvent<HTMLDivElement>) => void;
   /** Controls in the header before Close, such as a dialog's ⋯ menu of secondary actions. */
@@ -164,6 +169,10 @@ export function Modal({
   /** A step inside this dialog (a phone sheet's review step, §7.5): the header's Close becomes a
    * Back arrow with this name that runs this handler. Escape still closes the dialog. */
   back?: { label: string; onBack: () => void };
+  /** A stepper whose steps differ in height (Pair Device): the desktop card is anchored near the
+   * top, so a taller step grows downward and the top edge never moves. A local modifier (§19.4),
+   * `data-grows` on the backdrop; a phone sheet is unchanged. */
+  grows?: boolean;
 }) {
   const titleId = useId();
   const descriptionId = useId();
@@ -233,7 +242,10 @@ export function Modal({
     const parent = phone ? bodyRef.current : footRef.current;
     if (!parent) return;
     const before = phone ? null : parent.firstChild;
-    if (tertiaryHost.parentElement !== parent || (!phone && parent.firstChild !== tertiaryHost)) {
+    // Content the body mounts later (a loaded state replacing a skeleton) is appended after the
+    // tertiary, so on a phone it is moved back to the end whenever it is no longer last.
+    const placed = phone ? parent.lastChild === tertiaryHost : parent.firstChild === tertiaryHost;
+    if (tertiaryHost.parentElement !== parent || !placed) {
       moveKeepingFocus(tertiaryHost, parent, before === tertiaryHost ? tertiaryHost.nextSibling : before, lastFocusRef.current);
     }
   });
@@ -241,6 +253,12 @@ export function Modal({
   useLayoutEffect(() => {
     if (layerRef.current) layerRef.current.title = title;
     placePanels(phone);
+    // The grabber leads the sheet (§7.5). A sheet that turns from full height to its fitted height
+    // mounts it after the panel already placed in the surface, where React appends it, so it is
+    // moved back to the top.
+    const surface = surfaceRef.current;
+    const grabber = surface?.querySelector(":scope > .sheet-grabber");
+    if (surface && grabber && surface.firstChild !== grabber) surface.insertBefore(grabber, surface.firstChild);
   });
 
   useLayoutEffect(() => {
@@ -338,6 +356,11 @@ export function Modal({
   useEffect(() => {
     const panel = panelRef.current;
     if (!panel || panel.contains(document.activeElement)) return;
+    const initial = initialFocusRef?.current;
+    if (initial && panel.contains(initial)) {
+      initial.focus();
+      return;
+    }
     const field = mediaMatches(FIRST_FIELD_MEDIA)
       ? panel.querySelector<HTMLElement>(`.modal-body :is(${FIRST_FIELD})`)
       : null;
@@ -432,7 +455,7 @@ export function Modal({
   if (!canPortal || !panelHost) {
     // A server render has no portals: render the whole dialog in place.
     return (
-      <div className="modal-backdrop">
+      <div className="modal-backdrop" data-grows={grows || undefined}>
         <div className={["modal", size === "md" ? "" : size, phoneSheet === "full" ? "sheet-full" : ""].filter(Boolean).join(" ")}>
           {phoneSheet !== "full" && <div className="sheet-grabber" aria-hidden="true" />}
           {panel}
@@ -446,6 +469,7 @@ export function Modal({
   const sheet = (
     <div
       className={stacked ? "modal-backdrop stacked" : "modal-backdrop"}
+      data-grows={grows || undefined}
       onMouseDown={(event) => { if (event.target === event.currentTarget) closeTopOfSheet(); }}
     >
       <div

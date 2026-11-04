@@ -1,6 +1,9 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
-import type { ControlPlaneToUi, PromptImageInput, RunnerView, SessionConfig, SessionEvent, SessionView } from "@wollipog/protocol";
+import { campaignWorkflowOwner, PERSONAL_ORGANIZATION_ID, WORKFLOW_DECISION_CATEGORIES, type CampaignControl, type ControlPlaneToUi, type PromptImageInput,
+  type RunnerView, type SessionConfig, type SessionEvent, type SessionView } from "@wollipog/protocol";
+import { ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS, PROTOCOL_VERSION, type OrchestratorCampaignBehaviorView,
+  type OrchestratorSettingsCapabilities, type UpdateOrchestratorCampaignBehaviorRequest } from "@wollipog/protocol";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ViewNavigation } from "../navigation.js";
@@ -28,6 +31,30 @@ declare global {
  * `?event-heavy=1` makes 200 raw opening events collapse into one partial rendered response, and
  * `?live=1` adds a live tail event during the first prepend. */
 const params = new URLSearchParams(window.location.search);
+const FIXTURE_CODEX_HARNESS = { agentId: "codex-app-server", driver: "codex-app-server" as const, context: { kind: "native" as const } };
+const FIXTURE_CLAUDE_HARNESS = { agentId: "claude-code", driver: "claude-code" as const, context: { kind: "native" as const } };
+/** What the fixture's two machines offer for children (#3580). */
+const FIXTURE_CHILD_CAPABILITIES: OrchestratorSettingsCapabilities = {
+  harnesses: [
+    { ...FIXTURE_CLAUDE_HARNESS, name: "Claude Code", installations: 2, machines: 2,
+      models: [{ id: "claude-opus-5-5", displayName: "Claude Opus 5.5", efforts: ["low", "medium", "high", "xhigh"] },
+        { id: "claude-sonnet-5-5", displayName: "Claude Sonnet 5.5", efforts: ["low", "medium", "high"] }],
+      effortLevels: ["low", "medium", "high", "xhigh"],
+      supportedPairs: [{ modelId: "claude-opus-5-5", effortLevels: ["low", "medium", "high", "xhigh"] },
+        { modelId: "claude-sonnet-5-5", effortLevels: ["low", "medium", "high"] }] },
+    { ...FIXTURE_CODEX_HARNESS, name: "Codex", installations: 1, machines: 1,
+      models: [{ id: "gpt-6.1-sol", displayName: "GPT-6.1 Sol", efforts: ["low", "medium", "high"] }],
+      effortLevels: ["low", "medium", "high"], supportedPairs: [{ modelId: "gpt-6.1-sol", effortLevels: ["low", "medium", "high"] }] },
+  ],
+  models: [], effortLevels: [], supportedPairs: [], installations: 3, compatibleInstallations: 3, status: "available",
+};
+const FIXTURE_CHILD_RUNNER = {
+  runnerId: "runner-children", hostname: "children-host", os: "linux", version: "1", status: "online",
+  agents: FIXTURE_CHILD_CAPABILITIES.harnesses!.map((harness) => ({ id: harness.agentId, name: harness.name,
+    command: harness.agentId, args: [], env: {}, driver: harness.driver, available: true,
+    capabilities: { models: harness.models, effortLevels: harness.effortLevels, slashCommands: [], supportsImages: true, supportsApprovals: true } })),
+  workspaces: [], connectedAt: 1, lastSeen: 1, protocolVersion: 67,
+} as RunnerView;
 if (params.has("theme")) document.documentElement.dataset.theme = params.get("theme") === "light" ? "light" : "dark";
 const mode = params.get("mode") === "preview" ? ("preview" as const) : ("expanded" as const);
 const frameHeight = Number(params.get("height") ?? "600");
@@ -64,9 +91,13 @@ const servedWindow = Number(params.get("served") ?? "0");
 const unknownContextWindow = params.get("window") === "none";
 const costParam = params.get("cost");
 const unpricedCost = costParam === "none";
+// `?cost=partial`: one model priced, the other with no known rate (#3017).
+const partialCost = costParam === "partial";
 const unavailableCost = costParam === "unavailable";
 const freeCost = costParam === "free";
 const absentUsage = params.get("usage") === "absent";
+// `?usage=cost-only` is a provider-reported cost with no token counts at all (#3017).
+const costOnlyUsage = params.get("usage") === "cost-only";
 const activeUsage = params.get("active-usage") === "1";
 const usageDetail = params.get("usage-detail");
 const parsedCost = Number(costParam);
@@ -127,11 +158,11 @@ const session: SessionView = {
   model: "codex-large",
   effort: null,
   permissionMode: null,
-  tokensIn: absentUsage ? 0 : activeUsage ? 18_714 : 184_000,
-  tokensOut: absentUsage ? 0 : activeUsage ? 21 : 21_000,
-  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : activeUsage ? 0.075276 : sessionCostUsd,
+  tokensIn: absentUsage || costOnlyUsage ? 0 : activeUsage ? 18_714 : 184_000,
+  tokensOut: absentUsage || costOnlyUsage ? 0 : activeUsage ? 21 : 21_000,
+  costUsd: absentUsage || unpricedCost || unavailableCost || freeCost ? 0 : activeUsage ? 0.075276 : partialCost ? mainModelCostUsd : sessionCostUsd,
   ...(freeCost ? { costSource: "providerReported" as const }
-    : unpricedCost ? { costSource: "unpriced" as const } : {}),
+    : unpricedCost || partialCost ? { costSource: "unpriced" as const } : {}),
   contextTokensUsed: unknownContextWindow ? undefined : Number(params.get("used") ?? "72000"),
   adopted: false,
   // A known context window makes the ContextWindowMeter render in the strip's leading cell,
@@ -292,6 +323,7 @@ if (composerFixture) {
         merged_branch_deletion: "human",
         follow_up_issue_publication: "orchestrator",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       },
     };
     session.orchestratorPolicy = {
@@ -326,13 +358,19 @@ if (composerFixture) {
             merged_branch_deletion: "user_default",
             follow_up_issue_publication: "session_override",
             ui_evidence_approval: "user_default",
+            review_round_extension: "user_default",
           },
         },
         execution: { strictProjectIsolation: "user_default", integrationIsolation: "user_default" },
       },
     };
     if (params.get("campaign-state") !== "off") {
-      session.orchestratorCampaign = {
+      if (params.get("reviewPolicy") === "1") {
+      session.orchestratorPolicy.reviewPolicySnapshotVersion = 1;
+      Object.assign(session.orchestratorPolicy.behavior, { reviewHarness: "codex", reviewModel: "gpt-6.1-sol", reviewEffort: "high", reviewRoundBudget: 2 });
+      Object.assign(session.orchestratorPolicy.sources.behavior, { reviewHarness: "session_override", reviewModel: "session_override", reviewEffort: "session_override", reviewRoundBudget: "session_override" });
+    }
+    session.orchestratorCampaign = {
         status: "waiting_human",
         policyRevision: 4,
         decisionOwners: { ...session.parentControlPolicy.decisions },
@@ -354,8 +392,14 @@ if (composerFixture) {
         followUps: { unique: 2, duplicates: 1 },
       };
     }
+    // A saved delegation the server routes to a person, because this Orchestrator can't read the
+    // evidence images: the effective owners above keep the Human, as the server's projection does.
+    if (params.get("owners") === "routed" && session.orchestratorCampaign) {
+      session.parentControlPolicy.decisions.ui_evidence_approval = "orchestrator";
+      session.orchestratorPolicy.delegation.decisions.ui_evidence_approval = "orchestrator";
+    }
     const fullFixture = params.get("fullControlFixture");
-    if (["1", "legacy"].includes(fullFixture ?? "") && session.orchestratorCampaign) {
+    if (["1", "legacy", "enable"].includes(fullFixture ?? "") && session.orchestratorCampaign) {
       // Opt-in source UI fixture only: no authenticated Human/account/profile is created.
       const issueScope = { repository: "example/full-control-fixture", issueNumbers: [12], revision: 1,
         authorizedByUserId: "fixture-human", authorizedAt: 1 };
@@ -365,10 +409,46 @@ if (composerFixture) {
         repository: issueScope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 2,
         operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [] } };
       session.orchestratorCampaign.control = session.orchestratorPolicy.control;
+      session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorPolicy.control);
+      // `humanRules=1` (#2940): the server reports a person-marked Human Required rule; otherwise none.
+      session.orchestratorCampaign.fullControlHumanRequired = params.get("humanRules") === "1" ? ["human_required_rules"] : [];
+      // `video=certified|uncertified` (#1321): the server's campaign fact for delegated video review,
+      // with UI evidence delegated to an image-capable Orchestrator. Source UI fixture only.
+      const videoFixture = params.get("video");
+      if (fullFixture === "1" && (videoFixture === "certified" || videoFixture === "uncertified")) {
+        session.orchestratorCampaign.decisionOwners = { ...session.orchestratorCampaign.decisionOwners, ui_evidence_approval: "orchestrator" };
+        session.orchestratorCampaign.uiEvidenceReview = { status: "available", effectiveOwner: "orchestrator" };
+        session.orchestratorCampaign.videoEvidenceReview = videoFixture === "certified"
+          ? { status: "available", reason: "The Orchestrator hands video evidence to the certified media-only reviewer and decides " +
+            "from its verdict. A child not running on an attested agent is asked for screenshots instead, or its claim is denied as unproven." }
+          : { status: "unavailable",
+            reason: "The Orchestrator can't watch video because no current live proof certifies the media-only reviewer on the Orchestrator's machine. It asks for screenshots or denies the claim as unproven." };
+      }
+      if (fullFixture === "enable") {
+        // A live Custom root with a Human-established scope, ready to enable through the server preflight.
+        session.orchestratorPolicy.control = { mode: "custom" };
+        session.orchestratorCampaign.control = { mode: "custom" };
+        session.orchestratorCampaign.decisionOwners = fixtureEffectiveOwners(session.orchestratorCampaign.control);
+        session.parentControlPolicy = { ...session.parentControlPolicy!, revision: 3 };
+        session.orchestratorCampaign.policyRevision = 3;
+      }
+      // A stored Maximum Concurrent Children other than the fixture's 3, such as 0 (paused).
+      if (fullFixture === "enable" && params.get("maxChildren") !== null) {
+        const children = Number(params.get("maxChildren"));
+        session.orchestratorPolicy.behavior.maximumConcurrentChildren = children;
+        session.orchestratorCampaign.limits = { ...session.orchestratorCampaign.limits, maximumConcurrentChildren: children,
+          remaining: Math.max(0, children - session.orchestratorCampaign.limits.occupied) };
+        session.maxChildSessions = children;
+      }
       if (fullFixture === "legacy") {
         session.parentSessionId = "fixture-root-not-loaded";
         delete session.orchestratorCampaign.control;
       }
+    }
+    // `childHarness=codex` (#3580): a campaign launched with fixed Codex children, as the live one was.
+    if (params.get("childHarness") === "codex") {
+      Object.assign(session.orchestratorPolicy.behavior, { childHarness: FIXTURE_CODEX_HARNESS, childModel: "gpt-6.1-sol", childEffort: "high",
+        followUps: "recommend_only", completion: "retain" });
     }
   }
   session.serviceTier = serviceTiers ? "fast" : null;
@@ -413,6 +493,60 @@ if (params.get("account-switch-failure") === "1") {
     detectedAt: 5,
   };
 }
+// A launch refused at the provider HOME's lease (#3240): `lease-refusal=<code>`, on the session's
+// account, or with `lease-refusal-account=none` on the Machine's own provider HOME.
+const leaseRefusal = params.get("lease-refusal");
+// Before-evidence replay for worker codes v233 left text-only: no typed refusal is invented.
+if (params.has("lease-legacy-error")) {
+  session.status = "failed";
+  session.providerAccountId = "work-account";
+  session.providerAccountLabel = "Work Account";
+}
+if (leaseRefusal) {
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 233);
+  session.status = "failed";
+  const ownHome = params.get("lease-refusal-account") === "none";
+  if (!ownHome) {
+    session.providerAccountId = "work-account";
+    session.providerAccountLabel = "Work Account";
+  }
+  session.providerHomeRefusal = {
+    code: leaseRefusal as NonNullable<SessionView["providerHomeRefusal"]>["code"],
+    provider: session.driver === "claude-code" ? "claude" : "codex",
+    ...(ownHome ? {} : { providerAccountId: "work-account", providerAccountLabel: "Work Account" }),
+    detectedAt: 5,
+    ...(params.get("lease-cause") ? { cause: params.get("lease-cause") as NonNullable<SessionView["providerHomeRefusal"]>["cause"] } : {}),
+  };
+}
+// A v248 runner offers Wait for Account on a busy refusal (#3240): `lease-wait-capable`.
+if (params.has("lease-wait-capable")) runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
+// A starting session waiting for its busy account (#3240): `lease-wait=<cause>` (or `busy`).
+const leaseWait = params.get("lease-wait");
+if (leaseWait) {
+  runner.protocolVersion = Math.max(runner.protocolVersion ?? 0, 248);
+  session.status = "starting";
+  session.providerAccountId = "work-account";
+  session.providerAccountLabel = "Work Account";
+  session.providerHomeWait = {
+    provider: session.driver === "claude-code" ? "claude" : "codex",
+    ...(leaseWait === "busy" ? {} : { cause: leaseWait as NonNullable<NonNullable<SessionView["providerHomeWait"]>["cause"]> }),
+    providerAccountId: "work-account", providerAccountLabel: "Work Account",
+    waitingSince: Date.now() - 60_000, waitUntil: Date.now() - 60_000 + 8 * 3_600_000,
+  };
+}
+// A session relaunching in the worktree it switched to (#3810): `worktree-switch=pending` (the turn
+// ended and the relaunch is next) or `relaunching`.
+const worktreeSwitch = params.get("worktree-switch");
+if (worktreeSwitch === "pending" || worktreeSwitch === "relaunching") {
+  session.status = worktreeSwitch === "pending" ? "idle" : "starting";
+  session.worktreeSwitch = { phase: worktreeSwitch, branch: "fix/issue-3810-switching-worktree-status", since: Date.now() - 5_000 };
+  session.updatedAt = Date.now() - 5_000;
+}
+// `lease-viewer=owner` or `member` (#3240): a viewer who manages the Machine, as an Owner of the
+// personal organization (Set Up Managed Profile and Recover Existing Profile) or a member (Set Up
+// Managed Profile only).
+const leaseViewer = params.get("lease-viewer");
+if (leaseViewer === "owner" || leaseViewer === "member") runner.canManage = true;
 if (params.get("approval") === "checkpoint") {
   session.status = "input_required";
   session.costCheckpointsUsd = [1, 2.5];
@@ -485,7 +619,9 @@ const snapshotMessage: ControlPlaneToUi = {
     paginatedSessionHistory: false,
     projects: true,
   },
-  runners: [runner],
+  // `childHarness=codex` (#3580): a second machine whose installations name the child models, as
+  // the Child Model selector and the Campaign Behavior facts both show them.
+  runners: params.get("childHarness") === "codex" ? [runner, FIXTURE_CHILD_RUNNER] : [runner],
   boxes: [],
   projects: [],
   sessions: [session],
@@ -557,23 +693,51 @@ const connection: UiConnectionRuntime = {
 
 const navigation: ViewNavigation = {
   current: () => ({ name: "session", id: SESSION_ID }),
-  push() {},
+  // Recorded so a spec can see where a control navigated (the Session Cost footer's Usage and Cost).
+  push(view) { document.body.dataset.navigatedTo = view.name; },
   listen: () => () => {},
 };
 
 /** The default endpoints never answer, keeping recovery active for geometry tests. Pagination mode
  * resolves only the opening window; its next request stays pending so loading state is observable. */
 let tailRequestCount = 0;
+/** The projection's effective owners as the server derives them: under Full Control each gate follows
+ * the boundary, and UI Evidence Approval stays with a person while this Orchestrator can't inspect images. */
+function fixtureEffectiveOwners(control: CampaignControl) {
+  const saved = session.parentControlPolicy!.decisions;
+  const owners = { ...saved };
+  for (const category of WORKFLOW_DECISION_CATEGORIES) owners[category] = campaignWorkflowOwner(control, saved, category, true);
+  if (session.orchestratorCampaign?.uiEvidenceReview.effectiveOwner === "human") owners.ui_evidence_approval = "human";
+  return owners;
+}
+
 // Usage screenshots want the settled transcript on screen; the harness defaults to settled.
 const settledUsage = params.get("settled") !== "0";
 const client = {
   ...api,
+  ...(leaseViewer === "owner" || leaseViewer === "member" ? {
+    getIdentity: async () => ({ context: { organizationId: PERSONAL_ORGANIZATION_ID, role: leaseViewer } }) as never,
+  } : {}),
+  enableFullControl: async (id: string, input: Parameters<typeof api.enableFullControl>[1]) => {
+    if (params.get("fullControlFixture") !== "enable") return api.enableFullControl(id, input);
+    if (input.expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
+    const revision = input.expectedRevision + 1;
+    const scope = session.orchestratorPolicy!.issueScope!;
+    const control = { mode: "full_control" as const, boundary: { version: 1 as const, revision, issueScopeRevision: scope.revision,
+      repository: scope.repository, objective: "Review the source fixture", authorizedByUserId: "fixture-human", authorizedAt: 3,
+      operations: ["implementation_question", "pr_merge"] as Array<"implementation_question" | "pr_merge">, delegatablePolicyIds: [] } };
+    session.orchestratorPolicy = { ...session.orchestratorPolicy!, control };
+    session.parentControlPolicy = { ...session.parentControlPolicy!, revision };
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control, policyRevision: revision, decisionOwners: fixtureEffectiveOwners(control) };
+    return { ...session };
+  },
   revokeCampaignControl: async (id: string, expectedRevision: number) => {
     if (params.get("fullControlFixture") !== "1") return api.revokeCampaignControl(id, expectedRevision);
     if (expectedRevision !== session.parentControlPolicy!.revision) throw new ApiError("Fixture revision changed", 409);
     session.orchestratorPolicy = { ...session.orchestratorPolicy!, control: { mode: "custom" } };
     session.parentControlPolicy = { ...session.parentControlPolicy!, revision: expectedRevision + 1 };
-    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control: { mode: "custom" }, policyRevision: expectedRevision + 1 };
+    session.orchestratorCampaign = { ...session.orchestratorCampaign!, control: { mode: "custom" }, policyRevision: expectedRevision + 1,
+      decisionOwners: fixtureEffectiveOwners({ mode: "custom" }) };
     return { ...session };
   },
   // Orchestrator Controls (#2192): changes save at once against the policy revision. A conflict
@@ -596,6 +760,39 @@ const client = {
     session.parentControlPolicy = { revision: expectedRevision + 1, decisions };
     return { ...session };
   },
+  // Campaign Behavior (#3580): the edit form's values and catalog, and a compare-and-set save that marks
+  // each changed value as changed after launch. Source UI fixture only.
+  campaignBehavior: async () => {
+    const policy = session.orchestratorPolicy!;
+    const pick = <T,>(record: Record<string, T>) => Object.fromEntries(ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS.map((key) => [key, record[key]]));
+    return {
+      revision: policy.behaviorRevision ?? 0,
+      behavior: pick(policy.behavior as unknown as Record<string, unknown>),
+      sources: pick(policy.sources.behavior as unknown as Record<string, string>),
+      // `childMachines=offline` (#3580): no machine offers the campaign's fixed children now.
+      capabilities: params.get("childMachines") === "offline" ? {
+        harnesses: [{ ...FIXTURE_CODEX_HARNESS, name: "Codex", models: [], effortLevels: [], supportedPairs: [], installations: 0, machines: 0 }],
+        models: [], effortLevels: [], supportedPairs: [], installations: 0, compatibleInstallations: 0, status: "unavailable",
+        reason: "No connected machine supports this Child Harness, Child Model and Child Effort combination.",
+      } : FIXTURE_CHILD_CAPABILITIES,
+      runnerProtocolVersion: PROTOCOL_VERSION,
+    } as unknown as OrchestratorCampaignBehaviorView;
+  },
+  setCampaignBehavior: async (_id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => {
+    await new Promise((resolve) => window.setTimeout(resolve, 150));
+    const policy = session.orchestratorPolicy!;
+    if (request.expectedRevision !== (policy.behaviorRevision ?? 0)) throw new ApiError("Campaign behavior changed; refresh and try again.", 409);
+    const behavior = { ...policy.behavior };
+    const sources = { ...policy.sources.behavior };
+    for (const key of ORCHESTRATOR_CAMPAIGN_BEHAVIOR_KEYS) {
+      if (JSON.stringify(behavior[key]) === JSON.stringify(request.behavior[key])) continue;
+      (behavior as Record<string, unknown>)[key] = request.behavior[key];
+      sources[key] = "active_campaign";
+    }
+    session.orchestratorPolicy = { ...policy, behavior, sources: { ...policy.sources, behavior: sources },
+      behaviorRevision: request.expectedRevision + 1 };
+    return { ...session };
+  },
   // Model Settings' choices (#2191): each patch is recorded, in order, so a spec can read what a
   // context-window switch sent alongside the effort staged before it.
   setConfig: async (_id: string, patch: Partial<SessionConfig>) => {
@@ -605,6 +802,11 @@ const client = {
   },
   prompt: async () => {
     document.body.dataset.composerAction = "send";
+    // A Full Control campaign whose authority is stale refuses the person's message (#2940).
+    if (params.get("prompt-refusal") === "campaign-authority") {
+      throw new ApiError("This Full Control campaign's authority no longer matches its issue scope or policy, so it can't continue. " +
+        "Revoke Full Control in Orchestrator Controls, then Enable Full Control to authorize the campaign's current issue scope.", 409, "campaign_authority_stale");
+    }
     return { ...session, status: "running" as const };
   },
   cancelTurn: async () => {
@@ -618,6 +820,9 @@ const client = {
   sessionUsage: async () => {
     if (usageDetail === "pending") return new Promise<never>(() => {});
     if (usageDetail === "failed") throw new Error("Usage detail unavailable");
+    if (costOnlyUsage) {
+      return { sessionId: SESSION_ID, totals: usageAmount(0, 0, sessionCostUsd, 0), byModel: [{ model: "unknown", ...usageAmount(0, 0, sessionCostUsd, 0) }] };
+    }
     if (activeUsage) {
       const live = session.tokensOut > 21;
       return {
@@ -642,21 +847,24 @@ const client = {
       sessionId: SESSION_ID,
       totals: unpricedCost
         ? usageAmount(184_000, 21_000, 0, 205_000, "unpriced")
+        : partialCost ? usageAmount(184_000, 21_000, mainModelCostUsd, 205_000, "unpriced")
         : freeCost ? usageAmount(184_000, 21_000, 0, 205_000)
         : usageAmount(184_000, 21_000, sessionCostUsd, 205_000, "modelPriced"),
       byModel: [
         {
           model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
-          ...usageAmount(160_000, 18_000, freeCost ? 0 : mainModelCostUsd, 178_000),
+          ...(unpricedCost
+            ? usageAmount(160_000, 18_000, 0, 178_000, "unpriced")
+            : usageAmount(160_000, 18_000, freeCost ? 0 : mainModelCostUsd, 178_000, partialCost ? "modelPriced" : "providerReported")),
         },
         {
           model: driverName === "claude-code" ? "claude-haiku-4-5" : "gpt-5.5-codex-mini",
           ...usageAmount(
             24_000,
             3_000,
-            unpricedCost || freeCost ? 0 : miniModelCostUsd,
+            unpricedCost || partialCost || freeCost ? 0 : miniModelCostUsd,
             27_000,
-            unpricedCost ? "unpriced" : freeCost ? "providerReported" : "modelPriced",
+            unpricedCost || partialCost ? "unpriced" : freeCost ? "providerReported" : "modelPriced",
           ),
         },
       ],
@@ -666,6 +874,8 @@ const client = {
         fetchedAt: 1,
         knownModels: 1200,
       },
+      // Claude turns that billed their conversation's running total (#4069).
+      ...(params.get("runningTotals") === "1" ? { runningTotalRecords: { records: 4, costUsd: 1.2 } } : {}),
     };
   },
   // Only the conflict and transport fixtures reload the session; elsewhere the lookup never answers.
@@ -737,6 +947,7 @@ for (let turn = 0; turn < 4; turn += 1) {
     model: driverName === "claude-code" ? "claude-fable-5-1" : "gpt-5.5-codex",
   });
 }
+if (params.has("lease-legacy-error")) payloads.push({ kind: "error", message: params.get("lease-legacy-error")! });
 const fixtureEvents: SessionEvent[] = payloads.map((payload, index) => ({
   id: index + 1,
   sessionId: SESSION_ID,

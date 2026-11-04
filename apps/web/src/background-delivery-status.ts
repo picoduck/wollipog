@@ -12,7 +12,7 @@ export function historicalBackgroundResultRecovery(
 ): boolean {
   return session.driver === "claude-code" && session.status === "idle" && !session.backgroundWorkState &&
     (session.backgroundDeliveries ?? []).some((delivery) => delivery.watchdogState === "continuation_blocked" ||
-      delivery.watchdogState === "terminal_without_continuation");
+      delivery.watchdogState === "terminal_without_continuation" || delivery.blockedResultAcknowledgedAt != null);
 }
 
 export interface BackgroundDeliveryStatusCopy {
@@ -98,6 +98,16 @@ export function shownWatchdogDelivery<T extends Pick<BackgroundDeliveryView, "wa
   return watched.find((delivery) => backgroundDeliveryNeedsYou(delivery.watchdogState)) ?? watched[0];
 }
 
+export const ACKNOWLEDGE_BLOCKED_RESULT_EFFECT = "Clears this alert from session status. Background jobs and held results are kept.";
+
+/** Capture only the currently reported incidents, never a session-wide future mute. */
+export function blockedResultAcknowledgementTargets(session: Pick<SessionView, "backgroundDeliveries">) {
+  return (session.backgroundDeliveries ?? []).flatMap((delivery) =>
+    delivery.watchdogState === "continuation_blocked" && delivery.blockedResultRevision &&
+      delivery.blockedResultAcknowledgedAt == null
+      ? [{ parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision }] : []);
+}
+
 /** What a recovery notice names (#2859): the one job it is about, or how many when it is several or
  * none of them is listed. */
 export type BackgroundRecoverySubject = { job: string } | { count: number };
@@ -167,12 +177,12 @@ export const ACKNOWLEDGE_MISSING_RESULT_EFFECT = "Clears the alert. It doesn't r
 /**
  * Result Blocked's other ways out, behind its Show Details (#1779, #2859): stopping or restarting the
  * session ends the unfinished job too, at a cost. `restartReportsResult` says the runner's restart hands
- * this result to the new conversation rather than discarding it (v191).
+ * this result back after the restart rather than discarding it (v191).
  */
 export function blockedResultSessionAlternative(restartReportsResult: boolean): string {
   return restartReportsResult
     ? "Stopping the session also ends the unfinished job but discards this result. Restarting the session ends " +
-      "every job and reports this result to the new conversation."
+      "every job and reports this result after the restart."
     : "Restarting or stopping the session also ends the unfinished job, but ends every other job and discards " +
       "this result.";
 }

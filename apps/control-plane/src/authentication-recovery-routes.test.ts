@@ -35,6 +35,8 @@ async function setup(
   options: {
     protocolVersion?: number;
     human?: boolean;
+    unbound?: boolean;
+    accessible?: boolean;
     reply?: (message: ControlPlaneToRunner) => RunnerRequestResult;
   } = {},
 ) {
@@ -50,8 +52,7 @@ async function setup(
     driver: "claude-code",
     config: {},
     now: 1,
-    providerAccountId: "claude-work",
-    providerAccountLabel: "Claude Work",
+    ...(options.unbound ? {} : { providerAccountId: "claude-work", providerAccountLabel: "Claude Work" }),
   });
   db.setPendingApproval(SESSION, {
     requestId: CARD,
@@ -64,7 +65,12 @@ async function setup(
   const sent: ControlPlaneToRunner[] = [];
   const app = Fastify();
   registerAuthenticationRecoveryRoutes(app, {
-    db,
+    db: {
+      canAccessSession: (...args) => options.accessible === false ? false : db.canAccessSession(...args),
+      getSession: db.getSession.bind(db),
+      getRunner: db.getRunner.bind(db),
+      subscriptionUsageForPrincipal: db.subscriptionUsageForPrincipal.bind(db),
+    },
     hub: {
       isRunnerOnline: () => true,
       requestFromRunner: async (_runnerId, _requestId, message) => {
@@ -188,4 +194,59 @@ test("account selection validates the card, binding, and compatibility before th
   // The member who chose it is named on the card's Decision Record (#2783).
   const member = { kind: "user", userId: db.localIdentityContext().userId };
   assert.deepEqual(sent.map((message) => (message as { resolvedBy?: unknown }).resolvedBy), [member, member]);
+});
+
+
+test("default-sign-in recovery lists only its Machine's provider accounts and selects with explicit null", async (t) => {
+  const { app, db, sent } = await setup(t, {
+    unbound: true,
+    reply: (message) => ({ type: "select_provider_authentication_account_result", requestId: (message as { requestId: string }).requestId, ok: true }),
+  });
+  db.registerRunner({ ...runner, runnerId: "other-machine", providerAccounts: [
+    { id: "foreign-account", label: "Other Machine", provider: "claude", authStatus: "authenticated" },
+  ] }, 1, PROTOCOL_VERSION);
+  const listed = await app.inject({ method: "GET", url: `/api/sessions/${SESSION}/authentication/accounts` });
+  assert.deepEqual(listed.json().accounts.map((account: { id: string; availability: string }) => [account.id, account.availability]), [
+    ["claude-work", "available"], ["claude-personal", "available"],
+    ["claude-old", "sign_in_required"], ["claude-maybe", "status_unknown"],
+  ]);
+  const select = (providerAccountId: string, expectation: Record<string, unknown>) => app.inject({
+    method: "POST", url: `/api/sessions/${SESSION}/authentication/account`,
+    payload: { requestId: CARD, providerAccountId, ...expectation },
+  });
+  for (const expectation of [{}, { expectedProviderAccountId: "" }, { expectedProviderAccountId: false }]) {
+    assert.equal((await select("claude-personal", expectation)).statusCode, 400);
+  }
+  for (const id of ["foreign-account", "codex-work"]) {
+    const rejected = await select(id, { expectedProviderAccountId: null });
+    assert.equal(rejected.json().code, "account_unavailable");
+  }
+  const stale = await select("claude-personal", { expectedProviderAccountId: "claude-work" });
+  assert.equal(stale.json().code, "account_changed", "bound to unbound is stale too");
+  assert.equal(sent.length, 0);
+  const accepted = await select("claude-personal", { expectedProviderAccountId: null });
+  assert.equal(accepted.statusCode, 200);
+  assert.equal((sent[0] as { expectedProviderAccountId: unknown }).expectedProviderAccountId, null);
+});
+
+test("an unbound expectation cannot select after the session becomes bound", async (t) => {
+  const { app, sent } = await setup(t);
+  const response = await app.inject({
+    method: "POST", url: `/api/sessions/${SESSION}/authentication/account`,
+    payload: { requestId: CARD, providerAccountId: "claude-personal", expectedProviderAccountId: null },
+  });
+  assert.equal(response.json().code, "account_changed");
+  assert.equal(sent.length, 0);
+});
+
+test("another user's inaccessible session exposes neither recovery accounts nor selection", async (t) => {
+  const { app, sent } = await setup(t, { unbound: true, accessible: false });
+  const list = await app.inject({ method: "GET", url: `/api/sessions/${SESSION}/authentication/accounts` });
+  const select = await app.inject({
+    method: "POST", url: `/api/sessions/${SESSION}/authentication/account`,
+    payload: { requestId: CARD, providerAccountId: "claude-personal", expectedProviderAccountId: null },
+  });
+  assert.equal(list.statusCode, 404);
+  assert.equal(select.statusCode, 404);
+  assert.equal(sent.length, 0);
 });

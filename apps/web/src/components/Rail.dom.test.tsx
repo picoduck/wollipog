@@ -900,20 +900,23 @@ test("on a short screen the More sheet lays its rows out in two columns", async 
 });
 
 /** A desktop rail with Search and the real Settings item, as the shell mounts it. */
-async function mountDesktopRail(view: View = { name: "inbox" }) {
+async function mountDesktopRail(view: View = { name: "inbox" }, { disabled = false }: { disabled?: boolean } = {}) {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
   const searches: number[] = [];
+  const navigated: View[] = [];
+  const settingsOpened: number[] = [];
   const render = (next: View) => act(async () => {
     root.render(
       <Rail
         view={next}
-        blockedCount={0}
+        blockedCount={disabled ? 3 : 0}
         stalledCount={0}
-        onNavigate={() => undefined}
-        settingsControl={<SettingsTrigger active={next.name === "settings"} onOpen={() => undefined} />}
+        onNavigate={(destination) => navigated.push(destination)}
+        settingsControl={<SettingsTrigger active={next.name === "settings"} onOpen={() => settingsOpened.push(1)} disabled={disabled} />}
         onSearch={() => searches.push(1)}
+        disabled={disabled}
       />,
     );
   });
@@ -923,7 +926,7 @@ async function mountDesktopRail(view: View = { name: "inbox" }) {
     await act(async () => { root.unmount(); });
     container.remove();
   };
-  return { container, render, items, searches, dispose };
+  return { container, render, items, searches, navigated, settingsOpened, dispose };
 }
 
 test("Search leads the Work group, opens the palette and takes no digit", async () => {
@@ -1029,6 +1032,7 @@ async function withTooltipRail(
     item: (label: string) => HTMLElement;
     pointer: (type: string, target: Element, pointerType?: string, relatedTarget?: Element | null) => Promise<void>;
   }) => Promise<void>,
+  options: { disabled?: boolean } = {},
 ) {
   resetRailPreferencesForTest();
   let now = 10_000;
@@ -1055,7 +1059,7 @@ async function withTooltipRail(
       },
       clearTimeout: (id: number) => { timeouts.delete(id); },
     }, async () => {
-      const rail = await mountDesktopRail();
+      const rail = await mountDesktopRail(undefined, options);
       const tooltip = () => rail.container.querySelector<HTMLElement>(".rail-tooltip");
       const item = (label: string) => rail.container.querySelector<HTMLElement>(`[aria-label="${label}"]`)!;
       const pointer = (type: string, target: Element, pointerType = "mouse", relatedTarget: Element | null = null) =>
@@ -1188,6 +1192,51 @@ test("a keyboard-focused item gets its tooltip back when a hover elsewhere ends"
     await advance(RAIL_TOOLTIP_GRACE_MS + RAIL_TOOLTIP_DELAY_MS);
     assertNoDomNode(tooltip());
   });
+});
+
+test("a disabled rail announces each item as unavailable, says why on hover and focus, and goes nowhere (#3004)", async () => {
+  // A stored labelled rail does not widen it: the recovery screen keeps the 64px rail.
+  setRailLabels(true);
+  await withTooltipRail(async ({ container, items, item, tooltip, advance, pointer, navigated, searches, settingsOpened }) => {
+    assert.equal(container.querySelector(".app-rail")!.classList.contains("labelled"), false);
+    assertNoDomNode(container.querySelector(".rail-foot"), "no labels switch");
+    assertNoDomNode(container.querySelector('[aria-label="Search"]'), "no Search item");
+    assert.equal(container.querySelectorAll(".count-badge, .rail-attention-dot").length, 0, "no attention");
+    assertNoDomNode(container.querySelector('[role="status"]'), "no live session counts");
+    const destinations = items();
+    assert.deepEqual(destinations.map((element) => element.getAttribute("aria-label")),
+      GLOBAL_VIEW_ITEMS.map((entry) => entry.name));
+    for (const destination of destinations) {
+      assert.equal(destination.getAttribute("aria-disabled"), "true");
+      assert.equal(destination.getAttribute("role"), "link");
+      assert.equal(destination.hasAttribute("href"), false, `${destination.getAttribute("aria-label")} has no address`);
+      assert.equal(destination.hasAttribute("aria-current"), false);
+      assert.equal(destination.tabIndex, 0, "still reachable, so focus can say why");
+      const description = domWindow.document.getElementById(destination.getAttribute("aria-describedby")!);
+      assert.equal(description?.textContent, "Open an instance first.");
+    }
+    const settings = item("Settings");
+    assert.equal(settings.getAttribute("aria-disabled"), "true");
+    assert.equal(domWindow.document.getElementById(settings.getAttribute("aria-describedby")!)?.textContent,
+      "Open an instance first.");
+
+    await act(async () => {
+      for (const destination of destinations) destination.click();
+      settings.click();
+    });
+    assert.deepEqual(navigated, [], "no destination navigates");
+    assert.deepEqual(settingsOpened, [], "Settings does not open");
+    assert.deepEqual(searches, []);
+
+    await pointer("pointerover", item("Automations"));
+    await advance(RAIL_TOOLTIP_DELAY_MS);
+    assert.equal(tooltip()?.textContent, "AutomationsOpen an instance first.", "hover says why");
+    await pointer("pointerout", item("Automations"), "mouse", domWindow.document.body as never);
+    await advance(RAIL_TOOLTIP_GRACE_MS);
+    await act(async () => { settings.focus(); });
+    assert.equal(tooltip()?.textContent, "SettingsOpen an instance first.", "focus says why");
+  }, { disabled: true });
+  resetRailPreferencesForTest();
 });
 
 test("the labelled rail names every item, puts counts and keycaps after the name, and shows no tooltip", async () => {

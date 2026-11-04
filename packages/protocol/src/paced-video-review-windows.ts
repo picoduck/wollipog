@@ -121,6 +121,14 @@ export interface ClaudeMediaReviewerAttestation {
   windowLimitsRevision: PacedVideoReviewWindowLimits["revision"];
 }
 
+/** Canonical attestation serialization, hashed identically by the runner and the control plane. */
+export function mediaReviewerAttestationBody(attestation: ClaudeMediaReviewerAttestation): string {
+  return JSON.stringify({ profile: attestation.profile, harness: attestation.harness, agentId: attestation.agentId,
+    cliVersion: attestation.cliVersion, executableSha256: attestation.executableSha256,
+    namespacePolicySha256: attestation.namespacePolicySha256, tools: attestation.tools, credential: attestation.credential,
+    windowLimitsRevision: attestation.windowLimitsRevision });
+}
+
 /** Dedicated media dispatch. Generic start/restart keeps refusing `mediaReviewPurpose`. */
 export interface MediaReviewDispatch {
   identity: MediaActiveStopIdentity;

@@ -114,7 +114,7 @@ function GovernanceFixture() {
   const visibleDecisions = olderLoaded ? hookDecisions : hookDecisions.slice(1);
   return <>
     <EventTimeline ariaLabel="Native Governance Event" items={[{
-      kind: "tool_call", id: 10, toolCallId: "tool-1", title: "Run Shell Command",
+      kind: "tool_call", id: 10, toolCallId: "tool-1", title: "Run Shell Command", toolKind: "execute",
       status: "pending", text: "Awaiting governance approval", startedAt: now - 62_000,
     }, {
       kind: "governance_decision", id: 11, decision: hookDecisions[1]!,
@@ -137,7 +137,7 @@ const policyNames = { names: new Map([["deny-shell", "Deny Shell Commands"]]), l
  */
 function ApprovalsFixture() {
   const [section, setSection] = useState<SettingsSection>("approvals");
-  const empty = { appearance: null, notifications: null, behavior: null, orchestrator: null, network: null, storage: null, experimental: null, about: null };
+  const empty = { appearance: null, notifications: null, behavior: null, orchestrator: null, reviews: null, network: null, storage: null, experimental: null, about: null };
   return (
     <div className="app">
       <main className="main">

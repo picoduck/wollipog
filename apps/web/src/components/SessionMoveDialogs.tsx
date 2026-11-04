@@ -397,6 +397,7 @@ export function NewWorkspaceDialog({ session, onClose, onMoved, returnFocusRef }
       {choosing && (
         <ChooseFolderDialog
           runnerId={session.runnerId}
+          machineName={machine.name}
           protocolVersion={machine.runner?.protocolVersion}
           distro={browseDistro}
           returnFocusRef={browseRef}

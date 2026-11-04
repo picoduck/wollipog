@@ -18,8 +18,10 @@ async function openApprovals(page: Page, theme: string) {
       "default", "acceptEdits", "bypassPermissions", longLabel,
     ]);
   }, { theme, longLabel: LONG_LABEL });
-  const idlePreview = page.locator(".composer-idle-preview");
-  if (await idlePreview.isVisible()) await idlePreview.click();
+  // The phone composer collapses after mounting; wait for its preview instead of
+  // sampling visibility before that effect has run. Desktop stays expanded.
+  if (page.viewportSize()!.width <= 760) await page.locator(".composer-idle-preview").click();
+  await expect(page.locator(".composer-input"), "the composer is open before choosing Permission Mode").toBeVisible();
   const trigger = page.locator(".cbar-trigger").filter({ has: page.locator(".cbar-approvals") });
   await trigger.click();
   return trigger;

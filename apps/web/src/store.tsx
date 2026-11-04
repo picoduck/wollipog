@@ -47,7 +47,7 @@ import {
   recordSessionActivity,
   type SessionActivity,
 } from "./activity.js";
-import { BrowserNavigation, sameView, viewFromNotificationMessage, type View, type ViewNavigation } from "./navigation.js";
+import { BrowserNavigation, sameView, viewFromNotificationMessage, type NavigateOptions, type View, type ViewNavigation } from "./navigation.js";
 import { defaultPublishScheduler, type StorePublishScheduler } from "./store-publish-scheduler.js";
 import { interceptLeave, interceptTraversal } from "./leave-guard.js";
 import type { HistoryTraversal } from "./history-position.js";
@@ -330,6 +330,13 @@ export function isPartialHistory(window: EventWindowState | undefined): boolean 
   return window !== undefined && (window.hasOlder || !window.complete || window.laterGap !== undefined);
 }
 
+/** Whether the server New Project's requests reach honors their request id (#3468). The capability
+ * comes from the snapshot of the live connection; while it is down, a request may reach a server
+ * that restarted on another version before its snapshot arrives, so the answer is no. */
+export function projectCreationRetryAvailable(state: Pick<State, "conn" | "projectCreationRetrySupported">): boolean {
+  return state.conn === "online" && state.projectCreationRetrySupported;
+}
+
 export interface State {
   conn: ConnState;
   currentTurnOpeningSupported: boolean;
@@ -342,6 +349,9 @@ export interface State {
   sessionSummarySnapshots: boolean;
   /** Monotonic reconnect generation used to revalidate REST-only routed resources. */
   snapshotRevision: number;
+  /** Advanced each time the control plane reports a member directory change that left this
+   * viewer's access alone (#2606), so the viewer's identity reloads without a reconnect. */
+  identityDirectoryRevision: number;
   /** Session ids received in this connection's incomplete initial inventory. */
   pendingSnapshotSessionIds?: Set<string>;
   /** True only when the connected control plane advertises an authoritative Project inventory.
@@ -349,6 +359,9 @@ export interface State {
   projectsSupported: boolean;
   /** False against older control planes whose Project API cannot register a newly browsed folder. */
   projectLocationCreationSupported: boolean;
+  /** The last snapshot's server honors New Project's request id (#3468). Read it through
+   * `projectCreationRetryAvailable`, which also needs that server to still be the connected one. */
+  projectCreationRetrySupported: boolean;
   /** False against older control planes without explicit, preflighted access-scope mutations. */
   accessScopeManagementSupported: boolean;
   /** True only when New Session can atomically open the separate Native TUI process. */
@@ -1253,6 +1266,7 @@ function reducer(state: State, action: Action): State {
             pendingSnapshotSessionIds: msg.sessionsComplete === false ? new Set(msg.sessions.map((session) => session.id)) : undefined,
             projectsSupported: msg.capabilities?.projects === true || msg.projects !== undefined,
             projectLocationCreationSupported: msg.capabilities?.createProjectLocations === true,
+            projectCreationRetrySupported: msg.capabilities?.idempotentProjectCreation === true,
             accessScopeManagementSupported: msg.capabilities?.accessScopeManagement === true,
             nativeTuiLaunchSupported: msg.capabilities?.nativeTuiLaunch === true,
             stopBeforeArchiveSupported: msg.capabilities?.stopBeforeArchive === true,
@@ -1365,6 +1379,7 @@ function reducer(state: State, action: Action): State {
                 parentControlPolicy: previous.parentControlPolicy,
                 orchestratorCampaign: previous.orchestratorCampaign,campaignMembership: previous.campaignMembership,
                 providerAccountSwitchFailure: previous.providerAccountSwitchFailure,
+                providerHomeRefusal: previous.providerHomeRefusal,
                 agentCapabilities: previous.agentCapabilities,
                 executionTarget: previous.executionTarget,executionHandoff: previous.executionHandoff,
                 backgroundJobs: previous.backgroundJobs,backgroundJobsTruncated: previous.backgroundJobsTruncated,
@@ -1692,6 +1707,8 @@ function reducer(state: State, action: Action): State {
           podContext.set(msg.entry.podId, mergePodContext(podContext.get(msg.entry.podId), [msg.entry]));
           return { ...state, podContext };
         }
+        case "identity_directory_changed":
+          return { ...state, identityDirectoryRevision: state.identityDirectoryRevision + 1 };
       }
       return state;
     }
@@ -1710,8 +1727,10 @@ function initialState(
     currentTurnOpeningSupported: false,
     sessionSummarySnapshots: false,
     snapshotRevision: 0,
+    identityDirectoryRevision: 0,
     projectsSupported: false,
     projectLocationCreationSupported: false,
+    projectCreationRetrySupported: false,
     accessScopeManagementSupported: false,
     nativeTuiLaunchSupported: false,
     stopBeforeArchiveSupported: false,
@@ -1756,7 +1775,7 @@ function initialState(
 
 interface StoreValue extends State {
   dispatch: Dispatch<Action>;
-  navigate: (view: View) => void;
+  navigate: (view: View, options?: NavigateOptions) => void;
   setInboxPersistenceEnabled: (enabled: boolean) => void;
   setInboxSelection: (sessionId: string | null, splitKey?: string | null, persist?: boolean, repair?: boolean) => void;
   setInboxSplit: (splitKey: string | null, persist?: boolean) => void;
@@ -1888,7 +1907,7 @@ export class Store {
 
   constructor(
     initialView: View = { name: "inbox" },
-    private readonly onNavigate?: (view: View) => void,
+    private readonly onNavigate?: (view: View, options?: NavigateOptions) => void,
     private readonly instanceScope = LOCAL_INSTANCE_SCOPE,
     private readonly inboxStorage?: KeyValueStorage,
   ) {
@@ -2242,32 +2261,42 @@ export class Store {
   reconnectNow = (): boolean => this.reconnectHandler?.() ?? false;
 
   /**
-   * A view that asks for something to be focused — a session's attention target, or a Settings
-   * control a redirect lands on (#3023) — is an activation: each arrival gets a fresh id, so arriving
-   * again on the same address focuses it again rather than being dropped as the same view.
+   * A view that asks for something to be focused — a session's attention target, a Settings
+   * control a redirect lands on (#3023), or a Machine accounts action (#3240) — is an activation:
+   * each arrival gets a fresh id, so arriving again on the same address focuses it again rather
+   * than being dropped as the same view.
    */
   private activate(view: View): { view: View; activation: boolean } {
     if (view.name === "session" && view.attention) {
       return { view: { ...view, attention: { ...view.attention, activationId: ++this.attentionActivation } }, activation: true };
     }
+    // An artifact link opens the Browser on its artifact each time it is followed (#3924).
+    if (view.name === "session" && view.artifacts) {
+      return { view: { ...view, artifacts: { ...view.artifacts, activationId: ++this.attentionActivation } }, activation: true };
+    }
     if (view.name === "settings" && view.focus) {
       return { view: { ...view, focus: { ...view.focus, activationId: ++this.attentionActivation } }, activation: true };
     }
+    if (view.name === "runners" && view.accounts) {
+      return { view: { ...view, accounts: { ...view.accounts, activationId: ++this.attentionActivation } }, activation: true };
+    }
     return { view, activation: false };
   }
-  navigate = (view: View): void => {
+  navigate = (view: View, options?: NavigateOptions): void => {
+    if (view.name === "archived") view = { ...view, browseVisit: { restore: false, activationId: ++this.attentionActivation } };
     const { view: activated, activation } = this.activate(view);
     if (sameView(this.state.view, activated)) {
-      if (activation) this.dispatch({ type: "navigate", view: activated });
+      if (activation || activated.name === "archived") this.dispatch({ type: "navigate", view: activated });
       return;
     }
     // An editor with unsaved changes asks first (leave-guard.ts), and navigates here itself if the
-    // person chooses to leave.
-    if (interceptLeave(() => this.navigate(view))) return;
+    // person chooses to leave. A replace corrects a route that cannot be shown, so nothing is left.
+    if (!options?.replace && interceptLeave(() => this.navigate(view))) return;
     this.dispatch({ type: "navigate", view: activated });
-    this.onNavigate?.(activated);
+    this.onNavigate?.(activated, options);
   };
   navigateFromHistory = (view: View, traversal?: HistoryTraversal): void => {
+    if (view.name === "archived") view = { name: "archived", browseVisit: { restore: true, activationId: ++this.attentionActivation } };
     const { view: activated, activation } = this.activate(view);
     const leaving = !sameView(this.state.view, activated);
     // An editor with unsaved changes asks first, as in-app navigation does (#3218): the move is
@@ -2860,7 +2889,9 @@ export function StoreProvider({
     const navigation = navigationRef.current;
     storeRef.current = new Store(
       navigation?.current(),
-      navigation ? (view) => navigation.push(view) : undefined,
+      navigation
+        ? (view, options) => options?.replace && navigation.replace ? navigation.replace(view) : navigation.push(view)
+        : undefined,
       connection.instanceId,
     );
   }

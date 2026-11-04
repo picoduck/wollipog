@@ -1,10 +1,13 @@
 import { randomUUID } from "node:crypto";
+import { join } from "node:path";
 import { createRequire } from "node:module";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { Worker } from "node:worker_threads";
+import { providerContainmentIdentity, providerContainmentStatus, providerContainmentUnitIdentity } from "./linux-cgroup.js";
+import { leaseWorkerDeadline, leaseWorkerDelay, leaseWorkerNow } from "./provider-home-lease-clock.js";
 import { providerHomeLeaseTarget, type ProviderHomeLeaseOptions, type ProviderHomeLeaseRequest } from "./provider-home-lease.js";
-import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, LEASE_WORKER_ASSET, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
+import { boundedLeaseWorkerFrame, isLeaseWorkerAcquisition, leaseWorkerFrameKeys, leaseWorkerOperationTakesProfile, LEASE_WORKER_ASSET, LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_LIMITS, ProviderHomeLeaseError, validLeaseWorkerInspection, validLeaseWorkerOperation, validLeaseWorkerProfileAccess, validLeaseWorkerReplyProfileId, type LeaseWorkerInspection, type LeaseWorkerOperation, type LeaseWorkerProfileAccess, type LeaseWorkerReply } from "./provider-home-lease-worker-protocol.js";
 
 /** One acquired provider-HOME reference. Settle it exactly once: `release` drops exactly this
  * reference; `retain` keeps the reference until shutdown and frees only the worker-side handle.
@@ -37,6 +40,8 @@ export interface AsyncLeaseOptions {
   helperDataDir?: string;
   /** The attested control-plane instance; the worker checks it against a profile marker's grants. */
   controlPlaneInstanceId?: string;
+  /** #3241: the marker this runner's launches inherit, recorded as lease lifecycle evidence. */
+  runnerMarker?: string;
   /** Omitted: acquisitions carry no profile context unless one names an expected profile id. */
   profileAccess?: ProviderProfileAccessSource;
   /** The profile id a configured account recorded for this exact HOME path, used as the expected
@@ -54,7 +59,9 @@ interface Pending {
   id: string;
   operation: LeaseWorkerOperation;
   expectedProfileId?: string;
-  deadline: number;
+  /** #3719: a `user_home` import's credential directory's recorded profile id. */
+  credentialExpectedProfileId?: string;
+  deadline: bigint;
   enqueuedAt: number;
   startedAt?: number;
   timer: ReturnType<typeof setTimeout>;
@@ -66,7 +73,7 @@ interface Pending {
   compensation: boolean;
   phase: "queued" | "executing" | "accepting";
   receipt?: Extract<LeaseWorkerReply, { kind: "receipt" | "done" }>;
-  resolve: (value: boolean, profileId?: string) => void;
+  resolve: (value: boolean, profileId?: string, inspection?: LeaseWorkerInspection) => void;
   reject: (error: Error) => void;
 }
 const unavailable = (reason: string) => new Error(`Provider-HOME lease worker unavailable (${reason}); preserve all evidence and retry only after runner lifecycle recovery.`);
@@ -145,12 +152,52 @@ export class AsyncProviderHomeLeaseRegistry {
     return this.enqueue({ method: "profile_revoke", home, provider, profileId, grantId }).then(({ value }) => value);
   }
 
-  /** #3239: the retain-or-delete decision for a removed account's HOME, taken while the worker
+  /** #3239: write the first marker of a new managed profile HOME, identity `profileId` with this
+   * control plane's grant, while the worker holds the HOME's lease. Refused when the HOME already
+   * holds a marker. */
+  async createProfile(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<void> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    await this.enqueue({ method: "profile_create", home, provider, profileId, grantId });
+  }
+
+  /** #3719: copy the Codex API-key sign-in of the existing source HOME `home` into the new managed
+   * profile HOME `<destinationRoot>/<profileId>`, whose first marker records `grantId`, as one
+   * worker operation. The source's lease is taken exclusively with its own profile context (the
+   * recorded id in `profile`, else the configured account's for that path); a typed refusal, such
+   * as `import_source_held` or `import_source_unsupported`, leaves both HOMEs unchanged. */
+  async importCodexCredential(home: string, layout: "codex_home" | "user_home", destinationRoot: string, profileId: string,
+    grantId: string, profile: LeaseProfileBinding = {}): Promise<void> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    await this.enqueue({ method: "profile_import", home, provider: "codex", layout, destinationRoot, profileId, grantId }, {}, profile);
+  }
+
+  /** #3239: grant retirement for a removed account's HOME, taken while the worker
    * holds its lease: drops every grant of this control plane from the marker, then releases.
-   * Resolves true only when the lease was released and no other control plane is granted. */
-  retireProfileHome(home: string, provider: "claude" | "codex"): Promise<boolean> {
+   * Resolves true only when the lease was released and no other control plane is granted. This
+   * result never authorizes physical deletion after release; exact retirement is unproved (#3157). With
+   * `expectedProfileId` (a managed profile HOME) a marker holding another identity, or none, is kept
+   * unchanged and resolves false. */
+  retireProfileHome(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean> {
     if (this.closing) return Promise.reject(unavailable("shutdown admission closed"));
-    return this.enqueue({ method: "profile_retire", home, provider }).then(({ value }) => value);
+    return this.enqueue({ method: "profile_retire", home, provider, ...(expectedProfileId !== undefined ? { profileId: expectedProfileId } : {}) })
+      .then(({ value }) => value);
+  }
+
+  /** #3241 part 2: the HOME's lease state as an Owner or Admin sees it before authorizing a
+   * recovery, read with the account's profile context; creates nothing. */
+  async inspectHomeLease(home: string, profile: LeaseProfileBinding = {}): Promise<LeaseWorkerInspection> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    const { inspection } = await this.enqueue({ method: "lease_inspect", home }, {}, profile);
+    if (!inspection) throw unavailable("inspection completed without a result");
+    return inspection;
+  }
+
+  /** #3241 part 2: on an Owner/Admin authorization, succeed exactly the stale record hashed
+   * `staleTipHash` and release the HOME again. Refused with a typed code, such as
+   * `stale_tip_changed` or `no_reboot_proof`. */
+  async recoverHomeLease(home: string, provider: string, staleTipHash: string, authorizationId: string, profile: LeaseProfileBinding = {}): Promise<void> {
+    if (this.closing) throw unavailable("shutdown admission closed");
+    await this.enqueue({ method: "lease_recover", home, provider, staleTipHash, authorizationId }, {}, profile);
   }
 
   releaseHome(home: string): Promise<boolean> {
@@ -180,17 +227,24 @@ export class AsyncProviderHomeLeaseRegistry {
   }
 
   /** Resolves with the operation's value and the id of the request that completed it. */
-  private enqueue(operation: LeaseWorkerOperation, cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<{ value: boolean; id: string; profileId?: string }> {
+  private enqueue(operation: LeaseWorkerOperation, cancellation: LeaseCancellation = {}, profile: LeaseProfileBinding = {}): Promise<{ value: boolean; id: string; profileId?: string; inspection?: LeaseWorkerInspection }> {
     const { signal, isCurrent } = cancellation;
     let expectedProfileId = profile.expectedProfileId;
-    if (expectedProfileId === undefined && this.options.expectedProfileIdForHome && (operation.method === "acquire" || operation.method === "acquire_reference")) {
-      try { expectedProfileId = this.options.expectedProfileIdForHome(operation.home); } catch {
+    if (expectedProfileId === undefined && this.options.expectedProfileIdForHome && leaseWorkerOperationTakesProfile(operation.method)) {
+      try { expectedProfileId = this.options.expectedProfileIdForHome((operation as { home: string }).home); } catch {
+        return Promise.reject(new Error("Provider-HOME lease profile context is unavailable; retry later."));
+      }
+    }
+    // #3719: a `user_home` import also leases its credential directory, which an account may name.
+    let credentialExpectedProfileId: string | undefined;
+    if (operation.method === "profile_import" && operation.layout === "user_home" && this.options.expectedProfileIdForHome) {
+      try { credentialExpectedProfileId = this.options.expectedProfileIdForHome(join(operation.home, ".codex")); } catch {
         return Promise.reject(new Error("Provider-HOME lease profile context is unavailable; retry later."));
       }
     }
     if (this.poisonReason || this.closed) return Promise.reject(unavailable(this.poisonReason ?? "closed"));
     if (!validLeaseWorkerOperation(operation) || !boundedLeaseWorkerFrame(operation, LEASE_WORKER_LIMITS.requestBytes - 512) ||
-        (expectedProfileId !== undefined && (!isLeaseWorkerAcquisition(operation.method) ||
+        (expectedProfileId !== undefined && (!leaseWorkerOperationTakesProfile(operation.method) ||
           !validLeaseWorkerProfileAccess({ expectedId: expectedProfileId, controlPlaneSupportsProfiles: false, activeProfileIds: [] })))) return Promise.reject(new Error("invalid or oversized provider-HOME lease request"));
     try {
       if (signal?.aborted || (isCurrent && !isCurrent())) return Promise.reject(new Error(LEASE_WORKER_ERRORS.cancelled));
@@ -198,14 +252,12 @@ export class AsyncProviderHomeLeaseRegistry {
     if (this.queue.length + (this.active ? 1 : 0) >= this.pendingLimit) return Promise.reject(new Error("Provider-HOME lease queue is full; retry later."));
     return new Promise((resolve, reject) => {
       const pending: Pending = { id: randomUUID(), operation, ...(expectedProfileId === undefined ? {} : { expectedProfileId }),
-        deadline: Date.now() + this.deadlineMs, timer: undefined!, signal, isCurrent,
+        ...(credentialExpectedProfileId === undefined ? {} : { credentialExpectedProfileId }),
+        deadline: leaseWorkerDeadline(this.deadlineMs), timer: undefined!, signal, isCurrent,
         enqueuedAt: performance.now(),
         cancelled: false, acceptedCancel: false, compensation: false, phase: "queued",
-        resolve: (value, profileId) => resolve({ value, id: pending.id, ...(profileId === undefined ? {} : { profileId }) }), reject };
-      pending.timer = setTimeout(() => {
-        if (pending === this.active) this.poison("active deadline or ambiguous completion");
-        else { this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); }
-      }, this.deadlineMs);
+        resolve: (value, profileId, inspection) => resolve({ value, id: pending.id, ...(profileId === undefined ? {} : { profileId }), ...(inspection === undefined ? {} : { inspection }) }), reject };
+      this.watchDeadline(pending);
       pending.abort = () => this.cancel(pending);
       signal?.addEventListener("abort", pending.abort, { once: true });
       this.queue.push(pending);
@@ -215,8 +267,16 @@ export class AsyncProviderHomeLeaseRegistry {
 
   private startWorker(): void {
     if (this.worker) return;
-    const data = { epoch: this.epoch, ownerHash: this.ownerHash, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
-      ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }) };
+    // The launch parent owns the containment instance. A worker must never initialize a separate
+    // instance: provider spawns occur in the main thread and must match the journal's identity.
+    const parent = this.options.runnerMarker === undefined ? undefined : providerContainmentIdentity(this.options.helperDataDir);
+    const unit = providerContainmentUnitIdentity();
+    const containment = this.options.runnerMarker === undefined ? undefined : parent
+      ? { ...parent, ...(unit ? { unit } : {}) } : { kind: "marker-parent-links" as const, reason: providerContainmentStatus().reason };
+    const data = { epoch: this.epoch, ownerHash: this.ownerHash, clock: LEASE_WORKER_CLOCK, helperDataDir: this.options.helperDataDir, tests: this.options.engineOptionsForTest,
+      ...(containment ? { containment } : {}),
+      ...(this.options.controlPlaneInstanceId === undefined ? {} : { controlPlaneInstanceId: this.options.controlPlaneInstanceId }),
+      ...(this.options.runnerMarker === undefined ? {} : { runnerMarker: this.options.runnerMarker }) };
     if (this.options.workerFactoryForTest) this.worker = this.options.workerFactoryForTest(data);
     else {
       let code: string;
@@ -242,30 +302,36 @@ export class AsyncProviderHomeLeaseRegistry {
     const pending = this.queue.shift();
     if (!pending) { this.worker?.unref(); return; }
     if (!this.current(pending)) { this.cancel(pending); this.pump(); return; }
-    if (pending.deadline <= Date.now()) {
+    if (pending.deadline <= leaseWorkerNow()) {
       this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); this.pump(); return;
     }
     let operation: LeaseWorkerOperation;
     try { operation = this.dispatched(pending); } catch {
       this.remove(pending); pending.reject(new Error("Provider-HOME lease profile context is unavailable; retry later.")); this.pump(); return;
     }
+    // Dispatch-time context callbacks may consume the remaining enqueue budget.
+    if (pending.deadline <= leaseWorkerNow()) {
+      this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); this.pump(); return;
+    }
     this.active = pending; pending.phase = "executing";
     pending.startedAt = performance.now();
-    this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation });
+    this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline.toString(), operation });
   }
 
   /** Attach the profile context at dispatch, not enqueue, so a grant revoked while this request
    * waited in the queue is not carried into the worker. */
   private dispatched(pending: Pending): LeaseWorkerOperation {
     const operation = pending.operation;
-    if (operation.method !== "acquire" && operation.method !== "acquire_reference") return operation;
-    if (!this.options.profileAccess && pending.expectedProfileId === undefined) return operation;
+    if (!leaseWorkerOperationTakesProfile(operation.method)) return operation;
+    if (!this.options.profileAccess && pending.expectedProfileId === undefined && pending.credentialExpectedProfileId === undefined) return operation;
     const access = this.options.profileAccess?.() ?? { controlPlaneSupportsProfiles: false, activeProfileIds: [] };
-    const profile: LeaseWorkerProfileAccess = {
-      ...(pending.expectedProfileId === undefined ? {} : { expectedId: pending.expectedProfileId }),
+    const context = (expectedId: string | undefined): LeaseWorkerProfileAccess => ({
+      ...(expectedId === undefined ? {} : { expectedId }),
       controlPlaneSupportsProfiles: access.controlPlaneSupportsProfiles, activeProfileIds: [...access.activeProfileIds],
-    };
-    const profiled = { ...operation, profile };
+    });
+    const profiled = { ...operation, profile: context(pending.expectedProfileId),
+      ...(operation.method === "profile_import" && operation.layout === "user_home"
+        ? { credentialProfile: context(pending.credentialExpectedProfileId) } : {}) };
     if (!validLeaseWorkerOperation(profiled) || !boundedLeaseWorkerFrame(profiled, LEASE_WORKER_LIMITS.requestBytes - 512)) throw new Error("invalid profile context");
     return profiled;
   }
@@ -278,16 +344,16 @@ export class AsyncProviderHomeLeaseRegistry {
     if (this.poisonReason) return;
     if (!value || typeof value !== "object" || !boundedLeaseWorkerFrame(value, LEASE_WORKER_LIMITS.responseBytes)) return this.poison("invalid response");
     const reply = value as LeaseWorkerReply;
-    const keys = reply.kind === "ready" ? ["kind", "epoch", "pid"] : reply.kind === "diagnostic"
-      ? ["kind", "epoch", "event", "leaseId", "message"] : ["kind", "epoch", "id", "ok", "value", "error", "profileId"];
+    const keys = reply.kind === "ready" ? ["kind", "epoch", "pid", "clock"] : reply.kind === "diagnostic"
+      ? ["kind", "epoch", "event", "leaseId", "message"] : ["kind", "epoch", "id", "ok", "value", "error", "profileId", "inspection"];
     if (!leaseWorkerFrameKeys(reply, keys)) return this.poison("unexpected response fields");
     if (reply.epoch !== this.epoch) return this.poison("wrong worker epoch");
     if (reply.kind === "ready") {
-      if (this.ready || reply.pid !== process.pid) return this.poison("unproved worker parent identity");
+      if (this.ready || reply.pid !== process.pid || reply.clock !== LEASE_WORKER_CLOCK) return this.poison("unproved worker parent identity or clock");
       this.ready = true; this.pump(); return;
     }
     if (reply.kind === "diagnostic") {
-      if (!this.active || !["provider_home_checkpoint_unavailable", "provider_home_release_unpublished"].includes(reply.event) ||
+      if (!this.active || !["provider_home_checkpoint_unavailable", "provider_home_release_unpublished", "provider_home_boundary_recovered"].includes(reply.event) ||
           typeof reply.leaseId !== "string" || !/^[a-f0-9-]{36}$/u.test(reply.leaseId) || typeof reply.message !== "string" || reply.message.length > 1536) return this.poison("invalid diagnostic");
       this.diagnostic({ event: reply.event, leaseId: reply.leaseId, message: reply.message }); return;
     }
@@ -297,9 +363,13 @@ export class AsyncProviderHomeLeaseRegistry {
     // Only a successful adoption names a profile, and it must name exactly one valid id.
     if (Object.hasOwn(reply, "profileId") !== (reply.ok && pending.operation.method === "profile_adopt") ||
         (Object.hasOwn(reply, "profileId") && !validLeaseWorkerReplyProfileId(reply.profileId))) return this.poison("unexpected profile id");
-    if (pending.deadline <= Date.now()) return this.poison("late completion receipt");
+    // Only a successful inspection carries an inspection, and only in its exact shape.
+    if (Object.hasOwn(reply, "inspection") !== (reply.ok && pending.operation.method === "lease_inspect") ||
+        (Object.hasOwn(reply, "inspection") && !validLeaseWorkerInspection(reply.inspection))) return this.poison("unexpected inspection");
+    if (pending.deadline <= leaseWorkerNow()) return this.poison("late completion receipt");
     if (reply.kind === "receipt" && pending.phase === "executing") {
       if (!this.current(pending)) pending.cancelled = true;
+      if (pending.deadline <= leaseWorkerNow()) return this.poison("late completion receipt");
       pending.receipt = reply; pending.phase = "accepting";
       pending.acceptedCancel = pending.cancelled && isLeaseWorkerAcquisition(pending.operation.method);
       this.post({ kind: "accept", epoch: this.epoch, id: pending.id, cancel: pending.acceptedCancel }); return;
@@ -308,15 +378,17 @@ export class AsyncProviderHomeLeaseRegistry {
     const receipt = pending.receipt;
     if (pending.acceptedCancel && receipt.ok) {
       if (reply.ok || reply.value || !["cancelled", "cancel_release_failed"].includes(reply.error ?? "")) return this.poison("unproved cancellation completion");
-    } else if (reply.ok !== receipt.ok || reply.value !== receipt.value || reply.error !== receipt.error || reply.profileId !== receipt.profileId) return this.poison("changed completion receipt");
+    } else if (reply.ok !== receipt.ok || reply.value !== receipt.value || reply.error !== receipt.error || reply.profileId !== receipt.profileId ||
+        JSON.stringify(reply.inspection) !== JSON.stringify(receipt.inspection)) return this.poison("changed completion receipt");
     if (reply.error === "cancel_release_failed") return this.poison("unproved cancelled reference release");
     if (!this.current(pending)) pending.cancelled = true;
+    if (pending.deadline <= leaseWorkerNow()) return this.poison("late completion receipt");
     // An abort can arrive after accept was sent. Compensate before dispatching any other work.
     if (pending.cancelled && !pending.acceptedCancel && reply.ok &&
         (pending.operation.method === "acquire" || pending.operation.method === "acquire_reference")) {
       pending.operation = { method: "cancel", home: pending.operation.home, completedId: pending.id };
       pending.id = randomUUID(); pending.compensation = true; pending.phase = "executing"; pending.receipt = undefined;
-      this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline, operation: pending.operation }); return;
+      this.post({ kind: "execute", epoch: this.epoch, id: pending.id, deadline: pending.deadline.toString(), operation: pending.operation }); return;
     }
     if (pending.compensation && (!reply.ok || !reply.value)) return this.poison("unproved late cancellation release");
     if (pending.operation.method === "close" && reply.ok && reply.value) this.closed = true;
@@ -328,12 +400,21 @@ export class AsyncProviderHomeLeaseRegistry {
       outcome: pending.cancelled ? "cancelled" : reply.ok ? "completed" : "refused" });
     if (pending.cancelled) pending.reject(new Error(LEASE_WORKER_ERRORS.cancelled));
     else if (!reply.ok) pending.reject(new ProviderHomeLeaseError(reply.error!));
-    else pending.resolve(reply.value, reply.profileId);
+    else pending.resolve(reply.value, reply.profileId, reply.inspection);
     this.pump();
   }
 
   private current(pending: Pending): boolean {
     try { return !pending.cancelled && (pending.isCurrent?.() ?? true); } catch { return false; }
+  }
+
+  private watchDeadline(pending: Pending): void {
+    pending.timer = setTimeout(() => {
+      if (pending !== this.active && !this.queue.includes(pending)) return;
+      if (leaseWorkerDelay(pending.deadline) > 0) { this.watchDeadline(pending); return; }
+      if (pending === this.active) this.poison("active deadline or ambiguous completion");
+      else { this.remove(pending); pending.reject(new Error(LEASE_WORKER_ERRORS.expired)); }
+    }, Math.max(1, leaseWorkerDelay(pending.deadline)));
   }
 
   private cancel(pending: Pending): void {

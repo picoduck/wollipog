@@ -10,9 +10,16 @@ const fixture = JSON.parse(readFileSync(fixturePath, "utf8"));
 const command = process.env.CODEX_BIN || "codex";
 const providedSchemaDir = process.env.CODEX_SCHEMA_DIR ? resolve(process.env.CODEX_SCHEMA_DIR) : null;
 const out = providedSchemaDir || mkdtempSync(join(tmpdir(), "wollipog-codex-schema-"));
+const home = mkdtempSync(join(tmpdir(), "wollipog-codex-schema-home-"));
+let measured = false;
 
 function run(args) {
-  return spawnSync(command, args, { encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
+  // Keep this dependency-free entry point runnable without tsx; never inherit account config.
+  const env = { PATH: process.env.PATH, HOME: home, CODEX_HOME: home, XDG_CONFIG_HOME: home,
+    XDG_DATA_HOME: home, XDG_STATE_HOME: home, XDG_CACHE_HOME: home,
+    GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: "/dev/null", LANG: "C.UTF-8" };
+  return spawnSync(command, args, { cwd: home, env, timeout: 60_000,
+    encoding: "utf8", windowsHide: true, maxBuffer: 8 * 1024 * 1024 });
 }
 
 /** Every definition a property can reach in one hop. Codex expresses the same edge as a direct
@@ -113,6 +120,7 @@ try {
     }
   }
 
+  measured = true;
   const diffs = [];
   for (const [relative, expected] of Object.entries(fixture.files)) {
     let schema;
@@ -139,6 +147,16 @@ try {
     );
   }
   console.log(`Codex ${actualVersion} matches ${fixture.contractFingerprint} (${Object.keys(fixture.files).length} required schemas).`);
+  console.log(JSON.stringify({ event: "codex_assumption", assumption: "required app-server schema",
+    status: "unchanged", observed: `matches ${fixture.contractFingerprint}`, documentation: "apps/runner/src/discovery/fixtures/codex-app-server-required-contract.json; docs/DRIVERS.md" }));
+} catch (error) {
+  const status = measured ? "changed" : "could not run";
+  console.log(JSON.stringify({ event: "codex_assumption", assumption: "required app-server schema", status,
+    observed: measured ? String(error.message).slice(0, 8000) : "CLI version or schema generation unavailable",
+    documentation: "apps/runner/src/discovery/fixtures/codex-app-server-required-contract.json; docs/DRIVERS.md" }));
+  console.error(error.message);
+  process.exitCode = measured ? 1 : 2;
 } finally {
   if (!providedSchemaDir) rmSync(out, { recursive: true, force: true });
+  rmSync(home, { recursive: true, force: true });
 }

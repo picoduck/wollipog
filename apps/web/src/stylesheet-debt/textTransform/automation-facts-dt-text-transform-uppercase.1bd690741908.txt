@@ -1,1 +1,0 @@
-|.automation-facts dt|text-transform|uppercase

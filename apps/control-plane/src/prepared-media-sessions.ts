@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import type { DurableSessionCommand, PacedVideoTransportGrant } from "@wollipog/protocol";
+import { pacedVideoReviewWindowPlan, pacedVideoReviewWindowPlanBody, type DurableSessionCommand,
+  type PacedVideoTransportGrant } from "@wollipog/protocol";
 import { validReviewerBudgetAdmission, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
 
 type StartCommand = Extract<DurableSessionCommand, { type: "start_session" }>;
@@ -87,10 +88,16 @@ function validMaterialized(identity: PreparedMediaIdentity, value: MaterializedM
     (a.allocation.toolCalls === undefined || value.command.spec.config?.maxToolCalls !== undefined &&
       value.command.spec.config.maxToolCalls > 0 && value.command.spec.config.maxToolCalls <= a.allocation.toolCalls);
 }
+/** The grant's window plan is recomputed from its own frames, never trusted as supplied. */
+export function pacedGrantPlanDigest(frames: PacedVideoTransportGrant["frames"]): string | null {
+  try { return createHash("sha256").update(pacedVideoReviewWindowPlanBody(pacedVideoReviewWindowPlan(frames))).digest("hex"); }
+  catch { return null; }
+}
 function validBinding(record: PreparedMediaRecord, binding: PreparedMediaBinding, now: number): boolean {
   const g = binding.grant;
   return [binding.namespaceLaunchSha256, binding.namespacePolicySha256, binding.authoritySha256,
-    g.sourceSha256, g.manifestSha256, g.bindingSha256, g.criteriaSha256].every(digest) &&
+    g.sourceSha256, g.manifestSha256, g.bindingSha256, g.criteriaSha256, g.deliveryPlanSha256].every(digest) &&
+    pacedGrantPlanDigest(g.frames) === g.deliveryPlanSha256 &&
     [g.reviewId, g.occurrenceId, g.sourceEvidenceId, g.sourceArtifactId].every(id) &&
     g.reviewerSessionId === record.sessionId && g.childSessionId === record.childSessionId &&
     Number.isSafeInteger(g.policyRevision) && g.policyRevision === record.admission.authorityRevision &&
@@ -104,16 +111,29 @@ function validBinding(record: PreparedMediaRecord, binding: PreparedMediaBinding
     g.frames.at(-1)!.ptsUs + g.frames.at(-1)!.durationUs <= 30_000_000;
 }
 
+/** The one supported prepared-media schema initialization (#3366). Both the lifecycle ledger and
+ * its dedicated Stop coordinator call it, so neither depends on the other being constructed first.
+ * Each step is idempotent and additive: existing rows, Stop anchors and provenance are untouched. */
+export function initializePreparedMediaSchema(db: DatabaseSync): void {
+  db.exec("CREATE TABLE IF NOT EXISTS prepared_media_sessions (" +
+    "root_id TEXT NOT NULL, admission_id TEXT NOT NULL, request_sha256 TEXT NOT NULL," +
+    "state TEXT NOT NULL, payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL," +
+    "PRIMARY KEY(root_id,admission_id));");
+  if (!(db.prepare("PRAGMA table_info(prepared_media_sessions)").all() as Array<{ name: string }>)
+    .some((column) => column.name === "stop_operation_id")) {
+    db.exec("ALTER TABLE prepared_media_sessions ADD COLUMN stop_operation_id TEXT");
+  }
+  db.exec("CREATE TABLE IF NOT EXISTS prepared_media_active_stops (session_id TEXT PRIMARY KEY," +
+    "record TEXT NOT NULL,sha256 TEXT NOT NULL);");
+}
+
 /** Owned lifecycle ledger. It is deliberately NOT wired to automation delivery or public
  * createSession APIs. Production wiring is held for actual prerequisite integration and proof. */
 export class PreparedMediaSessions {
   constructor(private readonly db: DatabaseSync, private readonly ports: PreparedMediaSessionPorts,
     private readonly now: () => number = Date.now) {
     if (ports.database !== db) throw new Error("Media Session admission must share its atomic database.");
-    db.exec("CREATE TABLE IF NOT EXISTS prepared_media_sessions (" +
-      "root_id TEXT NOT NULL, admission_id TEXT NOT NULL, request_sha256 TEXT NOT NULL," +
-      "state TEXT NOT NULL, payload TEXT NOT NULL, payload_sha256 TEXT NOT NULL," +
-      "PRIMARY KEY(root_id,admission_id));");
+    initializePreparedMediaSchema(db);
   }
   private transaction<T>(action: () => T): T {
     this.db.exec("SAVEPOINT media_session_admission");

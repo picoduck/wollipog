@@ -312,7 +312,8 @@ export function RequestCard({
   // carries signed links the review must not expose.
   const decisionCategory = workflowDecision?.resourceSnapshot.category;
   const decisionDetails = workflowDecision && decisionCategory !== "issue_closure" &&
-    decisionCategory !== "campaign_issue_scope" && decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
+    decisionCategory !== "campaign_issue_scope" && decisionCategory !== "automation_creation" &&
+    decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
   const facts = [
     { label: "Tool", value: request.context?.toolName },
     { label: "Path", value: request.context?.path },
@@ -326,7 +327,8 @@ export function RequestCard({
   const readOnly = readOnlyNotice !== undefined;
   const body: ReactNode[] = readOnly ? [
     // Facts only: what is being decided, never a control that would act on it.
-    workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} /> : null,
+    workflowDecision ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot}
+      {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     request.kind === "question" && request.questions?.length ? (
       <ol key="questions" className="request-card-questions">
         {request.questions.map((question) => (
@@ -388,7 +390,8 @@ export function RequestCard({
       />
     ) : null,
     evidence ? <EvidenceReviewBody key="evidence" review={evidence} /> : null,
-    workflowDecision && !evidence ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot} /> : null,
+    workflowDecision && !evidence ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot}
+      {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     decisionDetails ? (
       <details key="details" className="disclosure">
         <summary><ChevronRightIcon className="disclosure-chevron" />{REQUEST_CARD_COPY.requestDetails}</summary>

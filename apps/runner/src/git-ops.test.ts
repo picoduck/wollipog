@@ -380,9 +380,43 @@ test("runner-owned routing permits only primary status/summary and rejects path 
   const linked = { ...primary, worktreePath: "C:/repo/.agent-worktrees/s_1" };
   assert.equal(resolveGitActionExecution(undefined, { kind: "status" }, linked).cwd, linked.worktreePath);
   assert.throws(
-    () => resolveGitActionExecution("C:/repo/.agent-worktrees/other", { kind: "status" }, linked),
+    () => resolveGitActionExecution("C:/repo/.agent-worktrees/other", { kind: "summary" }, linked),
     /does not match runner-owned session metadata/,
   );
+});
+
+test("a status read may name a linked unselected worktree, and says when the session no longer links one (#4070)", () => {
+  const meta = {
+    repoPath: "/repo",
+    worktreePath: "/repo/.agent-worktrees/current",
+    context: { kind: "native" as const },
+    worktrees: [
+      { path: "/repo/.agent-worktrees/current", source: "created" },
+      { path: "/repo/.agent-worktrees/earlier", source: "created" },
+      { path: "/elsewhere/operator", source: "attached" },
+    ],
+  };
+  // A worktree the session still links is inspected in place, selected or not.
+  assert.deepEqual(resolveGitActionExecution("/repo/.agent-worktrees/earlier/", { kind: "status" }, meta), {
+    cwd: "/repo/.agent-worktrees/earlier",
+    context: { useWorktree: true, lastTurnBaseTree: null, context: meta.context },
+  });
+  assert.equal(resolveGitActionExecution("/repo/.agent-worktrees/earlier", { kind: "status" },
+    { ...meta, worktreePath: null }).cwd, "/repo/.agent-worktrees/earlier");
+  // One it no longer links has nothing of the session's left to inspect.
+  for (const worktreePath of [meta.worktreePath, null]) {
+    assert.throws(
+      () => resolveGitActionExecution("/repo/.agent-worktrees/retired", { kind: "status" }, { ...meta, worktreePath }),
+      (error: unknown) => error instanceof GitOpError && error.code === "GIT_WORKTREE_UNLINKED",
+    );
+  }
+  // Other actions, and operator-attached worktrees, keep refusing a caller-selected path.
+  assert.throws(() => resolveGitActionExecution("/repo/.agent-worktrees/earlier", { kind: "diff", scope: "uncommitted" }, meta),
+    /does not match runner-owned session metadata/);
+  assert.throws(() => resolveGitActionExecution("/elsewhere/operator", { kind: "status" }, meta),
+    /does not match runner-owned session metadata/);
+  assert.throws(() => resolveGitActionExecution("/elsewhere/operator", { kind: "status" }, { ...meta, worktreePath: null }),
+    /cannot supply a caller-selected path/);
 });
 
 test("status fails closed when authoritative porcelain fails", async (t) => {

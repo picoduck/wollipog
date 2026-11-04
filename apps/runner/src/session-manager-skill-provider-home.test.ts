@@ -3,6 +3,9 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { spawn } from "node:child_process";
+import { codexProbeFixture } from "../test-support/codex-probe.js";
+import { readCodexHookInventory } from "./codex-managed-worktree-guard.js";
 import { prepareAgentTuiLaunch } from "./agent-tui.js";
 import type { LeaseCancellation } from "./provider-home-lease-async.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
@@ -262,6 +265,43 @@ function codexMeta(h: ReturnType<typeof fixture>) {
   return { ...h.meta, driver: "codex-app-server" as const, command: "codex", agentId: "codex" };
 }
 
+for (const proven of [true, false]) {
+  test(`a Codex TUI ${proven ? "releases" : "keeps"} its HOME after a real hook probe with a detached helper`,
+    { skip: process.platform === "win32" }, async (t) => {
+      const h = fixture();
+      const probe = codexProbeFixture(t);
+      try {
+        const launch = await prepareAgentTuiLaunch(codexMeta(h), tuiDependencies(h, {
+          permissionProfile: undefined, // production static checks start no profile probe here
+          provisionManagedWorktreeGuard: async (spec, _cwd, observer) => {
+            await readCodexHookInventory({ ...probe.launch, args: [probe.script, "app-server"], ...observer },
+              proven ? undefined : spawn);
+            return { protections: [], args: spec.args, guardActive: true };
+          },
+        }));
+        assert.ok(launch?.providerHome);
+        await launch.providerHome.settle(true);
+        assert.equal(h.registry.references.has(h.home), !proven);
+        assert.equal(h.registry.openHandles, 0);
+      } finally { h.cleanup(); }
+    });
+
+  test(`launch preparation ${proven ? "releases" : "keeps"} its HOME after a real Codex hook probe`,
+    { skip: process.platform === "win32" }, async (t) => {
+      const h = fixture();
+      const probe = codexProbeFixture(t);
+      try {
+        const scope = launchHome(h);
+        await h.manager.acquireLaunchProviderHome(h.home, { providerHome: scope });
+        await readCodexHookInventory({ ...probe.launch, args: [probe.script, "app-server"],
+          onProcess: proof => scope.onProcess(proof) }, proven ? undefined : spawn);
+        await scope.settle();
+        assert.equal(h.registry.references.has(h.home), !proven);
+        assert.equal(h.registry.openHandles, 0);
+      } finally { h.cleanup(); }
+    });
+}
+
 test("each Agent TUI holds its own reference handle until it is settled", async () => {
   const h = fixture();
   try {
@@ -302,14 +342,14 @@ test("an unproven or boundary-less (ConPTY, WSL) TUI keeps its reference until s
   } finally { h.cleanup(); }
 });
 
-test("a Codex TUI keeps its reference even when its own tree is proven gone", async () => {
+test("a Codex TUI with an injected untracked permission probe keeps its reference", async () => {
   const h = fixture();
   try {
     const launch = await prepareAgentTuiLaunch(codexMeta(h), tuiDependencies(h));
     assert.ok(launch?.providerHome);
     await launch.providerHome.settle(true);
     assert.equal(h.registry.references.get(h.home), 1,
-      "its permission-profile and hook-inventory probes ran outside any provable boundary");
+      "an injected permission-profile runner cannot prove its processes gone");
     assert.equal(h.registry.releases.length, 0);
     assert.equal(h.registry.openHandles, 0);
   } finally { h.cleanup(); }
@@ -325,7 +365,10 @@ test("a TUI preparation that fails after the grant releases unless a probe alrea
     assert.equal(h.registry.openHandles, 0);
 
     await assert.rejects(prepareAgentTuiLaunch(codexMeta(h), tuiDependencies(h, {
-      provisionManagedWorktreeGuard: () => { throw new Error("hook inventory failed"); },
+      provisionManagedWorktreeGuard: (_spec, _cwd, observer) => {
+        observer?.onProcess(Promise.resolve(false));
+        throw new Error("hook inventory failed");
+      },
     })), /hook inventory failed/);
     assert.equal(h.registry.references.get(h.home), 1, "a Codex probe may have started, so it is kept");
     assert.equal(h.registry.openHandles, 0);

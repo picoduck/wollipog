@@ -24,7 +24,7 @@ import {
   type SessionView,
   type StopOperationView,
 } from "@wollipog/protocol";
-import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
+import { ACKNOWLEDGE_BLOCKED_RESULT_EFFECT, BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
 
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral" | "review";
 
@@ -68,6 +68,11 @@ const VOCABULARY = {
     children_working: info("Children Working", { pulse: true }),
     children_pending: neutral("Child Work Pending"),
     ready_for_review: { label: "Ready for Review", tone: "review" },
+    /** A Full Control campaign's verified normal completion: informational, not review work (#2940). */
+    campaign_complete: success("Campaign Complete"),
+    /** An at-rest Full Control root whose campaign continues automatically: informational, not
+     * review work or a prompt the person owes (#2938). No pulse, so it never reads as Running. */
+    campaign_active: info("Campaign Active"),
     stalled: danger("Stalled"),
     failed: danger("Failed"),
     completed: success("Completed"),
@@ -91,6 +96,8 @@ const VOCABULARY = {
     bootstrapping: info("Bootstrapping", { pulse: true }),
     deploying: info("Deploying Runner", { pulse: true }),
     update_required: warning("Update Required"),
+    /** A Registry agent on the machine waits for its exact launch to be approved. */
+    approval_required: warning("Approval Required"),
     sign_in_required: warning("Sign-In Required"),
     pairing_required: warning("Pairing Required"),
     unreachable: danger("Unreachable"),
@@ -115,13 +122,58 @@ const VOCABULARY = {
     error: danger("Error"),
     offline: neutral("Offline", { hollow: true }),
   },
-  /** Automations, their runs and outbound event subscriptions. */
+  /** Automations; their runs are `automation_run`, their outbound event subscriptions `subscription`. */
   automation: {
     enabled: success("Enabled"),
     paused: neutral("Paused"),
     running: info("Running", { pulse: true }),
     failed: danger("Failed"),
     target_unavailable: warning("Target Unavailable"),
+    /** The automation page's badge when its latest run failed (#2968): attention outranks Enabled
+     * or Paused. */
+    last_run_failed: danger("Last Run Failed"),
+    last_run_ceiling_paused: warning("Last Run Paused"),
+  },
+  /** An outbound event subscription's one badge (#2973): Delivery Failed when its latest delivery
+   * failed, including a pause the failures caused. */
+  subscription: {
+    active: success("Active"),
+    paused: neutral("Paused"),
+    delivery_failed: danger("Delivery Failed"),
+  },
+  /** One outbound event delivery's result (#2973). A failure's badge reads the failure in words
+   * ("HTTP 500", "Connection Refused") in place of this label. */
+  outbound_delivery: {
+    pending: neutral("Pending"),
+    sending: info("Sending", { pulse: true }),
+    delivered: success("Delivered"),
+    failed: danger("Failed"),
+    dropped: neutral("Dropped"),
+  },
+  /** One run of an automation, by its wire status: the page's Last Run fact (#2968) and its Run
+   * History and Run Details (#2970). Expired is a warning: no machine ran it before its time ran out.
+   * Ceiling Paused means runner governance cancelled work that may have produced output. */
+  automation_run: {
+    dispatching: info("Starting", { pulse: true }),
+    running: info("Running", { pulse: true }),
+    succeeded: success("Succeeded"),
+    failed: danger("Failed"),
+    skipped: neutral("Skipped"),
+    expired: warning("Expired"),
+    ceiling_paused: warning("Ceiling Paused"),
+  },
+  /** One step of an automation run, by its runner command's wire state (#2970): Run Details' Steps.
+   * `superseded` has no wire form: a command a retry replaced, whose replacement carries the result. */
+  automation_step: {
+    staged: neutral("Queued"),
+    pending: neutral("Queued"),
+    sent: info("Sent"),
+    accepted: info("Accepted"),
+    started: info("Running", { pulse: true }),
+    completed: success("Done"),
+    rejected: danger("Failed"),
+    uncertain: warning("Unconfirmed"),
+    superseded: neutral("Retried"),
   },
   tool: {
     pending: neutral("Pending"),
@@ -161,7 +213,7 @@ const VOCABULARY = {
   jobGroup: {
     waiting: info("Waiting for Jobs"),
     finished: neutral("Finished"),
-    returning: info("Returning Result"),
+    returning: neutral("Follow-Up Pending"),
     returned: success("Result Returned"),
     result_missing: warning("Result Missing"),
     missing_acknowledged: neutral("Missing Result Acknowledged"),
@@ -172,7 +224,9 @@ const VOCABULARY = {
   /** A session's aggregate background work, as its header shows it. */
   background_work: {
     running: info("Waiting on External Job", { pulse: true }),
-    continuation_pending: info("Continuation Pending", { pulse: true }),
+    continuation_pending: neutral("Follow-Up Pending"),
+    follow_up_queued: neutral("Follow-Up Queued"),
+    follow_up_blocked: warning("Follow-Up Blocked"),
     orphaned: danger("Background Work Lost"),
   },
   /**
@@ -222,6 +276,29 @@ const VOCABULARY = {
   checks: {
     failing: danger("Checks Failing"),
     pending: info("Checks Running", { pulse: true }),
+  },
+  /** A cross-model review in Review's Cross-Model Reviews (#3369): where it is, then its verdict once
+   * it ends. Only a valid report votes; Stale is a separate fact, not one of these. */
+  reviewRun: {
+    requested: neutral("Requested"),
+    running: info("Reviewing", { pulse: true }),
+    upvote: success("Upvote"),
+    downvote: warning("Downvote"),
+    /** Completed on a runner that does not check reports against the review contract. */
+    unvalidated: neutral("Not Validated"),
+    invalid: danger("Invalid"),
+    failed: danger("Failed"),
+    canceled: neutral("Canceled"),
+  },
+  /** Where a pull request's cross-model review run stands, from its newest review (#3369): the
+   * Cross-Model Reviews section's summary. An attempt that did not vote keeps its reviewRun state. */
+  reviewPhase: {
+    requested: neutral("Review Requested"),
+    reviewing: info("Reviewing", { pulse: true }),
+    re_reviewing: info("Re-Reviewing", { pulse: true }),
+    delivering: info("Delivering Findings"),
+    fixing: warning("Fixing"),
+    settled: success("Settled"),
   },
   /** A background result's push notification receipt. */
   notification: {
@@ -274,6 +351,31 @@ const VOCABULARY = {
     failed: danger("Failed"),
     stopped: neutral("Stopped"),
   },
+  /** One step of a workflow run (`WorkflowNodeStatus`, #2977): its badge and its marker's tone on
+   * the run page's step list. Amber is Awaiting Decision's alone. */
+  workflowNode: {
+    pending: neutral("Waiting"),
+    ready: info("Ready"),
+    running: info("Running", { pulse: true }),
+    waiting_gate: warning("Awaiting Decision"),
+    succeeded: success("Succeeded"),
+    failed: danger("Failed"),
+    skipped: neutral("Skipped"),
+    stopped: neutral("Stopped"),
+  },
+  /** A Multi-Agent Run's one row badge (`runStatus()`, #2974). A run whose members are all idle has
+   * none. */
+  run: {
+    awaiting_decision: warning("Awaiting Decision"),
+    approval_required: warning("Approval Required"),
+    running: info("Running", { pulse: true }),
+    failed: danger("Failed"),
+  },
+  /** One member's answer to a run's Follow Up send (#2976), inline beside its name. */
+  followUp: {
+    delivered: success("Delivered"),
+    failed: danger("Failed"),
+  },
   pod: {
     active: info("Active"),
     paused: neutral("Paused"),
@@ -285,6 +387,14 @@ const VOCABULARY = {
     ready: neutral("Ready"),
     running: info("Running", { pulse: true }),
     stopped: neutral("Stopped"),
+  },
+  /** One merge of a member's committed work into another's, in a pod's Recent Merges (#2980). */
+  podMerge: {
+    running: info("Running", { pulse: true }),
+    applied: success("Merged"),
+    already_applied: neutral("Already Up to Date"),
+    conflicted: warning("Conflicted"),
+    failed: danger("Failed"),
   },
   /** One work item in an issue campaign's ledger (Campaign Status, #2417). */
   campaignWork: {
@@ -300,14 +410,19 @@ const VOCABULARY = {
   /** An organization member's account (People & Devices). */
   member: {
     active: success("Active"),
-    suspended: danger("Suspended"),
+    // An exception, not an alarm: a suspended person is listed neutral with a hollow dot (#2997).
+    suspended: neutral("Suspended", { hollow: true }),
   },
   provider_account: {
     signed_in: success("Signed In"),
     sign_in_required: warning("Sign-In Required"),
+    /** A sign-in for the account is running on the machine (#2995). */
+    signing_in: info("Signing In", { pulse: true }),
     signed_out: neutral("Signed Out"),
     /** The machine could not confirm the account's sign-in; using it rechecks first (#2208). */
     status_unknown: neutral("Status Unknown"),
+    /** A new account's sign-in ended because the account is already on the machine (#2996). */
+    not_added: neutral("Not Added", { hollow: true }),
   },
   /** A terminal tab's shell (#2864). A running shell carries no status; its tab is the fact. */
   shell: {
@@ -331,6 +446,23 @@ const VOCABULARY = {
     unsupported: neutral("Unsupported"),
     sign_in_required: warning("Sign-In Required"),
     not_applicable: neutral("Not Applicable"),
+  },
+  /** A person's spend today against the organization's daily budget (Usage and Cost's By Person).
+   * Only a reached budget carries a badge; below it the meter says how much is left. */
+  usageBudget: {
+    reached: warning("Budget Reached"),
+  },
+  /** One coding agent on a machine, by `agentStatus()` (#2990): the machine's agent rows, Agent
+   * Details and Set Up This Machine. Ready renders as the inline badge. */
+  agent: {
+    ready: success("Ready"),
+    not_installed: neutral("Not Installed", { hollow: true }),
+    sign_in_required: warning("Sign-In Required"),
+    update_required: warning("Update Required"),
+    approval_required: warning("Approval Required"),
+    unavailable: danger("Unavailable"),
+    /** A ready agent on a machine that is not online: its last report, not a current one. */
+    ready_when_last_seen: neutral("Ready When Last Seen", { hollow: true }),
   },
 } as const satisfies Record<string, Record<string, Entry>>;
 
@@ -431,8 +563,11 @@ export type SessionConditionKind =
   | "disconnected"
   /** Live workers. */
   | "workers"
-  /** Why a queued session is waiting: capacity, or a worktree or account handoff. */
+  /** Why a queued session is waiting: capacity, or a worktree or account handoff; or that a starting
+   * session is waiting for its busy provider account. */
   | "queue_reason"
+  /** The runner is relaunching the session in the worktree it switched to (#3810). */
+  | "worktree_switch"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
   | "lifecycle";
 
@@ -478,9 +613,52 @@ export interface SessionStatusContext {
 
 /** The session fields the ranking reads. */
 export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval" | "attentionOwners"> &
-  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners" | "archived" |
+  Partial<Pick<SessionView, "attention" | "orchestratorCampaign" | "orchestratorPolicy" | "parentSessionId" |
+    "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
-    "queueHold" | "holds" | "backgroundWorkState" | "backgroundDeliveries">>;
+    "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries" |
+    "providerHomeWait" | "worktreeSwitch">>;
+
+const FOLLOW_UP_BLOCKERS: Record<NonNullable<NonNullable<SessionView["backgroundFollowUp"]>["blocker"]>, string> = {
+  governance: "The session is paused by a governance limit. Review the session's pending action to continue.",
+  control_plane: "The session is held by Wollipog. Resolve the session's hold to continue.",
+  budget: "The session reached its cost budget. Review its budget before continuing.",
+  tool_limit: "The session reached its tool-call limit. Review its limit before continuing.",
+  input: "The session needs an answer or approval before the follow-up can start.",
+  worktree: "The session's worktree needs recovery. Open the session's recovery action to continue.",
+  recovery_authorization: "Automatic recovery has not been authorized for this adopted session.",
+};
+
+/** One presentation for live background facts across headers, lists, summaries and details. */
+export function backgroundWorkCondition(
+  session: Pick<SessionView, "status" | "backgroundWorkState" | "backgroundFollowUp">,
+  runnerOnline = true,
+): SessionCondition | null {
+  const state = session.backgroundWorkState;
+  if (!state || state === "resumed") return null;
+  if (state !== "continuation_pending") return {
+    kind: "background_work", meta: statusMeta("background_work", state), needsYou: false,
+    description: state === "orphaned" ? "Managed background work was lost and will not return its result."
+      : "A background job is still running, and its result returns to this conversation when it finishes.",
+  };
+  const followUp = runnerOnline ? session.backgroundFollowUp : undefined;
+  const blocked = followUp?.state === "blocked" && followUp.blocker != null;
+  const running = followUp?.state === "running" && session.status === "running";
+  const queued = followUp?.state === "queued";
+  return {
+    kind: "background_work",
+    meta: running ? statusMeta("session", "running") : statusMeta("background_work",
+      blocked ? "follow_up_blocked" : queued ? "follow_up_queued" : "continuation_pending"),
+    description: "Background jobs finished. " + (running
+      ? "The agent is processing their results in an automatic follow-up."
+      : blocked ? FOLLOW_UP_BLOCKERS[followUp.blocker!]
+      : queued ? "An automatic follow-up is queued to process their results."
+      : "An automatic follow-up is pending; its execution state is unavailable.") +
+      (runnerOnline && followUp?.retryScheduled === true ? " An automatic retry is scheduled." : "") +
+      (!runnerOnline ? " The machine is offline, so the follow-up's current state is unverified." : ""),
+    needsYou: Boolean(blocked),
+  };
+}
 
 const LIFECYCLE_DESCRIPTIONS: Partial<Record<StatusValue<"session">, string>> = {
   queued: "The session is waiting for a slot to start.",
@@ -558,6 +736,25 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
  * (background work while the agent is busy, a result still on its way back, workers and queue
  * reasons). Requests the Orchestrator owns are not a condition: their count is in the Requests panel.
  */
+/**
+ * Between the turn that switched worktrees and the provider relaunched there, the session is not
+ * idle but moving (#3810), so this outranks the lifecycle badge. A running turn is still the
+ * session's own news, and a prompt held behind the handoff already reads Worktree Handoff.
+ */
+function worktreeSwitchCondition(session: SessionStatusSource): SessionCondition | null {
+  const worktreeSwitch = session.worktreeSwitch;
+  if (!worktreeSwitch || !["idle", "starting", "queued", "input_required"].includes(session.status)) return null;
+  if (session.status === "queued" && session.queueHold) return null;
+  return {
+    kind: "worktree_switch",
+    meta: { label: "Switching Worktree", tone: "info", pulse: true },
+    description: worktreeSwitch.phase === "relaunching"
+      ? `The session is relaunching in worktree ${worktreeSwitch.branch}.`
+      : `The session is about to relaunch in worktree ${worktreeSwitch.branch}.`,
+    needsYou: false,
+  };
+}
+
 export function sessionStatusSummary(
   session: SessionStatusSource,
   context: SessionStatusContext = {},
@@ -608,7 +805,9 @@ export function sessionStatusSummary(
       tone: backgroundDeliveryNeedsYou(deliveryState) ? "warning" : "info",
       pulse: false,
     },
-    description: BACKGROUND_DELIVERY_STATUS[deliveryState].description,
+    description: BACKGROUND_DELIVERY_STATUS[deliveryState].description +
+      (deliveryState === "continuation_blocked" && watched.blockedResultRevision
+        ? ` ${ACKNOWLEDGE_BLOCKED_RESULT_EFFECT}` : ""),
     needsYou: backgroundDeliveryNeedsYou(deliveryState),
     delivery: watched,
   } : null;
@@ -622,16 +821,8 @@ export function sessionStatusSummary(
     runnerOnline,
   });
   const backgroundState = session.backgroundWorkState === "resumed" ? undefined : session.backgroundWorkState;
-  const background: SessionCondition | null = backgroundState ? {
-    kind: "background_work",
-    meta: statusMeta("background_work", backgroundState),
-    description: backgroundState === "orphaned"
-      ? "Managed background work was lost and will not return its result."
-      : backgroundState === "running"
-        ? "A background job is still running, and its result returns to this conversation when it finishes."
-        : "A background job finished, and the conversation continues with its result.",
-    needsYou: false,
-  } : null;
+  const background = backgroundWorkCondition(session, runnerOnline);
+  if (background?.needsYou) needs.push(background);
   const lost = backgroundState === "orphaned" ? background : null;
   const disconnected: SessionCondition | null = runnerOnline ? null : {
     kind: "disconnected",
@@ -640,15 +831,17 @@ export function sessionStatusSummary(
     needsYou: false,
   };
   const awaitingPrompt = lifecycle.label === statusMeta("session", "idle").label;
-  const waiting = !lost && awaitingPrompt ? background : null;
+  const waiting = !lost && !background?.needsYou && awaitingPrompt ? background : null;
 
   const conditions: SessionCondition[] = [...needs];
   if (lost) conditions.push(lost);
   if (disconnected) conditions.push(disconnected);
   if (waiting) conditions.push(waiting);
+  const switching = worktreeSwitchCondition(session);
+  if (switching) conditions.push(switching);
   // Listed even under a request, so the popover still says the agent is Running (#3073).
   conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
-  if (background && background !== lost && background !== waiting) conditions.push(background);
+  if (background && !background.needsYou && background !== lost && background !== waiting) conditions.push(background);
   if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;
   if (workers > 0) {
@@ -677,6 +870,15 @@ export function sessionStatusSummary(
         pulse: false,
       },
       description: reason ?? "A handoff is waiting on background work.",
+      needsYou: false,
+      fact: true,
+    });
+  } else if (session.status === "starting" && session.providerHomeWait) {
+    // #3240: the launch retries the busy account's lease; Stop ends the wait.
+    conditions.push({
+      kind: "queue_reason",
+      meta: { label: "Waiting for Account", tone: "neutral", pulse: false },
+      description: "The session starts as soon as its provider account is free.",
       needsYou: false,
       fact: true,
     });

@@ -21,6 +21,7 @@ import {
   viewFromPath,
   viewFromNotificationMessage,
   viewPath,
+  viewSubjectName,
   type View,
   GLOBAL_VIEW_ITEMS,
   SETTINGS_SECTIONS,
@@ -33,15 +34,22 @@ const routes: Array<[View, string]> = [
   [{ name: "runners", section: "machines" }, "/connections/machines"],
   [{ name: "runners", section: "instances" }, "/connections/instances"],
   [{ name: "runners", section: "people" }, "/connections/people"],
+  [{ name: "runners", section: "machines", machineId: "runner / ✅" }, `/connections/machines/~${encodeResourceId("runner / ✅")}`],
   [{ name: "runs" }, "/runs"],
   [{ name: "pods" }, "/pods"],
   [{ name: "automations" }, "/automations"],
+  [{ name: "automations", tab: "outbound" }, "/automations/outbound"],
+  [{ name: "automations", editor: { kind: "new" } }, "/automations/new"],
+  [{ name: "automations", editor: { kind: "edit", automationId: "automation / ✅" } },
+    `/automations/~${encodeResourceId("automation / ✅")}/edit`],
   [{ name: "skills" }, "/skills"],
   [{ name: "skills", id: "skill_abc" }, `/skills/~${encodeResourceId("skill_abc")}`],
   [{ name: "skills", pane: "orphans" }, "/skills/orphans"],
   [{ name: "skills", pane: "overview" }, "/skills/overview"],
   [{ name: "usage" }, "/usage"],
+  [{ name: "usage", tab: "subscriptions" }, "/usage/subscriptions"],
   [{ name: "projects" }, "/projects"],
+  [{ name: "projects", pane: "overview" }, "/projects/overview"],
   [{ name: "projects", id: "project / unicode ✅" }, `/projects/~${encodeResourceId("project / unicode ✅")}`],
   ...["space / unicode ✅ %?#", ".", "..", "foo.txt", "a/../foo.txt", "~already-marked"].map(
     (id): [View, string] => [{ name: "session", id }, `/sessions/~${encodeResourceId(id)}`],
@@ -66,6 +74,61 @@ test("attention routes retain exact opaque request identity and epoch through re
   assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/attention/~!`, "?epoch=0"), null);
 });
 
+test("an artifact link names its session's Browser tab and, optionally, one artifact (#3924)", () => {
+  for (const artifacts of [{}, { artifactId: "art_1" }, { artifactId: "artifact / ..? # % ✅" }]) {
+    const view: View = { name: "session", id: "session / ✅", artifacts };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+    assert.equal(sameView(view, { name: "session", id: "session / ✅" }), false);
+  }
+  // The ephemeral activation never reaches the address.
+  assert.equal(
+    viewPath({ name: "session", id: "s", artifacts: { artifactId: "a", activationId: 7 } }),
+    `/sessions/~${encodeResourceId("s")}/artifacts/~${encodeResourceId("a")}`,
+  );
+  const path = `/sessions/~${encodeResourceId("s")}/artifacts/~${encodeResourceId("a")}`;
+  assert.equal(viewFromPath(path, "?epoch=1"), null);
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/~!`), null);
+  assert.equal(viewFromPath(`/sessions/~${encodeResourceId("s")}/artifacts/`)?.name, "session");
+});
+
+test("a run's phone member is in its URL, so a reload and a shared link keep it (#2975)", () => {
+  const path = `/runs/~${encodeResourceId("run_abc")}`;
+  for (const member of ["s_claude", "member / ✅ &?#"]) {
+    const view: View = { name: "run", id: "run_abc", member };
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.equal(url.pathname, path);
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+  assert.equal(viewPath({ name: "run", id: "run_abc", member: "s_claude" }), `${path}?member=s_claude`);
+  assert.equal(sameView({ name: "run", id: "run_abc", member: "a" }, { name: "run", id: "run_abc", member: "b" }), false);
+  // A query that is not one member keeps the run open, without a member.
+  for (const query of ["", "?member=", "?member=%20", "?member=a&member=b", "?member=a&tab=b", "?tab=a", `?member=${"x".repeat(5000)}`]) {
+    assert.deepEqual(viewFromPath(path, query), { name: "run", id: "run_abc" }, query);
+  }
+});
+
+test("a pod's phone tab is in its URL, so a reload and a shared link keep it (#2981)", () => {
+  const path = `/pods/~${encodeResourceId("pod_abc")}`;
+  for (const view of [
+    { name: "pod", id: "pod_abc", tab: "huddle" },
+    { name: "pod", id: "pod_abc", member: "s_codex" },
+    { name: "pod", id: "pod_abc", member: "member / ✅ &?#" },
+  ] satisfies View[]) {
+    const url = new URL(viewPath(view), "http://localhost");
+    assert.equal(url.pathname, path);
+    assert.deepEqual(viewFromPath(url.pathname, url.search), view);
+  }
+  assert.equal(viewPath({ name: "pod", id: "pod_abc", tab: "huddle" }), `${path}?tab=huddle`);
+  assert.equal(viewPath({ name: "pod", id: "pod_abc", member: "s_codex" }), `${path}?member=s_codex`);
+  assert.equal(viewPath({ name: "pod", id: "pod_abc" }), path);
+  assert.equal(sameView({ name: "pod", id: "pod_abc", member: "a" }, { name: "pod", id: "pod_abc", tab: "huddle" }), false);
+  // A query that names no tab keeps the pod open on its default tab.
+  for (const query of ["", "?tab=", "?tab=members", "?tab=huddle&member=a", "?member=", "?member=a&member=b", `?member=${"x".repeat(5000)}`]) {
+    assert.deepEqual(viewFromPath(path, query), { name: "pod", id: "pod_abc" }, query);
+  }
+});
+
 test("Agent Skills panes have their own routes, and a skill id wins over a pane", () => {
   // Existing links keep their meaning (#1947): the bare route and a skill deep link.
   assert.deepEqual(viewFromPath("/skills"), { name: "skills" });
@@ -75,6 +138,31 @@ test("Agent Skills panes have their own routes, and a skill id wins over a pane"
   assert.equal(viewFromPath("/skills/unknown"), null);
   assert.equal(viewFromPath("/skills/Orphans"), null);
   assert.equal(sameView({ name: "skills", pane: "orphans" }, { name: "skills" }), false, "Back can leave the pane");
+});
+
+test("the Projects Overview has its own route, and a project id wins over it", () => {
+  assert.deepEqual(viewFromPath(`/projects/~${encodeResourceId("overview")}`), { name: "projects", id: "overview" },
+    "a project whose id reads like the pane is still a project");
+  assert.equal(viewPath({ name: "projects", id: "project_abc", pane: "overview" }), `/projects/~${encodeResourceId("project_abc")}`);
+  assert.equal(viewFromPath("/projects/Overview"), null);
+  assert.equal(viewFromPath("/projects/unknown"), null);
+  assert.equal(sameView({ name: "projects", pane: "overview" }, { name: "projects" }), false, "Back can leave the overview");
+});
+
+test("a machine is selected by its runner id under the Machines tab, and old Connections links still work (#2985)", () => {
+  assert.deepEqual(viewFromPath(`/connections/machines/~${encodeResourceId("native-t14s")}`),
+    { name: "runners", section: "machines", machineId: "native-t14s" });
+  assert.deepEqual(viewFromPath("/connections/machines"), { name: "runners", section: "machines" });
+  assert.deepEqual(viewFromPath("/connections"), { name: "runners", section: "machines" });
+  assert.deepEqual(viewFromPath("/runners"), { name: "runners", section: "machines" });
+  // A machine id names the Machines tab whatever section a caller passed with it.
+  assert.equal(viewPath({ name: "runners", section: "people", machineId: "a" }), `/connections/machines/~${encodeResourceId("a")}`);
+  assert.equal(viewFromPath("/connections/people/~YQ"), null);
+  assert.equal(viewFromPath("/connections/machines/~"), null);
+  assert.equal(viewFromPath("/connections/machines/~!"), null);
+  assert.equal(viewFromPath(`/connections/machines/~${encodeResourceId("a")}/more`), null);
+  assert.equal(sameView({ name: "runners", section: "machines", machineId: "a" }, { name: "runners", section: "machines" }), false,
+    "Back can return to the previous selection");
 });
 
 test("every dashboard view has a canonical round-tripping path", () => {
@@ -132,7 +220,7 @@ const RETIRED_TERMS = [
   "content-free",
 ];
 
-test("page descriptions are one short sentence in user terms", () => {
+test("page descriptions use short sentence-case copy in user terms", () => {
   assert.deepEqual(
     Object.fromEntries(GLOBAL_VIEW_ITEMS.map((item) => [item.id, item.description])),
     {
@@ -143,15 +231,17 @@ test("page descriptions are one short sentence in user terms", () => {
       pods: "Agents that share notes and a worktree while they work toward one objective.",
       runners: undefined,
       skills: "Write a skill once, then choose which machines and agents get it.",
-      archived: undefined,
-      usage: "What your agents spent, by day, agent and project.",
+      archived: "Archived sessions keep their transcripts. Restore one to keep working.",
+      usage: "What your sessions would cost at API rates and what's left on each subscription.",
     },
   );
   for (const item of GLOBAL_VIEW_ITEMS) {
     if (item.description === undefined) continue;
     assert.ok(item.description.length <= 80, `${item.name}: ${item.description.length} characters`);
-    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it.
-    assert.match(item.description, /^[A-Z][^A-Z]*\.$/u, `${item.name} is one sentence-case line`);
+    // Sentence case: one capital to start, a full stop to end, and no Title Case run after it. An
+    // established acronym keeps its capitals (AGENTS.md, UI Copy).
+    assert.match(item.description.replace(/\bAPI\b/g, "api"), item.id === "archived" ? /^[A-Z][^A-Z]*\. [A-Z][^A-Z]*\.$/u : /^[A-Z][^A-Z]*\.$/u,
+      `${item.name} uses sentence case`);
     for (const term of RETIRED_TERMS) {
       assert.ok(!item.description.toLowerCase().includes(term), `${item.name} uses the retired term "${term}"`);
     }
@@ -166,6 +256,30 @@ test("an entity page is titled by its entity once it has loaded", () => {
   assert.equal(viewTitle({ name: "pod", id: "pod-1" }), "Pod");
   assert.equal(viewTitle({ name: "pod", id: "pod-1" }, ""), "Pod");
   assert.equal(viewTitle({ name: "session", id: "s-1" }), "Session");
+  // The Automation editor is titled by what it edits (#2967).
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "new" } }), "New Automation");
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }, "Nightly"), "Edit Nightly");
+  assert.equal(viewTitle({ name: "automations", editor: { kind: "edit", automationId: "a" } }), "Edit Automation");
+  assert.equal(viewFromPath("/automations/~!/edit"), null);
+  // The automation page (#2968) is titled by its automation, "Automation" while it loads.
+  assert.equal(viewTitle({ name: "automation", id: "a" }, "Nightly"), "Nightly");
+  assert.equal(viewTitle({ name: "automation", id: "a" }), "Automation");
+});
+
+test("an automation's page has its own address, which survives a reload (#2968)", () => {
+  for (const id of ["automation-1", "a/b?c#d", "名前"]) {
+    const view = { name: "automation" as const, id };
+    const path = viewPath(view);
+    assert.equal(path, `/automations/~${encodeResourceId(id)}`);
+    assert.deepEqual(viewFromPath(path), view);
+    assert.deepEqual(viewFromPath(`${path}/`), view);
+  }
+  assert.equal(viewFromPath("/automations/~!"), null, "a malformed id is not a route");
+  assert.equal(viewFromPath("/automations/~"), null);
+  // The editor's route is not mistaken for the page, nor the page for the editor.
+  assert.deepEqual(viewFromPath(`/automations/~${encodeResourceId("a")}/edit`),
+    { name: "automations", editor: { kind: "edit", automationId: "a" } });
+  assert.equal(viewSubjectName({ name: "automation", id: "a" }), "This Automation");
 });
 
 const source = (path: string) => readFileSync(fileURLToPath(new URL(path, import.meta.url)), "utf8");
@@ -321,7 +435,7 @@ test("empty states that name a destination read its name", () => {
     ["./sessions-states.ts", /return `No \$\{destination\("inbox"\)\.name\} Yet`;/],
     ["./components/Board.tsx", /title=\{`No \$\{destination\("inbox"\)\.name\} Yet`\}/],
     ["./components/ArchivedSessionsView.tsx", /`No \$\{destination\("archived"\)\.name\}`/],
-    ["./components/ProjectsView.tsx", /`No \$\{PROJECTS\.name\} Found`/],
+    ["./components/ProjectsView.tsx", /title=\{`No \$\{PROJECTS\.name\} Yet`\}/],
     ["./components/RunsView.tsx", /title=\{`No \$\{runsDestination\.name\} Yet`\}/],
     ["./components/PodsView.tsx", /title=\{`No \$\{podsDestination\.name\} Yet`\}/],
     ["./detail-placeholder.ts", /const resource = destination\(list\)\.name;/],
@@ -551,7 +665,7 @@ test("browser history canonicalizes once, preserves state, and never pushes duri
 test("Keyboard folds into Behavior: /settings/keyboard replaces itself and lands on Keyboard Shortcuts (#3023)", () => {
   assert.equal(SETTINGS_SECTIONS.some((section) => section.id === ("keyboard" as never)), false);
   assert.deepEqual(SETTINGS_SECTIONS.map((section) => section.title),
-    ["Appearance", "Notifications", "Behavior", "Approvals", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
+    ["Appearance", "Notifications", "Behavior", "Approvals", "Reviews", "Orchestrator", "Network", "Storage", "Experimental", "About"]);
   const view = viewFromPath("/settings/keyboard");
   assert.deepEqual(view, { name: "settings", section: "behavior", focus: { target: "keyboard-shortcuts" } });
   assert.equal(viewPath(view!), "/settings/behavior", "the focus target is not part of the address");

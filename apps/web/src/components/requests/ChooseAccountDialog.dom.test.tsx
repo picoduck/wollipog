@@ -115,7 +115,9 @@ async function renderDialog({
   accounts = [WORK, PERSONAL, OLD, MAYBE] as readonly Option[],
   runnerOverrides = {} as Partial<RunnerView>,
   select,
+  sessionOverrides = {} as Partial<SessionView>,
 }: {
+  sessionOverrides?: Partial<SessionView>;
   accounts?: readonly Option[];
   runnerOverrides?: Partial<RunnerView>;
   select?: (providerAccountId: string) => Promise<void>;
@@ -146,7 +148,7 @@ async function renderDialog({
       root.render(
         <ApiProvider client={client}>
           <ChooseAccountDialog
-            session={session}
+            session={{ ...session, ...sessionOverrides }}
             approval={approval}
             runner={currentRunner}
             runnerOnline
@@ -259,6 +261,76 @@ test("the primary follows the chosen row: Use Account, Check and Use, or waiting
       "This account is signed out. A machine owner or organization admin must sign in to it first.");
   } finally {
     await viewer.unmount();
+  }
+});
+
+test("a sign-in started here shows the same two steps and endings inside the dialog, under a plain head without ⋯ (#2996)", async () => {
+  const running = {
+    operationId: "login_old", accountId: "claude-old", label: "Claude Old", provider: "claude", status: "awaiting_code",
+    verificationUrl: "https://claude.ai/oauth/authorize", expectsCode: true, startedAt: 1,
+  } as const;
+  const view = await renderDialog({ runnerOverrides: { providerLogins: [running] } });
+  try {
+    const card = view.dialog()!.querySelector<HTMLElement>("article.signin-card")!;
+    assert.ok(card, "the sign-in is inside the dialog");
+    assert.equal(card.querySelector(".signin-head-title")?.textContent, "Claude Old");
+    assert.equal(card.querySelector(".signin-head .status")?.textContent, "Signing In");
+    assertNoDomNode(card.querySelector('[aria-haspopup="menu"]'), "a plain head, without the row's ⋯");
+    const steps = [...card.querySelectorAll("ol.steps > li")];
+    assert.equal(steps.length, 2);
+    assert.equal(steps[0]!.querySelector("a")?.textContent, "Open Claude Sign-In");
+    assert.equal(steps[1]!.querySelector("label")?.textContent, "Paste the Code It Shows");
+
+    await view.setAccounts([WORK, PERSONAL, OLD, MAYBE], {
+      providerLogins: [{ ...running, status: "failed", expectsCode: false, error: "The provider did not confirm authentication." }],
+    });
+    const ended = view.dialog()!.querySelector<HTMLElement>("article.signin-card")!;
+    assertNoDomNode(ended.querySelector("ol.steps"));
+    assert.equal(ended.querySelector(".notice-title")?.textContent, "Sign-In Failed");
+    const tryAgain = [...ended.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Try Again")!;
+    await act(async () => { tryAgain.click(); await tick(); });
+    assert.deepEqual(view.signIns, [{ accountId: "claude-old" }], "Try Again starts the same account");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("a row reads Signing In without Sign In while its sign-in runs, and Sign In returns only once the ending is dismissed (#3520)", async () => {
+  const running = {
+    operationId: "login_old", accountId: "claude-old", label: "Claude Old", provider: "claude", status: "awaiting_code",
+    verificationUrl: "https://claude.ai/oauth/authorize", expectsCode: true, startedAt: 1,
+  } as const;
+  const statuses = (view: Rendered) => [...view.dialog()!.querySelectorAll(".choice-row")].map((row) => [
+    row.querySelector(".choice-row-title")!.firstChild!.textContent,
+    row.querySelector(".choice-row-status")?.textContent,
+    row.querySelector(".choice-row-action button")?.textContent?.trim() ?? null,
+  ]);
+  const accounts = [WORK, PERSONAL, OLD, MAYBE, { ...OLD, id: "claude-spare", label: "Claude Spare" }];
+  const view = await renderDialog({ accounts, runnerOverrides: { providerLogins: [running] } });
+  try {
+    assert.deepEqual(statuses(view), [
+      ["Claude Personal", "Signed In", null],
+      ["Claude Old", "Signing In", null],
+      ["Claude Maybe", "Status Unknown", null],
+      ["Claude Spare", "Sign-In Required", "Sign In"],
+    ], "only the signing-in row changes");
+    assert.equal(view.row("Claude Old")!.querySelector(".choice-row-status .status.t-info") !== null, true,
+      "the provider-account Signing In badge");
+    await act(async () => { view.radio("Claude Old")!.click(); await tick(); });
+    assert.equal(view.button("Use Account")!.disabled, true, "a signed-out account still can't be used while it signs in");
+
+    for (const ending of ["failed", "timed_out"] as const) {
+      await view.setAccounts(accounts, { providerLogins: [{ ...running, status: ending, expectsCode: false }] });
+      assert.deepEqual(statuses(view)[1], ["Claude Old", "Sign-In Required", null],
+        `after ${ending} the row shows the account's own status and leaves the restart to the ending`);
+      assert.equal(view.button("Use Account")!.disabled, true);
+    }
+
+    await view.setAccounts(accounts, { providerLogins: [] });
+    assert.deepEqual(statuses(view)[1], ["Claude Old", "Sign-In Required", "Sign In"], "dismissing the ending brings Sign In back");
+    assert.equal(view.row("Claude Old")!.querySelector<HTMLButtonElement>(".choice-row-action button")!.disabled, false);
+  } finally {
+    await view.unmount();
   }
 });
 
@@ -471,4 +543,20 @@ test("with no other account the dialog says who can add one and offers Open Conn
   } finally {
     await view.unmount();
   }
+});
+
+
+test("a default-sign-in session chooses an added account with an explicit unbound expectation", async () => {
+  const view = await renderDialog({
+    sessionOverrides: { providerAccountId: undefined, providerAccountLabel: undefined },
+    accounts: [{ ...WORK, availability: "available" }, PERSONAL, OLD, MAYBE],
+  });
+  try {
+    assert.ok(view.radio("Claude Work"));
+    assert.match(view.row("Claude Old")!.textContent!, /Sign-In Required/);
+    assert.match(view.row("Claude Maybe")!.textContent!, /Status Unknown/);
+    await act(async () => { view.button("Use Account")!.click(); await tick(); await tick(); });
+    assert.deepEqual(view.selections, [{ requestId: CARD, providerAccountId: "claude-work", expectedProviderAccountId: null }]);
+    assert.deepEqual(view.results, [{ kind: "selected" }]);
+  } finally { await view.unmount(); }
 });

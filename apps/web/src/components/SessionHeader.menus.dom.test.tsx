@@ -396,8 +396,8 @@ test("a slow clipboard write never closes a Share menu opened again, nor takes i
       });
       assert.ok(page().querySelector('[role="menu"][aria-label="Share"]'), `${outcome}: the reopened menu stays open`);
       assert.equal(domWindow.document.activeElement, focused, `${outcome}: focus stays where it was`);
-      assert.deepEqual(header.toasts, outcome === "resolve" ? [{ message: "Link copied.", tone: "success" }] : [],
-        `${outcome}: a stale refusal is dropped rather than reported`);
+      // A stale success is dropped too (#3582): the reopened menu has the person's attention.
+      assert.deepEqual(header.toasts, [], `${outcome}: a stale write is dropped rather than reported`);
       await act(async () => { domWindow.document.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape" }) as never); });
       const backdrop = page().querySelector<HTMLElement>(".menu-backdrop");
       if (backdrop) await act(async () => { backdrop.click(); await tick(); });
@@ -506,6 +506,72 @@ test("without a Clipboard API (a plain-HTTP page) Copy Session Link falls back a
     await header.unmount();
     if (originalExec) doc.execCommand = originalExec; else delete doc.execCommand;
     if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+  }
+});
+
+/** Swaps in a Clipboard API whose writes settle only when the test says so; `restore` puts it back. */
+function deferredClipboard() {
+  const pending: Array<() => void> = [];
+  const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: () => new Promise<void>((resolve) => { pending.push(resolve); }) },
+  });
+  return {
+    resolve: async () => { await act(async () => { pending.at(-1)!(); await tick(); await tick(); }); },
+    restore: () => {
+      if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+      else Reflect.deleteProperty(domWindow.navigator, "clipboard");
+    },
+  };
+}
+
+test("a copy that succeeds after the page was left shows no toast and moves no focus (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  const elsewhere = domWindow.document.createElement("button");
+  try {
+    const header = await renderHeader();
+    const menu = await open("Share");
+    await act(async () => { item(menu, "Copy Session Link").click(); await tick(); });
+    await header.unmount();
+    elsewhere.textContent = "Elsewhere";
+    domWindow.document.body.append(elsewhere);
+    elsewhere.focus();
+    await clipboard.resolve();
+    assert.deepEqual(header.toasts, [], "nothing is reported");
+    assert.ok(domWindow.document.activeElement === elsewhere, "focus stays where it went");
+
+    // Focus left nowhere in particular: only the unmount makes this copy stale.
+    const unfocused = await renderHeader();
+    const again = await open("Share");
+    await act(async () => { item(again, "Copy Session Link").click(); await tick(); });
+    await unfocused.unmount();
+    assert.ok(domWindow.document.activeElement === domWindow.document.body, "focus fell to the page");
+    await clipboard.resolve();
+    assert.deepEqual(unfocused.toasts, [], "unmounted: nothing is reported");
+  } finally {
+    elsewhere.remove();
+    clipboard.restore();
+  }
+});
+
+test("a slow copy that succeeds while it is still current confirms it and keeps focus on Share (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  const header = await renderHeader();
+  try {
+    const menu = await open("Share");
+    const copy = item(menu, "Copy Session Link");
+    copy.focus();
+    await act(async () => { copy.click(); await tick(); });
+    assertNoDomNode(page().querySelector('[role="menu"]'), "the menu closes as the copy starts");
+    assert.deepEqual(header.toasts, [], "nothing is reported before the write settles");
+    await clipboard.resolve();
+    assert.deepEqual(header.toasts, [{ message: "Link copied.", tone: "success" }]);
+    assert.equal((domWindow.document.activeElement as unknown as Element | null)?.getAttribute("aria-label"), "Share",
+      "focus is on the Share trigger");
+  } finally {
+    await header.unmount();
+    clipboard.restore();
   }
 });
 

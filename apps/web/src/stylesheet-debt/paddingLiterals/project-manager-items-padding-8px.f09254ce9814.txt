@@ -1,1 +1,0 @@
-|.project-manager-items|padding|8px

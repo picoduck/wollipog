@@ -1,1 +1,0 @@
-|.connection-details-list dt|font-size|10

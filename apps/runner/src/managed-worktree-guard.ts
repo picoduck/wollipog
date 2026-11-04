@@ -437,7 +437,7 @@ export function runManagedWorktreeGuardDecision(
   if (!protectionsFile) {
     return {
       stdout: "",
-      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard was launched without a protections file)\n`,
+      stderr: "Wollipog could not inspect this tool call (managed worktree guard was launched without a protections file), so it was not run.\n",
       exitCode: 2,
     };
   }
@@ -458,7 +458,7 @@ export function managedWorktreeGuardOutcome(decision: ManagedWorktreeGuardDecisi
     return {
       stdout: "",
       // Claude blocks the tool call on exit code 2 and shows stderr to the model.
-      stderr: `${MANAGED_WORKTREE_REFUSAL} (${decision.reason})\n`,
+      stderr: `Wollipog could not inspect this tool call (${decision.reason}), so it was not run.\n`,
       exitCode: 2,
     };
   }
@@ -497,7 +497,7 @@ export async function runManagedWorktreeGuardCli(
     if (socketPath === null) {
       outcome = {
         stdout: "",
-        stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard was launched with an empty verdict socket)\n`,
+        stderr: "Wollipog could not inspect this tool call (managed worktree guard was launched with an empty verdict socket), so it was not run.\n",
         exitCode: 2,
       };
     } else if (socketPath !== undefined) {
@@ -514,7 +514,7 @@ export async function runManagedWorktreeGuardCli(
         const message = name ? (error as Error).message.split(name).join("<verdict socket>") : (error as Error).message;
         outcome = {
           stdout: "",
-          stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard could not get a verdict from the runner: ${message})\n`,
+          stderr: `Wollipog could not inspect this tool call (managed worktree guard could not get a verdict from the runner: ${message}), so it was not run.\n`,
           exitCode: 2,
         };
       }
@@ -527,7 +527,7 @@ export async function runManagedWorktreeGuardCli(
   } catch (error) {
     outcome = {
       stdout: "",
-      stderr: `${MANAGED_WORKTREE_REFUSAL} (managed worktree guard failed: ${(error as Error).message})\n`,
+      stderr: `Wollipog could not inspect this tool call (managed worktree guard failed: ${(error as Error).message}), so it was not run.\n`,
       exitCode: 2,
     };
   }

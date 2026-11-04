@@ -1,13 +1,13 @@
 // Runs inside the sandbox of agent-control-sandbox-cli.integration.test.ts (#3270): the injected
 // CLI with and without its FIFO channel, then each socket a sandbox must refuse, then a write into
-// the FIFO channel directory and one into the workspace. Plain JavaScript, so nothing here needs
+// the FIFO channel directory, the workspace and the temporary directory. Plain JavaScript, so nothing here needs
 // the repository's loader. Prints one JSON object.
 import { spawnSync } from "node:child_process";
 import { writeFileSync } from "node:fs";
 import net from "node:net";
 import { join } from "node:path";
 
-const [controlPlanePort, relayPort, unixSocket, fifoDirectory] = process.argv.slice(2);
+const [controlPlanePort, relayPort, unixSocket, fifoDirectory, temporaryDirectory] = process.argv.slice(2);
 
 const connect = (options) => new Promise((resolve) => {
   const socket = net.connect(options);
@@ -48,4 +48,5 @@ process.stdout.write(JSON.stringify({
   outbound: await connect({ host: "192.0.2.1", port: 9 }),
   fifoDirectoryWrite: write(join(fifoDirectory, "probe-file")),
   workspaceWrite: write(join(process.cwd(), "probe-file")),
+  temporaryWrite: write(join(temporaryDirectory, "probe-file")),
 }));

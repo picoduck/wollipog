@@ -23,6 +23,8 @@ import {
 
 /** Ownership facts the rules read, looked up by the caller (#1843). */
 export interface SessionCommandPermissionFacts {
+  /** Same state/capability refusal as the recovery route; omitted evidence fails closed. */
+  archivedWorktreeRecoveryError?: string | null;
   /** `isSessionOwner`: the session's ownership scope names this person. Read for people only. */
   ownsSession: boolean;
   /** The session descends from the agent credential's own session. Read for agents only. */
@@ -32,6 +34,8 @@ export interface SessionCommandPermissionFacts {
 const STOP_ROUTE = "/api/sessions/:id/stop";
 const RESTART_ROUTE = "/api/sessions/:id/restart";
 const STOP_JOB_ROUTE = "/api/sessions/:id/background-jobs/:jobId/stop";
+/** Releasing a queue hold ends every unfinished job, so Stop Job's verdict covers it too (#3752). */
+const RELEASE_HOLD_ROUTE = "/api/sessions/:id/queue-hold/release";
 const ARCHIVE_ROUTE = "/api/sessions/:id/archive";
 const UNARCHIVE_AND_RESTART_ROUTE = "/api/sessions/:id/unarchive-and-restart";
 const PROMPT_ROUTE = "/api/sessions/:id/prompt";
@@ -145,6 +149,7 @@ export function sessionCommandPermissions(
   facts: SessionCommandPermissionFacts,
 ): SessionCommandPermissions {
   const stopJobRefusal = routeRefusal(STOP_JOB_ROUTE, principal, target, facts) ??
+    routeRefusal(RELEASE_HOLD_ROUTE, principal, target, facts) ??
     (backgroundJobStopAuthorizationError(principal, target, principal.kind === "human" && facts.ownsSession)
       ? STOP_JOB_OWNER_REASON
       : null);
@@ -153,10 +158,12 @@ export function sessionCommandPermissions(
     restart: permission(routeRefusal(RESTART_ROUTE, principal, target, facts)),
     stopBackgroundJob: permission(stopJobRefusal),
     archive: permission(routeRefusal(ARCHIVE_ROUTE, principal, target, facts)),
-    // Both restore routes refuse every agent credential first; for a person they apply the same
-    // role gate, so Unarchive and Unarchive and Restart share one verdict.
+    // Only plain Unarchive is available to the controlling Orchestrator; combined restart stays human-only.
     unarchive: permission(principal.kind === "agent"
-      ? sentence(AGENT_UNARCHIVE_ERROR)
+      ? principal.orchestrator && target.parentSessionId === principal.credentialSessionId && target.id !== principal.credentialSessionId
+        ? routeRefusal(ARCHIVE_ROUTE, principal, target, facts) ??
+          (facts.archivedWorktreeRecoveryError === null ? null : facts.archivedWorktreeRecoveryError ?? "Archived worktree recovery is unavailable.")
+        : sentence(AGENT_UNARCHIVE_ERROR)
       : routeRefusal(UNARCHIVE_AND_RESTART_ROUTE, principal, target, facts)),
     prompt: permission(routeRefusal(PROMPT_ROUTE, principal, target, facts)),
     delete: permission(principal.kind === "agent"
@@ -238,6 +245,7 @@ export function withHoldAdviceFor<T extends Pick<SessionView, "holds" | "queueHo
 
 /** The ownership lookups `withSessionCommandPermissions` needs from the database. */
 export interface SessionCommandPermissionSource {
+  campaignWorktreeRecoveryError?(sessionId: string): string | null;
   sessionAttentionForUser?(session: SessionView, userId: string | null): SessionView;
   campaignRequestsForPrincipal?(principal: AuthPrincipal, sessionId: string, includeArchived?: boolean): SessionView["campaignRequests"];
   isSessionOwner(principal: HumanPrincipal, sessionId: string): boolean;
@@ -362,6 +370,10 @@ function permissionFacts(
       return ownsSession ??= principal.kind === "human" && source.isSessionOwner(principal, sessionId);
     },
     isDescendant: Boolean(credentialSessionId && source.isSessionDescendant(credentialSessionId, sessionId)),
+    get archivedWorktreeRecoveryError() {
+      return source.campaignWorktreeRecoveryError?.(sessionId) ??
+        (source.campaignWorktreeRecoveryError ? null : "Archived worktree recovery is unavailable.");
+    },
   };
 }
 
@@ -448,8 +460,9 @@ export function withCampaignHoldAdviceFor<T extends Pick<OrchestratorCampaignPro
       const record = records.get(child.sessionId);
       if (!record) return child;
       // Of a person's verdicts only Stop Job reads ownership, and their advice reads Stop Job only for
-      // a queue hold whose runner can stop jobs, so no other child's ownership is looked up (#1873).
-      const facts = principal.kind === "human" && !record.queueHold?.canStopJobs
+      // a queue hold whose runner can stop jobs or release the hold (#3752), so no other child's
+      // ownership is looked up (#1873).
+      const facts = principal.kind === "human" && !record.queueHold?.canStopJobs && !record.queueHold?.canRelease
         ? { ownsSession: false, isDescendant: false }
         : permissionFacts(source, principal, child.sessionId);
       // A nested Orchestrator's campaign can list its own session, where its isolation policy decides

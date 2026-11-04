@@ -22,6 +22,10 @@
     "./skill-invocation": {
       "types": "./src/skill-invocation.ts",
       "default": "./src/skill-invocation.ts"
+    },
+    "./cron-schedule": {
+      "types": "./src/cron-schedule.ts",
+      "default": "./src/cron-schedule.ts"
     }
   },
   "scripts": {

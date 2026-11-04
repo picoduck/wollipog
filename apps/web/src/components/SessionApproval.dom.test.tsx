@@ -877,6 +877,49 @@ test("a failed submission shows a danger notice above the footer, keeps the choi
   }
 });
 
+test("a secret answer on the card never reaches the DOM, across steps or after a failed submit (#3814)", async () => {
+  const { container, root } = mount();
+  const calls: Array<Parameters<ApiClient["answerQuestion"]>[1]> = [];
+  let fail = true;
+  const client = {
+    ...api,
+    answerQuestion: async (_sessionId: string, action: Parameters<ApiClient["answerQuestion"]>[1]) => {
+      calls.push(structuredClone(action));
+      if (fail) throw new Error("The runner rejected this answer.");
+      return {} as SessionView;
+    },
+  } as ApiClient;
+  try {
+    await renderBanner(root, [
+      { id: "token", question: "Enter the token", options: [], allowOther: true, secret: true },
+      { id: "target", question: "Choose a target", options: [{ label: "Staging" }, { label: "Production" }] },
+    ], true, client);
+    const field = () => container.querySelector<HTMLInputElement>(".question-input")!;
+    assert.equal(field().type, "password");
+    await act(async () => { setInputValue(field(), "card-secret-answer"); });
+    assert.doesNotMatch(container.innerHTML, /card-secret-answer/, "a typed secret is not mirrored into a value attribute");
+    await act(async () => { button(container, "next").click(); });
+    await act(async () => { row(container, "Production").click(); });
+    await act(async () => { button(container, "back").click(); });
+    assert.equal(field().value, "card-secret-answer", "Back brings the secret back to its field");
+    assert.doesNotMatch(container.innerHTML, /card-secret-answer/);
+    await act(async () => { button(container, "next").click(); });
+    await act(async () => { submitButton(container).click(); await tick(); });
+    assert.match(container.querySelector('[role="alert"]')?.textContent ?? "", /Couldn't send your answers/);
+    assert.doesNotMatch(container.innerHTML, /card-secret-answer/, "nor after a failed submit");
+    fail = false;
+    await act(async () => { submitButton(container).click(); await tick(); });
+    assert.deepEqual(calls.at(-1), {
+      requestId: "question-1",
+      answers: { token: "card-secret-answer", target: "Production" },
+      action: "submit",
+    });
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
 test("Try Again keeps its label while the retry is pending", async () => {
   const { container, root } = mount();
   const retry = deferredAnswer();

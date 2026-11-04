@@ -105,18 +105,6 @@ export function isInboxRunning(session: Pick<SessionView, "status">): boolean {
 
 export const INBOX_COLLAPSED_THREADS_KEY = "wollipog.inbox.collapsedThreads";
 
-/**
- * Human input, outstanding results, unattended work, then quiet sessions. Lifecycle, unread
- * activity, and stalls alone never manufacture an outstanding result.
- */
-export function inboxUrgency(
-  session: Pick<SessionView, "id" | "status" | "pendingApproval"> &
-    Partial<SessionView>,
-  _stalledSessionIds: ReadonlySet<string> = new Set(),
-): number {
-  return sessionFollowUp(session as SessionView).priority;
-}
-
 interface InboxOrderKey {
   pinned: boolean;
   urgency: number;
@@ -172,6 +160,13 @@ function inboxChildrenByParent(sessions: readonly SessionView[]): Map<string, Se
   return children;
 }
 
+/** A review belongs only under its requester, including when filters or archival omit the parent. */
+function reviewFamilies<T extends { id: string; parentSessionId?: string | null; kind?: string }>(sessions: readonly T[]): T[] {
+  const present = new Set(sessions.map(session => session.id));
+  return sessions.filter(session => session.kind !== "review" || Boolean(session.parentSessionId &&
+    session.parentSessionId !== session.id && present.has(session.parentSessionId)));
+}
+
 /**
  * Stable card ordering: pinned families first, then human input, outstanding results, work, and
  * quiet, with deterministic fallbacks within each pin group. A session whose parent is also in
@@ -185,7 +180,7 @@ export function sortInboxSessions(
   stalledSessionIds: ReadonlySet<string> = new Set(),
   familySessions?: readonly SessionView[],
 ): SessionView[] {
-  const all = [...sessions];
+  const all = reviewFamilies([...sessions]);
   const childrenByParent = inboxChildrenByParent(all);
   const workingFamilies = sessionsWithWorkingDescendants((familySessions ?? all).filter((session) => !session.archived));
   const ownKeys = new Map(all.map((session) => [session.id, sessionOrderKey(session, pinnedSessions, stalledSessionIds, workingFamilies.has(session.id))]));
@@ -241,6 +236,8 @@ export interface InboxThreadChild {
 export interface InboxThreadChildren {
   followUpLabel?: "Needs Your Input" | "Ready for Review";
   count: number;
+  /** Direct children that are review sessions, which the chip names as reviews (#4077). */
+  reviews?: number;
   /** Direct child rows available for expansion after filtering. */
   visibleCount?: number;
   /** Working descendants, including those hidden by a collapsed nested thread. */
@@ -252,12 +249,22 @@ export interface InboxThreadChildren {
   children: InboxThreadChild[];
 }
 
-/** A row's place in its thread. Depth is visual: a grandchild indents like a child (#896). */
+/** The deepest indent a thread draws (#4077): a parent, its child, and that child's review or child. */
+export const INBOX_THREAD_MAX_DEPTH = 2;
+
+/**
+ * A row's place in its thread. Depth is visual: rows indent to their real depth up to
+ * {@link INBOX_THREAD_MAX_DEPTH}, and anything deeper indents like its depth-2 ancestor (#4077).
+ */
 export interface InboxThreadPosition {
   depth: number;
   parentId: string | null;
-  /** The last visible member of its parent's thread, which is where the spine ends. */
+  /** The last visible row on its spine, which is where the spine ends: no later row sits at its
+   * depth before a shallower one does. */
   last: boolean;
+  /** A depth-2 row whose depth-1 ancestor is not the last on its own spine, so that spine runs on
+   * past this row to a later sibling. */
+  outerSpine: boolean;
   /** Present on a parent row, expanded or collapsed. */
   children: InboxThreadChildren | null;
   collapsed: boolean;
@@ -300,7 +307,13 @@ export function inboxThreadChildrenLabel(
   children: InboxThreadChildren,
   { includeWorking = true }: { includeWorking?: boolean } = {},
 ): string {
-  const parts = [`${children.count} ${children.count === 1 ? "Child" : "Children"}`];
+  // A review is named as one rather than as another child (#4077); the counts lead either way.
+  const reviews = children.reviews ?? 0;
+  const others = children.count - reviews;
+  const parts = [
+    ...(others > 0 || reviews === 0 ? [`${others} ${others === 1 ? "Child" : "Children"}`] : []),
+    ...(reviews > 0 ? [`${reviews} ${reviews === 1 ? "Review" : "Reviews"}`] : []),
+  ];
   const running = children.working ?? children.children.filter((child) => child.state === "running").length;
   const done = children.children.filter((child) => child.state === "done").length;
   if (children.followUpLabel) parts.push(children.followUpLabel);
@@ -315,8 +328,8 @@ export function inboxThreadChildrenLabel(
 
 /**
  * Thread an ordered, filtered list of rows: each parent is followed by its descendants, indented
- * one level, and a collapsed parent's descendants leave the list entirely rather than hiding
- * inside a taller row, so every row stays one card (#896). A family takes the position of its
+ * to their depth up to {@link INBOX_THREAD_MAX_DEPTH} (#4077), and a collapsed parent's descendants
+ * leave the list entirely rather than hiding inside a taller row, so every row stays one card (#896). A family takes the position of its
  * FIRST member in the input, whichever that is: a child that a fired reminder or a held browsing
  * order placed ahead of its parent pulls the whole thread up to that slot, so the input's own
  * ordering contract survives threading. Everything else keeps its place.
@@ -327,7 +340,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
   stalledSessionIds: ReadonlySet<string> = new Set(),
   familySessions: readonly SessionView[] = rows.map((row) => row.session),
 ): Array<T & { thread: InboxThreadPosition }> {
-  const sessions = rows.map((row) => row.session);
+  const sessions = reviewFamilies(rows.map((row) => row.session));
   const childrenByParent = inboxChildrenByParent(sessions);
   const unarchivedFamily = familySessions.filter((session) => !session.archived);
   const familyChildrenByParent = inboxChildrenByParent(unarchivedFamily);
@@ -336,7 +349,7 @@ export function threadInboxRows<T extends { session: SessionView }>(
   const present = new Set(sessions.map((session) => session.id));
   const out: Array<T & { thread: InboxThreadPosition }> = [];
   const emitted = new Set<string>();
-  const emit = (row: T, depth: number, parentId: string | null, last: boolean, trail: Set<string>) => {
+  const emit = (row: T, depth: number, parentId: string | null, trail: Set<string>) => {
     if (emitted.has(row.session.id)) return;
     emitted.add(row.session.id);
     const next = new Set(trail).add(row.session.id);
@@ -351,10 +364,12 @@ export function threadInboxRows<T extends { session: SessionView }>(
     const strongest = members.map((member) => sessionFollowUp(member, { familyWorking: workingFamilies.has(member.id) }))
       .filter((followUp) => !(hasActiveWork || sessionWorking(row.session)) || followUp.group !== "ready_for_review")
       .sort((a, b) => b.priority - a.priority)[0];
+    const reviews = familyChildren.filter((child) => child.kind === "review").length;
     const summary: InboxThreadChildren | null = familyChildren.length === 0 ? null : {
       ...(strongest && strongest.priority >= 2 ? { followUpLabel: strongest.group === "needs_input"
         ? "Needs Your Input" as const : "Ready for Review" as const } : {}),
       count: familyChildren.length,
+      ...(reviews > 0 ? { reviews } : {}),
       visibleCount: children.length,
       hasActiveWork,
       working: members.filter((child) => !stalledSessionIds.has(child.id) && inboxThreadChildState(child, false) === "running").length,
@@ -367,11 +382,11 @@ export function threadInboxRows<T extends { session: SessionView }>(
       })),
     };
     const collapsed = children.length > 0 && collapsedParents.has(row.session.id);
-    out.push({ ...row, thread: { depth, parentId, last, children: summary, collapsed } });
+    out.push({ ...row, thread: { depth, parentId, last: false, outerSpine: false, children: summary, collapsed } });
     if (collapsed) return;
-    children.forEach((child, index) => {
-      emit(rowById.get(child.id)!, Math.min(depth + 1, 1), row.session.id, index === children.length - 1, next);
-    });
+    for (const child of children) {
+      emit(rowById.get(child.id)!, Math.min(depth + 1, INBOX_THREAD_MAX_DEPTH), row.session.id, next);
+    }
   };
   /** The top of a row's present ancestry; a cycle ends at the last member before it repeats. */
   const topOf = (row: T): T => {
@@ -385,8 +400,20 @@ export function threadInboxRows<T extends { session: SessionView }>(
     }
   };
   for (const row of rows) {
+    if (!present.has(row.session.id)) continue;
     if (emitted.has(row.session.id)) continue;
-    emit(topOf(row), 0, null, false, new Set());
+    emit(topOf(row), 0, null, new Set());
+  }
+  // Where each spine ends, read back to front: `open[d]` says a later row sits at depth d before a
+  // shallower row closes it. A depth-1 spine therefore ends at its last sibling, not under that
+  // sibling's descendants, and a clamped great-grandchild extends its depth-2 ancestor's spine.
+  const open: boolean[] = [];
+  for (let index = out.length - 1; index >= 0; index -= 1) {
+    const thread = out[index]!.thread;
+    thread.last = thread.depth > 0 && !open[thread.depth];
+    thread.outerSpine = thread.depth > 1 && Boolean(open[1]);
+    open.length = thread.depth;
+    open[thread.depth] = true;
   }
   return out;
 }

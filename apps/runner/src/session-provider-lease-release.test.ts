@@ -72,7 +72,7 @@ interface PreparationControl {
   /** Tree proofs of the auth preflight's status commands. */
   statusProofs: boolean[];
   status?: "authenticated" | "unauthenticated";
-  /** The adapter ran the Codex guard's hook inventory, which it marks unprovable. */
+  /** The adapter's Codex guard hook inventory could not prove its tree gone. */
   codexGuard?: boolean;
   /** The session is stopped while its preparation runs, so the launch goes stale. */
   stopDuringPreparation?: boolean;
@@ -131,7 +131,7 @@ function fixture(control: Partial<FakeDriverControl> = {}, preparation?: Prepara
     // What the adapter does for a native host launch with a credential home.
     await manager.acquireLaunchProviderHome(ACCOUNT_HOME, cancellation);
     if (preparation?.stopDuringPreparation) manager.stop(meta.sessionId);
-    if (preparation?.codexGuard) cancellation?.providerHome?.markUnprovable();
+    if (preparation?.codexGuard) cancellation?.providerHome?.onProcess(Promise.resolve(false));
   };
   const resolveLaunch = (_driver: unknown, _context: unknown, agentId: string | null | undefined) =>
     agentId === "claude" ? { command: "claude", args: [], env: { HOME: home } } : null;
@@ -247,7 +247,7 @@ test("launches past the session handle budget keep a plain reference until shutd
 for (const [label, preparation, released] of [
   ["whose preflight status command is proven gone", { statusProofs: [true] }, true],
   ["whose preflight status command was not proven gone", { statusProofs: [false] }, false],
-  ["whose preparation ran the Codex guard's hook inventory", { statusProofs: [true], codexGuard: true }, false],
+  ["whose preparation ran an unproven Codex hook inventory", { statusProofs: [true], codexGuard: true }, false],
 ] as const) {
   test(`a launch ${label} ${released ? "releases" : "keeps"} its preparation reference once the driver's reference holds the HOME`, async () => {
     const h = fixture({ proof: true }, { ...preparation, statusProofs: [...preparation.statusProofs] });

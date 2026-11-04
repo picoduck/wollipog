@@ -62,17 +62,6 @@ test("the iOS focus-zoom guard is the final rule in the stylesheet", () => {
     `the focus-zoom guard must be the last rule; found trailing CSS: ${remainder.slice(0, 120)}`);
 });
 
-test("known late form rules cannot outrank the focus-zoom guard", () => {
-  // These are the rules that beat the previous attempt. They must appear BEFORE the guard so the
-  // specificity tie resolves in the guard's favour on document order.
-  const guard = css.lastIndexOf(":root .composer-input {");
-  for (const selector of [".automation-form-grid input", ".usage-retention input"]) {
-    const at = css.indexOf(selector);
-    assert.notEqual(at, -1, `${selector} should still exist`);
-    assert.ok(at < guard, `${selector} must appear before the focus-zoom guard`);
-  }
-});
-
 /**
  * These custom properties were referenced across the stylesheet before they were ever defined, so
  * the declarations using them were invalid and dropped — "paused"/"conflicted" states rendered
@@ -127,7 +116,7 @@ test("every referenced custom property is defined in the shared root scope", () 
     ["--sessions-list-h", ".master-detail.sessions-md"],
     // Preview Right's list column (§6.3, #2219): InboxView sets the stored width; a drag sets it.
     ["--sessions-list-w", '.sessions-md[data-layout="right"]'],
-    // Where the Sessions preview's bar, meta line, request dock and transcript start (#2219).
+    // Where the Sessions preview's bar and meta line start, and its reading column's least gutter (#2219).
     ["--preview-inset", ".session-detail.preview"],
     // The terminal dock's stored height (#2866): ShellDock sets it; the body's on desktop, the
     // terminal's in the phone sheet.
@@ -259,11 +248,9 @@ test("a Sessions row's selection, unread state and focus are three different tre
  * 2px --focus line on its top edge that fades out, without the fade under reduced motion.
  */
 /** The rule that lets a container's gap space a `.field-label`, and the field label rule (§8.1). */
-const STACKED_FIELD_LABELS = [".field > .field-label", ".archive-filter > .field-label", ".automation-field > .field-label"];
-/** Labels of two forms that stack them over the control outside a `.field` (#2366). */
-const OUTSIDE_FIELD_LABELS = [".archive-search > span", ".archive-filter > .field-label", ".automation-form-grid > label",
-  ".automation-field > .field-label", ".automation-form-grid legend"];
-const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ...OUTSIDE_FIELD_LABELS, ".new-session-field-label"].join(",\n");
+const STACKED_FIELD_LABELS = [".field > .field-label"];
+/** Labels of a form that stacks them over the control outside a `.field` (#2366). */
+const FIELD_LABEL = [".field > span:first-child", ".field > .field-label", ".new-session-field-label"].join(",\n");
 
 /** The line under a field's control (§8.1): the helper, the error that replaces it, or a `.field-foot`. */
 const FIELD_LINE = ".field > :is(.field-helper, .field-error, .field-foot)";
@@ -309,31 +296,6 @@ test("every field row is one column under 480px, by one shared rule and no size 
   assert.deepEqual(bodies, [], "a dialog's scrolling body is never a size container");
 });
 
-/**
- * #2366: Archived Sessions and the Automations editor stack their labels over the control outside a
- * `.field`. Those labels share the §8.1 rule above, their containers space them by --space-2, and no
- * other rule gives them a colour or type of their own (the old weight-600 overrides are gone). A grid
- * label's helper is dim, 4px under the control. e2e/field-label-outside-field.spec.ts measures them.
- */
-test("a label stacked outside a .field is the §8.1 label, 8px above its control", () => {
-  for (const container of [".archive-search", ".archive-filter"]) {
-    assert.match(soleRuleBody(container), /gap: var\(--space-2\);/, `${container} spaces label and control by --space-2`);
-  }
-  for (const container of [".automation-form-grid > label", ".automation-form-grid > .automation-field"]) {
-    assert.equal(soleRuleBody(container), "display: grid;\ngap: var(--space-2);", `${container} spaces label and control by --space-2`);
-  }
-  assert.equal(soleRuleBody(".automation-form-grid > label > small"),
-    "margin-top: calc(-1 * var(--space-1));\ncolor: var(--text-dim);\nfont: var(--type-small);");
-  const overrides: string[] = [];
-  postcss.parse(css).walkRules((rule) => {
-    if (rule.selector === FIELD_LABEL) return;
-    const owns = rule.selectors.some((selector) => OUTSIDE_FIELD_LABELS.includes(selector.replace(/\s+/g, " ").trim()));
-    if (owns && rule.nodes.some((node) => node.type === "decl" && /^(color|font|line-height)/.test(node.prop))) {
-      overrides.push(rule.selector);
-    }
-  });
-  assert.deepEqual(overrides, [], "no other rule gives those labels a colour or type of their own");
-});
 
 /**
  * #2365: the dim rule for a field's later spans takes only BARE spans. As `.field > span` its
@@ -409,9 +371,6 @@ test("form controls and buttons inherit the app's type, and bare buttons reset",
   assert.equal(baseRule("input, select, textarea").split("\n")[0], "font-weight: 400;");
   assert.equal(baseRule(":where(button)"),
     ["background: none;", "border: 0;", "color: inherit;", "font: inherit;", "padding: 0;"].join("\n"));
-  // The Automation form's fields inherited 600 from their label through a local `font: inherit`.
-  assert.doesNotMatch(soleRuleBody(".automation-form-grid input, .automation-form-grid select, .automation-form-grid textarea"),
-    /font:/, "a local font shorthand would re-inherit the label's weight");
 });
 
 /**
@@ -454,6 +413,19 @@ test("a connection banner takes the top safe area only at the very top of the ma
   assert.deepEqual(first, ["max(var(--space-1), env(safe-area-inset-top, 0px))"]);
   const bare = phone.flatMap((block) => block.declarationsForSelector(".notice.page-banner").get("padding-top") ?? []);
   assert.deepEqual(bare, [], "a bare page-banner inset would clear the safe area twice under the Session bar");
+});
+
+test("an untitled page banner keeps its actions top right, and a titled one keeps its wrapping row", () => {
+  // The top-right grid is for a sentence and its actions (#2465, #3005). A titled banner (Secure
+  // Dashboard Available) has a head, a body and actions as three siblings, which that grid would
+  // scatter across two columns, so it keeps the wrapping flex row.
+  assert.match(baseRule(".notice.page-banner .notice-content"), /display: flex;/);
+  assert.match(baseRule(".notice.page-banner:not(.with-head) > .notice-content"), /display: grid;/);
+  const phone = mediaBlocks(css).filter((block) => block.maxWidths.includes(760));
+  const rows = phone.flatMap((block) => block.declarationsForSelector(
+    ".notice.page-banner:not(.with-head):has(> .notice-content > .notice-actions > .btn ~ .btn) > .notice-content",
+  ).get("grid-template-columns") ?? []);
+  assert.deepEqual(rows, ["minmax(0, 1fr)"], "two actions move under the sentence on a phone, for untitled banners only");
 });
 
 test("a crashed route's error notice lines up with its page header", () => {
@@ -504,8 +476,13 @@ test("message and turn actions use the shared small icon button and never size t
 });
 
 test("hover clusters take no height and show on hover, focus within or an open menu", () => {
-  const user = soleRuleBody(".tl-user-actions, .tl-user-menu");
-  assert.match(user, /position: absolute;/, "the user cluster sits beside the bubble, not under it");
+  const user = soleRuleBody(".tl-user-actions");
+  assert.match(user, /position: absolute;/, "the desktop user cluster sits beside the bubble");
+  const touch = soleRuleBody(".tl-user-menu");
+  assert.doesNotMatch(touch, /position: absolute;/, "touch controls keep their own row below the bubble");
+  assert.match(touch, /justify-self: end;/);
+  assert.match(touch, /gap: var\(--space-2\);/, "touch targets have room between controls");
+  assert.match(touch, /padding: var\(--space-1\);/, "the row reserves room for extended hit areas");
   assert.match(user, /bottom: 0;/, "bottom-aligned with the bubble");
   assert.match(user, /inset-inline-end: calc\(100% \+ var\(--space-1\)\);/, "to the bubble's left");
   assert.match(soleRuleBody(".tl-user-actions, .tl-hover-action"), /opacity: 0;/);

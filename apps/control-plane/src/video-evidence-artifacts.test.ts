@@ -3,7 +3,8 @@ import { createHash } from "node:crypto";
 import { test } from "node:test";
 import { ControlPlaneDb } from "./db.js";
 import { ControlPlaneVideoFrameStorage, createControlPlaneVideoReviewStore } from "./video-evidence-artifacts.js";
-import type { VideoReviewRecord } from "./video-evidence-runtime.js";
+import { pacedVideoReviewWindowPlan } from "@wollipog/protocol";
+import { videoReviewDeliveryPlanSha256, type VideoReviewRecord } from "./video-evidence-runtime.js";
 const hash = (bytes: string | Buffer) => createHash("sha256").update(bytes).digest("hex");
 const image = Buffer.from([137, 80, 78, 71, 13, 10, 26, 10, 1, 2, 3]);
 /** Actual referenced Session rows in an in-memory CODE fixture, never managed provider work. */
@@ -36,6 +37,7 @@ function review(): VideoReviewRecord {
       audienceSha256: hash("audience"), capabilitiesSha256: hash("capability"), sourceEvidenceId: "source_evidence", sourceArtifactId: "source",
       sourceSha256: hash("source"), workerAdmissionSha256: hash("admission"), criteriaSha256: hash(JSON.stringify(criteria)),
     }, manifest, manifestSha256: hash(JSON.stringify(manifest)), criteria, criteriaSha256: hash(JSON.stringify(criteria)),
+    deliveryPlanSha256: videoReviewDeliveryPlanSha256(pacedVideoReviewWindowPlan(manifest.frames)),
     createdAt: 1_000, expiresAt: 3_601_000, status: "pending",
   };
 }

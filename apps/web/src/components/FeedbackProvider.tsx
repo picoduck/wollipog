@@ -25,6 +25,10 @@ export interface ConfirmationDetailRow {
   /** The affected object's name, such as a session title. One line, truncated, with the full text in
    * a tooltip. */
   label: string;
+  /** Live content drawn in place of `label`, with no tooltip, for a personal identifier that must
+   * stay masked and revealable as the preference changes (§11.8). `label` stays the plain, masked
+   * text, which identifies the request. */
+  labelContent?: ReactNode;
   /** `mono` sets the label in the monospace face, for a path or an id (§11.3). */
   labelStyle?: "mono";
   /** A short neutral fact, trailing in `--text-faint` (§11.3). */
@@ -42,6 +46,10 @@ export interface ConfirmationOptions {
   title: string;
   /** One or two sentences: what happens, to which named object, and whether it can be undone. */
   message: string;
+  /** Live content drawn in place of `message`, for a sentence that names a personal identifier
+   * which must stay masked and revealable (a provider account label, §11.8). `message` stays the
+   * plain, masked text, which also identifies the request. */
+  messageContent?: ReactNode;
   /** Content under the body that is not a list of affected objects, such as a mono preview. A list
    * uses `detailRows`. */
   details?: ReactNode;
@@ -82,6 +90,11 @@ export interface ConfirmationOptions {
    * dialog shows a field for it, opens with focus there rather than on Cancel, and compares exactly
    * (case and spaces included). */
   typeToConfirm?: string;
+  /** A fixed Title Case label for the `typeToConfirm` field, for text that would make "Type <text>
+   * to Confirm" run long, such as a project's name: "Type the Project Name to Confirm". The field's
+   * helper then shows the text to type, "Enter <text> exactly.", with the text as an inline code
+   * chip. Without it the label names the text, as Delete Group's does. */
+  typeToConfirmLabel?: string;
   /** Durable element to restore focus to after settling. Needed when the invoking control is
    * a menu item that unmounts as the confirmation opens — the activeElement snapshot below
    * would then be disconnected by the time focus can be restored. */
@@ -129,6 +142,7 @@ function confirmationFingerprint(options: ConfirmationOptions): string {
     options.cancelLabel ?? "",
     options.secondaryAction?.label ?? "",
     options.typeToConfirm ?? "",
+    options.typeToConfirmLabel ?? "",
   ].join("\u0000");
 }
 
@@ -410,12 +424,17 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
   // Newest on top. Three are visible on desktop and one on a phone (§13.1); older ones wait behind
   // "+N More", whose list opens upward, so a persistent recovery toast is always reachable.
   const newestFirst = useMemo(() => [...toasts].sort((left, right) => right.id - left.id), [toasts]);
-  const visibleCount = isPhone ? 1 : 3;
+  const restingCount = isPhone ? 1 : 3;
+  const hiddenCount = Math.max(0, newestFirst.length - restingCount);
+  // While the older list is open only the newest toast stays above it. The stack must fit above
+  // whatever it clears, and the list is what gives way, so three full toasts over a dialog footer
+  // that sits high (a short New Session) left the open list no height at all (#2954).
+  const visibleCount = moreOpen && hiddenCount > 0 ? 1 : restingCount;
   const visibleToasts = newestFirst.slice(0, visibleCount);
   const olderToasts = newestFirst.slice(visibleCount);
   useEffect(() => {
-    if (olderToasts.length === 0) setMoreOpen(false);
-  }, [olderToasts.length]);
+    if (hiddenCount === 0) setMoreOpen(false);
+  }, [hiddenCount]);
   useToastClearance(toasts.length > 0);
 
   // Dismissing the focused toast removes the element that held focus, and a removed element fires
@@ -499,10 +518,10 @@ export function FeedbackProvider({ children }: { children: ReactNode }) {
             {[...olderToasts].reverse().map((toast) => <li key={toast.id}>{renderToast(toast)}</li>)}
           </ul>
         )}
-        {olderToasts.length > 0 && (
+        {hiddenCount > 0 && (
           <button type="button" className="btn sm toast-more" aria-expanded={moreOpen} aria-controls={moreListId}
             onClick={() => setMoreOpen((open) => !open)}>
-            {moreOpen ? "Show Fewer" : `+${olderToasts.length} More`}
+            {moreOpen ? "Show Fewer" : `+${hiddenCount} More`}
           </button>
         )}
         {visibleToasts.map(renderToast)}
@@ -614,6 +633,8 @@ function ConfirmationDialog({ request, onSettle }: {
   const typeToConfirm = request.typeToConfirm;
   const [typed, setTyped] = useState("");
   const typedId = useId();
+  const typedHelperId = useId();
+  const typeToConfirmLabel = request.typeToConfirmLabel;
   /** Until the typed text matches, the confirm button is disabled and confirming does nothing. */
   const typedMismatch = typeToConfirm !== undefined && typed !== typeToConfirm;
   /** The running `onConfirm`, if any. Cleared before settling, so a finished action is never aborted
@@ -722,14 +743,15 @@ function ConfirmationDialog({ request, onSettle }: {
         </>
       )}
     >
-      <p className="confirmation-message" id={descriptionId}>{request.message}</p>
+      <p className="confirmation-message" id={descriptionId}>{request.messageContent ?? request.message}</p>
       {request.details && <div id={detailsId}>{request.details}</div>}
       {shownRows.length > 0 && (
         <ul className="surface confirmation-rows" id={rowsId}>
           {shownRows.map((row, index) => (
             <li className="row dense" key={index}>
               <span className="row-body">
-                <span className={row.labelStyle === "mono" ? "row-title mono" : "row-title"} title={row.label}>{row.label}</span>
+                <span className={row.labelStyle === "mono" ? "row-title mono" : "row-title"}
+                  title={row.labelContent === undefined ? row.label : undefined}>{row.labelContent ?? row.label}</span>
               </span>
               {row.meta && <span className="row-trail">{row.meta}</span>}
               {row.status && <StatusBadge meta={row.status} inline />}
@@ -739,10 +761,11 @@ function ConfirmationDialog({ request, onSettle }: {
       )}
       {moreRows > 0 && <p className="confirmation-rows-more" id={moreId}>and {moreRows} more</p>}
       {typeToConfirm !== undefined && (
-        <label className="field" htmlFor={typedId}>
-          <span>Type {typeToConfirm} to Confirm</span>
+        <div className="field">
+          <label className="field-label" htmlFor={typedId}>{typeToConfirmLabel ?? `Type ${typeToConfirm} to Confirm`}</label>
           {/* Focused on open, on every pointer: nothing else can happen until the text is typed (§7.4). */}
           <input id={typedId} autoFocus value={typed} autoComplete="off" spellCheck={false} readOnly={running}
+            aria-describedby={typeToConfirmLabel !== undefined ? typedHelperId : undefined}
             onChange={(event) => setTyped(event.target.value)}
             onKeyDown={(event) => {
               // An input method's commit Enter is not a confirmation; some report it only as keyCode 229.
@@ -750,7 +773,13 @@ function ConfirmationDialog({ request, onSettle }: {
               event.preventDefault();
               void confirm();
             }} />
-        </label>
+          {/* The helper names the text, so the label can stay short for a long name. */}
+          {typeToConfirmLabel !== undefined && (
+            <p className="field-helper" id={typedHelperId}>
+              Enter <code className="confirmation-typed-text">{typeToConfirm}</code> exactly.
+            </p>
+          )}
+        </div>
       )}
       {failure && (
         // Show Details needs the action row under the sentence, which a one-line notice lacks.

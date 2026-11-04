@@ -3,155 +3,182 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 
 const view = readFileSync(new URL("./RunnersView.tsx", import.meta.url), "utf8");
+const machine = readFileSync(new URL("./MachineDetail.tsx", import.meta.url), "utf8");
+const settings = readFileSync(new URL("./MachineSettingsDialog.tsx", import.meta.url), "utf8");
 const discovery = readFileSync(new URL("./AgentSessionDiscoveryDialog.tsx", import.meta.url), "utf8");
 const access = readFileSync(new URL("./PeopleDevicesPanel.tsx", import.meta.url), "utf8");
+const teamDialog = readFileSync(new URL("./TeamDialog.tsx", import.meta.url), "utf8");
+const personAccess = readFileSync(new URL("./PersonAccessDialogs.tsx", import.meta.url), "utf8");
+const pairDevice = readFileSync(new URL("./PairDeviceDialog.tsx", import.meta.url), "utf8");
 const icons = readFileSync(new URL("./Icons.tsx", import.meta.url), "utf8");
-const onboarding = readFileSync(new URL("./OnboardRunnerDialog.tsx", import.meta.url), "utf8");
+const onboarding = readFileSync(new URL("./SetUpThisMachineDialog.tsx", import.meta.url), "utf8");
+const install = readFileSync(new URL("./InstallManuallyDialog.tsx", import.meta.url), "utf8");
+const repair = readFileSync(new URL("./RepairConnectionDialog.tsx", import.meta.url), "utf8");
 const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
+const agents = readFileSync(new URL("./MachineAgentsSection.tsx", import.meta.url), "utf8");
+const agentHelpers = readFileSync(new URL("../machine-agents.ts", import.meta.url), "utf8");
 
 test("Connections separates machines from people and exposes durable machine recovery", () => {
   // The shared tab row (§10.1) owns role="tablist"; it sits in the page header's tab slot.
-  assert.match(view, /tabs=\{\(\s*<TabList label="Connection Settings"/);
+  assert.match(view, /tabs=\{\(\s*<TabList label="Connections"/);
   assert.match(view, /aria-controls=\{`connections-\$\{item\.id\}-panel`\}/);
   assert.match(view, /handleRovingChoiceKeyDown\(event, "tab"\)/);
   assert.match(view, /id: "instances" as const/);
-  assert.match(view, /<InstancesPanel \/>/);
+  assert.match(view, /<InstancesPanel addButtonRef=\{addInstanceRef\} \/>/);
   assert.match(view, /id: "machines", label: <>Machines/);
-  assert.match(view, /id: "people", label: <>People &amp; Devices/);
-  assert.match(view, /instances\.desktopMultiInstance/);
-  assert.match(view, /<PeopleDevicesPanel identity=\{identity\}/);
-  assert.match(view, /Repair Credentials/);
-  assert.match(view, /canRepair=\{canManage\}/);
-  assert.match(view, /<NativeRunnerCard[\s\S]*canManage=\{canManageMachines\}/);
-  assert.match(view, /Ask an organization owner or admin to repair this connection/);
-  assert.match(view, /initialRunnerId=\{repairRunnerId\}/);
+  assert.match(view, /id: "people", label: <>People and Devices/);
+  assert.match(view, /const instancesTab = instances\.desktopMultiInstance && !isMobile/);
+  assert.match(view, /<PeopleDevicesTab\s+identity=\{identity\}/);
+  assert.match(machine, />Repair Connection…<\/button>/);
+  assert.match(machine, /actions=\{access\.canManage && \(/);
+  assert.match(view, /useMachineActions\(selectedMachine, \{\s*canManage: canManageMachines,/);
+  assert.match(machine, /Ask an organization owner or admin to repair this connection/);
+  assert.match(view, /runnerId=\{repairRunnerId\}/);
   assert.match(view, /isManagedLocalRunnerRepair\(runnerId, localRunnerStatus, bundledLocalRunner, localInstanceActive\)/);
   assert.match(view, /isManagedLocalRunnerRepair[\s\S]*setOnboarding\("local"\)[\s\S]*setRepairRunnerId\(runnerId\)/);
-  assert.match(view, /onRepair=\{repairRunner\}/);
-  assert.match(view, /const needsUpdate = !!runner && runnerOutdated\(runner\.protocolVersion\)/);
-  assert.match(view, /\{canManage && needsUpdate && !inProgress && \(/);
-  assert.doesNotMatch(view, /\{needsUpdate && !updating && \(/);
-  assert.doesNotMatch(view, /runner\.protocolVersion == null \|\| runnerOutdated/);
+  assert.match(view, /onRepair: repairRunner/);
+  // Only a known older protocol proves an SSH runner is out of date (#2988's Update Required notice).
+  assert.match(machine, /if \(runnerOutdated\(runner\.protocolVersion\)\) return "update_required";/);
+  assert.doesNotMatch(machine, /runner\.protocolVersion == null \|\| runnerOutdated/);
   assert.match(view, /role="alert"/);
 });
 
 test("People and device tasks use progressive disclosure and only Agents collapse", () => {
   assert.match(access, /const canPair = admin && identity\.context\.localBootstrap/);
-  assert.match(access, /Pairing and revocation must be started from this instance’s trusted local dashboard\./);
+  // A paired dashboard says where pairing happens, inside Paired Devices (#2997); the old note is gone.
+  assert.match(access, /You're on a paired device\. Pair and revoke devices from the computer running Wollipog\./);
+  assert.doesNotMatch(access, /connection-access-note/);
   assert.match(access, /kind: "add-person"/);
   assert.match(access, /kind: "pair-device"/);
   assert.match(access, /kind: "create-team"/);
-  assert.match(access, /Forms open only when/);
-  assert.match(access, /<Modal/);
-  assert.match(access, /nextAdmin \? await api\.listDevices\(\) : \{ devices: \[\] \}/);
-  assert.match(access, /api\.createIdentityTeam\(\{ name: name\.trim\(\), memberUserIds: memberIds \}\)/);
-  assert.match(access, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
+  assert.doesNotMatch(access, /Forms open only when|access-page-intro|access-context/);
+  // The forms are dialogs of their own files; Pair Device is one (#2999).
+  assert.match(pairDevice, /<Modal/);
+  // Nobody else asks for the device list, and theirs stays unloaded rather than empty (#2997).
+  assert.match(access, /if \(canAdminister\(context\)\) \{\s*await loadDevices\(\);\s*\} else \{[\s\S]*?setDevices\(null\);/);
+  assert.doesNotMatch(access, /\{ devices: \[\] \}/);
+  assert.match(teamDialog, /api\.createIdentityTeam\(\{ name: trimmed, memberUserIds: memberIds \}\)/);
+  assert.match(personAccess, /api\.updateIdentityMember\(member\.userId, \{\s*displayName:/s);
   assert.doesNotMatch(access, /device-pair-row/);
-  assert.match(view, /<dl className="runner-meta runner-system-meta" aria-label="System Details">/);
-  assert.match(view, /<details className="runner-agents disclosure">/);
+  // One detail for every machine (#2988): the spec sheet moved into Connection Details.
+  assert.doesNotMatch(view, /runner-meta|runner-system-meta/);
+  // Agents are a section of rows, not a disclosure of cards (#2990).
+  assert.match(view, /<MachineAgentsSection runner=\{runner\}/);
+  assert.doesNotMatch(view, /runner-agents disclosure|runner-agents-summary/);
   assert.doesNotMatch(view, /<details className="runner-details">/);
-  assert.match(view, /export function BoxCard\(/);
-  assert.match(view, /export function NativeRunnerCard\(/);
-  assert.match(view, /<article className=\{`runner-card status-\$\{runner\.status\}`\}>[\s\S]*<div className="runner-head">[\s\S]*<div className="runner-id">[\s\S]*<h2>\{runnerDisplay\(runner, undefined, runner\.runnerId\)\.name\}<\/h2>/);
-  assert.doesNotMatch(css, /\.runner-card\.status-offline\s*\{[^}]*opacity:/s);
-  // auto-FILL, not auto-fit: auto-fit collapses the empty tracks so a single machine — the default
-  // for a new install — stretched to a full-bleed card holding two fields.
-  // Asserted per grid: an unscoped match would be satisfied by .instance-grid alone, letting
-  // .runner-grid regress to a single full-width column without failing.
-  for (const selector of [".runner-grid", ".instance-grid"]) {
-    const rule = new RegExp(`\\${selector}\\s*\\{[^}]*\\}`, "s").exec(css)?.[0];
-    assert.ok(rule, `${selector} rule must exist`);
-    assert.match(rule!, /repeat\(auto-fill, minmax\(min\(100%, 360px\), 1fr\)\)/,
-      `${selector} must use auto-fill so one card does not span the row`);
-    assert.doesNotMatch(rule!, /auto-fit/, `${selector} must not reintroduce auto-fit`);
-  }
-  assert.match(css, /@media \(max-width: 760px\)[\s\S]*\.runner-grid\s*\{\s*grid-template-columns: minmax\(0, 1fr\)/);
+  assert.match(machine, /export function MachineDetail\(/);
+  assert.doesNotMatch(view, /export function (BoxCard|NativeRunnerCard)\(/);
+  assert.match(machine, /<h2 className="machine-detail-title" title=\{name\}>\{name\}<\/h2>/);
+  assert.doesNotMatch(css, /\.runner-card\.status-offline/);
+  // Instances are rows in one surface now (#3002): the card grid, its cards, their uppercase
+  // definition terms and the count toolbar are gone.
+  assert.doesNotMatch(css, /\.(instances-page|instance-grid|instance-card|instance-meta|instance-status-dot)\b/);
+  assert.doesNotMatch(css.match(/\.instance-row[^{]*\{[^}]*\}/g)?.join("\n") ?? "", /text-transform/);
+  // Machines are rows beside their detail now (#2985): the card grid is gone.
+  assert.doesNotMatch(css, /\.runner-grid\b/);
+  assert.doesNotMatch(view, /runner-grid/);
 });
 
 test("Connections controls use one centered SVG icon system instead of font glyphs", () => {
   assert.match(icons, /strokeLinecap="round"/);
   assert.match(icons, /className=\{`app-icon/);
-  assert.match(view, /<UpdateIcon \/>/);
-  assert.match(view, /<RefreshIcon \/>/);
-  assert.match(view, /<SettingsIcon \/>/);
-  assert.doesNotMatch(view.slice(view.indexOf("function BoxCard")), /⬆|↻|✕|🔍/);
-  assert.match(css, /\.btn-rediscover\s*\{[^}]*display: inline-flex;[^}]*align-items: center;/s);
+  assert.match(machine, /<RefreshIcon \/>/);
+  assert.match(machine, /<SettingsIcon \/>/);
+  assert.match(machine, /<WifiOffIcon \/>/);
+  assert.doesNotMatch(machine, /⬆|↻|✕|🔍/);
+  // Rediscover and Reconnect are ⋯ items now, not pill buttons (#2988).
+  assert.doesNotMatch(css + view + machine, /btn-rediscover/);
 });
 
-test("machine cards use consistent action rows and progressively disclose deployment diagnostics", () => {
-  assert.match(view, /className="runner-head-right runner-card-actions"/);
-  assert.match(view, /title="Connection Details"/);
-  assert.match(view, /<BoxConnectionDetailsDialog box=\{box\}/);
-  assert.match(view, /<dt>Last Deployed Build<\/dt>/);
-  assert.match(view, /<dt>Runner Platform<\/dt>/);
-  assert.doesNotMatch(view, /<dt>Deployed Binary<\/dt>/);
-  assert.match(css, /\.runner-card-actions\s*\{[^}]*margin-bottom: 14px;/s);
-  assert.match(css, /\.runner-connection-meta\s*\{[^}]*repeat\(2, minmax\(0, 1fr\)\)/s);
+test("a machine's actions live in Settings… and ⋯, and Connection Details lists its facts", () => {
+  assert.match(machine, /<ActionsMenu label="Machine Actions" items=\{actions\.menu\} \/>/);
+  assert.match(machine, /<ConnectionDetailsDialog runner=\{runner\} box=\{box\}/);
+  assert.match(machine, /label: "Deployed Build"/);
+  assert.match(machine, /label: "Platform"/);
+  assert.doesNotMatch(view + machine, /<dt>Deployed Binary<\/dt>|connection-details-trigger|runner-head|os-badge/);
+  assert.doesNotMatch(css, /\.runner-card-actions|\.runner-connection-meta|\.connection-details-list|\.os-badge/);
   assert.match(view, /<MachineSettingsDialog/);
-  assert.match(view, /<span>Machine Name<\/span>/);
-  assert.match(view, /<span>Add Workspace<\/span>/);
-  assert.match(view, /"Delete Machine"/);
-  assert.match(view, /api\.registerMachineWorkspace/);
-  assert.match(view, /<h3>Runner Capacity<\/h3>/);
-  assert.match(view, /api\.updateMachineCapacity/);
-  assert.match(view, /aria-label="Runner Capacity Usage"/);
-  assert.match(view, /aria-label="Capacity Dimensions"/);
-  assert.match(view, /<dt>Active Turns<\/dt>/);
-  assert.match(view, /<dt>Resident Process Units<\/dt>/);
-  assert.match(view, /<dt>Retained Resumable Sessions<\/dt>/);
-  assert.match(view, /<dt>Parked Sessions<\/dt>/);
-  assert.match(view, /<dt>Idle Process Policy<\/dt>/);
-  assert.match(view, /aria-label="Current Capacity Bottlenecks"/);
-  assert.match(view, /does not infer it from CPU or memory/);
-  assert.match(view, /machineSettingsMutationError\(cause\)/);
-  assert.match(view, /disabled=\{deleting \|\| onlineNativeRunner\}/);
-  assert.match(view, /box\?\.runnerDataLayout === "legacy"/);
-  assert.match(view, /box\.legacyDataAccountStatus === "adopted"/);
-  assert.match(view, /Legacy Runner Data Adopted/);
-  assert.match(view, /Legacy Data Adoption in Progress/);
-  assert.match(view, /Confirm that every legacy runner process using this SSH account on \$\{display\.name\} is stopped\./);
-  assert.match(view, /confirmLabel: "Adopt Legacy Data"/);
-  assert.match(view, /confirmLabel: "Interrupt Sessions and Adopt Legacy Data"/);
-  assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, false\)/);
-  assert.match(view, /api\.adoptLegacyBoxData\(box\.boxId, true\)/);
+  // Machine Settings is its own one-form dialog (#2991).
+  assert.doesNotMatch(view, /function MachineSettingsDialog|ProviderAccountDefaultsSettings|api\.updateMachine/);
+  assert.match(settings, /<label htmlFor=\{nameIds\.input\}>Machine Name<\/label>/);
+  assert.match(machine, /title: "Delete Machine"/);
+  assert.match(settings, /confirmDeleteMachine\(confirm, \{ name: display\.name/);
+  assert.match(settings, /api\.updateMachineCapacity/);
+  // Workspaces and the capacity readouts live in the machine's detail now (#2989).
+  assert.doesNotMatch(view + settings, /registerMachineWorkspace|DirectoryPicker|Add Workspace|<h3>Workspaces<\/h3>/);
+  assert.doesNotMatch(view + settings, /Runner Capacity Usage|Capacity Dimensions|Current Capacity Bottlenecks|Units Used/);
+  assert.doesNotMatch(css, /\.group-head|\.workspace-list|\.ws-(?:name|path)|machine-capacity-blockers|\.machine-workspace-(?:create|form)/);
+  assert.match(machine, /label: "Idle Processes"/);
+  assert.match(settings, /machineSettingsMutationError\(cause\)/);
+  assert.match(settings, /disabled=\{deleteBlocked \|\| saving\}/);
+  // Older runner data is the machine's notice now, not Machine Settings' Danger Zone (#2988).
+  assert.doesNotMatch(view + settings, /runnerDataLayout|adoptLegacyBoxData|Danger Zone/);
+  assert.match(machine, /if \(box\.runnerDataLayout === "legacy"\) return "legacy_data";/);
+  assert.match(machine, /box\.legacyDataAccountStatus === "adopted"/);
+  assert.match(machine, /title="Older Runner Data Found"/);
+  assert.match(machine, /Confirm that every legacy runner process using this SSH account on \$\{name\} is stopped\./);
+  assert.match(machine, /confirmLabel: "Adopt Legacy Data",\n\s*\}\);/, "a non-destructive confirmation");
+  assert.match(machine, /adopt: "Interrupt Sessions and Adopt"/);
+  assert.match(machine, /api\.adoptLegacyBoxData\(box\.boxId, force\)/);
 });
 
-test("runner repair preserves identity, rotates when needed, and exposes selection semantics", () => {
-  assert.match(onboarding, /initialRunnerId\?: string/);
-  assert.match(onboarding, /api\.rotateRunnerCredential\(id, "Connection repair"\)/);
-  assert.match(onboarding, /readOnly=\{repairingExisting\}/);
-  assert.match(onboarding, /showLocalSetup && mode !== "local" && \(\s*<button/);
-  assert.match(onboarding, /mode !== "local" && \(!showLocalSetup \|\| advancedOpen\)/);
-  assert.match(onboarding, /Wollipog could not access its managed local runner\. Close this dialog and try again\./);
-  // The host choice is the shared segmented control (§10.2), which renders the radio group.
-  assert.match(onboarding, /<SegmentedControl\s+className="runner-hosts"\s+label="Runner Connection Host"\s+value=\{host\}/);
+test("runner repair preserves identity and rotates when needed; adding and repairing are separate dialogs (#2992)", () => {
+  assert.match(repair, /api\.rotateRunnerCredential\(runnerId, "Connection repair"\)/);
+  assert.match(view, /<RepairConnectionDialog runnerId=\{repairRunnerId\}/);
+  assert.match(view, /onboarding === "manual" && <InstallManuallyDialog/);
+  assert.match(view, /onboarding === "local" && \(\s*<SetUpThisMachineDialog/);
+  assert.match(onboarding, /Wollipog couldn't reach its bundled runner\. Close this dialog and try again\./);
+  // The host choice is a Select whose options read in words (§8.4), not a segmented control.
+  assert.match(install, /<Select label="Connects To" value=\{host\} options=\{hostOptions\}/);
+  assert.doesNotMatch(install + repair + onboarding, /SegmentedControl|runner-hosts|step-head/);
+  assert.doesNotMatch(css, /\.onboard-health|\.onboard-advanced-toggle|\.step-head|\.runner-hosts/);
+  // Set Up This Machine (#2993) replaced the local mode's bordered card and its agent chips.
+  assert.doesNotMatch(css, /\.onboard \{|\.onboard-local/);
 });
 
 test("agent session discovery is a progressive modal instead of an inline runner-card list", () => {
-  assert.match(view, /<AgentSessionDiscoveryDialog runner=\{runner\}/);
-  assert.match(view, /setFindingSessions\(true\)/);
+  assert.match(machine, /<AgentSessionDiscoveryDialog runner=\{runner\}/);
+  assert.match(machine, /setFindingSessionsFor\(runnerId\)/);
+  // Find Agent Sessions… is a ⋯ item (#2988); the Agent Sessions promo group is gone.
+  assert.doesNotMatch(view + machine, /runner-agent-sessions/);
   assert.doesNotMatch(view, /function ExternalSessions/);
   assert.doesNotMatch(view, /<ul className="ext-session-list">/);
   assert.match(discovery, /title="Find Agent Sessions"/);
-  assert.match(discovery, /<legend>Select an Agent<\/legend>/);
+  assert.match(discovery, /<ChoiceRows\s+label="Agent"/);
   assert.match(discovery, /api\.listExternalSessions\(runner\.runnerId, selectedAgent\.id\)/);
   assert.match(discovery, /response\.sessions\.filter\(\(session\) => sessionMatchesAgent/);
   assert.match(discovery, /driver === "codex-app-server"/);
 });
 
-test("a Codex exec agent reads as no longer supported, never as a fallback (#3224, #3259)", () => {
-  assert.match(view, /isRetiredCodexExec\(a\) && \(\s*<span className="atag broken"[^>]*>No Longer Supported/);
-  assert.doesNotMatch(view, /Fallback Ready|Non-Interactive Fallback|Existing Sessions Only/);
+test("Find Agent Sessions sizes to its content and sets no uppercase text (#2994)", () => {
+  const rules = [...css.matchAll(/([^{}]*\.agent-session-[^{}]*)\{([^}]*)\}/g)];
+  assert.ok(rules.length > 0);
+  for (const [, selector, body] of rules) {
+    for (const [, px] of body!.matchAll(/min-height:\s*(\d+(?:\.\d+)?)px/g)) {
+      assert.ok(Number(px) <= 44, `${selector!.trim()} holds a ${px}px minimum height`);
+    }
+    assert.doesNotMatch(body!, /text-transform:\s*uppercase/, selector!.trim());
+  }
+  assert.doesNotMatch(discovery, /className="(?:[^"]*\s)?(?:ext-|atag)/, "results are §5.2 rows, not chips");
 });
 
-test("agent cards progressively disclose launch diagnostics with icon-only copy controls", () => {
-  assert.match(view, /<AgentDetailsDialog a=\{a\}/);
-  assert.match(view, /title=\{`\$\{displayName\} Details`\}/);
-  assert.match(view, /<h3>Launch Command<\/h3>/);
-  assert.match(view, /iconOnly/);
-  assert.match(view, /<InfoIcon \/>/);
-  assert.doesNotMatch(view, /\{contextLabel\(a\.context\)\} launch:/);
-  assert.match(css, /\.agent-details-command/);
+test("a Codex exec agent reads as no longer supported, never as a fallback (#3224, #3259)", () => {
+  // Its one status is Unavailable, and Agent Details says how to fix the configuration (#2990).
+  assert.match(agentHelpers, /if \(isRetiredCodexExec\(agent\)\) return notice\(CODEX_EXEC_RETIRED_CONFIG_REASON\)/);
+  for (const source of [view, agents, agentHelpers]) {
+    assert.doesNotMatch(source, /Fallback Ready|Non-Interactive Fallback|Existing Sessions Only/);
+  }
+});
+
+test("agent rows open Agent Details, which keeps launch diagnostics and their icon-only copy controls (#2990)", () => {
+  assert.match(agents, /<button type="button" className="row row-2" aria-haspopup="dialog"/);
+  assert.match(agents, /title=\{name\}\s*description=\{`On \$\{machineName\}`\}/);
+  assert.match(agents, />Launch Command<\/h3>/);
+  assert.match(agents, /<CodeWell value=\{launch\.command\} name=\{`\$\{name\} Launch Command`\} \/>/);
+  // No chips, dots, info buttons or inline guidance in the rows, and no retired classes left behind.
+  assert.doesNotMatch(agents, /atag|auth-dot|install-cmd|install-hints|agent-details-|<InfoIcon/);
+  assert.doesNotMatch(view, /AgentDetailsDialog|AgentRow|install-hints|auth-dot|Probing for agent CLIs/);
+  assert.doesNotMatch(css, /\.agent-details-|\.auth-dot|\.install-hints|\.atag\.driver-/);
   assert.match(css, /\.copy-btn\.icon-only-copy/);
   assert.match(css, /\.agent-session-results-step:focus\s*\{\s*outline: none;/);
 });

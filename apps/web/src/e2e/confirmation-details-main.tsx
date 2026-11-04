@@ -5,7 +5,7 @@ import { ApiError } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback } from "../components/FeedbackProvider.js";
 import { ProjectSplitMenu } from "../components/ProjectSplitMenu.js";
-import { lifecycleConflictPresentation } from "../components/RunnersView.js";
+import { lifecycleConflictPresentation } from "../components/MachineDetail.js";
 import type { InboxSplit } from "../inbox.js";
 import { statusMeta } from "../status-meta.js";
 import "../styles.css";

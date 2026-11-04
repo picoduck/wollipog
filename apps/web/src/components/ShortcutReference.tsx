@@ -1,5 +1,6 @@
 import React, { useRef, useState } from "react";
 import { Modal } from "./common.js";
+import { SearchIcon } from "./Icons.js";
 import { State } from "./State.js";
 import { useIsMobile, useIsTabletOrSmaller } from "./useIsMobile.js";
 import {
@@ -118,36 +119,54 @@ export function ShortcutReference({
   return (
     <Modal
       title="Keyboard Shortcuts"
-      description={phone
-        ? "These shortcuts need a hardware keyboard. Shortcuts pause while a terminal has focus."
-        : "Shortcuts pause while a terminal has focus."}
+      description={
+        phone
+          ? "These shortcuts need a hardware keyboard. Shortcuts pause while a terminal has focus."
+          : "Shortcuts pause while a terminal has focus."
+      }
       size="lg"
       onClose={onClose}
-      footer={(
+      footer={
         <>
-          <p className="shortcut-reference-note">Digits follow your rail order. Change it in Settings, Appearance.</p>
-          <button type="button" className="btn" onClick={onClose}>Done</button>
+          <p className="shortcut-reference-note">
+            Digits follow your rail order. Change it in Settings, Appearance.
+          </p>
+          <button type="button" className="btn" onClick={onClose}>
+            Done
+          </button>
         </>
-      )}
+      }
     >
-      <input
-        ref={filterRef}
-        type="search"
-        className="shortcut-filter"
-        aria-label="Filter Shortcuts"
-        placeholder="Filter by name or key"
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-      />
+      <label className="input-affix shortcut-filter">
+        <span className="input-affix-text" aria-hidden="true">
+          <SearchIcon size={14} />
+        </span>
+        <input
+          ref={filterRef}
+          type="search"
+          aria-label="Filter Shortcuts"
+          placeholder="Filter by name or key"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
       {groups.length === 0 ? (
         <State
           variant="no-results"
           compact
-          actions={<button type="button" className="btn sm" onClick={() => {
-            // The button leaves with the empty state; focus goes back to the field it cleared.
-            setQuery("");
-            filterRef.current?.focus();
-          }}>Clear Filter</button>}
+          actions={
+            <button
+              type="button"
+              className="btn sm"
+              onClick={() => {
+                // The button leaves with the empty state; focus goes back to the field it cleared.
+                setQuery("");
+                filterRef.current?.focus();
+              }}
+            >
+              Clear Filter
+            </button>
+          }
         >
           No shortcuts match “{query.trim()}”.
         </State>
@@ -155,7 +174,9 @@ export function ShortcutReference({
         <div className="shortcut-columns">
           {columns.map((column, index) => (
             <div className="shortcut-column" key={index}>
-              {column.map((group) => <ShortcutGroupSection key={group.group} group={group} />)}
+              {column.map((group) => (
+                <ShortcutGroupSection key={group.group} group={group} />
+              ))}
             </div>
           ))}
         </div>

@@ -27,6 +27,7 @@ import {
   LEGACY_CLAUDE_PERSISTENT_IDLE_MS,
 } from "./drivers/claude-code.js";
 import { killTree, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
+import { providerHomeLeaseEnv } from "./provider-home-lease.js";
 import type { ProviderLoginSupervisor } from "./provider-login.js";
 import type {
   ProviderAuthIdentityEvidence,
@@ -372,6 +373,9 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
   private readonly spawn: typeof spawnAgent;
   private readonly kill: typeof killTree;
   private readonly loginAccounts = new Map<string, { accountId: string; attempt: symbol }>();
+  /** The runner's own environment, which a native sign-in inherits beneath the session's launch
+   * environment; its lease reads it through `providerHomeLeaseEnv` (#3903). */
+  private readonly runnerEnvironment: NodeJS.ProcessEnv = process.env;
 
   constructor(
     private readonly injectedRun?: CommandRunner,
@@ -533,9 +537,12 @@ class NativeProviderAuthRecovery implements ProviderAuthRecoveryController {
   async startLogin(meta: SessionMeta): Promise<"completed" | "cancelled" | "failed"> {
     const scope = this.describe(meta);
     if (!scope?.canStartLogin || !this.loginSupervisor || this.loginAccounts.has(scope.id)) return "failed";
-    const directory = scope.provider === "claude"
-      ? meta.env.CLAUDE_CONFIG_DIR ?? meta.env.HOME ?? homedir()
-      : meta.env.CODEX_HOME ?? meta.env.HOME ?? homedir();
+    // The sign-in inherits the runner's `CLAUDE_CONFIG_DIR` / `CODEX_HOME` whenever the launch sets
+    // none, so its lease, working directory and credential home are that home (#3903). Its own
+    // environment stays the launch's: the runner's value reaches it by inheritance.
+    const leaseEnv = providerHomeLeaseEnv(meta, this.runnerEnvironment);
+    const directory = (scope.provider === "claude" ? leaseEnv.CLAUDE_CONFIG_DIR : leaseEnv.CODEX_HOME) ??
+      meta.env.HOME ?? homedir();
     const accountId = meta.providerAccountId ?? `default-${scope.provider}-${scope.id.slice(0, 12)}`;
     let entry: { accountId: string; attempt: symbol } | undefined;
     try {

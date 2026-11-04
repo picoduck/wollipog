@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { after, test } from "node:test";
 import { buildBwrapArgs, buildCloudArgs, buildContainerArgs, buildWslAgentControlRelayArgs, buildWslArgs, killTree, spawnAgent, terminateDescendantBoundariesAfterPendingKills, trackPendingKill, waitForPendingKills, winQuoteArg, wslProviderPidfile, type AgentProcess } from "./spawn.js";
 import { resolveExecutionIsolation } from "./execution-isolation.js";
+import { WSL_BWRAP_LAUNCHER_PATH } from "./wsl-bwrap-launcher.js";
 import { captureLiveProcess, runFixtureCleanup, terminateOriginalProcess, waitForOriginalProcessToStop, type PosixProcessIdentity } from "../test-support/posix-process.js";
 import { encodeWindowsJobSpec, materializeWindowsJobLauncher, WINDOWS_JOB_CACHE_HELPERS, WINDOWS_JOB_LAUNCHER, windowsJobCacheRoot } from "./windows-job.js";
 import { extendOwnedProcessTree, listPosixProcesses, ownsPosixRootProcessGroup, parsePosixProcessTable, terminatePosixProcessesByMarker } from "./posix-process-tree.js";
@@ -1239,7 +1240,7 @@ test("Direct WSL bridge binds broker-provisioned private files and launches only
   };
   const relayArgs = buildWslAgentControlRelayArgs(bridge);
   assert.deepEqual(relayArgs.slice(0, 7), ["-d", "Ubuntu", "--cd", "/", "--exec",
-    "/usr/local/lib/wollipog/wsl-bwrap-launcher-v1", "relay"]);
+    WSL_BWRAP_LAUNCHER_PATH, "relay"]);
   assert.ok(relayArgs.includes("/var/lib/wollipog-wsl-launcher/session/relay"));
   assert.ok(relayArgs.includes("1:2:3"));
   assert.ok(relayArgs.includes("/usr/bin/node"));

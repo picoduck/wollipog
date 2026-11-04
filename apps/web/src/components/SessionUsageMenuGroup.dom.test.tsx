@@ -167,10 +167,10 @@ test("the Session Usage group names an unpriced cost and drops an unknown window
   const view = await render(<SessionUsageMenuGroup session={session({ costUsd: 0, costSource: "unpriced" })} resolution={UNKNOWN} />);
   try {
     const rows = [...view.container.querySelectorAll("button")];
-    assert.deepEqual(rows.map((candidate) => rowName(candidate)), [{ name: "Session Cost", description: "Cost Unavailable" }]);
+    assert.deepEqual(rows.map((candidate) => rowName(candidate)), [{ name: "Session Cost", description: "205K Tokens, Unpriced" }]);
     const value = rows[0]!.querySelector(".session-usage-group-value")!;
-    assert.ok(value.classList.contains("is-unpriced"));
-    assert.equal(value.querySelector('[aria-hidden="true"]')!.textContent, "$—");
+    assert.equal(value.querySelector(".sr-only")!.textContent, ", Unpriced");
+    assert.doesNotMatch(value.textContent ?? "", /\$/);
   } finally {
     await view.cleanup();
   }
@@ -193,24 +193,25 @@ test("Session Cost opens the breakdown in Model Settings' place, and Escape clos
     assert.equal(title(), "Model Settings");
     await act(async () => { row("Session Cost")!.click(); });
 
-    const breakdown = dialog()!.querySelector<HTMLElement>('[role="group"][aria-label="Session Usage"]')!;
+    const breakdown = dialog()!.querySelector<HTMLElement>('[role="group"][aria-label="Session Cost"]')!;
     assert.equal(title(), "Session Cost", "the title row names the breakdown");
     assert.ok(active() === dialog()!.querySelector('[aria-label="Back to Model Settings"]'), "focus moves to Back");
     assertNoDomNode(dialog()!.querySelector('[role="radiogroup"]'));
-    assert.match(breakdown.textContent ?? "", /By Model/);
-    assert.deepEqual([...breakdown.querySelectorAll(".session-usage-model-name")].map((name) => name.textContent),
+    // The same contents as the bar's popover: one table by model with its Total row.
+    assert.deepEqual([...breakdown.querySelectorAll(".usage-table tbody th")].map((name) => name.textContent),
       ["gpt-5.5-codex", "gpt-5.5-codex-mini"]);
-    assert.ok(breakdown.querySelector('a[href="https://example.test/prices.json"]')?.textContent === "Estimated API Costs");
-    const about = breakdown.querySelector<HTMLButtonElement>('[aria-label="About Codex App Server Usage"]');
-    assert.ok(about, "a Codex App Server session keeps its usage note");
+    assert.equal(breakdown.querySelector(".usage-table tfoot")!.textContent, "Total205K$1,234.56");
+    assert.ok(breakdown.querySelector('a[href="https://example.test/prices.json"]')?.textContent === "published rates");
+    assert.match(breakdown.querySelector(".usage-disclosure")!.textContent ?? "",
+      /Codex App Server usage recorded before the machine's Wollipog update/, "a Codex App Server session keeps its usage note");
 
-    // Tab reaches the note's button and the pricing link, and stays inside.
+    // Tab reaches Token Breakdown and the pricing link, and stays inside.
     const stops: string[] = [];
     for (let index = 0; index < 4; index += 1) {
       await press("Tab");
       stops.push(active().getAttribute("aria-label") ?? active().textContent ?? "");
     }
-    assert.deepEqual(stops, ["Close Model Settings", "About Codex App Server Usage", "Estimated API Costs", "Back to Model Settings"]);
+    assert.deepEqual(stops, ["Close Model Settings", "Token Breakdown", "published rates", "Back to Model Settings"]);
 
     // The first Escape returns to the choices with focus on the row, not past Model Settings.
     let leaked = 0;
@@ -274,8 +275,8 @@ test("Context Window opens its breakdown too, and Back returns to its row", asyn
     await act(async () => { row("Context Window")!.click(); });
     assert.equal(title(), "Context Window");
     const breakdown = dialog()!.querySelector<HTMLElement>('[role="group"][aria-label="Context Window"]')!;
-    assert.match(breakdown.textContent ?? "", /Capacity200K · Provider Reported/);
-    assert.match(breakdown.textContent ?? "", /Remaining128k/);
+    assert.match(breakdown.textContent ?? "", /Used72KRemaining128KWindow200K/);
+    assert.match(breakdown.textContent ?? "", /Window size reported by the provider\./);
     assertNoDomNode(breakdown.querySelector('[aria-label="About Codex App Server Usage"]'));
     await act(async () => { dialog()!.querySelector<HTMLButtonElement>('[aria-label="Back to Model Settings"]')!.click(); });
     assert.equal(title(), "Model Settings");

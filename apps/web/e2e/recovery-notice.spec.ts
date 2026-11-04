@@ -310,7 +310,9 @@ test.describe("touch", () => {
     await expect(jump).toBeVisible();
     const jumpBox = await box(jump);
     const client = await context.newCDPSession(page);
+    const start = await settledScrollTop(page);
     const drag = async (x: number, startY: number, distance: number) => {
+      await reader(page).evaluate((el, top) => { el.scrollTop = top; }, start);
       const before = await settledScrollTop(page);
       await client.send("Input.dispatchTouchEvent", { type: "touchStart", touchPoints: [{ x, y: startY, id: 1 }] });
       for (let step = 1; step <= 10; step += 1) {
@@ -326,6 +328,9 @@ test.describe("touch", () => {
       return await settledScrollTop(page) - before;
     };
     const y = jumpBox.top + jumpBox.height / 2;
+    // As in the wheel comparison above, measure the rows first and compare both gestures from
+    // the same origin. Otherwise new row measurements alter scrollTop differently in each section.
+    await drag(jumpBox.left - 40, y, -200);
     // Moving the finger down reads back toward earlier activity.
     const onControl = await drag(jumpBox.left + jumpBox.width / 2, y, -200);
     const besideControl = await drag(jumpBox.left - 40, y, -200);

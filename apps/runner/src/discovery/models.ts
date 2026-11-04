@@ -13,7 +13,8 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import type { AgentContext, AgentDefinition, AgentDriverKind, AgentModel } from "@wollipog/protocol";
 import { JsonRpcPeer, type RpcError } from "../jsonrpc.js";
-import { killTree, spawnAgent, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
+import { killTree, provenProcessTreeExit, spawnAgent, type AgentProcess, type SpawnAgentOptions } from "../spawn.js";
+import type { CodexProbeObserver } from "../codex-probe.js";
 import { run } from "./resolve.js";
 
 /* ------------------------------- pure parsers ----------------------------- */
@@ -284,10 +285,13 @@ export function parseClaudeModels(initialization: unknown): AgentModel[] {
 /* --------------------------------- I/O ------------------------------------ */
 
 /** Read $HOME/<rel> in the given context (native fs / WSL cat); null if absent/unreadable. */
-async function readHomeFile(context: AgentContext, rel: string): Promise<string | null> {
+async function readHomeFile(context: AgentContext, rel: string, env: Record<string, string> = {}): Promise<string | null> {
   if (context.kind === "native") {
     try {
-      return readFileSync(join(homedir(), rel), "utf8");
+      const path = rel.startsWith(".codex/") && env.CODEX_HOME
+        ? join(env.CODEX_HOME, rel.slice(".codex/".length))
+        : join(env.HOME ?? homedir(), rel);
+      return readFileSync(path, "utf8");
     } catch {
       return null;
     }
@@ -300,11 +304,11 @@ async function readHomeFile(context: AgentContext, rel: string): Promise<string 
 }
 
 /** Discover a driver's model options from the agent's own sources. Empty ⇒ caller keeps the catalog. */
-export async function discoverModels(driver: AgentDriverKind, context: AgentContext): Promise<AgentModel[]> {
+export async function discoverModels(driver: AgentDriverKind, context: AgentContext, env: Record<string, string> = {}): Promise<AgentModel[]> {
   if (driver === "codex" || driver === "codex-app-server") {
     const [cache, config] = await Promise.all([
-      readHomeFile(context, ".codex/models_cache.json"),
-      readHomeFile(context, ".codex/config.toml"),
+      readHomeFile(context, ".codex/models_cache.json", env),
+      readHomeFile(context, ".codex/config.toml", env),
     ]);
     return cache ? parseCodexModels(cache, config ? parseCodexConfigModel(config) : null) : [];
   }
@@ -338,16 +342,19 @@ export const CODEX_DISCOVERY_CLIENT_INFO = {
   version: "0.8.0",
 } as const;
 
-async function queryCodexAppServerModels(agent: AgentDefinition): Promise<AgentModel[]> {
+async function queryCodexAppServerModels(agent: AgentDefinition, observer: CodexProbeObserver = {}): Promise<AgentModel[]> {
   const context = agent.context ?? { kind: "native" as const };
-  const child = spawnAgent({
+  let completeProof!: (value: boolean) => void;
+  observer.onProcess?.(new Promise<boolean>((resolve) => { completeProof = resolve; }));
+  let child: AgentProcess;
+  try { child = spawnAgent({
     command: agent.command,
     args: [...(agent.args ?? []), "app-server"],
     cwd: context.kind === "wsl" ? "/" : process.cwd(),
     env: agent.env,
     context,
     scrubInheritedEnv: ["OPENAI_API_KEY"],
-  });
+  }); } catch (error) { completeProof?.(false); throw error; }
   const peer = new JsonRpcPeer(child.stdin, child.stdout);
   child.stderr.resume();
   attachModelProbeLifecycle(child, peer);
@@ -367,7 +374,9 @@ async function queryCodexAppServerModels(agent: AgentDefinition): Promise<AgentM
     );
   } finally {
     peer.dispose("model discovery complete");
-    killTree(child);
+    let proven = false;
+    try { killTree(child); proven = await provenProcessTreeExit(child); }
+    finally { completeProof?.(proven); }
   }
 }
 
@@ -473,6 +482,7 @@ interface ClaudeModelQueryDeps {
   kill?: typeof killTree;
   timeoutMs?: number;
   requestId?: string;
+  onProcess?: CodexProbeObserver["onProcess"];
 }
 
 /** Query Claude Code's SDK control initialization without sending a prompt or repository content. */
@@ -480,7 +490,11 @@ export async function queryClaudeModels(
   agent: AgentDefinition,
   deps: ClaudeModelQueryDeps = {},
 ): Promise<AgentModel[]> {
-  const child = (deps.spawn ?? spawnAgent)(claudeModelProbeOptions(agent));
+  let completeProof!: (value: boolean) => void;
+  deps.onProcess?.(new Promise<boolean>((resolve) => { completeProof = resolve; }));
+  let child: AgentProcess;
+  try { child = (deps.spawn ?? spawnAgent)(claudeModelProbeOptions(agent)); }
+  catch (error) { completeProof?.(false); throw error; }
   child.stderr.resume();
   const requestId = deps.requestId ?? `wollipog-model-discovery-${Date.now().toString(36)}`;
   try {
@@ -490,7 +504,9 @@ export async function queryClaudeModels(
       "claude model discovery initialize",
     );
   } finally {
-    (deps.kill ?? killTree)(child);
+    let proven = false;
+    try { (deps.kill ?? killTree)(child); proven = await provenProcessTreeExit(child); }
+    finally { completeProof?.(proven); }
   }
 }
 
@@ -506,9 +522,9 @@ export interface AgentModelDiscovery {
 }
 
 interface AgentModelDiscovererDeps {
-  queryAppServer: (agent: AgentDefinition) => Promise<AgentModel[]>;
-  queryClaude?: (agent: AgentDefinition) => Promise<AgentModel[]>;
-  fallback: (driver: AgentDriverKind, context: AgentContext) => Promise<AgentModel[]>;
+  queryAppServer: (agent: AgentDefinition, observer?: CodexProbeObserver) => Promise<AgentModel[]>;
+  queryClaude?: (agent: AgentDefinition, observer?: CodexProbeObserver) => Promise<AgentModel[]>;
+  fallback: (driver: AgentDriverKind, context: AgentContext, env?: Record<string, string>) => Promise<AgentModel[]>;
 }
 
 function modelDiscoveryKey(agent: AgentDefinition): string {
@@ -519,6 +535,7 @@ function modelDiscoveryKey(agent: AgentDefinition): string {
     contextKey,
     agent.version ?? "unknown-version",
     agent.command,
+    agent.env.HOME, agent.env.CODEX_HOME, agent.env.CLAUDE_CONFIG_DIR,
     ...(agent.args ?? []),
   ]);
 }
@@ -532,12 +549,12 @@ function modelListUnavailable(error: unknown): boolean {
 export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
   const cache = new Map<string, AgentModelDiscovery>();
   const claudeFailures = new Map<string, number>();
-  return async (agent: AgentDefinition, options: { refresh?: boolean } = {}): Promise<AgentModelDiscovery> => {
+  return async (agent: AgentDefinition, options: { refresh?: boolean } & CodexProbeObserver = {}): Promise<AgentModelDiscovery> => {
     const driver = agent.driver ?? "acp";
     const context = agent.context ?? { kind: "native" as const };
     if (agent.available !== true) return { models: [] };
     if (driver !== "codex-app-server" && driver !== "claude-code") {
-      return { models: await deps.fallback(driver, context), ...(driver === "codex" ? { source: "cached" as const } : {}) };
+      return { models: await deps.fallback(driver, context, agent.env), ...(driver === "codex" ? { source: "cached" as const } : {}) };
     }
 
     const key = modelDiscoveryKey(agent);
@@ -549,13 +566,13 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
     let result: AgentModelDiscovery;
     if (driver === "claude-code") {
       if (!claudeModelProbeSupported(agent)) {
-        result = { models: await deps.fallback(driver, context) };
+        result = { models: await deps.fallback(driver, context, agent.env) };
         cache.set(key, result);
         return result;
       }
       try {
-        const models = deps.queryClaude ? await deps.queryClaude(agent) : [];
-        result = models.length ? { models, source: "live" } : { models: await deps.fallback(driver, context) };
+        const models = deps.queryClaude ? await deps.queryClaude(agent, options) : [];
+        result = models.length ? { models, source: "live" } : { models: await deps.fallback(driver, context, agent.env) };
         claudeFailures.delete(key);
       } catch {
         // A transient first failure must not poison the periodic discovery cache. Keep a prior live
@@ -564,7 +581,7 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
         const failures = (claudeFailures.get(key) ?? 0) + 1;
         claudeFailures.set(key, failures);
         if (previous?.source === "live") return previous;
-        const fallback = previous ?? { models: await deps.fallback(driver, context) };
+        const fallback = previous ?? { models: await deps.fallback(driver, context, agent.env) };
         if (failures >= 3) cache.set(key, fallback);
         return fallback;
       }
@@ -573,12 +590,12 @@ export function createAgentModelDiscoverer(deps: AgentModelDiscovererDeps) {
     }
 
     try {
-      result = { models: await deps.queryAppServer(agent), source: "live" };
+      result = { models: await deps.queryAppServer(agent, options), source: "live" };
     } catch (error) {
       // A working method that timed out or returned bad data must retain catalog metadata. Only an
       // older server that truly lacks model/list may use models_cache.json as a labeled fallback.
       if (!modelListUnavailable(error)) return previous ?? { models: [] };
-      result = { models: await deps.fallback("codex", context), source: "cached" };
+      result = { models: await deps.fallback("codex", context, agent.env), source: "cached" };
     }
     cache.set(key, result);
     return result;

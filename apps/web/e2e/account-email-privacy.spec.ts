@@ -117,11 +117,11 @@ test(`${width}px ${theme}: Usage and authentication recovery show emails by defa
   const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
   const usage = await context.newPage();
   await usage.setViewportSize({ width, height: 1000 });
-  await usage.goto("/usage-view-e2e.html?subscriptions=1");
+  await usage.goto("/usage-view-e2e.html?tab=subscriptions&subscriptions=1");
   await usage.evaluate(theme => document.documentElement.dataset.theme = theme, theme);
-  const account = usage.locator(".subscription-source").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-account");
+  const account = usage.locator(".subscription-plan").filter({ hasText: "Codex App Server on build-box" }).locator(".subscription-plan-head");
   await expect(account).toContainText("codex@example.com");
-  await expect(account.getByRole("button")).toHaveCount(0);
+  await expect(account.getByRole("button", { name: /Account Email/ })).toHaveCount(0);
   const auth = await context.newPage();
   await auth.setViewportSize({ width, height: 1000 });
   await auth.goto("/authentication-recovery-e2e.html");
@@ -148,28 +148,34 @@ test(`${width}px ${theme}: Usage and authentication recovery show emails by defa
 }
 
 for (const width of [390, 1440]) {
-  test(`${width}px: provider management hides a reopened disclosure and an already-open confirmation`, async ({ page, context }) => {
+  test(`${width}px: provider management hides a revealed account again, in its menu and in an already-open confirmation`, async ({ page, context }) => {
     await page.goto("/settings-rows-e2e.html?section=behavior");
     const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
     const management = await context.newPage();
     await management.setViewportSize({ width, height: 1000 });
-    await management.goto("/machine-management-e2e.html?emailLabels=1");
-    await management.getByText("Accounts", { exact: true }).click();
-    const row = management.locator(".agent-row").filter({ hasText: "work@example.com" });
+    // The machine's own route, which a phone opens as its detail (#2985).
+    await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
+    // Provider Accounts is a section of the machine (#2995), no longer a disclosure to reopen.
+    const accounts = management.getByRole("region", { name: /^Provider Accounts/ });
+    const row = accounts.locator(".surface > .row").filter({ hasText: "work@example.com" });
     await expect(row).toBeVisible();
     await expect(row.getByRole("button", { name: "Show Account Email" })).toHaveCount(0);
     await management.screenshot({ path: join(evidenceDir, `management-${width}-off.png`) });
     await privacy.click();
-    const maskedRow = management.locator(".agent-row").filter({ hasText: "Email Hidden" });
+    const maskedRow = accounts.locator(".surface > .row").filter({ hasText: "Email Hidden" });
     const show = maskedRow.getByRole("button", { name: "Show Account Email" });
     await show.focus(); await management.keyboard.press("Enter");
     await expect(row).toBeVisible();
-    await management.getByText("Accounts", { exact: true }).click();
-    await management.getByText("Accounts", { exact: true }).click();
+    // Turning the preference off and on again hides the reveal.
+    await privacy.click();
+    await privacy.click();
     await expect(show).toBeVisible();
     expect(await maskedRow.innerHTML()).not.toContain("work@example.com");
     await management.screenshot({ path: join(evidenceDir, `management-${width}-on.png`) });
-    await maskedRow.getByRole("button", { name: "Remove", exact: true }).click();
+    await maskedRow.getByRole("button", { name: "More Actions for Hidden Account" }).click();
+    const menu = management.getByRole("menu", { name: "Hidden Account" });
+    expect(await menu.innerHTML()).not.toContain("work@example.com");
+    await menu.getByRole("menuitem", { name: "Remove Account…" }).click();
     const confirm = management.getByRole("dialog", { name: "Remove Account" });
     await expect(confirm).toBeVisible();
     expect(await confirm.innerHTML()).not.toContain("work@example.com");
@@ -245,10 +251,11 @@ test("default account settings follow privacy and changing their selection reset
   await page.goto("/settings-rows-e2e.html?section=behavior");
   const privacy = page.getByRole("switch", { name: "Hide Account Emails" });
   const management = await context.newPage();
-  await management.goto("/machine-management-e2e.html?emailLabels=1");
-  await management.getByRole("button", { name: "Manage", exact: true }).click();
-  const dialog = management.getByRole("dialog", { name: "Manage Design Workstation" });
-  const defaults = dialog.locator("section.machine-settings-section").filter({ hasText: "Default Provider Accounts" });
+  // The machine's own route: with nothing selected the detail is the All Machines overview (#2986).
+  await management.goto("/machine-management-e2e.html?emailLabels=1&machine=native-t14s");
+  await management.locator(".machine-detail-title-row").getByRole("button", { name: "Settings…", exact: true }).click();
+  const dialog = management.getByRole("dialog", { name: "Machine Settings" });
+  const defaults = dialog.getByRole("group", { name: "Default Accounts" });
   const claude = dialog.getByRole("button", { name: /Default Claude Account:/ });
   await claude.click();
   await management.getByRole("option", { name: /work@example\.com/ }).click();

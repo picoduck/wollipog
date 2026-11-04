@@ -1,1 +1,0 @@
-|.agent-session-inline-error|font-size|12

@@ -93,12 +93,29 @@ test("FieldWarning is a helper-colored line with a warning icon, addressable by 
   const view = await render(<FieldWarning id="branch-warning">This branch already has a worktree.</FieldWarning>);
   try {
     const warning = view.container.querySelector<HTMLElement>(".field-warn")!;
-    assert.equal(warning.id, "branch-warning", "a field can point aria-describedby at it");
+    const words = view.container.querySelector<HTMLElement>('[id="branch-warning"]');
+    assert.ok(words && warning.contains(words), "a field can point aria-describedby at it");
+    assert.equal(words.textContent, "This branch already has a worktree.");
     assert.equal(warning.textContent, "This branch already has a worktree.");
     assert.ok(warning.querySelector(".field-warn-icon"), "the icon carries the tone");
     assert.equal(warning.getAttribute("role"), null, "a warning is not an alert");
     assert.match(rule(".field-warn"), /color:\s*var\(--text-dim\);/);
     assert.match(rule(".field-warn-icon"), /color:\s*var\(--amber\);/);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("FieldWarning's action follows its words without joining the description the field points at (#2953)", async () => {
+  const view = await render(
+    <FieldWarning id="agent-warning" action={<button type="button" className="btn sm">Use Codex App Server</button>}>
+      Your saved default is no longer supported.
+    </FieldWarning>,
+  );
+  try {
+    const warning = view.container.querySelector<HTMLElement>(".field-warn")!;
+    assert.equal(view.container.querySelector('[id="agent-warning"]')?.textContent, "Your saved default is no longer supported.");
+    assert.equal(warning.querySelector("button.btn.sm")?.textContent, "Use Codex App Server");
   } finally {
     await view.unmount();
   }

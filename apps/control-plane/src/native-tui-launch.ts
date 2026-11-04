@@ -136,7 +136,7 @@ export function nativeTuiCreationError(
       ),
     };
   }
-  const launch = db.getAgentLaunch(request.runnerId, request.agentId);
+  const launch = db.getAgentLaunch(request.runnerId, request.agentId, false, { allowAccountSelection: true });
   if (!launch) return { status: 404, error: "agent not found on runner" };
   if (!TUI_DRIVERS.has(launch.driver ?? "acp")) {
     return { status: 409, error: "this agent does not expose a standalone Native TUI" };
@@ -165,8 +165,8 @@ export function nativeTuiSessionError(
   if (nativeTuiHasTrackedGuardrails(session)) {
     return { status: 409, error: NATIVE_TUI_TRACKED_GUARDRAILS_ERROR };
   }
-  const scope = db.sessionScope(session.id);
-  if (scope?.owner.kind === "user" && db.getUsageDailyBudget(scope.organizationId).perUserUsd !== null) {
+  const budgetUser = db.sessionPersonalUser(session.id);
+  if (budgetUser && db.getUsageDailyBudget(budgetUser.organizationId).perUserUsd !== null) {
     return { status: 409, error: NATIVE_TUI_DAILY_BUDGET_ERROR };
   }
   if (sessionRole(session) === "orchestrator") {

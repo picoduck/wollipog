@@ -11,7 +11,7 @@ import { DatabaseSync } from "node:sqlite";
 import { before, test } from "node:test";
 import fc from "fast-check";
 import { SqliteVideoReviewStore, type VideoReviewFrameStorage } from "./video-evidence-runtime-store.js";
-import { VideoEvidenceRuntime, VideoReviewRefused, type VideoReviewBinding, type VideoReviewRecord,
+import { VideoEvidenceRuntime, VideoReviewRefused, videoReviewDeliveryPlanSha256, type VideoReviewBinding, type VideoReviewRecord,
   type VideoReviewRuntimeAccess } from "./video-evidence-runtime.js";
 import { prepareVideoEvidence, videoPreparationDecoderAvailable } from "./video-evidence-preparation.js";
 
@@ -49,7 +49,9 @@ before(async () => {
   const manifest = { ...result.manifest, purpose: "trusted_temporal_derivation" as const,
     profile: "paced-silent-complete-frames-v1" as const };
   template = { reviewId: "video_test", binding, manifest, manifestSha256: hash(JSON.stringify(manifest)),
-    criteria, criteriaSha256: hash(JSON.stringify(criteria)), createdAt: 1_000, expiresAt: 3_601_000, status: "pending" };
+    criteria, criteriaSha256: hash(JSON.stringify(criteria)),
+    deliveryPlanSha256: videoReviewDeliveryPlanSha256(pacedVideoReviewWindowPlan(manifest.frames)),
+    createdAt: 1_000, expiresAt: 3_601_000, status: "pending" };
 });
 function fixture(t: { skip(reason: string): void; after(fn: () => void): void }) {
   if (!template) { t.skip("isolated decoder unavailable"); return null; }
@@ -89,6 +91,23 @@ const report = { outcome: "accept" as const, criteria: [{
   criterionId: "transition", outcome: "pass" as const, observedFrameIndices: [157],
   observation: "Synthetic deterministic test observation, not live-model proof.",
 }], rationale: "Test verdict exercises the server provenance contract only." };
+const windows = (record: VideoReviewRecord) => pacedVideoReviewWindowPlan(record.manifest.frames).windows;
+/** Every planned window's frames, in delivery order: overlap frames appear once per window. */
+const plannedDeliveries = (record: VideoReviewRecord) =>
+  windows(record).flatMap((w) => Array.from({ length: w.endIndex - w.firstIndex }, (_, i) => w.firstIndex + i));
+/** Delivers and acknowledges every planned window in order, as the runner's paced reviewer does. */
+function deliverWindows(runtime: VideoEvidenceRuntime, record: VideoReviewRecord,
+  observe?: (batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]>) => void, resumeAt = 0): void {
+  for (const window of windows(record)) {
+    for (let cursor = Math.max(window.firstIndex, window.index === 0 ? resumeAt : 0); cursor < window.endIndex;) {
+      const batch = runtime.deliverBatch(record.reviewId, "reviewer", cursor, window.endIndex);
+      observe?.(batch);
+      runtime.acknowledgeBatch(record.reviewId, "reviewer", batch.deliveries.map((d) => ({
+        receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 })));
+      cursor = batch.nextIndex;
+    }
+  }
+}
 
 test("distinct candidate permit derives and hands off every native frame, while production approval stays refused", async (t) => {
   const f = fixture(t); if (!f) return;
@@ -102,7 +121,7 @@ test("distinct candidate permit derives and hands off every native frame, while 
   assert.equal(derived.review.manifest.captureProfile, "candidate");
   assert.equal(derived.review.manifest.frames.length, 16);
   assert.equal(derived.review.manifest.width, 640);
-  const batch = f.runtime.deliverBatch(derived.review.reviewId, "reviewer", 0);
+  const batch = f.runtime.deliverBatch(derived.review.reviewId, "reviewer", 0, 16);
   assert.equal(batch.frameCount, 16);
   assert.deepEqual(batch.deliveries.map((d) => d.receipt.videoFrame.ptsUs), Array.from({ length: 16 }, (_, i) => i * 250_000));
   f.runtime.acknowledgeBatch(derived.review.reviewId, "reviewer", batch.deliveries.map((d) => d.receipt));
@@ -122,12 +141,9 @@ test("Human validation observations retain their purpose on every frame and verd
   record.binding = { ...binding, operatorValidation: { permitId: "synthetic-permit", scopeSha256: hash("synthetic-human-scope") } };
   f.setCurrent(record.binding);
   f.store.saveDerived(record, images);
-  for (let index = 0; index < record.manifest.frames.length;) {
-    const batch = f.runtime.deliverBatch(record.reviewId, "reviewer", index);
+  deliverWindows(f.runtime, record, (batch) => {
     for (const delivered of batch.deliveries) assert.deepEqual(delivered.receipt.operatorValidation, record.binding.operatorValidation);
-    f.runtime.acknowledgeBatch(record.reviewId, "reviewer", batch.deliveries.map((d) => d.receipt));
-    index = batch.nextIndex;
-  }
+  });
   const verdict = f.runtime.recordVerdict(record.reviewId, "reviewer", report);
   f.complete();
   assert.deepEqual(verdict.operatorValidation, record.binding.operatorValidation);
@@ -143,8 +159,8 @@ test("Human validation observations retain their purpose on every frame and verd
     directImageReviewed: () => false });
   assert.throws(() => bridge.approvalProvenance(decision, [], [{ evidenceId: binding.sourceEvidenceId,
     reviewId: record.reviewId, verdictId: verdict.verdictId, reviewerSessionId: "reviewer" }], "resolve"), /not bound/);
-  f.db.prepare("UPDATE temporal_video_receipts SET receipt=json_remove(receipt,'$.operatorValidation') WHERE review_id=? AND frame_index=157")
-    .run(record.reviewId);
+  f.db.prepare("UPDATE temporal_video_receipts SET receipt=json_remove(receipt,'$.operatorValidation') WHERE review_id=? AND frame_index=157 AND window_index=(SELECT MIN(window_index) FROM temporal_video_receipts WHERE review_id=? AND frame_index=157)")
+    .run(record.reviewId, record.reviewId);
   assert.throws(() => f.runtime.validationObservation(record.reviewId, "reviewer"), refused("receipt"));
 });
 
@@ -180,24 +196,31 @@ test("actual trusted runtime derivation snapshots source and rejects implementer
 
 test("durable ordered all-frame acknowledgement is necessary but insufficient for approval", (t) => {
   const f = fixture(t); if (!f || !template) return;
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 1), refused("order"));
+  const first = windows(template)[0]!;
+  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("order"), "a frame outside a planned window has no receipt");
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 1, first.endIndex), refused("order"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", report), refused("receipt"));
-  for (const frame of template.manifest.frames) {
-    const delivery = f.runtime.deliver("video_test", "reviewer", frame.index);
-    assert.equal(hash(delivery.bytes), frame.sha256);
-    assert.equal(delivery.receipt.videoFrame.ptsUs, frame.ptsUs);
-    assert.equal(delivery.receipt.videoFrame.durationUs, frame.durationUs);
-    assert.throws(() => f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, hash("wrong")), refused("receipt"));
-    f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
-  }
+  const wrong = f.runtime.deliverBatch("video_test", "reviewer", 0, first.endIndex);
+  assert.throws(() => f.runtime.acknowledge("video_test", "reviewer", wrong.deliveries[0]!.receipt.receiptId, hash("wrong")), refused("receipt"));
+  deliverWindows(f.runtime, template, (batch) => {
+    for (const delivery of batch.deliveries) {
+      const frame = template!.manifest.frames[delivery.receipt.videoFrame.index]!;
+      assert.equal(hash(delivery.bytes), frame.sha256);
+      assert.equal(delivery.receipt.videoFrame.ptsUs, frame.ptsUs);
+      assert.equal(delivery.receipt.videoFrame.durationUs, frame.durationUs);
+      assert.equal(delivery.receipt.deliveryPlanSha256, template!.deliveryPlanSha256);
+    }
+  });
   assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("stale"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", { ...report, oracle: "unexpected truth" } as typeof report), refused("criteria"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", { ...report, criteria: [{ ...report.criteria[0]!, secret: "extra input" } as typeof report.criteria[number]] }), refused("criteria"));
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
-  assert.equal(verdict.receiptIds.length, 360);
+  assert.equal(verdict.receiptIds.length, plannedDeliveries(template).length);
+  assert.equal(verdict.deliveryPlanSha256, template.deliveryPlanSha256);
   assert.throws(() => f.runtime.approvalProvenance("video_test", "reviewer"), refused("stale"));
   assert.equal(f.store.getReview("video_test")?.status, "pending", "awaiting final settlement preserves the original quality record");
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 359), refused("order"));
+  const last = windows(template).at(-1)!;
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", last.endIndex - 1, last.endIndex), refused("order"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", report), refused("verdict"));
   f.complete();
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
@@ -208,14 +231,16 @@ test("durable ordered all-frame acknowledgement is necessary but insufficient fo
 });
 
 test("a replaced delivery cannot acknowledge or stand in for a new frame", (t) => {
-  const f = fixture(t); if (!f) return;
-  const first = f.runtime.deliver("video_test", "reviewer", 0);
-  const replaced = f.runtime.deliver("video_test", "reviewer", 0);
+  const f = fixture(t); if (!f || !template) return;
+  const end = windows(template)[0]!.endIndex;
+  const first = f.runtime.deliverBatch("video_test", "reviewer", 0, end).deliveries[0]!;
+  const replaced = f.runtime.deliverBatch("video_test", "reviewer", 0, end).deliveries[0]!;
   assert.throws(() => f.runtime.acknowledge("video_test", "reviewer", first.receipt.receiptId, first.receipt.sha256), refused("receipt"));
   f.runtime.acknowledge("video_test", "reviewer", replaced.receipt.receiptId, replaced.receipt.sha256);
-  const second = f.runtime.deliver("video_test", "reviewer", 1);
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("order"), "an acknowledged frame is never replaced");
+  const second = f.runtime.deliverBatch("video_test", "reviewer", 1, end).deliveries[0]!;
   f.runtime.acknowledge("video_test", "reviewer", second.receipt.receiptId, second.receipt.sha256);
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("order"));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("order"));
 });
 
 test("generated changes in every immutable context field fail closed and revoke review", (t) => {
@@ -231,19 +256,20 @@ test("generated changes in every immutable context field fail closed and revoke 
     const value = changed[key];
     Object.assign(changed, { [key]: typeof value === "number" ? value + delta : value + "_" + delta });
     f.setCurrent(changed);
-    assert.throws(() => f.runtime.deliver(original.reviewId, "reviewer", 0), refused("stale"));
+    assert.throws(() => f.runtime.deliverBatch(original.reviewId, "reviewer", 0, windows(original)[0]!.endIndex), refused("stale"));
     assert.equal(f.store.getReview(original.reviewId)?.status, "revoked");
   }), { numRuns: 50 });
 });
 
 test("frame mutation revokes unconsumed grants and repairing pixels cannot revive them", (t) => {
-  const f = fixture(t); if (!f) return;
+  const f = fixture(t); if (!f || !template) return;
+  const end = windows(template)[0]!.endIndex;
   f.frameBytes.set(0, Buffer.from("different pixels"));
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("frame_mismatch"));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("frame_mismatch"));
   assert.equal(f.store.getReview("video_test")?.status, "revoked");
   // No revival from a repaired source or capability.
   f.frameBytes.set(0, images[0]!);
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("stale"));
 });
 
 test("SQLite receipts and verdict absence survive process restart", async (t) => {
@@ -261,7 +287,8 @@ test("SQLite receipts and verdict absence survive process restart", async (t) =>
   let store = new SqliteVideoReviewStore(db, frames);
   store.saveDerived(template, images);
   const access = { currentBinding: () => binding, readSource: () => source, workerAdmission: () => workerAdmission, normalCompletion: () => false };
-  const delivery = new VideoEvidenceRuntime(store, access, () => 1_000).deliver("video_test", "reviewer", 0);
+  const delivery = new VideoEvidenceRuntime(store, access, () => 1_000)
+    .deliverBatch("video_test", "reviewer", 0, windows(template)[0]!.endIndex).deliveries[0]!;
   db.close();
   db = new DatabaseSync(path); t.after(() => db.close());
   store = new SqliteVideoReviewStore(db, frames);
@@ -289,15 +316,13 @@ test("failed frame storage rolls back metadata and removes only its own new part
 
 test("normally settled worker cannot read or attest again but owner can use its exact completed quality proof", (t) => {
   const f = fixture(t); if (!f || !template) return;
-  for (const frame of template.manifest.frames) {
-    const delivery = f.runtime.deliver("video_test", "reviewer", frame.index);
-    f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
-  }
+  deliverWindows(f.runtime, template);
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
   f.access.normalCompletion = () => true;
   f.access.currentBinding = (_b, phase) => phase === "resolve" ? binding : null;
   f.access.workerAdmission = (_b, phase) => phase === "historical" ? workerAdmission : null;
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 359), refused("stale"));
+  const last = windows(template).at(-1)!;
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", last.endIndex - 1, last.endIndex), refused("stale"));
   assert.throws(() => f.runtime.recordVerdict("video_test", "reviewer", report), refused("stale"));
   assert.equal(f.store.getReview("video_test")?.status, "pending");
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
@@ -308,28 +333,26 @@ test("normally settled worker cannot read or attest again but owner can use its 
 });
 
 test("expired, replaced admission and removed source cannot reuse a completed verdict grant", (t) => {
-  const f = fixture(t); if (!f) return;
+  const f = fixture(t); if (!f || !template) return;
+  const end = windows(template)[0]!.endIndex;
   f.setTime(3_601_000);
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("stale"));
   assert.equal(f.store.getReview("video_test")?.status, "revoked");
   f.setTime(1_000);
-  assert.throws(() => f.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("stale"));
   const replacement = fixture(t); if (!replacement) return;
   replacement.access.workerAdmission = () => ({ ...workerAdmission, worker: { ...workerAdmission.worker, sessionId: "replacement" } });
-  assert.throws(() => replacement.runtime.deliver("video_test", "reviewer", 0), refused("stale"));
+  assert.throws(() => replacement.runtime.deliverBatch("video_test", "reviewer", 0, end), refused("stale"));
   assert.equal(replacement.store.getReview("video_test")?.status, "revoked");
 });
 
 test("current source removal and completed quality proof frame substitution fail closed", (t) => {
-  const missing = fixture(t); if (!missing) return;
+  const missing = fixture(t); if (!missing || !template) return;
   missing.setSource(null);
-  assert.throws(() => missing.runtime.deliver("video_test", "reviewer", 0), refused("source_mismatch"));
+  assert.throws(() => missing.runtime.deliverBatch("video_test", "reviewer", 0, windows(template!)[0]!.endIndex), refused("source_mismatch"));
   assert.equal(missing.store.getReview("video_test")?.status, "revoked");
   const f = fixture(t); if (!f || !template) return;
-  for (const frame of template.manifest.frames) {
-    const delivery = f.runtime.deliver("video_test", "reviewer", frame.index);
-    f.runtime.acknowledge("video_test", "reviewer", delivery.receipt.receiptId, delivery.receipt.sha256);
-  }
+  deliverWindows(f.runtime, template);
   f.runtime.recordVerdict("video_test", "reviewer", report);
   f.complete();
   f.frameBytes.set(157, Buffer.from("transient substituted after model delivery"));
@@ -340,37 +363,35 @@ test("current source removal and completed quality proof frame substitution fail
 test("bounded consecutive batches preserve all 360 native frames and acknowledge each window atomically", (t) => {
   const f = fixture(t); if (!f || !template) return;
   const seen: number[] = [];
-  let cursor = 0;
-  while (cursor < template.manifest.frames.length) {
-    const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
+  const first = windows(template)[0]!;
+  const opening = f.runtime.deliverBatch("video_test", "reviewer", 0, first.endIndex);
+  const receipts = opening.deliveries.map((d) => ({ receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 }));
+  assert.throws(() => f.runtime.acknowledgeBatch("video_test", "reviewer",
+    receipts.map((r, i) => i === receipts.length - 1 ? { ...r, sha256: hash("wrong") } : r)), refused("receipt"));
+  assert.equal(f.store.latestReceipts("video_test").some((r) => r.acknowledged), false, "no partial acknowledgement survives");
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", opening.nextIndex, first.endIndex), refused("order"));
+  const replacement = f.runtime.deliverBatch("video_test", "reviewer", 0, first.endIndex);
+  assert.throws(() => f.runtime.acknowledgeBatch("video_test", "reviewer", receipts), refused("receipt"), "a replaced batch cannot be acknowledged");
+  f.runtime.acknowledgeBatch("video_test", "reviewer", replacement.deliveries.map((d) => ({
+    receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 })));
+  seen.push(...replacement.deliveries.map((d) => d.receipt.videoFrame.index));
+  deliverWindows(f.runtime, template, (batch) => {
     assert.ok(batch.deliveries.length > 0 && batch.deliveries.length <= 20);
     const encoded = { deliveries: batch.deliveries.map((d) => ({
       receipt: d.receipt, mimeType: d.mimeType, sizeBytes: d.bytes.length, data: d.bytes.toString("base64"),
     })), nextIndex: batch.nextIndex, frameCount: batch.frameCount };
     assert.ok(Buffer.byteLength(JSON.stringify(encoded)) <= 8 * 1024 * 1024);
-    const receipts = batch.deliveries.map((d) => ({ receiptId: d.receipt.receiptId, sha256: d.receipt.sha256 }));
-    if (cursor === 0) {
-      assert.throws(() => f.runtime.acknowledgeBatch("video_test", "reviewer",
-        receipts.map((r, i) => i === receipts.length - 1 ? { ...r, sha256: hash("wrong") } : r)), refused("receipt"));
-      assert.equal(f.store.latestReceipts("video_test").some((r) => r.acknowledged), false, "no partial acknowledgement survives");
-      assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", batch.nextIndex), refused("order"));
-      const replacement = f.runtime.deliverBatch("video_test", "reviewer", 0);
-      assert.throws(() => f.runtime.acknowledgeBatch("video_test", "reviewer", receipts), refused("receipt"));
-      f.runtime.acknowledgeBatch("video_test", "reviewer", replacement.deliveries.map((d) => ({
-        receiptId: d.receipt.receiptId, sha256: d.receipt.sha256,
-      })));
-    } else f.runtime.acknowledgeBatch("video_test", "reviewer", receipts);
     for (const delivery of batch.deliveries) {
-      assert.equal(hash(delivery.bytes), template.manifest.frames[delivery.receipt.videoFrame.index]!.sha256);
+      assert.equal(hash(delivery.bytes), template!.manifest.frames[delivery.receipt.videoFrame.index]!.sha256);
       assert.equal(delivery.receipt.evidenceId, binding.sourceEvidenceId, "original evidence ID retained with actual worker actor");
       seen.push(delivery.receipt.videoFrame.index);
     }
-    cursor = batch.nextIndex;
-  }
-  assert.deepEqual(seen, template.manifest.frames.map((frame) => frame.index));
-  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0), refused("order"));
+  }, replacement.nextIndex);
+  assert.deepEqual(seen, plannedDeliveries(template));
+  assert.deepEqual([...new Set(seen)], template.manifest.frames.map((frame) => frame.index));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, first.endIndex), refused("order"));
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
-  assert.equal(verdict.receiptIds.length, 360);
+  assert.equal(verdict.receiptIds.length, seen.length);
   f.complete();
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
 });
@@ -395,19 +416,13 @@ test("fresh-context windows keep every batch inside its planned window and repea
   assert.deepEqual(seen, expected, "overlap frames are the only repeats");
   assert.deepEqual([...new Set(seen)], template.manifest.frames.map((frame) => frame.index));
   assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, 0), refused("order"));
-  assert.equal(f.runtime.recordVerdict("video_test", "reviewer", report).receiptIds.length, 360);
+  assert.equal(f.runtime.recordVerdict("video_test", "reviewer", report).receiptIds.length, expected.length,
+    "each window receipts its own overlap frame");
 });
 
 test("original gate distinguishes parent-inspected images from exact worker video provenance at resolution and consumption", (t) => {
   const f = fixture(t); if (!f || !template) return;
-  let cursor = 0;
-  while (cursor < template.manifest.frames.length) {
-    const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
-    f.runtime.acknowledgeBatch("video_test", "reviewer", batch.deliveries.map((d) => ({
-      receiptId: d.receipt.receiptId, sha256: d.receipt.sha256,
-    })));
-    cursor = batch.nextIndex;
-  }
+  deliverWindows(f.runtime, template);
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
   const snapshot = { category: "ui_evidence_approval", evidence: [{
     evidenceId: binding.sourceEvidenceId, artifactId: binding.sourceArtifactId, sha256: binding.sourceSha256, mediaType: "video/webm",
@@ -440,18 +455,12 @@ test("original gate distinguishes parent-inspected images from exact worker vide
 
 test("attempted fresh reads after typed resolution do not destroy otherwise current unconsumed quality provenance", (t) => {
   const f = fixture(t); if (!f || !template) return;
-  let cursor = 0;
-  while (cursor < template.manifest.frames.length) {
-    const batch: ReturnType<VideoEvidenceRuntime["deliverBatch"]> = f.runtime.deliverBatch("video_test", "reviewer", cursor);
-    f.runtime.acknowledgeBatch("video_test", "reviewer", batch.deliveries.map((d) => ({
-      receiptId: d.receipt.receiptId, sha256: d.receipt.sha256,
-    }))); cursor = batch.nextIndex;
-  }
+  deliverWindows(f.runtime, template);
   const verdict = f.runtime.recordVerdict("video_test", "reviewer", report);
   f.complete();
   // Exact gate is approved: its owner can consume current provenance, worker has no new access.
   f.access.currentBinding = (_binding, phase) => phase === "resolve" ? binding : null;
-  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0), refused("stale"));
+  assert.throws(() => f.runtime.deliverBatch("video_test", "reviewer", 0, windows(template!)[0]!.endIndex), refused("stale"));
   assert.equal(f.store.getReview("video_test")?.status, "pending");
   assert.equal(f.runtime.approvalProvenance("video_test", "reviewer").verdictId, verdict.verdictId);
   f.access.currentBinding = () => null;

@@ -1,1 +1,0 @@
-|.agent-details-summary|font-size|13

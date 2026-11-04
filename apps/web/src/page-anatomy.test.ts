@@ -57,9 +57,8 @@ test("the page container is left-aligned and capped per kind", () => {
   assert.doesNotMatch(declarations(topLevelRule(css, ".settings-view"))["overflow-y"] ?? "", /auto|scroll/);
   assert.equal(declarations(topLevelRule(css, ".archive-view"))["overflow"], undefined);
   assert.equal(declarations(topLevelRule(css, ".main-body"))["padding"], undefined, "the page container is the only gutter");
-  // The instance recovery screen is not a routed page, so it keeps its own inset.
-  assert.equal(declarations(topLevelRule(css, ".main-body.instance-recovery-body"))["padding"],
-    "var(--space-5) var(--page-gutter) var(--space-8)");
+  // The instance recovery screen is a page in the page container like any other (#3004).
+  assert.doesNotMatch(css, /instance-recovery-body/);
   // Not a query container on phones, so the app bar never contains the switcher's fixed menu.
   assert.equal(inAtRule("media", "(max-width: 760px)", ".page-header")["container"], "none");
 });
@@ -104,9 +103,16 @@ test("secondaries overflow into ⋯ by tier and header width, and phones show a 
   assert.equal(phone(".page-header-row")["height"], "var(--bar-h)");
   assert.equal(phone(".page-title")["font"], "var(--type-title)");
   assert.equal(phone(".page-desc")["display"], "none");
-  assert.equal(phone(".page-actions > .page-primary")["width"], "var(--control-h)");
   assert.equal(phone(".page-primary-label")["clip-path"], "inset(50%)",
     "the label is clipped, not removed, so it stays the accessible name");
+  // The phone primary is an `.icon-btn` like Search (PageHeader), so nothing restyles the filled
+  // `.btn.primary` into a square any more.
+  assert.doesNotMatch(css, /\.page-primary \{/, "no rule squares or fills the phone primary");
+  const iconButton = declarations(topLevelRule(css, ".icon-btn"));
+  assert.equal(iconButton["background"], "transparent");
+  assert.equal(iconButton["border"], "none");
+  assert.equal(iconButton["color"], "var(--text-dim)");
+  assert.equal(iconButton["width"], "var(--control-h)");
   // Neither phone bar carries an instance switcher: it is the desktop rail's tile (#1970).
   assert.doesNotMatch(css, /:is\(\.page-actions, \.detail-bar-actions\) \.instance-/);
 });

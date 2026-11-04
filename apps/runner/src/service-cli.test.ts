@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { chmodSync, constants, cpSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, readlinkSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHash } from "node:crypto";
@@ -8,7 +8,8 @@ import { PROTOCOL_VERSION } from "@wollipog/protocol";
 import type { McpFetch } from "./session-management-mcp.js";
 import { executableFromUnit, runServiceCli, type ServiceHost, type ServiceIo } from "./service-cli.js";
 import { CONTROL_PLANE_UNIT, RUNNER_UNIT, serviceLayout } from "./systemd-service.js";
-import { stagingFilesystem } from "./release-staging.js";
+import { ReleaseStaging, stagingFilesystem } from "./release-staging.js";
+import { describeJournal } from "./release-staging-journal.js";
 
 const LOCAL_TOKEN = "L".repeat(43);
 const RUNNER_TOKEN = `wollipogr_${"r".repeat(43)}`;
@@ -51,9 +52,14 @@ function fake(t: { after(fn: () => void): void }, options: {
   // Synthetic system-mode identities cover the real staging helper without root/chown. Every
   // path and descriptor is mapped consistently; the syscall behavior remains real and private.
   const opened = new Map<number, string>();
-  const identity = (stat: ReturnType<typeof stagingFilesystem.lstat>, path: string) => options.system && path.startsWith(root)
-    ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: BigInt(path === layout.dataDir ? options.accountUid ?? MY_UID : 0) }) as typeof stat
-    : stat;
+  const identity = (stat: ReturnType<typeof stagingFilesystem.lstat>, path: string) => {
+    // Recovery addresses children through pinned descriptors. Resolve just that descriptor
+    // prefix for the synthetic UID mapping, preserving the final object's no-follow identity.
+    const named = path.replace(/^\/proc\/self\/fd\/\d+/u, (prefix) => readlinkSync(prefix));
+    return options.system && named.startsWith(root)
+      ? Object.assign(Object.create(Object.getPrototypeOf(stat)), stat, { uid: BigInt(named === layout.dataDir ? options.accountUid ?? MY_UID : 0) }) as typeof stat
+      : stat;
+  };
   const stagingFs = {
     ...stagingFilesystem,
     euid: () => options.system ? 0 : MY_UID,
@@ -71,6 +77,7 @@ function fake(t: { after(fn: () => void): void }, options: {
   };
   let cpRunning = false;
   let runnerRunning = false;
+  let runnerConnections = 0;
   let clock = 0;
   const enabled = new Set<string>();
   const unitState = (unit: string) => {
@@ -96,7 +103,7 @@ function fake(t: { after(fn: () => void): void }, options: {
         publicOrigin: null, dashboard: { webServed: true, pairingHosts: [] },
         database: { path: layout.controlPlaneDb, ready: true }, artifactStore: { path: layout.controlPlaneArtifactDir, ready: true },
         localCredential: { path: layout.controlPlaneLocalTokenFile, safe: true, issues: [] },
-        runners: { registered: online ? 1 : 0, online: online ? 1 : 0, items: online ? [{ runnerId: "box-1", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION }] : [] },
+        runners: { registered: online ? 1 : 0, online: online ? 1 : 0, items: online ? [{ runnerId: "box-1", status: "online", version: "0.22.0", protocolVersion: PROTOCOL_VERSION, harnessReadiness: { connectedAt: runnerConnections, refreshed: true, agents: [] } }] : [] },
         devices: { paired: 0 }, warnings: [],
       });
     }
@@ -125,7 +132,7 @@ function fake(t: { after(fn: () => void): void }, options: {
         if (args[args.length - 1] === "enable" || args[args.length - 1] === "disable") return { code: 1, stdout: "", stderr: "Too few arguments." };
         if (args.includes("enable")) for (const unit of args.slice(args.indexOf("enable") + 1)) { enabled.add(unit); rmSync(join(layout.unitDir, `${unit}.disabled`), { force: true }); }
         if (args.includes("disable")) for (const unit of args.slice(args.indexOf("disable") + 1).filter((a) => a !== "--now")) { enabled.delete(unit); if (existsSync(layout.unitDir)) writeFileSync(join(layout.unitDir, `${unit}.disabled`), ""); }
-        if (args.includes("show")) return { code: 0, stdout: unitState(args[args.length - 1]!), stderr: "" };
+        if (args.includes("show")) return { code: 0, stdout: args.includes("--property=Delegate") ? "yes\n" : unitState(args[args.length - 1]!), stderr: "" };
         if (args.includes("restart") || args.includes("start")) {
           const unit = args[args.length - 1]!;
           if (unit === CONTROL_PLANE_UNIT) {
@@ -135,7 +142,7 @@ function fake(t: { after(fn: () => void): void }, options: {
             mkdirSync(join(file, ".."), { recursive: true });
             if (!existsSync(file)) writeFileSync(file, `${LOCAL_TOKEN}\n`, { mode: 0o600 });
           }
-          if (unit === RUNNER_UNIT) runnerRunning = true;
+          if (unit === RUNNER_UNIT) { runnerRunning = true; runnerConnections++; }
           return { code: 0, stdout: "", stderr: "" };
         }
         if (args.includes("disable")) { cpRunning = false; runnerRunning = false; }
@@ -154,6 +161,13 @@ function fake(t: { after(fn: () => void): void }, options: {
     fetchJson: async () => ({ ok: false, status: 500, text: async () => "" }),
     download: async () => { throw new Error("no downloads in this fake"); },
     stagingFilesystem: stagingFs,
+    // No other processes. Every CLI invocation is a new process, so each identity read of this
+    // PID sees a new start time: an updater recorded by an earlier command is gone.
+    stagingProcesses: (() => {
+      let starts = 0;
+      return { self: 5000, list: () => [5000], uids: () => [MY_UID], links: () => [], name: () => "wollipog",
+        identity: (pid: number) => (pid === 5000 ? { pid, startTime: String(++starts), bootId: "fixture-boot" } : null) };
+    })(),
     arch: "x64",
     sleep: async () => { clock += 1_000; },
     now: () => clock,
@@ -640,6 +654,17 @@ function releaseFixture(f: Fake, options: { version?: string; webBundle?: boolea
   const host: ServiceHost = {
     ...f.host,
     arch: "x64",
+    fetch: async (url, init) => {
+      const response = await f.host.fetch(url, init);
+      if (!url.endsWith("/api/admin/status") || !response.ok) return response;
+      const body = JSON.parse(await response.text());
+      if (!body.runners?.items) return response;
+      const runner = join(f.root, "wollipog-runner");
+      const installed = existsSync(runner) && readFileSync(runner, "utf8") === `runner ${version}`;
+      return { ...response, text: async () => JSON.stringify({ ...body,
+        runners: { ...body.runners, items: body.runners.items.map((item: object) => ({ ...item, version: installed ? version : "0.22.0" })) },
+      }) };
+    },
     fetchJson: async (url) => ({ ok: true, status: 200, text: async () => JSON.stringify({ tag_name: `v${version}`, assets, url }) }),
     download: async (url, sink) => {
       downloads.push(url);
@@ -724,6 +749,76 @@ test("service upgrade stages, verifies, swaps, restarts, and keeps the previous 
   assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], sameHost, again.io), 0);
   assert.equal(JSON.parse(again.stdout()).upgraded, false);
   assert.equal(JSON.parse(again.stdout()).release, "v9.9.9");
+});
+
+test("upgrading a legacy runner unit preserves settings, enables delegation, and rolls it back with a failed generation", { skip: process.platform !== "linux" }, async t => {
+  for (const fail of [false, true]) await t.test(fail ? "rollback" : "success", async t => {
+    const f = fake(t);
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const path = join(f.layout.unitDir, RUNNER_UNIT);
+    const original = readFileSync(path, "utf8").replace("Delegate=yes\n", "") + "\n# local customization\n[Service]\nEnvironment=CUSTOM_VALUE=preserved\n";
+    writeFileSync(path, original); chmodSync(path, 0o640);
+    const fixture = releaseFixture(f);
+    const host: ServiceHost = { ...fixture.host,
+      exec: async (command, args, options) => args[0] === "--version"
+        ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" }
+        : fixture.host.exec(command, args, options),
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!response.ok || !url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fail ? "0.22.0" : fixture.version }) };
+      },
+    };
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), fail ? 1 : 0, io.stdout() + io.stderr());
+    assert.equal(readFileSync(path, "utf8"), fail ? original : `${original.trimEnd()}\n\n[Service]\nDelegate=yes\n`);
+    assert.equal(statSync(path).mode & 0o777, 0o640);
+    if (fail) assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
+  });
+});
+
+test("upgrade cannot succeed on stale discovery, ownership refusal, or a lost previously ready harness", { skip: process.platform !== "linux" }, async t => {
+  for (const problem of ["stale", "pre-restart-inventory", "ownership", "unknown-ownership", "lost", "account-lost", "pending", "healthy", "already-blocked"]) await t.test(problem, async t => {
+    const f = fake(t);
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const fixture = releaseFixture(f);
+    const host: ServiceHost = { ...fixture.host,
+      now: problem === "pre-restart-inventory" ? () => fixture.host.now() + 100 : fixture.host.now,
+      exec: async (command, args, options) => args[0] === "--version"
+        ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" }
+        : fixture.host.exec(command, args, options),
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!response.ok || !url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        const installed = readFileSync(join(f.root, "wollipog-runner"), "utf8") === `runner ${fixture.version}`;
+        body.appVersion = installed ? fixture.version : "0.22.0";
+        for (const runner of body.runners.items) {
+          runner.harnessReadiness = {
+            connectedAt: installed && problem === "pre-restart-inventory" ? 50 : installed && problem !== "stale" ? 2 : 1,
+            refreshed: !installed || problem !== "pending",
+            agents: [{ id: "claude", available: problem === "already-blocked" ? false : !installed || problem === "healthy" || problem === "account-lost" || problem === "pre-restart-inventory",
+              ownershipBlocked: problem === "already-blocked" || installed && (problem === "ownership" || problem === "unknown-ownership") }],
+            accounts: [{ id: "account-1", authStatus: installed && problem === "account-lost" ? "unknown" : "authenticated" }],
+          };
+          if (!installed && problem === "unknown-ownership") delete runner.harnessReadiness;
+        }
+        return { ...response, text: async () => JSON.stringify(body) };
+      },
+    };
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], host, io.io), problem === "healthy" || problem === "already-blocked" ? 0 : 1, io.stdout() + io.stderr());
+    if (problem === "already-blocked") {
+      const report = JSON.parse(io.stdout());
+      assert.equal(report.runnerVerification, "fresh-harness-discovery-degraded");
+      assert.match(report.warnings.join(" "), /pre-existing.*ownership/);
+    } else if (problem !== "healthy") {
+      assert.match(io.stdout() + io.stderr(), /failed upgrade readiness.*rolled back/s);
+      if (problem === "account-lost") assert.match(io.stdout() + io.stderr(), /previously signed-in provider account became unavailable/);
+      assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "#!/bin/sh\n");
+    }
+  });
 });
 
 test("service upgrade rolls back when the new control plane does not report the release version, and refuses bad downloads", { skip: process.platform !== "linux" }, async (t) => {
@@ -965,6 +1060,172 @@ test("cleanup failure after a healthy upgrade reports retained staging without r
   assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1", "owner.json")), true);
 });
 
+function journalPhases(path: string): string[] {
+  return (JSON.parse(readFileSync(path, "utf8")) as { events: Array<{ phase: string }> }).events.map((event) => event.phase);
+}
+
+test("a blocked upgrade names the slot, inspection explains it read-only, and authorized recovery lets the next upgrade run", { skip: process.platform !== "linux" }, async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const fixture = releaseFixture(f, { webBundle: false });
+  const slot = join(f.layout.dataDir, "upgrades", "download-attempt-v1");
+  const working: ServiceHost = {
+    ...fixture.host,
+    exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options),
+    fetch: async (url, init) => {
+      const response = await fixture.host.fetch(url, init);
+      if (!url.endsWith("/api/admin/status")) return response;
+      const body = JSON.parse(await response.text());
+      return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+    },
+  };
+  const failingCleanup: ServiceHost = { ...working, stagingFilesystem: { ...f.host.stagingFilesystem!, unlink: (path) => { if (String(path).endsWith("/owner.json")) throw new Error("fixture retirement failure"); stagingFilesystem.unlink(path); } } };
+  const first = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], failingCleanup, first.io), 1);
+  const healthyButRetained = JSON.parse(first.stdout());
+  assert.match(healthyButRetained.error, /completed and is healthy, but .*fixture retirement failure/u);
+  assert.equal(healthyButRetained.staging.next.inspect, "wollipog service staging inspect --user");
+
+  // Retries, another release and --force all refuse before any download, naming the slot.
+  for (const extra of [[], ["--force"], ["--release", "v8.8.8"]]) {
+    const before = fixture.downloads.length;
+    const io = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json", ...extra], working, io.io), 1);
+    const refusal = JSON.parse(io.stdout());
+    assert.match(refusal.error, /occupied or has unknown entries: .*download-attempt-v1/u);
+    assert.equal(refusal.staging.blockedPath, slot);
+    assert.equal(refusal.staging.previousAttempt.outcome, "healthy-installation-cleanup-failed");
+    assert.equal(refusal.staging.previousAttempt.uncertain, false);
+    assert.deepEqual(refusal.staging.installed, { "control-plane": "0.22.0", runner: "0.22.0" });
+    assert.equal(refusal.staging.recoverable, true);
+    assert.equal(refusal.staging.next.inspect, "wollipog service staging inspect --user");
+    assert.equal(fixture.downloads.length, before, "admission refusal downloads nothing");
+  }
+  const text = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes"], working, text.io), 1);
+  assert.match(text.stderr(), /Blocked: {3}.*download-attempt-v1 \(the user layout's single upgrade slot/u);
+  assert.match(text.stderr(), /Previous: {2}v9\.9\.9 \(owner record valid\); the installation was verified healthy, but staging cleanup failed/u);
+  assert.match(text.stderr(), /Next: {6}wollipog service staging inspect --user/u);
+  assert.match(text.stderr(), /--force does not clear the slot/u);
+
+  // Inspection is read-only and reports the attempt, installed versions and health separately.
+  const list = (dir: string): string[] => readdirSync(dir, { recursive: true }).map(String).sort();
+  const before = list(f.layout.dataDir);
+  const downloads = fixture.downloads.length;
+  const inspected = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], working, inspected.io), 1);
+  const report = JSON.parse(inspected.stdout());
+  assert.deepEqual(list(f.layout.dataDir), before);
+  assert.equal(fixture.downloads.length, downloads);
+  assert.equal(report.state, "blocked");
+  assert.equal(report.slot, slot);
+  assert.equal(report.owner.tag, "v9.9.9");
+  assert.equal(report.journal.outcome, "healthy-installation-cleanup-failed");
+  assert.deepEqual(report.journal.events.map((event: { phase: string }) => event.phase), ["reserved", "staged", "installing", "installed", "verified", "cleanup-failed"]);
+  assert.deepEqual(report.installed.versions, { "control-plane": "0.22.0", runner: "0.22.0" });
+  assert.equal(report.installed.health.ok, true);
+  assert.match(report.next.recover, /^wollipog service staging recover --user --attempt sa1-[0-9a-f]{32}$/u);
+  const inspectedText = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "inspect"], working, inspectedText.io), 1);
+  assert.match(inspectedText.stdout(), /Recovery: {3}eligible\. This moves the exact attempt above into .*upgrade-recovery\/ without deleting anything/u);
+  assert.match(inspectedText.stdout(), /Installed: {2}control-plane 0\.22\.0, runner 0\.22\.0/u);
+
+  // Recovery needs the exact token and explicit confirmation; ordinary errors change nothing.
+  const usage = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--yes"], working, usage.io), 2);
+  assert.match(usage.stderr(), /requires --attempt/u);
+  const unconfirmed = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", report.recovery.token], working, unconfirmed.io), 2);
+  assert.match(unconfirmed.stderr(), /pass --yes in non-interactive use/u);
+  const declined = makeIo({ stdinIsTTY: true, confirm: async () => false });
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", report.recovery.token], working, declined.io), 1);
+  const wrong = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sa1-${"0".repeat(32)}`, "--yes", "--json"], working, wrong.io), 1);
+  assert.match(JSON.parse(wrong.stdout()).error, /token does not match.*Nothing was deleted/su);
+  assert.equal(JSON.parse(wrong.stdout()).recovery.refused, true);
+  assert.deepEqual(list(f.layout.dataDir), before);
+
+  const recovered = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", report.recovery.token, "--yes", "--json"], working, recovered.io), 0, recovered.stdout());
+  const result = JSON.parse(recovered.stdout());
+  assert.equal(result.recovered, true);
+  assert.equal(result.admissible, true);
+  assert.equal(result.next, "wollipog update --user");
+  assert.equal(existsSync(slot), false);
+  assert.ok(existsSync(join(result.preservedPath, "owner.json")), "the attempt is preserved, not deleted");
+
+  // The next update proceeds without manual filesystem edits and retires its staging normally.
+  const next = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], working, next.io), 0, next.stdout());
+  const upgraded = JSON.parse(next.stdout());
+  assert.equal(upgraded.upgraded, true);
+  assert.equal(existsSync(slot), false);
+  assert.equal(upgraded.diagnostics.problem, null);
+  assert.deepEqual(journalPhases(upgraded.diagnostics.journal), ["reserved", "staged", "installing", "installed", "verified", "cleaned"]);
+  const clear = makeIo();
+  assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], working, clear.io), 0);
+  assert.equal(JSON.parse(clear.stdout()).state, "clear");
+  assert.equal(JSON.parse(clear.stdout()).preserved[0].state, "preserved");
+});
+
+test("upgrade journals distinguish pre-installation failure and rollback, and a live updater blocks recovery", { skip: process.platform !== "linux" }, async (t) => {
+  const f = fake(t);
+  assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+  const fixture = releaseFixture(f, { webBundle: false });
+  const journalDir = join(f.layout.dataDir, "upgrade-journal");
+  const newest = () => readdirSync(journalDir).map((name) => join(journalDir, name)).sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs)[0]!;
+  const wrongVersion: ServiceHost = { ...fixture.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? "1.0.0" : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options) };
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], wrongVersion, makeIo().io), 1);
+  assert.deepEqual(journalPhases(newest()), ["reserved", "failed", "cleaned"]);
+  const unhealthy: ServiceHost = { ...fixture.host, exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options) };
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], unhealthy, makeIo().io), 1);
+  assert.deepEqual(journalPhases(newest()), ["reserved", "staged", "installing", "installed", "rolled-back", "cleaned"]);
+
+  // Journaling is best effort: a journal that stops accepting writes after `staged` never fails
+  // the upgrade, and its stale record does not claim the installation was untouched.
+  let journalWrites = 0;
+  const failingJournal: ServiceHost = {
+    ...unhealthy,
+    stagingFilesystem: { ...f.host.stagingFilesystem!, rename: (from, to) => {
+      if (/\/[0-9a-f-]{36}\.json$/u.test(String(to)) && ++journalWrites > 2) throw Object.assign(new Error("fixture ENOSPC"), { code: "ENOSPC" });
+      stagingFilesystem.rename(from, to);
+    } },
+    fetch: async (url, init) => {
+      const response = await fixture.host.fetch(url, init);
+      if (!url.endsWith("/api/admin/status")) return response;
+      const body = JSON.parse(await response.text());
+      return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+    },
+  };
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  const degraded = makeIo();
+  assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], failingJournal, degraded.io), 0, degraded.stdout());
+  const degradedReport = JSON.parse(degraded.stdout());
+  assert.equal(degradedReport.upgraded, true);
+  assert.match(degradedReport.diagnostics.problem, /could not record installing: fixture ENOSPC/u);
+  assert.equal(readFileSync(join(f.root, "wollipog-runner"), "utf8"), "runner 9.9.9");
+  assert.equal(existsSync(join(f.layout.dataDir, "upgrades", "download-attempt-v1")), false, "staging still retires");
+  const stale = JSON.parse(readFileSync(newest(), "utf8"));
+  assert.deepEqual(stale.events.map((event: { phase: string }) => event.phase), ["reserved", "staged"]);
+  const summary = describeJournal({ state: "recorded", record: stale, reason: null });
+  assert.equal(summary.outcome, "unknown");
+  assert.match(summary.conclusion, /may still have been replaced/u);
+
+  // An updater still running with its recorded identity keeps its slot even with a token.
+  const live = { pid: 5001, startTime: "9", bootId: "fixture-boot" };
+  const manifest = { name: "SHA256SUMS", size: 1, digest: `sha256:${"a".repeat(64)}`, url: "" };
+  const attempt = ReleaseStaging.create(f.layout.dataDir, { mode: "user", serviceUid: MY_UID }, "v9.9.9", [manifest], f.host.stagingFilesystem, live);
+  t.after(() => attempt.finish());
+  const io = makeIo();
+  const procs = { ...f.host.stagingProcesses!, self: 1, identity: (pid: number) => (pid === 5001 ? live : null) };
+  assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], { ...fixture.host, stagingProcesses: procs }, io.io), 1);
+  const inspection = JSON.parse(io.stdout());
+  assert.equal(inspection.recovery.token, null);
+  assert.match(inspection.recovery.reasons.join(" "), /5001 .*still running/u);
+  assert.equal(attempt.finish(), null, "the live attempt still completes normally");
+});
+
 test("upgrade close errors preserve pre-swap bytes or healthy installed generations without stale retries", { skip: process.platform !== "linux" }, async (t) => {
   for (const phase of ["writer", "final-owner"]) await t.test(phase, async (t) => {
     const f = fake(t);
@@ -982,6 +1243,9 @@ test("upgrade close errors preserve pre-swap bytes or healthy installed generati
         ...base,
         open: (...args) => {
           const fd = base.open(...args);
+          // A later open (for example the phase journal) may legitimately receive the released
+          // number; that is a new generation, not a retry of the retired one.
+          foreign.delete(fd);
           handles.set(fd, { path: String(args[0]), flags: args[1] as number });
           return fd;
         },
@@ -1028,5 +1292,68 @@ test("upgrade close errors preserve pre-swap bytes or healthy installed generati
       assert.equal(readFileSync(`${installed}.previous`, "utf8"), "#!/bin/sh\n");
       assert.equal(f.execs.slice(before).filter((line) => line.includes("restart")).length, 2, "final close error does not trigger rollback");
     }
+  });
+});
+
+test("staging CLI exposes legacy preservation, requires confirmation, and admits the next update", { skip: process.platform !== "linux" }, async (t) => {
+  for (const system of [false, true]) await t.test(system ? "system" : "user", async (t) => {
+    const f = fake(t, { system, ...(system ? { uid: 0, accountUid: MY_UID } : {}) });
+    assert.equal(await runServiceCli(["service", "install", ...bins(f), "--json"], f.host, f.io), 0, f.stderr());
+    const fixture = releaseFixture(f, { webBundle: false });
+    const working: ServiceHost = {
+      ...fixture.host,
+      exec: async (command, args, options) => args[0] === "--version" ? { code: 0, stdout: `${command.includes("/upgrades/") ? fixture.version : "0.22.0"}\n`, stderr: "" } : fixture.host.exec(command, args, options),
+      fetch: async (url, init) => {
+        const response = await fixture.host.fetch(url, init);
+        if (!url.endsWith("/api/admin/status")) return response;
+        const body = JSON.parse(await response.text());
+        return { ...response, text: async () => JSON.stringify({ ...body, appVersion: fixture.version }) };
+      },
+    };
+    const path = join(f.layout.dataDir, "upgrades", "v0.28.0");
+    mkdirSync(path, { recursive: true, mode: 0o700 });
+    writeFileSync(join(path, "SHA256SUMS"), "interrupted", { mode: 0o600 });
+    for (const force of [false, true]) {
+      const refused = makeIo();
+      assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json", ...(force ? ["--force"] : [])], working, refused.io), 1);
+      assert.equal(fixture.downloads.length, 0);
+    }
+    const inspected = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "inspect", "--json"], working, inspected.io), 1);
+    const report = JSON.parse(inspected.stdout());
+    assert.equal(report.legacy[0].path, path);
+    assert.equal(report.legacy[0].recovery.eligible, true);
+    assert.match(report.legacy[0].next.recover, /staging recover --(?:user|system) --attempt sl1-[a-f0-9]{32}$/u);
+    const token = report.legacy[0].recovery.token;
+    const text = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "inspect"], working, text.io), 1);
+    assert.match(text.stdout(), /Legacy:.*v0\.28\.0/u);
+    assert.match(text.stdout(), /Preservation: eligible/u);
+    assert.match(text.stdout(), /SHA256SUMS \(file, 11 B, 0600, 1 links\)/u);
+    const missingConfirmation = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token], working, missingConfirmation.io), 2);
+    let question = "";
+    const declined = makeIo({ stdinIsTTY: true, confirm: async (value) => { question = value; return false; } });
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token], working, declined.io), 1);
+    assert.ok(question.includes(path));
+    assert.ok(existsSync(path));
+    let stalePrompt = false;
+    const stale = makeIo({ stdinIsTTY: true, confirm: async () => { stalePrompt = true; return false; } });
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sl1-${"0".repeat(32)}`], working, stale.io), 1);
+    assert.equal(stalePrompt, false, "an unmatched legacy token must refuse before asking to move the wrong directory");
+    assert.ok(existsSync(path));
+    const staleJson = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", `sl1-${"0".repeat(32)}`, "--yes", "--json"], working, staleJson.io), 1);
+    assert.equal(JSON.parse(staleJson.stdout()).recovery.refused, true);
+    assert.match(JSON.parse(staleJson.stdout()).recovery.next.inspect, /staging inspect/u);
+    const recovered = makeIo();
+    assert.equal(await runServiceCli(["service", "staging", "recover", "--attempt", token, "--yes", "--json"], working, recovered.io), 0, recovered.stdout());
+    const result = JSON.parse(recovered.stdout());
+    assert.equal(result.admissible, true);
+    assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted");
+    const update = makeIo();
+    assert.equal(await runServiceCli(["service", "upgrade", "--yes", "--json"], working, update.io), 0, update.stdout());
+    assert.ok(fixture.downloads.length > 0);
+    assert.equal(readFileSync(join(result.preservedPath, "SHA256SUMS"), "utf8"), "interrupted", "update retains the preserved legacy evidence");
   });
 });

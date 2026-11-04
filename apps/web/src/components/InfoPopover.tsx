@@ -10,18 +10,31 @@ import { MenuSurface } from "./Menu.js";
  * (`PanelHeaderActions`). Anchored on a fine pointer, a bottom sheet with the grabber on phones.
  * Escape closes only the popover and returns focus to its button.
  *
- * Its content is a short sentence-case `children` and an optional `.facts` list.
+ * Its content is a short sentence-case `children` and an optional `.facts` list. Beside a field's
+ * label (Time Zone's About Time Zones, #2971) its button is the small `.icon-btn.sm`.
  */
-export function InfoPopover({
-  tool,
-  facts,
-  children,
-}: {
+interface InfoPopoverProps {
   /** The tool's name, Title Case: the button and the popover are "About <tool>". */
   tool: string;
   facts?: readonly { term: string; value: ReactNode }[];
+  /** `sm` beside a field's label. */
+  size?: "sm";
+  /**
+   * At a toolbar's trailing end (Usage and Cost's About These Numbers, #3010): a ghost button with
+   * the icon and its name. The toolbar drops the name, leaving the icon, when its main column is
+   * no wider than a phone (#4029).
+   */
+  labelled?: boolean;
   children: ReactNode;
-}) {
+}
+
+export function InfoPopover({
+  tool,
+  facts,
+  size,
+  labelled: showLabel = false,
+  children,
+}: InfoPopoverProps) {
   const [open, setOpen] = useState(false);
   const popover = useDismissiblePopover(open, setOpen, "info-popover");
   const name = `About ${tool}`;
@@ -34,9 +47,9 @@ export function InfoPopover({
       <button
         ref={popover.triggerRef}
         type="button"
-        className="icon-btn"
-        title={name}
-        aria-label={name}
+        className={showLabel ? "btn ghost" : size ? `icon-btn ${size}` : "icon-btn"}
+        title={showLabel ? undefined : name}
+        aria-label={showLabel ? undefined : name}
         aria-haspopup="dialog"
         aria-expanded={open}
         aria-controls={open ? popover.panelId : undefined}
@@ -44,6 +57,7 @@ export function InfoPopover({
         onKeyDown={popover.onTriggerKeyDown}
       >
         <InfoIcon />
+        {showLabel && name}
       </button>
       {open && (
         <MenuSurface

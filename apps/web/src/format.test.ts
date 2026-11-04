@@ -10,6 +10,7 @@ import {
   permissionModeLabel,
   resolvedModelLabel,
   serviceTierLabel,
+  describeSshFailure,
   sshErrorHint,
   titleCaseLabel,
   relativeTime,
@@ -39,6 +40,9 @@ test("titleCaseLabel formats trusted compact UI labels while preserving acronyms
   assert.equal(titleCaseLabel("ChatGPT plus or pro"), "ChatGPT Plus or Pro");
   assert.equal(titleCaseLabel("OpenCode zen"), "OpenCode Zen");
   assert.equal(titleCaseLabel("API key"), "API Key");
+  // An ordinal's suffix stays with its number (#2971).
+  assert.equal(titleCaseLabel("monthly on the 1st at 9:00 AM"), "Monthly on the 1st at 9:00 AM");
+  assert.equal(titleCaseLabel("the 22nd and 3rd"), "The 22nd and 3rd");
 });
 
 test("formatTokens: small counts are exact", () => {
@@ -47,16 +51,19 @@ test("formatTokens: small counts are exact", () => {
   assert.equal(formatTokens(999), "999");
 });
 
-test("formatTokens: thousands use 'k' (one decimal below 10k)", () => {
-  assert.equal(formatTokens(1234), "1.2k");
-  assert.equal(formatTokens(9999), "10.0k");
-  assert.equal(formatTokens(12_500), "13k");
-  assert.equal(formatTokens(250_000), "250k");
+test("formatTokens: thousands use 'K' (one decimal below 10K, none when it is zero)", () => {
+  assert.equal(formatTokens(1234), "1.2K");
+  assert.equal(formatTokens(2000), "2K");
+  assert.equal(formatTokens(9999), "10K");
+  assert.equal(formatTokens(12_500), "13K");
+  assert.equal(formatTokens(72_000), "72K");
+  assert.equal(formatTokens(250_000), "250K");
 });
 
-test("formatTokens: crosses cleanly to 'M' at the 1000k boundary", () => {
-  assert.equal(formatTokens(999_499), "999k");
-  assert.equal(formatTokens(999_999), "1.0M"); // was "1000k" before the fix
+test("formatTokens: crosses cleanly to 'M' at the 1000K boundary", () => {
+  assert.equal(formatTokens(999_499), "999K");
+  assert.equal(formatTokens(999_999), "1M"); // was "1000k" before the fix
+  assert.equal(formatTokens(1_000_000), "1M");
   assert.equal(formatTokens(1_200_000), "1.2M");
 });
 
@@ -137,6 +144,59 @@ test("sshErrorHint: connection-blocked errors get the VPN/split-tunneling hint",
     const hint = sshErrorHint(msg);
     assert.ok(hint, `expected a hint for: ${msg}`);
     assert.match(hint!, /split-tunneling/);
+  }
+});
+
+test("describeSshFailure: one plain sentence per known failure, and the target in the fallback", () => {
+  assert.equal(describeSshFailure("ssh devbox: Permission denied (publickey,password).", "devbox"),
+    "The host refused your SSH key. Load the key with ssh-add, then try again.");
+  assert.equal(describeSshFailure("Received disconnect from 10.0.0.2: Too many authentication failures", "devbox"),
+    "The host refused your SSH key. Load the key with ssh-add, then try again.");
+  // A connect-time EACCES is a blocked connection, not a refused key.
+  const blocked = "ssh: connect to host devbox port 22: Permission denied";
+  assert.equal(describeSshFailure(blocked, "devbox"), sshErrorHint(blocked));
+  assert.equal(describeSshFailure("ssh: connect to host devbox port 22: Connection timed out", "devbox"),
+    sshErrorHint("ssh: connect to host devbox port 22: Connection timed out"));
+  assert.equal(describeSshFailure("Host key verification failed.", "me@devbox"),
+    "The host key for me@devbox doesn't match the one this computer knows. Check the host, then update ~/.ssh/known_hosts.");
+  assert.equal(describeSshFailure("ssh: Could not resolve hostname devbx: Name or service not known", "devbx"),
+    "This computer couldn't find devbx. Check the SSH target.");
+  assert.equal(describeSshFailure("ssh: connect to host devbox port 2222: Connection refused", "devbox"),
+    "devbox refused the connection. Check that SSH runs there and the port is right.");
+  for (const network of ["Failed to fetch", "Load failed", "NetworkError when attempting to fetch resource."]) {
+    assert.equal(describeSshFailure(network, "devbox"), "Wollipog couldn't be reached. Check the connection, then try again.");
+  }
+  assert.equal(describeSshFailure("unsupported remote platform: SunOS i86pc", " build-box "), "Wollipog couldn't reach build-box over SSH.");
+  assert.equal(describeSshFailure(null), "Wollipog couldn't reach the machine over SSH.");
+  for (const sentence of [describeSshFailure(blocked), describeSshFailure("x", "devbox")]) {
+    assert.doesNotMatch(sentence, /—|e\.g\.|dashboard/, "§17: no em-dash fragments, Latin abbreviations or 'dashboard'");
+  }
+});
+
+test("describeSshFailure: a Connect via SSH request failure is classified as a request, never as SSH", () => {
+  const unreachable = "Wollipog couldn't be reached. Check the connection, then try again.";
+  // No HTTP answer: the desktop transport's own words, a browser network error, a timeout.
+  assert.equal(describeSshFailure("The remote instance request failed.", "devbox", { status: null }), unreachable);
+  assert.equal(describeSshFailure("Failed to fetch", "devbox", { status: null }), unreachable);
+  assert.equal(describeSshFailure("The Wollipog server didn't answer within 45 seconds.", "devbox", { status: null }),
+    "Wollipog didn't answer in time. Check the machine list before trying again.");
+  assert.equal(describeSshFailure("The Wollipog server did not answer within 45 seconds.", "devbox", { status: null }),
+    "Wollipog didn't answer in time. Check the machine list before trying again.");
+  // The control plane's answers to POST /api/boxes.
+  assert.equal(describeSshFailure("displayName must be 120 characters or fewer and contain no control characters", "devbox", { status: 400 }),
+    "Use a machine name of 120 characters or fewer, with no control characters.");
+  assert.equal(describeSshFailure("sshPort must be an integer between 1 and 65535", "devbox", { status: 400 }), "Use a port from 1 to 65535.");
+  assert.equal(describeSshFailure("invalid sshTarget (expected user@host, no leading '-' or whitespace)", "-x", { status: 400 }),
+    "Use an SSH target such as user@host, with no spaces or leading dash.");
+  for (const status of [401, 403]) {
+    assert.equal(describeSshFailure("forbidden", "devbox", { status }),
+      "Wollipog refused the request. Check that you're signed in and allowed to connect machines.");
+  }
+  // Even text that looks like ssh's is a request failure here: no SSH runs before the answer.
+  for (const raw of ["ssh devbox: Permission denied (publickey).", "SQLITE_BUSY: database is locked", ""]) {
+    const sentence = describeSshFailure(raw, "devbox", { status: 500 });
+    assert.equal(sentence, "Wollipog couldn't start connecting to devbox. Try again.");
+    assert.doesNotMatch(sentence, /over SSH|SSH key/);
   }
 });
 

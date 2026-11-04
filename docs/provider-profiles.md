@@ -33,9 +33,9 @@ runner and control-plane owner and per-process holder.
 
 | Status | Meaning |
 | --- | --- |
-| `pending` | An Owner or Admin authorized the grant; the runner has not confirmed the profile id it wrote. One per runner account. |
+| `pending` | An Owner or Admin authorized the grant (adoption), or the account's creator did (Add Account, `origin = 'created'`); the runner has not confirmed the profile id it wrote. One per runner account. |
 | `active` | The runner recorded the grant in the marker and reported the profile id. One per profile and control-plane instance. |
-| `revoked` | Revoked by an Owner or Admin, by account removal, by a coded runner refusal, or superseded by a newer grant of the same control plane to the same profile. |
+| `revoked` | Revoked by an Owner or Admin, by account removal, by a coded runner refusal, spent by an Add Account sign-in that recorded no profile-bearing account, or superseded by a newer grant of the same control plane to the same profile. |
 
 The marker holds one grant per control-plane instance, so a newer grant of the same control plane to
 the same profile (for example from a second runner on the same OS account) supersedes the older row
@@ -88,10 +88,386 @@ naming the profile). Each (runner, account, grant) is sent at most once per five
 account reports do not repeat it. No reconnect is needed.
 
 Adoption is strict. After adoption only explicitly granted control planes may use the HOME; grants are
-never reconstructed from lease-journal owners. Sessions created after adoption that use the account
-are checked against its recorded profile id. Session-level `providerProfileId` binding, the adoption
-confirmation copy, automatic grants for accounts created through Add Account and managed profile
-paths are later parts of #3239.
+never reconstructed from lease-journal owners. Other control planes that share the Machine's OS
+account lose the implicit access they had to the HOME. Sessions created after adoption record the
+profile id (see [Sessions](#sessions)). Accounts created through Add Account are profiles from the
+start; see [Managed Profiles](#managed-profiles).
+
+## Managed Profiles
+
+Native Claude Code, Codex and Pi installation discovery uses a private probe HOME beneath each
+runner's owner-namespaced data directory. Executable resolution still searches the OS account's
+installed binaries. Version, compatibility and update-help probes use leased private state;
+authentication and models are inspected separately under the intended launch account's lease
+(or the legacy default HOME when no accounts are configured). A busy or ungranted launch HOME
+does not hide the installation: authentication stays unknown and no authenticated model catalog
+is invented. When the launch HOME can be inspected, existing sign-in state, Pi models and Claude
+user commands remain visible. Model-cache fallback reads its admitted HOME. npm release checks
+retain the operator's userconfig source while their writable state stays isolated. Discovery
+never copies credentials or replaces an account or saved session binding.
+
+Each granted account is checked independently with a compatible installed harness, even when the
+default account is signed out. A ready account keeps the harness selectable for that account;
+the account rows retain their own authentication states. This aggregate readiness never changes
+the saved default, the account chosen by an implicit launch, or a session's recorded binding.
+An explicit or saved ungranted default is refused rather than silently replaced. When no default
+is configured, discovery and new implicit launches choose the first granted compatible account,
+matching control-plane session creation. With no granted account, neither falls back to HOME.
+Protocol v283 carries separate readiness for the unchanged default and ready explicit accounts.
+Automatic reviews use their runner default; automations, orchestration and implicit session creation
+check their effective Machine default. They skip or refuse a signed-out default even when another
+account is ready. Explicit account choices and existing session bindings remain unchanged. Older
+control planes receive conservative default-account availability instead of aggregate readiness.
+WSL without an explicit default keeps its discovered legacy HOME, and configured API/cloud auth
+retains its authentication and billing precedence.
+
+An installed harness can report **Sign-In Required** while the Machine's SSH connection remains
+online. Use **Add Account** to complete supported sign-in into a persistent managed profile, then
+select that account for new sessions. Existing accounts and saved sessions keep their recorded
+HOMEs across reconnects and upgrades; explicitly selecting a shared HOME still enforces its lease
+and grants. Configured launch environments retain their explicit HOME selection and ownership
+checks. The content-free `provider_discovery_completed` log reports installation availability and
+sign-in counts without credential paths or account labels.
+
+An account created through Add Account on a v225 runner connected to a v225 control plane is a
+managed profile. Its HOME is `~/.agent-manager/profiles/<profileId>`: one root per SSH account,
+outside every runner's owner-namespaced data directory, named by a fresh random profile id. Existing
+account homes keep their paths, and an older control plane (or runner) still creates new homes at
+`<dataDir>/provider-accounts/<accountId>` without a marker.
+
+The control plane that creates the account is granted it automatically:
+
+1. `POST /api/runners/:id/provider-logins` without `accountId` (anyone who can manage the Machine)
+   records a pending grant with `origin = 'created'`, `granted_by` the caller and `granted_role` the
+   caller's organization role, and sends its id as `start_provider_login.profileGrantId`. A non-human
+   caller, or a runner without a recorded scope, gets no grant and today's HOME. Adoption and
+   revocation stay Owner/Admin only.
+2. The runner creates `.agent-manager` and `profiles` (0700 when missing) and refuses either one
+   when it is a link, owned by another user, or writable by group or others. It creates
+   `<profileId>` 0700 and refuses one that already exists. Its lease worker then writes the first
+   marker, holding the HOME's lease (`profile_create`), with this identity and only this control
+   plane's grant. Only then does the sign-in take the HOME's lease and start the provider.
+3. The start reply names the new account id; the control plane binds the pending grant to it (until
+   then the row's account key is a placeholder that matches no account). When the sign-in succeeds,
+   the runner records the account with its `profileId`, counts the grant as active, and reports the
+   account with `profile.access = 'granted'`; the account report completes the pending grant, as a
+   lost adoption reply does.
+
+Windows runners (including their WSL account homes) cannot verify a marker, so they ignore the grant
+and create today's HOME; the control plane spends the grant when the account is reported without a
+profile.
+
+A sign-in that does not record the account spends the grant on both sides:
+
+| Outcome | Runner | Control Plane |
+| --- | --- | --- |
+| The start is refused (no agent, the profile cannot be created, the lease is unavailable) | Retains any created HOME and ownership evidence; settles any created grant | Revokes the grant from the start reply |
+| Cancelled, failed or timed out | Forgets the grant and retains the HOME, including scratch files and credentials; drops the grant from the marker under the lease when possible | Revokes the grant when the sign-in inventory reports the settled sign-in |
+| A duplicate of an account already on the Machine | Retains the new HOME and credentials; drops the grant from its marker when possible | Same as failed |
+
+A lost start reply leaves the grant pending and unbound. The runner still uses it, and the account
+reports `pending` access; adopting the account replaces the grant in the marker.
+
+Labels are reserved the same way as before: a second Add Account with the same provider and an
+equal label (trimmed, case-insensitive) is refused while the first is running. A managed start
+reserves its label before it creates the HOME, so an overlapping request is refused without creating
+a HOME or starting a process; the reservation ends when the sign-in settles or its start fails.
+
+## Replacement Runners
+
+A grant is bound to a profile, a control-plane instance and an organization/owner scope, never to a
+runner. A replacement runner (a new runner id, so a new owner hash and data directory) for the same
+control-plane instance and the same `~/runner.config.json` reports the same profile ids at
+registration and is listed the same active grants. After the old runner released the HOME's lease in
+an orderly shutdown, the replacement acquires it, binds new sessions to the same profile, and keeps
+resumable conversations, without any filesystem change. Because a managed HOME is outside the
+owner-namespaced data directory, the replacement may also retire it when the account is removed.
+
+A runner connected to another control-plane instance is refused at the lease as
+`profile_not_granted`, and its account reports show `not_granted`, until an Owner or Admin there
+adopts the profile.
+
+A stale lease left by a crashed predecessor on the same host is recovered when the profile grants the
+replacement's control plane and the predecessor's lifecycle evidence proves nothing it launched
+survives: the host rebooted, or a same-boot process scan finds no survivor (#3241; see
+[the lease worker](provider-home-lease-worker.md#recovering-an-abandoned-lease)). The recovery is an
+explicit journal record; the old lease is kept, never released on its behalf.
+
+A lease without evidence (from an older runner, or on macOS), or any lease on a HOME without a
+profile grant for this control plane, needs an Owner or Admin's one-time authorization. The Accounts
+list on a v229 Machine shows **Recovery Needed** for such an account. **Recover Account** is offered only
+when the runner reports that a recovery would proceed: the record has evidence that proves it
+abandoned, or the Machine has restarted since the record was written. Otherwise the badge's tooltip
+explains why in plain language. An Owner or Admin can open **View Recovery Details** for the
+structured recovery code and safe blocking-process metadata. For an unreadable process, the primary
+guidance offers another account or saving work and restarting the machine; restarting Wollipog alone
+does not supply the missing proof for a historical lease. No action stops unrelated processes or
+changes the account's recovery records to bypass that check. The authorization names the exact record that was inspected and is used once; see
+[Owner/Admin Recovery Authorization](provider-home-lease-worker.md#owneradmin-recovery-authorization).
+
+## Web Actions
+
+The Accounts list on a Machine shows each account's profile state from `profile.access`: **Profile**
+(`granted`), **Grant Pending** (`pending`) or **Not Granted** (`not_granted`); a legacy HOME has no
+badge. An Owner or Admin of the personal control-plane organization sees two actions on a v225
+runner, and nobody sees them on an older runner. A member who can manage the Machine, and an Owner or
+Admin of any other organization (whom the routes refuse; see
+[Authorization and Audit](#authorization-and-audit)), see only the badges:
+
+- **Adopt as Profile**, for an account without a profile, `not_granted`, or `pending` (a retry), while
+  the Machine is online. The confirmation says that after adoption only control planes granted the
+  profile can use the HOME, so other control planes sharing the Machine's account lose access, and
+  that existing sessions keep working while new sessions record the profile. Coded refusals, the
+  capability refusal and a 504 (the Machine did not confirm in time; the grant completes when it
+  reports the account again) are shown in the section.
+- **Revoke Access**, for `granted` or `pending`, also while the Machine is offline (the control plane
+  records the revocation; the runner drops the grant at its next registration). The confirmation
+  says sessions that use the profile cannot restart until access is granted again and that other
+  control planes are not affected. A `PROVIDER_PROFILE_HAS_ACTIVE_SESSIONS` refusal opens a second
+  confirmation, **Revoke Access from Active Sessions**, listing the sessions, which retries with
+  `force: true`.
+
+On a Windows Machine, **Adopt as Profile** is shown disabled with the reason: a Windows runner cannot
+verify a profile marker and refuses every adoption as `UNSUPPORTED_HOME`.
+
+## Session Launch Refusals
+
+When a session's launch is refused at a provider HOME's lease (the driver launch, or launch
+preparation for an account HOME), a v233 runner records the refusal's code on the session and
+reports it in session snapshots as `providerHomeRefusal`: the code, the provider, the bound account's
+id and label (absent for the runner's own provider HOME), and the time. It never carries a path. The
+control plane stores it in `sessions.provider_home_refusal`, drops a malformed one, and projects it
+as `SessionView.providerHomeRefusal`; the session's next launch clears it (`null`). Cancellations,
+deadlines and recovery codes are not states of the HOME, so they stay text only. A refusal during
+launch preparation is reported as `provider account unavailable`, no longer as an isolation failure.
+
+A failed or stopped session from a runner without a specific recovery cause shows one notice for
+the code, with the recovery it needs:
+
+| Code | Notice | Actions |
+| --- | --- | --- |
+| `busy` | **Account in Use** | Restart Session, Switch Account… |
+| `foreign_owner` | **Account Locked by Another Runner** | Recover Existing Profile…, Switch Account… |
+| `foreign_host` | **Account in Use on Another Host** | Switch Account…, Set Up Managed Profile… |
+| `unavailable` | **Lease Helper Unavailable** | Restart Session |
+| `unverifiable` | **Lease Can't Be Verified** | Switch Account… |
+| `profile_not_granted` | **Profile Not Granted** | Recover Existing Profile…, Switch Account… |
+| `profile_changed` | **Profile Changed** | Switch Account…, Open Machine Accounts |
+| `profile_unverifiable` | **Profile Can't Be Read** | Open Machine Accounts, Switch Account… |
+
+A refusal of the runner's own provider HOME (no account bound) names it as "this Machine's Claude
+sign-in" (or Codex) and offers no account switch: the way out is a managed profile of this control
+plane, so a busy, locked or foreign-host refusal of that HOME offers **Set Up Managed Profile…**
+(after **Restart Session** when it is only busy). The profile serves new sessions: a session bound
+to no account can't be switched onto an account, so the refused session itself keeps the Machine's
+own HOME. Older runners report only text; the session's **Turn Failed**
+notice says that the runner couldn't use the session's provider account, with the runner's message
+under its details.
+
+When the v235 structured recovery cause is available, the notice instead uses plain-language
+guidance for that cause. A live runner or surviving session offers **Restart Session** after its work
+finishes, then **Switch Account…**; other causes prioritize **Switch Account…**, followed by **Open
+Machine Accounts**. The transcript keeps the established `provider account unavailable:` prefix on
+both launch paths so older clients still recognize the account-specific error; its explanation no
+longer includes process-boundary or journal instructions. Technical recovery codes and process
+metadata stay in the authorized account details rather than the badge tooltip.
+
+### Waiting for a Busy Account
+
+A busy account frees itself once the other holder finishes, so with a v248 runner a **busy** refusal
+(including its live-runner and surviving-session causes) offers **Wait for Account** in place of
+**Restart Session**: its launch starts at once when the account is already free, so a plain restart
+would only risk a second refusal. It restarts the session with `waitForProviderHome` (`POST /api/sessions/:id/restart` with
+`{ "waitForProviderHome": true }`); the control plane refuses the request for an older runner rather
+than letting it fail the launch again.
+
+The runner waits, not the browser. Only that launch waits: every provider-HOME acquisition it makes
+(launch preparation's account HOME and the driver's) retries a `busy` lease with backoff from 2
+seconds up to 30 seconds between attempts. Nothing is held between attempts, and the provider
+starts only after an acquisition is granted. While it waits the session stays **starting** and
+reports `providerHomeWait` in its snapshots: the provider, the busy cause, the bound account and
+when the wait started and ends, never a path. The control plane stores it in
+`sessions.provider_home_wait` and projects it only while the session is starting. The session shows
+**Waiting for Account** (an info notice, not a failure) with **Stop Waiting**, and lists show a
+**Waiting for Account** condition.
+
+- **Stop** (or **Stop Waiting**), a restart, deletion or runner shutdown ends the wait; nothing
+  started, so nothing needs to be stopped, and no refusal is recorded.
+- Any other refusal ends the wait with that refusal, exactly as a launch that didn't wait.
+- After 8 hours the wait gives up and the launch fails with the ordinary **Account in Use**
+  refusal, so a forgotten wait doesn't hold its runner slot indefinitely. A waiting launch keeps
+  the runner capacity it was admitted with, as any starting launch does.
+- The wait is in the runner's memory only and does not survive a runner restart, which ends the
+  launch it belonged to. A later launch of the session, including an account switch or an ordinary
+  restart, doesn't wait unless it is asked to.
+
+### Refused Forks
+
+A conversation fork (including Recover Conversation and Edit in Fork) launches its own provider
+under the source session's account, so its lease can refuse it too. A v248 runner returns the same
+typed `providerHomeRefusal` in `fork_result` for a v248 control plane, which passes it on in the
+fork's 409 response. The fork's failure notice then has the same title as a refused session launch
+and the same guidance, worded for a fork ("so the fork didn't start. Try again once it's free."),
+with the runner's message under its details. A fork is never waited for. The source session is
+unaffected. Older peers keep the text-only failure.
+
+### Refused Agent TUIs
+
+An ordinary Agent TUI runs in its session's provider account: the runner resolves the account's
+`CLAUDE_CONFIG_DIR` / `CODEX_HOME` when the TUI opens and leases exactly that HOME, without writing
+the environment to session metadata (#3338). A TUI of a session without an account leases the HOME
+it inherits, including the runner's own `CLAUDE_CONFIG_DIR` / `CODEX_HOME`. A v258 runner returns the
+lease's typed `providerHomeRefusal` in `shell_open_result` for a v258 control plane, which passes it
+on with the open's error. The terminal's notice then shows the guidance of a refused session launch,
+worded for the TUI ("so the Agent TUI didn't open. Try again once it's free."), in place of the
+generic Terminal Error. An Agent TUI is never waited for, and the session itself is unaffected.
+Older peers keep the text-only failure.
+
+## Set Up and Recover Onboarding
+
+Two control planes connected to the same SSH account share the runner user's own provider HOME,
+so the second one's sessions are refused at its lease. The refusal notice leads to the Machine's
+accounts with one of two actions (#3240):
+
+- **Set Up Managed Profile…** opens **Add Account** with the session's provider selected. The
+  sign-in creates a managed profile granted to this control plane only (see
+  [Managed Profiles](#managed-profiles)). Once it records the account, the section offers
+  **Use for New Sessions**, which saves it as the Machine's default account for that provider, so new
+  sessions that don't choose an account use it.
+- **Recover Existing Profile…** is for a configured account. One confirmation covers what the
+  account needs before this control plane can use it again: **Adopt as Profile** when its profile
+  isn't granted here, then, after inspecting the lock again, **Recover Account** when an earlier
+  runner left it locked. Each step keeps its own checks; a lock the runner still refuses to recover
+  (for example one without reboot proof) is explained in the section and left alone.
+
+The actions follow the routes' authority. Set Up Managed Profile needs manage rights on the
+Machine and a v225 runner; Use for New Sessions and Recover Existing Profile need an Owner or Admin
+of the personal organization as well. A viewer who can't complete one gets **Open Machine
+Accounts** instead, where the section says why. Recover Existing Profile is not offered for the
+runner's own HOME, which has no account to adopt. An Owner or Admin can also create the managed
+profile from an existing sign-in instead of signing in again; see
+[Importing an Existing Sign-In](#importing-an-existing-sign-in).
+
+## Importing an Existing Sign-In
+
+An Owner or Admin setting up a managed profile can copy an existing sign-in on the same Machine
+into it instead of starting a new provider sign-in (#3719). The import is a separate, explicit
+authorization that names the source and the new profile.
+
+### What Can Be Imported
+
+Only one combination is supported: a **copy** of a **Codex** sign-in that is an **API key** stored
+in a file-backed `auth.json`, on a **native Linux or macOS** runner. The source is the runner user's
+own Codex HOME (its `CODEX_HOME`, else `~/.codex`) or a configured Codex account.
+
+| Source or context | Import | Why |
+| --- | --- | --- |
+| Codex API key in `auth.json` (native Linux, macOS) | Copy | A static key has no refresh state, so two copies stay usable. |
+| Codex ChatGPT (OAuth) sign-in | Not supported | Refresh tokens rotate, and Codex treats a reused refresh token (`refresh_token_reused`) as a permanent failure, so two copies can sign each other out. |
+| Codex keyring, `auto` or `ephemeral` credential storage | Not supported | The credential is not, or not only, in `auth.json`. |
+| Any Claude credential (file, Keychain, keyless Console) | Not supported | No version-safe credential-only extraction is verified. |
+| Native Windows, Windows-hosted WSL | Not supported | The runner cannot verify a profile marker there, and a WSL path does not identify its distribution. |
+| A runner inside WSL or a container; container execution targets | Not supported | The HOME's relation to the Machine cannot be verified, and container targets never bind host accounts. |
+
+There is no "move": nothing is removed from the source, and Wollipog never runs a provider logout
+or revokes anything. Both copies share the key's billing, rate limits and revocation. Where import
+is not available, the setup explains why and offers the ordinary sign-in.
+
+### What Is Copied
+
+Only the API key. The runner never copies the source's JSON: it writes a fresh record holding only
+the key, in exactly the shape `codex login --with-api-key` writes (`{ "auth_mode": "apikey",
+"OPENAI_API_KEY": … }`, verified against codex-cli 0.165.0 with a throwaway `CODEX_HOME` and a fake
+key). Configuration, transcripts, plugins and skills stay behind, so the new profile is as isolated
+as one created by sign-in. `config.toml` is read only to prove that Codex uses file storage: any
+`cli_auth_credentials_store` other than `file`, at any level, refuses the import. The source record
+must hold an API key and nothing else; OAuth tokens, a refresh time, another `auth_mode`, or an
+unknown key (a newer authentication type) refuse it.
+
+### Source Safety
+
+The whole import is one operation in the serialized provider-HOME lease worker (`profile_import`;
+see [Profile Marker Operations](provider-home-lease-worker.md#profile-marker-operations)), so there
+is no inspect-then-acquire gap:
+
+1. The source must already exist as a real directory (it is never created) and must not be another
+   provider's profile. This runner must not hold it or be acquiring it: a running session, sign-in,
+   Agent TUI or another import of it refuses the import instead of lending its reference.
+2. Its lease is taken exclusively, with the source's own profile context, so another runner's or
+   control plane's lease, and a profile this control plane is not granted, refuse it as an
+   acquisition would. For the runner user's own HOME without `CODEX_HOME`, the lease covers the
+   HOME, and its `.codex` directory is admitted the same way with its own profile context, since a
+   configured account may name `~/.codex` itself as its HOME.
+3. Under those leases the credential directory and `auth.json` are read without following links and
+   with their identities pinned: a real directory and a single-link regular file owned by the
+   runner's user, the directory not group- or world-writable and the file private (no group or
+   other permission bits), at most 16 KiB, and unchanged across the read. The source directories
+   and files are checked unchanged once more. This is the last check that can refuse.
+4. Only then is the new managed HOME created (as for Add Account), its first marker written with
+   this control plane's grant, and the record published by an exclusive 0600 temporary file, fsync,
+   rename and directory fsync, while the source is still held.
+5. The source's leases are released.
+
+Every refusal happens before step 4, so it leaves both HOMEs unchanged; the source's lease journal
+records the acquisition and release, which is bookkeeping, not a credential change. A failure in
+step 4 is an I/O failure (`FAILED`), which retains the new HOME unrecorded, without this control
+plane's grant, as a failed sign-in retains its HOME. A Wollipog lease does not stop an ordinary
+terminal process from changing the source; the pinned identities refuse a change they observe, and a
+change after the last check is no different from a change after the import.
+
+### Authorization and Audit
+
+`POST /api/runners/:id/provider-imports` with:
+
+```json
+{
+  "provider": "codex",
+  "label": "Work",
+  "source": { "kind": "default_home" },
+  "confirmation": { "acknowledgeCredentialImport": true, "sourceLabel": "This Machine's Codex Sign-In", "destinationLabel": "Work" }
+}
+```
+
+`source` is `{ "kind": "default_home" }` or `{ "kind": "account", "accountId": "<id>" }`; nothing
+else, and never a path, is accepted. The runner resolves the path itself. The confirmation must
+name the source exactly as the person confirmed it (the account's label, or "This Machine's Codex
+Sign-In") and the new profile's label; a stale or different name is 409 `CONFIRMATION_MISMATCH`.
+
+The route needs a human Owner or Admin who can access the Machine, so the central gate confines it
+to the personal control-plane organization; members, agent credentials and other organizations'
+Owners and Admins are refused. The control plane chooses the new account's id
+(`import-<random>`), records the new profile's pending grant for that account (`origin =
+'created'`, with the authorizer's role) before sending `import_provider_credential` with that id,
+and an audit row in
+`provider_credential_imports`: the authorizer and role, the source kind (and, for an account
+source, its opaque account id), the grant, and, once the runner answers, the new account and
+profile ids or the refusal code. It holds no credential content or path. A refusal spends the grant;
+a lost reply leaves it pending and the audit `unknown`. Because the grant is bound to the named
+account from the start, a later report of that account with its profile (after the runner's next
+registration lists the pending grant) completes it if the import ran.
+
+The runner records the new account through the same fenced configuration publication as Add
+Account (#3506): it captures the configuration's preimage, then publishes. Only a confirmed
+publication is a success. A publication that definitely did not happen is a refusal (`FAILED`) that
+drops this control plane's grant from the new HOME's marker. One whose outcome is unknown (including
+one published but not confirmed) answers `PUBLICATION_UNKNOWN`: the runner stops using the grant
+without removing it from the marker, the control plane leaves the grant pending and the audit
+`unknown`, and a later report of the named account with its profile completes it. Neither case is reported as a
+copied account.
+
+### Compatibility
+
+A v260 runner on a supported host reports `runtime.providerCredentialImport` (`{ version: 1,
+providers: ["codex"] }`) and accepts `import_provider_credential`. The control plane sends an import
+only to a v260 runner that reports the capability, and refuses the route with 409 otherwise, so
+older runners never receive an import request. Refusals carry a code
+(`ProviderCredentialImportCode`) and a fixed, path-free sentence.
+
+A session that doesn't choose an account never takes one whose profile only other control planes
+may use (`profile.access` of `not_granted`): the control plane's implicit choice, and New Session's
+displayed preselection, skip it. Such an account can't be saved as the Machine's default either
+(409 `PROVIDER_PROFILE_NOT_GRANTED`); Machine Settings leaves it out of the choices unless it is the
+saved one, which says why. Naming the account explicitly is still the person's decision.
 
 ## Registration and Use
 
@@ -123,6 +499,58 @@ so one refused HOME does not fail the whole pass.
 Account reports to a v225 control plane carry `profile: { id, access }` where `access` is `granted`,
 `pending` (this control plane's grant is recorded but not yet confirmed here) or `not_granted`.
 
+## Sessions
+
+A session's account binding is made once and is authoritative afterwards; a restart never re-reads
+the configured account. Provider profiles add one field to it:
+
+- A **new** binding (a session created with an account, an account switch target, or the account
+  chosen in authentication recovery) records the profile id the runner has verified for the
+  account's HOME as the session's `providerProfileId`: the account's configured `profileId`, or,
+  when the configuration has none (a replacement runner's account pointing at a HOME another runner
+  adopted), the HOME marker's identity when this control plane's access to it is `granted` or
+  `pending`. A binding to an unadopted account, or to a HOME this control plane may not use, records
+  none. Existing bindings are never backfilled, and the discovered id is not written back to the
+  account's configuration.
+- A binding made **before** the account was adopted keeps its recorded credential and conversation
+  homes and gets no profile id. Its acquisitions still expect the id the configured account records
+  for that HOME path, as above.
+- An account handoff (manual switch, automatic switch, or the account chosen in authentication
+  recovery) records the target's id as `pendingProviderProfileId` with the rest of the pending
+  binding, so a handoff that resumes after a runner restart still knows it. A follow-up selected
+  mid-handoff keeps its own. A fork's temporary provider uses the source session's binding.
+- When the handoff runs (resuming a stopped session, or replacing an active session's provider),
+  the runner re-resolves the target account, and the saved `pendingProviderProfileId` is
+  authoritative. A target that now reports a different profile id (its configured id, or a usable
+  marker identity) refuses the switch: nothing is bound, the pending binding is cleared, and the
+  refusal is reported like any other switch failure (the **Account Switch Failed** notice and a
+  transcript error for an active session; the command's failure for a stopped one). A target that
+  reports no id binds the saved one, so a replaced HOME is still refused at its lease. A handoff
+  saved without an id binds whatever the target reports when it runs.
+
+The session's recorded `providerProfileId` is the expected id of every acquisition of the session's
+credential HOME: the driver launch, an Agent TUI, launch preparation and provider forks. It takes
+precedence over the id the configured account records for the path, so a HOME substituted under a
+renamed or re-pointed account, or a replacement directory without the marker, is refused for that
+session as `profile_changed` before any provider starts. An acquisition of any other HOME is not
+bound by it.
+
+Session snapshots to a v225 control plane carry `providerProfileId`: the id, or `null` for a binding
+without one. It is absent for older control planes and in the register frame's pre-negotiation
+snapshots, and the control plane keeps the stored value when it is absent. The control plane stores
+it in `sessions.provider_profile_id` and projects it as `SessionView.providerProfileId`.
+
+Session creation refuses, before anything is sent to the runner, an account the runner would refuse
+at its lease:
+
+| Case | Refusal |
+| --- | --- |
+| The runner is below v225 and this control plane holds an active grant for the account | 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." |
+| The account reports a profile, this control plane's grant for it was revoked, and no live grant is left | 409 "Access to this provider profile was revoked for this control plane." |
+
+Both read grants in the runner's scope only. An account without a profile, or one with a live grant,
+is unaffected.
+
 ## Revocation
 
 `POST /api/runners/:id/provider-accounts/:accountId/revoke-profile-access` with `{ "force"?: boolean }`.
@@ -144,21 +572,36 @@ plane's grant and drops it from the marker before it attempts the removal, so th
 even when the runner refuses the removal (an agent default names the account, a sign-in is running,
 or the configuration cannot be written).
 
-Whether the HOME is kept is decided at deletion time, under the HOME's lease: the runner takes the
-lease without the grant check, drops every grant of this control plane from the marker, and keeps
-the HOME when the marker still grants another control plane (or cannot be read), so a grant another
-runner recorded while the removal waited is never deleted with the directory. The runner re-reads
-the marker once more immediately before deleting, after the lease is released, because the lease
-journal lives inside the HOME. When no other control plane is granted, the existing deletion rules
-apply unchanged: a runner-created HOME is deleted only when nothing on the Machine still uses it.
+Physical HOME cleanup is disabled pending proved retirement authority (#3157). Removal forgets the
+configured account and reports `credentialsRetained: true`, including for unshared managed HOMEs and
+legacy `<dataDir>/provider-accounts/<accountId>` directories. It preserves credentials, scratch state
+and canonical lease evidence. A matching managed path/profile, an unshared marker or a released
+lease does not prove that a successor or dormant consumer cannot still depend on the HOME.
+
+Grant retirement still takes the HOME's lease without the grant check and drops this control plane's
+grants when the existing path, marker and local-use checks permit it. Its legacy boolean is not
+deletion authority. A replacement runner can forget an account its predecessor created and settle
+this control plane's grants, but it retains the HOME. Operator-configured and linked HOMEs remain
+protected.
+
+A managed profile HOME must still hold the identity its account recorded before grant retirement. If
+`profiles/<profileId>` was replaced by another profile's HOME (or holds no readable marker), it is
+not this account's HOME: the removal reports `credentialsRetained`, keeps the directory and leaves
+its marker alone, so neither this control plane's grant in it nor any other control plane's is
+dropped. The identity is checked when the removal handler reads the marker (only a
+marker holding the recorded id loses this control plane's grant), under the HOME's lease during
+retirement (`profile_retire` is sent the recorded id and keeps any other identity unchanged).
+The account itself is still forgotten. Accounts at other paths are also forgotten without physical
+HOME cleanup. See [Provider HOME Cleanup Status](provider-home-cleanup.md) for the current safety
+boundary and the remaining retirement requirements.
 
 ## Mixed Versions
 
 | Peer | Behavior |
 | --- | --- |
-| Runner below v225 | Every profile route returns 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." |
-| Control plane below v225 | The runner never reports a profile-bearing account to it, and a HOME holding a marker is refused as `profile_unsupported_control_plane`. Marker-less homes behave as before. |
-| Revoked or never-granted control plane | The runner refuses the HOME as `profile_not_granted`. |
+| Runner below v225 | Every profile route returns 409 "This machine needs a newer runner for provider profiles. Update and restart the runner." Session creation with an account this control plane holds an active grant for returns the same sentence. The web hides the profile actions. Add Account records no grant, and the runner creates today's HOME. |
+| Control plane below v225 | The runner never reports a profile-bearing account to it, and a HOME holding a marker is refused as `profile_unsupported_control_plane`. Marker-less homes behave as before. Session snapshots omit `providerProfileId`. Add Account sends no grant, so new accounts get today's HOME and no marker. |
+| Revoked or never-granted control plane | The runner refuses the HOME as `profile_not_granted`. Session creation with a revoked account returns 409 "Access to this provider profile was revoked for this control plane." |
 
 ## Authorization and Audit
 
@@ -166,6 +609,11 @@ Both routes require a human Owner or Admin who can access the runner; they are n
 the central gate also confines them to the personal control-plane organization like other Machine
 credential routes. Agent credentials are refused. Grant rows record `granted_by`/`granted_role` and
 `revoked_by`/`revoked_role`, and both routes are recorded in the content-free mutation audit.
+
+An Add Account grant is recorded by the sign-in route, which any person who can manage the Machine
+may call; its row records that person and role with `origin = 'created'`. When the control plane
+spends it automatically (a sign-in that settled without an account, or an account reported without
+a profile), `revoked_by`/`revoked_role` repeat the grantor's.
 
 ## Known Limits
 
@@ -181,3 +629,12 @@ credential routes. Agent credentials are refused. Grant rows record `granted_by`
   from the marker; the adoption then has to be repeated.
 - A grant activated on one runner reaches another online runner sharing the profile at its next
   registration.
+- A managed profile's HOME is shared by every runner on the SSH account, by design. A runner of
+  another control plane cannot use it without a grant, but grants do not stop a hostile process on
+  the same OS account (see [Premise](#premise)).
+- When the start reply of an Add Account sign-in is lost, the grant stays pending without an
+  account and is never completed; the account shows **Grant Pending** until an Owner or Admin adopts
+  it.
+- A sign-in whose runner stopped before it settled leaves its pending grant bound to an account that
+  never appears (the row is listed to that runner but grants nothing), and leaves its new HOME in the
+  managed root, as an interrupted sign-in leaves its directory today.

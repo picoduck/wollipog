@@ -1,1 +1,0 @@
-|.access-page-intro h2|font-size|18

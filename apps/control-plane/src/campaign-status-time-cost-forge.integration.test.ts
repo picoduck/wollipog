@@ -143,7 +143,7 @@ async function stack(t: TestContext, options: { budgetUsd?: number } = {}) {
 
   const decisions = {
     implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
   } as const;
   const created = svc.createSession({
     runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "orchestrator-agent", title: "Time, Cost and Forge Campaign",

@@ -7,12 +7,15 @@ import { ControlPlaneDb } from "./db.js";
 import type { Hub, RunnerRequestResult } from "./hub.js";
 import { PERSONAL_ORGANIZATION_ID, type HumanPrincipal } from "./identity.js";
 import {
+  authorizeCreatedProviderProfileGrant,
   ProviderProfileInventoryRevocations,
   providerProfileGrantsForRunner,
   reconcileProviderProfileGrants,
   registerProviderProfileRoutes,
   revokeProviderProfileAccessForAccountRemoval,
   revokeProviderProfileGrantsForAccountRemoval,
+  revokeUnrecordedCreatedProviderProfileGrants,
+  settleCreatedProviderProfileGrantStart,
 } from "./provider-profile-route.js";
 
 const PROFILE = "6f1c2d3e-4a5b-4c6d-8e7f-001122334455";
@@ -67,6 +70,125 @@ const hubOf = (f: { hub: Pick<Hub, "isRunnerOnline" | "requestFromRunner" | "run
 
 const adopted = (profileId = PROFILE): Handler => (_runnerId, message) => ({
   type: "adopt_provider_profile_result", requestId: (message as { requestId: string }).requestId, ok: true, profileId,
+});
+
+test("adoption enrolls before RPC, retains its ticket through concurrent revocation and never readmits it", async () => {
+  const f = await fixture();
+  let finish!: (result: RunnerRequestResult) => void, entered!: () => void;
+  const reached = new Promise<void>(resolve => { entered = resolve; });
+  let requestId = "", grantId = "", ticket = "";
+  f.setHandler((_runnerId, message) => {
+    if (message.type !== "adopt_provider_profile") return { type: "revoke_provider_profile_grant_result",
+      requestId: (message as { requestId: string }).requestId, ok: true, markerUpdated: true };
+    requestId = message.requestId; grantId = message.grantId;
+    const intent = f.db.providerPublicationIntent(requestId);
+    assert.equal(intent?.kind, "adopt");
+    assert.equal(intent?.grantId, grantId);
+    assert.equal(f.db.raw().isTransaction, false, "no RPC inside an uncommitted transaction");
+    ticket = intent!.ticket!;
+    entered();
+    return new Promise<RunnerRequestResult>(resolve => { finish = resolve; });
+  });
+  try {
+    const response = f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } }).then(value => value);
+    await reached;
+    f.db.revokeProviderProfileGrant({ grantId, revokedBy: "user-1", revokedRole: "owner", now: 101 });
+    finish({ type: "adopt_provider_profile_result", requestId, ok: true, profileId: PROFILE });
+    assert.equal((await response).statusCode, 409);
+    assert.equal(f.db.providerPublicationIntent(requestId)?.ticket, ticket);
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.status, "revoked");
+    assert.throws(() => f.db.enrollProviderProfileDispatch({ grantId, requestId, runnerId: "runner-a", kind: "adopt" }));
+    assert.equal(f.sent.filter(entry => entry.message.type === "adopt_provider_profile").length, 1);
+    assert.ok(f.db.providerPublicationEvents().records.some(event => event.kind === "observe" && event.observation === "reply"));
+  } finally { await f.close(); }
+});
+
+test("adoption timeout retains durable unknown intent, then inventory completes only the grant", async () => {
+  const f = await fixture();
+  try {
+    const response = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+    assert.equal(response.statusCode, 504);
+    const message = f.sent[0]!.message as Extract<ControlPlaneToRunner, { type: "adopt_provider_profile" }>;
+    const intent = f.db.providerPublicationIntent(message.requestId);
+    assert.equal(intent?.kind, "adopt");
+    assert.ok(f.db.providerPublicationEvents().records.some(event => event.observation === "uncertain"));
+    reconcileProviderProfileGrants(f.db, "runner-a", [account("work", { id: PROFILE, access: "granted" })], 101);
+    assert.equal(f.db.getProviderProfileGrant(message.grantId)?.status, "active");
+    assert.deepEqual(f.db.providerPublicationIntent(message.requestId), intent);
+    assert.equal(f.sent.length, 1, "inventory must not retry the unknown command");
+  } finally { await f.close(); }
+});
+
+test("explicit adoption still settles a previously authorized pending Add Account grant", async () => {
+  const f = await fixture({ handler: adopted() });
+  try {
+    const grant = f.db.authorizeProviderProfileGrant({ grantId: randomUUID(), runnerId: "runner-a", providerAccountId: "work",
+      provider: "claude", origin: "created", grantedBy: "user-1", grantedRole: "owner", now: 1 })!.grant;
+    const response = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+    assert.equal(response.statusCode, 200);
+    const message = f.sent[0]!.message as Extract<ControlPlaneToRunner, { type: "adopt_provider_profile" }>;
+    assert.equal(message.grantId, grant.grantId);
+    assert.equal(f.db.providerPublicationIntent(message.requestId)?.grantId, grant.grantId);
+    assert.equal(f.db.getProviderProfileGrant(grant.grantId)?.status, "active");
+  } finally { await f.close(); }
+});
+
+test("adoption admission fails before RPC on epoch, capacity, dispatch-write or enclosing-transaction failure", async () => {
+  for (const mode of ["epoch", "capacity", "dispatch", "outer"] as const) {
+    const f = await fixture();
+    try {
+      if (mode === "epoch") f.db.raw().exec("DELETE FROM control_plane_metadata WHERE key='provider_profile_publication_epoch_v1'");
+      if (mode === "capacity") f.db.raw().exec("UPDATE provider_profile_publication_source SET intent_count=4096");
+      if (mode === "dispatch") f.db.raw().exec(`CREATE TRIGGER dispatch_fault BEFORE INSERT ON provider_profile_publication_events
+        WHEN json_extract(NEW.record,'$.kind')='adopt' BEGIN SELECT RAISE(ABORT,'fixture dispatch fault'); END`);
+      if (mode === "outer") f.db.raw().exec("BEGIN");
+      const response = await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } });
+      assert.equal(response.statusCode, 503, mode);
+      assert.equal(response.json().code, "PROVIDER_PUBLICATION_UNAVAILABLE", mode);
+      assert.equal(f.sent.length, 0, mode);
+      if (mode === "outer") f.db.raw().exec("ROLLBACK");
+      if (mode === "capacity" || mode === "dispatch") assert.equal(f.db.providerPublicationStatus().status, "degraded");
+      assert.deepEqual(f.db.liveProviderProfileGrantsForAccount("runner-a", "work"), [], mode);
+      assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", [account("work", { id: PROFILE, access: "granted" })], 101), [],
+        "a later report cannot complete a fresh authorization whose enrollment refused");
+      if (mode === "dispatch") {
+        const row = f.db.raw().prepare("SELECT grant_id,status FROM provider_profile_grants WHERE provider_account_id='work'")
+          .get() as { grant_id: string; status: string };
+        assert.equal(row.status, "revoked");
+        assert.ok(f.db.raw().prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?").get(`grant:${row.grant_id}`));
+      }
+    } finally { if (f.db.raw().isTransaction) f.db.raw().exec("ROLLBACK"); await f.close(); }
+  }
+});
+
+test("adoption refusal preserves a reused grant and its earlier uncertain dispatch", async () => {
+  const f = await fixture();
+  try {
+    assert.equal((await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } })).statusCode, 504);
+    const first = f.sent[0]!.message as Extract<ControlPlaneToRunner, { type: "adopt_provider_profile" }>;
+    const grant = f.db.getProviderProfileGrant(first.grantId), intent = f.db.providerPublicationIntent(first.requestId);
+    f.db.raw().exec(`CREATE TRIGGER adoption_retry_fault BEFORE INSERT ON provider_profile_publication_events
+      WHEN json_extract(NEW.record,'$.kind')='adopt' BEGIN SELECT RAISE(ABORT,'fixture retry fault'); END`);
+    assert.equal((await f.app.inject({ method: "POST", url: ADOPT, payload: { acknowledgeProfileAdoption: true } })).statusCode, 503);
+    assert.equal(f.sent.length, 1, "no second command or automatic retry on admission refusal");
+    assert.deepEqual(f.db.getProviderProfileGrant(first.grantId), grant);
+    assert.deepEqual(f.db.providerPublicationIntent(first.requestId), intent);
+    assert.equal(f.db.providerPublicationStatus().status, "degraded");
+  } finally { await f.close(); }
+});
+
+test("adoption preserves established raw runner identities instead of globally degrading", async () => {
+  const f = await fixture({ handler: adopted() });
+  try {
+    for (const runnerId of ["box@lab", "ci+1", "Müller-PC", "_build"]) {
+      f.register(runnerId, [account("work")]); f.online.add(runnerId);
+      const response = await f.app.inject({ method: "POST", url: `/api/runners/${encodeURIComponent(runnerId)}/provider-accounts/work/adopt-profile`,
+        payload: { acknowledgeProfileAdoption: true } });
+      assert.equal(response.statusCode, 200, response.body);
+      assert.equal(f.db.liveProviderProfileGrantsForAccount(runnerId, "work")[0]?.status, "active");
+      assert.equal(f.db.providerPublicationStatus().status, "healthy");
+    }
+  } finally { await f.close(); }
 });
 
 test("profile routes require an Owner or Admin human, an acknowledgement, and a v225 runner", async () => {
@@ -399,6 +521,153 @@ test("a runner whose marker holds one of the later of 257 grants in its scope is
     assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-replacement", [late!.profileId]),
       [{ grantId: late!.grantId, status: "active", profileId: late!.profileId }],
       "the grant is listed, so the runner neither treats it as stale nor removes it from the marker");
+  } finally {
+    await f.close();
+  }
+});
+
+test("Add Account on a v225 runner records a created grant with the creator's role and completes it from the account report", async () => {
+  const f = await fixture();
+  try {
+    const grantId = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, principal("operator"), "codex", 10, "created-operator");
+    assert.ok(grantId, "any person who can manage the Machine is granted the account they create");
+    const pending = f.db.getProviderProfileGrant(grantId)!;
+    assert.deepEqual([pending.status, pending.origin, pending.grantedBy, pending.grantedRole, pending.provider, pending.profileId],
+      ["pending", "created", "user-1", "operator", "codex", null]);
+    assert.notEqual(pending.providerAccountId, "work-1234", "the account is named only by the runner's start reply");
+    assert.deepEqual(providerProfileGrantsForRunner(f.db, "runner-a", []), [{ grantId, status: "pending" }],
+      "a reconnect during the sign-in still lists the grant to the runner");
+
+    settleCreatedProviderProfileGrantStart(f.db, grantId, { started: true, accountId: "work-1234" }, principal("operator"), 11);
+    assert.equal(f.db.getProviderProfileGrant(grantId)?.providerAccountId, "work-1234");
+    f.register("runner-a", [account("work-1234", { id: PROFILE, access: "granted" })]);
+    assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", f.db.getRunner("runner-a")?.providerAccounts, 12), [grantId]);
+    const active = f.db.getProviderProfileGrant(grantId)!;
+    assert.deepEqual([active.status, active.profileId, active.origin], ["active", PROFILE, "created"]);
+  } finally {
+    await f.close();
+  }
+});
+
+test("Add Account records no grant for an older runner or a non-human caller", async () => {
+  const f = await fixture({ protocolVersion: 224 });
+  try {
+    assert.equal(authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 224 }, principal("owner"), "claude", 1, "old-runner"), undefined);
+    const agent = { kind: "agent", actorId: "agent-1" } as unknown as Parameters<typeof authorizeCreatedProviderProfileGrant>[2];
+    assert.equal(authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, agent, "claude", 1, "agent"), undefined);
+    assert.equal(authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-unknown", protocolVersion: 225 }, principal("owner"), "claude", 1, "unknown-runner"),
+      undefined, "a runner without a recorded scope keeps today's HOME");
+    assert.deepEqual(f.db.liveProviderProfileGrantsForAccount("runner-a", "work"), []);
+  } finally {
+    await f.close();
+  }
+});
+
+test("an Add Account grant is spent when the sign-in does not start, settles without an account, or reports no profile", async () => {
+  const f = await fixture();
+  try {
+    const owner = principal("admin");
+    const refused = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 1, "refused")!;
+    settleCreatedProviderProfileGrantStart(f.db, refused, { started: false }, owner, 2);
+    assert.deepEqual([f.db.getProviderProfileGrant(refused)?.status, f.db.getProviderProfileGrant(refused)?.revokedBy],
+      ["revoked", "user-1"]);
+
+    const cancelled = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 3, "cancelled")!;
+    settleCreatedProviderProfileGrantStart(f.db, cancelled, { started: true, accountId: "cancelled-1" }, owner, 4);
+    const adoption = f.db.authorizeProviderProfileGrant({ grantId: randomUUID(), runnerId: "runner-a", providerAccountId: "work",
+      provider: "claude", origin: "adopted", grantedBy: "user-1", grantedRole: "owner", now: 4 })!.grant.grantId;
+    const login = (accountId: string, status: string, sessionId?: string) => ({ accountId, status, ...(sessionId ? { sessionId } : {}) });
+    assert.deepEqual(revokeUnrecordedCreatedProviderProfileGrants(f.db, "runner-a",
+      [login("cancelled-1", "waiting_for_provider"), login("work", "failed"), login("cancelled-1", "failed", "session-1")], 5), [],
+      "a running sign-in, a re-sign-in of an adopted account, and a session's repair keep their grants");
+    assert.deepEqual(revokeUnrecordedCreatedProviderProfileGrants(f.db, "runner-a", [login("cancelled-1", "cancelled")], 6), [cancelled]);
+    assert.equal(f.db.getProviderProfileGrant(cancelled)?.status, "revoked");
+    assert.equal(f.db.getProviderProfileGrant(adoption)?.status, "pending");
+
+    const windows = authorizeCreatedProviderProfileGrant(f.db, { runnerId: "runner-a", protocolVersion: 225 }, owner, "claude", 7, "windows")!;
+    settleCreatedProviderProfileGrantStart(f.db, windows, { started: true, accountId: "windows-1" }, owner, 8);
+    f.register("runner-a", [account("windows-1"), account("work")]);
+    assert.deepEqual(reconcileProviderProfileGrants(f.db, "runner-a", f.db.getRunner("runner-a")?.providerAccounts, 9), []);
+    assert.equal(f.db.getProviderProfileGrant(windows)?.status, "revoked", "the runner created no profile, so the grant is spent");
+    assert.equal(f.db.getProviderProfileGrant(adoption)?.status, "pending", "an adoption waiting for its runner is untouched");
+  } finally {
+    await f.close();
+  }
+});
+
+const LEASE = "/api/runners/runner-a/provider-accounts/work/home-lease";
+const RECOVER = "/api/runners/runner-a/provider-accounts/work/recover-lease";
+const TIP = "c".repeat(64);
+const STALE = { state: "stale", tipHash: TIP, createdAt: "2026-08-19T00:00:00.000Z", sameHost: true, hasEvidence: false, refusal: null } as const;
+const leaseRunner = (recover: (message: { requestId: string; authorizationId: string }) => RunnerRequestResult): Handler => (_runnerId, message) =>
+  message.type === "inspect_provider_home_lease"
+    ? { type: "inspect_provider_home_lease_result", requestId: message.requestId, ok: true, inspection: STALE }
+    : recover(message as unknown as { requestId: string; authorizationId: string });
+
+test("lease routes need an Owner or Admin, a v229 online runner, the account, and an explicit exact recovery", async () => {
+  const f = await fixture({ protocolVersion: 229, handler: leaseRunner((m) => ({ type: "recover_provider_home_lease_result", requestId: m.requestId, ok: true })) });
+  try {
+    f.as(principal("operator"));
+    assert.equal((await f.app.inject({ method: "GET", url: LEASE })).statusCode, 403);
+    assert.equal((await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } })).statusCode, 403);
+    f.as(principal("admin"));
+    for (const payload of [{ staleTipHash: TIP }, { staleTipHash: "abc", acknowledgeLeaseRecovery: true }, []]) {
+      assert.equal((await f.app.inject({ method: "POST", url: RECOVER, payload })).statusCode, 400, JSON.stringify(payload));
+    }
+    assert.equal((await f.app.inject({ method: "GET", url: "/api/runners/runner-a/provider-accounts/missing/home-lease" })).statusCode, 404);
+    f.online.delete("runner-a");
+    assert.equal((await f.app.inject({ method: "GET", url: LEASE })).json().error, "runner is offline");
+    assert.deepEqual(f.sent, [], "no refused request reaches the runner");
+    f.online.add("runner-a");
+    assert.deepEqual((await f.app.inject({ method: "GET", url: LEASE })).json(), STALE);
+  } finally {
+    await f.close();
+  }
+  const older = await fixture({ protocolVersion: 228 });
+  try {
+    const refused = await older.app.inject({ method: "GET", url: LEASE });
+    assert.equal(refused.statusCode, 409);
+    assert.deepEqual(refused.json(), {
+      error: "This machine needs a newer runner for provider HOME lease recovery. Update and restart the runner.",
+      requiredRunnerProtocolVersion: 229, runnerProtocolVersion: 228,
+    });
+    assert.deepEqual(older.sent, []);
+  } finally {
+    await older.close();
+  }
+});
+
+test("a recovery records who authorized which exact record, once, and how the runner answered", async () => {
+  let answer: (requestId: string) => RunnerRequestResult = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: true });
+  const f = await fixture({ protocolVersion: 229, handler: leaseRunner((m) => answer(m.requestId)) });
+  try {
+    const recovered = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.equal(recovered.statusCode, 200);
+    const { authorizationId } = recovered.json() as { authorizationId: string };
+    assert.deepEqual(f.sent.at(-1)!.message, { type: "recover_provider_home_lease", requestId: (f.sent.at(-1)!.message as { requestId: string }).requestId,
+      accountId: "work", staleTipHash: TIP, authorizationId });
+    assert.deepEqual({ ...f.db.getProviderHomeLeaseRecovery(authorizationId)!, createdAt: 0 }, {
+      authorizationId, runnerId: "runner-a", providerAccountId: "work", staleTipHash: TIP, status: "recovered", resultCode: null,
+      authorizedBy: "user-1", authorizedRole: "owner", createdAt: 0, completedAt: 100,
+    });
+
+    answer = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: false, code: "NO_REBOOT_PROOF", error: "restart first" });
+    const refused = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.deepEqual([refused.statusCode, refused.json().code], [409, "NO_REBOOT_PROOF"]);
+    const refusedId = (f.sent.at(-1)!.message as { authorizationId: string }).authorizationId;
+    assert.notEqual(refusedId, authorizationId, "every attempt is its own authorization");
+    assert.deepEqual([f.db.getProviderHomeLeaseRecovery(refusedId)?.status, f.db.getProviderHomeLeaseRecovery(refusedId)?.resultCode], ["refused", "NO_REBOOT_PROOF"]);
+
+    answer = (requestId) => ({ type: "recover_provider_home_lease_result", requestId, ok: false, error: "worker unavailable" });
+    const uncertain = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.deepEqual([uncertain.statusCode, uncertain.json().code, uncertain.json().status], [409, "PROVIDER_HOME_LEASE_RECOVERY_FAILED", "unknown"]);
+    assert.equal(f.db.getProviderHomeLeaseRecovery(uncertain.json().authorizationId)?.status, "unknown");
+
+    answer = () => { throw new Error("runner request timed out"); };
+    const lost = await f.app.inject({ method: "POST", url: RECOVER, payload: { staleTipHash: TIP, acknowledgeLeaseRecovery: true } });
+    assert.deepEqual([lost.statusCode, lost.json().status], [504, "unknown"]);
+    assert.equal(f.db.getProviderHomeLeaseRecovery(lost.json().authorizationId)?.status, "unknown",
+      "a lost reply is not a refusal: the runner's journal may already record it");
   } finally {
     await f.close();
   }

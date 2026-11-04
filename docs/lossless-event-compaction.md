@@ -146,12 +146,19 @@ startup migration; repeated maintenance gradually converts an oversized active f
 
 ## Audit retention
 
-Session-event compaction never rewrites or filters an event, including approval, review, workflow,
-automation, provenance, and usage events. The runner's log stays complete even when the control plane prunes an
-archived session's cached transcript ([archived-history retention](./archived-history-retention.md)). Control-plane `governance_audit` remains append-only and
+Lossless session-event compaction never rewrites or filters an event. Separately, opt-in organization
+[archived-history retention](./archived-history-retention.md) also trims protocol-v231 runners after
+the control plane completes its prune. It keeps prompts, the final response, turn completions and
+final reports, usage and attachments, plus approval, review, workflow, automation, provenance and
+resume evidence. Removed tool-call ids remain hashed accounting evidence; costs, usage, native
+resume state, sequence high-water and epoch are preserved. Provider-native transcripts are untouched.
+A runner without the capability retains its full log. After trimming, Reprocess reports that full
+history cannot be restored. Already-enabled organizations begin runner trimming after upgrade,
+without another arming delay; retained manifest format 2 requires a pre-upgrade backup to downgrade. Control-plane `governance_audit` remains append-only and
 independent of the session foreign-key lifecycle.
 
-Mutation attribution has a bounded hot table and an indexed append-only archive. Before completed
+Mutation attribution has a bounded hot table and an indexed archive, kept forever unless the host
+operator enables [mutation audit archive retention](./archived-history-retention.md#mutation-audit-archive-retention). Before completed
 rows can leave the 180-day/100,000-row hot window, one SQLite transaction copies them into
 `mutation_audit_archive` and only then removes the hot copies. Status-0 crash intents stay hot until
 completion. Authorized listing merges hot and archived rows into the same bounded newest-first

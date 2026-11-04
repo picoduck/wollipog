@@ -374,7 +374,3 @@ export function inspectSkillTree(root: number, durable = false): { files: SkillF
     if (!files.some((file) => file.path === "SKILL.md")) throw new Error();
     return { files: files.sort((a, b) => a.path.localeCompare(b.path)), executablePaths: executablePaths.sort() };
 }
-
-export function readSkillTree(root: number, durable = false): SkillFile[] {
-  return inspectSkillTree(root, durable).files;
-}

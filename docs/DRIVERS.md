@@ -183,12 +183,14 @@ exposes the campaign tools on the Agent Control extension every verified Pi sess
 Nothing else is injected — no `--no-extensions`, `--no-skills`, `--no-prompt-templates`,
 `--no-context-files`, or `--exclude-tools`. Crucially the approval path is the ordinary one: every
 permission branch in `pi-rpc.ts` keys on the coupled preset literal, so an additive Orchestrator
-waits for Pi's `project_trust` event, receives `--no-approve` only when a normal session of that
-mode would, and is **never** blanket auto-confirmed — the preset's auto-confirm is safe only because
+takes the ordinary project-trust path (see [Pi Project Trust](#pi-project-trust)), receives
+`--no-approve` only when a normal session of that mode would, and is **never** blanket auto-confirmed — the preset's auto-confirm is safe only because
 the preset also excludes `bash`, `edit`, and `write`. Measured against pi 0.85.0, repeated
 `--append-system-prompt` values accumulate rather than displace one another, and the flag is matched
 by exact equality (so `--append-system-prompt=TEXT` is an extension flag, not an append, and the
-resume strip leaves it alone). The Pi bridge requirement reaches the control plane as `capabilities.orchestratorAdditive`, a
+resume strip leaves it alone). Pi 1.4.0 keeps the accumulation but rejects the `=` form as an
+unknown option and exits; it still never appends. `pnpm probe:pi-assumptions` re-measures these and
+the rest of the Pi RPC contract; see [Pi Assumption Probes](pi-assumption-probes.md). The Pi bridge requirement reaches the control plane as `capabilities.orchestratorAdditive`, a
 runner attestation published only for a discovery-verified bridge; `piAgentControl` itself is
 cleared before publication and never persisted.
 
@@ -308,6 +310,8 @@ compatibility floor. Readiness also requires the driver's implicit `acceptEdits`
 enumerated. A stale value explicitly submitted by a client is rejected, while an older persisted
 session is healed if a CLI update narrows its modes or effort levels. The runner checks the same
 advertised capability immediately before constructing argv.
+[Claude Code Assumption Probes](claude-assumption-probes.md) re-measure the floors, hooks, control
+channel and transcript layout against each release without credentials.
 
 `AgentDefinition.claudeCode` reports ready/unauthenticated/unsupported/unavailable state, how the
 binary was resolved (ordinary PATH, common directory, version manager, or login shell), and a safe
@@ -456,7 +460,7 @@ The lifetime policy is quiescence-aware and fail-safe:
   and a bounded runner-local output reference. Jobs from one parent turn form a barrier. When the
   final job in that barrier becomes terminal outside its parent turn, the runner durably queues one
   synthetic continuation and the UI moves from **Waiting on External Job** to
-  **Continuation Pending**. Claude's stdin-write callback is the acceptance boundary; definite
+  **Follow-Up Pending**. Claude's stdin-write callback is the acceptance boundary; definite
   pre-acceptance failures remain retryable, while accepted or uncertain submissions are never
   replayed. Cancellation before the write callback is treated as uncertain rather than replayed,
   because the provider may have received the bytes before local acknowledgement. A stable
@@ -496,16 +500,37 @@ The lifetime policy is quiescence-aware and fail-safe:
   and records every remaining job as `killed` and runner-ended instead of orphaned, so no recovery
   turn relaunches it. An ended job's task file never gets a completion marker, so its id is
   tombstoned in the driver and in the session's recovered-task ids: no later receipt read revives
-  it as unfinished work. An agent-authored `hold.json` does not extend this bound: the prompts it
+  it as unfinished work. The driver's own tombstones end with its process, so every relaunch (the
+  handoff's move, a restart) passes the new driver the ids of every job the ledger already records
+  as ended. Claude can deliver the dead task's queued `stopped` notification to the new process;
+  without those ids, the driver would record it as pending and observed, which lifts the session's
+  tombstone and holds the next handoff on a job the session lists as killed (#3752). An
+  agent-authored `hold.json` does not extend this bound: the prompts it
   would hold are someone else's. See Queue Holds in [agent-control.md](agent-control.md).
 - Claude reports a stopped task as a `task_updated` patch to `killed`, then a `stopped`
   `task_notification`. It sends the same pair when the runner stops the task, when the model stops
-  it with its own `TaskStop` tool, and when Claude kills every task because its stdin closed. Only
-  the first two end the job. A model stop counts when its report arrives while that `TaskStop` call
+  it with its own `TaskStop` tool, and when Claude kills every task because its stdin closed.
+  A provider-initiated `killed` patch also ends a shell job (including an unclassified job moved
+  to the background after a foreground timeout) while its persistent transport's stdin is still
+  open. An explicitly classified shell job's `stopped` notification is sufficient at that same
+  live boundary. Both provider and tool-use identities are tombstoned so trailing notifications,
+  repeated launch results and markerless output files cannot revive it (#3204).
+  A model stop counts when its report arrives while that `TaskStop` call
   naming the task has not yet returned. The job is recorded as `killed`, not runner-ended, and
   tombstoned like the jobs above, so the trailing `stopped` report and a restart's receipt read
-  cannot revive it. A stdin-close kill, or any other unrequested report, leaves the job pending for
-  orphan recovery. A report that carries out a runner stop already answered `unconfirmed` is marked
+  cannot revive it. A stdin-close kill, an unrequested agent/workflow kill, or an ambiguous
+  `stopped` report for an unclassified task leaves the job pending for orphan recovery.
+  A successful recovery turn that does not re-observe a seeded task records that task as killed
+  without another continuation, rather than leaving an unfinished durable row. A live re-observed
+  task stays pending. Historical `stopped` text alone remains insufficient proof of termination.
+  Before returning an unconfirmed single-job stop, the driver inspects that job's durable terminal
+  receipts. A receipt settles it as already finished with its actual terminal status, without
+  attributing a stop to the requester. A concurrent live report or transport replacement invalidates
+  that read; a bare successful `stop_task` response still proves nothing.
+  Receipt-settled agent/workflow ids remain resumable. A later unexpected provider exit does not
+  revive a shell job whose termination was already observed; it orphans only jobs without terminal
+  evidence, while the killed shell's result remains due through its normal continuation.
+  A report that carries out a runner stop already answered `unconfirmed` is marked
   `stopConfirmedLate`, so the job keeps the actor who asked (#1849); while a model `TaskStop` call
   naming the task is outstanding, that call counts as the cause and no actor is recorded.
   When the report arrives in the provider turn that made the `TaskStop` call, the model already
@@ -559,7 +584,9 @@ The lifetime policy is quiescence-aware and fail-safe:
   N cannot settle turn N+1.
 - Claude `modelUsage` and `total_cost_usd` include the whole query tree. In CLI 2.1.277+ they
   restore cumulative conversation totals on resume and fork; older CLIs scope them to the process.
-  The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
+  Each process's `system/init` `claude_code_version` decides that scope, overriding the version
+  recorded at launch; a total whose baseline cannot be proven is marked incomplete rather than
+  billed as a delta (#4069). The driver subtracts raw per-model checkpoints and reconciles the prefix a replacement process
   will restore with a zero-inference local `/context` probe. Against a v216+ control plane each
   completed top-level request is also published live as an unaccrued `provisional` record, closed by
   the next checkpoint or republished when none can cover it, so a running or interrupted turn is not
@@ -1100,6 +1127,11 @@ their `supportedReasoningEfforts` come from the `model/list` request (also used 
 
 #### OpenAI Inference Transport
 
+The credential-free upgrade suite, `pnpm probe:codex-assumptions`, measures optional diagnostic
+shapes using scripted loopback providers; see [Codex Assumption Probes](codex-assumption-probes.md).
+Optional drift remains advisory and never changes launch eligibility or proves WebSocket traffic.
+The authenticated real-traffic probe below is deliberately excluded from that suite.
+
 The supported Codex App Server builds use WebSockets by default for the built-in OpenAI Responses
 provider. This is Codex-to-model traffic; Wollipog's manager connection remains stdio. Native defaults
 are verified in official source at [0.147.0](https://github.com/openai/codex/blob/rust-v0.147.0/codex-rs/model-provider-info/src/lib.rs)
@@ -1485,6 +1517,32 @@ provider schema. Their questions expose `customAnswerError`: entering custom tex
 and retains the question, instead of converting it into an enum, a boolean, or a cancellation.
 These form responses grant no tool or governance authorization.
 
+### Pi Project Trust
+
+Pi resolves project trust while it builds its runtime, before RPC mode reads stdin, and offers
+command-line extensions no UI there (`hasUI: false`). No RPC client can answer it in-band, so a
+verified ordinary Pi session (both Agent Control nonces present, not the coupled Orchestrator preset)
+obtains the decision in two steps:
+
+1. The first launch passes neither `--approve` nor `--no-approve` and a fresh per-launch nonce. When
+   the project has protected resources, Pi dispatches `project_trust`; the runner extension always
+   declines it without remembering, so project resources are skipped and Pi's `trust.json` is never
+   written. At `session_start` the extension reports `<launch nonce>.declined.<canonical cwd>` (or
+   `not_requested`) before Agent Control readiness.
+2. Only for a `declined` report that carries this launch's nonce and this session's working
+   directory does the driver hold `initialize()` and show **Trust Pi Project Resources?** The
+   declined process does no turn or session-writing work meanwhile; even the model and thinking-level
+   selection waits. **Trust This Project** stops that process, requires proof that its tree exited,
+   and relaunches the same session with `--approve` (`--session-id <id>` for a new session, whose
+   file does not exist yet; `--session <id>` for a resumed one). **Skip Project Resources**, a
+   dismissal, or disposal keeps the declined process.
+
+Every other path stays skipped: a missing, mismatched, stale, or repeated report never asks, a
+relaunch failure fails startup visibly, and a Pi exit while the question is open fails startup.
+Strict Orchestrators and unverified bridges keep `--no-approve`. The decision applies to one launch;
+the next launch asks again. A nonce-bound `select` envelope claiming project trust is cancelled
+rather than shown. `pnpm probe:pi-assumptions` re-measures each Pi behavior this relies on.
+
 
 ## Provider Failure Categories and Background Retry Exhaustion
 
@@ -1513,3 +1571,26 @@ The new runner fact requires protocol v221. Current HTTP clients advertise their
 `x-wollipog-ui-protocol`; WebSockets use the existing `protocolVersion` negotiation. Older UI clients
 receive the legacy view without the new enum or fields, retaining history/log diagnostics. This
 display downgrade does not mutate canonical evidence or create retry authority.
+# Review Session Skill Isolation
+
+Codex discovers `.agents/skills` along cwd's ancestor chain and `.codex/skills` through
+project configuration layers. Disabling project instructions does not disable that discovery;
+`skip_host_skill_discovery` also still loads both locations on 0.165.0. Per-skill enablement
+settings leave disabled entries visible in the catalog, so they cannot meet the review contract.
+
+Codex review sessions therefore launch, list skills, start threads and send turns from an empty
+runner-owned sibling directory with a local `.git` root marker. Developer instructions identify
+the absolute reviewed checkout. Its files, including changed skill files, remain intact and
+readable with absolute paths or an explicit command workdir. Snapshot verification still checks
+the original checkout. Session release and startup reconciliation remove the discovery directory.
+Claude Code's preset and discovery protections are unchanged. This is runner-local; no wire
+format or protocol version changes.
+
+Run `node --import tsx apps/runner/scripts/codex-review-skills-probe.mjs` with `CODEX_BIN` selecting
+the CLI. This credential-free probe reuses the original #3368 canaries and loopback Responses
+provider through the real app-server driver, checking its catalog and two model turns against a
+positive control. It fails on missing requests, timeouts, launch errors or a broken control.
+`--verify-sandbox-read` additionally scripts a real read of both skill files under the review
+sandbox and requires their contents in tool output. It requires working user namespaces on Linux;
+a sandbox failure is a failed probe. CI runs this mode in the Codex Sandbox version matrix.
+The normal probe also runs in the Codex assumptions suite used for supported-range measurements.

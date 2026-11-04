@@ -39,6 +39,7 @@ export interface AgentTuiGuardProvisioning {
 }
 
 export interface AgentTuiGuardConfig {
+  onProcess?: (proof: Promise<boolean>) => void;
   controlPlaneUrl: string;
   controlPlaneProtocolVersion: number | null;
   enabled: boolean;
@@ -139,8 +140,8 @@ function provisionClaudeTuiGuard(
  * Since #1438 one that owns none is provisioned too, over an EMPTY list, exactly as a Claude TUI
  * has been since #1303: a TUI cannot be given a hook after it starts, so a worktree the session
  * acquires later is protected only if the hook was there from the beginning, reading the list the
- * live refresh keeps in step. The hook-trust rule is unchanged — the bypass is passed only when the
- * runner's hook is the sole untrusted one — but for a session with nothing to protect a failed
+ * live refresh keeps in step. Hash trust is preferred on measured CLI versions; a legacy bypass
+ * fallback requires every foreign hook disabled and verified. For nothing to protect a failed
  * provisioning is NOT a refusal: the caller opens that TUI unguarded, as it always has, and the
  * runner says so if a worktree appears while it is still open.
  *
@@ -167,10 +168,12 @@ async function provisionAgentTuiCodexManagedWorktreeGuard(
     {
       protections,
       cwd,
+      entryPoint: "tui",
       ...(guardSocket ? { guardSocket } : {}),
       platform: config.platform,
       verifyGuardLaunch: config.verifyGuardLaunch,
       readHookInventory: config.readCodexHookInventory,
+      onProcess: config.onProcess,
       isolateForeignHooks: isOrchestratorLaunch(spec),
     },
     log,

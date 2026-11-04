@@ -10,6 +10,8 @@ export interface VideoProfileLiveProof {
   proofId: string;
   driver: string;
   modelId: string;
+  /** Certified reasoning effort; another effort is a different reviewer identity. */
+  effort: string;
   providerId: string;
   capabilitiesSha256: string;
   reviewerNamespaceSha256: string;
@@ -39,6 +41,7 @@ export interface EvidenceReviewerTarget {
   agentId: string;
   driver: string;
   modelId: string;
+  effort: string;
   providerId: string;
   runnerId: string;
   runnerProtocolVersion: number;
@@ -123,7 +126,8 @@ const digest = (v: unknown): boolean => typeof v === "string" && /^[a-f0-9]{64}$
 export function validVideoLiveProof(proof: VideoProfileLiveProof | null,
   target: EvidenceReviewerTarget, now: number): boolean {
   return Boolean(proof && proof.profile === PACED_VIDEO_REVIEW_PROFILE && proof.driver === target.driver &&
-    proof.modelId === target.modelId && proof.providerId === target.providerId &&
+    proof.modelId === target.modelId && typeof proof.effort === "string" && proof.effort.length > 0 &&
+    proof.effort === target.effort && proof.providerId === target.providerId &&
     proof.capabilitiesSha256 === target.capabilitiesSha256 && digest(proof.capabilitiesSha256) &&
     target.mediaOnlyNamespaceVerified && digest(target.reviewerNamespaceSha256) &&
     proof.reviewerNamespaceSha256 === target.reviewerNamespaceSha256 && digest(proof.oracleIsolationEvidenceSha256) &&

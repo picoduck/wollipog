@@ -2,7 +2,11 @@ import type { ProjectLocationAvailability, ProjectLocationView, ProjectView, Res
 import { statusMeta, type StatusMeta } from "./status-meta.js";
 import { workspaceLocationKey } from "./projects.js";
 
-export type ProjectVisibilityFilter = "all" | "visible" | "hidden";
+/** The Projects list's filter: whether a project has a Sessions tab (#2957). */
+export type ProjectVisibilityFilter = "all" | "shown" | "hidden";
+
+/** The name of the machine a location is on, as the Projects list shows and searches it. */
+export type LocationMachineName = (location: ProjectLocationView) => string;
 
 export interface ProjectLocationLink {
   projectId: string;
@@ -47,17 +51,59 @@ export function projectAvailabilityLabel(availability: ProjectLocationAvailabili
   return projectAvailabilityMeta(availability).label;
 }
 
+/** Projects matching the list's search and filter, by name. The search matches each project's name
+ * and the machines its locations are on (#2957). */
 export function filterManagedProjects(
   projects: Iterable<ProjectView>,
   query: string,
   visibility: ProjectVisibilityFilter,
+  machineName?: LocationMachineName,
+): ProjectView[] {
+  return projectsMatchingSearch(projects, query, machineName)
+    .filter((project) => visibility === "all" || (visibility === "hidden") === project.hidden);
+}
+
+function projectsMatchingSearch(
+  projects: Iterable<ProjectView>,
+  query: string,
+  machineName?: LocationMachineName,
 ): ProjectView[] {
   const normalized = query.trim().toLocaleLowerCase();
   return [...projects]
-    .filter((project) => visibility === "all" || (visibility === "hidden") === project.hidden)
     .filter((project) => !normalized || project.name.toLocaleLowerCase().includes(normalized) ||
-      project.locations.some((location) => `${location.name} ${location.path}`.toLocaleLowerCase().includes(normalized)))
+      Boolean(machineName && project.locations.some((location) => machineName(location).toLocaleLowerCase().includes(normalized))))
     .sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id));
+}
+
+/** Each filter option's plain count. The counts follow the search, as Sessions' tab counts do (§8.4). */
+export function projectVisibilityCounts(
+  projects: Iterable<ProjectView>,
+  query: string,
+  machineName?: LocationMachineName,
+): Record<ProjectVisibilityFilter, number> {
+  const matching = projectsMatchingSearch(projects, query, machineName);
+  const hidden = matching.filter((project) => project.hidden).length;
+  return { all: matching.length, shown: matching.length - hidden, hidden };
+}
+
+/**
+ * The machine a project row names on its sub-line: its default location's, or, with no default,
+ * each machine its locations are on. Null when it has no locations yet.
+ */
+export function projectMachineSummary(project: ProjectView, machineName: LocationMachineName): string | null {
+  const defaultLocation = project.locations.find((location) => location.isDefault);
+  if (defaultLocation) return machineName(defaultLocation);
+  const machines = [...new Set(project.locations.map(machineName))];
+  return machines.length ? machines.join(", ") : null;
+}
+
+/**
+ * The status a project row shows when none of its locations is available: its default location's
+ * (or its first location's) reachability. Null while any location is available, or with none.
+ */
+export function projectUnavailableStatus(project: ProjectView): ProjectLocationAvailability | null {
+  if (project.locations.length === 0 || project.locations.some((location) => location.availability === "available")) return null;
+  return (project.locations.find((location) => location.isDefault) ?? project.locations[0]!).availability;
 }
 
 /** Build one exact candidate per runner/workspace. Project links remain separate so one physical

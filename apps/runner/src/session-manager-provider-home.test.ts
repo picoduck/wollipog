@@ -1,11 +1,12 @@
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import type { RunnerToControlPlane } from "@wollipog/protocol";
 import { SessionManager } from "./session-manager.js";
 import { SessionStore, type SessionMeta } from "./session-store.js";
+import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
 
 test("a refused home lease reaches failed status and the visible conversation error before any provider starts", async (t) => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-provider-home-launch-"));
@@ -47,8 +48,11 @@ test("a refused home lease reaches failed status and the visible conversation er
   assert.ok(failed?.type === "session_status");
   // The bounded worker returns a fixed refusal instead of forwarding native paths/exception data.
   assert.ok(!failed.detail?.includes(lock));
-  assert.match(failed.detail!, /preserve all evidence/);
-  assert.match(failed.detail!, /quarantine the entire.*do not remove individual records/);
+  assert.equal(failed.detail, LEASE_WORKER_ERRORS.invalid_journal);
+  assert.match(failed.detail!, /Choose another account.*check the recovery details/);
+  assert.doesNotMatch(failed.detail!, /quarantine|delete|remove individual|journal/iu);
+  assert.deepEqual(readdirSync(lock), [], "refusal preserves the original malformed lock evidence");
+  assert.equal(store.readMeta(meta.sessionId)?.providerHomeRefusal?.code, "unverifiable");
   const error = store.readEvents(meta.sessionId).find((event) => event.payload.kind === "error");
   assert.ok(error?.payload.kind === "error");
   assert.ok(error.payload.message.includes(failed.detail!));

@@ -21,6 +21,7 @@ import type {
 export const CAMPAIGN_WORK_ITEM_ID_PREFIX = "cwi_";
 export const CAMPAIGN_ATTEMPT_ID_PREFIX = "catt_";
 export const CAMPAIGN_WORK_VERIFICATION_ID_PREFIX = "cwv_";
+export const CAMPAIGN_WORK_DELIVERY_ID_PREFIX = "cwd_";
 /** Recommendations keep the existing follow-up row identity (`followup_…`). */
 export const CAMPAIGN_RECOMMENDATION_ID_PREFIX = "followup_";
 
@@ -41,15 +42,48 @@ export const CAMPAIGN_WORK_LEDGER_LIMITS = {
   pageSizeMax: 100,
 } as const;
 
-/** `owner/repo` plus issue number. The repository is compared case-insensitively. */
+/** A repository (see `campaignRepositoryLocation`) plus issue number. The repository is compared
+ * case-insensitively. */
 export interface CampaignIssueRef {
   repository: string;
   number: number;
 }
 
+/** A pull request, or a GitLab merge request by its project-scoped IID. */
 export interface CampaignPullRequestRef {
   repository: string;
   number: number;
+}
+
+/** Where a ref's `repository` lives (#3539): a github.com `owner/repo`, or a GitLab project named by
+ * its host and full namespace path, `<gitlab-host>/group[/subgroup…]/project`. */
+export type CampaignRepositoryLocation =
+  | { forge: "github"; repository: string }
+  | { forge: "gitlab"; host: string; project: string };
+
+const GITHUB_REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/u;
+const HOST_LABEL = "[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?";
+const GITLAB_HOST = new RegExp(`^${HOST_LABEL}(?:\\.${HOST_LABEL})+(?::([0-9]{1,5}))?$`, "u");
+const GITLAB_PATH_SEGMENT = /^[A-Za-z0-9_][A-Za-z0-9_.-]*$/u;
+/** A top-level group, at most 20 nested subgroups, and the project. */
+const GITLAB_MAX_PATH_SEGMENTS = 22;
+
+/**
+ * Classifies a ref's repository, or returns null for one the ledger does not accept. Two segments
+ * are a GitHub slug, as before. A GitLab project must name its host: a bare `group/sub/project`
+ * cannot be told apart from other paths, and `glab -R` would resolve it against gitlab.com.
+ */
+export function campaignRepositoryLocation(repository: unknown): CampaignRepositoryLocation | null {
+  if (typeof repository !== "string" || repository.length > 256) return null;
+  if (GITHUB_REPOSITORY.test(repository)) return { forge: "github", repository };
+  const [host = "", ...path] = repository.split("/");
+  const hostMatch = GITLAB_HOST.exec(host);
+  if (!hostMatch || path.length < 2 || path.length > GITLAB_MAX_PATH_SEGMENTS) return null;
+  if (hostMatch[1] !== undefined && (Number(hostMatch[1]) < 1 || Number(hostMatch[1]) > 65_535)) return null;
+  // GitHub repositories are never host-qualified, so one ref has one spelling.
+  if (/^(?:www\.)?github\.com(?::|$)/iu.test(host)) return null;
+  if (!path.every((segment) => GITLAB_PATH_SEGMENT.test(segment) && !/\.(?:git|atom)$/iu.test(segment))) return null;
+  return { forge: "gitlab", host, project: path.join("/") };
 }
 
 /* ------------------------------ Work items ------------------------------ */
@@ -121,6 +155,18 @@ export interface CampaignWorkItemBlocker {
   responsibleActor: CampaignResponsibleActor;
   /** Optional link to the existing Request this blocker waits on. */
   requestOccurrenceId?: string;
+  recordedAt: number;
+  recordedBySessionId: string | null;
+}
+
+/** v275 (#4070): the Orchestrator's record that the agent work on an item is done and its next step
+ * belongs to `responsibleActor`. Only a `human` or `external` handoff lets a campaign finish as
+ * `complete_with_handoffs`; one to `orchestrator` or `child` still blocks it. Assigning the item
+ * again clears it. It describes; it never closes an issue, merges, or publishes. */
+export interface CampaignWorkItemHandoff {
+  responsibleActor: CampaignResponsibleActor;
+  reason: string;
+  nextAction: string;
   recordedAt: number;
   recordedBySessionId: string | null;
 }
@@ -229,6 +275,8 @@ export type CampaignForgeMergeQueueState =
 /** Slice 8: GitHub pull-request observation read on a runner through its existing `gh` login.
  * Status data only: no token, account, or raw `gh` output crosses. */
 export interface CampaignForgePullRequestObservation {
+  /** Absent on a GitHub observation, which predates the GitLab variant (#3600). */
+  forge?: undefined;
   state: "open" | "closed" | "merged";
   draft: boolean;
   headSha: string;
@@ -241,7 +289,54 @@ export interface CampaignForgePullRequestObservation {
   /** The pull request's merge-queue entry, or null when it is not queued. */
   mergeQueue: { state: CampaignForgeMergeQueueState; position: number | null } | null;
   mergeCommitSha: string | null;
+  /** v275: the repository's default branch. Absent from older runners, which cannot prove that a
+   * merge landed on it. */
+  defaultBranch?: string;
+  /** v284 (#4067): the pull request's head branch and its current tip, `null` once the branch is
+   * deleted. Reported only for a branch in the pull request's own repository whose name Git
+   * accepts; absent from older runners and for a fork's branch. */
+  headBranch?: { name: string; tipSha: string | null };
+  /** v284 (#4067): whether the head branch lives in another repository (a fork), which merged-branch
+   * cleanup does not track. Absent from older runners; a merged pull request that is not known to
+   * be a fork and has no usable `headBranch` stays pending cleanup rather than being skipped. */
+  crossRepository?: boolean;
 }
+
+/** A GitLab pipeline status, collapsed: `pending` covers created, waiting_for_resource, preparing,
+ * pending, and scheduled; `unknown` is a status this server does not know. Only `success` passes. */
+export type CampaignGitLabPipelineStatus =
+  "success" | "failed" | "running" | "pending" | "canceled" | "skipped" | "manual" | "unknown";
+
+/** A merge-train car's status as GitLab reports it; `unknown` is one this server does not know. */
+export type CampaignGitLabMergeTrainStatus =
+  "idle" | "stale" | "fresh" | "merging" | "merged" | "skip_merged" | "unknown";
+
+/** #3600: a GitLab merge request read on a runner through its existing `glab` login, in GitLab's
+ * own terms rather than GitHub's. Status data only: no token, account, or raw `glab` output. */
+export interface CampaignForgeGitLabMergeRequestObservation {
+  forge: "gitlab";
+  /** GitLab's `locked` (a merge in progress) reads `open`. */
+  state: "open" | "closed" | "merged";
+  draft: boolean;
+  headSha: string;
+  /** The target branch. */
+  baseRef: string;
+  /** `approved`: the project's approval rules are satisfied (with `approvedBy` 0 when none are
+   * required). `left` is null when GitLab does not report it. */
+  approvals: { approved: boolean; approvedBy: number; left: number | null };
+  /** The merge request's head pipeline (its merged-results pipeline where the project runs them),
+   * or null when it has none. */
+  pipeline: { id: number; status: CampaignGitLabPipelineStatus } | null;
+  /** The merge request's merge-train car, or null when it is not on a train. `position` counts
+   * from 1 and is null when the train could not be read far enough. */
+  mergeTrain: { status: CampaignGitLabMergeTrainStatus; position: number | null } | null;
+  /** The merge commit, or the squash commit of a squash merge without one. */
+  mergeCommitSha: string | null;
+}
+
+/** A pull request or merge request observation. A GitHub one carries no `forge`, as before #3600. */
+export type CampaignForgeChangeRequestObservation =
+  CampaignForgePullRequestObservation | CampaignForgeGitLabMergeRequestObservation;
 
 /** Slice 8 bounds and timings, documented in docs/campaign-work-ledger.md "Forge Status". */
 export const CAMPAIGN_FORGE_OBSERVATION = {
@@ -267,7 +362,7 @@ export const CAMPAIGN_FORGE_OBSERVATION = {
  * pull requests now, subject to the rate limit, and returns their facts afterwards. */
 export interface CampaignForgeRefreshResponse {
   revision: number;
-  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> }>;
+  pullRequests: Array<{ ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgeChangeRequestObservation> }>;
 }
 
 /* ------------------------------ Attempts and verification ------------------------------ */
@@ -332,6 +427,21 @@ export interface CampaignWorkItemVerification {
   /** The verifying Orchestrator, which may be nested; null once it is deleted. */
   verifiedBySessionId: string | null;
   verifiedAt: number;
+}
+
+/** v275 (#4070): delivery the controlling Orchestrator recorded from evidence the control plane
+ * checked itself: pull requests the forge reported merged into the repository's default branch, a
+ * campaign child's exact completed report inside its attempt on the item, or both. A report also
+ * adds an ordinary delivered verification of that attempt. It holds until the item is assigned
+ * again. */
+export interface CampaignWorkItemRecordedDelivery {
+  id: string;
+  workItemId: string;
+  pullRequests: Array<CampaignPullRequestRef & { mergeCommitSha: string; baseRef: string }>;
+  report: { childSessionId: string | null; attemptId: string; seq: number } | null;
+  note: string | null;
+  recordedBySessionId: string | null;
+  recordedAt: number;
 }
 
 /* ------------------------------ Recommendations ------------------------------ */
@@ -410,6 +520,9 @@ export interface CampaignCostSummary {
   unattributed: CampaignMetric<CampaignCostValue>;
   /** Earliest time from which attribution was recorded; earlier usage is not split. */
   attributedSince: number | null;
+  /** Claude turns in these buckets that billed their conversation's running total (#4069), so the
+   * cost may be overstated. Absent when there are none, or from older planes. */
+  runningTotalClaudeRecords?: number;
 }
 
 /** Wall-clock bounds. Elapsed is `(endedAt ?? now) - startedAt`, computed by the reader. */
@@ -507,6 +620,8 @@ export interface CampaignWorkItemSummary {
   attemptCount: number;
   stage: CampaignReportedStage | null;
   blocker: CampaignWorkItemBlocker | null;
+  /** v275 (#4070). Omitted by older control planes. */
+  handoff?: CampaignWorkItemHandoff | null;
   createdAt: number;
   updatedAt: number;
   /** Last ledger or observed-status change; drives the `activity` sort. */
@@ -523,6 +638,8 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
   commitmentRecord: CampaignWorkItemCommitment;
   attempts: CampaignAttempt[];
   verifications: CampaignWorkItemVerification[];
+  /** v275 (#4070): recorded deliveries, oldest first. Omitted by older control planes. */
+  deliveries?: CampaignWorkItemRecordedDelivery[];
   /** The recommendation this item was accepted from, if any. */
   sourceRecommendation: CampaignRecommendation | null;
   /** Recommendations naming this item as an origin. */
@@ -535,7 +652,7 @@ export interface CampaignWorkItemDetail extends CampaignWorkItemSummary {
      * when it names none). Omitted means not collected. */
     pullRequests?: Array<{
       ref: CampaignPullRequestRef;
-      fact: CampaignObservedFact<CampaignForgePullRequestObservation>;
+      fact: CampaignObservedFact<CampaignForgeChangeRequestObservation>;
     }>;
   };
   /** Slice 6. Omitted means not collected. */
@@ -618,6 +735,9 @@ export interface CampaignPlanItemInput {
  * It never changes commitment, attempts, or verification. */
 export interface RecordCampaignPlanRequest {
   items: CampaignPlanItemInput[];
+  /** Immutable closure relationships, recorded by the root before the first dispatch.
+   * Keys must name items in this call or already in this campaign. */
+  fixedBy?: Array<{ issue: CampaignIssueRef; workItemKeys: string[] }>;
   /** True when the ledger now lists the campaign's whole original scope. */
   planComplete: boolean;
 }
@@ -640,8 +760,30 @@ export interface UpdateCampaignWorkItemRequest {
   stage?: { stage: CampaignReportedStageKind; note?: string; pullRequests?: CampaignPullRequestRef[] } | null;
   blocker?: { reason: string; responsibleActor: CampaignResponsibleActor; requestOccurrenceId?: string } | null;
   nextAction?: string | null;
+  /** v275 (#4070): hand the item's next step to someone; `null` withdraws the handoff. */
+  handoff?: { responsibleActor: CampaignResponsibleActor; reason: string; nextAction: string } | null;
   /** Closes the item's open attempt without delivery. */
   endAttempt?: { reason: "abandoned" | "failed"; note?: string };
+}
+
+/** v275 `record_campaign_work_item_delivery` (#4070), root or nested Orchestrator only. Needs
+ * `pullRequests`, `report`, or both; every one given is checked:
+ * - each pull request must be in the campaign's repository, named by the item's reported stage, and
+ *   read from the forge now as merged into the repository's default branch;
+ * - the report must be the exact completed top-level response of a campaign child, inside that
+ *   child's attempt on this item, including one closed as `reassigned` or `superseded`.
+ * It inspects no worktree, and never closes an issue, merges, or publishes. */
+export interface RecordCampaignWorkItemDeliveryRequest {
+  workItemId: string;
+  pullRequests?: CampaignPullRequestRef[];
+  report?: { childSessionId: string; reportEventSeq: number };
+  note?: string;
+}
+
+export interface RecordCampaignWorkItemDeliveryResponse {
+  revision: number;
+  delivery: CampaignWorkItemRecordedDelivery;
+  item: CampaignWorkItemDetail;
 }
 
 export interface CampaignWorkItemMutationResponse {

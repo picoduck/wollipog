@@ -184,6 +184,7 @@ function ArchivedHistoryRetentionEditor() {
   const lastRun = view?.lastRun ? retentionLastRun(view.lastRun) : null;
   return (
     <SettingsGroup
+      title="Archived Session History"
       intro={view && !canManage ? RETENTION_NO_PERMISSION : isUnsupported ? RETENTION_UNSUPPORTED : undefined}
       notice={source ? <Notice compact tone="neutral" role="note">{source}</Notice> : undefined}
       failure={groupFailure}
@@ -192,7 +193,7 @@ function ArchivedHistoryRetentionEditor() {
           <summary><ChevronRightIcon size={14} className="disclosure-chevron" />About Archived History Retention</summary>
           <div className="disclosure-body">
             <p>A prune removes tool calls and their output, file edits, reasoning, and intermediate messages from sessions archived longer than the threshold. Prompts, the final response, usage and cost, and attachments are kept, and the session stays in the archive.</p>
-            <p>Turning pruning on or shortening the threshold takes effect 24 hours later, so it can be undone first. Pruned history can't be restored here; the machines that ran the sessions keep their own logs until a session is deleted.</p>
+            <p>Turning pruning on or shortening the threshold takes effect 24 hours later, so it can be undone first. Capable machines also trim their session logs after the control plane prunes them. Once a machine has trimmed a log, Reprocess cannot restore its full history. Older machines keep their complete logs.</p>
             <p>The database reuses the space a prune frees, so it stops growing. Making the file smaller needs an offline VACUUM.</p>
           </div>
         </details>

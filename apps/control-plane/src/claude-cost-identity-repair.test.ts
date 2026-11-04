@@ -58,9 +58,9 @@ for (const driver of ["claude-code", "codex-app-server"] as const) for (const co
       costUsd: corrupt.costUsd, tokensIn: corrupt.tokensIn, tokensOut: corrupt.tokensOut, seq: corrupt.seq, logEpoch: 1,
       costReconciliationRevision: corrupt.costReconciliationRevision, costReconciliationIdentity: corrupt.costReconciliationIdentity,
       costReconciliationDeltaUsd: corrupt.costReconciliationDeltaUsd, preview: null, pendingApproval: null, createdAt: f.now, updatedAt: f.now });
-    const factory = () => ({ initialize: async () => {}, newSession: async () => {}, close: async () => {},
+    const factory = (_kind: unknown, options: { resumeId?: string }) => ({ initialize: async () => {}, newSession: async () => {}, close: async () => {},
       prompt: async () => "end_turn", cancel() {}, dispose() {}, setConfig() {}, resolvePermission: () => false,
-      agentSessionId: () => "fresh-conversation" });
+      agentSessionId: () => options.resumeId ?? "fresh-conversation" });
     manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, factory as never, root, 1);
     // Use the actual runner CAS and snapshot projection, including a crash before CP confirmation.
     const frame = acknowledgementRepairFrame(f.db, "session")!;
@@ -70,7 +70,11 @@ for (const driver of ["claude-code", "codex-app-server"] as const) for (const co
     assert.equal(await manager.start({ sessionId: "session", agentId: "claude", workspaceId: "repo", workspacePath: root,
       driver, command: driver === "claude-code" ? "claude" : "codex", args: [], env: {}, context: { kind: "native" }, useWorktree: false }), true);
     const restarted = store.projectSnapshotForProtocol(manager.snapshotForControlPlane(store.readMeta("session")!), PROTOCOL_VERSION);
-    assert.notEqual(store.readMeta("session")!.agentSessionId, "old-conversation");
+    if (driver === "claude-code") {
+      assert.equal(store.readMeta("session")!.agentSessionId, "old-conversation", "Claude Restart resumes its conversation");
+    } else {
+      assert.notEqual(store.readMeta("session")!.agentSessionId, "old-conversation", "changing providers starts fresh");
+    }
     observeReconciliationSnapshot(f.db, restarted);
     assert.equal(reconciliationSnapshotAvailable(f.db, restarted), true);
     assert.equal(normalizeReconciledSnapshot(f.db, restarted).costUsd, corrupt.costUsd);

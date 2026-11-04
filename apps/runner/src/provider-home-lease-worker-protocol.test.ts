@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { join } from "node:path";
 import { EventEmitter } from "node:events";
 import { test } from "node:test";
+import { PROVIDER_HOME_RECOVERY_CAUSES } from "@wollipog/protocol";
 import { AsyncProviderHomeLeaseRegistry } from "./provider-home-lease-async.js";
-import { LEASE_WORKER_ERRORS, LEASE_WORKER_PROFILE_LIMIT, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
+import { LEASE_WORKER_CLOCK, LEASE_WORKER_ERRORS, LEASE_WORKER_PROFILE_LIMIT, ProviderHomeLeaseError, validLeaseWorkerOperation, type LeaseWorkerExecute, type LeaseWorkerAccept } from "./provider-home-lease-worker-protocol.js";
 
 class Port extends EventEmitter {
   readonly sent: Array<LeaseWorkerExecute | LeaseWorkerAccept> = [];
@@ -12,7 +14,7 @@ class Port extends EventEmitter {
   ref(): this { return this; }
   unref(): this { return this; }
   async terminate(): Promise<number> { this.terminated++; return 1; }
-  ready(): void { this.emit("message", { kind: "ready", epoch: this.epoch, pid: process.pid }); }
+  ready(): void { this.emit("message", { kind: "ready", epoch: this.epoch, pid: process.pid, clock: LEASE_WORKER_CLOCK }); }
   reply(kind: "receipt" | "done", request: LeaseWorkerExecute, extra: Record<string, unknown> = {}): void {
     this.emit("message", { kind, epoch: this.epoch, id: request.id, ok: true, value: true, ...extra });
   }
@@ -31,6 +33,45 @@ function fixture(options: { deadlineMsForTest?: number; pendingLimitForTest?: nu
   });
   return { registry, get port() { return port; }, get starts() { return starts; }, diagnostics };
 }
+
+test("each typed recovery cause crosses the worker lane without poisoning other accounts", async () => {
+  const f = fixture();
+  for (const [index, cause] of PROVIDER_HOME_RECOVERY_CAUSES.entries()) {
+    const acquisition = f.registry.acquireHome("/private/refused", "claude");
+    if (index === 0) f.port.ready();
+    const request = f.port.execute(index);
+    for (const kind of ["receipt", "done"] as const) f.port.reply(kind, request, { ok: false, value: false, error: cause });
+    await assert.rejects(acquisition, error => error instanceof ProviderHomeLeaseError && error.code === cause);
+  }
+  const other = f.registry.acquireHome("/private/usable", "claude");
+  const request = f.port.execute(PROVIDER_HOME_RECOVERY_CAUSES.length);
+  f.port.reply("receipt", request); f.port.reply("done", request);
+  assert.equal(await other, true);
+  const close = f.registry.close(); const shutdown = f.port.execute(PROVIDER_HOME_RECOVERY_CAUSES.length + 1);
+  f.port.reply("receipt", shutdown); f.port.reply("done", shutdown); assert.equal(await close, true);
+});
+
+test("an inspection carries exact bounded process observations across both worker receipts", async () => {
+  const f = fixture();
+  const inspection = { state: "stale", tipHash: "a".repeat(64), sameHost: true, hasEvidence: true, refusal: "boundary_survivor",
+    blockingProcess: { pid: 42, startTime: "123", kind: "boundary_member", cgroupMembership: "recorded_boundary" } };
+  const pending = f.registry.inspectHomeLease("/private/home");
+  f.port.ready(); const request = f.port.execute();
+  f.port.reply("receipt", request, { inspection }); f.port.reply("done", request, { inspection });
+  assert.deepEqual(await pending, inspection);
+  const changed = f.registry.inspectHomeLease("/private/home"); const next = f.port.execute(1);
+  f.port.reply("receipt", next, { inspection });
+  f.port.reply("done", next, { inspection: { ...inspection, blockingProcess: { ...inspection.blockingProcess, pid: 43 } } });
+  await assert.rejects(changed, /changed completion receipt/);
+});
+
+test("private process fields poison an inspection rather than crossing the worker boundary", async () => {
+  const f = fixture(); const pending = f.registry.inspectHomeLease("/private/home");
+  f.port.ready();
+  f.port.reply("receipt", f.port.execute(), { inspection: { state: "stale", tipHash: "a".repeat(64), sameHost: true, hasEvidence: true,
+    refusal: "process_uninspectable", blockingProcess: { pid: 42, kind: "uninspectable", cgroupMembership: "unavailable", environ: "secret" } } });
+  await assert.rejects(pending, /unexpected inspection/);
+});
 
 test("a receipt grants nothing until its exact acknowledgement completes", async () => {
   const f = fixture(); let settled = false;
@@ -95,7 +136,9 @@ for (const fault of ["wrong-id", "wrong-epoch", "duplicate", "changed", "unprove
 test("queue bounds include the active receipt and expired queued work never executes", async () => {
   const f = fixture({ pendingLimitForTest: 2, deadlineMsForTest: 60 });
   const active = f.registry.acquireHome("/private/first"); const activeRejected = assert.rejects(active, /worker unavailable/);
-  const queued = f.registry.acquireHome("/private/second"); const queuedRejected = assert.rejects(queued, /worker unavailable|expired/);
+  const queued = f.registry.acquireHome("/private/second");
+  const queuedRejected = assert.rejects(queued, error => error instanceof Error &&
+    (error.message.includes("worker unavailable") || error.message === LEASE_WORKER_ERRORS.expired));
   await assert.rejects(f.registry.acquireHome("/private/third"), /queue is full/);
   f.port.ready(); assert.equal(f.port.sent.length, 1);
   await Promise.all([activeRejected, queuedRejected]);
@@ -222,9 +265,70 @@ test("profile change frames are exact: provider, grant id and, for revocation, t
     ["retire for a non-provider lease key", { method: "profile_retire", home: "/private/home", provider: "skills" }],
     ["retire naming a grant", { method: "profile_retire", home: "/private/home", provider: "claude", grantId: GRANT }],
     ["retire without home", { method: "profile_retire", provider: "claude" }],
+    ["retire with a malformed expected profile", { method: "profile_retire", home: "/private/home", provider: "claude", profileId: "../profile" }],
+    ["retire with an expected profile and extra key", { method: "profile_retire", home: "/private/home", provider: "claude", profileId: PROFILE, extra: 1 }],
+    ["create without profile", { method: "profile_create", home: "/private/home", provider: "claude", grantId: GRANT }],
+    ["create with a non-v4 profile", { method: "profile_create", home: "/private/home", provider: "claude", profileId: "2a1b2c3d-4e5f-1a6b-8c7d-8e9fa0b1c2d3", grantId: GRANT }],
+    ["create for a non-provider lease key", { method: "profile_create", home: "/private/home", provider: "skills", profileId: PROFILE, grantId: GRANT }],
+    ["create with extra key", { method: "profile_create", home: "/private/home", provider: "claude", profileId: PROFILE, grantId: GRANT, extra: 1 }],
   ];
   assert.equal(validLeaseWorkerOperation({ method: "profile_retire", home: "/private/home", provider: "codex" }), true);
+  assert.equal(validLeaseWorkerOperation({ method: "profile_retire", home: "/private/home", provider: "codex", profileId: PROFILE }), true);
+  assert.equal(validLeaseWorkerOperation({ method: "profile_create", home: "/private/home", provider: "codex", profileId: PROFILE, grantId: GRANT }), true);
   for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
+});
+
+test("an import frame is exact: Codex only, a known layout, an absolute destination root, a profile and grant", () => {
+  const frame = { method: "profile_import", home: "/private/home", provider: "codex", layout: "user_home",
+    destinationRoot: "/private/home/.agent-manager/profiles", profileId: PROFILE, grantId: GRANT };
+  assert.equal(validLeaseWorkerOperation(frame), true);
+  assert.equal(validLeaseWorkerOperation({ ...frame, layout: "codex_home" }), true);
+  assert.equal(validLeaseWorkerOperation({ ...frame, profile: { expectedId: OTHER_PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [OTHER_PROFILE] } }), true);
+  const invalid: Array<[string, unknown]> = [
+    ["a Claude import", { ...frame, provider: "claude" }],
+    ["an unknown layout", { ...frame, layout: "keychain" }],
+    ["a relative destination root", { ...frame, destinationRoot: "profiles" }],
+    ["a destination root with NUL", { ...frame, destinationRoot: "/private/\0profiles" }],
+    ["an oversized destination root", { ...frame, destinationRoot: `/${"a".repeat(32768)}` }],
+    ["a non-v4 profile", { ...frame, profileId: "2a1b2c3d-4e5f-1a6b-8c7d-8e9fa0b1c2d3" }],
+    ["a malformed grant", { ...frame, grantId: "grant" }],
+    ["a missing destination root", { method: "profile_import", home: "/private/home", provider: "codex", layout: "user_home", profileId: PROFILE, grantId: GRANT }],
+    ["an extra key", { ...frame, path: "/private/home/.codex/auth.json" }],
+    ["a malformed profile context", { ...frame, profile: { controlPlaneSupportsProfiles: "yes", activeProfileIds: [] } }],
+    ["a credential context for an account HOME", { ...frame, layout: "codex_home", credentialProfile: { controlPlaneSupportsProfiles: true, activeProfileIds: [] } }],
+    ["a malformed credential context", { ...frame, credentialProfile: { activeProfileIds: [] } }],
+  ];
+  assert.equal(validLeaseWorkerOperation({ ...frame, credentialProfile: { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] } }), true);
+  for (const [name, value] of invalid) assert.equal(validLeaseWorkerOperation(value), false, name);
+});
+
+test("an import carries the source's dispatch-time profile context and its typed refusal", async () => {
+  const access = { controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] };
+  let port!: Port;
+  const registry = new AsyncProviderHomeLeaseRegistry("a".repeat(64), {
+    controlPlaneInstanceId: "0a1b2c3d-4e5f-4a6b-8c7d-8e9fa0b1c2d3", profileAccess: () => access,
+    expectedProfileIdForHome: (home) => home === "/private/account" ? PROFILE : home === join("/private/home", ".codex") ? OTHER_PROFILE : undefined,
+    workerFactoryForTest: value => port = new Port(value.epoch as string),
+  });
+  const imported = registry.importCodexCredential("/private/account", "codex_home", "/private/profiles", OTHER_PROFILE, GRANT);
+  port.ready();
+  const op = port.execute();
+  assert.deepEqual(op.operation, { method: "profile_import", home: "/private/account", provider: "codex", layout: "codex_home",
+    destinationRoot: "/private/profiles", profileId: OTHER_PROFILE, grantId: GRANT,
+    profile: { expectedId: PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] } });
+  for (const kind of ["receipt", "done"] as const) port.reply(kind, op, { ok: false, value: false, error: "import_source_unsupported" });
+  await assert.rejects(imported, (error: unknown) => error instanceof ProviderHomeLeaseError && error.code === "import_source_unsupported" &&
+    error.message === LEASE_WORKER_ERRORS.import_source_unsupported);
+  // A user_home import also carries its credential directory's own context, since an account may
+  // name `.codex` itself. A successful import replies with no profile id: the parent chose it.
+  const second = registry.importCodexCredential("/private/home", "user_home", "/private/profiles", OTHER_PROFILE, GRANT);
+  const op2 = port.execute(1);
+  assert.deepEqual((op2.operation as { credentialProfile?: unknown }).credentialProfile,
+    { expectedId: OTHER_PROFILE, controlPlaneSupportsProfiles: true, activeProfileIds: [PROFILE] });
+  port.reply("receipt", op2); port.reply("done", op2);
+  await second;
+  const close = registry.close(); const shutdown = port.execute(2);
+  port.reply("receipt", shutdown); port.reply("done", shutdown); assert.equal(await close, true);
 });
 
 test("only a successful adoption reply may carry a profile id", async () => {

@@ -1,1 +1,0 @@
-|.project-detail-section|padding|19px

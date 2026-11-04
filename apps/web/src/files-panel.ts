@@ -1,7 +1,16 @@
 /** Pure logic for the session Files panel (kept out of the component for unit tests —
  * @wollipog/web has no component-render harness, pure-logic tests only). */
 
-import type { EditorInfo, EditorLocationPrecision, EditorSourceLocation, SourceLocation } from "@wollipog/protocol";
+import {
+  fuzzyPathMatch,
+  fuzzyPathMatchIsClean,
+  fuzzyPathNeedle,
+  type EditorInfo,
+  type EditorLocationPrecision,
+  type EditorSourceLocation,
+  type SessionView,
+  type SourceLocation,
+} from "@wollipog/protocol";
 
 /** Extensions the viewer renders through the Markdown component (everything else is <pre> text). */
 export function isMarkdownPath(path: string): boolean {
@@ -36,6 +45,31 @@ export interface Crumb {
 export function workspaceFolderName(folderPath: string | null | undefined, workspaceName?: string | null): string {
   const last = (folderPath ?? "").split(/[\\/]+/).filter(Boolean).pop();
   return last || workspaceName?.trim() || "Workspace";
+}
+
+/**
+ * Whether the session works in a worktree Wollipog made for it, whose folder is named after the
+ * session rather than the project (#2852). The selected worktree's own record says so where the
+ * session lists it; a worktree attached from elsewhere keeps the name its owner gave it. Without the
+ * record, a session launched in a worktree is in Wollipog's.
+ */
+export function inManagedWorktree(session: Pick<SessionView, "useWorktree" | "worktreePath" | "worktrees">): boolean {
+  if (!session.worktreePath) return false;
+  const selected = session.worktrees?.find((worktree) => worktree.path === session.worktreePath);
+  return selected ? selected.source !== "attached" : session.useWorktree;
+}
+
+/**
+ * The name Files and Session Tools call the session's root by (#2852): the workspace's name for a
+ * session in a managed worktree, whose folder name is only its session id, otherwise the folder's
+ * own name (`workspaceFolderName`). The worktree's full path stays in the first crumb's tooltip.
+ */
+export function sessionRootName(
+  session: Pick<SessionView, "useWorktree" | "worktreePath" | "worktrees" | "workspaceName">,
+): string {
+  const workspace = session.workspaceName?.trim();
+  if (workspace && inManagedWorktree(session)) return workspace;
+  return workspaceFolderName(session.worktreePath, session.workspaceName);
 }
 
 /** The parent of a root-relative path ("" for a top-level entry and for the root itself). */
@@ -129,49 +163,87 @@ export function unquotePorcelainPath(path: string): string {
   return new TextDecoder("utf-8", { ignoreBOM: true }).decode(new Uint8Array(bytes));
 }
 
+/** A half-open range of UTF-16 offsets. */
+export interface TextRange {
+  start: number;
+  end: number;
+}
+
 /** One Go to File result, ranked and split for display. */
 export interface GoToFileMatch {
   path: string;
   name: string;
   /** The containing folder, root-relative ("" at the root). */
   folder: string;
-  /** Where the query matched: the name, or (only) the folder part of the path. */
-  matchIn: "name" | "folder" | "path";
-  /** The matched range within `name` or `folder`, for underlining; absent for a path-only match. */
-  range?: { start: number; end: number };
+  /** The matched characters within `name` and within `folder`, for underlining. */
+  nameRanges: TextRange[];
+  folderRanges: TextRange[];
 }
 
 /**
- * Ranks the runner's bounded search for Go to File (#2852): files only; git-changed files and files
- * opened earlier in this session first; then name matches before path matches. Ties keep the
- * runner's order, which is breadth-first, so shallower files come first.
+ * Ranks the runner's bounded search for Go to File (#2852, #1263): files whose path holds the query's
+ * characters in order (`fuzzyPathMatch`); git-changed files and files opened earlier in this session
+ * first when their match is clean (`fuzzyPathMatchIsClean`: each matched run starts a word or is
+ * three or more letters of the name), then the best match, then the shorter path, as the runner chose
+ * them. Remaining ties keep the runner's order, which is breadth-first, so shallower files come first.
+ * A priority file whose letters merely scatter through its path ranks by score like any other, so
+ * it cannot push a stronger match off the top row that Enter opens.
+ *
+ * A truncated answer can leave out a priority file, so those with a clean match are added from
+ * `priority`. A complete answer that lacks one means the file is gone, so nothing is added to it.
  */
 export function rankGoToFileResults(
   results: readonly { path: string; isDirectory: boolean }[],
   query: string,
-  priority: (path: string) => boolean,
+  priority: ReadonlySet<string>,
+  truncated = false,
 ): GoToFileMatch[] {
-  const needle = query.trim().toLocaleLowerCase();
-  return results
-    .filter((result) => !result.isDirectory)
-    .map((result, index) => {
-      const name = baseName(result.path);
-      const folder = parentPath(result.path);
-      const inName = needle ? name.toLocaleLowerCase().indexOf(needle) : -1;
-      const inFolder = inName < 0 && needle ? folder.toLocaleLowerCase().indexOf(needle) : -1;
-      const match: GoToFileMatch = inName >= 0
-        ? { path: result.path, name, folder, matchIn: "name", range: { start: inName, end: inName + needle.length } }
-        : inFolder >= 0
-          ? { path: result.path, name, folder, matchIn: "folder", range: { start: inFolder, end: inFolder + needle.length } }
-          : { path: result.path, name, folder, matchIn: "path" };
-      return { match, index, first: priority(result.path) ? 0 : 1, nameFirst: inName >= 0 ? 0 : 1 };
+  const needle = fuzzyPathNeedle(query);
+  const paths = results.filter((result) => !result.isDirectory).map((result) => result.path);
+  const answered = paths.length;
+  if (truncated) {
+    const listed = new Set(paths);
+    for (const path of priority) {
+      if (!listed.has(path) && !path.endsWith("/")) paths.push(path);
+    }
+  }
+  return paths
+    .flatMap((path, index) => {
+      const found = fuzzyPathMatch(path, needle);
+      if (!found) return [];
+      const lifted = priority.has(path) && fuzzyPathMatchIsClean(path, found.positions);
+      if (index >= answered && !lifted) return [];
+      return [{ match: goToFileMatch(path, found.positions), index, score: found.score, first: lifted ? 0 : 1 }];
     })
-    .sort((a, b) => a.first - b.first || a.nameFirst - b.nameFirst || a.index - b.index)
+    .sort((a, b) => a.first - b.first || b.score - a.score || a.match.path.length - b.match.path.length || a.index - b.index)
     .map(({ match }) => match);
 }
 
+function goToFileMatch(path: string, positions: readonly number[]): GoToFileMatch {
+  const slash = path.lastIndexOf("/");
+  const nameStart = slash + 1;
+  return {
+    path,
+    name: path.slice(nameStart),
+    folder: slash < 0 ? "" : path.slice(0, slash),
+    nameRanges: textRanges(positions.filter((at) => at >= nameStart).map((at) => at - nameStart)),
+    folderRanges: textRanges(positions.filter((at) => at < slash)),
+  };
+}
+
+/** Ascending offsets as runs of consecutive characters. */
+function textRanges(offsets: readonly number[]): TextRange[] {
+  const ranges: TextRange[] = [];
+  for (const at of offsets) {
+    const last = ranges[ranges.length - 1];
+    if (last && last.end === at) last.end += 1;
+    else ranges.push({ start: at, end: at + 1 });
+  }
+  return ranges;
+}
+
 /** Breadcrumb segments for a root-relative dir path; always starts with the root crumb, named by
- * `rootName` (the workspace folder's name, `workspaceFolderName`). */
+ * `rootName` (the session's root, `sessionRootName`). */
 export function crumbsFor(path: string, rootName: string): Crumb[] {
   const crumbs: Crumb[] = [{ name: rootName, path: "" }];
   if (!path) return crumbs;

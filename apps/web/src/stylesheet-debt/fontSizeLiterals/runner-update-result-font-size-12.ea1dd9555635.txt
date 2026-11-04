@@ -1,1 +1,0 @@
-|.runner-update-result|font-size|12

@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { BackgroundDeliveryView, ManagedBackgroundJobView } from "@wollipog/protocol";
-import { backgroundJobLabel, blockedDeliveryStopTarget } from "./background-job-stop.js";
+import { backgroundJobLabel, backgroundJobShortId, blockedDeliveryStopTarget } from "./background-job-stop.js";
 import {
   backgroundJobGroupBadge,
   backgroundJobGroupCounts,
@@ -11,6 +11,7 @@ import {
   backgroundNotificationStage,
   backgroundTurnLabel,
   groupBackgroundHistory,
+  inBackgroundTurn,
 } from "./background-work.js";
 
 const MINUTE = 60_000;
@@ -28,10 +29,11 @@ const finished = (overrides: Partial<ManagedBackgroundJobView> = {}) => job({
   terminalStatus: "completed", terminalObservedAt: NOW - 5 * MINUTE, continuationRequired: true, ...overrides,
 });
 
-test("a job's name is its kind and the last six characters of its id, wherever it is shown (#2858)", () => {
+test("a job's name is its kind and a six-character suffix of its id, wherever it is shown (#2858)", () => {
   assert.equal(backgroundJobLabel(job()), "Shell Job a1f3c9");
   assert.equal(backgroundJobLabel(job({ id: "x-7be210", launchType: "monitor" })), "Monitor Job 7be210");
-  assert.equal(backgroundJobLabel(job({ id: "abc", launchType: "unknown" })), "Background Job abc");
+  // A short id is hashed rather than shown cut or padded.
+  assert.equal(backgroundJobLabel(job({ id: "abc", launchType: "unknown" })), "Background Job 47e90b");
   // The Session Status popover's Stop Job names the job the same way (#2275).
   const target = blockedDeliveryStopTarget({
     driver: "claude-code", backgroundWorkTracking: "managed", backgroundWorkState: "running",
@@ -40,11 +42,41 @@ test("a job's name is its kind and the last six characters of its id, wherever i
   assert.deepEqual(target, { jobId: "monitor-7be210", jobLabel: "Monitor Job 7be210" });
 });
 
+test("a job's suffix never cuts a word: a readable id is hashed, a random-looking one is kept (#2858)", () => {
+  const monitor = job({ id: "job-monitor", launchType: "monitor" });
+  const shell = job({ id: "session-tools-job-2" });
+  const random = job({ id: "job-shell-a1f3c9" });
+  assert.match(backgroundJobShortId(monitor), /^[0-9a-f]{6}$/);
+  assert.match(backgroundJobShortId(shell), /^[0-9a-f]{6}$/);
+  assert.notEqual(backgroundJobLabel(monitor), "Monitor Job onitor");
+  assert.notEqual(backgroundJobLabel(shell), "Shell Job -job-2");
+  assert.equal(backgroundJobLabel(random), "Shell Job a1f3c9");
+  // The same id always gets the same name.
+  assert.equal(backgroundJobLabel(job({ id: "job-monitor", launchType: "monitor" })), backgroundJobLabel(monitor));
+  // Six letters with no digit read as a word, so they are hashed too; digits alone stay.
+  assert.match(backgroundJobShortId(job({ id: "x-monitor" })), /^[0-9a-f]{6}$/);
+  assert.notEqual(backgroundJobShortId(job({ id: "x-monitor" })), "onitor");
+  assert.equal(backgroundJobShortId(job({ id: "job-123456" })), "123456");
+  // Different ids never share a name, including near neighbours a hash must still separate.
+  const ids = ["job-monitor", "session-tools-job-2", "job-shell-a1f3c9", "session-tools-job-1",
+    "session-tools-job-3", "job-1", "job-2", "monitor", "abc", "x-7be210"];
+  const suffixes = ids.map((id) => backgroundJobShortId(job({ id })));
+  assert.equal(new Set(suffixes).size, ids.length);
+});
+
 test("a turn is named by the transcript's number, never its place in the list (#2858)", () => {
   assert.equal(backgroundTurnLabel("turn-4", { eventId: 40, turn: 4 }), "Turn 4");
   assert.equal(backgroundTurnLabel("turn-4", undefined), "Earlier Turn");
   assert.equal(backgroundTurnLabel("unknown", { eventId: 40, turn: 4 }), "Unknown Turn");
   assert.match(backgroundTurnLabel("turn-4", { eventId: 40, startedAt: NOW }), /^Turn at \d{1,2}:\d{2}/u);
+});
+
+test("a notice's title names the same turn after \"in\" (#2871)", () => {
+  assert.equal(inBackgroundTurn("turn-4", { eventId: 40, turn: 4 }), "in Turn 4");
+  assert.equal(inBackgroundTurn("turn-4", undefined), "in an Earlier Turn");
+  assert.equal(inBackgroundTurn("unknown", { eventId: 40, turn: 4 }), "in an Unknown Turn");
+  assert.match(inBackgroundTurn("turn-4", { eventId: 40, startedAt: NOW }), /^in the Turn at \d{1,2}:\d{2}/u);
+  assert.equal(inBackgroundTurn("turn-4", { eventId: 40 }), "in an Earlier Turn");
 });
 
 test("a group's status: waiting, some finished, returning, returned, missing, unverified (#2858)", () => {
@@ -55,7 +87,7 @@ test("a group's status: waiting, some finished, returning, returned, missing, un
   assert.deepEqual(read(status([job(), job({ id: "b" })])), ["Waiting for 2 Jobs", "info"]);
   assert.deepEqual(read(status([finished(), job({ id: "b" })])), ["1 of 2 Finished", "neutral"]);
   assert.deepEqual(read(status([finished()], [{ parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, acceptedAt: NOW }])),
-    ["Returning Result", "info"]);
+    ["Follow-Up Pending", "neutral"]);
   assert.deepEqual(read(status([finished({ assistantResultPersistedAt: NOW })])), ["Result Returned", "success"]);
   assert.deepEqual(read(status([finished()], [{ parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, acceptedAt: NOW,
     missingResultAt: NOW }])), ["Result Missing", "warning"]);
@@ -80,7 +112,7 @@ test("a row's sentence and the page's Result say where the job's result is, in t
   assert.equal(backgroundJobRowSentence(job(), "unverified", 0, NOW), "Last seen 1m ago");
   assert.equal(backgroundJobRowSentence(finished(), "completed", 1, NOW), "Result waits for the other job");
   assert.equal(backgroundJobRowSentence(finished(), "completed", 2, NOW), "Result waits for 2 other jobs");
-  assert.equal(backgroundJobRowSentence(finished({ continuationQueuedAt: NOW }), "completed", 0, NOW), "Returning result");
+  assert.equal(backgroundJobRowSentence(finished({ continuationQueuedAt: NOW }), "completed", 0, NOW), "Awaiting follow-up");
   assert.equal(backgroundJobRowSentence(finished({ assistantResultPersistedAt: NOW - 50 * MINUTE }), "completed", 0, NOW),
     "Result returned 50m ago");
   assert.equal(backgroundJobRowSentence(finished({ continuationMissingResultAt: NOW }), "completed", 0, NOW), "Result never arrived");
@@ -129,13 +161,13 @@ test("a blocked receipt's unfinished siblings hold the turn even when the bounde
 });
 
 
-test("exhausted delivery wording supersedes stale Returning result until acceptance", () => {
+test("exhausted delivery wording supersedes stale Awaiting follow-up until acceptance", () => {
   const item = finished({ continuationId: "continuation", continuationSubmittedAt: NOW });
   const delivery: BackgroundDeliveryView = { continuationId: "continuation", parentTurnId: item.parentTurnId,
     jobCount: 1, terminalCount: 1, retryExhaustedAt: NOW, watchdogState: "capacity_retry_exhausted" };
   assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [delivery]), "Result return stopped");
   assert.equal(backgroundJobResultSentence(item, "completed", 0, NOW, [delivery]), "Automatic capacity retries ended before this result was accepted");
   assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, retryExhaustionAcknowledgedAt: NOW }]), "Result return stopped");
-  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, acceptedAt: NOW }]), "Returning result");
-  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, continuationId: "unrelated" }]), "Returning result");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, acceptedAt: NOW }]), "Awaiting follow-up");
+  assert.equal(backgroundJobRowSentence(item, "completed", 0, NOW, [{ ...delivery, continuationId: "unrelated" }]), "Awaiting follow-up");
 });

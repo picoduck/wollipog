@@ -12,7 +12,7 @@ import { videoPreparationDecoderAvailable } from "./video-evidence-preparation.j
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { test } from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PACED_VIDEO_REVIEW_MIN_PROTOCOL,
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PACED_VIDEO_REVIEW_MIN_PROTOCOL, pacedVideoReviewWindowPlan,
   PACED_VIDEO_REVIEW_CONTRACT_ID, type RunnerMetadata } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -21,7 +21,7 @@ import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { mintCampaignEvidenceAuthority } from "./evidence-authority.js";
 import type { HumanPrincipal } from "./identity.js";
 import { MEDIA_SESSION_PURPOSE_ERROR, type PreparedMediaSessionRuntime } from "./prepared-media-session-runtime.js";
-import { PreparedMediaSessions, type PreparedMediaSessionPorts } from "./prepared-media-sessions.js";
+import { PreparedMediaSessions, pacedGrantPlanDigest, type PreparedMediaSessionPorts } from "./prepared-media-sessions.js";
 import type { ReviewerAdmissionContext, EvidenceReviewerTarget, VideoProfileLiveProof } from "./evidence-review-worker.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
@@ -45,7 +45,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
     workspaces: [{ id: "w", name: "Repo", path: "/synthetic-repo" }],
     agents: [{ id: "claude", name: "Synthetic Claude", command: "claude", args: [], env: {}, driver: "claude-code", available: true,
       capabilities: { models: [{ id: "claude-opus-5-5", displayName: "Synthetic Image Model", default: true, inputModalities: ["text", "image"] }],
-        effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
+        effortLevels: ["high"], slashCommands: [], supportsImages: true, supportsApprovals: true, imageToolResults: true,
         // Synthetic compatibility metadata only; proof/rates/namespace remain Source fixtures.
         pacedVideoReviewContract: { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 },
         permissionModes: ["default"] } }] };
@@ -63,7 +63,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
   const hub = new Hub(db), messages: unknown[] = [];
   hub.isRunnerOnline = () => true; hub.sendToRunner = (_, message) => { messages.push(message); return true; };
   hub.sessionChanged = () => {}; hub.sessionChangedById = () => {};
-  const log = { info() {}, warn() {}, error() {} };
+  const log = { info(_message: string) {}, warn() {}, error() {} };
   const bootstrap = new SessionsService(db, hub, log);
   assert.ok(bootstrap.setCampaignControl("root", { mode: "full_control", objective: "Review #1321", operations: ["ui_evidence_approval"],
     delegatablePolicyIds: [], budgetAuthority: { version: 1, accounting: "managed_workers_only", unpriced: "stop",
@@ -101,7 +101,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
   assert.ok(db.createWorkflowDecision({ requestId: "synthetic-ui", occurrenceId: "original-gate", sessionId: "child",
     controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "synthetic", resourceSnapshot: snapshot,
     resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision, authority: validation ? "human" : "orchestrator", createdAt: 7 }));
-  const target: EvidenceReviewerTarget = { agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5",
+  const target: EvidenceReviewerTarget = { agentId: "claude", driver: "claude-code", modelId: "claude-opus-5-5", effort: "high",
     providerId: "synthetic-provider", runnerId: "r", runnerProtocolVersion: PACED_VIDEO_REVIEW_MIN_PROTOCOL, capabilitiesSha256: sha("synthetic capability"),
     pacedVideoReviewContract: { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 },
     auditedAllFrameDelivery: true, reviewerNamespaceSha256: sha("synthetic namespace"), mediaOnlyNamespaceVerified: true };
@@ -113,7 +113,7 @@ function harness(sourceBytes?: Buffer, validation = false) {
     controllerPacedVideoReviewContract: { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 },
     childPacedVideoReviewContract: { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 },
     boundaryCurrent: true, scopeCurrent: true, destinationPrivateVerified: true };
-  let proof: VideoProfileLiveProof | null = { proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId,
+  let proof: VideoProfileLiveProof | null = { proofId: "synthetic-not-live", driver: target.driver, modelId: target.modelId, effort: target.effort,
     providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256, reviewerNamespaceSha256: target.reviewerNamespaceSha256,
     oracleIsolationEvidenceSha256: sha("synthetic probe"), profile: "paced-silent-complete-frames-v1",
     validatedAt: Date.now() - 1000, expiresAt: Date.now() + 60_000, candidateValidationRunId: "synthetic-candidate",
@@ -128,12 +128,12 @@ function harness(sourceBytes?: Buffer, validation = false) {
   const runtime: PreparedMediaSessionRuntime = { resolve: () => ({ context, target, liveProof: proof,
     ...(validation ? { operatorValidation: { permitId: validationPermitId! } } : {}),
     request: { runnerId: "r", workspaceId: "w", agentId: "claude", title: "Synthetic Media Reviewer",
-      prompt: "Review authorized #1321 through the exact scoped media tools.", config: { model: target.modelId, costBudgetUsd: 2, maxToolCalls: 10 } } }) };
+      prompt: "Review authorized #1321 through the exact scoped media tools.", config: { model: target.modelId, effort: target.effort, costBudgetUsd: 2, maxToolCalls: 10 } } }) };
   const identity = { rootSessionId: "root", childSessionId: "child", admissionId: "synthetic-media", requestSha256: sha("exact source and criteria") };
   const subject = { occurrenceId: "original-gate", evidenceId: "original-video" };
   // Disclosed synthetic permit scope only: no real Human mint, provider profile or live proof.
   let validationScope: OperatorVideoValidationScope | null = validation ? {
-    identity, subject: { ...subject, profile: "paced" }, authorizedByUserId: human.userId, organizationId: human.organizationId,
+    identity, subject: { ...subject, profile: "paced", privateOracleCommitmentSha256: sha("disclosed synthetic test commitment, never a blind oracle") }, authorizedByUserId: human.userId, organizationId: human.organizationId,
     gate: { authority: "human", status: "pending", resourceDigest: sha(JSON.stringify(snapshot)), policyRevision: boundary.revision },
     source: { artifactId: "source", sha256: sha(source), sizeBytes: source.length, manifestSha256: sha("synthetic native manifest"),
       orderedFramesSha256: sha(JSON.stringify(syntheticValidationFrames())), criteriaSha256: sha("synthetic criteria"),
@@ -143,7 +143,8 @@ function harness(sourceBytes?: Buffer, validation = false) {
     nativeToolProfileSha256: sha("synthetic installed media tools"), namespaceLaunchSha256: sha("synthetic launch"), authoritySha256: sha("synthetic current authority"),
   } : null;
   const permits = validation ? new OperatorVideoValidationPermits(db.raw(), { current: () => validationScope }) : undefined;
-  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const },
+  const validationProposal = { identity, subject: { ...subject, profile: "paced" as const,
+    privateOracleCommitmentSha256: sha("disclosed synthetic test commitment, never a blind oracle") },
     expectedScopeSha256: sha(JSON.stringify(validationScope)), expiresAt: Date.now() + 30_000 };
   const permit = permits?.mint(human, validationProposal);
   if (validation) { assert.ok(permit); validationPermitId = permit.permitId; }
@@ -389,16 +390,22 @@ for (const phase of ["preflight", "materialize"] as const) {
 }
 test("media preparation announces its actual committed record once and refuses an external commit boundary", (t) => {
   const h = harness(); t.after(() => h.db.close());
-  let broadcasts = 0, createdLogs = 0;
+  let broadcasts = 0;
+  const logs: string[] = [];
   h.hub.sessionChanged = (session) => {
     assert.equal(h.db.raw().isTransaction, false);
     assert.equal(h.prepared.get(h.identity)?.sessionId, session.id);
     broadcasts++;
   };
-  h.log.info = () => { assert.equal(h.db.raw().isTransaction, false); createdLogs++; };
+  h.log.info = (message) => { assert.equal(h.db.raw().isTransaction, false); logs.push(message); };
   const actual = h.prepared.prepare(h.identity);
   assert.equal(h.prepared.prepare(h.identity).sessionId, actual.sessionId);
-  assert.equal(broadcasts, 1); assert.equal(createdLogs, 1);
+  assert.equal(broadcasts, 1);
+  assert.equal(logs.filter(message => message.startsWith("session created ")).length, 1);
+  const snapshots = logs.filter(message => message.startsWith("{")).map(message => JSON.parse(message));
+  assert.deepEqual(snapshots, [{ event: "campaign_child_review_policy_snapshot", entryPoint: "prepared_media",
+    sessionId: actual.sessionId, parentSessionId: "root", ...h.db.getSession(actual.sessionId)!.reviewPolicy }]);
+  assert.equal(logs.length, 2, "creation and snapshot audits publish once, after the owning commit");
   h.db.raw().exec("BEGIN");
   try { assert.throws(() => h.prepared.prepare(h.identity), /own its commit boundary/); }
   finally { h.db.raw().exec("ROLLBACK"); }
@@ -421,7 +428,8 @@ function releaseHarness(t: { after(fn: () => void): void }) {
       childSessionId: "child", occurrenceId: h.subject.occurrenceId, policyRevision: actual.admission.authorityRevision,
       sourceEvidenceId: h.subject.evidenceId, sourceArtifactId: "source", sourceSha256: sha(h.source),
       manifestSha256: sha("synthetic manifest"), bindingSha256: sha("synthetic binding"), criteriaSha256: sha("synthetic criteria"),
-      expiresAt: Date.now() + 30_000, frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: sha("synthetic native frame"), sizeBytes: 10 }] } };
+      expiresAt: Date.now() + 30_000, frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: sha("synthetic native frame"), sizeBytes: 10 }],
+      deliveryPlanSha256: pacedGrantPlanDigest([{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: sha("synthetic native frame"), sizeBytes: 10 }])! } };
   const fenceIdentity = (record: import("./prepared-media-sessions.js").PreparedMediaRecord) => ({ rootSessionId: record.rootSessionId,
     sessionId: record.sessionId, runnerId: record.runnerId, generation: record.admission.dispatch.generation,
     commandSha256: record.commandSha256, dispatchSha256: record.dispatchSha256! });
@@ -521,7 +529,7 @@ test("exact validation grant binds one dispatch; unknown reply retains actual ca
       policyRevision: s.gate.policyRevision, sourceEvidenceId: h.subject.evidenceId, sourceArtifactId: s.source.artifactId,
       sourceSha256: s.source.sha256, manifestSha256: s.source.manifestSha256, bindingSha256: sha(JSON.stringify(h.permits!.binding(h.permit!.permitId))),
       criteriaSha256: s.source.criteriaSha256, expiresAt: h.permit!.expiresAt - 1,
-      frames: syntheticValidationFrames() },
+      frames: syntheticValidationFrames(), deliveryPlanSha256: pacedGrantPlanDigest(syntheticValidationFrames())! },
   };
   h.ports.authorize = async (record) => h.permits!.authorize(record);
   let sends = 0;
@@ -605,7 +613,10 @@ test("purpose-bound HTTP routes allow only exact media operations while parent s
   }
   for (const route of ["/api/sessions/:id/prompt", "/api/sessions/:id/config", "/api/sessions/:id/restart",
     "/api/sessions/:id/fork", "/api/sessions/:id/shells"]) assert.equal(mediaSessionMutationAllowed("POST", route), false);
-  for (const route of ["/api/sessions/:id/stop", "/api/sessions/:id/archive"]) assert.equal(mediaSessionMutationAllowed("POST", route), true);
+  for (const route of ["/api/sessions/:id/stop", "/api/sessions/:id/archive",
+    "/api/sessions/:id/background-jobs/:jobId/stop", "/api/sessions/:id/queue-hold/release"]) {
+    assert.equal(mediaSessionMutationAllowed("POST", route), true, route);
+  }
   assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions", "normal"), true);
 });
 
@@ -734,10 +745,13 @@ async function gateHarness(t: { skip(reason: string): void; after(fn: () => void
     service.resolveWorkflowDecision("root", "child", original.occurrenceId, resolution, "orchestrator",
       { kind: "agent", id: "root" }, () => true);
   const complete = () => {
-    for (let index = 0; index < record.manifest.frames.length;) {
-      const batch = runtime.deliverBatch(record.reviewId, reviewer.sessionId, index);
-      runtime.acknowledgeBatch(record.reviewId, reviewer.sessionId, batch.deliveries.map((delivery) => delivery.receipt));
-      index = batch.nextIndex;
+    // Window by window, as the runner's paced reviewer delivers them; overlap frames repeat.
+    for (const window of pacedVideoReviewWindowPlan(record.manifest.frames).windows) {
+      for (let index = window.firstIndex; index < window.endIndex;) {
+        const batch = runtime.deliverBatch(record.reviewId, reviewer.sessionId, index, window.endIndex);
+        runtime.acknowledgeBatch(record.reviewId, reviewer.sessionId, batch.deliveries.map((delivery) => delivery.receipt));
+        index = batch.nextIndex;
+      }
     }
     const verdict = runtime.recordVerdict(record.reviewId, reviewer.sessionId, { outcome: "accept", criteria: [{
       criterionId: "transients", outcome: "pass", observedFrameIndices: [157],
@@ -761,7 +775,9 @@ test("original UI gate persists actual media actor separately and consumes compl
   assert.deepEqual(approved.data?.resourceSnapshot, h.original.resourceSnapshot);
   assert.equal(approved.data?.resourceDigest, h.original.resourceDigest);
   assert.equal(h.db.validUiEvidenceReviewReceipts(h.original.occurrenceId, "root", Date.now()).length, 0);
-  assert.equal(h.store.latestReceipts(h.record.reviewId).length, 360);
+  assert.equal(h.store.latestReceipts(h.record.reviewId).length,
+    pacedVideoReviewWindowPlan(h.record.manifest.frames).windows.reduce((n, w) => n + w.endIndex - w.firstIndex, 0),
+    "every window receipts each of its frames");
   const consumed = await h.service.consumeWorkflowDecision("child", h.original.occurrenceId,
     { resourceSnapshot: h.original.resourceSnapshot });
   assert.ok(consumed.ok, consumed.error ?? "Consumption refused"); assert.equal(consumed.data?.status, "consumed");
@@ -1134,7 +1150,11 @@ test("exact prior quality schema migrates atomically, preserves live provenance 
     const h = await gateHarness(t); if (!h) return; h.complete();
     const sql = h.db.raw();
     const review = sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get()!;
-    const receipts = sql.prepare("SELECT * FROM temporal_video_receipts ORDER BY frame_index").all();
+    // Legacy rows predate window binding: one receipt per frame (the overlap frame's last delivery).
+    const byFrame = new Map<number, Record<string, unknown>>();
+    for (const r of sql.prepare("SELECT review_id,frame_index,receipt_id,receipt,acknowledged FROM temporal_video_receipts " +
+      "ORDER BY window_index,frame_index").all()) byFrame.set(Number(r.frame_index), { ...r });
+    const receipts = [...byFrame.values()].sort((a, b) => Number(a.frame_index) - Number(b.frame_index)) as Array<Record<string, string | number>>;
     const verdict = sql.prepare("SELECT * FROM temporal_video_verdicts").get()!;
     const intents = sql.prepare("SELECT * FROM prepared_media_sessions").all();
     sql.exec("BEGIN; DROP TABLE temporal_video_verdicts; DROP TABLE temporal_video_receipts; DROP TABLE temporal_video_reviews;" +
@@ -1162,8 +1182,11 @@ test("exact prior quality schema migrates atomically, preserves live provenance 
       assert.equal(migrated.latestReceipts(h.record.reviewId).length, 0);
       assert.equal(migrated.getVerdict(h.record.reviewId), null);
     } else {
-      assert.deepEqual(sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get(), review);
-      assert.deepEqual(sql.prepare("SELECT * FROM temporal_video_receipts ORDER BY frame_index").all(), receipts);
+      assert.deepEqual({ ...sql.prepare("SELECT review_id,binding_sha256,record,status FROM temporal_video_reviews").get() },
+        { ...review, status: "revoked" }, "a pending review cannot prove which window saw each frame");
+      assert.deepEqual(sql.prepare("SELECT review_id,frame_index,receipt_id,receipt,acknowledged FROM temporal_video_receipts ORDER BY frame_index")
+        .all().map((r) => ({ ...r })), receipts.map((r) => ({ ...r })));
+      assert.equal(sql.prepare("SELECT COUNT(*) AS n FROM temporal_video_receipts WHERE window_index<>0").get()!.n, 0, "kept as window 0");
       assert.deepEqual(sql.prepare("SELECT * FROM temporal_video_verdicts").get(), verdict);
       h.db.deleteSession(h.record.binding.reviewerSessionId);
       assert.equal(migrated.getReview(h.record.reviewId), null);
@@ -1438,6 +1461,66 @@ test("dedicated Stop registration is required even after an authentic running st
   assert.deepEqual(h.messages.filter((m) => (m as { sessionId?: string }).sessionId === h.actual.sessionId), []);
   assert.ok(h.messages.some((m) => (m as { sessionId?: string; type?: string }).sessionId === "root" &&
     (m as { type?: string }).type === "stop_session"), "ordinary campaign budget Stop remains effective");
+});
+
+// #3365: archive acceptance (202) must mean a durable archive intent exists, in every media state.
+function archiveOutcome(h: Awaited<ReturnType<typeof activeStopHarness>> | ReturnType<typeof releaseHarness>) {
+  const session = h.db.getSession(h.actual.sessionId)!;
+  return { status: session.status, archived: session.archived === true,
+    archiveIntent: h.db.sessionStopIntent(h.actual.sessionId)?.archiveAfterStop === true,
+    stopIntent: h.db.hasSessionStopIntent(h.actual.sessionId), active: h.db.campaignBudgets.active(h.actual.sessionId) };
+}
+for (const state of ["active-running", "active-queued", "ambiguous-running", "ambiguous-queued"] as const) {
+  test("archive of " + state + " media refuses without an archive intent, generic kill or dedicated Stop", async (t) => {
+    const h = await activeStopHarness(t, state.startsWith("ambiguous"));
+    const record = h.prepared.get(h.actual)!;
+    assert.equal(record.state, state.startsWith("ambiguous") ? "uncertain" : "active");
+    // Only the trusted active command admits a running status; an ambiguous one is set directly.
+    if (state === "active-running") h.service.onSessionStatus(h.actual.sessionId, "running", undefined, undefined, "r");
+    if (state === "ambiguous-running") h.db.updateSessionStatus(h.actual.sessionId, "running", Date.now());
+    const status = state.endsWith("running") ? "running" : "queued";
+    assert.equal(h.db.getSession(h.actual.sessionId)?.status, status);
+    const result = h.service.setArchived(h.actual.sessionId, true);
+    assert.equal(result.ok, false); assert.equal(result.status, 409);
+    // A dispatched reviewer is open whether running or still queued, so the lifecycle fence answers first.
+    assert.match(result.error!, /cannot be archived yet/u);
+    assert.deepEqual(archiveOutcome(h), { status, archived: false, archiveIntent: false, stopIntent: false, active: true });
+    assert.equal(h.stops(), 0); assert.equal(h.sends(), 0);
+    assert.deepEqual(h.messages, []);
+    assert.deepEqual(h.prepared.get(record), record);
+  });
+}
+test("a dedicated Stop acknowledgement is not archival: archive still refuses after an accepted media Stop", async (t) => {
+  const h = await activeStopHarness(t);
+  h.service.onSessionStatus(h.actual.sessionId, "running", undefined, undefined, "r");
+  assert.equal(h.service.stop(h.actual.sessionId).status, 202);
+  assert.equal(h.service.onMediaReviewStopAcknowledged("r", h.ack()!), true);
+  const result = h.service.setArchived(h.actual.sessionId, true);
+  assert.equal(result.ok, false); assert.equal(result.status, 409);
+  assert.deepEqual(archiveOutcome(h), { status: "running", archived: false, archiveIntent: false, stopIntent: false, active: true });
+  assert.equal(h.stops(), 1, "archive sends no second Stop"); assert.equal(h.sends(), 1);
+  assert.equal(h.db.campaignBudgets.completedAttestation(h.actual.sessionId), null, "no final pricing is implied");
+});
+test("archive of locally cancelled and terminal media is accepted only with its durable archived state", async (t) => {
+  // Cancelled: never-enqueued cancellation already released capacity; archive commits directly.
+  const cancelled = releaseHarness(t);
+  assert.ok(cancelled.service.stop(cancelled.actual.sessionId).ok);
+  assert.equal(cancelled.service.mediaSessionPurposes.lifecycleState(cancelled.actual.sessionId), "cancelled");
+  const archived = cancelled.service.setArchived(cancelled.actual.sessionId, true);
+  assert.equal(archived.ok, true); assert.equal(archived.status, 200);
+  assert.deepEqual(archiveOutcome(cancelled), { status: "stopped", archived: true, archiveIntent: false, stopIntent: false, active: false });
+  // Queued and locally cancellable: the same request cancels and archives atomically.
+  const queued = releaseHarness(t);
+  const accepted = queued.service.setArchived(queued.actual.sessionId, true);
+  assert.equal(accepted.ok, true); assert.equal(accepted.status, 202);
+  assert.deepEqual(archiveOutcome(queued), { status: "stopped", archived: true, archiveIntent: false, stopIntent: false, active: false });
+  // Terminal row: no Stop is needed, and the archive is recorded rather than promised.
+  const terminal = await activeStopHarness(t);
+  terminal.db.updateSessionStatus(terminal.actual.sessionId, "failed", Date.now());
+  const done = terminal.service.setArchived(terminal.actual.sessionId, true);
+  assert.equal(done.ok, true); assert.equal(done.status, 200);
+  assert.equal(archiveOutcome(terminal).archived, true);
+  assert.equal(terminal.stops(), 0); assert.deepEqual(terminal.messages, []);
 });
 
 test("ordinary rate-priced usage sends exactly one authoritative accounting acknowledgement", (t) => {

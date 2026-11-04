@@ -164,27 +164,36 @@ test.describe("at 1440×900", () => {
     expect(geometry.body, "the command is not squeezed to nothing").toBeGreaterThan(40);
   });
 
-  test("the title, the meta line and the first transcript turn share the page title's left edge", async ({ page }) => {
+  test("the title and the meta line share the page title's left edge, and the transcript is centered", async ({ page }) => {
     await open(page);
     await select(page, IDLE);
     await expect(page.locator(".session-detail.preview .detail-scroll .tl-row").first()).toBeVisible();
     const lefts = await page.evaluate(() => {
       const left = (element: Element | null | undefined) => element?.getBoundingClientRect().left ?? Number.NaN;
-      const scroll = document.querySelector(".session-detail.preview .detail-scroll")!;
+      const scroll = document.querySelector<HTMLElement>(".session-detail.preview .detail-scroll")!;
       const scrollTop = scroll.getBoundingClientRect().top;
       const firstTurn = [...scroll.querySelectorAll(".tl-row")].find((row) => row.getBoundingClientRect().bottom > scrollTop);
+      const style = getComputedStyle(scroll);
       return {
         page: left(document.getElementById("page-title")),
         title: left(document.querySelector(".session-preview-bar .detail-bar-title")),
         meta: left(document.querySelector(".session-preview-facts > li")),
         turn: left(firstTurn),
+        column: left(scroll) + Number.parseFloat(style.paddingLeft),
+        startGutter: Number.parseFloat(style.paddingLeft),
+        endGutter: Number.parseFloat(style.paddingRight),
         turnWidth: firstTurn?.getBoundingClientRect().width ?? Number.NaN,
         chatMax: Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--chat-max")),
       };
     });
-    for (const [name, value] of Object.entries({ title: lefts.title, "meta line": lefts.meta, "first turn": lefts.turn })) {
+    for (const [name, value] of Object.entries({ title: lefts.title, "meta line": lefts.meta })) {
       expectGeometry(Math.abs(value - lefts.page), `the preview's ${name} starts at the page title's left edge`).toBeLessThanOrEqual(0.61);
     }
+    // The reading column is centered, as in the open session: at 1440px it is far narrower than the
+    // preview, so it starts well inside the page gutter.
+    expectGeometry(Math.abs(lefts.turn - lefts.column), "the first turn starts at the reading column's edge").toBeLessThanOrEqual(0.61);
+    expectGeometry(Math.abs(lefts.startGutter - lefts.endGutter), "the reading column is centered in the preview").toBeLessThanOrEqual(0.61);
+    expect(lefts.turn - lefts.page, "the transcript does not start at the page title's left edge").toBeGreaterThan(100);
     expectGeometry(lefts.turnWidth - lefts.chatMax, "the reading column is at most --chat-max wide").toBeLessThanOrEqual(0.61);
   });
 

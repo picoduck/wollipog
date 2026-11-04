@@ -120,6 +120,7 @@ test("Parent Control setting and descendant reads use encoded session-scoped end
     merged_branch_deletion: "human",
     follow_up_issue_publication: "human",
     ui_evidence_approval: "human",
+    review_round_extension: "human",
   }, 7);
   const controller = new AbortController();
   assert.deepEqual(await client.descendantRequests("parent/1", controller.signal), { requests: [] });
@@ -140,6 +141,7 @@ test("Parent Control setting and descendant reads use encoded session-scoped end
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         },
         expectedRevision: 7,
       },
@@ -339,7 +341,6 @@ test("Project API methods use stable encoded resource paths and exact mutation b
     { kind: "organization", organizationId: "org/1" },
     "b".repeat(64),
   );
-  await client.moveProjectLocation("project/a", { locationId: "location/1" });
   await client.removeProjectLocation("project/a", "location/1");
   await client.setDefaultProjectLocation("project/a", "location/1");
   await client.archiveProjectSessions("project/a");
@@ -385,7 +386,6 @@ test("Project API methods use stable encoded resource paths and exact mutation b
         confirmationToken: "b".repeat(64),
       },
     },
-    { path: "/api/projects/project%2Fa/locations/move", method: "POST", body: { locationId: "location/1" } },
     { path: "/api/projects/project%2Fa/locations/location%2F1", method: "DELETE", body: undefined },
     { path: "/api/projects/project%2Fa/locations/location%2F1/default", method: "POST", body: undefined },
     { path: "/api/projects/project%2Fa/archive-sessions", method: "POST", body: undefined },

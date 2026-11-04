@@ -7,9 +7,28 @@ import { Window } from "happy-dom";
 import type { IdentityAdministrationView } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
-import { textBefore } from "../dom-test-assertions.js";
+import { assertNoDomNode, textBefore } from "../dom-test-assertions.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
-import { ManagePersonDialog, PairDeviceDialog, PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
+import { PeopleDevicesPanel } from "./PeopleDevicesPanel.js";
+
+/** The panel inside the state RunnersView keeps for it, so an identity it reports is rendered back. */
+function PanelHost({ initial, offline, reported }: {
+  initial: IdentityAdministrationView;
+  offline: boolean;
+  reported: IdentityAdministrationView[];
+}) {
+  const [identity, setIdentity] = React.useState(initial);
+  return (
+    <PeopleDevicesPanel
+      identity={identity}
+      offline={offline}
+      onIdentityChange={(next) => {
+        reported.push(next);
+        setIdentity(next);
+      }}
+    />
+  );
+}
 
 const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
@@ -39,174 +58,6 @@ const identity = {
   }],
   teams: [],
 } as unknown as IdentityAdministrationView;
-
-test("pairing reveals the one-time credential even when the follow-up refresh fails", async () => {
-  const priorPairDevice = api.pairDevice;
-  const token = "one_time_device_token";
-  api.pairDevice = async () => ({
-    device: { deviceId: "device-1", name: "Phone" } as never,
-    token,
-    pairing: {
-      hosts: ["100.114.88.27", "192.168.1.197"],
-      port: 443,
-      webServed: true,
-      boundBeyondLoopback: true,
-    },
-  });
-
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const mountPoint = happyContainer as unknown as HTMLDivElement;
-  // Dialogs are portalled to <body>, so the test queries the body.
-  const container = domWindow.document.body as unknown as HTMLDivElement;
-  const root = createRoot(mountPoint);
-  try {
-    await act(async () => {
-      root.render(
-        <PairDeviceDialog
-          identity={identity}
-          onClose={() => {}}
-          onSaved={async () => {
-            throw new Error("refresh offline");
-          }}
-        />,
-      );
-    });
-
-    const continueButton = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Continue") as unknown as HTMLButtonElement;
-    await act(async () => { continueButton.click(); });
-
-    const input = container.querySelector("input") as unknown as HTMLInputElement;
-    await act(async () => {
-      input.value = "Phone";
-      fireDomEvent.change(input);
-    });
-    const createButton = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Create Pairing") as unknown as HTMLButtonElement;
-    await act(async () => {
-      createButton.click();
-      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
-    });
-
-    assert.match(container.textContent ?? "", /Device Ready to Pair/);
-    assert.match(container.textContent ?? "", /This credential is shown once/);
-    assert.match(container.textContent ?? "", /Scan to Pair/);
-    assert.match(container.textContent ?? "", /open the camera and scan this code/);
-    const qr = container.querySelector('.access-pairing-qr svg[role="img"]');
-    assert.ok(qr, "the reachable pairing link should render as an accessible QR code");
-    assert.equal(qr.querySelector("title")?.textContent, "Pair Phone with Wollipog");
-    const address = container.querySelector(".access-pairing-address select") as unknown as HTMLSelectElement;
-    assert.equal(address.value, `http://100.114.88.27:443/#pair=${token}`);
-    const firstQr = qr.innerHTML;
-    await act(async () => {
-      address.value = `http://192.168.1.197:443/#pair=${token}`;
-      fireDomEvent.change(address);
-    });
-    assert.equal(address.value, `http://192.168.1.197:443/#pair=${token}`);
-    assert.notEqual(qr.innerHTML, firstQr, "changing the reachable address should regenerate the QR code");
-    assert.match(container.textContent ?? "", /Device created, but the device list could not be refreshed: refresh offline/);
-    assert.match(container.textContent ?? "", new RegExp(token));
-  } finally {
-    await act(async () => { root.unmount(); });
-    api.pairDevice = priorPairDevice;
-    mountPoint.remove();
-  }
-});
-
-test("managing an email-named person keeps the stored name out of the form until shown", async () => {
-  const priorUpdate = api.updateIdentityMember;
-  const updates: Array<{ displayName?: string }> = [];
-  api.updateIdentityMember = (async (_userId: string, body: { displayName?: string }) => {
-    updates.push(body);
-    return {} as never;
-  }) as typeof api.updateIdentityMember;
-  const member = { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" } as never;
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const mountPoint = happyContainer as unknown as HTMLDivElement;
-  // Dialogs are portalled to <body>, so the test queries the body.
-  const container = domWindow.document.body as unknown as HTMLDivElement;
-  const root = createRoot(mountPoint);
-  const button = (text: string) => Array.from(container.querySelectorAll("button"))
-    .find((candidate) => candidate.textContent === text) as unknown as HTMLButtonElement | undefined;
-  const nameInput = () => Array.from(container.querySelectorAll("input"))
-    .find((input) => (input as unknown as HTMLInputElement).value.includes("@")) as unknown as HTMLInputElement | undefined;
-  try {
-    await act(async () => {
-      root.render(<ManagePersonDialog actorRole="owner" member={member} onClose={() => {}} onSaved={async () => {}} />);
-    });
-    assert.equal(container.innerHTML.includes("@example."), false, "neither the title nor the field shows the name");
-    assert.equal(nameInput(), undefined);
-
-    const show = button("Show Person Name")!;
-    show.focus();
-    await act(async () => { show.click(); });
-    assert.equal(nameInput()?.value, "pat@example.com");
-    // A keyboard reveal keeps focus on the same control, so the next Enter hides it again.
-    assert.equal(domWindow.document.activeElement, button("Hide Person Name") as unknown as Element);
-    await act(async () => { button("Hide Person Name")!.click(); });
-    assert.equal(container.innerHTML.includes("@example."), false, "the name can be hidden again while the dialog is open");
-
-    // Changing only the role never needs the name revealed, and saves it unchanged.
-    await act(async () => {
-      button("Save Changes")!.click();
-      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
-    });
-    assert.equal(updates[0]?.displayName, "pat@example.com");
-  } finally {
-    await act(async () => { root.unmount(); });
-    api.updateIdentityMember = priorUpdate;
-    mountPoint.remove();
-  }
-});
-
-test("the pairing person picker masks email-named people until one deliberate reveal", async () => {
-  const emailIdentity = {
-    ...identity,
-    memberships: [
-      { userId: "user-1", userName: "Misko", role: "owner", userStatus: "active" },
-      { userId: "user-2", userName: "pat@example.com", role: "operator", userStatus: "active" },
-      { userId: "user-3", userName: "pat@example.org", role: "viewer", userStatus: "active" },
-    ],
-  } as unknown as IdentityAdministrationView;
-  const happyContainer = domWindow.document.createElement("div");
-  domWindow.document.body.append(happyContainer);
-  const mountPoint = happyContainer as unknown as HTMLDivElement;
-  // Dialogs are portalled to <body>, so the test queries the body.
-  const container = domWindow.document.body as unknown as HTMLDivElement;
-  const root = createRoot(mountPoint);
-  try {
-    await act(async () => {
-      root.render(<PairDeviceDialog identity={emailIdentity} onClose={() => {}} onSaved={async () => {}} />);
-    });
-    const names = () => Array.from(container.querySelectorAll(".choice-row-title")).map((node) => node.textContent);
-    assert.equal(container.innerHTML.includes("@example."), false);
-    assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2"]);
-    const reveal = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent === "Show Person Names") as unknown as HTMLButtonElement;
-    assert.ok(reveal);
-    await act(async () => { reveal.click(); });
-    assert.deepEqual(names(), ["Misko", "pat@example.com", "pat@example.org"]);
-
-    // A refreshed membership list is a different set of values: the earlier reveal does not carry over.
-    const refreshed = {
-      ...emailIdentity,
-      memberships: [
-        ...emailIdentity.memberships,
-        { userId: "user-4", userName: "sam@example.net", role: "viewer", userStatus: "active" },
-      ],
-    } as unknown as IdentityAdministrationView;
-    await act(async () => {
-      root.render(<PairDeviceDialog identity={refreshed} onClose={() => {}} onSaved={async () => {}} />);
-    });
-    assert.equal(container.innerHTML.includes("@example."), false);
-    assert.deepEqual(names(), ["Misko", "Hidden Name 1", "Hidden Name 2", "Hidden Name 3"]);
-  } finally {
-    await act(async () => { root.unmount(); });
-    mountPoint.remove();
-  }
-});
 
 test("every masked name on People & Devices says what it hides after a visible label (#1954)", async () => {
   const emailIdentity = {
@@ -246,16 +97,81 @@ test("every masked name on People & Devices says what it hides after a visible l
       assert.equal(mask.textContent, "Email Hidden");
       return textBefore(scope, mask);
     };
-    assert.equal(labelled(container.querySelector(".access-context")!), "Signed in as");
-    const rows = [...container.querySelectorAll(".access-row-main")];
+    // The identity chip is gone (#2997); your own row says "You" instead.
+    assertNoDomNode(container.querySelector(".access-context"));
+    const rows = [...container.querySelectorAll(".access-row")];
     const [owner, member, device] = rows;
     assert.equal(rows.length, 3, "two people and one device");
     // The value is an email, not a name, so the row says whose it is (#1954 review).
-    assert.equal(labelled(owner!), "Person");
-    assert.equal(labelled(member!), "Person");
-    // A device row names the device first; the person it belongs to is labelled on its own line.
-    assert.equal(device!.querySelector("strong")?.textContent, "Pat's Phone");
-    assert.equal(labelled(device!.children[1]!), "Person");
+    assert.equal(labelled(owner!.querySelector(".row-title")!), "Person");
+    assert.equal(labelled(member!.querySelector(".row-title")!), "Person");
+    // A device row names the device first; the person it belongs to is labelled on line 2.
+    assert.equal(device!.querySelector(".row-title")?.textContent, "Pat's Phone");
+    assert.equal(labelled(device!.querySelector(".access-row-meta")!), "Person");
+  } finally {
+    await act(async () => { root.unmount(); });
+    container.remove();
+  }
+});
+
+test("an earlier refresh that answers after a newer one changes nothing (#2997 review)", async () => {
+  const directory = (role: "owner" | "viewer") => ({
+    context: { userId: "user-1", userName: "Misko", role, localBootstrap: true },
+    memberships: [
+      { userId: "user-1", userName: "Misko", role, userStatus: "active" },
+      { userId: "user-2", userName: "Pat", role: "operator", userStatus: "active" },
+    ],
+    teams: [],
+  }) as unknown as IdentityAdministrationView;
+  // The first refresh waits; the reconnect's refresh answers at once, with a demoted role.
+  let answerFirst: (identity: IdentityAdministrationView) => void = () => {};
+  let identityCalls = 0;
+  let deviceCalls = 0;
+  const client = {
+    ...api,
+    getIdentity: () => {
+      identityCalls += 1;
+      return identityCalls === 1
+        ? new Promise<IdentityAdministrationView>((resolve) => { answerFirst = resolve; })
+        : Promise.resolve(directory("viewer"));
+    },
+    listDevices: async () => {
+      deviceCalls += 1;
+      return { devices: [] };
+    },
+  } as unknown as ApiClient;
+  const reported: IdentityAdministrationView[] = [];
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  const render = (offline: boolean) => act(async () => {
+    root.render(
+      <ApiProvider client={client}>
+        <FeedbackProvider>
+          <PanelHost initial={directory("owner")} offline={offline} reported={reported} />
+        </FeedbackProvider>
+      </ApiProvider>,
+    );
+  });
+  const settle = () => act(async () => { for (let index = 0; index < 8; index += 1) await Promise.resolve(); });
+  try {
+    await render(false);
+    await render(true);
+    await render(false);
+    await settle();
+    assert.equal(identityCalls, 2, "the reconnect asked again while the first refresh was still out");
+    assert.deepEqual(reported.map((identity) => identity.context.role), ["viewer"]);
+    assert.equal(deviceCalls, 0, "a viewer asks for no devices");
+    const actions = () => [...container.querySelectorAll("button")].map((button) => button.textContent);
+    assert.equal(actions().includes("Add Person…"), false);
+
+    await act(async () => answerFirst(directory("owner")));
+    await settle();
+    assert.deepEqual(reported.map((identity) => identity.context.role), ["viewer"], "the older owner identity is dropped");
+    assert.equal(deviceCalls, 0, "and asks for no devices on that older role's behalf");
+    assert.equal(actions().includes("Add Person…"), false, "no administration controls come back");
+    assert.match(container.textContent ?? "", /Only owners and admins can see paired devices\./);
   } finally {
     await act(async () => { root.unmount(); });
     container.remove();

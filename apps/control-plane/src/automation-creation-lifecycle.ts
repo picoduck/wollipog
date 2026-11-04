@@ -1,0 +1,2 @@
+export const AUTOMATION_PROPOSAL_TTL_MS = 24 * 60 * 60_000;
+export const AUTOMATION_APPROVAL_TTL_MS = 30 * 60_000;

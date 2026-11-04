@@ -5,6 +5,7 @@ import { createHash, randomInt } from "node:crypto";
 import { chmod, mkdir, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import { promisify } from "node:util";
+import { pacedVideoReviewWindowPlan } from "@wollipog/protocol";
 import { prepareVideoEvidence } from "../src/video-evidence-preparation.js";
 import { decodeShortSilentWebm } from "../src/video-frame-decode.js";
 
@@ -27,6 +28,8 @@ for (const path of [captureRoot, oracleRoot]) {
   // Existing parent symlinks could silently place the oracle into reviewer scope.
   if (await realpath(dirname(path)) !== resolve(dirname(path))) throw new Error("Use real parent directories without symlinks.");
 }
+/** Fresh draws per multi-window profile before giving up on an early-window transient. */
+const EARLY_WINDOW_ATTEMPTS = 24;
 const created: string[] = [];
 try {
   for (const path of [captureRoot, oracleRoot]) { await mkdir(path, { mode: 0o700 }); created.push(path); }
@@ -37,38 +40,50 @@ try {
     { id: "paced", width: 1280, height: 720, fps: 30, duration: 12, frameCount: 360 },
     { id: "maximum", width: 1280, height: 720, fps: 30, duration: 30, frameCount: 900 },
   ]) {
-    const selected = new Set<number>();
-    while (selected.size < 3) selected.add(randomInt(1, profile.frameCount - 1));
-    const transients = [...selected].sort((a, b) => a - b).map((index) => ({
-      index, color: ["red", "green", "blue", "yellow", "magenta"][randomInt(5)]!,
-      x: randomInt(0, Math.floor(profile.width / 2)),
-      y: randomInt(0, Math.floor(profile.height / 2)), width: 128, height: 96,
-    }));
-    const filter = transients.map((t) => "drawbox=x=" + t.x + ":y=" + t.y + ":w=" + t.width +
-      ":h=" + t.height + ":color=" + t.color + ":t=fill:enable='eq(n," + t.index + ")'").join(",");
     const path = resolve(captureRoot, profile.id + ".webm");
-    await run("/usr/bin/ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-n",
-      "-f", "lavfi", "-i", "testsrc=size=" + profile.width + "x" + profile.height +
-      ":rate=" + profile.fps + ":duration=" + profile.duration, "-vf", filter,
-      "-an", "-threads", "1", "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8",
-      "-crf", "30", "-b:v", "0", path], { timeout: 90_000, maxBuffer: 128 * 1024, env: {} });
-    await chmod(path, 0o600);
-    const bytes = await readFile(path);
+    let bytes: Buffer;
+    let transients: Array<{ index: number; color: string; x: number; y: number; width: number; height: number }>;
     // Timings in the oracle come from actual encoded source derivation, never n/fps guesses.
     let times: Array<{ index: number; ptsUs: number }>;
     let manifestSha256: string;
-    if (profile.id === "candidate") {
-      const decoded = await decodeShortSilentWebm(bytes);
-      if (!decoded.ok) throw new Error("Candidate cannot be derived: " + decoded.reason);
-      times = decoded.frames.map((f) => ({ index: f.index, ptsUs: f.ptsMs * 1000 }));
-      manifestSha256 = hash(JSON.stringify(decoded.frames.map(({ bytes: _bytes, ...frame }) => frame)));
-    } else {
-      const prepared = await prepareVideoEvidence(bytes, "video/webm");
-      if (!prepared.ok) throw new Error(profile.id + " cannot satisfy complete preparation: " + prepared.code + ": " + prepared.reason);
-      times = prepared.manifest.frames;
-      manifestSha256 = prepared.manifestSha256;
+    // A multi-window profile certifies cross-window delivery only when a transient sits in delivery
+    // window 1 or 2, where the final verdict can report it only through carried notes. The window
+    // plan comes from the same complete manifest a reviewer grant uses; otherwise draw again.
+    for (let attempt = 1; ; attempt++) {
+      const selected = new Set<number>();
+      while (selected.size < 3) selected.add(randomInt(1, profile.frameCount - 1));
+      transients = [...selected].sort((a, b) => a - b).map((index) => ({
+        index, color: ["red", "green", "blue", "yellow", "magenta"][randomInt(5)]!,
+        x: randomInt(0, Math.floor(profile.width / 2)),
+        y: randomInt(0, Math.floor(profile.height / 2)), width: 128, height: 96,
+      }));
+      const filter = transients.map((t) => "drawbox=x=" + t.x + ":y=" + t.y + ":w=" + t.width +
+        ":h=" + t.height + ":color=" + t.color + ":t=fill:enable='eq(n," + t.index + ")'").join(",");
+      await rm(path, { force: true });
+      await run("/usr/bin/ffmpeg", ["-nostdin", "-hide_banner", "-loglevel", "error", "-n",
+        "-f", "lavfi", "-i", "testsrc=size=" + profile.width + "x" + profile.height +
+        ":rate=" + profile.fps + ":duration=" + profile.duration, "-vf", filter,
+        "-an", "-threads", "1", "-c:v", "libvpx-vp9", "-deadline", "realtime", "-cpu-used", "8",
+        "-crf", "30", "-b:v", "0", path], { timeout: 90_000, maxBuffer: 128 * 1024, env: {} });
+      await chmod(path, 0o600);
+      bytes = await readFile(path);
+      let earlyWindowEnd: number | null = null;
+      if (profile.id === "candidate") {
+        const decoded = await decodeShortSilentWebm(bytes);
+        if (!decoded.ok) throw new Error("Candidate cannot be derived: " + decoded.reason);
+        times = decoded.frames.map((f) => ({ index: f.index, ptsUs: f.ptsMs * 1000 }));
+        manifestSha256 = hash(JSON.stringify(decoded.frames.map(({ bytes: _bytes, ...frame }) => frame)));
+      } else {
+        const prepared = await prepareVideoEvidence(bytes, "video/webm");
+        if (!prepared.ok) throw new Error(profile.id + " cannot satisfy complete preparation: " + prepared.code + ": " + prepared.reason);
+        times = prepared.manifest.frames;
+        manifestSha256 = prepared.manifestSha256;
+        earlyWindowEnd = pacedVideoReviewWindowPlan(prepared.manifest.frames).windows[1]?.endIndex ?? null;
+      }
+      if (times.length !== profile.frameCount) throw new Error("Synthetic source frame count does not match complete derivation.");
+      if (earlyWindowEnd === null || transients.some((t) => t.index < earlyWindowEnd!)) break;
+      if (attempt >= EARLY_WINDOW_ATTEMPTS) throw new Error(profile.id + " placed no transient in delivery window 1 or 2 in " + attempt + " draws.");
     }
-    if (times.length !== profile.frameCount) throw new Error("Synthetic source frame count does not match complete derivation.");
     oracle.push({ profile: profile.id, sourceSha256: hash(bytes),
       transients: transients.map((t) => ({ ...t, ptsUs: times[t.index]!.ptsUs })) });
     captures.push({ profile: profile.id, path, sourceSha256: hash(bytes), sizeBytes: bytes.length,

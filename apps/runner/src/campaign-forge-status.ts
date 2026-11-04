@@ -15,7 +15,8 @@ import type {
   CampaignForgePullRequestObservation,
   CampaignPullRequestRef,
 } from "@wollipog/protocol";
-import { CAMPAIGN_FORGE_OBSERVATION } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, campaignRepositoryLocation, forgeActionBranchName } from "@wollipog/protocol";
+import { observeGitLabMergeRequests, type GlabRunner } from "./campaign-gitlab-status.js";
 import { runContextCommand } from "./context-command.js";
 import { summarizeCheckRollup } from "./git-ops.js";
 
@@ -80,8 +81,10 @@ export function githubRepository(ref: CampaignPullRequestRef): { owner: string; 
  * as GraphQL literals (JSON string syntax) cannot change the query's shape. */
 export function forgeStatusQuery(refs: ReadonlyArray<{ owner: string; name: string; number: number }>): string {
   const fields = refs.map((ref, index) => `r${index}: repository(owner:${JSON.stringify(ref.owner)},name:${JSON.stringify(ref.name)}){
+    defaultBranchRef{name}
     pullRequest(number:${ref.number}){
       state isDraft headRefOid baseRefName reviewDecision mergeStateStatus
+      headRefName isCrossRepository headRef{target{oid}}
       mergeCommit{oid}
       mergeQueueEntry{position state}
       commits(last:1){nodes{commit{statusCheckRollup{state
@@ -176,8 +179,9 @@ export function checkRollups(
   };
 }
 
-/** Validate one pull request node into the wire shape, or null when anything is off. */
-export function pullRequestObservation(node: unknown): CampaignForgePullRequestObservation | null {
+/** Validate one pull request node into the wire shape, or null when anything is off. A default
+ * branch name that is missing or malformed is left out rather than failing the observation. */
+export function pullRequestObservation(node: unknown, defaultBranch?: unknown): CampaignForgePullRequestObservation | null {
   const pr = record(node);
   if (!pr) return null;
   const state = STATE[pr.state as string];
@@ -200,6 +204,7 @@ export function pullRequestObservation(node: unknown): CampaignForgePullRequestO
   if (commits.length === 1 && !commit) return null;
   const rollups = checkRollups(commit ? commit.statusCheckRollup ?? null : null, REQUIREMENTS_MET.has(pr.mergeStateStatus as string));
   if (!rollups) return null;
+  const headBranch = observedHeadBranch(pr);
   return {
     state,
     draft: pr.isDraft,
@@ -209,7 +214,19 @@ export function pullRequestObservation(node: unknown): CampaignForgePullRequestO
     ...rollups,
     mergeQueue,
     mergeCommitSha: mergeCommit ? mergeCommit.oid as string : null,
+    ...(typeof defaultBranch === "string" && defaultBranch.length > 0 && defaultBranch.length <= 256 ? { defaultBranch } : {}),
+    ...(headBranch ? { headBranch } : {}),
+    ...(typeof pr.isCrossRepository === "boolean" ? { crossRepository: pr.isCrossRepository } : {}),
   };
+}
+
+/** v284 (#4067): the head branch in the pull request's own repository and its tip, `null` once it
+ * is deleted. A fork's branch, or anything malformed, is left out rather than guessed. */
+function observedHeadBranch(pr: Record<string, unknown>): CampaignForgePullRequestObservation["headBranch"] {
+  if (pr.isCrossRepository !== false || !forgeActionBranchName(pr.headRefName)) return undefined;
+  if (pr.headRef === null) return { name: pr.headRefName, tipSha: null };
+  const tip = record(record(pr.headRef)?.target)?.oid;
+  return typeof tip === "string" && /^[0-9a-f]{40}$/u.test(tip) ? { name: pr.headRefName, tipSha: tip } : undefined;
 }
 
 type Result = NonNullable<CampaignForgeObserveResultMessage["results"]>[number];
@@ -217,9 +234,40 @@ export type ForgeStatusOutcome =
   | { ok: true; results: Result[] }
   | { ok: false; failure: CampaignForgeObservationFailure };
 
-/** Read every ref in one `gh` call. A malformed ref is `forge_unsupported` without being read. */
-export async function observeForgeStatus(refs: readonly CampaignPullRequestRef[], gh: GhRunner): Promise<ForgeStatusOutcome> {
+/**
+ * Read every ref: GitHub refs in one `gh` call and, when `glab` is given (the control plane asked
+ * for GitLab, #3600), host-qualified GitLab refs through `glab`, both at once. A malformed or other
+ * ref is `forge_unsupported` without being read. With GitLab refs present, a failed GitHub call
+ * fails only the GitHub refs, so one forge never makes the other's refs unavailable.
+ */
+export async function observeForgeStatus(
+  refs: readonly CampaignPullRequestRef[],
+  gh: GhRunner,
+  options: { glab?: GlabRunner } = {},
+): Promise<ForgeStatusOutcome> {
   if (!Array.isArray(refs) || refs.length > CAMPAIGN_FORGE_OBSERVATION.refsPerRequest) return { ok: false, failure: "forge_error" };
+  const gitlabIndexes = options.glab
+    ? refs.flatMap((ref, index) => campaignRepositoryLocation(ref?.repository)?.forge === "gitlab" ? [index] : [])
+    : [];
+  if (gitlabIndexes.length === 0) return observeGitHubStatus(refs, gh);
+  const [github, gitlab] = await Promise.all([
+    observeGitHubStatus(refs, gh),
+    observeGitLabMergeRequests(gitlabIndexes.map((index) => refs[index]!), options.glab!),
+  ]);
+  const results: Result[] = github.ok ? [...github.results] : refs.map((ref) => ({
+    ref: { repository: String(ref?.repository), number: Number(ref?.number) },
+    ok: false,
+    failure: githubRepository(ref) ? github.failure : "forge_unsupported",
+  }));
+  for (const [position, index] of gitlabIndexes.entries()) {
+    const read = gitlab[position]!;
+    const ref = { repository: refs[index]!.repository, number: refs[index]!.number };
+    results[index] = read.ok ? { ref, ok: true, observation: read.observation } : { ref, ok: false, failure: read.failure };
+  }
+  return { ok: true, results };
+}
+
+async function observeGitHubStatus(refs: readonly CampaignPullRequestRef[], gh: GhRunner): Promise<ForgeStatusOutcome> {
   const readable = refs.map((ref) => {
     const repository = githubRepository(ref);
     return repository ? { ...repository, number: ref.number } : null;
@@ -250,12 +298,13 @@ export async function observeForgeStatus(refs: readonly CampaignPullRequestRef[]
       const alias = byIndex.get(index);
       if (!alias) return unsupported(ref);
       const clean = { repository: ref.repository, number: ref.number };
-      const node = record(data[alias])?.pullRequest;
+      const repository = record(data[alias]);
+      const node = repository?.pullRequest;
       if (node === null || node === undefined) {
         const type = aliasErrors.get(alias);
         return { ref: clean, ok: false, failure: type === "NOT_FOUND" || type === "FORBIDDEN" || type === undefined ? "forge_not_found" : "forge_error" };
       }
-      const observation = pullRequestObservation(node);
+      const observation = pullRequestObservation(node, record(repository?.defaultBranchRef)?.name);
       return observation ? { ref: clean, ok: true, observation } : { ref: clean, ok: false, failure: "forge_error" };
     }),
   };

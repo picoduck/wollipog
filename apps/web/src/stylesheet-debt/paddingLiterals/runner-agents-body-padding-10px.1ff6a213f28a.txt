@@ -1,2 +1,0 @@
-|.runner-agents-body|padding|10px
-|.runner-agents-body|padding|10px

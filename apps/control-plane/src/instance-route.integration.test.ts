@@ -469,7 +469,7 @@ test("two real control planes isolate identical ids and persist identity and dat
     headers: { authorization: `Bearer ${firstSeed.operatorToken}` },
   });
   assert.equal(operatorCompatibility.status, 200, "an organization member can read compatibility metadata");
-  const liveDb = ControlPlaneDb.open(firstDb);
+  const liveDb = ControlPlaneDb.attach(firstDb);
   try {
     liveDb.updateSessionStatus(SHARED_SESSION_ID, "running", Date.now());
     assert.equal(liveDb.setAgentControlCredential(

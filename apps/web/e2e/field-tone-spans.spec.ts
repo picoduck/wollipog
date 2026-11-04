@@ -48,7 +48,7 @@ async function open(page: Page, query: string, heading: string) {
  */
 async function sweep(page: Page) {
   return page.locator(".modal").evaluate((modal) => {
-    const classes = ["form-error", "muted", "muted agent-meta", "project-location-reason"];
+    const classes = ["form-error", "muted"];
     const read = (element: Element) => {
       const style = getComputedStyle(element);
       return { color: style.color, size: style.fontSize, weight: style.fontWeight };
@@ -93,30 +93,21 @@ async function sweep(page: Page) {
 
 for (const theme of ["dark", "light"] as const) {
   test.describe(`${theme} theme`, () => {
-    test("New Session: a field error is red and its notes keep their own look, under a --type-label label", async ({ page }) => {
+    test("New Session: a field's notes keep their own look, under a --type-label label", async ({ page }) => {
+      // Role, Harness and Working Copy are setting rows inside Options since #2954, so their notes
+      // are row descriptions (below); the fields left are Project, Location, Agent and Account.
       await open(page, `theme=${theme}&defaults=error`, "New Session");
       const [red, faint, text, dim] = await Promise.all(
         ["--red", "--text-faint", "--text", "--text-dim"].map((name) => token(page, name)),
       );
       expect(new Set([red, faint, text, dim]).size, "the four tones are distinct").toBe(4);
 
-      const role = field(page, "Session Role");
-      const error = role.locator(":scope > span.form-error");
-      await expect(error).toHaveText(/Could not load saved permission defaults/);
-      expect(await look(error), "Session Role's field error").toEqual({ color: red, size: "12.5px", weight: "400" });
-
-      // The Agent field's meta line asks for 12.5px; the Mode note keeps the dialog's own size.
-      const meta = field(page, "Agent").locator(":scope > span.muted.agent-meta");
-      await expect(meta).toBeVisible();
-      expect(await look(meta), "Agent meta line").toEqual({ color: faint, size: "12.5px", weight: "400" });
-      const modeNote = field(page, "Mode").locator(":scope > span.muted").first();
-      await expect(modeNote).toHaveText(/Runs (directly in the workspace directory|in an isolated git worktree)/);
-      expect((await look(modeNote)).color, "Mode note").toBe(faint);
-      expect((await look(modeNote)).weight, "Mode note").toBe("400");
+      // The Agent field has no meta line (#2953).
+      await expect(field(page, "Agent").locator(":scope > span.muted")).toHaveCount(0);
 
       // The labels keep §8.1's --type-label (12/16, 500) in --text: a bare first span and a
       // `.new-session-field-label`.
-      for (const label of [role.locator(":scope > span:first-child"), page.locator(".new-session-field-label", { hasText: /^Agent$/ })]) {
+      for (const label of [field(page, "Location").locator(":scope > span:first-child"), page.locator(".new-session-field-label", { hasText: /^Agent$/ })]) {
         const style = await label.evaluate((element) => {
           const computed = getComputedStyle(element);
           return { color: computed.color, size: computed.fontSize, lineHeight: computed.lineHeight, weight: computed.fontWeight };
@@ -125,53 +116,41 @@ for (const theme of ["dark", "light"] as const) {
       }
 
       const result = await sweep(page);
-      expect(result.fields, "New Session renders fields to sweep").toBeGreaterThan(4);
+      expect(result.fields, "New Session renders fields to sweep").toBeGreaterThanOrEqual(4);
       expect(result.mismatches, "a classed later span looks the same inside and outside a field").toEqual([]);
       expect(result.reference["form-error"]?.color).toBe(red);
       expect(result.reference.muted?.color).toBe(faint);
       for (const bare of result.bare) expect(bare, "a bare later span keeps the dim rule").toEqual({ color: dim, size: "12px", weight: "500" });
     });
 
-    test("New Session: Session Role's muted notes are --text-faint", async ({ page }) => {
-      for (const [defaults, copy] of [
-        ["pending", /Loading saved permission defaults/],
-        ["orchestrator", /Orchestrator is your saved Agent Harness default/],
+    test("New Session: Options' notes are their rows' --text-dim descriptions (#2954)", async ({ page }) => {
+      for (const [defaults, title, copy] of [
+        ["pending", "Permissions", /Change them in the composer after the session opens\./],
+        ["orchestrator", "Role", /Orchestrator is your saved default\. Choose Normal to ignore it for this session/],
       ] as const) {
         await open(page, `theme=${theme}&defaults=${defaults}`, "New Session");
-        const note = field(page, "Session Role").locator(":scope > span.muted");
+        await page.getByRole("button", { name: "Options", exact: true }).click();
+        const row = page.locator(".setting-row").filter({ has: page.locator(".setting-row-title", { hasText: new RegExp(`^${title}$`) }) });
+        const note = row.locator(".setting-row-desc").first();
         await expect(note).toHaveText(copy);
         const style = await look(note);
-        expect(style.color, `${defaults}: muted note`).toBe(await token(page, "--text-faint"));
-        expect(style.weight, `${defaults}: muted note`).toBe("400");
+        expect(style.color, `${defaults}: row description`).toBe(await token(page, "--text-dim"));
+        expect(style.size, `${defaults}: row description`).toBe("12px");
       }
     });
 
-    test("New Multi-Agent Run: Project notes are --text-faint and Location reasons keep 11px at 400", async ({ page }) => {
+    test("New Multi-Agent Run: the Project helper is --text-dim at 400, and every field keeps classed spans' looks", async ({ page }) => {
       await open(page, `theme=${theme}&dialog=run`, "New Multi-Agent Run");
-      const [faint, dim] = await Promise.all(["--text-faint", "--text-dim"].map((name) => token(page, name)));
+      const dim = await token(page, "--text-dim");
 
-      const projectNote = field(page, "Project").locator(":scope > span.muted");
-      await expect(projectNote).toHaveText(/Choose a Project/);
-      expect((await look(projectNote)).color).toBe(faint);
+      // #2978: the Project's one sentence is the field's helper (§8.1); Location reasons moved into
+      // its options and the footer.
+      await page.getByRole("button", { name: /^Project:/ }).click();
+      await page.getByRole("option", { name: "Two Locations" }).click();
+      const projectNote = field(page, "Project").locator(":scope > .field-helper");
+      await expect(projectNote).toHaveText("Wollipog can't show who can see the agents' sessions.");
+      expect((await look(projectNote)).color).toBe(dim);
       expect((await look(projectNote)).weight).toBe("400");
-
-      const projectSelect = page.getByLabel("Project", { exact: true });
-      const location = field(page, "Project Location");
-      for (const [name, copy] of [
-        ["No Locations Yet", /This Project has no Locations/],
-        ["Offline Location", /No Locations are currently available/],
-      ] as const) {
-        await projectSelect.selectOption({ label: name });
-        const reason = location.locator(":scope > span.project-location-reason");
-        await expect(reason).toHaveText(copy);
-        expect(await look(reason), `${name}: Location reason`).toEqual({ color: dim, size: "11px", weight: "400" });
-      }
-
-      await projectSelect.selectOption({ label: "Two Locations" });
-      const choose = location.locator(":scope > span.muted");
-      await expect(choose).toHaveText(/Choose the exact Location/);
-      expect((await look(choose)).color).toBe(faint);
-      expect((await look(choose)).weight).toBe("400");
 
       const result = await sweep(page);
       expect(result.fields, "New Multi-Agent Run renders fields to sweep").toBeGreaterThan(2);

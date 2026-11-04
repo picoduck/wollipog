@@ -38,7 +38,7 @@ export function seedCampaignStatus(databasePath: string, workspacePath: string) 
   const ownerUserId = db.localIdentityContext().userId;
   const decisions = {
     implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator",
+    follow_up_issue_publication: "orchestrator", ui_evidence_approval: "orchestrator", review_round_extension: "orchestrator",
   } as const;
   const now = Date.now();
   try {
@@ -199,7 +199,7 @@ export function recordPlanOffline(databasePath: string, rootId: string, items: A
 
 /** Startup marks sessions without a connected runner stopped. Put the live children back. */
 export function restoreCampaignStatuses(databasePath: string, seeded: ReturnType<typeof seedCampaignStatus>) {
-  const db = ControlPlaneDb.open(databasePath);
+  const db = ControlPlaneDb.attach(databasePath);
   try {
     const now = Date.now();
     db.updateSessionStatus(seeded.rootId, "running", now);

@@ -16,7 +16,7 @@ import {
   visibleForgeFacts,
   type GitPresentation,
 } from "../pinned-summary.js";
-import { statusMeta } from "../status-meta.js";
+import { backgroundWorkCondition, statusMeta } from "../status-meta.js";
 import { pullRequestStateLabel } from "../worktree-identity.js";
 import type { GitStatus, GitSummary } from "./useGitStatus.js";
 import { GitPinnedSection, type GitBranchFallback } from "./GitVisibility.js";
@@ -31,6 +31,7 @@ import {
   DiffIcon,
   FolderIcon,
   GlobeIcon,
+  IdentifierIcon,
   JobsIcon,
   PlanInProgressIcon,
   PlanPendingIcon,
@@ -41,7 +42,7 @@ import {
   WarningIcon,
   WorkflowDecisionsIcon,
 } from "./Icons.js";
-import { BackgroundDeliveryBadge, BackgroundNotificationBadge, Spinner } from "./common.js";
+import { BackgroundDeliveryBadge, BackgroundNotificationBadge, CopyButton, Spinner } from "./common.js";
 import { AccountIdentifier } from "./AccountIdentifier.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { shownWatchdogDelivery } from "../background-delivery-status.js";
@@ -49,7 +50,7 @@ import { effortLabel, relativeTime, resolvedModelLabel, shortenPath } from "../f
 import { effectiveModelEffortForDisplay, resolveCaps, resolveEffectiveCaps } from "../caps.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { safeExternalHref } from "../external-href.js";
-import { childSessionRequestsLabel, workflowDecisionsSummary } from "./OrchestratorControlsDialog.js";
+import { childSessionRequestsNote, workflowDecisionsNote } from "./OrchestratorControlsDialog.js";
 
 const BUSY = ["queued", "starting", "running", "input_required"];
 
@@ -177,7 +178,7 @@ export function PinnedSummary({
     : backgroundWorkState === "orphaned"
       ? statusMeta("job", "lost")
       : backgroundWorkState === "continuation_pending"
-        ? statusMeta("background_work", "continuation_pending")
+        ? backgroundWorkCondition(session, runnerOnline)?.meta ?? null
         : null;
   const backgroundWorkUntracked = !backgroundWorkMeta && session.backgroundWorkTracking === "untracked";
   const watchdogState = shownWatchdogDelivery(session.backgroundDeliveries)?.watchdogState;
@@ -209,11 +210,19 @@ export function PinnedSummary({
             note={session.providerAccountAutomaticallySelected ? "Chosen Automatically" : undefined}
           />
         )}
+        {/* The id is short enough to show whole (#3897), so it is not shortened like a hash. */}
+        <SummaryRow
+          icon={<IdentifierIcon className="ps-icon" size={14} aria-hidden="true" />}
+          label="Session ID"
+          value={<span className="ps-mono">{session.id}</span>}
+          title={session.id}
+          trailing={<CopyButton text={session.id} iconOnly ariaLabel="Copy Session ID" className="icon-btn sm" />}
+        />
         {orchestrator && (
           <SummaryRow
             icon={<ChildSessionRequestsIcon className="ps-icon" size={14} aria-hidden="true" />}
             label="Child Session Requests"
-            note={childSessionRequestsLabel(session.parentControl)}
+            note={childSessionRequestsNote(session)}
             title="Open Orchestrator Controls"
             onClick={onOpenOrchestratorControls}
           />
@@ -222,7 +231,7 @@ export function PinnedSummary({
           <SummaryRow
             icon={<WorkflowDecisionsIcon className="ps-icon" size={14} aria-hidden="true" />}
             label="Workflow Decisions"
-            note={workflowDecisionsSummary(session.parentControlPolicy.decisions)}
+            note={workflowDecisionsNote(session) ?? undefined}
             title="Open Orchestrator Controls"
             onClick={onOpenOrchestratorControls}
           />

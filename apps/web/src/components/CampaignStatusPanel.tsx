@@ -10,7 +10,7 @@ import {
   type ReactNode,
 } from "react";
 import type {
-  CampaignForgePullRequestObservation,
+  CampaignForgeChangeRequestObservation,
   CampaignIssueRef,
   CampaignObservedCleanup,
   CampaignObservedFact,
@@ -39,6 +39,7 @@ import {
   forgePullRequestView,
   issueRefLabel,
   observationUnavailableText,
+  pullRequestShortLabel,
   stateCauseText,
   timeAgo,
   workItemOriginLabel,
@@ -50,12 +51,13 @@ import {
 } from "../campaign-status.js";
 import { effortLabel, formatRecordedTimestamp, resolvedModelLabel, titleCaseLabel } from "../format.js";
 import { viewPath } from "../navigation.js";
-import { statusMeta } from "../status-meta.js";
+import { statusMeta, type StatusMeta } from "../status-meta.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { sessionAgentLabel } from "./agent-options.js";
 import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
+import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
 import { StaleContent } from "./StaleContent.js";
@@ -85,6 +87,15 @@ export function forgetCampaignStatusMemory(): void {
 }
 
 type AvailableCampaign = Extract<CampaignStatusAvailability, { kind: "available" }>;
+
+/** A work item's badge. An unfinished item handed to a person or an outside party reads Handed Off
+ * (#4070) whatever its derived state: no agent in the campaign is meant to act on it, and calling
+ * it Blocked would misstate whose turn it is. The derived state still filters and sorts it. */
+function workItemStatusMeta(item: Pick<CampaignWorkItemSummary, "primaryState" | "handoff">): StatusMeta {
+  const handedOff = (item.handoff?.responsibleActor === "human" || item.handoff?.responsibleActor === "external") &&
+    !["delivered", "cancelled", "removed"].includes(item.primaryState);
+  return handedOff ? { ...statusMeta("campaignWork", "planned"), label: "Handed Off" } : statusMeta("campaignWork", item.primaryState);
+}
 
 /** The request a work item waits on: the occurrence its blocker names, else its child session's. */
 export interface CampaignRequestTarget {
@@ -237,6 +248,22 @@ function AvailableCampaignStatus({
           <StaleContent stale={data.offline}>
             <div className="campaign-status-sections">
               <CampaignSummarySection data={data} now={now} />
+              {data.summary.campaign?.ownerDecisions && (
+                <CampaignOwnerDecisions
+                  ownerDecisions={data.summary.campaign.ownerDecisions}
+                  now={now}
+                  findRequest={findRequest}
+                  onOpenRequest={onOpenRequest}
+                />
+              )}
+              {data.summary.campaign?.handoffs && (
+                <CampaignHandoffs
+                  handoffs={data.summary.campaign.handoffs}
+                  now={now}
+                  onOpen={(workItemId) => setMemory({ selectedItemId: workItemId, focusItemId: workItemId,
+                    scrollTop: scrollRef.current?.scrollTop ?? memory.scrollTop })}
+                />
+              )}
               {data.summary.campaign?.recovery?.automation?.reason && (
                 <Notice tone="warning" title="Authorized Recovery Unavailable">
                   {data.summary.campaign.recovery.automation.reason}
@@ -246,6 +273,16 @@ function AvailableCampaignStatus({
                 <CampaignRecoveryNotice key={record.id} record={record} />
               ))}
               {data.summary.campaign?.recovery?.truncated && <p>More recovery records are available through the campaign tools.</p>}
+              {data.summary.campaign?.budget?.followUpApprovals && (
+                <CampaignFollowUpLimit
+                  campaignId={availability.campaignSessionId}
+                  budget={data.summary.campaign.budget}
+                  policyRevision={data.summary.campaign.policyRevision}
+                  canEdit={availability.role === "campaign"}
+                  findRequest={(occurrenceId) => findRequest({ occurrenceId, sessionId: availability.campaignSessionId })}
+                  onOpenRequest={onOpenRequest}
+                />
+              )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
@@ -263,6 +300,104 @@ function AvailableCampaignStatus({
         </>
       )}
     </div>
+  );
+}
+
+/* ------------------------------------------------------------------------------------------------
+ * Handed Off (#4070)
+ * ---------------------------------------------------------------------------------------------- */
+
+/** Decisions the campaign's owner kept (#4064), which wait for that person while the campaign keeps
+ * working: the Orchestrator's questions for them and the decisions it handed to them. */
+function CampaignOwnerDecisions({ ownerDecisions, now, findRequest, onOpenRequest }: {
+  ownerDecisions: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["ownerDecisions"]>;
+  now: number;
+  findRequest: (target: CampaignRequestTarget) => string | null;
+  onOpenRequest: (requestKey: string) => void;
+}) {
+  const headingId = useId();
+  const hidden = ownerDecisions.total - ownerDecisions.items.length;
+  return (
+    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
+      <h3 id={headingId} className="section-title">Waiting for You</h3>
+      <p className="section-note">
+        You kept {ownerDecisions.total === 1 ? "this decision" : "these decisions"}, so only you can make{" "}
+        {ownerDecisions.total === 1 ? "it" : "them"}. The Orchestrator keeps working on everything else meanwhile.
+      </p>
+      <ul className="campaign-detail-list">
+        {ownerDecisions.items.map((item) => {
+          const requestKey = findRequest({ occurrenceId: item.occurrenceId, sessionId: item.sessionId });
+          return (
+            <li key={item.occurrenceId}>
+              <dl className="facts">
+                <div>
+                  <dt>{item.handedOff ? "Handed to You" : "Owner Decision"}</dt>
+                  <dd>
+                    {item.summary}
+                    <span className="campaign-status-meta">
+                      {item.handedOff ? "Handed over by the Orchestrator" : "Asked by the Orchestrator"}{" "}
+                      <RecordedTime at={item.createdAt} now={now} />
+                    </span>
+                  </dd>
+                </div>
+              </dl>
+              {requestKey && <button type="button" className="btn sm" aria-label={`Open Request: ${item.summary}`}
+                onClick={() => onOpenRequest(requestKey)}>Open Request</button>}
+            </li>
+          );
+        })}
+      </ul>
+      {hidden > 0 && <p className="section-note">{hidden} more decision{hidden === 1 ? " waits" : "s wait"} for you under Requests.</p>}
+    </section>
+  );
+}
+
+/** The owner's to-do list: unfinished items the campaign handed to a person or an outside party.
+ * The server lists them whenever any exist, so none is dropped once the agents are done. */
+function CampaignHandoffs({ handoffs, now, onOpen }: {
+  handoffs: NonNullable<NonNullable<CampaignStatusData["summary"]["campaign"]>["handoffs"]>;
+  now: number;
+  onOpen: (workItemId: string) => void;
+}) {
+  const headingId = useId();
+  const hidden = handoffs.total - handoffs.items.length;
+  return (
+    <section className="campaign-status-handoffs" aria-labelledby={headingId}>
+      <h3 id={headingId} className="section-title">Handed Off</h3>
+      <p className="section-note">
+        The agent work on {handoffs.total === 1 ? "this item is" : "these items is"} done. What happens next is up to the
+        person or outside party named.
+      </p>
+      <ul className="campaign-detail-list">
+        {handoffs.items.map((item) => (
+          <li key={item.workItemId}>
+            <dl className="facts">
+              <div>
+                <dt>Work Item</dt>
+                <dd>
+                  {workItemTitle(item)}
+                  {item.issue && item.title && <span className="campaign-status-meta">{issueRefLabel(item.issue)}</span>}
+                </dd>
+              </div>
+              <div><dt>Responsible</dt><dd>{RESPONSIBLE_ACTOR_LABELS[item.handoff.responsibleActor]}</dd></div>
+              <div><dt>Reason</dt><dd>{item.handoff.reason}</dd></div>
+              <div>
+                <dt>Next Action</dt>
+                <dd>
+                  {item.handoff.nextAction}
+                  <span className="campaign-status-meta">Handed off <RecordedTime at={item.handoff.recordedAt} now={now} /></span>
+                </dd>
+              </div>
+            </dl>
+            <button type="button" className="btn ghost sm" aria-label={`Open Details for ${workItemTitle(item)}`}
+              onClick={() => onOpen(item.workItemId)}>
+              Open Details
+            </button>
+          </li>
+        ))}
+      </ul>
+      {hidden > 0 && <p className="section-note">{hidden} more handed-off item{hidden === 1 ? " is" : "s are"} listed under Work Items.</p>}
+    </section>
   );
 }
 
@@ -330,6 +465,7 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
               {view.costBreakdown.length > 0
                 ? <span className="campaign-status-meta">{view.costBreakdown.map((row) => `${row.phrase} ${row.text}`).join(", ")}</span>
                 : view.cost.note && <span className="campaign-status-meta">{view.cost.note}</span>}
+              {view.costUncertainty && <span className="campaign-status-meta">{view.costUncertainty}</span>}
             </dd>
           </div>
           {view.budget && !summary.campaign?.budget && <div><dt>Session Limits</dt><dd>{view.budget}</dd></div>}
@@ -354,10 +490,11 @@ function CampaignSummarySection({ data, now }: { data: CampaignStatusData; now: 
 }
 
 export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/protocol").CampaignBudgetView }) {
-  const limits = [budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
+  // A campaign authorized without a ceiling says so: it runs unbounded while usage is still metered.
+  const limits = [budget.authority.costUsd === undefined && budget.authority.toolCalls === undefined ? "No limit" : null,
+    budget.authority.costUsd === undefined ? null : `$${budget.authority.costUsd.toFixed(2)}`,
     budget.authority.toolCalls === undefined ? null : `${budget.authority.toolCalls} tool calls`,
-    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`,
-    budget.authority.acceptedFollowUps === undefined ? null : `${budget.authority.acceptedFollowUps} accepted follow-ups`].filter(Boolean).join(", ");
+    budget.authority.concurrency === undefined ? null : `${budget.authority.concurrency} concurrent workers`].filter(Boolean).join(", ");
   return <>
     <div><dt>Campaign Allowance</dt><dd>{limits}<span className="campaign-status-meta">{budget.reason ?? "Human authorized; allocations cannot enlarge this allowance."}</span></dd></div>
     <div><dt>Session Limits</dt><dd>{budget.sessionLimits?.costBudgetUsd == null ? "No session cost ceiling" : `$${budget.sessionLimits.costBudgetUsd.toFixed(2)}`}, {budget.sessionLimits?.maxToolCalls == null ? "no session tool ceiling" : `${budget.sessionLimits.maxToolCalls} tool calls`}</dd></div>
@@ -366,7 +503,7 @@ export function CampaignBudgetFacts({ budget }: { budget: import("@wollipog/prot
       <span className="campaign-status-meta">Includes an estimate for running turns.</span>}</dd></div>
     <div><dt>Outstanding Allocations</dt><dd>${budget.outstanding.costUsd.toFixed(2)}, {budget.outstanding.toolCalls} tool calls</dd></div>
     <div><dt>Unallocated Allowance</dt><dd>{budget.remaining.costUsd === null ? "No campaign cost ceiling" : `$${budget.remaining.costUsd.toFixed(2)}`}, {budget.remaining.toolCalls === null ? "no campaign tool ceiling" : `${budget.remaining.toolCalls} tool calls`}</dd></div>
-    <div><dt>Accounting Policy</dt><dd>Managed Sessions and approved native review jobs. Unpriced usage stops protected admission. Unmanaged reviewer invocations are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
+    <div><dt>Accounting Policy</dt><dd>Managed Sessions and approved native review jobs. {budget.authority.costUsd === undefined ? "Unpriced usage is counted without a cost." : "Unpriced usage stops protected admission."} Unmanaged reviewer invocations are unsupported.<span className="campaign-status-meta">Cancellation is asynchronous; in-flight work can overshoot the allowance. This is not a hard billing cap.</span></dd></div>
   </>;
 }
 
@@ -528,7 +665,7 @@ function CampaignWorkRow({
       <span className="campaign-work-row-line">
         <span className="campaign-work-row-title">{workItemTitle(item)}</span>
         {assignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
-        <StatusBadge meta={statusMeta("campaignWork", item.primaryState)} inline />
+        <StatusBadge meta={workItemStatusMeta(item)} inline />
       </span>
       <span className="campaign-work-row-line campaign-work-row-meta">
         <span>{workItemOriginLabel(item)}</span>
@@ -582,7 +719,7 @@ function RecordedTime({ at, now, prefix }: { at: number | null; now: number; pre
 
 function IssueLink({ issue, kind }: { issue: CampaignIssueRef; kind: "issues" | "pull" }) {
   const href = issueRefHref(issue, kind);
-  const label = issueRefLabel(issue);
+  const label = issueRefLabel(issue, kind);
   return href ? <a href={href} target="_blank" rel="noreferrer">{label}</a> : <>{label}</>;
 }
 
@@ -612,7 +749,8 @@ function sessionStatusText(value: CampaignObservedSessionStatus): string {
 
 function cleanupText(value: CampaignObservedCleanup): string {
   if (value.worktrees.length === 0) return "No Worktrees";
-  return value.worktrees.map((worktree, index) => index === 0 ? titleCaseLabel(worktree.status) : worktree.status).join(", ");
+  return value.worktrees.map((worktree) => `${titleCaseLabel(worktree.status)}: ${worktree.path}` +
+    (worktree.reason ? ` — ${worktree.reason}` : "")).join("; ");
 }
 
 /** One pull request as GitHub was observed: its status line says when, and a stale observation's
@@ -621,11 +759,11 @@ function ForgePullRequestFacts({
   entry,
   now,
 }: {
-  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgePullRequestObservation> };
+  entry: { ref: CampaignPullRequestRef; fact: CampaignObservedFact<CampaignForgeChangeRequestObservation> };
   now: number;
 }) {
-  const view = forgePullRequestView(entry.fact, now);
-  const label = `PR #${entry.ref.number}`;
+  const view = forgePullRequestView(entry.fact, now, entry.ref);
+  const label = pullRequestShortLabel(entry.ref);
   if (view.kind === "unavailable") {
     return (
       <div className="campaign-forge-pr">
@@ -634,7 +772,7 @@ function ForgePullRequestFacts({
           {UNAVAILABLE}
           <span className="campaign-status-meta">
             {view.reason}
-            {view.lastObservedAt !== null && <> Last observed on GitHub <RecordedTime at={view.lastObservedAt} now={now} />.</>}
+            {view.lastObservedAt !== null && <> Last observed on {view.forge} <RecordedTime at={view.lastObservedAt} now={now} />.</>}
           </span>
         </dd>
       </div>
@@ -648,8 +786,8 @@ function ForgePullRequestFacts({
           {view.status}
           <span className="campaign-status-meta">
             {view.current
-              ? <RecordedTime at={view.observedAt} now={now} prefix="Observed on GitHub" />
-              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix="observed on GitHub" />. It may have changed since.</>}
+              ? <RecordedTime at={view.observedAt} now={now} prefix={`Observed on ${view.forge}`} />
+              : <>Stale: <RecordedTime at={view.observedAt} now={now} prefix={`observed on ${view.forge}`} />. It may have changed since.</>}
           </span>
         </dd>
       </div>
@@ -700,7 +838,7 @@ function CampaignWorkItemDetailView({
       {offline && <p className="campaign-status-offline" role="status">Reconnecting… Showing the last loaded details.</p>}
       <div className="campaign-detail-head">
         <h3 ref={headingRef} tabIndex={-1} className="campaign-detail-title">{detail ? workItemTitle(detail) : "Work Item"}</h3>
-        {detail && <StatusBadge meta={statusMeta("campaignWork", detail.primaryState)} />}
+        {detail && <StatusBadge meta={workItemStatusMeta(detail)} />}
         {detail && isAssignment && <StatusBadge label="Current Assignment" tone="info" noDot />}
       </div>
     </>
@@ -735,6 +873,8 @@ function CampaignWorkItemDetailView({
   const latestVerification = latestAttempt
     ? detail.verifications.filter((verification) => verification.attemptId === latestAttempt.id).at(-1) ?? null
     : null;
+  // A recorded delivery (#4070) shows while it is what the item's delivered state rests on.
+  const recordedDelivery = detail.primaryState === "delivered" ? detail.deliveries?.at(-1) ?? null : null;
   const held = currentSessionId ? heldChildren.find((child) => child.sessionId === currentSessionId) : undefined;
   const pullRequests = [
     ...(detail.observed.pullRequests?.map((entry) => entry.ref) ?? []),
@@ -848,8 +988,19 @@ function CampaignWorkItemDetailView({
                 <dd>{hold.reason}{hold.recoveryAction && <span className="campaign-status-meta">{hold.recoveryAction}</span>}</dd>
               </div>
             ))}
-            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor] : "None Recorded"}</dd></div>
+            <div><dt>Responsible</dt><dd>{detail.blocker ? RESPONSIBLE_ACTOR_LABELS[detail.blocker.responsibleActor]
+              : detail.handoff ? RESPONSIBLE_ACTOR_LABELS[detail.handoff.responsibleActor] : "None Recorded"}</dd></div>
             <div><dt>Next Action</dt><dd>{detail.nextAction ?? "None Recorded"}</dd></div>
+            {detail.handoff && (
+              <div>
+                <dt>Handoff</dt>
+                <dd>
+                  Handed to {RESPONSIBLE_ACTOR_LABELS[detail.handoff.responsibleActor]}: {detail.handoff.reason}
+                  <span className="campaign-status-note">Next action: {detail.handoff.nextAction}</span>
+                  <span className="campaign-status-meta">Recorded <RecordedTime at={detail.handoff.recordedAt} now={now} /></span>
+                </dd>
+              </div>
+            )}
           </DetailSection>
           {/* A request is answered in Requests when this session can reach it; a hold has nothing to
               answer, so a held child, like any request this session cannot see, is opened instead. */}
@@ -892,7 +1043,7 @@ function CampaignWorkItemDetailView({
                 <div>
                   <dt>Review and Checks</dt>
                   <dd>{detail.observed.pullRequests
-                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub status is observed for the pull requests the Orchestrator reports.</span></>
+                    ? <>No Pull Request Reported<span className="campaign-status-meta">GitHub and GitLab status is observed for the pull requests and merge requests the Orchestrator reports.</span></>
                     : <ObservedValue fact={undefined} now={now} render={() => null} />}</dd>
                 </div>
               )}
@@ -905,6 +1056,21 @@ function CampaignWorkItemDetailView({
                 </>
               ) : "Not Verified"}</dd>
             </div>
+            {recordedDelivery && (
+              <div>
+                <dt>Recorded Delivery</dt>
+                <dd>
+                  {[
+                    ...recordedDelivery.pullRequests.map((pr) => `${pullRequestShortLabel(pr)} merged`),
+                    ...(recordedDelivery.report ? [`report ${recordedDelivery.report.seq}`] : []),
+                  ].join(", ")}
+                  <span className="campaign-status-meta">
+                    Checked by Wollipog when the Orchestrator recorded it <RecordedTime at={recordedDelivery.recordedAt} now={now} />
+                  </span>
+                  {recordedDelivery.note && <span className="campaign-status-note">{recordedDelivery.note}</span>}
+                </dd>
+              </div>
+            )}
             <div>
               <dt>Cleanup</dt>
               <dd><ObservedValue fact={detail.observed.cleanup} now={now} render={cleanupText} /></dd>

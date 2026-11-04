@@ -38,7 +38,8 @@ separate gates from live acceptance.
   exhaustion recommends exact typed rejection for child correction, not a new human permission.
   Custom and genuinely unavailable trusted capability/access retain human fallback.
 - video-evidence-review-routes: exact credential-to-path binding, bounded media/ack/verdict methods,
-  no-store responses and separate owner provenance; not yet registered in the hosting entry point.
+  no-store responses and separate owner provenance; registered in hosting behind a readiness gate
+  that refuses every call (see Hosting Composition).
 - runner/evidence-review-namespace: allowlist mount namespace with no host-root/project bind and
   synthetic kernel probes denying oracle, generator, parent-path and symlink access.
 - runner/video-evidence-review-mcp: a two-handler registry enforces media-only names at discovery
@@ -47,10 +48,11 @@ separate gates from live acceptance.
 - runner/video-evidence-review-transport: pinned full-context/criterion/native-frame verification
   before authenticated acknowledgement and model image handoff; never claims typed approval.
 - video-live-validation: durable human-inspected candidate/paced/maximum empirical proof,
-  bound to exact driver/model/provider/capability digest. No default record is supplied.
+  bound to exact driver/model/provider/capability digest. No default record is supplied; hosting
+  exposes owner/admin-only record, revoke and list routes.
 - scripts/prepare-video-live-challenge.ts: offline fresh synthetic source/oracle preparation.
 
-The reviewer modules currently have no hosting entry-point caller. Artifact maintenance is
+Hosting composes these modules with inert ports only (see Hosting Composition). Artifact maintenance is
 prepared in the source tree only; the hosting process has not been changed or restarted. They do not advertise a current runner
 protocol revision or activate production. Current main advertises public protocol223 for
 runner-mediated session cross-model review; public221 describes background retry exhaustion and
@@ -163,11 +165,177 @@ No real live delivery, model temporal recognition, model usage/cost, external tr
 or production activation has occurred in this implementation session. Until the final adapters,
 human-only empirical proof and preceding main dependencies are present, readiness fails closed.
 
+## Hosting Composition
+
+`hosting-video-evidence.ts` is the production composition (#1321 PR A, adapters in PR C). It
+constructs the review store and runtime, `WorkflowVideoEvidenceApprovals`, `PreparedMediaActiveStops`,
+`VideoLiveValidationRegistry`, `EvidenceReviewService`, `OperatorVideoValidationPermits` and the
+`DelegatedVideoReviews` adapters (`delegated-video-reviews.ts`), and passes the prepared-media
+resolver, approvals, permits and dedicated Stop coordinator to `SessionsService`. `attach` then
+connects the Session service and runner hub. Construction creates the durable schema and admits
+nothing. The Full Control launch preflight reports video as `verified` only through
+`launchCertification` (a current proof for an installation on the root's runner) and the conditions in
+`docs/full-control-launch-preparation.md`; without a proof it is `human_required` exactly as before.
+
+Readiness refuses in this order, and every review route returns `409` with the matching code:
+
+1. `no_paced_video_peer`: no registered installation advertises the paced video review contract at
+   a supporting protocol.
+2. `live_validation`: no unrevoked, unexpired Human-inspected proof names an installation's current
+   media-only reviewer attestation at the certified model and effort.
+3. `reviewer_unavailable`: the adapters are not attached to Sessions yet.
+
+Readiness is available only after all three hold, and that happens only once a Human records a
+proof. No proof is seeded, and none exists in hosting.
+
+### Certified Reviewer and Window Binding
+
+The certification reviewer is Claude Opus 5.5 (`claude-opus-5-5`) at effort `high`. The reviewer
+target and the live proof both carry that model and effort, and the target's capability digest is
+the runner attestation digest (`mediaReviewerAttestationBody`, shared by runner and control plane),
+which covers the executable, namespace policy, tool set and window-limits revision. A changed
+attestation needs a new proof. The recording route refuses a target that does not name the runner's
+current attestation and namespace at that model and effort (`attestation_mismatch`).
+
+Each review record stores `deliveryPlanSha256`, the digest of the fresh-context window plan derived
+from its manifest. The transport grant carries it, `PreparedMediaSessions` recomputes it from the
+grant's frames, and the runner refuses a dispatch whose plan differs. Receipts are keyed by review,
+window and frame, and carry `deliveryPlanSha256` and the server-derived `windowIndex`:
+
+- A batch must end exactly at a planned window's end and start inside that window. Every earlier
+  window must be fully acknowledged under its own index, and so must every earlier frame of this
+  window, so window k+1 cannot start from window k's acknowledgement of their shared overlap frame.
+- A verdict needs, for every window in order, exactly one acknowledged receipt for each of its
+  frames, so each overlap frame appears twice. The verdict stores the plan digest and the ordered
+  receipt IDs. A verdict bound to another plan is an irreversible negative, like `frame_mismatch`.
+- Single-frame delivery is refused: a frame outside a window has no window receipt.
+- Migration revokes pending reviews recorded before window binding and keeps settled history as
+  window 0. A record without a plan digest is never current.
+
+### Owner Tools and Lifecycle
+
+Orchestrator credentials, and only those, reach `POST .../video-evidence-review/prepare` and
+`.../provenance`. Reviewer credentials reach only the media methods; child and implementation
+credentials reach neither. `/api/compatibility` declares the contract so the runner exposes
+`prepare_descendant_video_evidence_review` and `get_descendant_video_evidence_provenance` to
+Orchestrators; declaring it admits nothing.
+
+`prepare` takes only `childSessionId`, `occurrenceId` and `evidenceId`. The server re-checks the
+current gate owner, peers and live proof, then materializes a fresh reviewer Session through the
+ordinary creation guards, derives every frame, binds the grant and sends `media_review_dispatch` to
+the owning runner. The Orchestrator cannot choose the frames, reviewer, model, budget or criteria.
+The criteria are server-pinned (`visual_defects`, `coherent_flow`) and judged the same way for every
+capture. Ceilings are $10 and 120 tool calls per review, within the campaign allocation.
+
+Runner messages are accepted only on the owning runner's authenticated channel and only for the
+exact prepared command, generation and dispatch:
+
+- `media_review_dispatch_receipt` (accepted, with the matching plan digest) marks the reviewer
+  running.
+- `media_review_finished` projects completion or failure. Priced usage settles once in the campaign
+  ledger and releases the unused reservation. Unpriced usage stops campaign accounting and keeps the
+  reservation, so provenance stays withheld.
+- `media_review_never_dispatched` records the fence and releases the unsent reservation. Only the
+  runner's structured `reason: "host_busy"` is retried: a new identity after 30 seconds, 2 minutes
+  and 8 minutes, never later than 20 minutes after the first busy refusal. Nothing is reserved
+  while queued, the owner sees `pending` with reason `host_busy` and the next attempt time, and the
+  cap ends in `reviewer_busy_exhausted`. Every other reason refuses at once.
+
+Every binding check (derive, media, verdict and provenance) also requires a current proof for
+the review's own installation, so revoking or expiring it ends that review even while another
+installation stays certified.
+
+A dispatched reviewer runs outside its runner's Session inventory, so one rule decides its
+lifecycle (`SessionsService.dedicatedMediaReviewerOpen`). A reviewer is open while it has no Stop
+or archive, its command was sent, and its Session is live or only provisionally stopped. For an
+open reviewer:
+
+- disconnect, absent-inventory and startup sweeps leave it alone;
+- only the owning runner's authenticated report restores or finishes it;
+- Archive refuses it.
+
+A Stopped reviewer that still reports its end becomes stopped, never completed, and yields no
+provenance. On runner registration and at control-plane startup, the control plane sends
+`media_review_readback` for every dispatched reviewer that still holds a reservation, listed from
+the reviewers' own records, so a reviewer orphaned by a deleted child or root is recovered too;
+an owner's polling reads back its review at most once a minute. The runner answers from its
+durable fences and never relaunches:
+
+- never-dispatched releases the reservation;
+- a finished result settles it once;
+- running marks the reviewer running, and an orphaned reviewer, or one whose review was revoked,
+  also gets the dedicated Stop;
+- `unknown` (the reviewer died without a result) ends it as stopped, stops campaign accounting and
+  retains its reservation as unknown usage.
+
+Each of these ends commits the terminal status, the accounting and a durable disposition in one
+transaction, and a reviewer stays eligible for readback until that disposition exists, whatever
+its Session status says. Every runner answer is persisted, with its reason, before it is acted on,
+so a review interrupted between steps is re-derived from those records. Settlement reads the reviewer's own prepared record,
+so deleting the child or root never strands a reservation, and an unsent reservation whose subject
+was deleted is released on the next runner registration.
+
+`provenance` returns `pending` until the reviewer finished and its priced usage settled, then the
+verdict (accept or reject, with its observations), plan digest, receipt-set digest, reviewer
+identity and settled usage. Only an accepted verdict includes the `delegatedVideoEvidence`
+reference. It never resolves the decision: the Orchestrator still resolves the original occurrence
+with `resolve_descendant_workflow_decision`, which re-checks everything at resolution and
+consumption.
+
+The live validation ingress is Human-only and installation-wide. Owners and admins of the personal organization use
+`GET /api/video-evidence/live-validations` (inventory plus current readiness),
+`POST /api/video-evidence/live-validations` (an exact reviewer target and its three inspected runs)
+and `POST /api/video-evidence/live-validations/:proofId/revoke`. Session credentials, other
+members and other organizations are refused. Recording is refused with `no_paced_video_peer` unless a registered installation
+currently advertises the contract for that exact runner, agent, driver, model, protocol and contract
+revision, and with `attestation_mismatch` unless the target names that installation's current
+attestation. Admission still matches the proof against the server-derived target with `validVideoLiveProof`.
+
+Human validation permits and runs (#1321 PR E) are composed in hosting. Every route below is for
+owners and admins of the personal organization only; Session credentials are refused:
+
+- `POST /api/video-evidence/validation-permits/preview` derives the Human-owned gate's capture with
+  the server's isolated decoder. The result is cached by source and profile in
+  `video_validation_derivations`, and only when it fits the profile's exact frame count, size and
+  duration. It returns the exact scope and `scopeSha256`.
+- `POST /api/video-evidence/validation-permits` mints a permit for that scope
+  (`OperatorVideoValidationPermits.mint`). Only the Human who established the boundary can mint, and
+  the expiry is at most one hour ahead.
+- `POST /api/video-evidence/validation-permits/:permitId/run` materializes, derives, binds and
+  dispatches the permit's one reviewer.
+- `GET /api/video-evidence/validation-permits/:permitId` returns the run's state. Once the run
+  completes with priced usage, it adds the verified `validationObservation` and a run record whose
+  Human-adjudicated fields are `null`.
+- `POST /api/video-evidence/validation-permits/:permitId/revoke` revokes the permit.
+
+The trusted scope port is `DelegatedVideoReviews.validationScope`. It resolves every fact from
+current records: the Human-owned pending gate, its source, the cached derivation, the context with
+the Human as UI evidence owner, the attested target on the root's runner, the request (with the
+pinned blind-challenge criteria and the $10 and 120 tool-call ceilings), the executable and tool
+digests, and the authority digest. The one exception is the Human's oracle commitment, which is
+part of the minted subject.
+
+The admission identity is fixed per gate, evidence and profile (`videoValidationIdentity`). The
+launch digest binds the namespace policy and that admission, so both are known before the reviewer
+Session exists. A validation reviewer reaches the media routes before any proof exists only while
+its permit binding is current. A busy host refuses the run instead of requeueing it, because a
+permit is one-shot.
+
+Still required before delegated video review can run in production:
+
+- The remaining #1321 integration work tracked on the issue.
+- A Human certification: three inspected live runs recorded through the ingress for the exact
+  attested target. `docs/video-review-certification-runbook.md` is the exact procedure.
+
+`GET /api/video-evidence/review-status` (owners and admins of the personal organization) reports
+readiness and, for each machine, the first reason it cannot host the media-only reviewer or its
+installation's newest proof state (certified, expired, revoked or missing). Settings shows it.
+
 ## Remaining Integration
 
 The private `operator-video-validation.ts` permit path prepares first-proof admission without
-claiming that a production profile has passed live validation. It is code/interface preparation,
-with no hosting route or installed native sender/driver registration. Only an authenticated Human
+claiming that a production profile has passed live validation. Hosting composes it through the
+Human-only routes above. Only an authenticated Human
 owner/admin who established the current boundary may mint a finite permit after the trusted server
 adapter has verified the original **Human-owned** pending UI occurrence and its exact source,
 complete native manifest/ordered frame set, criteria, private destination/provider disclosure,
@@ -314,9 +482,10 @@ and historical actor proof are checked again before consumption. Corrupt proof, 
 image receipt, revoked authority, unsupported peer or an absent runtime refuses. Delegated tools
 require private223 and the exact separate identity from the authenticated current compatibility
 response; a cached integer, public221/222/223, or another installation's metadata cannot authorize a
-POST. Hosting registration remains absent.
+POST. Hosting registers the bridge with an access adapter that reports no gate as available.
 
-The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. No disclosure lookup is registered on the hosting service and no authority has been minted there.
+The existing human-only campaign control CAS can compose an evidence proposal only through trusted destination/provider disclosure lookups, deriving the authenticated author, revision and scope. Public, unknown, stale or agent-authored disclosure is refused. Budget and issue scope retain their existing contracts. Hosting registers the server-authored disclosure lookups with the Full Control launch (#3379), which mints
+evidence authority only for a launch whose selected installation advertises the paced-video contract.
 
 
 ## Installed Native Readiness and Integrated Adapters
@@ -367,6 +536,36 @@ bindings. It cannot approve the original artifact from those new pixels. Sampled
 unbound or unknown transients refuse. Actual capture/allowance/provenance/typed-owner/gate execution
 ports remain unregistered; disclosed synthetic SQLite fixtures prove code control flow only, not real
 capture, native model inspection, Human allowance, genuine usage or production readiness.
+
+### Repair Through the Typed Gate (#2938)
+
+Hosting does not register that coordinator. It has no trusted capture trace, owner quality
+disposition, capture allowance or server-created replacement occurrence. Inadequate video evidence
+is repaired through the existing typed gate instead. When the isolated decoder needs a split or a
+recapture, `prepare` persists a content-safe repair exception on the refused subject: the blocked
+action, the exact occurrence, a digest of the child-authored evidence id, the decoder code, the
+planner's fixed reason, the owner and the smallest next input. Preparing the same occurrence again
+returns the same exception, as does the refusal's HTTP `error` that the Orchestrator's tool shows.
+A refusal before any review has no review id, so `provenance` cannot look it up; `prepare` is the
+lookup. Decoder-busy retries of one source never count as replacement captures. Under Full Control the
+Orchestrator owns `ui_evidence_approval`, so it denies that occurrence with the reason as
+`childMessage`. The child records adjacent shorter clips or a simpler recapture and requests a
+fresh occurrence under the same resource key. Nothing reaches the Human, and the inadequate
+original is never approved.
+
+An occurrence's source is immutable, so preparing a refused one again returns the same exception
+and reserves no reviewer. A lineage (root, child and resource key) gets one initial capture and two
+replacement captures. A third inadequate capture is exhausted (`reject`), and any later occurrence
+is refused before a reviewer is reserved. A busy decoder (`wait`) leaves the occurrence preparable
+and does not count. An unverifiable source (`human`) keeps today's Human route. Custom control
+keeps video with the Human throughout.
+
+A reviewer left provisionally stopped (an unconfirmed restart or disconnect stop, for example
+written by an older control plane's startup) is refused at HTTP authentication until its runner's
+readback restores it. If an in-process caller reaches the runtime first, the media or verdict call
+is refused without revoking, provided the binding is otherwise exactly current, and a throttled
+readback is requested. Any changed owner, policy, proof, audience or source, a confirmed stop, an
+explicit Stop or archive still revokes, as before.
 
 Current private destination and provider disclosure revisions, retention text and exact offered
 reviewer identities are re-read at preparation, resolution and consumption. A privacy or retention
@@ -422,8 +621,8 @@ immutable active dispatch identity supplies terminal Stop, settlement or privacy
 
 Dedicated active Stop preparation uses `PreparedMediaActiveStops` and `RunnerMediaActiveStops`.
 The private ports require both the actual current prepared/purpose/member generation and the
-owning runner's exact durable launch claim plus registered worker handle. No hosting adapter is
-registered. Missing, revoked, corrupt, replaced or unknown ownership refuses; generic SessionManager
+owning runner's exact durable launch claim plus registered worker handle. Hosting registers the
+coordinator with no owning-handle port, so it never signals. Missing, revoked, corrupt, replaced or unknown ownership refuses; generic SessionManager
 or PID kills are never a fallback. With those trusted ports, a Stop can return 202 while retaining
 the queued identity, reservation and history. Request and ACK cannot settle cost, capacity or quality.
 The operation is committed before the first send/signal and anchored on the original command as

@@ -286,6 +286,23 @@ export function adoptProviderProfileMarker(
 }
 
 /**
+ * The first marker of a new managed profile HOME (Add Account, #3239): identity `profileId` with
+ * only `grant`. The HOME must hold no marker yet; anything else is refused rather than merged, so a
+ * creation can never take over a HOME that already has an identity.
+ */
+export function createProviderProfileMarker(
+  read: ProviderProfileRead,
+  input: { provider: "claude" | "codex"; profileId: string; grant: ProviderProfileGrant; now?: string },
+): { marker: ProviderProfileMarker; changed: true } {
+  if (read.state === "unverifiable") throw new ProviderProfileChangeError("profile_unverifiable");
+  if (read.state === "present") throw new ProviderProfileChangeError("profile_changed");
+  if (!isProviderProfileId(input.profileId)) throw new ProviderProfileChangeError("profile_unverifiable");
+  const { marker } = adoptProviderProfileMarker(read, { provider: input.provider, grant: input.grant, newProfileId: input.profileId,
+    ...(input.now ? { now: input.now } : {}) });
+  return { marker, changed: true };
+}
+
+/**
  * The marker without one exact grant of one control-plane instance. Other instances' grants, and a
  * newer grant of the same instance, are kept. A HOME without a marker has nothing to revoke; a
  * marker holding a different profile is refused rather than edited.
@@ -308,11 +325,17 @@ export function revokeProviderProfileMarkerGrant(
  * The retain-or-delete decision for a removed account's HOME (#3239), taken while its lease is held:
  * every grant of this instance is dropped, and the HOME is `shared` (kept) when the marker still
  * grants another control plane or cannot be verified. A marker-less HOME is not shared.
+ *
+ * With `expectedProfileId` (a managed profile HOME, whose account recorded that identity) the HOME
+ * must still hold exactly that identity: a missing, unverifiable or different marker means the
+ * directory is no longer the account's HOME, so it is kept and its marker is left untouched.
  */
 export function retireProviderProfileMarker(
   read: ProviderProfileRead,
-  input: { controlPlaneInstanceId: string },
+  input: { controlPlaneInstanceId: string; expectedProfileId?: string },
 ): { marker?: ProviderProfileMarker; changed: boolean; shared: boolean } {
+  if (input.expectedProfileId !== undefined &&
+    (read.state !== "present" || read.marker.profileId !== input.expectedProfileId)) return { changed: false, shared: true };
   if (read.state === "absent") return { changed: false, shared: false };
   if (read.state === "unverifiable") return { changed: false, shared: true };
   const { marker } = read;

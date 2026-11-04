@@ -81,6 +81,9 @@ interface RowTextProps {
   busyLabel?: ReactNode;
   /** The Saved check at the end of the text cell, for a control that fills its column. */
   saved?: boolean;
+  /** Why the row cannot be operated, a line of its own under the description (§11.3). */
+  reason?: ReactNode;
+  reasonId?: string;
 }
 
 /**
@@ -89,7 +92,7 @@ interface RowTextProps {
  * height and nothing below it moves.
  */
 function RowText({
-  title, titleId, icon, badge, description, descriptionId, descriptionHidden, failure, busy, busyLabel, saved,
+  title, titleId, icon, badge, description, descriptionId, descriptionHidden, failure, busy, busyLabel, saved, reason, reasonId,
 }: RowTextProps) {
   // With no sentence of its own the busy row still says what is happening.
   const busyText = busy ? busyLabel ?? (description ? undefined : "Saving…") : undefined;
@@ -122,10 +125,19 @@ function RowText({
             )}
           </span>
         ) : descriptionNode}
+        {reason && <span className="setting-row-reason" id={reasonId}>{reason}</span>}
       </span>
       {saved && <SavedCheck />}
     </span>
   );
+}
+
+/**
+ * An invalid value's `FieldError` in the description's place (§8.5): where the row's sentence is the
+ * field's helper, the error replaces it rather than showing beside it, and the row keeps its height.
+ */
+function descriptionError(id: string, error: string | null | undefined): ReactNode {
+  return error ? <FieldError as="span" id={id}>{error}</FieldError> : null;
 }
 
 /** A failed change in place of the description (§8.5): the sentence, then Try Again. */
@@ -147,6 +159,9 @@ function FailureSentence({ id, failure }: { id: string; failure: RowFailure }) {
  *
  * `failure` shows a failed read or change in place of the description with Try Again (§8.5), as
  * `SwitchRow` does, for a row that has no value to show until it succeeds. The caller announces it.
+ *
+ * `error` is an invalid value in an editor that saves several rows at once (§8.5): a `FieldError` in
+ * the description's place, with `errorId` so the caller's field can be `aria-invalid` and point at it.
  */
 export function SettingRow({
   title,
@@ -162,15 +177,20 @@ export function SettingRow({
   busyLabel,
   saved,
   failure,
+  error,
+  errorId,
   className,
-}: Omit<RowTextProps, "failure" | "descriptionHidden"> & {
+}: Omit<RowTextProps, "failure" | "descriptionHidden" | "reason" | "reasonId"> & {
   control?: ReactNode;
   trailing?: boolean;
   disabled?: boolean;
   failure?: RowFailure | null;
+  error?: string | null;
+  errorId?: string;
   className?: string;
 }) {
   const id = useId();
+  const fieldError = descriptionError(errorId ?? `${id}-error`, error);
   return (
     <div className={rowClass(trailing ? "setting-row setting-row-trailing" : "setting-row", { disabled, extra: className })} aria-busy={busy || undefined}>
       <RowText
@@ -183,7 +203,7 @@ export function SettingRow({
         busy={busy && !failure}
         busyLabel={busyLabel}
         saved={saved}
-        failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
+        failure={fieldError ?? (failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />)}
       />
       {control && <span className="setting-row-control">{control}</span>}
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
@@ -211,14 +231,25 @@ export function SegmentedRow({
   disabledReason,
   onChange,
   label,
+  describedBy,
+  error,
+  invalid,
+  block,
+  badge,
   busy,
   busyLabel,
   saved,
 }: InstantRowProps & {
   title: string;
+  /** A short mark after the title (a draft's "Changed" with its reset), outside the title's name. */
+  badge?: ReactNode;
   /** Shown only when the selected option has nothing to say for itself — see below. */
   description?: ReactNode;
-  options: ReadonlyArray<{ value: string; label: string; description?: string }>;
+  /**
+   * An option that cannot be chosen here keeps its place, in the arrow order, and its
+   * `disabledReason` replaces the row's description while it is not the selected one.
+   */
+  options: ReadonlyArray<{ value: string; label: string; description?: string; disabled?: boolean; disabledReason?: string }>;
   value: string;
   disabled?: boolean;
   /**
@@ -230,6 +261,14 @@ export function SegmentedRow({
   onChange: (value: string) => void;
   /** The group’s accessible name, where the row’s title is not the right one. Defaults to the title. */
   label?: string;
+  /** The id of text outside the row that describes the group, such as a form's error for it. */
+  describedBy?: string;
+  /** A form's error for this choice (§8.5), under the pills: a `FieldError` the caller renders. */
+  error?: ReactNode;
+  /** The group is what that error is about, and `describedBy` names it. */
+  invalid?: boolean;
+  /** The pills fill the control column as equal options (`.seg.block`, §10.2). */
+  block?: boolean;
 }) {
   /*
    * The SELECTED option’s description becomes the row’s, rather than being dropped.
@@ -237,17 +276,24 @@ export function SegmentedRow({
    * Each option owns a sentence and a pill is too small to carry one. Showing the selected one keeps
    * the row a single line and makes the sentence track the choice — it answers "what am I getting?",
    * which is the question someone reading their own settings actually has.
+   *
+   * An unavailable option's reason outranks it: a pill that cannot be pressed says why where the
+   * row's sentence is, rather than in a tooltip touch cannot reach (§11.3).
    */
   const selected = options.find((option) => option.value === value);
+  const unavailable = disabled ? undefined
+    : options.find((option) => option.disabled && option.disabledReason && option.value !== value);
+  const optionSentence = unavailable?.disabledReason ?? selected?.description;
   return (
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
         title={title}
-        description={selected?.description ?? description}
+        badge={badge}
+        description={optionSentence ?? description}
         // The pills carry the same sentence, referenced from the radio it belongs to. Left exposed
         // here as well it is announced twice. A row-level description with no option behind it is
         // nobody else’s, and stays exposed.
-        descriptionHidden={Boolean(selected?.description)}
+        descriptionHidden={Boolean(optionSentence)}
         busy={busy}
         busyLabel={busyLabel}
         saved={saved}
@@ -257,17 +303,22 @@ export function SegmentedRow({
           label={label ?? title}
           value={value}
           onChange={onChange}
+          className={block ? "block" : undefined}
+          describedBy={describedBy}
+          invalid={invalid}
           // `disabled` is per OPTION in the primitive, which keeps an unavailable choice in the roving
           // order and able to explain itself. A row-level disable is every option at once — and the
           // reason travels with it.
           options={options.map((option) => ({
             value: option.value,
             label: option.label,
-            description: option.description,
-            disabled,
-            disabledReason: disabled ? disabledReason : undefined,
+            // An unavailable option is described by why, so arrowing onto it says so.
+            description: !disabled && option.disabled && option.disabledReason ? option.disabledReason : option.description,
+            disabled: disabled || option.disabled,
+            disabledReason: disabled ? disabledReason : option.disabledReason,
           }))}
         />
+        {error}
       </span>
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
     </div>
@@ -300,11 +351,14 @@ export function SelectRow({
   label,
   menuWidth,
   estimatedOptionHeight,
+  badge,
   busy,
   busyLabel,
   saved,
 }: InstantRowProps & {
   title: string;
+  /** A short mark after the title, outside the title's name. */
+  badge?: ReactNode;
   description?: ReactNode;
   options: readonly SelectOption<string>[];
   value: string;
@@ -334,6 +388,7 @@ export function SelectRow({
     <div className={rowClass("setting-row", { disabled })} aria-busy={busy || undefined}>
       <RowText
         title={title}
+        badge={badge}
         description={description}
         descriptionId={description ? descriptionId : undefined}
         busy={busy}
@@ -367,8 +422,12 @@ export function SelectRow({
  * in the title or the description, which is why the field stays 96px.
  *
  * Named by the title and its unit. An invalid value is `aria-invalid` with a `FieldError` under the
- * field (§8.5), which the field points at while it shows. `value` is the field's text, so a person can
- * clear it while typing; the caller parses it.
+ * field (§8.5), which the field points at while it shows. `errorPlacement="description"` puts it in
+ * the description's place instead, for a row whose description is the field's helper ("A whole
+ * number."), so the two never show at once. `value` is the field's text, so a person can clear it
+ * while typing; the caller parses it.
+ *
+ * `readOnly` is a value the person can never change here, with the read-only treatment (§8.1).
  */
 export function NumberRow({
   title,
@@ -381,13 +440,20 @@ export function NumberRow({
   max,
   step,
   disabled,
+  readOnly,
+  placeholder,
   error,
+  errorPlacement = "field",
   inputId,
+  textEntry = false,
+  badge,
   busy,
   busyLabel,
   saved,
 }: InstantRowProps & {
   title: string;
+  /** A short mark after the title, outside the title's name. */
+  badge?: ReactNode;
   description?: ReactNode;
   value: string | number;
   onChange: (value: string) => void;
@@ -398,38 +464,57 @@ export function NumberRow({
   max?: number;
   step?: number;
   disabled?: boolean;
+  readOnly?: boolean;
+  /** What an empty field means ("No limit"), never a label substitute (§8.1). */
+  placeholder?: string;
   /** One sentence that says what is wrong and how to fix it. */
   error?: string | null;
+  /** Under the field, or in the description's place where the description is the field's helper. */
+  errorPlacement?: "field" | "description";
   /** The field's id, for a link or a label elsewhere that has to reach it. */
   inputId?: string;
+  /** A text field with a numeric keyboard instead of `type="number"`. A number input reports text it
+   * cannot read, such as `1e`, as "", so a caller that gives "" a meaning (cleared, or the default)
+   * uses this and validates the text itself: `onChange` then always receives exactly what is shown. */
+  textEntry?: boolean;
 }) {
   const id = useId();
   const titleId = `${id}-title`;
   const unitId = `${id}-unit`;
   const descriptionId = `${id}-desc`;
   const errorId = `${id}-error`;
-  const describedBy = [error ? errorId : null, description ? descriptionId : null].filter(Boolean).join(" ") || undefined;
+  // An error in the description's place hides the description, so it alone describes the field.
+  const describedBy = [
+    error ? errorId : null,
+    description && !(error && errorPlacement === "description") ? descriptionId : null,
+  ].filter(Boolean).join(" ") || undefined;
   return (
     <div className={rowClass("setting-row setting-row-number", { disabled })} aria-busy={busy || undefined}>
       <RowText
         title={title}
         titleId={titleId}
+        badge={badge}
         description={description}
         descriptionId={description ? descriptionId : undefined}
         busy={busy}
         busyLabel={busyLabel}
         saved={saved}
+        failure={errorPlacement === "description" ? descriptionError(errorId, error) : undefined}
       />
       <span className="setting-row-control">
         <span className="field">
           <span className="input-affix w-xs">
             <input
               id={inputId ?? `${id}-input`}
-              type="number"
-              inputMode="numeric"
-              min={min}
-              max={max}
-              step={step}
+              className={readOnly ? "is-read-only" : undefined}
+              readOnly={readOnly}
+              placeholder={placeholder}
+              type={textEntry ? "text" : "number"}
+              inputMode={textEntry && step !== undefined && !Number.isInteger(step) ? "decimal" : "numeric"}
+              autoComplete={textEntry ? "off" : undefined}
+              min={textEntry ? undefined : min}
+              max={textEntry ? undefined : max}
+              step={textEntry ? undefined : step}
               value={value}
               disabled={disabled}
               aria-labelledby={unit ? `${titleId} ${unitId}` : titleId}
@@ -440,7 +525,7 @@ export function NumberRow({
             />
             {unit && <span className="input-affix-text" id={unitId} ref={affixSuffixRef}>{unit}</span>}
           </span>
-          {error && <FieldError id={errorId}>{error}</FieldError>}
+          {error && errorPlacement === "field" && <FieldError id={errorId}>{error}</FieldError>}
         </span>
       </span>
       {saved !== undefined && <span className="sr-only" role="status">{rowStatus(title, saved)}</span>}
@@ -720,6 +805,9 @@ export interface RowFailure {
  *
  * A row with either is wrapped in `.setting-row-frame` with its status region, so a group's surface
  * sees one child per setting.
+ *
+ * `disabledReason` says why a disabled switch cannot be changed: a line of its own under the
+ * description, which the switch is described by as well (§11.3).
  */
 export function SwitchRow({
   title,
@@ -728,6 +816,7 @@ export function SwitchRow({
   description,
   checked,
   disabled,
+  disabledReason,
   busy,
   busyLabel,
   saved,
@@ -739,6 +828,7 @@ export function SwitchRow({
   description?: ReactNode;
   icon?: ReactNode;
   disabled?: boolean;
+  disabledReason?: string;
   onClick?: () => void;
   checked: boolean;
   /** A short flag after the title, such as "Custom". */
@@ -753,6 +843,7 @@ export function SwitchRow({
   /** Whether focus was last inside this row. A removed element takes focus with it silently. */
   const focusInside = useRef(false);
   const failed = Boolean(failure);
+  const reason = disabled && disabledReason ? disabledReason : undefined;
   useLayoutEffect(() => {
     if (!focusInside.current) return;
     const active = document.activeElement;
@@ -769,15 +860,18 @@ export function SwitchRow({
       busy={busy && !failed}
       busyLabel={busyLabel}
       failure={failure === undefined ? undefined : failure && <FailureSentence id={`${id}-failure`} failure={failure} />}
+      reason={reason}
+      reasonId={`${id}-reason`}
     />
   );
+  // While busy the visible sentence is the busy line, and that is what the switch is described by.
+  const sentenceId = failed ? `${id}-failure`
+    : busy && (busyLabel !== undefined || !description) ? `${id}-desc-busy`
+    : description ? `${id}-desc` : undefined;
   const control = {
     switchRef,
     labelledBy: `${id}-title`,
-    // While busy the visible sentence is the busy line, and that is what the switch is described by.
-    describedBy: failed ? `${id}-failure`
-      : busy && (busyLabel !== undefined || !description) ? `${id}-desc-busy`
-      : description ? `${id}-desc` : undefined,
+    describedBy: [sentenceId, reason ? `${id}-reason` : null].filter(Boolean).join(" ") || undefined,
     checked,
     disabled,
     busy,

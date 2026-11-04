@@ -21,10 +21,11 @@ const now = 1_800_000_000_000;
 
 function grantFor(frameCount: number): { grant: PacedVideoTransportGrant; bytes: Buffer[] } {
   const bytes = Array.from({ length: frameCount }, (_, i) => Buffer.from(`synthetic frame ${i}`));
+  const frames = bytes.map((b, index) => ({ index, ptsUs: index * 40_000, durationUs: 40_000, sha256: sha(b), sizeBytes: b.length }));
   return { bytes, grant: { reviewId: "review_1", reviewerSessionId: "reviewer", childSessionId: "child", occurrenceId: "occ",
     policyRevision: 3, sourceEvidenceId: "ev", sourceArtifactId: "art", sourceSha256: sha("source"), manifestSha256: sha("manifest"),
     bindingSha256: sha("binding"), criteriaSha256: sha("criteria"), expiresAt: now + 3_600_000,
-    frames: bytes.map((b, index) => ({ index, ptsUs: index * 40_000, durationUs: 40_000, sha256: sha(b), sizeBytes: b.length })) } as PacedVideoTransportGrant };
+    deliveryPlanSha256: sha(pacedVideoReviewWindowPlanBody(pacedVideoReviewWindowPlan(frames))), frames } };
 }
 
 /** In-memory media routes with the control plane's ordering rules: every earlier frame must be
@@ -40,6 +41,9 @@ function fakeControlPlane(grant: PacedVideoTransportGrant, bytes: Buffer[]) {
     if (action === "frames") {
       const end = Math.min(body.end ?? grant.frames.length, grant.frames.length);
       if (Array.from({ length: body.index }, (_, i) => i).some((i) => !acked.has(i))) return reply(409, { error: "order" });
+      // Server-derived window, as the control plane derives it from the review's plan.
+      const windowIndex = pacedVideoReviewWindowPlan(grant.frames).windows
+        .find((w) => w.endIndex === end && body.index >= w.firstIndex && body.index < w.endIndex)?.index ?? -1;
       const deliveries = [];
       for (let index = body.index; index < end && deliveries.length < 20; index++) {
         const frame = grant.frames[index]!, receiptId = `r${++receipt}`;
@@ -49,7 +53,8 @@ function fakeControlPlane(grant: PacedVideoTransportGrant, bytes: Buffer[]) {
           artifactId: `${grant.reviewId}:frame:${index}`, sha256: frame.sha256, deliveredAt: now, deliveryOrder: ++order,
           videoFrame: { sourceArtifactId: grant.sourceArtifactId, sourceSha256: grant.sourceSha256, manifestSha256: grant.manifestSha256,
             profile: "paced-silent-complete-frames-v1", index, ptsMs: frame.ptsUs / 1000, ptsUs: frame.ptsUs, durationUs: frame.durationUs },
-          bindingSha256: grant.bindingSha256, criteriaSha256: grant.criteriaSha256 },
+          bindingSha256: grant.bindingSha256, criteriaSha256: grant.criteriaSha256,
+          deliveryPlanSha256: grant.deliveryPlanSha256, windowIndex },
         mimeType: "image/png", sizeBytes: frame.sizeBytes, data: bytes[index]!.toString("base64") });
       }
       return reply(200, { deliveries, nextIndex: body.index + deliveries.length, frameCount: grant.frames.length });
@@ -69,7 +74,7 @@ function fakeControlPlane(grant: PacedVideoTransportGrant, bytes: Buffer[]) {
   return { fetch, requests, acked, verdict: () => verdict };
 }
 
-async function harness(t: TestContext, options: { mode?: string; frames?: number; driver?: string; tamper?: (d: MediaReviewDispatch) => void } = {}) {
+async function harness(t: TestContext, options: { mode?: string; frames?: number; driver?: string; busy?: boolean; tamper?: (d: MediaReviewDispatch) => void } = {}) {
   const root = mkdtempSync(join(tmpdir(), "media-dispatch-test-"));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const sessions = join(root, "sessions"), operator = join(root, "operator"), recordFile = join(root, "record.jsonl");
@@ -92,7 +97,7 @@ async function harness(t: TestContext, options: { mode?: string; frames?: number
     db: new DatabaseSync(":memory:"), root: sessions, runnerId: () => "runner-1", controlPlaneHttpUrl: () => "http://cp.test",
     fetch: cp.fetch, send: (message) => sent.push(message), registerCredential: async (_session, hash) => { registered.push(hash); },
     reviewer: async () => reviewer, forbiddenRoots: () => [operator], nodeExecutable: process.execPath,
-    reserve: (id) => { if (admissions.has(id)) return false; admissions.add(id); return true; }, release: (id) => { admissions.delete(id); },
+    reserve: (id) => { if (options.busy || admissions.has(id)) return false; admissions.add(id); return true; }, release: (id) => { admissions.delete(id); },
     log: () => {}, now: () => now,
     // No bwrap in unit tests: run the fake provider directly with the exact provider argv, its
     // environment taken from the namespace's --setenv pairs, and the relay socket outside /relay.
@@ -239,6 +244,7 @@ test("Codex, digest mismatches and changed attestations are never dispatched", a
     { tamper: (d) => { d.deliveryPlanSha256 = sha("other plan"); } },
     { tamper: (d) => { d.attestationSha256 = sha("other attestation"); } },
     { tamper: (d) => { d.grant.childSessionId = "someone-else"; } },
+    { tamper: (d) => { d.grant.deliveryPlanSha256 = sha("a different plan"); } },
   ];
   for (const options of cases) {
     const h = await harness(t, options);
@@ -254,6 +260,19 @@ test("Codex, digest mismatches and changed attestations are never dispatched", a
       assert.equal(h.spawned.length, 0);
     }
   }
+});
+
+test("a busy host is reported as host_busy so the owner can requeue a fresh identity", async (t) => {
+  if (process.platform !== "linux" || process.getuid?.() === 0) { t.skip("native non-root Linux namespace preparation required"); return; }
+  const h = await harness(t, { busy: true });
+  await h.dispatcher.dispatch(h.dispatch);
+  const never = h.sent.filter((m) => m.type === "media_review_never_dispatched") as Array<{ reason?: string }>;
+  assert.deepEqual(never.map((m) => m.reason), ["host_busy"]);
+  assert.equal(h.spawned.length, 0);
+  const other = await harness(t, { tamper: (d) => { d.identity.commandSha256 = sha("other"); } });
+  await other.dispatcher.dispatch(other.dispatch);
+  assert.deepEqual((other.sent.filter((m) => m.type === "media_review_never_dispatched") as Array<{ reason?: string }>)
+    .map((m) => m.reason), [undefined], "only host admission is retryable");
 });
 
 test("the owning runner Stop acknowledges and ends the running reviewer without settling usage", async (t) => {

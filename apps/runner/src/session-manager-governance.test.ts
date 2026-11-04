@@ -886,6 +886,32 @@ test("runner reconnect replay pins the original trip identity, threshold, and ob
   } finally { h.cleanup(); }
 });
 
+test("runner reconnect pins only the crossing turn's durable command owner", () => {
+  for (const kind of ["cost_budget", "max_tool_calls"] as const) {
+    for (const owner of ["durable", "manual", "provider"] as const) {
+      const h = harness(kind === "cost_budget" ? { costBudgetUsd: 1 } : { maxToolCalls: 1 });
+      try {
+        if (owner !== "manual") h.entry.currentDurable = { commandId: "owning-command" };
+        if (owner === "provider") h.entry.providerInitiatedTurnActive = true;
+        (h.sm as any).onDriverEvent("s_governance", kind === "cost_budget"
+          ? { kind: "token_usage", costUsd: 2 }
+          : { kind: "tool_call", toolCallId: "one", title: "Tool", status: "pending" });
+        const first = h.sent.find((message) => message.type === "governance_tripped");
+        assert.ok(first && first.type === "governance_tripped");
+        assert.equal(first.commandId, owner === "durable" ? "owning-command" : undefined);
+        // The drain clears its lifecycle before reconnect; a later turn cannot replace it either.
+        h.entry.currentDurable = undefined;
+        h.entry.running = false;
+        h.sm.reportGovernanceTrips();
+        assert.deepEqual(h.sent.filter((message) => message.type === "governance_tripped").at(-1), first);
+        h.entry.currentDurable = { commandId: "later-command" };
+        h.sm.reportGovernanceTrips();
+        assert.deepEqual(h.sent.filter((message) => message.type === "governance_tripped").at(-1), first);
+      } finally { h.cleanup(); }
+    }
+  }
+});
+
 test("explicit null re-arm clears runner metadata and delivers a prompt queued behind a real trip", async () => {
   const h = harness({ costBudgetUsd: 5, maxToolCalls: 1 });
   try {

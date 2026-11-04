@@ -81,11 +81,13 @@ test("each individual cause names itself", () => {
     orchestratorUnavailableReason({ ...AVAILABLE, ...overrides });
 
   assert.match(reason({ runnerSupportsOrchestration: false }) ?? "", /runner is too old/);
-  assert.match(reason({ agentOffersOrchestrator: false }) ?? "", /agent does not offer/);
+  assert.equal(reason({ agentOffersOrchestrator: false }), "This agent doesn't offer the Orchestrator role.");
+  assert.equal(reason({ agentOffersOrchestrator: false, agentName: "Claude Code" }), "Claude Code doesn't offer the Orchestrator role.",
+    "the reason names the agent the Agent field shows (#2954)");
   assert.match(reason({ agentOffersOrchestrator: false,
     agentOrchestratorRequirement: "Upgrade Codex to 0.154.0 or newer." }) ?? "", /0\.154\.0/);
   assert.match(reason({ contextKind: "wsl" }) ?? "", /verified Direct WSL bridge/);
-  assert.match(reason({ hostExecutionTarget: false }) ?? "", /host execution target/);
+  assert.match(reason({ hostExecutionTarget: false }) ?? "", /only on this machine's host, not in a container or the cloud/);
 });
 
 test("a verified WSL bridge is available, and an unverified one is not", () => {
@@ -121,7 +123,7 @@ test("independent blockers are all reported in actionable order", () => {
   }), "This runner is too old to orchestrate child sessions. " +
     "Upgrade Codex to 0.154.0 or newer. " +
     "WSL agents need the verified Direct WSL bridge and a bubblewrap-isolated runner. " +
-    "Orchestrator runs only on the host execution target.");
+    "Orchestrator runs only on this machine's host, not in a container or the cloud.");
 });
 
 test("an old runner suppresses only an unverified generic agent claim", () => {
@@ -165,7 +167,7 @@ test("the Orchestrator preset applies only where independent provider permission
       "each harness names its own runner requirement",
     );
     assert.match(orchestratorPresetPermissionsReason({ ...additive, driver, contextKind: "wsl" }) ?? "",
-      /native Claude Code, Codex, or Pi harness on the host/);
+      /Only Claude Code, Codex and Pi on this machine's host keep normal permissions/);
   }
   // Pi gained the additive shape in v163 (#1294); ACP still has no audited provider-mode contract.
   assert.equal(orchestratorPresetPermissionsReason({ ...additive, driver: "pi" }), undefined,
@@ -184,15 +186,15 @@ test("the Orchestrator preset applies only where independent provider permission
     "Pi names its own runner requirement",
   );
   assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "pi", contextKind: "wsl" }) ?? "",
-    /native Claude Code, Codex, or Pi harness on the host/);
+    /Only Claude Code, Codex and Pi on this machine's host keep normal permissions/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, driver: "acp" }) ?? "",
-    /ACP adapter's provider permission contract was audited and does not meet the bar/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /native Claude Code, Codex, or Pi harness on the host/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /host execution target/);
+    /^This agent's adapter can't run an Orchestrator with normal permissions, so the preset sets them\.$/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, contextKind: "wsl" }) ?? "", /Only Claude Code, Codex and Pi on this machine's host keep normal permissions/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, hostExecutionTarget: false }) ?? "", /on this machine's host/);
   assert.match(orchestratorPresetPermissionsReason({ ...additive, nativeTui: true }) ?? "", /Native TUI/);
-  assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /saved Agent Harness default/);
+  assert.match(orchestratorPresetPermissionsReason({ ...additive, savedOrchestratorDefault: true }) ?? "", /Your saved default is the Orchestrator preset/);
   const olderServer = orchestratorPresetPermissionsReason({ ...additive, controlPlaneSupportsRole: false }) ?? "";
-  assert.equal(olderServer, "Update Wollipog to give an Orchestrator ordinary provider permissions.");
+  assert.equal(olderServer, "This version of Wollipog can't give an Orchestrator normal permissions, so the preset sets them. Update Wollipog to change that.");
   assert.doesNotMatch(olderServer, /control plane|durable/iu, "docs/design-system.md §17.2 retires both terms");
   assert.equal(
     orchestratorPresetPermissionsReason({ ...additive, runnerProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorAdditiveRole - 1 }),

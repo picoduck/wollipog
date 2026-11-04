@@ -1,3 +1,4 @@
+import type { ProviderHomeBlockingProcess } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import {
   closeSync,
@@ -13,16 +14,23 @@ import {
   realpathSync,
   rmSync,
   writeFileSync,
+  type Stats,
 } from "node:fs";
 import { homedir, hostname as systemHostname } from "node:os";
 import { basename, dirname, isAbsolute, join, resolve } from "node:path";
 import type { AgentContext, AgentDriverKind } from "@wollipog/protocol";
 import { WSL_BWRAP_UNAVAILABLE_ERROR } from "./execution-isolation-policy.js";
+import type { SessionMeta } from "./session-store.js";
 import type { SpawnIsolation } from "./spawn.js";
 import { readLeaseIoSnapshot, applyLeaseIoPlan, ensureLeaseIoAvailable, withLeaseIoOptions, LeaseIoError, type LeaseIoSnapshot, type LeaseIoEntry, type LeaseIoJob } from "./provider-home-lease-io.js";
 import { LEASE_CHECKPOINT_LIMITS as LIMITS, type LeaseCheckpointProof, type LeaseRetirementEntry } from "./provider-home-lease-checkpoint.js";
 import { LEASE_WORKER_ERRORS } from "./provider-home-lease-worker-protocol.js";
-import { decideProviderProfileAccess, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
+import { createProviderProfileMarker, decideProviderProfileAccess, isProviderProfileId, ProviderProfileChangeError, readProviderProfileMarker, retireProviderProfileMarker, writeProviderProfileMarker, type ProviderProfileAccess, type ProviderProfileChangeRefusal, type ProviderProfileDenial, type ProviderProfileGrant, type ProviderProfileMarker, type ProviderProfileRead } from "./provider-profile.js";
+import { codexApiKeyRecord, ProviderCredentialImportRefusal, publishCodexCredential, readCodexCredentialSource, type CodexCredentialLayout } from "./provider-credential-import.js";
+import { createManagedProviderProfileHome } from "./provider-profile-home.js";
+import { currentBootTimeMs } from "./provider-home-lease-boot.js";
+import { leaseContainmentGuidance, type LeaseContainmentEvidence } from "./provider-home-lease-containment.js";
+import { currentLeaseProcessEvidence, isLeaseProcessEvidence, linuxLeaseProcessProbe, proveLeaseAbandoned, type LeaseAbandonmentProof, type LeaseProcessEvidence, type LeaseProcessProbe } from "./provider-home-lease-evidence.js";
 
 const OWNER_HASH = /^[a-f0-9]{64}$/u;
 const PROVIDER_KEY = /^[a-z0-9][a-z0-9-]{0,63}$/u;
@@ -75,7 +83,9 @@ interface ProviderHomeLeaseRecordV1 {
 }
 
 interface ProviderHomeLeaseRecordV2 {
-  version: 2;
+  /** v5 carries versioned containment evidence. Old readers reject the record itself, including
+   * pre-lifecycle readers that ignored unknown `process` properties. v2 remains readable. */
+  version: 2 | 5;
   state: "active" | "released";
   ownerHash: string;
   leaseId: string;
@@ -87,6 +97,46 @@ interface ProviderHomeLeaseRecordV2 {
   hostname: string;
   provider: string;
   createdAt: string;
+  /** #3241: lifecycle evidence of the recording runner. Older readers ignore it. */
+  process?: LeaseProcessEvidence;
+  /** #3241: present only on an active record that took over another owner's abandoned active
+   * lease. Older readers refuse that owner change as an unexpected transition. */
+  recovery?: LeaseRecoveryNote;
+}
+
+/**
+ * Why a successor was allowed to take over an unreleased lease. Either another owner proved the
+ * lease abandoned and holds this control plane's profile grant (`profileId`), or an Owner or Admin
+ * authorized succeeding that exact record (`authorized`, #3241 part 2), with the proof it rests on:
+ * the record's own lifecycle evidence, or, for a record without evidence, a boot after it was written.
+ */
+type LeaseRecoveryNote =
+  | { proof: LeaseAbandonmentProof; profileId?: string }
+  | { proof: "authorized"; authorizationId: string; basis: LeaseAbandonmentProof | "booted_after"; profileId?: string };
+
+/** An Owner or Admin's one-time authorization to succeed the unreleased record hashed `staleTipHash`. */
+export interface LeaseRecoveryAuthorization {
+  staleTipHash: string;
+  authorizationId: string;
+}
+
+/** A boot this long after a record was written proves no process of that boot survives; the margin
+ * absorbs small wall-clock adjustments between the old writer and this reader. */
+const BOOT_PROOF_MARGIN_MS = 60_000;
+
+function isLeaseRecoveryNote(value: unknown): value is LeaseRecoveryNote {
+  if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
+  const note = value as Record<string, unknown>;
+  if (note.proof === "authorized") {
+    const profiled = Object.hasOwn(note, "profileId");
+    return Object.keys(note).length === (profiled ? 4 : 3) &&
+      typeof note.authorizationId === "string" && LEASE_ID.test(note.authorizationId) &&
+      (note.basis === "reboot" || note.basis === "process_scan" || note.basis === "linux_cgroup" || note.basis === "linux_cgroup_unit_removed" || note.basis === "booted_after") &&
+      (!profiled || isProviderProfileId(note.profileId));
+  }
+  const profiled = Object.hasOwn(note, "profileId");
+  return Object.keys(note).length === (profiled ? 2 : 1) &&
+    (note.proof === "reboot" || note.proof === "process_scan" || note.proof === "linux_cgroup" || note.proof === "linux_cgroup_unit_removed") && (!profiled || isProviderProfileId(note.profileId));
 }
 
 interface ProviderHomeLeaseRecordV4 extends Omit<ProviderHomeLeaseRecordV2, "version"> {
@@ -95,6 +145,11 @@ interface ProviderHomeLeaseRecordV4 extends Omit<ProviderHomeLeaseRecordV2, "ver
 }
 
 type ProviderHomeLeaseRecord = ProviderHomeLeaseRecordV1 | ProviderHomeLeaseRecordV2 | ProviderHomeLeaseRecordV4;
+
+function isJournalTransition(record: unknown): record is ProviderHomeLeaseRecordV2 {
+  const version = (record as { version?: unknown } | undefined)?.version;
+  return version === 2 || version === 5;
+}
 
 interface ReadLeaseRecord {
   record: ProviderHomeLeaseRecord;
@@ -132,9 +187,33 @@ export interface ProviderHomeLeaseOptions {
   nativeCheckpointBarrierForTest?: { boundary: string; marker: string };
   onCheckpointFailureForTest?: (error: unknown) => void;
   disableCompactionForTest?: boolean;
-  onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished"; leaseId: string; message: string }) => void;
+  onDiagnostic?: (diagnostic: { event: "provider_home_checkpoint_unavailable" | "provider_home_release_unpublished" | "provider_home_boundary_recovered"; leaseId: string; message: string }) => void;
   /** The attested control-plane instance this registry acquires for; checked against profile grants. */
   controlPlaneInstanceId?: string;
+  /** #3241: the marker every process this runner launches inherits. Without it records carry no
+   * lifecycle evidence and can only be reclaimed by their own owner, as before. */
+  runnerMarker?: string;
+  /** Main-thread containment chosen before any lease or provider launch; never selected by the worker. */
+  containment?: LeaseContainmentEvidence;
+  /** Test seam for the process view; defaults to procfs on Linux and to none elsewhere. */
+  processProbe?: LeaseProcessProbe | null;
+  /** Test seam for the current boot time (epoch ms, null when unknown); see `currentBootTimeMs`. */
+  bootTimeMs?: () => number | null;
+}
+
+/** What an Owner or Admin is shown before authorizing a recovery (#3241 part 2). */
+export interface ProviderHomeLeaseInspection {
+  /** `none`: no lease journal; `released`: free; `held`: held by this runner; `stale`: an unreleased
+   * record of another runner process; `unverifiable`: the journal cannot be verified. */
+  state: "none" | "released" | "held" | "stale" | "unverifiable";
+  /** For `stale`: the exact record an authorization must name, and what it shows. */
+  tipHash?: string;
+  createdAt?: string;
+  sameHost?: boolean;
+  hasEvidence?: boolean;
+  /** For `stale`: why an authorized recovery would be refused now, or null when it would proceed. */
+  refusal?: ProviderHomeLeaseRefusalKind | null;
+  blockingProcess?: ProviderHomeBlockingProcess;
 }
 
 function boundedEntries(path: string): string[] {
@@ -175,6 +254,37 @@ function providerKey(driver: AgentDriverKind, command: string): string {
   if (driver === "codex" || driver === "codex-app-server") return "codex";
   if (driver === "pi") return "pi";
   return `acp-${createHash("sha256").update(command).digest("hex").slice(0, 16)}`;
+}
+
+/** The environment that decides which provider home a provider process uses: an Agent TUI's
+ * (#3338), a structured session driver's, a provider fork's (#3858), or a non-launch provider
+ * process's: a recovery sign-in, an auth or discovery probe, or a naming helper (#3903). A native
+ * provider is spawned with its launch environment layered over the runner's own, so a runner-level
+ * `CLAUDE_CONFIG_DIR` / `CODEX_HOME` is its home whenever the launch sets none: the lease must be
+ * keyed on that home, not on the home directory. A bound account's credential home is set by the
+ * launch environment, so it still wins. On Windows a name matches in any case and its last
+ * spelling wins, the launch's over the runner's, exactly as the ConPTY launch
+ * (`windowsEnvironmentForLaunch`) and `spawnAgent` (`layerLaunchEnvironment`) merge them. A WSL
+ * provider receives only its explicit environment. Only the lease reads the result: it is neither
+ * the launch environment nor persisted. */
+export function providerHomeLeaseEnv(
+  meta: Pick<SessionMeta, "context" | "env">,
+  runnerEnv: NodeJS.ProcessEnv = process.env,
+  platform: NodeJS.Platform = process.platform,
+): Record<string, string> {
+  if (meta.context.kind !== "native") return { ...meta.env };
+  const env = { ...meta.env };
+  const matches = (key: string, name: string) => platform === "win32" ? key.toUpperCase() === name : key === name;
+  for (const name of ["CLAUDE_CONFIG_DIR", "CODEX_HOME"] as const) {
+    let effective: string | undefined;
+    for (const source of [runnerEnv, meta.env]) {
+      for (const [key, value] of Object.entries(source)) {
+        if (value !== undefined && matches(key, name)) effective = value;
+      }
+    }
+    if (effective !== undefined) env[name] = effective;
+  }
+  return env;
 }
 
 /** Ordinary bwrap redirects mutable transcripts; a protected managed worktree can instead keep
@@ -274,11 +384,21 @@ function readRecord(path: string): ReadLeaseRecord {
   try { value = JSON.parse(bytes.toString("utf8")) as Record<string, unknown>; }
   catch { throw new Error("provider-home lease metadata is invalid"); }
   const validV1 = value.version === 1 && isBaseRecord(value);
-  const validV2 = (value.version === 2 || value.version === 4) && isBaseRecord(value) &&
+  const validV2 = (isJournalTransition(value) || value.version === 4) && isBaseRecord(value) &&
     (value.state === "active" || value.state === "released") &&
     (value.previousLeaseId === null || typeof value.previousLeaseId === "string" && LEASE_ID.test(value.previousLeaseId)) &&
     (value.previousRecordHash === null || typeof value.previousRecordHash === "string" && OWNER_HASH.test(value.previousRecordHash));
   if (!validV1 && !validV2 || value.version !== 4 && bytes.length > MAX_RECORD_BYTES) throw new Error("provider-home lease metadata is invalid");
+  // #3241 fields: evidence only on v2/v4 records, and a recovery note only on an active one.
+  if ((value.process !== undefined && (validV1 || !isLeaseProcessEvidence(value.process))) ||
+      (value.recovery !== undefined && (validV1 || value.state !== "active" || !isLeaseRecoveryNote(value.recovery)))) {
+    throw new Error("provider-home lease metadata is invalid");
+  }
+  // New evidence may never masquerade as a v2 record an older binary might ignore.
+  if ((value.version === 5 && (!isLeaseProcessEvidence(value.process) || value.process.version !== 2)) ||
+      (value.version === 2 && isLeaseProcessEvidence(value.process) && value.process.version === 2)) {
+    throw new Error("provider-home lease metadata is invalid");
+  }
   const result = { record: value as unknown as ProviderHomeLeaseRecord, hash: hashText(bytes.toString("utf8")), raw: bytes.toString("utf8") };
   if (cachedEntry) decodedEntries.set(cachedEntry, result);
   return result;
@@ -292,17 +412,27 @@ function unexpectedEntries(lockDir: string): Error {
  * recorded process is alive; `foreign_owner` is a lease from another runner or control plane whose
  * recorded process is gone; `foreign_host` is a lease recorded on another host; `unverifiable` is
  * everything the registry cannot prove. The `profile_*` kinds are pre-acquisition provider-profile
- * refusals (#3239), decided before any lease journal I/O. */
-export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable" | ProviderProfileDenial | ProviderProfileChangeRefusal;
+ * refusals (#3239), decided before any lease journal I/O. `stale_tip_changed` and `no_reboot_proof`
+ * refuse an authorized recovery (#3241): the lease is no longer the authorized record, or the host
+ * has not booted since that record (without lifecycle evidence) was written. `recovery_unconfirmed`
+ * is not a refusal: an authorized recovery failed after it may have been published. */
+export type ProviderHomeLeaseRefusalKind = "busy" | "foreign_owner" | "foreign_host" | "unverifiable" | "stale_tip_changed" | "no_reboot_proof" |
+  "holder_alive" | "boundary_survivor" | "process_survivor" | "boundary_unverifiable" | "process_uninspectable" | "process_uninspectable_not_delegated" |
+  "recovery_unconfirmed" | ProviderProfileDenial | ProviderProfileChangeRefusal;
 
 class ProviderHomeLeaseRefusal extends Error {
-  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind) { super(message); }
+  constructor(readonly reason: string, message: string, readonly kind: ProviderHomeLeaseRefusalKind, options?: ErrorOptions, readonly blockingProcess?: ProviderHomeBlockingProcess) { super(message, options); }
 }
 
 /** The typed refusal kind, or null when `error` is not a registry refusal. */
 export function providerHomeLeaseRefusalKind(error: unknown): ProviderHomeLeaseRefusalKind | null {
   if (error instanceof ProviderProfileChangeError) return error.code;
   return error instanceof ProviderHomeLeaseRefusal ? error.kind : null;
+}
+
+/** Sanitized observations are separate from the registry's private path-bearing Error text. */
+export function providerHomeLeaseBlockingProcess(error: unknown): ProviderHomeBlockingProcess | undefined {
+  return error instanceof ProviderHomeLeaseRefusal ? error.blockingProcess : undefined;
 }
 
 /** Marker changes take the lease without the grant check; see `changeProfileMarkerWhileHeld`. */
@@ -314,11 +444,16 @@ function refusal(
   reason: string,
   restartAfterQuarantine = false,
   kind: ProviderHomeLeaseRefusalKind = "unverifiable",
+  blockingProcess?: ProviderHomeBlockingProcess,
 ): Error {
   const recovery = restartAfterQuarantine
     ? "restart the runner before retrying; quarantine does not clear this registry's in-memory failed initialization reservations"
     : "retry";
-  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`, kind);
+  return new ProviderHomeLeaseRefusal(reason, `provider home lease directory ${lockDir} ${reason}; after proving no provider process or runner uses this HOME, manually quarantine the entire provider-home-leases-v1 directory (including mutable-home.lock, all lease-/next- records, and mutable-home.recovery.json) and ${recovery}; do not remove individual records`, kind, undefined, blockingProcess);
+}
+
+function staleTipChanged(lockDir: string): Error {
+  return refusal(lockDir, "is no longer the stale lease that was authorized for recovery; inspect it again", false, "stale_tip_changed");
 }
 
 function verificationRefusal(lockDir: string, error: unknown, restartAfterQuarantine = false): Error {
@@ -327,7 +462,7 @@ function verificationRefusal(lockDir: string, error: unknown, restartAfterQuaran
   if (error instanceof LeaseIoError && error.kind === "busy") return new LeaseIoError("busy", `provider home lease directory ${lockDir} is already in use: checkpoint publication is in progress; preserve evidence and retry`);
   if (error instanceof LeaseIoError && error.kind === "unavailable") return error;
   return error instanceof ProviderHomeLeaseRefusal
-    ? refusal(lockDir, error.reason, restartAfterQuarantine, error.kind)
+    ? refusal(lockDir, error.reason, restartAfterQuarantine, error.kind, error.blockingProcess)
     : refusal(lockDir, "cannot be verified: metadata is unsafe or unreadable", restartAfterQuarantine);
 }
 
@@ -336,8 +471,28 @@ function recordsHash(records: Array<{ name: string; hash: string }>): string {
     .sort((a, b) => a.name < b.name ? -1 : a.name > b.name ? 1 : 0)));
 }
 
+/** #3241: an active successor of an unreleased lease on the same host. Without an Owner/Admin
+ * authorization it succeeds another owner's active lease that carried lifecycle evidence and was
+ * proved abandoned. With one it may succeed any unreleased record of any owner: one without evidence
+ * (including a v1 lease) on a later boot, one with evidence only on that evidence. */
+function isRecoveryTransition(current: ReadLeaseRecord, next: ReadLeaseRecord): boolean {
+  const note = isJournalTransition(next.record) && next.record.state === "active" ? next.record.recovery : undefined;
+  if (!note || next.record.hostname !== current.record.hostname) return false;
+  const unreleased = current.record.version === 1 || current.record.state === "active";
+  const evidence = current.record.version !== 1 && current.record.process !== undefined;
+  if (note.proof === "authorized") return unreleased && (note.basis === "booted_after" ? !evidence : evidence);
+  return unreleased && evidence && (next.record.ownerHash === current.record.ownerHash || note.profileId !== undefined);
+}
+
 function validateTransition(current: ReadLeaseRecord, next: ReadLeaseRecord, lockDir: string): void {
-  if (next.record.version !== 2 || next.record.previousLeaseId !== current.record.leaseId ||
+  if (isJournalTransition(next.record) && next.record.recovery !== undefined) {
+    if (!isRecoveryTransition(current, next) || next.record.previousLeaseId !== current.record.leaseId ||
+        (next.record.previousRecordHash !== current.hash && (current.record.version !== 4 || next.record.previousRecordHash !== current.record.checkpoint.previousTipHash))) {
+      throw unexpectedEntries(lockDir);
+    }
+    return;
+  }
+  if (!isJournalTransition(next.record) || next.record.previousLeaseId !== current.record.leaseId ||
       (next.record.previousRecordHash !== current.hash && (current.record.version !== 4 || next.record.previousRecordHash !== current.record.checkpoint.previousTipHash)) ||
       (next.record.state === "released" &&
         (current.record.version === 1 || current.record.state !== "active" ||
@@ -372,7 +527,7 @@ function verifyCheckpoint(anchor: ReadLeaseRecord, lockDir: string): LeaseRetire
       typeof proof.migration !== "boolean" || !exactIdentity(proof.guardDevice, proof.guardInode) ||
       !Array.isArray(proof.retired) || proof.retired.length > LIMITS.retirementEntries) throw unexpectedEntries(lockDir);
   const tip = JSON.parse(proof.previousTip) as ProviderHomeLeaseRecord;
-  if (tip.version !== 2 || tip.state !== "active" || !isBaseRecord(tip as unknown as Record<string, unknown>) ||
+  if (!isJournalTransition(tip) || tip.state !== "active" || !isBaseRecord(tip as unknown as Record<string, unknown>) ||
       hashText(proof.previousTip) !== proof.previousTipHash ||
       ["leaseId", "ownerHash", "pid", "hostname", "provider", "createdAt"].some((key) =>
         tip[key as keyof typeof tip] !== record[key as keyof typeof record])) throw unexpectedEntries(lockDir);
@@ -479,14 +634,16 @@ function readChainAt(lockDir: string, root: string): LeaseChain {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
   }
   if (recovery) {
-    if ((recovery.record.version !== 2 && recovery.record.version !== 4) || recovery.record.state !== "active" ||
+    // A v4 checkpoint copies its tip, which may be a recovery; a v2 anchor never succeeds anything.
+    if ((!isJournalTransition(recovery.record) && recovery.record.version !== 4) || recovery.record.state !== "active" ||
+        (isJournalTransition(recovery.record) && recovery.record.recovery !== undefined) ||
         recovery.record.previousLeaseId !== null || recovery.record.previousRecordHash !== null ||
         typeof recovery.record.recoveredEntriesHash !== "string" || !OWNER_HASH.test(recovery.record.recoveredEntriesHash)) {
       throw unexpectedEntries(lockDir);
     }
     current = recovery;
     marker = `lease-${current.record.leaseId}.json`;
-    if (recovery.record.version === 2) verifyMirror(marker, current.hash);
+    if (isJournalTransition(recovery.record)) verifyMirror(marker, current.hash);
   } else if (entries.length === 0) {
     throw refusal(lockDir, "is incomplete and has no ownership proof");
   } else if (entrySet.has(LEGACY_MARKER)) {
@@ -501,7 +658,7 @@ function readChainAt(lockDir: string, root: string): LeaseChain {
     const match = GENESIS_MARKER.exec(marker);
     // A genesis is only ever published `active` (release appends a `next-*` record), so a released
     // genesis is fabricated or corrupted state — never an explicit handoff to trust.
-    if (current.record.version !== 2 || current.record.state !== "active" ||
+    if (!isJournalTransition(current.record) || current.record.state !== "active" || current.record.recovery !== undefined ||
         current.record.previousLeaseId !== null ||
         current.record.previousRecordHash !== null || match?.[1] !== current.record.leaseId) {
       throw unexpectedEntries(lockDir);
@@ -535,7 +692,7 @@ function readChainAt(lockDir: string, root: string): LeaseChain {
   // Updated binaries publish the canonical chain outside the directory and leave in-lock
   // mirrors for inspection. A rollback binary must refuse this marker instead of acquiring
   // a lease while ignoring the canonical journal.
-  if (recovery?.record.version === 2 && entrySet.has("checkpoint.json")) {
+  if (isJournalTransition(recovery?.record) && entrySet.has("checkpoint.json")) {
     verifyMirror("checkpoint.json", recovery.hash);
     consumed.add("checkpoint.json");
   }
@@ -545,7 +702,7 @@ function readChainAt(lockDir: string, root: string): LeaseChain {
   const canonicalRecords = recovery ? [{ name: RECOVERY_MARKER, hash: recovery.hash }] : [];
   if (guardHash) canonicalRecords.push({ name: FORMAT_GUARD, hash: guardHash });
   const evidence: LeaseChain["evidence"] = [];
-  if (recovery?.record.version === 2) {
+  if (isJournalTransition(recovery?.record)) {
     for (const name of consumed) if (name !== FORMAT_GUARD && !presentRetired.has(`lock/${name}`)) evidence.push({ directory: "lock", name, hash: readRecord(join(lockDir, name)).hash });
   }
   const seenLeaseIds = new Set<string>();
@@ -609,7 +766,7 @@ function publishRecord(root: string, target: string, record: ProviderHomeLeaseRe
     withLeaseIoOptions({ fenceWaitMs: 10000 }, () => withVerificationBudget(() => {
       const snapshot = capture(root);
       const chain = withSnapshot(snapshot, () => readChainAt(join(root, "mutable-home.lock"), root));
-      if (record.version !== 2 || record.previousLeaseId !== chain.tip.record.leaseId || record.previousRecordHash !== chain.tip.hash) throw new Error("provider home lease changed during recovery; retry");
+      if (!isJournalTransition(record) || record.previousLeaseId !== chain.tip.record.leaseId || record.previousRecordHash !== chain.tip.hash) throw new Error("provider home lease changed during recovery; retry");
       const work = applyLeaseIoPlan(ioPlan(snapshot, chain.tip, [{ name: `next-${chain.tip.record.leaseId}.json`, raw: Buffer.from(`${JSON.stringify(record)}\n`), copiesOwner: false, retire: [] }]), 2, remainingBudget());
       spendVerificationWork(work.records, work.bytes);
     }));
@@ -640,7 +797,10 @@ function lstatExists(path: string): boolean {
   try { lstatSync(path); return true; } catch (error) { if ((error as NodeJS.ErrnoException).code === "ENOENT") return false; throw error; }
 }
 function ioPlan(snapshot: LeaseIoSnapshot, tip: ReadLeaseRecord, jobs: LeaseIoJob[], barrier?: ProviderHomeLeaseOptions["nativeCheckpointBarrierForTest"]) {
-  const tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && !publicationTemporary(entry) && entry.raw.toString("utf8") === tip.raw);
+  const legacy = !snapshot.entries.some(entry => entry.directory === "root" && entry.name === RECOVERY_MARKER);
+  let tipIndex = legacy ? snapshot.entries.findIndex(entry => entry.directory === "lock" && !entry.optional && NEXT_MARKER.test(entry.name) && entry.raw.toString("utf8") === tip.raw) : -1;
+  if (tipIndex < 0) tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "root" && !entry.optional && !publicationTemporary(entry) && entry.raw.toString("utf8") === tip.raw);
+  if (tipIndex < 0) tipIndex = snapshot.entries.findIndex((entry) => entry.directory === "lock" && !entry.optional && NEXT_MARKER.test(entry.name) && entry.raw.toString("utf8") === tip.raw);
   if (tipIndex < 0) throw new Error("acquired immutable tip is unavailable");
   const guard = snapshot.entries.find((entry) => entry.directory === "lock" && entry.name === FORMAT_GUARD)?.raw ?? Buffer.alloc(0);
   return { snapshot, guard, guardTemp: `.provider-home-lease-${randomUUID()}.tmp`, tipIndex,
@@ -692,6 +852,9 @@ export class ProviderHomeLeaseRegistry {
   private readonly diagnostics: string[] = [];
   private readonly onDiagnostic?: ProviderHomeLeaseOptions["onDiagnostic"];
   private readonly controlPlaneInstanceId?: string;
+  private readonly processProbe?: LeaseProcessProbe;
+  private readonly processEvidence?: LeaseProcessEvidence;
+  private readonly bootTimeMs: () => number | null;
   private lastAcquisitionHome?: string;
 
   constructor(private readonly ownerHash: string, options: ProviderHomeLeaseOptions = {}) {
@@ -710,6 +873,10 @@ export class ProviderHomeLeaseRegistry {
     this.helperDataDir = options.helperDataDir;
     this.afterTransitionPublishForTest = options.afterTransitionPublishForTest;
     this.controlPlaneInstanceId = options.controlPlaneInstanceId;
+    this.processProbe = options.processProbe === null ? undefined : options.processProbe ?? linuxLeaseProcessProbe();
+    this.processEvidence = currentLeaseProcessEvidence(this.processProbe, this.pid, options.runnerMarker, options.containment);
+    if (options.containment?.kind === "linux-cgroup-v2" && !this.processEvidence) throw new Error("provider containment has no matching lease process evidence");
+    this.bootTimeMs = options.bootTimeMs ?? (() => currentBootTimeMs());
   }
 
   getDiagnostics(): readonly string[] { return this.diagnostics; }
@@ -726,13 +893,81 @@ export class ProviderHomeLeaseRegistry {
     return this.acquireHomeFor(requestedHome, provider, profile);
   }
 
-  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext): boolean {
+  private acquireHomeFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization, create = true): boolean {
     let providerHome = resolve(requestedHome);
     try { providerHome = realpathSync(requestedHome); } catch { /* A fresh HOME must not be created before probing. */ }
     return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome }, () => {
       ensureLeaseIoAvailable();
-      return this.acquireHomeAvailable(requestedHome, provider, profile);
+      return this.acquireHomeAvailable(requestedHome, provider, profile, authorization, create);
     });
+  }
+
+  /**
+   * #3241 part 2: what an Owner or Admin sees before authorizing a recovery of `requestedHome`'s
+   * lease. Reads the journal without creating anything, and reports for a stale record the exact
+   * hash an authorization must name and whether an authorized recovery would proceed now.
+   */
+  inspectHome(requestedHome: string, profile?: ProviderProfileAccess): ProviderHomeLeaseInspection {
+    let home: string;
+    try { home = realpathSync(requestedHome); } catch { return { state: "none" }; }
+    const root = join(home, ".agent-manager", "provider-home-leases-v1");
+    const lockDir = join(root, "mutable-home.lock");
+    if (!lstatExists(root)) return { state: "none" };
+    if (this.held.has(home)) return { state: "held" };
+    return withLeaseIoOptions({ helperDataDir: this.helperDataDir, providerHome: home }, () => {
+      ensureLeaseIoAvailable();
+      let chain: LeaseChain;
+      try { chain = readChain(lockDir); } catch {
+        return lstatExists(lockDir) || lstatExists(join(root, RECOVERY_MARKER)) ? { state: "unverifiable" as const } : { state: "none" as const };
+      }
+      const tip = chain.tip;
+      if (isJournalTransition(tip.record) && tip.record.state === "released") return { state: "released" as const };
+      let refused: ProviderHomeLeaseRefusalKind | null = null;
+      let blockingProcess: ProviderHomeBlockingProcess | undefined;
+      try {
+        const profileId = this.assertProfileAccess(home, lockDir, profile);
+        this.assertAbandoned(tip.record, lockDir, profileId, { staleTipHash: tip.hash, authorizationId: randomUUID() });
+      } catch (error) {
+        refused = providerHomeLeaseRefusalKind(error) ?? "unverifiable";
+        blockingProcess = providerHomeLeaseBlockingProcess(error);
+      }
+      return {
+        state: "stale" as const, tipHash: tip.hash, createdAt: tip.record.createdAt, sameHost: tip.record.hostname === this.hostname,
+        hasEvidence: tip.record.version !== 1 && tip.record.process !== undefined, refusal: refused,
+        ...(blockingProcess ? { blockingProcess } : {}),
+      };
+    });
+  }
+
+  /**
+   * #3241 part 2: on an Owner or Admin's authorization, succeed the exact unreleased record it names
+   * and release the HOME again at once, so later launches acquire it normally. The profile grant
+   * check still applies to a HOME with a marker; the record must still be proved abandoned, by its
+   * lifecycle evidence or, without evidence, by a boot after it was written. Refused as
+   * `stale_tip_changed` when the lease is no longer that record (including when it was released).
+   *
+   * Only a typed refusal while this attempt holds nothing proves nothing was published. Any other
+   * failure, or a failure once the successor is held (completion or the immediate release), may
+   * follow publication of the authorized record, so it is `recovery_unconfirmed`, never a refusal.
+   */
+  recoverStaleLease(requestedHome: string, provider: string, authorization: LeaseRecoveryAuthorization, profile?: ProviderProfileAccess): void {
+    const unconfirmed = (cause: unknown) => new ProviderHomeLeaseRefusal("recovery could not be confirmed",
+      "the provider HOME lease recovery may have been recorded but could not be confirmed; inspect the lease again before retrying", "recovery_unconfirmed", { cause });
+    let heldBefore = false;
+    try { heldBefore = this.held.has(realpathSync(requestedHome)); } catch { /* an unavailable HOME is refused below */ }
+    let receipt: { first: boolean; cancel: () => boolean };
+    try {
+      receipt = this.acquireReceiptFor(requestedHome, provider, profile, authorization);
+    } catch (error) {
+      // This attempt published its successor only if it now holds a HOME it did not hold before.
+      const home = this.lastAcquisitionHome;
+      const published = !heldBefore && home !== undefined && this.held.has(home);
+      if (error instanceof ProviderHomeLeaseRefusal && !published) throw error;
+      throw unconfirmed(error);
+    }
+    let released: boolean;
+    try { released = receipt.cancel(); } catch (error) { throw unconfirmed(error); }
+    if (!released) throw unconfirmed(new Error("the recovered provider HOME lease could not be released"));
   }
 
   /** A worker-private reference receipt. Cancellation never re-resolves a mutable HOME alias. */
@@ -740,8 +975,8 @@ export class ProviderHomeLeaseRegistry {
     return this.acquireReceiptFor(requestedHome, provider, profile);
   }
 
-  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext): { first: boolean; cancel: () => boolean } {
-    const first = this.acquireHomeFor(requestedHome, provider, profile);
+  private acquireReceiptFor(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization, create = true): { first: boolean; cancel: () => boolean } {
+    const first = this.acquireHomeFor(requestedHome, provider, profile, authorization, create);
     const home = this.lastAcquisitionHome!;
     const held = this.held.get(home);
     if (!held) throw new Error("acquisition has no private reference proof");
@@ -788,18 +1023,21 @@ export class ProviderHomeLeaseRegistry {
   }
 
   /**
-   * Worker-internal (#3239): decide whether a removed account's HOME may be deleted while holding
+   * Worker-internal (#3239): retire a removed account's profile grants while holding
    * its lease. Like a marker change it skips the grant check (this control plane's grant may already
    * be revoked), drops every grant of `controlPlaneInstanceId` from the marker, and then drops the
    * reference taken here. True only when that released the lease (no other reference was held here)
-   * and the marker grants no other control plane; an unverifiable marker is kept.
+   * and the marker grants no other control plane; an unverifiable marker is kept. This boolean
+   * proves no authority to delete after release: a successor may already own the HOME (#3157). With
+   * `expectedProfileId` a marker that does not hold exactly that identity is kept and left unchanged.
    */
-  retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string): boolean {
+  retireProfileHomeWhileHeld(requestedHome: string, provider: "claude" | "codex", controlPlaneInstanceId: string, expectedProfileId?: string): boolean {
     const receipt = this.acquireReceiptFor(requestedHome, provider, PROFILE_CHANGE);
     const home = this.lastAcquisitionHome!;
     let shared: boolean;
     try {
-      const result = retireProviderProfileMarker(readProviderProfileMarker(home, { provider }), { controlPlaneInstanceId });
+      const result = retireProviderProfileMarker(readProviderProfileMarker(home, { provider }),
+        { controlPlaneInstanceId, ...(expectedProfileId !== undefined ? { expectedProfileId } : {}) });
       if (result.changed && result.marker) this.writeProfileMarkerWhileHeld(home, result.marker);
       shared = result.shared;
     } catch (error) {
@@ -810,19 +1048,108 @@ export class ProviderHomeLeaseRegistry {
     return !shared && !this.held.has(home);
   }
 
+  /**
+   * Worker-internal (#3719): copy the Codex API-key sign-in of `sourceHome` into a new managed
+   * profile HOME `<destinationRoot>/<profileId>`, in this one operation. The source must already
+   * exist as a real directory (it is never created), hold no other provider's marker, and be
+   * neither held nor being acquired by this registry, so a running session, sign-in or Agent TUI of
+   * this runner refuses the import instead of lending its reference. Its lease is then taken
+   * exclusively with the source's own profile context, so another owner's lease and a profile not
+   * granted here refuse exactly as an acquisition would. With `user_home` the credential directory
+   * `.codex` is admitted the same way, with its own context, since an account may name it as its
+   * HOME. The credential is read and validated while those leases are held, and the source is
+   * checked unchanged once more; only then is the destination created, given its first marker and a
+   * fresh API-key-only record, before the source is released. Every refusal therefore precedes the
+   * destination and leaves both HOMEs unchanged apart from the source's lease-journal bookkeeping;
+   * a later failure is an I/O failure that retains the new, unrecorded HOME.
+   */
+  importCodexCredentialWhileHeld(input: {
+    sourceHome: string; layout: CodexCredentialLayout; sourceProfile?: ProviderProfileAccess; credentialProfile?: ProviderProfileAccess;
+    destinationRoot: string; profileId: string; grant: ProviderProfileGrant;
+  }): void {
+    const admitted: Array<{ receipt: { cancel: () => boolean }; unchanged: () => void }> = [];
+    const drop = (cause?: unknown) => {
+      let dropped = true;
+      for (const entry of admitted.reverse()) dropped = entry.receipt.cancel() && dropped;
+      admitted.length = 0;
+      if (!dropped) throw new Error("provider credential import could not drop its source reference", { cause });
+    };
+    try {
+      if (!isAbsolute(input.sourceHome)) throw new ProviderCredentialImportRefusal("import_source_unsafe");
+      const home = this.admitImportSource(input.sourceHome, input.sourceProfile, admitted);
+      const credentialDirectory = input.layout === "codex_home" ? home
+        : this.admitImportSource(join(home, ".codex"), input.credentialProfile, admitted);
+      const credential = readCodexCredentialSource(credentialDirectory);
+      // The last source check: nothing after it refuses, so a refusal never leaves a destination.
+      for (const entry of admitted) entry.unchanged();
+      credential.verifyUnchanged();
+      const destination = createManagedProviderProfileHome(input.destinationRoot, input.profileId);
+      const target = this.acquireReceiptFor(destination, "codex", PROFILE_CHANGE);
+      const destinationHome = this.lastAcquisitionHome!;
+      try {
+        if (!target.first) throw new Error("a new managed profile HOME was already held");
+        const created = createProviderProfileMarker(readProviderProfileMarker(destinationHome, { provider: "codex" }),
+          { provider: "codex", profileId: input.profileId, grant: input.grant });
+        this.writeProfileMarkerWhileHeld(destinationHome, created.marker);
+        publishCodexCredential(destinationHome, codexApiKeyRecord(credential.apiKey));
+      } catch (error) {
+        if (!target.cancel()) throw new Error("provider credential import could not drop its new profile's reference", { cause: error });
+        throw error;
+      }
+      if (!target.cancel()) throw new Error("provider credential import could not drop its new profile's reference");
+    } catch (error) {
+      drop(error);
+      throw error;
+    }
+    drop();
+  }
+
+  /** #3719: admit one existing source directory of an import: a real directory that this registry
+   * neither holds nor is acquiring, without another provider's marker, leased exclusively and
+   * without creating it. Its receipt joins `admitted`; returns the canonical path. */
+  private admitImportSource(requested: string, profile: ProviderProfileAccess | undefined,
+    admitted: Array<{ receipt: { cancel: () => boolean }; unchanged: () => void }>): string {
+    let root: Stats;
+    try { root = lstatSync(requested); } catch (error) {
+      throw new ProviderCredentialImportRefusal((error as NodeJS.ErrnoException).code === "ENOENT" ? "import_source_missing" : "import_source_unsafe");
+    }
+    if (root.isSymbolicLink() || !root.isDirectory()) throw new ProviderCredentialImportRefusal("import_source_unsafe");
+    let home: string;
+    try { home = realpathSync(requested); } catch { throw new ProviderCredentialImportRefusal("import_source_missing"); }
+    if (this.held.has(home) || this.failedInitializations.has(home) || this.pendingCompletions.has(home) || this.pendingMigrations.has(home)) {
+      throw new ProviderCredentialImportRefusal("import_source_held");
+    }
+    const marker = readProviderProfileMarker(home);
+    if (marker.state === "present" && marker.marker.provider !== "codex") throw new ProviderCredentialImportRefusal("import_source_foreign");
+    const receipt = this.acquireReceiptFor(requested, "codex", profile, undefined, false);
+    const unchanged = () => {
+      let now: Stats;
+      try { now = lstatSync(requested); } catch { throw new ProviderCredentialImportRefusal("import_source_changed"); }
+      if (now.isSymbolicLink() || now.dev !== root.dev || now.ino !== root.ino) throw new ProviderCredentialImportRefusal("import_source_changed");
+    };
+    admitted.push({ receipt, unchanged });
+    if (!receipt.first) throw new ProviderCredentialImportRefusal("import_source_held");
+    if (this.lastAcquisitionHome !== home) throw new ProviderCredentialImportRefusal("import_source_changed");
+    unchanged();
+    return home;
+  }
+
   /** Profile grants are checked against the canonical HOME before any lease journal I/O, and again
-   * on every re-entrant reference, so a revoked grant stops new references to a held HOME. */
-  private assertProfileAccess(home: string, lockDir: string, profile: ProfileContext): void {
+   * on every re-entrant reference, so a revoked grant stops new references to a held HOME. Returns
+   * the profile whose marker grants this control plane, which is what authorizes recovering another
+   * owner's abandoned lease (#3241); marker changes and marker-less HOMEs authorize none. */
+  private assertProfileAccess(home: string, lockDir: string, profile: ProfileContext): string | undefined {
     const read = readProviderProfileMarker(home);
     // An unsafe `.agent-manager` was refused by the ancestry check before profiles existed; keep
     // that exact refusal so marker-less homes behave as before.
     if (read.state === "unverifiable" && read.cause === "ancestry") throw refusal(lockDir, "has unsafe metadata directory ancestry");
-    if (profile === PROFILE_CHANGE) return;
+    if (profile === PROFILE_CHANGE) return undefined;
     const decision = decideProviderProfileAccess(read, profile, this.controlPlaneInstanceId);
     if (!decision.allowed) throw new ProviderHomeLeaseRefusal(decision.reason, LEASE_WORKER_ERRORS[decision.reason], decision.reason);
+    return decision.profileId;
   }
 
-  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext): boolean {
+  private acquireHomeAvailable(requestedHome: string, provider: string, profile: ProfileContext, authorization?: LeaseRecoveryAuthorization, create = true): boolean {
     if (!PROVIDER_KEY.test(provider)) throw new Error("provider home lease key is invalid");
     if (!isAbsolute(requestedHome)) throw new Error("provider HOME must be absolute");
     let home: string;
@@ -830,7 +1157,9 @@ export class ProviderHomeLeaseRegistry {
       // A newly configured account is expected to be Login Required before the provider creates
       // its files. Establish the private root before canonicalizing it so the ownership boundary,
       // rather than a raw ENOENT containing the runner-local path, is the first launch result.
-      mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
+      // A recovery only ever succeeds a lease that already exists, so it creates nothing, and an
+      // import's source must already exist (#3719).
+      if (!authorization && create) mkdirSync(requestedHome, { recursive: true, mode: 0o700 });
       home = realpathSync(requestedHome);
     } catch {
       throw new Error("provider credential home is unavailable");
@@ -841,8 +1170,11 @@ export class ProviderHomeLeaseRegistry {
     // HOME. Lease the whole effective home rather than pretending those mutations are disjoint.
     const lockDir = join(root, "mutable-home.lock");
     const key = home;
-    this.assertProfileAccess(home, lockDir, profile);
+    const recoveryProfileId = this.assertProfileAccess(home, lockDir, profile);
     const borrowed = this.held.get(key);
+    // A lease this runner holds or is still initializing is no stale record of anyone's, and an
+    // authorized recovery succeeds an existing journal's exact tip: it never creates or initializes one.
+    if (authorization && (borrowed || this.failedInitializations.has(key) || !lstatExists(lockDir))) throw staleTipChanged(lockDir);
     if (borrowed) {
       const pending = this.pendingCompletions.get(key);
       if (pending) return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, pending));
@@ -884,6 +1216,7 @@ export class ProviderHomeLeaseRegistry {
       if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
       exists = false;
     }
+    if (authorization && !exists) throw staleTipChanged(lockDir);
     if (!exists) {
       // Publish the exclusive ownership proof BEFORE creating the directory. A crash at either
       // subsequent instruction leaves a same-host/owner/dead-PID proof, never an unowned empty lock.
@@ -907,17 +1240,17 @@ export class ProviderHomeLeaseRegistry {
         // authorize recreating that directory; never mkdir on a foreign or live reservation.
         let initialization: LeaseChain;
         try { initialization = readChain(lockDir); } catch (error) { throw verificationRefusal(lockDir, error); }
-        if (initialization.tip.record.version !== 2 || initialization.tip.record.state !== "released") {
-          this.assertAbandoned(initialization.tip.record, lockDir);
+        if (!isJournalTransition(initialization.tip.record) || initialization.tip.record.state !== "released") {
+          this.assertAbandoned(initialization.tip.record, lockDir, recoveryProfileId);
         }
         try { mkdirSync(lockDir, { mode: 0o700 }); } catch (error) {
           if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
         }
         delete record.recoveredEntriesHash;
-        this.transitionExistingLease(key, root, lockDir, record);
+        this.transitionExistingLease(key, root, lockDir, record, recoveryProfileId);
       }
     } else {
-      this.transitionExistingLease(key, root, lockDir, record);
+      this.transitionExistingLease(key, root, lockDir, record, recoveryProfileId, authorization);
     }
     this.rememberAcquisition(key, root, lockDir, record);
     return withLeaseIoOptions({ fenceWaitMs: 10000 }, () => this.finishAcquisition(key, root, lockDir, record));
@@ -934,11 +1267,14 @@ export class ProviderHomeLeaseRegistry {
     if (record.previousLeaseId) this.mirrorRecord(root, lockDir, `next-${record.previousLeaseId}.json`);
     // This fixed incompatible marker prevents a rollback binary from ignoring the external
     // journal even when crash recovery recreated an empty directory.
-    if (readChain(lockDir).anchor?.record.version === 2) {
+    if (isJournalTransition(readChain(lockDir).anchor?.record)) {
       this.mirrorRecord(root, lockDir, RECOVERY_MARKER, "checkpoint.json", true);
       readChain(lockDir);
     }
-    const migrationRequired = this.pendingMigrations.has(key) || (() => { const chain = readChain(lockDir); return chain.external && chain.transitions >= LIMITS.hardTransitions - 1; })();
+    const migrationRequired = this.pendingMigrations.has(key) || (() => {
+      const chain = readChain(lockDir);
+      return !chain.external || chain.transitions >= LIMITS.hardTransitions - 1;
+    })();
     if (migrationRequired) this.pendingMigrations.add(key);
     const compacted = this.compactHeld(root, lockDir, record.leaseId);
     if (migrationRequired && !compacted) throw refusal(lockDir, "requires successful bounded catch-up before this HOME can be granted; preserve the acquired reservation and retry with this registry");
@@ -1004,7 +1340,7 @@ export class ProviderHomeLeaseRegistry {
     previousRecordHash: string | null,
   ): ProviderHomeLeaseRecordV2 {
     return {
-      version: 2,
+      version: this.processEvidence?.version === 2 ? 5 : 2,
       state: "active",
       ownerHash: this.ownerHash,
       leaseId: randomUUID(),
@@ -1014,18 +1350,28 @@ export class ProviderHomeLeaseRegistry {
       hostname: this.hostname,
       provider,
       createdAt: new Date().toISOString(),
+      ...(this.processEvidence ? { process: { ...this.processEvidence } } : {}),
     };
   }
 
-  private transitionExistingLease(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
+  private transitionExistingLease(
+    key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2, recoveryProfileId?: string,
+    authorization?: LeaseRecoveryAuthorization,
+  ): void {
     let chain: LeaseChain;
     try {
       chain = readChain(lockDir);
     } catch (error) {
+      // A first migration can hold the permanent fence before selecting its
+      // initial anchor. Temporary I/O refusals are not malformed legacy state
+      // and must never enter partial-journal recovery.
+      if (error instanceof LeaseIoError && (error.kind === "busy" || error.kind === "unavailable")) throw error;
       // A published recovery checkpoint is authoritative. Corruption in it or its retained
       // evidence must never trigger another recovery that could erase an ownership boundary.
       try { lstatSync(join(root, RECOVERY_MARKER)); } catch (markerError) {
         if ((markerError as NodeJS.ErrnoException).code === "ENOENT") {
+          // A partial in-lock journal has no single tip an authorization could have named.
+          if (authorization) throw staleTipChanged(lockDir);
           this.recoverPartialJournal(key, root, lockDir, replacement);
           return;
         }
@@ -1036,10 +1382,15 @@ export class ProviderHomeLeaseRegistry {
     if (chain.anchor?.record.version === 4 && chain.transitions >= LIMITS.hardTransitions - 1) {
       throw refusal(lockDir, `has reached the ${LIMITS.hardTransitions}-transition growth cap; compaction is unavailable; preserve the last valid chain`);
     }
-    if (existing.record.version === 2 && existing.record.state === "released") {
+    delete replacement.recovery;
+    const released = isJournalTransition(existing.record) && existing.record.state === "released";
+    // The authorization names one unreleased record; any other tip, released or not, is not it.
+    if (authorization && (released || existing.hash !== authorization.staleTipHash)) throw staleTipChanged(lockDir);
+    if (released) {
       // An orderly release is an explicit handoff and may pass the HOME to a different owner.
     } else {
-      this.assertAbandoned(existing.record, lockDir);
+      const recovery = this.assertAbandoned(existing.record, lockDir, recoveryProfileId, authorization);
+      if (recovery) replacement.recovery = recovery;
     }
 
     this.beforeTransitionPublishForTest?.();
@@ -1061,13 +1412,69 @@ export class ProviderHomeLeaseRegistry {
       throw error;
     }
     this.rememberAcquisition(key, root, lockDir, replacement);
+    const recoveryProof = replacement.recovery?.proof === "authorized" ? replacement.recovery.basis : replacement.recovery?.proof;
+    if (recoveryProof === "linux_cgroup_unit_removed") {
+      try { this.onDiagnostic?.({ event: "provider_home_boundary_recovered", leaseId: replacement.leaseId,
+        message: "Provider HOME recovered after its recorded cgroup and enclosing delegated unit retired on the same boot. Kernel cgroup v2 removal requires emptiness and forbids rename. Lifecycle proof does not cover deliberate same-user cgroup migration by provider code." }); }
+      catch { /* diagnostics cannot change published ownership */ }
+    }
     this.afterTransitionPublishForTest?.();
   }
 
-  private assertAbandoned(record: ProviderHomeLeaseRecord, lockDir: string): void {
+  /**
+   * Refuse unless `record`'s lease is provably abandoned and this owner may succeed it. A record
+   * without lifecycle evidence (older runners, other platforms) is reclaimed only by its own owner
+   * once its PID is gone, as before. A record with evidence needs proof that nothing it launched
+   * survives (#3241), whoever succeeds it; another owner additionally needs `recoveryProfileId`,
+   * the profile whose marker grants this control plane. Returns the note a recovery publishes.
+   *
+   * With an Owner/Admin `authorization` for this exact record (#3241 part 2), any owner's record may
+   * be succeeded without a profile grant, but never on weaker proof: a record with evidence still
+   * needs that proof, and one without evidence needs a boot at least a minute after it was written
+   * (its PID alone is never consulted, since a later boot may reuse it).
+   */
+  private assertAbandoned(
+    record: ProviderHomeLeaseRecord, lockDir: string, recoveryProfileId?: string, authorization?: LeaseRecoveryAuthorization,
+  ): LeaseRecoveryNote | undefined {
     if (record.hostname !== this.hostname) throw refusal(lockDir, `is leased by host ${record.hostname}; use an isolated OS account`, false, "foreign_host");
-    if (this.isProcessAlive(record.pid)) throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`, false, "busy");
-    if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner", false, "foreign_owner");
+    const evidence = record.version === 1 ? undefined : record.process;
+    if (authorization) {
+      const authorized = { proof: "authorized" as const, authorizationId: authorization.authorizationId, ...(recoveryProfileId ? { profileId: recoveryProfileId } : {}) };
+      if (evidence) return { ...authorized, basis: this.proveEvidence(evidence, record.pid, lockDir) };
+      const booted = this.bootTimeMs();
+      const written = Date.parse(record.createdAt);
+      if (booted === null || !Number.isFinite(written) || booted - written < BOOT_PROOF_MARGIN_MS) {
+        throw refusal(lockDir, "has a stale lease written during the current boot; it can be recovered only after the host restarts", false, "no_reboot_proof");
+      }
+      return { ...authorized, basis: "booted_after" };
+    }
+    if (!evidence) {
+      if (this.isProcessAlive(record.pid)) throw refusal(lockDir, `is already in use by process ${record.pid}; use bwrap or an isolated OS account`, false, "busy");
+      if (record.ownerHash !== this.ownerHash) throw refusal(lockDir, "has a stale lease from another attested owner", false, "foreign_owner");
+      return undefined;
+    }
+    const proof = this.proveEvidence(evidence, record.pid, lockDir);
+    if (record.ownerHash === this.ownerHash) return { proof };
+    if (!recoveryProfileId) throw refusal(lockDir, "has a stale lease from another attested owner", false, "foreign_owner");
+    return { proof, profileId: recoveryProfileId };
+  }
+
+  private proveEvidence(evidence: LeaseProcessEvidence, pid: number, lockDir: string): LeaseAbandonmentProof {
+    const result = proveLeaseAbandoned(evidence, pid, this.processProbe);
+    if (result.proven) return result.proof;
+    if (result.reason === "runner_alive") {
+      let cgroupMembership: ProviderHomeBlockingProcess["cgroupMembership"] = "unavailable";
+      if (evidence.containment?.kind === "linux-cgroup-v2") {
+        try { cgroupMembership = this.processProbe?.membership?.(pid, evidence.startTime, evidence.containment) ?? "unavailable"; }
+        catch { /* Best-effort diagnostics do not change the live-holder refusal. */ }
+      }
+      throw refusal(lockDir, `is already in use by process ${pid}; use bwrap or an isolated OS account`, false, "holder_alive", { pid, startTime: evidence.startTime, kind: "recorded_runner", cgroupMembership });
+    }
+    if (result.reason === "marked_process") throw refusal(lockDir, "is still used by a process the leasing runner launched; stop that process and retry", false, "process_survivor", result.blockingProcess);
+    if (result.reason === "boundary_populated") throw refusal(lockDir, "still has a surviving provider or helper in its recorded boundary; stop that work and retry", false, "boundary_survivor", result.blockingProcess);
+    if (result.reason === "boundary_unverifiable") throw refusal(lockDir, leaseContainmentGuidance(evidence.containment), false, "boundary_unverifiable");
+    throw refusal(lockDir, `has a stale lease whose processes cannot all be inspected. ${leaseContainmentGuidance(evidence.containment)}`, false,
+      evidence.containment?.kind === "marker-parent-links" && evidence.containment.reason === "cgroup-not-delegated" ? "process_uninspectable_not_delegated" : "process_uninspectable", result.blockingProcess);
   }
 
   private recoverPartialJournal(key: string, root: string, lockDir: string, replacement: ProviderHomeLeaseRecordV2): void {
@@ -1083,18 +1490,18 @@ export class ProviderHomeLeaseRegistry {
         const genesis = GENESIS_MARKER.exec(name);
         const next = NEXT_MARKER.exec(name);
         const valid = name === LEGACY_MARKER ? record.version === 1 :
-          genesis ? record.version === 2 && record.state === "active" && genesis[1] === record.leaseId &&
+          genesis ? isJournalTransition(record) && record.state === "active" && genesis[1] === record.leaseId &&
             record.previousLeaseId === null && record.previousRecordHash === null :
-          next ? record.version === 2 && next[1] === record.previousLeaseId &&
+          next ? isJournalTransition(record) && next[1] === record.previousLeaseId &&
             typeof record.previousRecordHash === "string" : false;
-        if (!valid || byId.has(record.leaseId) || (record.version === 2 && record.recoveredEntriesHash !== undefined)) throw unexpectedEntries(lockDir);
+        if (!valid || byId.has(record.leaseId) || (isJournalTransition(record) && record.recoveredEntriesHash !== undefined)) throw unexpectedEntries(lockDir);
         this.assertAbandoned(record, lockDir);
         byId.set(record.leaseId, value);
         return { name, ...value };
       });
       for (const value of records) {
         const record = value.record;
-        if (record.version !== 2 || record.previousLeaseId === null) continue;
+        if (!isJournalTransition(record) || record.previousLeaseId === null) continue;
         const previous = byId.get(record.previousLeaseId);
         if (previous) validateTransition(previous, value, lockDir);
         const seen = new Set([record.leaseId]);
@@ -1102,7 +1509,7 @@ export class ProviderHomeLeaseRegistry {
         while (ancestor) {
           if (seen.has(ancestor.record.leaseId)) throw unexpectedEntries(lockDir);
           seen.add(ancestor.record.leaseId);
-          ancestor = ancestor.record.version === 2 && ancestor.record.previousLeaseId
+          ancestor = isJournalTransition(ancestor.record) && ancestor.record.previousLeaseId
             ? byId.get(ancestor.record.previousLeaseId) : undefined;
         }
       }
@@ -1170,10 +1577,22 @@ export class ProviderHomeLeaseRegistry {
         };
         const indexes = (retired: LeaseRetirementEntry[]): number[] => {
           const index = new Map(snapshot.entries.map((entry, i) => [`${entry.directory}/${entry.name}`, i]));
-          return retired.flatMap((entry) => { const i = index.get(`${entry.directory}/${entry.name}`); return i === undefined ? [] : [i]; });
+          const result = retired.flatMap((entry) => { const i = index.get(`${entry.directory}/${entry.name}`); return i === undefined ? [] : [i]; });
+          // Windows retains the last moved inode at this fixed witness. Its
+          // original name may already be absent; carry the selected tuple's
+          // physical witness into the native cleanup manifest as well.
+          const aliasIndex = index.get(`root/${RETIREMENT_ALIAS}`);
+          if (aliasIndex !== undefined && !result.includes(aliasIndex)) {
+            const alias = snapshot.entries[aliasIndex]!;
+            const hash = withSnapshot(snapshot, () => readRecord(join(root, RETIREMENT_ALIAS))).hash;
+            if (retired.some(entry => entry.device === alias.device && entry.inode === alias.inode && entry.hash === hash)) result.push(aliasIndex);
+          }
+          return result;
         };
         let chain = owned();
-        if (!chain.external) return true;
+        // A new journal has no historical successor to checkpoint yet. Its first
+        // release remains bounded; the following acquisition migrates the chain.
+        if (!chain.external && chain.transitions === 0) return true;
         if (chain.retired.some((entry) => snapshot.entries.some((file) => file.directory === entry.directory && file.name === entry.name))) {
           apply(chain, [{ name: "", raw: Buffer.alloc(0), copiesOwner: false, retire: indexes(chain.retired) }]);
           chain = owned();
@@ -1182,33 +1601,85 @@ export class ProviderHomeLeaseRegistry {
         // A completed candidate commits to its prior verified anchor and historical tip. Prove
         // that selecting it leaves this newly acquired Q as the exact active successor first.
         const candidates = snapshot.entries.filter((entry) => entry.directory === "root" && CHECKPOINT_SLOTS.includes(entry.name));
+        const bootstrapCandidates = new Set<string>();
+        if (!chain.anchor && candidates.length) {
+          const genesis = snapshot.entries.find(item => item.directory === "lock" && (GENESIS_MARKER.test(item.name) || item.name === LEGACY_MARKER));
+          const guard = snapshot.entries.find(item => item.directory === "lock" && item.name === FORMAT_GUARD);
+          for (const candidate of candidates) {
+            const pending = withSnapshot(snapshot, () => readRecord(join(root, candidate.name)));
+            const retired = verifyCheckpoint(pending, lockDir);
+            if (pending.record.version !== 4 || !genesis || !guard ||
+                pending.record.checkpoint.previousAnchorHash !== hashText(genesis.raw.toString("utf8")) ||
+                pending.record.checkpoint.previousHistoryHash !== pending.record.checkpoint.previousAnchorHash ||
+                pending.record.ownerHash !== this.ownerHash || pending.record.hostname !== this.hostname ||
+                pending.record.checkpoint.guardHash !== hashText(guard.raw.toString("utf8")) ||
+                pending.record.checkpoint.guardDevice !== guard.device || pending.record.checkpoint.guardInode !== guard.inode ||
+                !chain.evidence.some(item => item.directory === "lock" && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven first checkpoint candidate");
+            withSnapshot(snapshot, () => verifyRetired(root, lockDir, retired));
+            bootstrapCandidates.add(candidate.name);
+          }
+        }
         for (const entry of candidates.slice().reverse()) {
           if (chain.retired.some((item) => item.directory === "root" && item.name === entry.name)) continue;
           const pending = withSnapshot(snapshot, () => readRecord(join(root, entry.name)));
           const retired = verifyCheckpoint(pending, lockDir);
-          if (pending.record.version !== 4 || !chain.anchor || pending.record.checkpoint.previousAnchorHash !== chain.anchor.hash ||
+          if (!chain.anchor) {
+            // Preserve the complete in-lock chain until an anchor is selected.
+            // Exact aliases of the verified successors make the candidate's
+            // hypothetical canonical chain retain this private acquired tip.
+            if (pending.record.version !== 4 || !bootstrapCandidates.has(entry.name)) throw new Error("unproven first checkpoint candidate");
+            let cursor = JSON.parse(pending.record.checkpoint.previousTip) as ProviderHomeLeaseRecord;
+            for (let steps = 0; cursor.leaseId !== chain.tip.record.leaseId; steps++) {
+              if (steps >= LIMITS.migrationEntries) throw new Error("legacy successor migration limit exceeded");
+              const name = `next-${cursor.leaseId}.json`;
+              const source = withSnapshot(snapshot, () => readRecord(join(lockDir, name)));
+              const alias = snapshot.entries.find(item => item.directory === "root" && item.name === name);
+              const original = snapshot.entries.find(item => item.directory === "lock" && item.name === name)!;
+              if (alias) {
+                if (alias.device !== original.device || alias.inode !== original.inode || !alias.raw.equals(original.raw)) throw new Error("legacy successor alias changed");
+                cursor = source.record; continue;
+              }
+              const plan = ioPlan(snapshot, source, [{ name, raw: Buffer.alloc(0), copiesOwner: false, retire: [] }]);
+              const work = applyLeaseIoPlan(plan, 3, remainingBudget()); spendVerificationWork(work.records, work.bytes);
+              snapshot = capture(root); chain = owned();
+              cursor = source.record;
+            }
+          }
+          if (pending.record.version !== 4 || (chain.anchor && pending.record.checkpoint.previousAnchorHash !== chain.anchor.hash) ||
               pending.record.ownerHash !== this.ownerHash || pending.record.hostname !== this.hostname ||
-              !chain.evidence.some((item) => item.directory === "root" && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven completed checkpoint candidate");
+              !chain.evidence.some((item) => item.directory === (chain.anchor ? "root" : "lock") && item.hash === (pending.record as ProviderHomeLeaseRecordV4).checkpoint.previousTipHash)) throw new Error("unproven completed checkpoint candidate");
           withSnapshot(snapshot, () => verifyRetired(root, lockDir, retired));
-          const oldAnchor = snapshot.entries.find((item) => item.directory === "root" && item.name === RECOVERY_MARKER)!;
+          const selectedCandidate = snapshot.entries.find(item => item.directory === "root" && item.name === entry.name)!;
+          if (!selectedCandidate.raw.equals(entry.raw)) throw new Error("completed candidate changed during successor migration");
+          const oldAnchor = snapshot.entries.find((item) => item.directory === "root" && item.name === RECOVERY_MARKER);
           const hypothetical = { ...snapshot, entries: snapshot.entries.filter((file) => file.name !== RECOVERY_MARKER || file.directory !== "root")
-            .filter((file) => file !== entry)
+            .filter((file) => file !== selectedCandidate)
             // Selection removes the old anchor's canonical hard link; its two remaining
             // verified mirrors must reflect that physical post-selection count.
-            .map((file) => file.device === oldAnchor.device && file.inode === oldAnchor.inode ? { ...file, links: file.links - 1 } : file)
-            .concat({ ...entry, name: RECOVERY_MARKER }) };
+            .map((file) => oldAnchor && file.device === oldAnchor.device && file.inode === oldAnchor.inode ? { ...file, links: file.links - 1 } : file)
+            .concat({ ...selectedCandidate, name: RECOVERY_MARKER }) };
           const after = withSnapshot(hypothetical, () => readChainAt(lockDir, root));
           if (!sameTip(chain.tip, after.tip)) throw new Error("completed candidate does not preserve the acquired successor");
           apply(chain, [{ name: entry.name, raw: entry.raw, copiesOwner: false, retire: indexes(retired) }]);
           chain = owned(); adopted = true; break;
         }
-        if (chain.transitions < LIMITS.compactAfter && !adopted) return true;
-        if (chain.tip.record.version !== 2 || !chain.anchor) throw new Error("unsupported checkpoint tip");
+        if (chain.external && chain.transitions < LIMITS.compactAfter && !adopted) return true;
+        if (!isJournalTransition(chain.tip.record)) throw new Error("unsupported checkpoint tip");
+        // In-lock journals predate the canonical anchor. They have already passed complete
+        // chain validation and abandonment admission, and this registry owns the exact new
+        // active successor. Keep their genesis as the history root of the first checkpoint.
+        const legacy = !chain.anchor;
+        const historyRoot = chain.anchor ?? withSnapshot(snapshot, () => {
+          const genesis = snapshot.entries.find(entry => entry.directory === "lock" &&
+            (GENESIS_MARKER.test(entry.name) || entry.name === LEGACY_MARKER));
+          if (!genesis) throw new Error("legacy journal genesis is unavailable");
+          return readRecord(join(lockDir, genesis.name));
+        });
         if (!snapshot.entries.some((entry) => entry.directory === "lock" && entry.name === FORMAT_GUARD)) {
           const guard = Buffer.from(`${JSON.stringify({ ...chain.tip.record, version: 4, protocol: "bounded-canonical-checkpoint", fenceBackend: process.platform === "win32" ? "lockfileex" : "flock", previousLeaseId: null, previousRecordHash: null })}\n`);
           apply(chain, [], guard); chain = owned();
         }
-        if (chain.tip.record.version !== 2 || !chain.anchor) throw new Error("unsupported checkpoint tip");
+        if (!isJournalTransition(chain.tip.record)) throw new Error("unsupported checkpoint tip");
         const retired = new Map<string, LeaseRetirementEntry>();
         const add = (entry: LeaseIoEntry, name = entry.name, directory = entry.directory) => {
           retired.set(`${directory}/${name}`, { directory, name, device: entry.device, inode: entry.inode, hash: withSnapshot(snapshot, () => readRecord(join(root, entry.directory === "root" ? "" : "mutable-home.lock", entry.name))).hash });
@@ -1216,14 +1687,23 @@ export class ProviderHomeLeaseRegistry {
         const evidence = new Set(chain.evidence.map((entry) => `${entry.directory}/${entry.name}`));
         const prior = new Set(chain.retired.map((entry) => `${entry.directory}/${entry.name}`));
         for (const entry of snapshot.entries) {
-          if (evidence.has(`${entry.directory}/${entry.name}`) || prior.has(`${entry.directory}/${entry.name}`) || entry.directory === "root" && entry.name === RETIREMENT_ALIAS) {
+          if (legacy && entry.directory === "lock" && entry.name !== FORMAT_GUARD && entry.name !== LEGACY_MARKER ||
+              evidence.has(`${entry.directory}/${entry.name}`) || prior.has(`${entry.directory}/${entry.name}`) || entry.directory === "root" && (entry.name === RETIREMENT_ALIAS || bootstrapCandidates.has(entry.name))) {
             add(entry);
             if (entry.directory === "root" && NEXT_MARKER.test(entry.name) && !snapshot.entries.some((file) => file.directory === "lock" && file.name === entry.name)) {
               add(entry, entry.name, "lock");
             }
           }
         }
-        if (chain.anchor.record.version === 2) {
+        if (legacy) {
+          // Canonical checkpoints commit to a root-side previous-tip tuple. The exact
+          // in-lock inode supplies that tuple even when its optional root alias never
+          // existed; no missing alias authorizes ownership or evidence retirement.
+          const tipEntry = snapshot.entries.find(entry => entry.directory === "lock" && entry.raw.toString("utf8") === chain.tip.raw);
+          if (!tipEntry) throw new Error("legacy acquired tip is unavailable");
+          add(tipEntry, tipEntry.name, "root");
+        }
+        if (chain.anchor && isJournalTransition(chain.anchor.record)) {
           const anchorEntry = snapshot.entries.find((entry) => entry.directory === "root" && entry.name === RECOVERY_MARKER)!;
           for (const name of ["checkpoint.json", `lease-${chain.anchor.record.leaseId}.json`]) if (!retired.has(`lock/${name}`)) add(anchorEntry, name, "lock");
         }
@@ -1235,13 +1715,15 @@ export class ProviderHomeLeaseRegistry {
         const partial: Omit<LeaseCheckpointProof, "historyHash"> = {
           migration: snapshot.entries.filter((entry) => entry.directory === "root").length >= LIMITS.directoryEntries - 4 ||
             snapshot.entries.filter((entry) => entry.directory === "lock").length >= LIMITS.directoryEntries - 4,
-          previousTip: chain.tip.raw, previousTipHash: chain.tip.hash, previousAnchorHash: chain.anchor.hash,
-          previousHistoryHash: chain.anchor.record.version === 4 ? chain.anchor.record.checkpoint.historyHash : chain.anchor.hash,
+          previousTip: chain.tip.raw, previousTipHash: chain.tip.hash, previousAnchorHash: historyRoot.hash,
+          previousHistoryHash: historyRoot.record.version === 4 ? historyRoot.record.checkpoint.historyHash : historyRoot.hash,
           guardHash: withSnapshot(snapshot, () => readRecord(join(lockDir, FORMAT_GUARD))).hash, guardDevice: guard.device, guardInode: guard.inode,
           retired: [...retired.values()],
         };
         const checkpoint: ProviderHomeLeaseRecordV4 = { ...chain.tip.record, version: 4, previousLeaseId: null, previousRecordHash: null,
-          recoveredEntriesHash: chain.anchor.record.version === 1 ? undefined : chain.anchor.record.recoveredEntriesHash,
+          recoveredEntriesHash: legacy
+            ? recordsHash(historyRoot.record.version === 1 ? [{ name: LEGACY_MARKER, hash: historyRoot.hash }] : [])
+            : historyRoot.record.version === 1 ? undefined : historyRoot.record.recoveredEntriesHash,
           checkpoint: { ...partial, historyHash: checkpointHistory(partial) } };
         const raw = Buffer.from(`${JSON.stringify(checkpoint)}\n`);
         if (raw.length > LIMITS.checkpointBytes) throw new Error("checkpoint byte limit exceeded");
@@ -1309,7 +1791,7 @@ export class ProviderHomeLeaseRegistry {
           current.record.leaseId !== leaseId || !sameAcquiredTip(current, acquiredHash)) throw unexpectedEntries(lockDir);
       const released: ProviderHomeLeaseRecordV2 = {
         ...current.record,
-        version: 2,
+        version: current.record.process?.version === 2 ? 5 : 2,
         state: "released",
         leaseId: randomUUID(),
         previousLeaseId: current.record.leaseId,
@@ -1319,6 +1801,8 @@ export class ProviderHomeLeaseRegistry {
       // A transition is a small v2 record, never a recursive copy of checkpoint history.
       delete (released as unknown as Partial<ProviderHomeLeaseRecordV4>).checkpoint;
       delete released.recoveredEntriesHash;
+      // A recovery note describes how the active record was acquired, never a release.
+      delete released.recovery;
       const name = `next-${current.record.leaseId}.json`;
       publishRecord(root, join(chain.external ? root : lockDir, name), released);
       if (chain.external) this.mirrorRecord(root, lockDir, name);

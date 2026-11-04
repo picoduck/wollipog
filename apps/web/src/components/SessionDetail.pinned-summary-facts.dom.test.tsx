@@ -246,6 +246,35 @@ test("the Pinned Summary states the account, branch, pull request and changes on
   });
 });
 
+test("the Pinned Summary's Session section shows the whole session ID after the account, and copies it (#3897)", async () => {
+  const written: string[] = [];
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: async (text: string) => { written.push(text); } },
+  });
+  try {
+    await withSession({ phone: false }, async (container) => {
+      const sessionSection = container.querySelector<HTMLElement>('aside.ps[aria-label="Pinned Summary"] .ps-sec');
+      assert.ok(sessionSection);
+      const rows = [...sessionSection.querySelectorAll<HTMLElement>(".ps-row")];
+      const labels = rows.map((candidate) => candidate.querySelector(":scope > .k")?.textContent);
+      assert.equal(labels.indexOf("Session ID"), labels.indexOf("Account") + 1, `it follows Account (${labels.join(", ")})`);
+      assert.ok(labels.indexOf("Session ID") < labels.indexOf("Updated"), "and comes before Updated");
+      const row = rows[labels.indexOf("Session ID")]!;
+      assert.equal(row.tagName, "DIV", "a static fact, not a navigating row");
+      assert.equal(row.querySelector(":scope > .v > .ps-mono")?.textContent, session.id, "the whole id, in mono");
+      const copy = row.querySelector<HTMLButtonElement>(':scope > button[aria-label="Copy Session ID"]');
+      assert.ok(copy, "a Copy Session ID button after the value");
+      assert.ok(copy.classList.contains("icon-btn") && copy.classList.contains("sm"));
+      await act(async () => { copy.click(); });
+      await settle();
+      assert.deepEqual(written, [session.id]);
+    });
+  } finally {
+    delete (domWindow.navigator as { clipboard?: unknown }).clipboard;
+  }
+});
+
 test("a legacy runner with no Git read names the session record's branch, not a made-up one", async () => {
   await withSession({ phone: false, runner: { protocolVersion: 75 }, gitNeverSettles: true }, async (container) => {
     const summaryAside = container.querySelector<HTMLElement>('aside.ps[aria-label="Pinned Summary"]');
@@ -267,6 +296,7 @@ const ORCHESTRATOR: Partial<SessionView> = {
       merged_branch_deletion: "human",
       follow_up_issue_publication: "orchestrator",
       ui_evidence_approval: "human",
+      review_round_extension: "human",
     },
   },
 };
@@ -285,7 +315,7 @@ test("an Orchestrator's Pinned Summary states how its requests and decisions are
       .find((candidate) => candidate.querySelector(":scope > .k")?.textContent === label);
     for (const [label, value] of [
       ["Child Session Requests", "Questions"],
-      ["Workflow Decisions", "3 of 5 decisions stay with a person."],
+      ["Workflow Decisions", "4 of 6 decisions stay with a person."],
     ] as const) {
       const fact = row(label);
       assert.ok(fact, `${label} is a Session row`);
@@ -321,7 +351,7 @@ test("the composer's + menu opens Orchestrator Controls from its one Orchestrato
     const item = [...(domWindow.document as unknown as Document).querySelectorAll<HTMLButtonElement>(".menu-item")]
       .find((candidate) => candidate.querySelector(".menu-text")?.textContent === "Orchestrator Controls…");
     assert.ok(item, "the row is in the menu");
-    assert.equal(item.querySelector(".menu-desc")?.textContent, "3 of 5 decisions stay with a person.");
+    assert.equal(item.querySelector(".menu-desc")?.textContent, "4 of 6 decisions stay with a person.");
     await act(async () => item.click());
     await settle();
     assert.ok(orchestratorDialog(), "it opens the dialog");

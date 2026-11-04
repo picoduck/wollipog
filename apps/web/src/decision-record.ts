@@ -142,14 +142,6 @@ export function permissionOptionOutcome(
   return "resolved";
 }
 
-/** The past-tense word for a chosen option: "Allowed", "Rejected", "Rechecked Automatically". */
-export function permissionResolutionLabel(
-  options: ReadonlyArray<Pick<PermissionOption, "optionId" | "kind">>,
-  optionId: string | null | undefined,
-): string {
-  return statusMeta("requestDecision", permissionOptionOutcome(options, optionId)).label;
-}
-
 type PermissionItem = Extract<TimelineItem, { kind: "permission" }>;
 
 /** How a resolved permission ended. A parent's decision uses the same words; the parent is its actor. */

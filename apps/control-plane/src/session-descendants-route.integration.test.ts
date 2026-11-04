@@ -113,7 +113,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       await delay(50);
     }
     assert.ok(healthy, logs);
-    liveDb = ControlPlaneDb.open(database);
+    liveDb = ControlPlaneDb.attach(database);
     for (const mode of ["normal", "orchestrator", "orchestrator-provider", "orchestrator-child", "policy-agent"]) {
       liveDb.updateSessionStatus(mode, "running", Date.now());
       assert.equal(liveDb.setAgentControlCredential(mode, "r", hashToken(`token-${mode}`), Date.now()), true);
@@ -141,7 +141,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     };
     const ordinary = ["fixture-global", "fixture-same-org", "fixture-foreign-org"];
     const humanQuestions = ["fixture-owner-question", "fixture-admin-question", "fixture-other-question"];
-    const ownerDb = ControlPlaneDb.open(database);
+    const ownerDb = ControlPlaneDb.attach(database, { readOnly: true });
     const ownerId = ownerDb.localIdentityContext().userId;
     ownerDb.close();
     // #1448: steering recovery reads and mutations have prompt's descendant scope, even when
@@ -251,6 +251,30 @@ test("HTTP agent management scopes descendants and composes governance policy vi
       });
       assert.equal(response.status, 403, "ancestor cannot mutate child decision");
     }
+    // #3917: a withdrawal names the caller's own session in the path, and only an Orchestrator may
+    // name another session in the body; the service then requires its exact controller.
+    const withdraw = (path: string, token: string, actor: string, body: Record<string, unknown>) => fetch(
+      `http://127.0.0.1:${port}/api/sessions/${path}/workflow-decisions/inspect-pending/withdraw`, {
+        method: "POST", signal: AbortSignal.timeout(3000), body: JSON.stringify(body),
+        headers: { authorization: `Bearer ${token}`, [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: actor, "content-type": "application/json" },
+      });
+    const reason = { reason: "No longer needed." };
+    assert.equal((await withdraw("inspection", "token-orchestrator", "orchestrator", reason)).status, 403,
+      "the path must be the caller's own credential session");
+    assert.equal((await withdraw("normal", "token-normal", "normal", { ...reason, sessionId: "inspection" })).status, 403,
+      "an ordinary agent cannot name another session's decision");
+    assert.equal((await withdraw("orchestrator", "token-orchestrator", "orchestrator", { ...reason, sessionId: 7 })).status, 400);
+    assert.equal((await withdraw("orchestrator", "token-orchestrator", "orchestrator", { sessionId: "inspection", reason: " " })).status, 400);
+    assert.equal((await withdraw("orchestrator", "token-orchestrator", "orchestrator", { ...reason, sessionId: "normal-child" })).status, 404,
+      "an occurrence of another session is concealed");
+    assert.equal((await withdraw("orchestrator-child", "token-orchestrator-child", "orchestrator-child",
+      { ...reason, sessionId: "inspection" })).status, 403, "an ancestor that is not an Orchestrator gains nothing");
+    const device = await fetch(`http://127.0.0.1:${port}/api/sessions/inspection/workflow-decisions/inspect-pending/withdraw`, {
+      method: "POST", signal: AbortSignal.timeout(3000), body: JSON.stringify(reason),
+      headers: { authorization: `Bearer device-${ownerId}`, "content-type": "application/json" },
+    });
+    assert.equal(device.status, 403, "withdrawal is an agent operation; a person denies the request instead");
+    assert.equal(liveDb.workflowDecisionByOccurrence("inspect-pending")?.status, "pending", "no refused withdrawal changed it");
     liveDb.deleteSession("inspection");
     await assertPolicies(`device-${ownerId}`, [...ordinary, ...humanQuestions, "fixture-unscoped-owner-question"]);
     await assertPolicies("device-policy-admin", [...ordinary, ...humanQuestions, "fixture-unscoped-admin-question"]);
@@ -303,6 +327,34 @@ test("HTTP agent management scopes descendants and composes governance policy vi
     assert.deepEqual(await stopJob("orchestrator-child", "device-policy-admin"), {
       status: 403, error: "only the session owner or its controlling Orchestrator may stop its background jobs",
     }, "an organization admin who can see another user's session is not its owner");
+    // #3316: only a session's own credential may ask the runner to delete its refs. An admitted
+    // request reaches the runner, which is offline in this fixture.
+    const deleteRefs = async (target: string, token: string, agent?: string,
+      body: unknown = { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: "a".repeat(40) }] }) => {
+      const response = await fetch(`http://127.0.0.1:${port}/api/sessions/${target}/worktrees/delete-refs`, {
+        method: "POST", signal: AbortSignal.timeout(3000),
+        headers: { authorization: `Bearer ${token}`, "content-type": "application/json",
+          ...(agent ? { [WOLLIPOG_AGENT_ACTOR_SESSION_HEADER]: agent } : {}) },
+        body: JSON.stringify(body),
+      });
+      return { status: response.status, error: (await response.json() as { error?: string }).error };
+    };
+    assert.deepEqual(await deleteRefs("normal", "token-normal", "normal"), { status: 409, error: "runner is offline" },
+      "a session's own credential is admitted");
+    assert.ok([403, 404].includes((await deleteRefs("normal-child", "token-normal", "normal")).status),
+      "a parent cannot delete its child's refs");
+    assert.ok([403, 404].includes((await deleteRefs("orchestrator-child", "token-orchestrator", "orchestrator")).status),
+      "an Orchestrator cannot delete its child's refs");
+    assert.equal((await deleteRefs("orchestrator", "token-orchestrator", "orchestrator")).status, 403,
+      "Strict Project Isolation keeps an Orchestrator out of its own worktrees");
+    assert.deepEqual(await deleteRefs("normal", `device-${ownerId}`), {
+      status: 403, error: "a matching session credential is required",
+    }, "a person, even the owner, cannot use another session's credential path");
+    for (const body of [{}, { refs: [] }, { refs: [{ ref: "CHERRY_PICK_HEAD" }] },
+      { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: "abc" }] }, { path: 7, refs: [{ ref: "AUTO_MERGE", oldOid: "a".repeat(40) }] },
+      { refs: Array.from({ length: 17 }, (_, index) => ({ ref: `refs/heads/b${index}`, oldOid: "a".repeat(40) })) }]) {
+      assert.equal((await deleteRefs("normal", "token-normal", "normal", body)).status, 400, JSON.stringify(body));
+    }
     for (const mode of ["normal", "orchestrator"]) {
       const request = (target: string, operation: string, body: unknown, method = "POST") => fetch(
         `http://127.0.0.1:${port}/api/sessions/${target}${operation ? `/${operation}` : ""}`, {
@@ -358,6 +410,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         } })).status, 200, "only the owning human can delegate one typed category");
         const childRequest = (operation: string, body: unknown, method = "POST") => fetch(
           `http://127.0.0.1:${port}/api/sessions/${mode}-child/${operation}`, {
@@ -506,6 +559,7 @@ test("HTTP agent management scopes descendants and composes governance policy vi
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         } })).status, 200, "the owning human can take back a typed category");
         const humanCreatedResponse = await childRequest("workflow-decisions", {
           requestId: "implementation-human", resourceKey: "implementation:human", resourceSnapshot: snapshot,

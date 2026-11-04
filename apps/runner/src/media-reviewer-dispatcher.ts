@@ -159,10 +159,10 @@ export class MediaReviewerDispatcher {
 
   private async dispatchOnce(dispatch: MediaReviewDispatch, identity: MediaActiveStopIdentity, fence: MediaDispatchFenceIdentity): Promise<void> {
     if (this.fences.claimed(fence)) { this.readback(identity); return; }
-    const refuse = (reason: string) => {
+    const refuse = (reason: string, busy = false) => {
       const receipt = this.fences.cancelBeforeLaunch(fence);
       this.deps.log(`media review ${fence.sessionId} not dispatched: ${reason}`);
-      if (receipt) this.deps.send({ type: "media_review_never_dispatched", receipt });
+      if (receipt) this.deps.send({ type: "media_review_never_dispatched", receipt, ...(busy ? { reason: "host_busy" as const } : {}) });
       else this.readback(identity);
     };
     let plan: ReturnType<typeof pacedVideoReviewWindowPlan>;
@@ -178,7 +178,8 @@ export class MediaReviewerDispatcher {
         json(grant.operatorValidation) !== json(purpose.operatorValidation) || !(grant.expiresAt > this.now())) {
         return refuse("media grant does not bind this prepared command");
       }
-      if (sha(pacedVideoReviewWindowPlanBody(plan)) !== dispatch.deliveryPlanSha256) return refuse("delivery window plan mismatch");
+      if (sha(pacedVideoReviewWindowPlanBody(plan)) !== dispatch.deliveryPlanSha256 ||
+        grant.deliveryPlanSha256 !== dispatch.deliveryPlanSha256) return refuse("delivery window plan mismatch");
       if (spec.driver === "codex" || spec.driver === "codex-app-server") return refuse("builtin_tool_allowlist_unavailable");
       if (spec.driver !== "claude-code") return refuse("media_reviewer_unsupported");
       if (typeof spec.config?.model !== "string" || !spec.config.model) return refuse("admitted reviewer model is missing");
@@ -186,7 +187,7 @@ export class MediaReviewerDispatcher {
     const reviewer = await this.deps.reviewer(spec.agentId).catch(() => ({ refused: "media reviewer installation is unavailable" }));
     if ("refused" in reviewer) return refuse(reviewer.refused);
     if (mediaReviewerAttestationSha256(reviewer.attestation) !== dispatch.attestationSha256) return refuse("media reviewer attestation changed");
-    if (!this.deps.reserve(`media:${fence.sessionId}`, spec.agentId)) return refuse("host provider admission is unavailable");
+    if (!this.deps.reserve(`media:${fence.sessionId}`, spec.agentId)) return refuse("host provider admission is unavailable", true);
     // Claim BEFORE any provider action. From here on the outcome is possibly dispatched.
     let claimed = false;
     try { claimed = this.fences.claim(fence); } catch {}
@@ -248,8 +249,10 @@ export class MediaReviewerDispatcher {
           const index = body.index as number;
           if (!Number.isSafeInteger(index) || index < w.firstIndex || index >= w.endIndex) throw new Error("outside the current window");
           const batch = await post("frames", { reviewId: body.reviewId, index, end: w.endIndex }) as {
-            deliveries?: Array<{ receipt?: { receiptId?: string; videoFrame?: { index?: number } } }>; nextIndex?: number };
+            deliveries?: Array<{ receipt?: { receiptId?: string; windowIndex?: number; videoFrame?: { index?: number } } }>; nextIndex?: number };
           if (typeof batch?.nextIndex !== "number" || batch.nextIndex > w.endIndex) throw new Error("batch crossed the window");
+          // The server derives the window; a receipt from another window cannot satisfy this one.
+          if ((batch.deliveries ?? []).some((delivery) => delivery?.receipt?.windowIndex !== w.index)) throw new Error("receipt names another window");
           seen.pending.clear();
           for (const delivery of batch.deliveries ?? []) {
             if (typeof delivery?.receipt?.receiptId === "string" && Number.isSafeInteger(delivery.receipt.videoFrame?.index)) {

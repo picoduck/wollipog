@@ -249,6 +249,7 @@ function publicMessages(
       case "question_resolved":
       case "checkpoint":
       case "checkpoint_restored":
+      case "worktree_refs_deleted":
       case "conversation_checkpoint":
       case "conversation_forked":
       case "provider_account_switched":

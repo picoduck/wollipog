@@ -3,8 +3,10 @@ import { readFileSync } from "node:fs";
 import { PassThrough, type Readable, type Writable } from "node:stream";
 import type { WslBwrapPreparedPath } from "./wsl-bwrap-launcher.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
+import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { serveSessionManagementMcp, type McpFetch } from "./session-management-mcp.js";
 import { runPullRequestCli, runWollipogCli } from "./wollipog-cli.js";
+import { claudeWollipogMcpServer } from "./claude-wollipog-mcp.js";
 
 export const WSL_AGENT_CONTROL_PROTOCOL = 1 as const;
 export const WSL_AGENT_CONTROL_HELPER_PATH = "/usr/local/lib/wollipog/wsl-agent-control-v1.mjs";
@@ -106,6 +108,8 @@ export function attachWslAgentControlBroker(
   fetchImpl: McpFetch = globalThis.fetch,
   // `wait_pull_request` reads GitHub with the distro's own `gh` login, never the Windows host's.
   gh: GhRunner = contextGhRunner({ kind: "wsl", distro: config.distro }, "/"),
+  // A GitLab merge request is read with the distro's own `glab` login, likewise (#3602).
+  glab: GlabRunner = contextGlabRunner({ kind: "wsl", distro: config.distro }, "/"),
 ): () => void {
   // `abort` cancels a bridged command still running when its connection closes.
   const connections = new Map<string, { input?: PassThrough; abort?: AbortController; closed: boolean }>();
@@ -152,6 +156,7 @@ export function attachWslAgentControlBroker(
         actorHeader: "x-wollipog-agent-session",
         orchestrator: true,
         gh,
+        glab,
       });
       return;
     }
@@ -165,7 +170,7 @@ export function attachWslAgentControlBroker(
     if (args[0] === "pr") {
       // The broker's working directory is not the agent's, so a bare number needs --repo here.
       connection.abort = new AbortController();
-      void runPullRequestCli(args, args.includes("--json"), io, gh, connection.abort.signal)
+      void runPullRequestCli(args, args.includes("--json"), io, gh, connection.abort.signal, undefined, glab)
         .then((code) => close(id, code), (error) => close(id, 1, (error as Error).message));
       return;
     }
@@ -220,16 +225,14 @@ export function attachWslAgentControlBroker(
     runtime: config.nodeRuntime,
     helper: config.helperPath,
     token: Buffer.from(config.token).toString("base64"),
-    mcp: Buffer.from(JSON.stringify({ mcpServers: { wollipog: {
-      type: "stdio",
-      command: config.nodeRuntime,
-      args: [config.helperPath, "mcp"],
-      env: {
+    mcp: Buffer.from(JSON.stringify({ mcpServers: { wollipog: claudeWollipogMcpServer(
+      { command: config.nodeRuntime, args: [config.helperPath, "mcp"] },
+      {
         WOLLIPOG_SESSION_ID: config.sessionId,
         WOLLIPOG_SESSION_TOKEN_FILE: WSL_AGENT_CONTROL_PRIVATE_TOKEN,
         WOLLIPOG_AGENT_CONTROL_SOCKET: WSL_AGENT_CONTROL_PRIVATE_SOCKET,
       },
-    } } })).toString("base64"),
+    ) } })).toString("base64"),
   });
   return dispose;
 }

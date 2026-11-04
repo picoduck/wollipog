@@ -12,6 +12,8 @@ import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION, WOLLIPOG_CONTROL_PLANE_SERVICE } from "@wollipog/protocol";
 
+import { transportRunnerEnvironment, waitForTransportRunnerProbe } from "./fixtures/transport-runner-environment.js";
+
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
 
 // The `ws` server the runner's own client talks to — resolve the exact copy the runner depends on.
@@ -113,11 +115,10 @@ test(
     const child = spawn(process.execPath, ["--import", "tsx", "apps/runner/src/cli.ts"], {
       cwd: REPO_ROOT,
       env: {
-        ...process.env,
+        ...transportRunnerEnvironment(temp),
         RUNNER_ID: "runner-survival",
         RUNNER_TOKEN: "runner-survival-token",
         CONTROL_PLANE_URL: `ws://127.0.0.1:${cp.port}/runner`,
-        RUNNER_DATA_DIR: temp,
       },
       stdio: ["ignore", "pipe", "pipe"],
       windowsHide: true,
@@ -127,9 +128,13 @@ test(
     child.stderr?.on("data", capture);
 
     t.after(async () => {
-      await stopChild(child);
-      await cp.close();
-      rmSync(temp, { recursive: true, force: true });
+      try {
+        await waitForTransportRunnerProbe(child, join(temp, "runner-data"));
+      } finally {
+        await stopChild(child);
+        await cp.close();
+        rmSync(temp, { recursive: true, force: true });
+      }
     });
 
     // The runner attests, then opens its /runner socket and sends `register`.

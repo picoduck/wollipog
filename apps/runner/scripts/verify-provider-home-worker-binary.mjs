@@ -1,7 +1,7 @@
 /** Run the actual source/SEA daemon against an isolated loopback peer and empty skill sync.
  * No provider is launched. Exercises SessionManager -> async facade -> fixed worker -> native I/O. */
 import assert from "node:assert/strict";
-import { spawn } from "node:child_process";
+import { execFile, spawn } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, writeFileSync } from "node:fs";
@@ -11,6 +11,7 @@ import { hostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { setTimeout as pause } from "node:timers/promises";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import { WebSocketServer } from "ws";
 
 const repo = resolve(dirname(fileURLToPath(import.meta.url)), "../../..");
@@ -29,6 +30,14 @@ const instanceId = randomUUID(), runnerId = "isolated-lease-worker", interval = 
 // Daemons only: Windows requires a native numeric exit receipt from each. Holders are plain Node
 // children whose forced exit reports a signal instead, so they are tracked and reaped separately.
 const children = [], holders = [], peers = [], states = new Map();
+const deadlineReport = join(root, "embedded-worker-deadlines.json");
+// Windows needs its system tools for the fixed PowerShell helper; provider install roots
+// and PATH entries are isolated from both the verifier process and ordinary daemons.
+const inherited = process.platform === "win32"
+  ? Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value])) : process.env;
+const systemPath = process.platform === "win32" ? `${inherited.SYSTEMROOT}\\System32;${inherited.SYSTEMROOT}\\System32\\WindowsPowerShell\\v1.0` : "/usr/bin:/bin";
+const fixtureEnvironment = { ...inherited, HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
+  TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source || process.platform === "win32" ? systemPath : emptyBin };
 let output = "", lastHeartbeat = 0, delays = [], measuring = false;
 const wss = new WebSocketServer({ noServer: true });
 const server = createServer((request, response) => {
@@ -93,20 +102,40 @@ function launchDaemon(file, args, options) {
   });
   return child;
 }
+async function verifyEmbeddedWorker() {
+  // This verifier-only preload reads the actual SEA asset and executes its unchanged bytes in
+  // a separate process. Native Windows fixture work can exceed the unchanged 30-second daemon
+  // registration budget, so finish it before launching any daemon or measuring its heartbeat.
+  const preload = join(root, "verify-embedded-deadlines.cjs");
+  writeFileSync(preload, [
+    `const assert = require("node:assert/strict");`,
+    `const {getAsset,isSea} = require("node:sea"); assert.equal(isSea(),true);`,
+    `assert.throws(()=>getAsset("wollipog/provider-home-lease-worker","utf8"));`,
+    `const code = getAsset("wollipog/provider-home-lease-worker-hrtime-ns-v1","utf8");`,
+    `const {verifyWorkerDeadlines} = require(${JSON.stringify(join(repo, "apps/runner/scripts/provider-home-worker-deadline-fixture.cjs"))});`,
+    `const report = verifyWorkerDeadlines(code,__filename);`,
+    `require("node:fs").writeFileSync(${JSON.stringify(deadlineReport)},JSON.stringify(report));`,
+    // This process runs only assertions against the embedded asset. Reaching exit proves every
+    // assertion and the synchronous report write completed; ordinary daemon startup is separate.
+    `process.exit(0);`,
+  ].join("\n"));
+  await promisify(execFile)(binary, [], { cwd: root, windowsHide: true, maxBuffer: 64 * 1024,
+    env: { ...fixtureEnvironment, NODE_OPTIONS: `${inherited.NODE_OPTIONS ?? ""} --require ${JSON.stringify(preload)}` } });
+  const report = JSON.parse(readFileSync(deadlineReport, "utf8"));
+  assert.ok(report.cases >= 25, "actual embedded worker ran all deadline cases");
+  const builtWorker = readFileSync(join(repo, "apps/runner/.bin-build/provider-home-lease-worker.cjs"));
+  assert.equal(report.exactWorkerSha256, createHash("sha256").update(builtWorker).digest("hex"),
+    "the tested SEA worker is byte-identical to this build's fixed worker asset");
+  return report;
+}
 async function start(dataDir) {
   mkdirSync(dataDir, { mode: 0o700 });
   const config = `${dataDir}.config.json`;
   writeFileSync(config, JSON.stringify({ runnerId, controlPlaneUrl: `ws://127.0.0.1:${server.address().port}/runner`,
     token: "isolated-smoke-token", dataDir, agents: [], workspaces: [], features: { acpRegistry: false } }));
-  // Windows needs its system tools for the fixed PowerShell helper; PATH provider entries are
-  // removed, and each conventional user install root points into this fixture.
-  const inherited = process.platform === "win32"
-    ? Object.fromEntries(Object.entries(process.env).map(([key, value]) => [key.toUpperCase(), value])) : process.env;
-  const systemPath = process.platform === "win32" ? `${inherited.SYSTEMROOT}\\System32;${inherited.SYSTEMROOT}\\System32\\WindowsPowerShell\\v1.0` : "/usr/bin:/bin";
   const child = launchDaemon(binary, [...(source ? ["--import", loader, join(repo, "apps/runner/src/cli.ts")] : []), "--config", config], {
     cwd: dataDir, stdio: ["ignore", "pipe", "pipe"], windowsHide: true,
-    env: { ...inherited, HOME: home, USERPROFILE: home, LOCALAPPDATA: join(home, "local"), APPDATA: join(home, "roaming"),
-      TMPDIR: temp, TMP: temp, TEMP: temp, PATH: source ? systemPath : process.platform === "win32" ? systemPath : emptyBin,
+    env: { ...fixtureEnvironment,
       RUNNER_ID: runnerId, RUNNER_DATA_DIR: dataDir, RUNNER_TOKEN: "isolated-smoke-token",
       CONTROL_PLANE_URL: `ws://127.0.0.1:${server.address().port}/runner` },
   });
@@ -191,6 +220,7 @@ async function stop(child, signal) {
 }
 
 try {
+  const embeddedDeadlines = source ? undefined : await verifyEmbeddedWorker();
   await new Promise(resolveListen => server.listen(0, "127.0.0.1", resolveListen));
   const first = await start(join(root, "runner-a"));
   const ownerHash = JSON.parse(readFileSync(join(first.dataDir, ".wollipog-runner-owner-v2.json"), "utf8")).ownerHash;
@@ -226,6 +256,7 @@ try {
   const stopped = await stop(second.child, "SIGTERM"); assert.equal(stopped.code, 0, output);
   assert.ok(evidence().some(item => item.record.state === "released" && item.record.pid === second.child.pid), "graceful shutdown awaited exact release");
   console.log(JSON.stringify({ mode: source ? "source-daemon" : "SEA-daemon", platform: process.platform, maximal,
+    ...(embeddedDeadlines ? { embeddedDeadlines } : {}),
     operationDurationMs, heartbeatIntervalMs: interval, heartbeatDispatches: delays.length, maxHeartbeatDelayMs: Math.max(...delays),
     liveOwnerRefused: true, killedRunnerRecovered: true, gracefulReleaseProved: true }));
 } finally {

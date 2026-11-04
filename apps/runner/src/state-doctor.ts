@@ -412,6 +412,20 @@ export async function runStateDoctor(
   writeOutput: (value: string) => unknown = (value) => process.stdout.write(value),
   options: StateDoctorOptions = {},
 ): Promise<void> {
+  const mode = argv.indexOf("--state-doctor");
+  if (mode >= 0 && argv[mode + 1] === "provider-home") {
+    const { runProviderHomeDoctor } = await import("./provider-home-doctor.js");
+    runProviderHomeDoctor(argv.slice(mode + 2), writeOutput);
+    return;
+  }
+  if (mode >= 0 && argv[mode + 1] === "review-writers") {
+    const { parseReviewWriterDoctorArgs, runReviewWriterDoctor } = await import("./review-writer-doctor.js");
+    const args = parseReviewWriterDoctorArgs(argv.slice(mode + 2));
+    const maintenance = acquireMaintenanceLease(args.dataDir, options);
+    try { runReviewWriterDoctor({ ...args, dataDir: maintenance.dataDir }, writeOutput); }
+    finally { maintenance.release(); }
+    return;
+  }
   const args = parseDoctorArgs(argv);
   const maintenance = acquireMaintenanceLease(args.dataDir, options);
   const dataDir = maintenance.dataDir;

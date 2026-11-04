@@ -12,6 +12,12 @@ Current protocol 222, including child-at-create attribution/transaction rollback
 rejection recovery, stays intact. The merged #3230 touch behavior and #3260 settled opening-frame
 fixtures are preserved without editing their implementation or tests. Preparation tests do not complete the original live release criteria.
 
+Protocol 254 retires the native code-review job used by the historical v1 plan. The offline
+checker retains that shape for historical completeness and always reports blocked; it now names
+`review_session_plan_migration` as an independent requirement. Current code review uses admitted
+review sessions and managed Session usage. Updating the live plan's admission/evidence schema is
+a separate follow-up; do not run the retired adapter or treat old profile digests as current proof.
+
 ## Executable Preparation
 
 From this worktree:
@@ -54,7 +60,19 @@ test setup; it is never a live issuer, and a synthetic runner launch is not a na
 
 ## Native Feasibility Before Live Authorization
 
-The fixed release target remains Codex App Server, `gpt-6.1-sol`, high effort. Offline inspection
+The Human fixed this release run's root as native Claude Code, `claude-opus-5-5`, high effort,
+and its implementation children as native Claude Code too. Delegated video review needs paced
+peers: admission refuses `mixed_peer` unless the controller, the child and the reviewer each declare
+the paced video review contract (`reviewerAdmissionPrerequisites` in
+`apps/control-plane/src/evidence-review-worker.ts`). Only a native Claude Code agent with a re-proven
+media-only reviewer attestation advertises that contract (`withMediaReviewerCapabilities` in
+`apps/runner/src/index.ts`). With a Codex App Server root, no #2939 video could ever be delegated.
+Codex remains a supported implementation harness elsewhere; this release run does not exercise a
+Codex root. The plan's `fixed_root_profile` check requires exactly that root, and
+`paced_video_peers` requires the declared children to be native Claude Code (undeclared children
+fail closed).
+
+Codex was inspected as a media reviewer and refused. Offline inspection
 of installed Codex `0.162.1` found executable SHA256
 `628e35487d888a28f0427fc37501da529dd3d81fcbad7a2c3421c1e8670d92e1` and freshly generated
 experimental `ThreadStartParams` schema SHA256
@@ -77,8 +95,14 @@ describes narrower shell/image/MCP/connector switches. Adding dynamic tools, omi
 emptying environments, accepting arbitrary config keys or advertising image modality does not
 establish complete native tool/context/FS/network/resource/API restriction.
 
-Keep installed media preflight **unsupported / `builtin_tool_allowlist_unavailable`** until an
-actual reviewed same-harness path exists. A possible upstream/native-host bridge to the internal
+Codex media preflight therefore stays **unsupported / `builtin_tool_allowlist_unavailable`**, and the
+plan's media boundary no longer accepts it. The boundary now requires the Claude Code media-only
+reviewer from #1321 PR B (`docs/video-evidence-media-reviewer.md`): driver `claude-code`,
+`claude-opus-5-5` at high effort, profile `claude-code-media-only-v1`, pinned CLI `2.1.296`, exactly
+the `review_video_evidence_frame` and `submit_video_evidence_verdict` tools, a dedicated API key, the
+runner's executable and namespace policy digests, a denied-routes probe digest, and an
+`attestationSha256` equal to the media `capabilitiesSha256` that the certification proof names.
+Every other check is unchanged. A possible upstream/native-host bridge to the internal
 startup hooks requires separate owner coordination, authorization, immutable resume enforcement
 and adversarial denied-route evidence; acceptance preparation does not implement or activate it.
 The proposal now records the inspected native inputs and absent enforcement prerequisites.
@@ -95,7 +119,7 @@ to prove blindness. Native dispatch/usage receipts remain separate from media de
 | Review feedback and repair | Different screenshot bytes, original occurrence denial, replacement receipt/consumption; driver/service tests | Verify the actual reviewer identified a defect, independently reproduce it, repair code, review changed head and bytes; synthetic rejection is not a quality verdict |
 | Screenshot delivery | Existing delegated-image HTTP/browser digest/receipt route coverage; joined service test | Actual selected model receives private attached bytes and answers a fresh blind image challenge; identifiers and acknowledgments alone are insufficient |
 | Normal video | Existing candidate complete-frame decode/transient/integrity tests; normal video fails closed on foundation | #1321 registered normal-profile runtime/transport/admission/decision bridge and trusted all-source-frame temporal proof, criteria/defect verdict and measured maximum-profile model cost |
-| Native code review and allowance | Existing bounded review/usage contracts inspected read-only | #2936 exact native controller/executable/account/profile admission, durable job identity and final priced usage settlement; native code jobs do not attest managed media delivery |
+| Review sessions and historical allowance | Review-session admission/usage tests, retired-job receipt/reconnect/liveness tests and bounded campaign accounting | Actual admitted review session with exact harness/model/effort, head/verdict and managed Session usage; migrate the historical live-plan schema first. Code review does not attest managed media delivery |
 | Exact-head CI, merge queue and delivery | Existing workflow-action reconciliation routes and ledger/forge-state tests | Actual required check on pushed reviewed SHA, matching canonical command admission, successful merge-group check, forge MERGED and commit present on default branch |
 | Recovery and decision inspection | Existing route fixtures cover agent uncertain-steering resolution, ancestor decision read/list with status and pagination, audience refusal and ancestor consume/reconcile refusal; runner steering and durable recovery suites are reused | Actual integrated recovery/read delivery and #2938 bounded single-flight recovery with unknown-outcome fences remain live proof requirements; closed #1448/#1469 alone do not satisfy them |
 | Cleanup and completion | Campaign Status cleanup refusal and report verification; attention persistence suites | Actual branch deletion after safe stacked handoff, managed worktree retirement, session Stop/Archive confirmation, informational completion with no required acknowledgment |
@@ -105,7 +129,7 @@ These files intentionally do not import sibling implementations. Historical prep
 
 - #2935 PR #3063: `1ed656018aa282bf5c084ad8ad117207088ad93a`, protocol 216 issue authority.
 - #2936 PR #3065: `828464a9a8272d42d5f49f8a1482ee5959ea0cc2` at initial inspection;
-  its continuing corrections and exact native-review contract must be read again at integration.
+  its native executor is retired. Preserve historical accounting; current review uses review sessions.
 - #1321 production preparation: `efa6ea5210ad939f2ed2af3f2ac227009ed2f935`;
   offline PR #3053: `1f379ed690d3b7bcd0850c55ef5285a4c6459de6`.
 - #2938 PR #3068: `9eb186d24593835b8ae4d83bbf6ab246d1c79365`.
@@ -134,16 +158,19 @@ The executable matrix lists actual integrated steering recovery and descendant d
 
 ## Concrete Live Proposal, Awaiting Human Limits and Operator Resources
 
-`scripts/fixtures/full-control-live-plan.json` names the proposed **private** isolated repository
-`picoduck/wollipog-full-control-2939-validation`, synthetic issue #1 and one related follow-up. It
-does not claim that repository exists or that anyone approved creating it. A read-only access
-check could not resolve it with the current account; existence and access remain unverified.
-Operator setup must
-create/verify that exact private destination and sanitized seed issue before the observed campaign,
-or explicitly approve a revised exact plan. Do not use `picoduck/wollipog` for validation effects.
-Seed fixtures and bootstrap effects are disclosed separately from the measured positive campaign.
+The Human decided that the live #2939 run targets `picoduck/wollipog` itself, not an isolated
+sandbox repository, under a Human-set **$200** ceiling. `scripts/fixtures/full-control-live-plan.json`
+records that decision as `repositoryTarget` (`kind: "human_authorized_repository"`,
+`authorizedBy: "human"`, the repository and `costCeilingUsd: 200`). The check admits
+`picoduck/wollipog` only through that explicit target, only when the target names the plan's own
+repository and only while `limits.costUsd` stays within the ceiling. The report then asks for
+`human_repository_target_authorization` instead of `isolated_repository_operator_authorization`.
+A plan without a target still rejects `picoduck/wollipog`, so the isolation check is not weakened
+for any other plan. Agent-authored JSON is not evidence of the Human's decision; the Human still
+confirms it through the authenticated ingress. Seed fixtures and bootstrap effects are disclosed
+separately from the measured positive campaign.
 
-Proposed aggregate admission bounds are **$40 model-priced usage, 1,200 distinct tool calls, two
+Proposed aggregate admission bounds are **$200 model-priced usage, 1,200 distinct tool calls, two
 concurrent descendants/jobs, one accepted follow-up, 180 minutes and six fault attempts**. These
 are proposals, not authority or guaranteed invoice caps. The operator must inspect current official
 pricing, context/frame feasibility, native invalid-attempt cost and stricter Session/organization
@@ -152,12 +179,16 @@ without repeated overrides; unknown usage keeps reservations. If normal/maximum 
 report that concrete refusal rather than silently increasing limits, sampling frames or using an
 external unaccounted reviewer. All positive and fault attempts share the original ledger/allowance.
 
-Root/implementation path: fixed Codex App Server / `gpt-6.1-sol` / high, existing runner-default
-OpenAI account. Proposed media path: a separately admitted, narrowed managed Session on that exact
-provider/model only if its actual capability and namespace probes pass. Native code review remains
-Claude Opus 5.5 / high / Read-only using the exact #2936 admitted controller, executable hash, CLI
-version and existing runner-default Claude account. Neither account is provisioned, inspected for
-secrets, copied or changed by this preparation. Provider-account retention and permissions are
+Root/implementation path: fixed native Claude Code / `claude-opus-5-5` / high root and native
+Claude Code implementation children, all on the existing runner-default Claude account (the
+operator must verify it). Each must run on an agent whose media-only reviewer attestation the runner
+re-proves, or that peer cannot declare the paced contract and its video stays with the Human. Media path: the separately admitted Claude Code media-only reviewer
+(`claude-opus-5-5`, high, dedicated runner-local API key) only if its runner attestation and actual
+namespace probes pass and a current Human-recorded live proof certifies that exact attestation.
+Code review uses an admitted review session with its captured harness/model/effort, read-only
+snapshot and managed Session usage. The retired #2936 controller cannot admit code-review work.
+Provider accounts are never provisioned, inspected for secrets, copied or changed by this preparation.
+Provider-account retention and permissions are
 human-only inputs. Persistent grants and unsupported profiles remain exceptions.
 
 Disposable data paths are listed under `/tmp/wollipog-2939-live/` in the proposal. An operator must
@@ -176,7 +207,7 @@ generator, oracle, operator directories, shared provider history and every unrel
 Record direct-path, symlink, parent-traversal, shell/search/plugin/resource/management refusal and
 the actual tool/capability digest. Separate folders, prompt omission or a cooperative reviewer
 assertion do not create a blind oracle. Generic coding worker tools must never inherit this media
-namespace, and native code-review admission must never stand in for media admission. If the
+namespace, and code-review session admission must never stand in for media admission. If the
 managed driver cannot enforce it, the live plan remains blocked.
 
 The #1321 handoff's offline generator prepares fresh candidate, paced and maximum challenges only
@@ -196,7 +227,7 @@ synthetic receipt, blind-answer claim or advertised image capability does not pr
 | 2 | Concurrent approve/consume and stale snapshot | One winner; old head/artifact/revision cannot consume; no reset by replacement worker identity |
 | 3 | Transient evidence/decode failure | Bounded queue/retry/recapture; unchanged exact gate binding; complete coverage retained; unrelated authorized work continues |
 | 4 | Uncertain steering, follow-up publication or merge response | Inspect exact durable submission/payload/head/forge object before replay; unknown stays fenced; no duplicate issue or merge |
-| 5 | Auth, unknown human information, foreign scope and Human Required ask | One actionable owned exception with reason/resource/input; no agent issuer or sign-in workaround; sibling work proceeds |
+| 5 | Auth, unknown human information, foreign scope and Human Required ask | Sign-in and credential requests are declined once as content-safe blocked work (#2940); foreign scope and the Human Required ask are one actionable owned exception with reason/resource/input; no agent issuer or sign-in workaround; sibling work proceeds |
 | 6 | Hard denial, exhausted/unpriced allowance and unsupported peer | Stop admission, preserve usage/reservations and failed attempt accounting; no repeated override prompt or substituted profile |
 
 Use the original bound for all faults. No interactive authentication, unavailable human information,
@@ -210,7 +241,7 @@ result/attention/notification surfaces rather than inferred from a role or owner
 The operator's private result bundle must retain exact initial server-authorized scope/budget/evidence
 digests, effective driver/model/provider/profile and capability limits, every post-authorization
 human request/acknowledgment/policy edit, media source and ordered receipt bindings, independently
-verified blind quality answers, defect/fix/review head records, native review job/adjudication/usage,
+verified blind quality answers, defect/fix/review head records, review-session identity/verdict/adjudication/usage,
 both forge PR/check/merge-group/merge readbacks, accepted follow-up lineage/sanitized payload/dedup
 and publication readback, delivered-vs-remaining closure evidence, stacked-dependent checks,
 branch-ref absence, retired managed worktree receipts and confirmed Stop/Archive states.

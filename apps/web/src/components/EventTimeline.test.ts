@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import * as React from "react";
-import type { SessionEventPayload, SessionView } from "@wollipog/protocol";
+import type { PermissionOption, SessionEventPayload, SessionView } from "@wollipog/protocol";
 import { renderToStaticMarkup } from "react-dom/server";
 import { deriveTimeline, groupTimeline, publishTimelineSnapshotDelta, SubagentTreeProjector, TimelineBuilder, type TimelineItem } from "../timeline.js";
 import {
@@ -26,7 +26,8 @@ import {
   userRewindTurns,
   type TimelineRenderRow,
 } from "./EventTimeline.js";
-import { permissionResolutionLabel } from "../decision-record.js";
+import { permissionDecisionRecord } from "../decision-record.js";
+import { statusMeta } from "../status-meta.js";
 import { reanchorAtLogicalIndex } from "./MeasuredVirtualList.js";
 import type { EditInForkAvailability } from "../session-actions.js";
 
@@ -52,6 +53,7 @@ test("timeline row estimates match one quiet step row", () => {
     kind: "work_summary",
     key: "work",
     tools: 1,
+    commands: 0,
     edits: 0,
     thoughts: 0,
     failed: 0,
@@ -82,6 +84,7 @@ test("auto-approved reviews expose an exact count and highest risk while expande
     key: workKey,
     firstItemId: items[0]!.id,
     tools: 1,
+    commands: 0,
     edits: 0,
     thoughts: 0,
     failed: 0,
@@ -424,6 +427,23 @@ test("checkpoints stay in the model but render no Start Turn or End Turn separat
   assert.deepEqual([...assistantForkTurns(items)], [[3, 19]], "fork still reads the conversation checkpoint");
 });
 
+for (const agents of [undefined, [{ id: "codex-app", name: "Codex (App Server)" }, { id: "claude-native", name: "Claude Code" }]]) {
+  test(`handoff divider resolves known agents and preserves historical IDs (${agents ? "definitions" : "no runner"})`, () => {
+    for (const sourceAgent of ["codex-app", "retired-agent"]) {
+      const html = renderToStaticMarkup(React.createElement(EventTimeline, { agents, items: [{
+        kind: "conversation_forked", id: 1, sourceSessionId: "historical-source", turn: 1,
+        handoff: { sourceAgent, destinationAgent: "claude-native", disclosure: "Historical disclosure." },
+      }] }));
+      const source = agents?.find((agent) => agent.id === sourceAgent)?.name ?? sourceAgent;
+      const destination = agents ? "Claude Code" : "claude-native";
+      const label = `Handoff from ${source} to ${destination} after Turn\u00a01`;
+      assert.ok(html.includes(`aria-label="${label}"`));
+      assert.ok(html.includes(`${label}</span>`), "visible and accessible labels match");
+      assert.match(html, /Historical disclosure/);
+    }
+  });
+}
+
 const historyDividers: TimelineItem[] = [
   { kind: "checkpoint_restored", id: 1, turn: 7 },
   { kind: "conversation_forked", id: 2, sourceSessionId: "source", turn: 8 },
@@ -444,11 +464,11 @@ test("rewind, fork, handoff and account dividers expose concise accessible seman
   const html = renderToStaticMarkup(React.createElement(EventTimeline, { items: historyDividers }));
 
   assert.match(html, /class="tl-divider" role="separator" aria-label="Files Rewound to Before Turn 7" title="Files restored to the checkpoint before turn 7"/);
-  assert.match(html, /class="tl-divider" role="separator" aria-label="Forked from Turn 8" title="Conversation forked from turn 8"/);
+  assert.match(html, /class="tl-divider" role="separator" aria-label="Forked from Turn\u00a08" title="Conversation forked from turn 8"/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Automatically Switched Account to Work" title="Provider conversation resumed with Work"/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Conversation Compacted" title="Earlier messages were summarized to free context \(48,213 tokens before\)\."/);
   assert.match(html, /class="tl-divider" role="separator" aria-label="Conversation Compacted Automatically" title="Earlier messages were summarized to free context\."/);
-  const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex After Turn 9" aria-describedby="([^"]+)"/)?.[1];
+  const descriptionId = html.match(/aria-label="Handoff from Claude Code to Codex after Turn\u00a09" aria-describedby="([^"]+)"/)?.[1];
   assert.ok(descriptionId, "the concise handoff separator names its visible secondary description");
   assert.ok(html.includes(`<p id="${descriptionId}" class="tl-divider-desc">Fresh provider conversation. Tool output and reasoning were omitted.</p>`));
   assert.doesNotMatch(html, /aria-label="[^"]*Tool output and reasoning/,
@@ -460,8 +480,8 @@ test("every history divider is one neutral label with a faint 14px icon and no g
   const labels = [...html.matchAll(/<span class="tl-divider-label"><span class="tl-divider-icon" aria-hidden="true">(<svg[^>]*>)[\s\S]*?<\/svg><\/span>([^<]*)<\/span>/g)];
   assert.deepEqual(labels.map((match) => match[2]), [
     "Files Rewound to Before Turn 7",
-    "Forked from Turn 8",
-    "Handoff from Claude Code to Codex After Turn 9",
+    "Forked from Turn\u00a08",
+    "Handoff from Claude Code to Codex after Turn\u00a09",
     "Automatically Switched Account to Work",
     "Conversation Compacted",
     "Conversation Compacted Automatically",
@@ -495,7 +515,7 @@ test("a fork or handoff links its source session only where the app can navigate
     items: historyDividers,
     onOpenSession: (id: string) => opened.push(id),
   }));
-  const forkDescription = html.match(/aria-label="Forked from Turn 8" aria-describedby="([^"]+)"/)?.[1];
+  const forkDescription = html.match(/aria-label="Forked from Turn\u00a08" aria-describedby="([^"]+)"/)?.[1];
   assert.ok(forkDescription, "the fork separator names its description");
   assert.match(html, new RegExp(`<p id="${forkDescription}" class="tl-divider-desc"><button type="button" class="link">Open Source Session</button></p>`));
   assert.equal((html.match(/<button type="button" class="link">Open Source Session<\/button>/g) ?? []).length, 2,
@@ -1443,7 +1463,7 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     ...prompt({ inputTokens: 1_000, outputTokens: 200, costUsd: 0.01 }),
     resumed, fileCheckpoint, finished, continuationUsage, completed,
   ]);
-  assert.deepEqual(footerUsage(items), ["1.2k tok · $0.01", "4.8k tok · $0.05"]);
+  assert.deepEqual(footerUsage(items), ["1.2K tok · $0.01", "4.8K tok · $0.05"]);
   assert.deepEqual(usageOf(items), [[1, 1_000, 200, 0.01], [2, 4_000, 800, 0.05]],
     "the footers together hold every parentless report exactly once");
 
@@ -1476,7 +1496,7 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     event(9.5, 14_000, { kind: "token_usage", inputTokens: 3_000, outputTokens: 500, costUsd: 0.03 }),
     completed,
   ].sort((a, b) => a.seq - b.seq));
-  assert.deepEqual(footerUsage(split), ["1.2k tok · $0.01", "4.8k tok · $0.05"], "several reports per turn");
+  assert.deepEqual(footerUsage(split), ["1.2K tok · $0.01", "4.8K tok · $0.05"], "several reports per turn");
 
   // A cancelled turn records no conversation checkpoint: a stopped continuation without a file
   // checkpoint keeps its counters on its stop, whether they land before or after it.
@@ -1491,7 +1511,7 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     const segments = summarizeTimelineTurns(stopped, new Map()).segments.slice(1);
     assert.deepEqual(segments.map((segment) => [segment.stopped !== undefined, segment.usage?.inputTokens, segment.finishedAt]),
       [[false, 1_000, 3_000], [true, 4_000, order === "before" ? 13_000 : 13_500]], `stopped continuation, report ${order}`);
-    assert.deepEqual(footerUsage(stopped), ["1.2k tok · $0.01", "4.8k tok · $0.05"], `stopped continuation footer, report ${order}`);
+    assert.deepEqual(footerUsage(stopped), ["1.2K tok · $0.01", "4.8K tok · $0.05"], `stopped continuation footer, report ${order}`);
   }
 
   // A refusal or provider error records neither a conversation checkpoint nor a stop, so such a
@@ -1507,9 +1527,9 @@ test("a continuation's tokens and cost land on its own footer, not the turn befo
     event(22, 23_000, { kind: "token_usage", inputTokens: 500, outputTokens: 100, costUsd: 0.02 }),
     event(23, 23_001, { kind: "conversation_checkpoint", turn: 2 }),
   ];
-  assert.deepEqual(footerUsage(deriveTimeline(refused)), ["6.0k tok · $0.06"], "an unanchored continuation's counters are held");
+  assert.deepEqual(footerUsage(deriveTimeline(refused)), ["6K tok · $0.06"], "an unanchored continuation's counters are held");
   const afterRefusal = deriveTimeline([...refused, ...next]);
-  assert.deepEqual(footerUsage(afterRefusal), ["6.0k tok · $0.06", "600 tok · $0.02"], "the next prompt does not drop them");
+  assert.deepEqual(footerUsage(afterRefusal), ["6K tok · $0.06", "600 tok · $0.02"], "the next prompt does not drop them");
   const totals = summarizeTimelineTurns(afterRefusal, new Map()).segments.reduce(
     (sum, segment) => [sum[0]! + (segment.usage?.inputTokens ?? 0) + (segment.usage?.outputTokens ?? 0), sum[1]! + (segment.usage?.costUsd ?? 0)],
     [0, 0],
@@ -1736,22 +1756,30 @@ test("an unusable Edit as a New Turn stays listed on every user message, disable
   assert.equal((usable.match(/aria-label="Edit as a New Turn"/g) ?? []).length, 2);
 });
 
-test("a chosen option reads as its past-tense outcome, never as its id (#2204)", () => {
-  assert.equal(permissionResolutionLabel([], "auth:select-account"), "Another Account Selected");
-  assert.equal(permissionResolutionLabel([], "auth:automatic-retry"), "Rechecked Automatically");
-  assert.equal(permissionResolutionLabel([{ optionId: "reject", kind: "reject_once" }], "reject"), "Rejected");
-  assert.equal(permissionResolutionLabel([{ optionId: "trust", kind: "allow_always" }], "trust"), "Allowed");
-  assert.equal(permissionResolutionLabel([{ optionId: "skip", kind: "reject_once" }], "skip"), "Rejected");
-  assert.equal(permissionResolutionLabel([{ optionId: "cancel", kind: "cancel" }], "cancel"), "Ended Early");
-  assert.equal(permissionResolutionLabel([{ optionId: "trust" }], "trust"), "Resolved",
-    "an option with no kind and no common id is Resolved, not its raw id");
-  assert.equal(permissionResolutionLabel([{ optionId: "allow" }], "allow"), "Allowed");
-  assert.equal(permissionResolutionLabel([{ optionId: "deny" }], "deny"), "Rejected");
-  assert.equal(permissionResolutionLabel([{ optionId: "auth:select-account", kind: "allow_once" }], "auth:select-account"),
-    "Allowed", "a provider option that reuses a runner id is decided by its kind");
-  assert.equal(permissionResolutionLabel([], "toString"), "Resolved",
-    "an id matching an inherited property is never replaced by it");
-  assert.equal(permissionResolutionLabel([], null), "Dismissed");
+test("a chosen option reads as its past-tense outcome on the live decision record (#2204)", () => {
+  const cases: [options: Pick<PermissionOption, "optionId" | "kind">[], chosen: string | null, label: string][] = [
+    [[], "auth:select-account", "Another Account Selected"],
+    [[], "auth:automatic-retry", "Rechecked Automatically"],
+    [[{ optionId: "reject", kind: "reject_once" }], "reject", "Rejected"],
+    [[{ optionId: "trust", kind: "allow_always" }], "trust", "Allowed"],
+    [[{ optionId: "skip", kind: "reject_once" }], "skip", "Rejected"],
+    [[{ optionId: "cancel", kind: "cancel" }], "cancel", "Ended Early"],
+    [[{ optionId: "trust" }], "trust", "Resolved"],
+    [[{ optionId: "allow" }], "allow", "Allowed"],
+    [[{ optionId: "deny" }], "deny", "Rejected"],
+    // A provider option's kind wins when it reuses a runner resolution id.
+    [[{ optionId: "auth:select-account", kind: "allow_once" }], "auth:select-account", "Allowed"],
+    // An inherited property must never become an outcome.
+    [[], "toString", "Resolved"],
+    [[], null, "Dismissed"],
+  ];
+  for (const [options, resolvedOptionId, expected] of cases) {
+    const record = permissionDecisionRecord({
+      kind: "permission", id: 1, requestId: "request", title: "Run Command",
+      options: options.map((option) => ({ ...option, label: "Choose" })), resolvedOptionId,
+    });
+    assert.equal(statusMeta("requestDecision", record.outcome).label, expected, String(resolvedOptionId));
+  }
 });
 
 /** Every incremental projection must equal a from-scratch one: folding retries may only ever cost

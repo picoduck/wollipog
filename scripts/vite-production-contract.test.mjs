@@ -50,6 +50,8 @@ test("Vite production browser coverage cannot silently lose a selected check", (
   const productionConfig = readFileSync(new URL("../playwright.production.config.ts", import.meta.url), "utf8");
   const markers = `${timelineSpec}\n${settingsSpec}\n${xtermSpec}`.match(/@production/g) ?? [];
   const requiredDeclarations = [
+    [timelineSpec, "following live output keeps every painted frame pinned while a long streamed row grows @production"],
+    [timelineSpec, "following live output keeps every painted frame pinned while a new reply grows @production"],
     [timelineSpec, "continuous panel resizing keeps long wrapped rows disjoint in every painted frame @production"],
     [timelineSpec, "mounting and unmounting a preceding notice preserves the anchor in every painted frame @production"],
     [timelineSpec, "mounting and unmounting a preceding notice during a list rerender preserves the anchor in every painted frame @production"],
@@ -64,9 +66,9 @@ test("Vite production browser coverage cannot silently lose a selected check", (
     [xtermSpec, "the active search match is visibly different from the other matches in ${theme} (#2865) @production"],
   ];
 
-  // Twelve tagged declarations discover fourteen tests because the painted-affordance case and the
+  // Fourteen tagged declarations discover sixteen tests because the painted-affordance case and the
   // active-search-match case each run in two themes.
-  assert.equal(markers.length, 12);
+  assert.equal(markers.length, 14);
   for (const [source, title] of requiredDeclarations) {
     assert.ok(source.includes(title), `missing required production browser declaration: ${title}`);
   }

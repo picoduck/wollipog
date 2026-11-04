@@ -1,6 +1,6 @@
 import { useAccountEmailPrivacy } from "../account-email-privacy.js";
 import { useShowAgentLogs } from "../agent-logs.js";
-import type { AgentDriverKind, WorkflowArtifactView } from "@wollipog/protocol";
+import type { AgentDefinition, AgentDriverKind, InPlaceHandoffTurn, WorkflowArtifactView } from "@wollipog/protocol";
 import { Profiler, createContext, memo, useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type CSSProperties, type ReactNode, type RefObject } from "react";
 import { isWorkspaceReference, normalizeSourcePath, type PlanEntry, type SourceLocation } from "@wollipog/protocol";
 import { type TurnUsage,
@@ -68,8 +68,17 @@ import { statusMeta, toolStatusMeta } from "../status-meta.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { ReadonlyReferenceChip } from "./images.js";
 import { PromptImageView } from "./PromptImageView.js";
-import { ArtifactInlinePreview } from "./ArtifactPreview.js";
+import {
+  INLINE_ARTIFACT_LIMIT,
+  ReplyArtifactScope,
+  TranscriptArtifact,
+  TranscriptArtifactViewerProvider,
+  useArtifactDirectory,
+  type ReplyArtifactPreviews,
+  type TranscriptArtifactSlot,
+} from "./TranscriptArtifacts.js";
 import { TranscriptImageCacheProvider } from "./TranscriptImageCache.js";
+import { referencedArtifactIds } from "../artifact-references.js";
 import { EventPayloadContent } from "./EventPayloadContent.js";
 import { useTimelineClock } from "../timeline-clock.js";
 import { deriveSubagentLifecycle } from "../subagents.js";
@@ -83,26 +92,6 @@ type UserMessageItem = Extract<TimelineItem, { kind: "user_message" }>;
 /** A reply in the transcript: one agent message, which Side Chat's Insert into Draft takes (#2862). */
 export type AgentReplyItem = Extract<TimelineItem, { kind: "agent_message" }>;
 
-function TranscriptArtifact({ artifact }: { artifact: WorkflowArtifactView }) {
-  const [load, setLoad] = useState(false);
-  const ref = useRef<HTMLDivElement>(null);
-  useEffect(() => {
-    if (load || artifact.kind === "video" || !ref.current) return;
-    if (typeof IntersectionObserver === "undefined") { setLoad(true); return; }
-    const observer = new IntersectionObserver((entries) => {
-      if (entries.some((entry) => entry.isIntersecting)) { setLoad(true); observer.disconnect(); }
-    }, { rootMargin: "240px" });
-    observer.observe(ref.current);
-    return () => observer.disconnect();
-  }, [artifact.kind, load]);
-  return (
-    <div className="tl-artifact" ref={ref}>
-      <div className="tl-artifact-head"><strong>{artifact.name}</strong><span>{artifact.kind === "video" ? "Video" : "Image"} · {artifact.sizeBytes.toLocaleString()} Bytes</span></div>
-      {artifact.kind === "video" && !load && <button className="btn ghost sm" type="button" onClick={() => setLoad(true)}>Load Video</button>}
-      {load && <ArtifactInlinePreview artifact={artifact} />}
-    </div>
-  );
-}
 const useBrowserLayoutEffect = typeof window === "undefined" ? useEffect : useLayoutEffect;
 
 export interface TimelineRevealRequest {
@@ -503,6 +492,112 @@ export function layoutTurns(
   return { footers, turnStarts, standaloneReplies };
 }
 
+/**
+ * Each attachment row's place among its turn's artifacts (#3924): the first INLINE_ARTIFACT_LIMIT
+ * are previews, the next is the turn's counted View All, and the rest render nothing. An artifact
+ * delivered twice (a replayed or re-polled event) counts once, at its first row. `previous` is the
+ * last layout: a slot that did not change keeps its identity, so a memoized row holds while another
+ * row streams (#2763).
+ */
+export function layoutTranscriptArtifacts(
+  rows: readonly TimelineRenderRow[],
+  turns: TimelineTurns,
+  previous?: ReadonlyMap<string, TranscriptArtifactSlot>,
+): Map<string, TranscriptArtifactSlot> {
+  const groups = new Map<number, { artifacts: WorkflowArtifactView[]; seen: Set<string> }>();
+  const placed: Array<{ key: string; turn: number; index: number | null }> = [];
+  for (const row of rows) {
+    if (row.kind !== "item" || row.item.kind !== "artifact_attached") continue;
+    const turn = turns.segmentOf.get(row.item.id) ?? -1;
+    let group = groups.get(turn);
+    if (!group) groups.set(turn, group = { artifacts: [], seen: new Set() });
+    const { artifact } = row.item;
+    if (group.seen.has(artifact.artifactId)) {
+      placed.push({ key: row.key, turn, index: null });
+      continue;
+    }
+    group.seen.add(artifact.artifactId);
+    placed.push({ key: row.key, turn, index: group.artifacts.push(artifact) - 1 });
+  }
+  const sameGroup = (a: readonly WorkflowArtifactView[], b: readonly WorkflowArtifactView[]) =>
+    a.length === b.length && a.every((artifact, index) => artifact === b[index]);
+  // One array per turn, reused from the last layout while its artifacts are the same.
+  const stableGroups = new Map<number, readonly WorkflowArtifactView[]>();
+  const slots = new Map<string, TranscriptArtifactSlot>();
+  for (const { key, turn, index } of placed) {
+    const artifacts = groups.get(turn)!.artifacts;
+    let group = stableGroups.get(turn);
+    if (!group) {
+      const prior = previous?.get(key)?.group;
+      group = prior && sameGroup(prior, artifacts) ? prior : artifacts;
+      stableGroups.set(turn, group);
+    }
+    const role: TranscriptArtifactSlot["role"] = index === null || index > INLINE_ARTIFACT_LIMIT ? "hidden"
+      : index === INLINE_ARTIFACT_LIMIT ? "more" : "preview";
+    const slot = { role, group, index: index ?? 0 };
+    const prior = previous?.get(key);
+    slots.set(key, prior && prior.role === slot.role && prior.group === slot.group && prior.index === slot.index ? prior : slot);
+  }
+  return slots;
+}
+
+/** A reply's cited ids, read once per reply text: items are cloned on write, so the text decides. */
+const replyIdsByText = new Map<string, readonly string[]>();
+function replyArtifactIds(text: string): readonly string[] {
+  if (!text.includes("art_")) return [];
+  let ids = replyIdsByText.get(text);
+  if (!ids) {
+    if (replyIdsByText.size > 500) replyIdsByText.clear();
+    ids = referencedArtifactIds(text);
+    replyIdsByText.set(text, ids);
+  }
+  return ids;
+}
+
+/**
+ * Which artifacts each top-level reply previews under it (#3970): those it cites that its turn did
+ * not attach and no earlier reply in the turn cited, within what the turn's attachment previews
+ * leave of INLINE_ARTIFACT_LIMIT. Read from the ids in the text alone, so the layout never waits on
+ * a lookup; an id that resolves to nothing previews nothing. `previous` keeps an unchanged entry's
+ * identity, so a memoized row holds while another streams (#2763).
+ */
+export function layoutReplyArtifactPreviews(
+  rows: readonly TimelineRenderRow[],
+  turns: TimelineTurns,
+  previous?: ReadonlyMap<string, ReplyArtifactPreviews>,
+): Map<string, ReplyArtifactPreviews> {
+  // The turn's attachments first, wherever its replies fall: they keep their own previews.
+  const turnState = new Map<number, { cited: Set<string>; previews: number }>();
+  const stateOf = (turn: number) => {
+    let state = turnState.get(turn);
+    if (!state) turnState.set(turn, state = { cited: new Set(), previews: 0 });
+    return state;
+  };
+  for (const row of rows) {
+    if (row.kind !== "item" || row.item.kind !== "artifact_attached") continue;
+    const state = stateOf(turns.segmentOf.get(row.item.id) ?? -1);
+    if (state.cited.has(row.item.artifact.artifactId)) continue;
+    state.cited.add(row.item.artifact.artifactId);
+    state.previews = Math.min(INLINE_ARTIFACT_LIMIT, state.previews + 1);
+  }
+  const layout = new Map<string, ReplyArtifactPreviews>();
+  for (const row of rows) {
+    if (row.kind !== "item" || row.depth > 0 || row.item.kind !== "agent_message" || row.item.parentToolUseId) continue;
+    const ids = replyArtifactIds(row.item.text);
+    if (ids.length === 0) continue;
+    const state = stateOf(turns.segmentOf.get(row.item.id) ?? -1);
+    const fresh = ids.filter((id) => !state.cited.has(id));
+    for (const id of fresh) state.cited.add(id);
+    const budget = Math.max(0, INLINE_ARTIFACT_LIMIT - state.previews);
+    state.previews += Math.min(budget, fresh.length);
+    const prior = previous?.get(row.key);
+    const same = prior && prior.budget === budget && prior.ids.length === fresh.length &&
+      prior.ids.every((id, index) => id === fresh[index]);
+    layout.set(row.key, same ? prior : { ids: fresh, budget });
+  }
+  return layout;
+}
+
 export type TimelineRenderRow =
   | ({
       kind: "work_summary";
@@ -525,7 +620,6 @@ export type TimelineRenderRow =
       attempts?: readonly ToolItem[];
     };
 
-const timelineRowKey = (row: TimelineRenderRow) => row.key;
 export const estimateTimelineRow = (row: TimelineRenderRow): number => {
   if (row.kind === "work_summary") return 28;
   if (row.kind === "subagent_summary" || row.kind === "subagent_output") return 28;
@@ -550,7 +644,15 @@ export const estimateTimelineRow = (row: TimelineRenderRow): number => {
  * keystrokes, status flips) skips the whole timeline subtree, not just the row bodies.
  * `onRewind` (when provided — session detail only) must be identity-stable (useCallback)
  * or it defeats the row memoization. */
-const HandoffContext = createContext<{ open: (turn: number) => void; reason?: string } | undefined>(undefined);
+interface HandoffControl {
+  open: (turn: number) => void;
+  reason?: string;
+  /** Only in-place handoffs use prompt ordinals from the shared durable-history projection. */
+  inPlaceTurns?: ReadonlyMap<number, InPlaceHandoffTurn>;
+  historyReason?: string;
+}
+const TimelineAgentsContext = createContext<readonly Pick<AgentDefinition, "id" | "name">[] | undefined>(undefined);
+const HandoffContext = createContext<HandoffControl | undefined>(undefined);
 
 /** Retry Turn for a failed turn's notice (#2169): re-submits the turn's prompt as a new turn. */
 export interface TurnRetryControl {
@@ -565,6 +667,7 @@ export interface TurnRetryControl {
 const TurnRetryContext = createContext<TurnRetryControl | undefined>(undefined);
 export const EventTimeline = memo(function EventTimeline({
   handoff,
+  agents,
   turnRetry,
   items,
   onRewind,
@@ -597,8 +700,12 @@ export const EventTimeline = memo(function EventTimeline({
   onOpenSession,
   onInsertReply,
   subagentStatus,
+  onOpenArtifact,
+  artifactSessionId,
 }: {
-  handoff?: { open: (turn: number) => void; reason?: string };
+  handoff?: HandoffControl;
+  /** Current definitions on this session's runner; stored handoff IDs remain the fallback. */
+  agents?: readonly Pick<AgentDefinition, "id" | "name">[];
   /** Retry Turn on a failed turn's notice; absent where a transcript cannot start a turn. */
   turnRetry?: TurnRetryControl;
   items: TimelineItem[];
@@ -651,16 +758,25 @@ export const EventTimeline = memo(function EventTimeline({
   /** The session's status, runner and worker requests, so an agent row's badge matches the Agents
    * roster's (#2857). Must be identity-stable. */
   subagentStatus?: SubagentStatusContextValue;
+  /** An attachment's Open in Browser: Browser → Artifacts on it (#3924). Must be identity-stable. */
+  onOpenArtifact?: (artifact: WorkflowArtifactView) => void;
+  /**
+   * The session whose artifacts a reply's cited ids name (#3970). Without it ids stay text, as in a
+   * public shared transcript, which never resolves them.
+   */
+  artifactSessionId?: string;
 }) {
   const effectiveHistoryKey = historyKey ?? "timeline";
   const scopedRevealRequest = revealRequest?.historyKey === effectiveHistoryKey ? revealRequest : null;
   return (
+    <TimelineAgentsContext.Provider value={agents}>
     <HandoffContext.Provider value={handoff}>
     <TimelineSessionLinkContext.Provider value={onOpenSession}>
     <InsertReplyContext.Provider value={onInsertReply}>
     <SubagentStatusContext.Provider value={subagentStatus ?? DEFAULT_SUBAGENT_STATUS}>
     <TurnRetryContext.Provider value={turnRetry}>
     <TranscriptImageCacheProvider key={effectiveHistoryKey} enabled={historyKey !== undefined}>
+    <TranscriptArtifactViewerProvider onOpenInBrowser={onOpenArtifact} sessionId={artifactSessionId}>
     <EventTimelineBody
       key={effectiveHistoryKey}
       items={items}
@@ -691,12 +807,14 @@ export const EventTimeline = memo(function EventTimeline({
       questionContext={questionContext}
       workspaceRoot={workspaceRoot}
     />
+    </TranscriptArtifactViewerProvider>
     </TranscriptImageCacheProvider>
     </TurnRetryContext.Provider>
     </SubagentStatusContext.Provider>
     </InsertReplyContext.Provider>
     </TimelineSessionLinkContext.Provider>
     </HandoffContext.Provider>
+    </TimelineAgentsContext.Provider>
   );
 });
 
@@ -783,6 +901,44 @@ function EventTimelineBody({
     () => layoutTurns(rows, turns, sessionActive),
     [rows, projection.revision, turns, sessionActive],
   );
+  const artifactSlotsRef = useRef<ReadonlyMap<string, TranscriptArtifactSlot> | undefined>(undefined);
+  const artifactSlots = useMemo(() => {
+    const slots = layoutTranscriptArtifacts(rows, turns, artifactSlotsRef.current);
+    artifactSlotsRef.current = slots;
+    return slots;
+  }, [rows, projection.revision, turns]);
+  const replyPreviewsRef = useRef<ReadonlyMap<string, ReplyArtifactPreviews> | undefined>(undefined);
+  const replyPreviews = useMemo(() => {
+    const layout = layoutReplyArtifactPreviews(rows, turns, replyPreviewsRef.current);
+    replyPreviewsRef.current = layout;
+    return layout;
+  }, [rows, projection.revision, turns]);
+  // The transcript's attachments name their ids for a reply's references without a list read.
+  const artifactDirectory = useArtifactDirectory();
+  useEffect(() => {
+    if (!artifactDirectory) return;
+    const attached = new Set<WorkflowArtifactView>();
+    for (const slot of artifactSlots.values()) for (const artifact of slot.group) attached.add(artifact);
+    artifactDirectory.remember(attached);
+  }, [artifactDirectory, artifactSlots]);
+  // A turn's artifacts past its View All take no room: their rows are empty and keep no gap, unless
+  // the row also closes the turn and so carries its footer.
+  const collapsedRow = (row: TimelineRenderRow | undefined) =>
+    row !== undefined && artifactSlots.get(row.key)?.role === "hidden" && !turnFooters.has(row.key);
+  // Nor in the virtual list's geometry while unmounted: a hidden row is estimated at zero, and keyed
+  // apart from the preview it may have been (before history was prepended), so no height measured
+  // for that preview is kept for it. A row only turns hidden when rows are inserted before it, which
+  // the projection already reports as dirty from there. Read through a ref, so both callbacks keep
+  // their identity, and the list its key index, while other rows stream.
+  const hiddenArtifactKeysRef = useRef<ReadonlySet<string>>(new Set());
+  hiddenArtifactKeysRef.current = useMemo(
+    () => new Set([...artifactSlots].filter(([, slot]) => slot.role === "hidden").map(([key]) => key)),
+    [artifactSlots],
+  );
+  const virtualRowKey = useCallback((row: TimelineRenderRow) =>
+    hiddenArtifactKeysRef.current.has(row.key) ? `${row.key}:hidden` : row.key, []);
+  const estimateVirtualRow = useCallback((row: TimelineRenderRow) =>
+    hiddenArtifactKeysRef.current.has(row.key) ? 0 : estimateTimelineRow(row), []);
   // Prompts a settled turn's More Turn Actions already lists; on a coarse pointer every other user
   // message (a steer, a running or footerless turn's prompt) keeps a menu of its own.
   const turnMenuPrompts = useMemo(() => {
@@ -796,9 +952,12 @@ function EventTimelineBody({
     (_row: TimelineRenderRow, index: number) => {
       const next = rows[index + 1];
       if (next && rowOnWorkRule(next)) return 0;
+      // The gap before a collapsed row is taken by the row after it instead.
+      if (collapsedRow(next)) return 0;
       return turnStarts.has(next?.key ?? "") ? TIMELINE_TURN_GAP : TIMELINE_ROW_GAP;
     },
-    [rows, turnStarts],
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [rows, turnStarts, artifactSlots, turnFooters],
   );
   const liveWorkKey = useMemo(
     () => sessionActive ? liveWorkSummaryKey(rows) : null,
@@ -852,13 +1011,14 @@ function EventTimelineBody({
     const footer = turnFooters.get(row.key);
     // A stop's row is only its turn's footer, sitting where the footer would under the row before.
     const stopRow = row.kind === "item" && row.item.kind === "turn_interrupted";
-    const content = stopRow ? null : renderRowContent(row, state);
+    const hiddenArtifact = artifactSlots.get(row.key)?.role === "hidden";
+    const content = stopRow || hiddenArtifact ? null : renderRowContent(row, state);
     if (!footer) return content;
     return (
       <>
         {content}
         <TurnFooter
-          alone={stopRow}
+          alone={stopRow || hiddenArtifact}
           summary={footer}
           onFork={onFork}
           forkAvailability={footer.forkTurn == null ? undefined : forkAvailabilityByTurn?.get(footer.forkTurn)}
@@ -924,6 +1084,8 @@ function EventTimelineBody({
           inTurnMenu={item.kind === "user_message" && turnMenuPrompts.has(item.id)}
           failedTurnPrompt={item.kind === "error" ? turns.segments[turns.segmentOf.get(item.id) ?? -1]?.prompt : undefined}
           questionContext={item.kind === "question" ? questionContext : undefined}
+          artifactSlot={item.kind === "artifact_attached" ? artifactSlots.get(row.key) : undefined}
+          replyArtifacts={item.kind === "agent_message" ? replyPreviews.get(row.key) : undefined}
         />
       </WorkRule>
     );
@@ -931,10 +1093,10 @@ function EventTimelineBody({
   const timeline = scrollRef ? (
     <MeasuredVirtualList
       items={rows}
-      getKey={timelineRowKey}
+      getKey={virtualRowKey}
       renderItem={renderRow}
       scrollRef={scrollRef}
-      estimateSize={estimateTimelineRow}
+      estimateSize={estimateVirtualRow}
       overscan={8}
       rowGap={rowGap}
       className="timeline"
@@ -952,7 +1114,7 @@ function EventTimelineBody({
     />
   ) : (
     <div className="timeline" role="list" aria-label={ariaLabel}>
-      {rows.map((row, index) => (
+      {rows.map((row, index) => collapsedRow(row) ? null : (
         <div
           key={row.key}
           className={turnStarts.has(row.key) ? "tl-turn-start" : rowOnWorkRule(row) ? "tl-on-work-rule" : undefined}
@@ -2255,6 +2417,10 @@ interface TimelineRowContentProps {
   disclosureOpen?: boolean;
   onDisclosureToggle?: () => void;
   questionContext?: TimelineQuestionContext;
+  /** For an attachment: its place among its turn's artifacts (#3924). */
+  artifactSlot?: TranscriptArtifactSlot;
+  /** For a top-level reply: the cited artifacts it previews under it (#3970). */
+  replyArtifacts?: ReplyArtifactPreviews;
 }
 
 function TimelineRowContent({
@@ -2275,13 +2441,15 @@ function TimelineRowContent({
   disclosureOpen = false,
   onDisclosureToggle,
   questionContext,
+  artifactSlot,
+  replyArtifacts,
 }: TimelineRowContentProps) {
   const sessionActive = useContext(TimelineActivityContext);
   const onInsertReply = useContext(InsertReplyContext);
   const mediaSettled = timelineMediaSettled(item, sessionActive);
   switch (item.kind) {
     case "artifact_attached":
-      return <TranscriptArtifact artifact={item.artifact} />;
+      return <TranscriptArtifact artifact={item.artifact} slot={artifactSlot} />;
     case "checkpoint_restored":
       return (
         <HistoryDivider
@@ -2348,7 +2516,9 @@ function TimelineRowContent({
       const insertable = onInsertReply !== undefined && !item.parentToolUseId && item.text.trim() !== "";
       return (
         <div className="tl-agent-msg">
-          <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+          <ReplyArtifactScope text={item.text} settled={mediaSettled} previews={replyArtifacts}>
+            <Markdown highlightEligible={highlightEligible} inlineMedia settled={mediaSettled}>{item.text}</Markdown>
+          </ReplyArtifactScope>
           {(standaloneCopy || insertable) && item.text && (
             <div className="tl-message-actions tl-reply-actions" role="group" aria-label="Message Actions">
               <CopyButton text={item.text} format={markdownPlainText} iconOnly ariaLabel="Copy Response" className="icon-btn sm" />
@@ -2392,6 +2562,7 @@ function TimelineRowContent({
     case "stderr":
       return <AgentLogStep item={item} open={disclosureOpen} onToggle={onDisclosureToggle} />;
     case "error":
+      if (item.nonFatal) return <TurnProblemNotice message={item.message} />;
       return isAutomaticTurnsHeld(item.message)
         ? <AutomaticTurnsHeldNotice message={item.message} />
         : <TurnFailedNotice message={item.message} prompt={failedTurnPrompt} />;
@@ -2903,20 +3074,20 @@ export function messageActions(item: UserMessageItem, input: MessageActionInput)
   return actions;
 }
 
-/** Beside the user bubble, drawn to its left and taking no height. On a fine pointer (§15.3): Copy
- * Message, Edit as a New Turn when it can be used, and More Message Actions, transparent until the
- * message is hovered, focused within or its menu is open. On a coarse pointer the turn's More Turn
- * Actions holds the same actions, so nothing renders here, unless no turn menu lists this message
- * (a steer, or a prompt whose turn is running or has no footer): then More Message Actions alone,
- * visible at rest, so no message loses its actions on a touch screen. */
+/** Fine pointers keep the hover cluster beside the bubble. Touch screens always get direct Copy
+ * below the bubble, plus More Message Actions when no settled turn menu lists this message; that
+ * menu leaves out the Copy beside it (#3961). The touch row takes its own space so full-size
+ * targets cannot overlap the bubble or one another. */
 function UserMessageActions({ item, inTurnMenu, ...input }: MessageActionInput & { item: UserMessageItem; inTurnMenu: boolean }) {
   const coarsePointer = useIsCoarsePointer();
-  if (coarsePointer && inTurnMenu) return null;
+  if (coarsePointer && inTurnMenu && !item.text) return null;
   const actions = messageActions(item, input);
   if (coarsePointer) {
+    const menuActions = item.text ? actions.filter((action) => action.key !== "copy-message") : actions;
     return (
       <div className="tl-message-actions tl-user-menu" role="group" aria-label="Message Actions">
-        <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions }]} />
+        {item.text && <CopyButton text={item.text} iconOnly ariaLabel="Copy Message" className="icon-btn sm" />}
+        {!inTurnMenu && <TranscriptActionMenu label="More Message Actions" groups={[{ label: "Your Message", actions: menuActions }]} />}
       </div>
     );
   }
@@ -2989,6 +3160,17 @@ function AutomaticTurnsHeldNotice({ message }: { message: string }) {
   );
 }
 
+/** A problem the driver reported while the turn kept running (#3806), such as an async question it
+ * could not show as a card. The turn did not fail, so there is no Retry Turn: re-running a turn that
+ * completed would repeat its side effects. The runner writes this message as a plain sentence. */
+function TurnProblemNotice({ message }: { message: string }) {
+  return (
+    <Notice tone="warning" title="Problem During Turn">
+      <p>{message}</p>
+    </Notice>
+  );
+}
+
 /** "Started 12:25:38 AM, finished 12:26:04 AM (26s)": the exact span behind the footer's clock. The
  * duration is always finish minus start, so the three figures never contradict one another. */
 export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt" | "finishedAt">): string {
@@ -2997,12 +3179,13 @@ export function turnSpanDescription(summary: Pick<TurnFooterSummary, "startedAt"
 
 /** The This Turn group, in menu order. Fork and Hand Off appear where the turn established a
  * conversation checkpoint, disabled with their reason when they cannot be used now. */
-export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff }: {
+export function turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff, handoffTurn = forkTurn }: {
   responseText: string;
   forkAvailability?: ConversationForkAvailability;
   onFork?: (turn: number) => void;
   forkTurn?: number;
-  handoff?: { open: (turn: number) => void; reason?: string };
+  handoffTurn?: number;
+  handoff?: HandoffControl;
 }): TranscriptAction[] {
   const noResponse = "This turn has no response to copy.";
   const actions: TranscriptAction[] = [
@@ -3033,13 +3216,13 @@ export function turnActions({ responseText, forkAvailability, onFork, forkTurn, 
         : { unavailableReason: forkAvailability.available ? "This action is unavailable." : forkAvailability.reason }),
     });
   }
-  if (handoff && forkTurn != null) {
+  if (handoff && handoffTurn != null) {
     actions.push({
       key: "handoff",
       label: "Hand Off After This Turn…",
       icon: <HandOffIcon size={16} />,
       unavailableReason: handoff.reason,
-      onSelect: () => handoff.open(forkTurn),
+      onSelect: () => handoff.open(handoffTurn),
     });
   }
   return actions;
@@ -3068,7 +3251,13 @@ function TurnFooter({ summary, onFork, forkAvailability, prompt, alone = false, 
   const span = turnSpanDescription(summary);
   const usage = summary.usage ? turnUsageLabel(summary.usage, driver) : null;
   const responseText = useMemo(() => turnResponseText(summary), [summary.responseParts]);
-  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoff });
+  const inPlacePoint = prompt ? handoff?.inPlaceTurns?.get(prompt.id) : undefined;
+  const handoffTurn = handoff?.inPlaceTurns ? inPlacePoint?.turn ?? 0 : forkTurn;
+  const handoffReason = handoff?.reason ?? (handoff?.inPlaceTurns
+    ? handoff.historyReason ?? inPlacePoint?.reason ?? (!inPlacePoint ? "This turn didn't finish, so it can't be handed off yet." : undefined)
+    : undefined);
+  const actions = turnActions({ responseText, forkAvailability, onFork, forkTurn, handoffTurn,
+    handoff: handoff ? { ...handoff, reason: handoffReason } : undefined });
   const fork = actions.find((action) => action.key === "fork");
   const forkUsable = fork !== undefined && transcriptActionAvailable(fork);
   const groups = [
@@ -3305,6 +3494,8 @@ function HistoryDivider({ icon, label, title, description }: {
 /** A fork or handoff names its turn; where the app can navigate, its source session is a link. */
 function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversation_forked" }> }) {
   const openSession = useContext(TimelineSessionLinkContext);
+  const agents = useContext(TimelineAgentsContext);
+  const agentName = (id: string) => agents?.find((agent) => agent.id === id)?.name || id;
   const sourceLink = openSession && (
     <button type="button" className="link" onClick={() => openSession(item.sourceSessionId)}>Open Source Session</button>
   );
@@ -3312,7 +3503,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
     return (
       <HistoryDivider
         icon={<ThreadForkIcon size={14} />}
-        label={`Forked from Turn ${item.turn}`}
+        label={`Forked from Turn\u00a0${item.turn}`}
         title={`Conversation forked from turn ${item.turn}`}
         description={sourceLink || undefined}
       />
@@ -3321,7 +3512,7 @@ function ForkDivider({ item }: { item: Extract<TimelineItem, { kind: "conversati
   return (
     <HistoryDivider
       icon={<HandOffIcon size={14} />}
-      label={`Handoff from ${item.handoff.sourceAgent} to ${item.handoff.destinationAgent} After Turn ${item.turn}`}
+      label={`Handoff from ${agentName(item.handoff.sourceAgent)} to ${agentName(item.handoff.destinationAgent)} after Turn\u00a0${item.turn}`}
       description={<>Fresh provider conversation. {item.handoff.disclosure}{sourceLink && <> {sourceLink}</>}</>}
     />
   );

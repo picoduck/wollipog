@@ -5,11 +5,18 @@ residue that concurrent issue work leaves behind.
 
 ## Ground Truth
 
-**Tracker against repository.** Review up to 60 closed issues per run against the merged
+**Tracker against repository.** Review up to 250 closed issues per run against the merged
 code, including unfinished reviews carried forward from earlier runs. Split the reading across
-read-only helper agents when the count is large. The review cap bounds investigation, not the
-number of closures retained: the 2026-10-02 run found 281 closures and reviewed 60; selecting only
-the newest 60 and advancing the next run's window would permanently drop the other 221.
+read-only helper agents when the count is large: about ten issues per helper, three helpers at a
+time. The review cap bounds investigation, not the number of closures retained: the 2026-10-02
+run found 281 closures and reviewed 60; selecting only the newest 60 and advancing the next run's
+window would permanently drop the other 221.
+
+The cap is sized to the observed inflow. Weekly runs harvested 202 closures on 2026-10-09 and 179
+on 2026-10-16, and the 60-issue cap left 125 pending after one week. Reviewing all 179 of the
+2026-10-16 closures, with the harvest, hygiene and report, cost about $63, or $0.35 per issue. A
+full 250-issue run costs about $90, so the automation's cost budget is $100. Recheck both figures
+when the inflow or the per-issue cost moves.
 
 **Record the window and retain the backlog.** At launch, write the actual UTC start time to
 `run-start.txt` in this run's scratch directory. Use the automation session's `createdAt` for a
@@ -40,7 +47,7 @@ incomplete harvest. Keep the previous boundary and retrieved pending entries for
 For a complete harvest, advance the boundary only to this run's recorded start time; overlapping
 entries are harmless because of deduplication. Save the merged inventory before investigating.
 
-Review the oldest 60 pending entries first. Update the audit artifact after each completed review,
+Review the oldest 250 pending entries first. Update the audit artifact after each completed review,
 moving only fully assessed entries to `reviewed`; interrupted or budget-limited entries remain
 pending. Fetch the issue's current state and criteria when reviewing a carried entry; record a
 reopened issue as superseded and move that closure key to `reviewed` with this outcome. Treat a

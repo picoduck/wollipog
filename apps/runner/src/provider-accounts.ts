@@ -1,3 +1,4 @@
+import { providerForDriver } from "@wollipog/protocol";
 import { existsSync } from "node:fs";
 import { join, posix, win32 } from "node:path";
 import type {
@@ -8,6 +9,8 @@ import type {
 } from "@wollipog/protocol";
 import type { RunnerConfigAgent, RunnerProviderAccount } from "./config.js";
 import type { SessionMeta } from "./session-store.js";
+
+export { providerForDriver };
 
 export interface BoundProviderAccount {
   id: string;
@@ -28,23 +31,21 @@ export function bindSessionProviderAccount(
   // account would falsely label a credential scope that the provider process never uses.
   if (spec.executionTarget && spec.executionTarget.adapter !== "host") return undefined;
   if (prior?.providerAccountId && prior.providerCredentialHome && prior.providerAccountProvider) {
+    // The recorded binding is authoritative, including its profile id (#3239): a binding made
+    // before the account was adopted keeps its homes and gains no profile id; the account's
+    // current profile is never read here.
     return {
       id: prior.providerAccountId,
       label: prior.providerAccountLabel ?? spec.providerAccountLabel ?? prior.providerAccountId,
       provider: prior.providerAccountProvider,
       credentialHome: prior.providerCredentialHome,
+      ...(prior.providerProfileId !== undefined ? { profileId: prior.providerProfileId } : {}),
     };
   }
   // A session created before provider accounts were configured belongs to the legacy provider
   // home. Do not silently move its transcript and credentials when that session restarts.
   if (prior) return undefined;
   return resolveAccount?.(spec);
-}
-
-export function providerForDriver(driver: AgentDriverKind): "claude" | "codex" | null {
-  if (driver === "claude-code") return "claude";
-  if (driver === "codex" || driver === "codex-app-server") return "codex";
-  return null;
 }
 
 /** Whether one background provider process can address the configured credential home without
@@ -80,6 +81,9 @@ export function agentForProviderAccount(
     (!supportedDrivers || supportedDrivers.includes(candidate.driver ?? "acp")));
   const preferred = (compatible: AgentDefinition[], ambiguousTargetContexts: boolean) =>
     compatible.find((candidate) => candidate.defaultProviderAccountId === account.id) ??
+    // Retired configured entries can precede a working installation after discovery. Prefer
+    // positive availability within native execution without changing explicit/context choices.
+    compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native" && candidate.available === true) ??
     compatible.find((candidate) => (candidate.context?.kind ?? "native") === "native") ??
     (!ambiguousTargetContexts || compatible.length === 1 ? compatible[0] : undefined);
   if (account.directory === undefined) return preferred(providerAgents, false);
@@ -132,6 +136,7 @@ export function selectProviderAccount(
   driver: AgentDriverKind,
   requestedId?: string,
   platform: NodeJS.Platform = process.platform,
+  usable: (account: RunnerProviderAccount) => boolean = () => true,
 ): BoundProviderAccount | undefined {
   const provider = providerForDriver(driver);
   if (!provider) {
@@ -140,7 +145,8 @@ export function selectProviderAccount(
   }
   const matching = accounts.filter((candidate) => candidate.provider === provider);
   if (matching.length === 0) {
-    if (requestedId) throw new Error(`provider account '${requestedId}' is not configured`);
+    const missing = requestedId ?? agent?.defaultProviderAccountId;
+    if (missing) throw new Error(`provider account '${missing}' is not configured`);
     return undefined;
   }
   // Account directories use runner-host path syntax. A WSL agent may opt in explicitly (or via
@@ -150,12 +156,16 @@ export function selectProviderAccount(
   const selected = selectedId
     ? matching.find((candidate) => candidate.id === selectedId)
     : agent && (agent.context?.kind ?? "native") === "native"
-      ? matching.find((candidate) => providerAccountAgentContextCompatible(candidate, agent, platform))
+      ? matching.find((candidate) => usable(candidate) && providerAccountAgentContextCompatible(candidate, agent, platform))
       : undefined;
   if (selectedId && !selected) {
     throw new Error(`provider account '${selectedId}' is not configured for ${provider}`);
   }
   if (!selected) {
+    if (agent && (agent.context?.kind ?? "native") === "native" &&
+        matching.some((candidate) => providerAccountAgentContextCompatible(candidate, agent, platform))) {
+      throw new Error("No compatible provider account is granted to this control plane.");
+    }
     if (agent && (agent.context?.kind ?? "native") === "native" && matching[0]) {
       throw providerAccountContextMismatch(matching[0], agent);
     }
@@ -164,6 +174,8 @@ export function selectProviderAccount(
   if (agent && !providerAccountAgentContextCompatible(selected, agent, platform)) {
     throw providerAccountContextMismatch(selected, agent);
   }
+  // Preserve explicit bindings so the launch's existing profile/lease gate can return its
+  // structured refusal. Grant filtering changes only the otherwise implicit choice.
   return {
     id: selected.id,
     label: selected.label,
@@ -171,6 +183,108 @@ export function selectProviderAccount(
     credentialHome: selected.directory,
     ...(selected.profileId !== undefined ? { profileId: selected.profileId } : {}),
   };
+}
+
+/** Discovery and new implicit launches choose the first granted compatible account, matching
+ * control-plane session creation. An explicit/saved default is never silently substituted. */
+export function selectProviderAccountForDiscovery(
+  accounts: RunnerProviderAccount[],
+  agent: Pick<AgentDefinition, "id" | "driver" | "context" | "defaultProviderAccountId">,
+  usable: (account: RunnerProviderAccount) => boolean,
+  platform: NodeJS.Platform = process.platform,
+): BoundProviderAccount | undefined {
+  const selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform, usable);
+  const configured = selected ? accounts.find((account) => account.id === selected.id) : undefined;
+  if ((configured && !usable(configured)) || (agent.defaultProviderAccountId && !configured)) {
+    throw new Error("The selected discovery account is not granted to this control plane.");
+  }
+  return selected;
+}
+
+/** Account authentication is independent of the currently selected account's readiness. A
+ * compatible installed CLI may probe another granted HOME even when its default is signed out. */
+export function providerAccountProbeAvailable(agent: AgentDefinition): boolean {
+  if (agent.driver === "codex-app-server" && agent.codexAppServer) return agent.codexAppServer.status === "supported";
+  if (agent.driver === "claude-code" && agent.claudeCode) return agent.claudeCode.status === "ready" || agent.claudeCode.status === "unauthenticated";
+  return agent.available === true && agent.driver !== "codex";
+}
+
+export async function probeProviderAccountsForDiscovery(input: {
+  accounts: RunnerProviderAccount[];
+  agents: AgentDefinition[];
+  usable(account: RunnerProviderAccount): boolean;
+  environment(agent: AgentDefinition): Record<string, string>;
+  probe(agent: AgentDefinition, env: Record<string, string>): Promise<ProviderAccountDefinition["authStatus"]>;
+  failed?(account: RunnerProviderAccount): void;
+}): Promise<Map<string, ProviderAccountDefinition["authStatus"]>> {
+  const statuses = new Map<string, ProviderAccountDefinition["authStatus"]>();
+  const installed = input.agents.filter(providerAccountProbeAvailable);
+  await Promise.all(input.accounts.map(async (account) => {
+    if (!input.usable(account)) { statuses.set(account.id, "unknown"); return; }
+    const agent = agentForProviderAccount(installed, account);
+    if (!agent) { statuses.set(account.id, "unknown"); return; }
+    try {
+      const env = { ...input.environment(agent), ...providerAccountEnvironment({ provider: account.provider, credentialHome: account.directory }) };
+      statuses.set(account.id, mergeProviderAccountAuthStatus(account, await input.probe(agent, env)));
+    } catch {
+      statuses.set(account.id, mergeProviderAccountAuthStatus(account, "unknown"));
+      input.failed?.(account);
+    }
+  }));
+  return statuses;
+}
+
+/** With configured accounts, harness selection answers whether any granted compatible account
+ * is ready. Per-account observations remain authoritative and no saved default/binding changes. */
+export function projectProviderAccountDiscoveryReadiness(
+  agents: AgentDefinition[], accounts: RunnerProviderAccount[],
+  statuses: ReadonlyMap<string, ProviderAccountDefinition["authStatus"]>,
+  usable: (account: RunnerProviderAccount) => boolean,
+  platform: NodeJS.Platform = process.platform,
+): AgentDefinition[] {
+  return agents.map((agent) => {
+    // WSL never implicitly inherits a host account, even if its path happens to be POSIX.
+    // Without an explicit default it retains the independently discovered in-distro HOME.
+    if (agent.context?.kind === "wsl" && !agent.defaultProviderAccountId) return agent;
+    // Configured keys/cloud/gateway auth already won credential precedence before this
+    // projection. Account inventory must not undo that assertion or discard its billing data.
+    const provider = providerForDriver(agent.driver ?? "acp");
+    const claudeAuth = agent.claudeCode?.auth;
+    const configuredAuth = provider === "codex" ? agent.codexBillingSource === "api" || agent.env.OPENAI_API_KEY
+      : provider === "claude" && (agent.env.ANTHROPIC_API_KEY || agent.env.ANTHROPIC_AUTH_TOKEN || agent.env.CLAUDE_CODE_OAUTH_TOKEN ||
+        (claudeAuth?.status === "authenticated" && (claudeAuth.method === "oauth_token" ||
+          ["api", "gateway", "bedrock", "vertex"].includes(claudeAuth.billingSource))));
+    const configured = provider ? accounts.filter((account) => account.provider === provider) : [];
+    if (!configured.length || !providerAccountProbeAvailable(agent) || agent.harnessSelectionBlocked) return agent;
+    const eligible = configured.filter((account) => usable(account) && providerAccountAgentContextCompatible(account, agent, platform));
+    let selected: BoundProviderAccount | undefined;
+    try { selected = selectProviderAccount(accounts, agent, agent.driver ?? "acp", undefined, platform, usable); }
+    catch { /* Invalid or incompatible defaults stay unknown; never choose another implicitly. */ }
+    const readyAccountIds = eligible.filter((account) => configuredAuth || statuses.get(account.id) === "authenticated")
+      .map((account) => account.id);
+    const providerAccountReadiness: NonNullable<AgentDefinition["providerAccountReadiness"]> = {
+      ...(selected ? { defaultAccountId: selected.id } : {}),
+      defaultAuthStatus: selected && eligible.some((account) => account.id === selected.id)
+        ? configuredAuth ? "authenticated" : statuses.get(selected.id) ?? "unknown" : "unknown",
+      readyAccountIds,
+    };
+    // Keep configured authentication and billing precedence, while representing grants and
+    // execution-context compatibility separately for automatic consumers.
+    if (configuredAuth) return { ...agent, providerAccountReadiness };
+    const observations = eligible.map((account) => statuses.get(account.id) ?? "unknown");
+    const authStatus = observations.includes("authenticated") ? "authenticated" as const
+      : observations.length && observations.every((status) => status === "unauthenticated") ? "unauthenticated" as const : "unknown" as const;
+    return { ...agent, providerAccountReadiness, available: authStatus === "authenticated", authStatus,
+      unavailableReason: authStatus === "authenticated" ? undefined : authStatus === "unauthenticated"
+        ? "Sign in to a provider account before starting a session."
+        : "Provider accounts could not be inspected. Review their setup and ownership details.",
+      ...(agent.claudeCode ? { claudeCode: { ...agent.claudeCode,
+        status: authStatus === "unauthenticated" ? "unauthenticated" as const : "ready" as const,
+        auth: { status: authStatus, billingSource: "unknown" as const },
+        failure: authStatus === "unauthenticated" ? { code: "unauthenticated" as const,
+          message: "Sign in to a provider account before starting a session." } : undefined } } : {}),
+    };
+  });
 }
 
 function providerAccountContextMismatch(

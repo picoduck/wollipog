@@ -14,6 +14,7 @@ import type {
   SessionConfig,
   SessionEventPayload,
   AcpSessionContextConfig,
+  FullControlAutomaticResponse,
 } from "@wollipog/protocol";
 import type { SpawnIsolation } from "../spawn.js";
 import type { ManagedWorktreeProtection } from "../managed-worktree-protection.js";
@@ -217,6 +218,8 @@ export interface DriverCallbacks {
 }
 
 export interface DriverOptions {
+  /** Durable parent for every process owned by one unprotected writer. */
+  reviewWriterCgroup?: import("../linux-cgroup.js").LinuxCgroupGroup;
   command: string;
   args: string[];
   cwd: string;
@@ -233,13 +236,21 @@ export interface DriverOptions {
   /** An agent-native session/thread id to resume (Claude UUID, Codex thread id, or ACP session id). */
   resumeId?: string;
   agentVersion?: string;
+  /** Refresh runner-owned hooks against the current mode and registration before each spawn. */
+  prepareClaudeHooks?: (config: SessionConfig) => { args: string[]; managerRequired: boolean };
   claudeUsageCheckpoint?: import("./claude-usage-accounting.js").ClaudeUsageCheckpoint;
   /** Live request usage already published after `claudeUsageCheckpoint`, awaiting settlement. */
   claudeLiveUsage?: import("./claude-usage-accounting.js").ClaudeLiveUsage;
+  /** A restart cut a republication of that window short: part of it is accounted, and the
+   * checkpoint that would have closed it was never journaled (#4069). */
+  claudeRepublicationInterrupted?: boolean;
   /** Runner-owned session directory used for bounded hold sentinels and lifecycle reconciliation. */
   sessionStateDir?: string;
   /** Durable Claude task ids that a resumed transport must reconcile before declaring quiescence. */
   initialBackgroundTaskIds?: string[];
+  /** Task ids (and `tool:` aliases) the session already recorded as ended (#3752). A relaunched
+   * transport never treats them as pending again, whatever Claude reports for them afterwards. */
+  endedBackgroundTaskIds?: string[];
   acpSessionContext?: AcpSessionContextConfig;
   isolation?: SpawnIsolation;
   /** Runner-private durable descendant marker for one managed worktree. */
@@ -254,6 +265,9 @@ export interface DriverOptions {
   hookStateDir?: string;
   /** Codex App Server: custom prompts discovered for this launch, bodies included. */
   codexPrompts?: readonly CodexPromptTemplate[];
+  /** A review session (#3368): the driver applies the read-only review parameters and keeps the
+   * turn's final structured output for `reviewOutput()`. */
+  review?: boolean;
 }
 
 export type { ProviderFailureCategory } from "./provider-failure.js";
@@ -279,6 +293,10 @@ export interface Driver {
    * a turn the provider itself ended in error; the session manager attaches it to the durable
    * receipt so a scheduler sees the cause instead of a bare stop reason. */
   lastTurnError?(): string | null;
+  /** Review sessions: the last completed turn's final structured output, exactly as returned. */
+  reviewOutput?(): string | null;
+  /** Review sessions: what the harness reported about the last turn's policy (#3369). */
+  reviewDiagnostics?(): { permissionDenials?: number; modelOk?: boolean | null };
   /** Reliable provider evidence for the exact runner turn; null preserves diagnostic fallback.
    * Optional for older drivers. It must reset before submission and ignore unrelated turns. */
   lastTurnFailureCategory?(): import("./provider-failure.js").ProviderFailureCategory | null;
@@ -344,8 +362,9 @@ export interface Driver {
   /** Answer a pending permission/approval request surfaced via onEvent. Returns true iff a
    * live ask was answered (the response reached the agent); false = nothing was waiting
    * (unknown id / process gone) — the caller must surface that instead of pretending the
-   * decision landed. */
-  resolvePermission(requestId: string, optionId: string | null): boolean;
+   * decision landed. `automaticResponse` is present only on a Full Control policy decline (#4063);
+   * a driver whose provider result carries text says so instead of naming a person. */
+  resolvePermission(requestId: string, optionId: string | null, automaticResponse?: FullControlAutomaticResponse): boolean;
 
   /** Answer a structured agent question (question_request event). Answers are keyed by
    * AgentQuestion.id verbatim. Explicit action distinguishes an accepted all-optional form from
@@ -355,6 +374,7 @@ export interface Driver {
     requestId: string,
     answers: Record<string, string | string[]>,
     action?: "submit" | "dismiss",
+    automaticResponse?: FullControlAutomaticResponse,
   ): boolean;
 
   /** Sign out through a negotiated provider capability. Unsupported drivers omit this method. */

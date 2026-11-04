@@ -1,8 +1,10 @@
 import React from "react";
 import { createRoot } from "react-dom/client";
 import {
+  DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   type AgentHarnessDefaultsView,
+  type OrchestratorSettingsView,
   type CreateSessionRequest,
   type ProjectLocationView,
   type ProjectView,
@@ -41,11 +43,56 @@ const fixtureParams = new URLSearchParams(window.location.search);
 /** The runner decides which presets are offered, which is the whole subject of the spec. */
 const orchestratorCapable = fixtureParams.get("orchestrator") !== "0";
 
+/**
+ * #2955: the saved Orchestrator defaults the policy row and the Orchestrator Policy dialog start
+ * from. `?policy=1` answers with defaults that execute approved follow-ups and two child harnesses;
+ * `?policy=error` fails the request the way a dropped connection does. Without it the request goes
+ * to the network, as the Full Control spec intercepts it.
+ */
+const policyFixture = fixtureParams.get("policy");
+const policyView: OrchestratorSettingsView = {
+  defaults: {
+    ...structuredClone(DEFAULT_ORCHESTRATOR_DEFAULTS),
+    behavior: { ...DEFAULT_ORCHESTRATOR_DEFAULTS.behavior, maximumConcurrentChildren: 6, followUps: "execute_approved" },
+  },
+  source: "user_default",
+  controlModeSupported: true,
+  ...(fixtureParams.get("reviewPolicy") === "1" ? { reviewPolicySupported: true } : {}),
+  capabilities: {
+    reviewers: ["codex", "claude-code"].map(harness => ({ harness: harness as "codex" | "claude-code", name: harness === "codex" ? "Codex" : "Claude Code", runnerId: "fixture", agentId: harness,
+      capabilities: { models: [{ id: harness === "codex" ? "gpt-sol" : "claude-opus", displayName: harness === "codex" ? "GPT Sol" : "Claude Opus", default: true, efforts: ["medium", "high"] }], effortLevels: ["medium", "high"], slashCommands: [], supportsImages: false, supportsApprovals: true } })),
+    harnesses: [
+      {
+        agentId: "claude", driver: "claude-code", context: { kind: "native" }, name: "Claude Code",
+        models: [{ id: "claude-opus", displayName: "Claude Opus", efforts: ["high", "medium"] }], effortLevels: ["high", "medium"],
+        supportedPairs: [{ modelId: "claude-opus", effortLevels: ["high", "medium"] }], installations: 1,
+      },
+      {
+        agentId: "codex", driver: "codex-app-server", context: { kind: "native" }, name: "Codex App Server",
+        models: [{ id: "gpt-sol", displayName: "GPT Sol", efforts: ["high"] }], effortLevels: ["high"],
+        supportedPairs: [{ modelId: "gpt-sol", effortLevels: ["high"] }], installations: 1,
+      },
+    ],
+    models: [{ id: "claude-opus", displayName: "Claude Opus", efforts: ["high", "medium"] }, { id: "gpt-sol", displayName: "GPT Sol", efforts: ["high"] }],
+    effortLevels: ["high", "medium"], installations: 2, compatibleInstallations: 2, status: "available",
+  },
+};
+
 /** #1648: accounts people named after their email, which the picker must mask by default. */
 const emailAccounts = fixtureParams.get("emailAccounts") === "1";
 
 /** #1695: host and container execution targets, so target-specific copy can be inspected. */
 const containerTargets = fixtureParams.get("containerTargets") === "1";
+
+/** #2954: a cloud target with a budget policy, beside the host and container targets. */
+const cloudTargets = fixtureParams.get("cloudTargets") === "1";
+
+/**
+ * #1360: an available ACP agent (machine-management-main.tsx's fixture shape), so the ACP-specific
+ * New Session copy has browser coverage. It offers the Orchestrator preset, and its workspace grants
+ * the Extra Folders an ACP agent may also use. `?savedAgent=gemini` makes it the chosen agent.
+ */
+const acpAgent = fixtureParams.get("acp") === "1";
 
 /**
  * #2365: the saved permission defaults' three states under Session Role. `error` shows the field's
@@ -69,7 +116,23 @@ const runDialog = fixtureParams.get("dialog") === "run";
 const codexDiscovery = fixtureParams.get("codexDiscovery") === "1";
 const appServerCheckTimedOut = fixtureParams.get("appServerCheck") === "timeout";
 const savedAgent = fixtureParams.get("savedAgent");
+/**
+ * #2953: `?agentSetup=1` adds two agents that need setup (Gemini, not installed; OpenCode, signed
+ * out) beside the three that can start, on a machine named Studio Workstation. `?noPreset=1` opens
+ * New Session with nothing chosen, so Agent waits for a location.
+ */
+const agentSetup = fixtureParams.get("agentSetup") === "1";
+const noPreset = fixtureParams.get("noPreset") === "1";
 if (savedAgent) saveAgentDefault({}, "runner-1", savedAgent);
+
+/**
+ * #2955: a current control plane and a single account, the plain state New Session's 700px budget is
+ * measured in. `?role=1` takes the Orchestrator role, `?nativeTui=1` launches Native TUI, and
+ * `?oneAccount=1` leaves only Work, so New Session draws no Account field.
+ */
+const currentRole = fixtureParams.get("role") === "1";
+const currentNativeTui = fixtureParams.get("nativeTui") === "1";
+const oneAccount = fixtureParams.get("oneAccount") === "1";
 
 /** `?theme=light|dark` pins the theme; without it the page keeps the app's own default. */
 const fixtureTheme = fixtureParams.get("theme");
@@ -78,6 +141,7 @@ if (fixtureTheme === "light" || fixtureTheme === "dark") document.documentElemen
 const runner: RunnerView = {
   runnerId: "runner-1",
   hostname: "fixture-runner",
+  ...(agentSetup ? { displayName: "Studio Workstation" } : {}),
   os: "linux",
   version: "1",
   status: "online",
@@ -149,6 +213,34 @@ const runner: RunnerView = {
         permissionModes: [],
       },
     },
+    ...(agentSetup ? [
+      { id: "gemini", name: "Gemini", command: "gemini", args: [], env: {}, driver: "acp" as const, available: false },
+      {
+        id: "opencode", name: "OpenCode", command: "opencode", args: [], env: {}, driver: "acp" as const,
+        available: false, authStatus: "unauthenticated" as const,
+      },
+    ] : []),
+    ...(acpAgent ? [{
+      id: "gemini",
+      name: "Gemini",
+      command: "gemini",
+      args: ["--experimental-acp"],
+      env: {},
+      driver: "acp" as const,
+      context: { kind: "native" as const },
+      source: "config" as const,
+      available: true,
+      authStatus: "authenticated" as const,
+      capabilities: {
+        models: [],
+        effortLevels: [],
+        slashCommands: [],
+        supportsImages: false,
+        supportsApprovals: true,
+        permissionModes: ["default", "orchestrator"],
+      },
+      acp: { logout: false, loadSession: false, sessionList: false, sessionDelete: false, sessionResume: false, sessionClose: false },
+    }] : []),
   ],
   providerAccounts: [
     {
@@ -157,20 +249,29 @@ const runner: RunnerView = {
       provider: "claude",
       authStatus: "authenticated",
     },
-    {
+    ...(oneAccount ? [] : [{
       id: "claude-personal",
       label: emailAccounts ? "work.me@example.org" : "Personal",
-      provider: "claude",
-      authStatus: "unauthenticated",
-    },
+      provider: "claude" as const,
+      authStatus: "unauthenticated" as const,
+    }]),
   ],
-  workspaces: [{ id: "workspace-1", name: "Wollipog", path: "/repos/wollipog" }],
+  workspaces: [{
+    id: "workspace-1",
+    name: "Wollipog",
+    path: "/repos/wollipog",
+    ...(acpAgent ? { additionalDirectoryGrants: ["/shared/reference-docs", "/shared/design-assets"] } : {}),
+  }],
+  // A bubblewrap runner, as an ACP Orchestrator's Strict Project Isolation needs.
+  ...(acpAgent ? { runtime: { dataDir: "/runner", worktreeRoot: "/runner/worktrees", maxConcurrentSessions: 4,
+    executionIsolation: { mode: "bwrap" as const, network: "inherit" as const } } } : {}),
   connectedAt: 1,
   lastSeen: 1,
   // A current runner, so `sessionOrchestration` is advertised and the Orchestrator preset is a real
   // choice rather than a disabled card. The disabled path is covered by `?orchestrator=0`.
   protocolVersion: PROTOCOL_VERSION,
-  ...(containerTargets ? {
+  // An ACP agent's Extra Folders are offered on a host target, so its fixture advertises the two.
+  ...(containerTargets || cloudTargets || acpAgent ? {
     executionTargets: [
       {
         id: "host-in-place", runnerId: "runner-1", name: "Runner Host · in place",
@@ -184,12 +285,22 @@ const runner: RunnerView = {
         boundaries: { filesystem: "worktree", network: "inherit", secrets: "runner_local", billing: "agent_account" },
         available: true,
       },
-      {
+      ...(containerTargets || cloudTargets ? [{
         id: "container", runnerId: "runner-1", name: "Offline Container",
-        kind: "container", workspaceStrategy: "worktree", adapter: "container",
-        boundaries: { filesystem: "container", network: "deny", secrets: "none", billing: "none" },
+        kind: "container" as const, workspaceStrategy: "worktree" as const, adapter: "container" as const,
+        boundaries: { filesystem: "container" as const, network: "deny" as const, secrets: "none" as const, billing: "none" as const },
         available: true,
-      },
+      }] : []),
+      ...(cloudTargets ? [{
+        id: "cloud", runnerId: "runner-1", name: "Cloud Sandbox",
+        kind: "cloud" as const, workspaceStrategy: "snapshot" as const, adapter: "cloud" as const,
+        boundaries: { filesystem: "snapshot" as const, network: "policy" as const, secrets: "references" as const, billing: "target_metered" as const },
+        policy: {
+          cost: { currency: "USD" as const, estimatedHourlyRateUsd: 0.4, minimumBudgetUsd: 1, maximumBudgetUsd: 50 },
+          admission: { maxConcurrentSessions: 2, queue: "fifo" as const },
+        },
+        available: true,
+      }] : []),
     ],
   } satisfies Partial<RunnerView> : {}),
 };
@@ -250,7 +361,8 @@ const snapshot: UiSnapshotMessage = {
     paginatedSessionHistory: false,
     projects: true,
     // The saved Orchestrator default's note appears only when the control plane takes the role.
-    ...(savedDefaults === "orchestrator" ? { orchestratorRole: true } : {}),
+    ...(savedDefaults === "orchestrator" || currentRole ? { orchestratorRole: true } : {}),
+    ...(currentNativeTui ? { nativeTuiLaunch: true } : {}),
   },
   runners: [runner],
   boxes: [],
@@ -311,6 +423,19 @@ const client = {
     ? Promise.reject(new Error("Saved defaults are unavailable."))
     : savedDefaults === "pending" ? new Promise<AgentHarnessDefaultsView>(() => undefined) : Promise.resolve(defaults),
   workflowDefinitions: async (): Promise<WorkflowDefinition[]> => [],
+  ...(policyFixture ? {
+    orchestratorSettings: () => policyFixture === "error"
+      ? Promise.reject(new TypeError("Failed to fetch"))
+      : Promise.resolve(structuredClone(policyView)),
+  } : {}),
+  // The skills assigned to Claude Code on this machine, which a container or cloud target can't see.
+  runnerSkills: async () => ({
+    desired: [
+      { name: "review-pr", versionDigest: "a", targets: [{ agentId: "claude" }] },
+      { name: "release-notes", versionDigest: "b", targets: [{ agentId: "claude" }] },
+    ],
+    reported: null,
+  }) as Awaited<ReturnType<ApiClient["runnerSkills"]>>,
   createSession: async (request: CreateSessionRequest) => {
     const documentRoot = document.documentElement;
     const count = Number(documentRoot.dataset.createSessionCount ?? "0") + 1;
@@ -320,7 +445,7 @@ const client = {
     if (delay > 0) await new Promise((resolve) => window.setTimeout(resolve, delay));
     return { id: `session-${count}` };
   },
-} as ApiClient;
+} as unknown as ApiClient;
 
 /**
  * A bare two-option Select, kept because migrating Permission Preset off it removed the app's only
@@ -384,7 +509,7 @@ function Harness() {
   return (
     <NewSessionDialog
       onClose={() => undefined}
-      preset={{ projectId: project.id, projectLocationId: project.locations[0]!.id }}
+      preset={noPreset ? undefined : { projectId: project.id, projectLocationId: project.locations[0]!.id }}
     />
   );
 }

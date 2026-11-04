@@ -26,6 +26,155 @@ import {
   type SessionMeta,
 } from "./session-store.js";
 
+for (const driver of ["claude-code", "codex-app-server", "pi"] as const) {
+  test(`stop then restart resumes the established ${driver} conversation`, async () => {
+    const h = harness({ driver, agentSessionId: "conversation-before-stop", tokensIn: 42, costUsd: 1 });
+    try {
+      h.manager.stop("resume-session");
+      assert.equal(h.store.readMeta("resume-session")?.status, "stopped");
+      assert.equal(await h.manager.start({ ...launchSpec(h.root), driver }), true);
+      assert.equal(h.launches[0]?.options.resumeId, "conversation-before-stop");
+      assert.equal(h.store.readMeta("resume-session")?.agentSessionId, "conversation-before-stop");
+      assert.equal(h.store.readMeta("resume-session")?.tokensIn, 42);
+      h.manager.prompt("resume-session", "What were we doing?");
+      await tick();
+      assert.deepEqual(h.prompts, ["What were we doing?"]);
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
+test("restarting a live Claude process resumes its established conversation", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: "claude-existing" });
+  try {
+    h.manager.prompt("resume-session", "First turn");
+    await shortDelay();
+    assert.equal(h.launches.length, 1);
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.launches.length, 2);
+    assert.equal(h.launches[1]?.options.resumeId, "claude-existing");
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("restarting a never-run Claude session still creates its first conversation", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: null });
+  try {
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.launches[0]?.options.resumeId, undefined);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("switching providers on restart does not reuse the old provider conversation", async () => {
+  const h = harness({ driver: "codex-app-server", agentSessionId: "codex-existing",
+    stoppedBackgroundTaskIds: ["old-task"],
+    claudeUsageCheckpoint: { sessionId: "old-claude", totalCostUsd: 1, models: {} } });
+  try {
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.launches[0]?.options.resumeId, undefined);
+    assert.deepEqual(h.launches[0]?.options.endedBackgroundTaskIds, []);
+    assert.equal(h.launches[0]?.options.claudeUsageCheckpoint, undefined);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+for (const driver of ["codex-app-server", "pi"] as const) {
+  test(`switching Claude to ${driver} and back clears resumed-history task ownership`, async () => {
+    const h = harness({ driver: "claude-code", agentSessionId: "old-claude",
+      backgroundJobs: [{ id: "task-1", toolUseId: "old-tool", parentTurnId: "old-turn", runnerId: "runner",
+        workspaceId: "workspace", context: { kind: "native" }, launchType: "shell", registeredAt: 1,
+        terminalStatus: "completed", terminalObservedAt: 2, assistantResultPersistedAt: 3,
+        restartedAt: 4, restartResumed: true }] });
+    try {
+      assert.equal(await h.manager.start({ ...launchSpec(h.root), driver }), true);
+      assert.equal(h.store.readMeta("resume-session")!.backgroundJobs![0]!.restartResumed, undefined);
+      assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+      assert.equal(h.launches[1]!.options.resumeId, undefined);
+      assert.deepEqual(h.launches[1]!.options.endedBackgroundTaskIds, []);
+      h.callbacks().onBackgroundWork?.({ state: "running", pendingTaskIds: ["task-1"],
+        jobs: [{ id: "task-1", launchType: "shell", startedAt: 10 }], observedTaskIds: ["task-1"] });
+      const jobs = h.store.readMeta("resume-session")!.backgroundJobs!;
+      assert.equal(jobs.find((job) => job.id === "task-1")?.terminalStatus, undefined);
+      assert.ok(jobs.some((job) => job.id.startsWith("task-1~restart-") && job.terminalStatus === "completed"));
+    } finally { h.manager.shutdownAll(); h.cleanup(); }
+  });
+}
+
+test("a resumed Claude restart seeds killed jobs into the replacement driver's ended set", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: "claude-existing",
+    backgroundJobs: [{ id: "watcher", toolUseId: "watch-tool", parentTurnId: "turn-1", runnerId: "runner",
+      workspaceId: "workspace", context: { kind: "native" }, launchType: "monitor", registeredAt: 1 }],
+    pendingBackgroundTaskIds: ["watcher"], backgroundWorkState: "running" });
+  let driver: ClaudeCodeDriver | undefined;
+  try {
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    const options = h.launches[0]!.options;
+    assert.ok(options.endedBackgroundTaskIds?.includes("watcher"));
+    assert.ok(options.endedBackgroundTaskIds?.includes("tool:watch-tool"));
+    const updates: unknown[] = [];
+    driver = new ClaudeCodeDriver(options, { onEvent() {}, onStderr() {}, onExit() {},
+      onBackgroundWork: (update) => { updates.push(update); h.callbacks().onBackgroundWork?.(update); } });
+    (driver as any).handleEvent({ type: "system", subtype: "task_notification", task_id: "watcher",
+      tool_use_id: "watch-tool", status: "stopped" });
+    assert.deepEqual(updates, [], "the actual driver ignores the dead task's queued notification");
+    const jobs = h.store.readMeta("resume-session")!.backgroundJobs!;
+    assert.equal(jobs.length, 1);
+    assert.equal(jobs[0]!.terminalStatus, "killed");
+    assert.equal(h.store.readMeta("resume-session")!.backgroundWorkState, undefined);
+    // The tombstone must survive another restart of the same provider conversation.
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.ok(h.launches[1]!.options.endedBackgroundTaskIds?.includes("watcher"));
+    h.manager.stop("resume-session");
+    h.manager.stop("resume-session"); // An idempotent Stop must not discard its tombstones.
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.ok(h.launches[2]!.options.endedBackgroundTaskIds?.includes("watcher"));
+    assert.ok(h.launches[2]!.options.endedBackgroundTaskIds?.includes("tool:watch-tool"));
+  } finally { driver?.dispose(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("a resumed Claude restart preserves its checkpoint and recovers unbilled live usage", async () => {
+  const checkpoint = { sessionId: "claude-existing", totalCostUsd: 1, models: {} };
+  const h = harness({ driver: "claude-code", agentSessionId: "claude-existing",
+    claudeUsageCheckpoint: checkpoint, claudeUsageCheckpointSeq: 0 });
+  const live = { kind: "token_usage" as const, model: "claude-opus-5", inputTokens: 9,
+    outputTokens: 2, liveUsage: "provisional" as const };
+  try {
+    h.store.appendEvent("resume-session", live);
+    h.manager.stop("resume-session");
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.deepEqual(h.launches[0]!.options.claudeUsageCheckpoint, checkpoint);
+    assert.deepEqual(h.launches[0]!.options.claudeLiveUsage, [live]);
+    assert.equal(h.store.readMeta("resume-session")!.claudeUsageCheckpointSeq, 0);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("Stop retains unfinished Claude task ids for the next resumed process", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: "claude-existing",
+    pendingBackgroundTaskIds: ["untracked-watcher"], backgroundWorkState: "running" });
+  try {
+    h.manager.stop("resume-session");
+    assert.deepEqual(h.store.readMeta("resume-session")!.backgroundJobs, []);
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.ok(h.launches[0]!.options.endedBackgroundTaskIds?.includes("untracked-watcher"));
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("establishing the first Claude conversation publishes its restart capability", async () => {
+  const h = harness({ driver: "claude-code", agentSessionId: null });
+  try {
+    assert.equal(await h.manager.start({ ...launchSpec(h.root), driver: "claude-code" }), true);
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!)
+      .agentCapabilities?.restartResumesConversation, false);
+    h.callbacks().onSessionEstablished?.("thread-new");
+    const updated = h.sent.filter((message) => message.type === "session_runtime_updated").at(-1);
+    assert.equal(updated?.type === "session_runtime_updated" &&
+      updated.snapshot.agentCapabilities?.restartResumesConversation, true);
+    h.manager.stop("resume-session");
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!)
+      .agentCapabilities?.restartResumesConversation, true);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
+
 test("restart keeps the acknowledged correction with its carried cumulative cost", async () => {
   const h = harness({ costUsd: 2, costReconciliationRevision: 1, costReconciliationDeltaUsd: -1 });
   try {
@@ -319,6 +468,96 @@ function harness(
     cleanup: () => rmSync(root, { recursive: true, force: true }),
   };
 }
+
+test("follow-up projection requires exact executing job ids and retains its durable queue time", () => {
+  const h = harness({ driver: "claude-code", backgroundWorkState: "continuation_pending", backgroundJobs: [{
+    id: "finished", parentTurnId: "parent", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "shell", registeredAt: 100,
+    terminalStatus: "completed", terminalObservedAt: 200, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 300,
+  }] });
+  try {
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 240 });
+    const project = () => h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!).backgroundFollowUp;
+    assert.deepEqual(project(), { state: "queued", queuedAt: 300, retryScheduled: false });
+    assert.deepEqual(h.manager.sessionSnapshots().find((s) => s.id === "resume-session")?.backgroundFollowUp, project(),
+      "reconnect hydration carries the same facts as runtime updates");
+    const internals = h.manager as any;
+    internals.active.set("resume-session", { running: true, currentBackgroundJobIds: ["unrelated"], toolCallIds: new Set() });
+    h.store.patchMeta("resume-session", { status: "running" });
+    assert.equal(project()?.state, "queued", "unrelated running work is not the follow-up");
+    internals.active.get("resume-session").currentBackgroundJobIds = ["finished"];
+    assert.deepEqual(project(), { state: "running", queuedAt: 300 });
+    internals.active.clear();
+    h.store.patchMeta("resume-session", { status: "idle", config: { costBudgetUsd: 1 }, costUsd: 1 });
+    assert.deepEqual(project(), { state: "blocked", blocker: "budget", queuedAt: 300, retryScheduled: false });
+    assert.deepEqual(h.manager.sessionSnapshots().find((s) => s.id === "resume-session")?.backgroundFollowUp, project());
+    h.store.patchMeta("resume-session", { backgroundWorkState: undefined });
+    assert.equal(project(), null);
+    Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 239 });
+    assert.equal(h.manager.snapshotForControlPlane(h.store.readMeta("resume-session")!).backgroundFollowUp, undefined);
+  } finally { (h.manager as any).active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+function queuedFollowUpHarness(overrides: Partial<SessionMeta> = {}) {
+  const h = harness({ driver: "claude-code", backgroundWorkState: "continuation_pending", backgroundJobs: [{
+    id: "finished", parentTurnId: "parent", runnerId: "runner", workspaceId: null,
+    context: { kind: "native" }, launchType: "shell", registeredAt: 100,
+    terminalStatus: "completed", terminalObservedAt: 200, continuationRequired: true,
+    continuationId: "continuation", continuationQueuedAt: 300,
+  }], ...overrides });
+  Object.defineProperty(h.manager, "controlPlaneProtocolVersion", { value: () => 240 });
+  return h;
+}
+
+test("follow-up retry display clears on firing and cancellation, and excludes immediate first attempts", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = queuedFollowUpHarness();
+  const internals = h.manager as any;
+  try {
+    internals.active.set("resume-session", { running: true, queue: [{ backgroundJobIds: ["finished"] }], toolCallIds: new Set() });
+    const last = () => h.sent.filter((m) => m.type === "session_runtime_updated").at(-1)?.snapshot.backgroundFollowUp;
+    internals.scheduleBackgroundContinuation("resume-session", 0);
+    assert.equal(last()?.retryScheduled, false, "the initial attempt is not a retry");
+    t.mock.timers.tick(0);
+    assert.equal(last()?.retryScheduled, false);
+    internals.scheduleBackgroundContinuation("resume-session", 30_000);
+    assert.equal(last()?.retryScheduled, true);
+    t.mock.timers.tick(30_000);
+    assert.equal(last()?.retryScheduled, false, "a queued prompt does not leave a fictional retry timer");
+    internals.scheduleBackgroundContinuation("resume-session", 30_000);
+    internals.cancelBackgroundContinuationTimer("resume-session");
+    assert.equal(last()?.retryScheduled, false, "cancellation republishes the clear");
+  } finally { internals.active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("follow-up execution display publishes at turn start before provider acceptance", () => {
+  const h = queuedFollowUpHarness();
+  const internals = h.manager as any;
+  try {
+    internals.active.set("resume-session", { running: true, currentBackgroundJobIds: ["finished"], toolCallIds: new Set() });
+    internals.emitStatus("resume-session", "running");
+    const last = h.sent.filter((m) => m.type === "session_runtime_updated").at(-1);
+    assert.equal(last?.snapshot.backgroundFollowUp?.state, "running");
+    assert.equal(h.store.readMeta("resume-session")?.backgroundJobs?.[0]?.continuationAcceptedAt, undefined,
+      "displaying execution never invents provider acceptance");
+  } finally { internals.active.clear(); h.manager.shutdownAll(); h.cleanup(); }
+});
+
+test("a held follow-up publishes once per retry interval without a transient scheduling clear", (t) => {
+  t.mock.timers.enable({ apis: ["setTimeout"] });
+  const h = queuedFollowUpHarness({ config: { costBudgetUsd: 1 }, costUsd: 1 });
+  const internals = h.manager as any;
+  try {
+    void internals.runBackgroundContinuation("resume-session");
+    const updates = () => h.sent.filter((m) => m.type === "session_runtime_updated");
+    assert.equal(updates().length, 1);
+    assert.equal(updates()[0]!.snapshot.backgroundFollowUp?.retryScheduled, true);
+    t.mock.timers.tick(30_000);
+    assert.equal(updates().length, 2);
+    assert.equal(updates()[1]!.snapshot.backgroundFollowUp?.retryScheduled, true);
+  } finally { h.manager.shutdownAll(); h.cleanup(); }
+});
 
 function exitActive(manager: SessionManager, sessionId: string, code: number | null): void {
   const internals = manager as any;
@@ -2227,6 +2466,7 @@ test("fresh-start authentication failure preserves its worktree and ordinary ini
     cancel: () => false,
   };
   const h = harness({}, Promise.resolve(), Promise.resolve(), () => {}, undefined, undefined, 4, undefined, controller);
+  Object.assign(h.manager, { dataDir: h.root }); // Keep this fixture's worktree out of the real runner state.
   const repo = join(h.root, "fresh-repo");
   try {
     execFileSync("git", ["init", repo]);
@@ -7176,6 +7416,7 @@ test("Claude resume hands the driver the live requests still open after its chec
     assert.equal(h.launches.length, 1);
     assert.deepEqual(h.launches[0]!.options.claudeUsageCheckpoint, checkpoint);
     assert.deepEqual(h.launches[0]!.options.claudeLiveUsage, [live(7), live(8)]);
+    assert.equal(h.launches[0]!.options.claudeRepublicationInterrupted, true, "the checkpoint that would close it is stale (#4069)");
     // Live records are display-only: runner totals accrue the record that closes their window.
     const before = h.store.readMeta("resume-session")!;
     (h.manager as any).accrueMeta("resume-session", live(9));
@@ -7198,6 +7439,41 @@ test("Claude resume hands the driver the live requests still open after its chec
   } finally {
     h.manager.shutdownAll();
     h.cleanup();
+  }
+});
+
+test("a restart inside an uncertain Claude total keeps every unaccounted request open and flags a stale checkpoint (#4069)", async () => {
+  const before = { sessionId: "claude-conversation", totalCostUsd: 1, models: {}, accountingScope: "conversation" as const };
+  const after = { ...before, totalCostUsd: 1.1 };
+  const live = (inputTokens: number) => ({ kind: "token_usage" as const, model: "claude-opus-5", inputTokens, outputTokens: 0,
+    liveUsage: "provisional" as const });
+  // The driver's batch for an uncertain total: each open request republished, then the marker that
+  // closes the window and journals the new baseline.
+  const batch = [{ ...live(50), liveUsage: "republished" as const }, { ...live(10), liveUsage: "republished" as const },
+    { kind: "token_usage" as const, accountingIncomplete: true as const, liveUsage: "settled" as const, claudeUsageCheckpoint: after }];
+  const expected = [
+    { claudeUsageCheckpoint: before, claudeLiveUsage: [live(50), live(10)], claudeRepublicationInterrupted: undefined },
+    { claudeUsageCheckpoint: before, claudeLiveUsage: [live(10)], claudeRepublicationInterrupted: true },
+    { claudeUsageCheckpoint: before, claudeLiveUsage: undefined, claudeRepublicationInterrupted: true },
+    { claudeUsageCheckpoint: after, claudeLiveUsage: undefined, claudeRepublicationInterrupted: undefined },
+  ];
+  for (let durable = 0; durable <= batch.length; durable++) {
+    const h = harness({ driver: "claude-code", command: "claude", agentId: "claude-native", agentVersion: "2.1.296",
+      agentSessionId: "claude-conversation", claudeUsageCheckpoint: before, claudeUsageCheckpointSeq: 0 });
+    try {
+      h.store.appendEvent("resume-session", live(50));
+      h.store.appendEvent("resume-session", live(10));
+      for (const event of batch.slice(0, durable)) h.store.appendEvent("resume-session", event);
+      h.manager.prompt("resume-session", "resume");
+      for (let index = 0; index < 20 && h.launches.length === 0; index++) await tick();
+      assert.equal(h.launches.length, 1);
+      const { claudeUsageCheckpoint, claudeLiveUsage, claudeRepublicationInterrupted } = h.launches[0]!.options;
+      assert.deepEqual({ claudeUsageCheckpoint, claudeLiveUsage, claudeRepublicationInterrupted }, expected[durable],
+        `after ${durable} durable records of the batch`);
+    } finally {
+      h.manager.shutdownAll();
+      h.cleanup();
+    }
   }
 });
 

@@ -35,6 +35,15 @@ export function backgroundTurnLabel(parentTurnId: string, turn: BackgroundParent
   return clock ? `Turn at ${clock}` : "Earlier Turn";
 }
 
+/** The same turn after "in", for a title that names it: "Result Missing in Turn 4" (#2871). */
+export function inBackgroundTurn(parentTurnId: string, turn: BackgroundParentTurn | undefined): string {
+  if (parentTurnId === UNKNOWN_PARENT_TURN) return "in an Unknown Turn";
+  if (!turn) return "in an Earlier Turn";
+  if (turn.turn !== undefined) return `in Turn ${turn.turn}`;
+  const clock = formatClock(turn.startedAt);
+  return clock ? `in the Turn at ${clock}` : "in an Earlier Turn";
+}
+
 export interface BackgroundJobGroup {
   key: string;
   parentTurnId: string;
@@ -224,7 +233,7 @@ export function backgroundJobRowSentence(
   if (job.continuationMissingResultAt != null) return "Result never arrived";
   if (backgroundJobRetryExhausted(job, deliveries)) return "Result return stopped";
   if (job.continuationAcceptedAt != null || job.continuationSubmittedAt != null || job.continuationQueuedAt != null) {
-    return "Returning result";
+    return "Awaiting follow-up";
   }
   if (job.continuationRequired !== false && unfinishedSiblings > 0) {
     return unfinishedSiblings === 1 ? "Result waits for the other job" : `Result waits for ${unfinishedSiblings} other jobs`;
@@ -246,7 +255,7 @@ export function backgroundJobResultSentence(
   if (job.continuationMissingResultAt != null) return "Never reached this conversation";
   if (backgroundJobRetryExhausted(job, deliveries)) return "Automatic capacity retries ended before this result was accepted";
   if (job.continuationAcceptedAt != null || job.continuationSubmittedAt != null || job.continuationQueuedAt != null) {
-    return "Returning to this conversation now";
+    return "Waiting for the follow-up to return this result";
   }
   if (state === "lost") return "Can't return to this conversation, because the job was lost";
   if (!finishedStates.has(state)) return "Returns to this conversation when the job finishes";
@@ -256,7 +265,7 @@ export function backgroundJobResultSentence(
       ? "Returns to this conversation when the other job finishes"
       : `Returns to this conversation when the other ${unfinishedSiblings} jobs finish`;
   }
-  return "Returning to this conversation now";
+  return "Waiting for the follow-up to return this result";
 }
 
 /** How far the push notification for a turn's result got, or null when none was sent. */

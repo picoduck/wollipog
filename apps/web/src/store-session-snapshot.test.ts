@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import type { SessionView } from "@wollipog/protocol";
 import { Store } from "./store.js";
+import { completedFullControlCampaign, outstandingSessionResult } from "./session-follow-up.js";
+import { sessionRowStatus } from "./session-row-status.js";
 
 const session=(id: string,eventEpoch=1): SessionView => ({ id,eventEpoch,status: "idle",title: id } as SessionView);
 test("detail hydration preserves legacy live state and rejects stale responses", () => {
@@ -115,4 +117,26 @@ test("authoritative summary omissions clear optional list facts without discardi
     assert.equal(current[field],undefined,`${field} must clear when omitted from the authoritative summary`);
   }
   assert.deepEqual(current.agentCapabilities,previous.agentCapabilities);
+});
+
+test("a retained Full Control detail never makes a reconnected Custom summary read as Campaign Complete (#2940)", () => {
+  // Full Control was revoked while disconnected: the store keeps the earlier detail's projection, but
+  // the fresh summary's own policy is Custom and it carries no Full Control status.
+  const store=new Store({ name: "inbox" });
+  const fullControl={ mode: "full_control",boundary: { version: 1,revision: 2,issueScopeRevision: 1,repository: "owner/repo",
+    objective: "Deliver",authorizedByUserId: "user",authorizedAt: 1,operations: [],delegatablePolicyIds: [] } };
+  const attention={ version: 1,humanActions: [],meaningfulAt: 1,result: { revision: "r1",at: 1,owner: "human" },acknowledgedRevision: null };
+  const detail={ ...session("root"),role: "orchestrator",attention,orchestratorPolicy: { control: fullControl },
+    fullControlCampaignStatus: "verified_complete",orchestratorCampaign: { status: "verified_complete",policyRevision: 2,control: fullControl } } as unknown as SessionView;
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [detail],runs: [] } });
+  assert.equal(completedFullControlCampaign(store.getState().sessions.get("root")!),true,"before the revoke");
+  store.dispatch({ type: "msg",msg: { type: "snapshot",runners: [],boxes: [],sessions: [],runs: [],sessionsComplete: false } });
+  store.dispatch({ type: "msg",msg: { type: "session_snapshot_page",sessions: [{ ...session("root"),projection: "summary",role: "orchestrator",
+    attention,orchestratorPolicy: { control: { mode: "custom" } } } as unknown as SessionView],complete: true } });
+  const current=store.getState().sessions.get("root")!;
+  assert.equal(current.projection,undefined,"the mounted detail is retained");
+  assert.equal(current.orchestratorCampaign?.control?.mode,"full_control","with its pre-revoke projection");
+  assert.equal(completedFullControlCampaign(current),false);
+  assert.notEqual(outstandingSessionResult(current),null);
+  assert.equal(sessionRowStatus(current).badge?.meta.label,"Ready for Review");
 });

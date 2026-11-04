@@ -1,1 +1,0 @@
-|.onboard|gap|6px

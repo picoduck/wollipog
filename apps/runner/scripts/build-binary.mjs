@@ -21,6 +21,7 @@ import { fileURLToPath } from "node:url";
 import { createRequire } from "node:module";
 import { assertRunnerTargetHost, publishLegacyRunnerAlias, runnerArtifactNames } from "./runner-artifacts.mjs";
 import { removeWindowsSignature, signWindowsBinary } from "./windows-authenticode.mjs";
+import { prepareWindowsAccountConfig } from "./build-account-config-windows-helper.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const runner = join(here, ".."); // apps/runner
@@ -28,6 +29,8 @@ const buildDir = join(runner, ".bin-build");
 const outDir = join(runner, "dist-bin");
 mkdirSync(buildDir, { recursive: true });
 mkdirSync(outDir, { recursive: true });
+// Compile/reuse the exact Windows account-config engine before main bundling and bundle-only exit.
+const windowsAccountConfig = await prepareWindowsAccountConfig();
 
 // 1) Bundle the runner into a single CJS file. node: builtins stay external — provided by
 // the Node runtime the SEA is built on.
@@ -41,7 +44,7 @@ await build({
   target: "node24",
   // The bundle is CJS, where __filename is always available. This removes esbuild's otherwise
   // noisy import.meta fallback warning while preserving the source ESM path under tsx.
-  define: { "import.meta.url": "undefined" },
+  define: { "import.meta.url": "undefined", __WACW_ENGINE_SHA__: JSON.stringify(windowsAccountConfig?.engine.sha256 ?? "") },
   outfile: bundle,
   legalComments: "none",
   logLevel: "info",
@@ -56,6 +59,15 @@ await build({
   bundle: true, platform: "node", format: "cjs", target: "node24",
   define: { "import.meta.url": "undefined" },
   outfile: leaseWorker, legalComments: "none", logLevel: "info",
+});
+
+// The guard owns its listener as well as classification off the daemon's main event loop.
+const guardWorker = join(buildDir, "managed-worktree-guard-worker.cjs");
+await build({
+  entryPoints: [join(runner, "src", "managed-worktree-guard-worker.ts")],
+  bundle: true, platform: "node", format: "cjs", target: "node24",
+  define: { "import.meta.url": "undefined" },
+  outfile: guardWorker, legalComments: "none", logLevel: "info",
 });
 
 // Linux adoption moves files with a fixed renameat2(RENAME_NOREPLACE) helper. It is linked
@@ -86,6 +98,13 @@ if (process.platform === "linux") {
   console.log("compiled Claude provider pipe helper ->", claudePipeHelper);
 }
 
+// Native Linux providers join their cgroup before any provider code executes.
+const cgroupLaunchHelper = join(buildDir, "linux-cgroup-launch");
+if (process.platform === "linux") {
+  execFileSync("/usr/bin/cc", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", "-static",
+    join(runner, "native", "linux-cgroup-launch.c"), "-o", cgroupLaunchHelper], { stdio: "inherit" });
+}
+
 // Stop here when only validating the bundle (CI / quick check).
 if (process.argv.includes("--bundle-only")) {
   console.log("bundle-only: skipping SEA packaging");
@@ -95,9 +114,13 @@ if (process.argv.includes("--bundle-only")) {
 // 2) Node SEA blob.
 const seaConfig = join(buildDir, "sea-config.json");
 const blob = join(buildDir, "runner.blob");
-const assets = { "wollipog/provider-home-lease-worker": leaseWorker };
+const assets = {
+  "wollipog/provider-home-lease-worker-hrtime-ns-v1": leaseWorker,
+  "wollipog/managed-worktree-guard-worker-v1": guardWorker,
+};
 if (process.platform === "linux" || process.platform === "darwin") assets["wollipog/provider-home-lease-io"] = leaseIoHelper;
 if (process.platform === "linux") assets["wollipog/claude-provider-pipe"] = claudePipeHelper;
+if (process.platform === "linux") assets["wollipog/linux-cgroup-launch"] = cgroupLaunchHelper;
 if (process.platform === "darwin") {
   const helper = join(buildDir, "macos-skill-snapshots");
   execFileSync("/usr/bin/clang", ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror",
@@ -107,6 +130,10 @@ if (process.platform === "darwin") {
 }
 if (process.platform === "linux") assets["wollipog/linux-skill-rename"] = linuxRenameHelper;
 if (process.platform === "win32") {
+  if (!windowsAccountConfig) throw new Error("native Windows account-config build identity missing");
+  assets["wollipog/account-config-windows-engine-wacw1"] = join(buildDir, windowsAccountConfig.engine.name);
+  assets["wollipog/account-config-windows-ntfs-v1"] = join(buildDir, "provider-account-config-windows-v1.dll");
+  assets["wollipog/account-config-windows-ntfs-v1.identity"] = join(buildDir, "provider-account-config-windows-v1.identity.json");
   const require = createRequire(import.meta.url);
   const packageJson = require.resolve("node-pty/package.json");
   assets["node-pty/conpty.node"] = join(dirname(packageJson), "prebuilds", `win32-${process.arch}`, "conpty.node");

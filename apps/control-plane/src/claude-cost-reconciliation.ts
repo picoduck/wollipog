@@ -424,6 +424,9 @@ function commitPlan(db: ControlPlaneDb, principal: HumanPrincipal, evidence: Evi
         VALUES (?, ?, 'claude-code', ?, 1, ?)
         ON CONFLICT(session_id, model) DO UPDATE SET cost_microusd=cost_microusd+excluded.cost_microusd, model_priced_records=model_priced_records+1`).run(evidence.sessionId, modelId, cost, Date.now());
     }
+    const corrected = Object.values(row.byModelMicro).reduce((sum, cost) => sum + cost, 0);
+    db.correctLauncherDailyCostInTransaction(evidence.sessionId, row.attribution!.organizationId, row.attribution!.ownerKind,
+      row.attribution!.bucketTs, corrected - row.originalMicro);
   }
   const state = sql.prepare("UPDATE usage_session_state SET cost_microusd=cost_microusd+?, cost_remainder_picousd=?, provider_reported_records=provider_reported_records-?, model_priced_records=model_priced_records+?, revision=revision+1 WHERE session_id=? AND cost_microusd+?>=0 AND provider_reported_records>=?").run(delta, preview.sessionProposedRemainderPicousd, rows.length, rows.reduce((n, r) => n + Object.keys(r.byModelMicro).length, 0), evidence.sessionId, delta, rows.length);
   if (Number(state.changes) !== 1) throw new Error("session ledger lacks the original contributions");

@@ -1,1 +1,0 @@
-|.tick|font-size|13

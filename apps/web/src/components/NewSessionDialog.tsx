@@ -1,3 +1,4 @@
+import { flushSync } from "react-dom";
 import {
   useEffect,
   useId,
@@ -9,63 +10,56 @@ import {
 } from "react";
 import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
-  DEFAULT_LIVE_CHILD_LIMIT,
-  MAX_LIVE_CHILD_LIMIT,
   WORKFLOW_DECISION_CATEGORIES,
   advertisesOrchestratorAdditiveRole,
-  agentHarnessIdentityKey,
-  orchestratorChildHarnessRequirement,
-  orchestratorExecutionPolicyRequirement,
-  orchestratorIntegrationIsolationRequirement,
+  type ProjectLocationAvailability,
   type ProjectLocationView,
   type ProjectView,
+  type RunnerView,
   runnerCapabilityRequirement,
   runnerSupportsProtocol,
   type BoxView,
   type AgentHarnessDefaultsView,
   type CreateSessionRequest,
-  type ParentControlMode,
-  type OrchestratorDefaults,
   type OrchestratorSettingsView,
   type SessionConfig,
-  type DelegatableWorkflowDecisionCategory,
 } from "@wollipog/protocol";
-import { agentHarnessMachinesDescription, agentHarnessOptionLabel } from "../agent-presentation.js";
 import { useApi } from "../api-context.js";
-import { managedSkillsAvailableForTarget, SKILLS_UNAVAILABLE_ON_TARGET } from "./SkillsUnavailableNotice.js";
+import { SkillsUnavailableNotice, useSessionSkillsUnavailable } from "./SkillsUnavailableNotice.js";
 import { ApiError } from "../api.js";
-import { useStore } from "../store.js";
+import { projectCreationRetryAvailable, useStore } from "../store.js";
 import { legacyWorkspaceLocationsByName, workspaceLocationKey } from "../projects.js";
 import {
   NO_PROJECT_SELECTION,
   isLaunchableProjectLocation,
   initialProjectSelectionForPreset,
+  liveLocationAvailability,
+  primaryProjectLocation,
   projectForSessionPreset,
+  projectNameQualifiers,
   projectFallbacksAwaitingStore,
   projectLocationForSessionPreset,
   projectInventoryWithFallbacks,
-  projectSelectionLabel,
   projectSessionPlacement,
+  startTruncatedPath,
   suggestedProjectLocation,
 } from "../project-session-selection.js";
 import { machineOptionLabels, runnerDisplay } from "../runners.js";
-import { shortenPath, permissionModeLabel, titleCaseLabel } from "../format.js";
+import { permissionModeLabel, titleCaseLabel } from "../format.js";
 import {
-  INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED,
-  INTEGRATION_ISOLATION_PRESERVED,
-  ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE,
   controlPlaneSupportsIntegrationIsolation,
-  integrationIsolationDisclosure,
   orchestratorPresetPermissionsReason,
   orchestratorUnavailableReason,
   savedSessionPermissionMode,
 } from "../session-preset-defaults.js";
 import { loadAgentDefaults, saveAgentDefault } from "../agent-defaults.js";
 import {
-  agentMeta,
   agentOptions,
-  codexAppServerSetupReason,
+  agentSessionLimits,
+  agentSetupProblem,
+  agentSetupReason,
   currentAgentSelectionIssue,
+  savedAgentName,
   savedAgentSelection,
 } from "./agent-options.js";
 import { AgentIcon } from "./AgentIcon.js";
@@ -76,46 +70,94 @@ import { ChooseFolderDialog } from "./ChooseFolderDialog.js";
 import { useInstanceScope } from "../instance-scope.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
-import { nativeTuiAccountingDetail } from "../native-tui-accounting.js";
-import { projectAvailabilityLabel, projectAvailabilityMeta, type ProjectLocationCandidate } from "../project-management.js";
-import { StatusBadge } from "./StatusBadge.js";
-import { FullControlPreparation } from "./FullControlPreparation.js";
-import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
+import { projectAvailabilityLabel } from "../project-management.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { FieldError } from "./FieldError.js";
+import { FieldWarning } from "./FieldWarning.js";
+import { statusMeta } from "../status-meta.js";
+import { Notice } from "./Notice.js";
+import { FullControlBlockedError, launchFullControlCampaign } from "./FullControlPreparation.js";
+import {
+  evaluateOrchestratorPolicy,
+  policyDraftFromDefaults,
+  type OrchestratorPolicyContext,
+  type OrchestratorPolicyDraft,
+  type OrchestratorPolicyTab,
+} from "../orchestrator-policy.js";
+import { OrchestratorPolicyDialog, OrchestratorPolicySummary } from "./OrchestratorPolicyDialog.js";
 import { supportsAgentTui } from "../shells-panel.js";
 import { nativeTuiUnavailableReason } from "../native-tui-availability.js";
+import { BranchIcon, ComputerIcon, FolderIcon, ShieldIcon, TerminalIcon } from "./Icons.js";
+import { SessionOptions, describeBoundaries, type SessionOptionsAttention } from "./SessionOptions.js";
+import { NumberRow, SegmentedRow, SelectRow, SettingRow, SettingsGroup, ValueRow } from "./ui/SettingsRows.js";
 import {
-  ChoiceRows,
+  Checkbox,
   SearchableCombobox,
-  SegmentedControl,
   Select,
-  type PickerCreateOption,
+  type PickerFooterAction,
   type SearchableComboboxOption,
+  type SelectOption,
   useTapOnlyPicker,
 } from "./ui/ChoiceControls.js";
 
-const AUTOMATIC_ORCHESTRATOR_VALUE = "__automatic__";
-const ORCHESTRATOR_DECISION_LABELS: Record<DelegatableWorkflowDecisionCategory, string> = {
-  implementation_question: "Implementation Questions",
-  pr_merge: "PR Merge Approval",
-  merged_branch_deletion: "Merged Branch Deletion",
-  follow_up_issue_publication: "Follow-Up Issue Publication",
-  ui_evidence_approval: "UI Evidence Approval",
-};
+/**
+ * A dollar amount as people write it, "$1", "$0.40", without rounding away precision a policy limit
+ * has: a minimum of $1.004 reads "$1.004", because "$1.00" would name a value the field refuses.
+ */
+function usd(amount: number): string {
+  return `$${Number.isInteger(amount) ? amount
+    : amount.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 20, useGrouping: false })}`;
+}
 
-function cloneOrchestratorDefaults(defaults: OrchestratorDefaults): OrchestratorDefaults {
-  return {
-    ...(defaults.controlMode === undefined ? {} : { controlMode: defaults.controlMode }),
-    behavior: { ...defaults.behavior },
-    delegation: { ...defaults.delegation, decisions: { ...defaults.delegation.decisions } },
-    execution: { ...defaults.execution },
-  };
+/** An account's sign-in in the words Switch Account and Choose Another Account use (§11.2). */
+function providerAccountDescription(authStatus: "authenticated" | "unauthenticated" | "unknown" | undefined): string {
+  const status = authStatus === "authenticated" ? "signed_in"
+    : authStatus === "unauthenticated" ? "sign_in_required" : "status_unknown";
+  const { label } = statusMeta("provider_account", status);
+  return status === "sign_in_required" ? `${label} · Sign in again before using it.` : label;
+}
+
+/** Why a chosen location cannot host the session, and what to do about it (§8.5). */
+function unavailableLocationSentence(availability: ProjectLocationAvailability, machine: string): string {
+  return availability === "workspace_missing"
+    ? `${machine} no longer has this folder. Choose another location, or add the folder again.`
+    : availability === "runner_removed"
+      ? `${machine} was removed. Choose another location, or add one on another machine.`
+      : `${machine} is offline. Start it, or add a location on another machine.`;
 }
 
 /**
- * New Session is intentionally minimal — pick where it runs (runner + agent + workspace) and go.
- * Model, reasoning effort, approvals, and the first message are all chosen in the chat itself
- * (the composer bar), like the Codex app, so they can be changed per turn.
+ * A failed create request in one user sentence (§8.5, §13.2). The raw message stays behind Show
+ * Details, so nothing the server says is lost.
  */
+function createFailureSentence(error: unknown, kept: boolean): string {
+  if (kept) return "Wollipog kept the session, but its terminal may not have opened.";
+  if (!(error instanceof ApiError)) return "Wollipog couldn't reach the server. Check your connection and try again.";
+  if (error.status === 403) return "You don't have permission to start a session here.";
+  return "The machine didn't start the session. Check the choices above and try again.";
+}
+
+/**
+ * New Session asks where a session runs and with which agent. Model, reasoning effort, approvals,
+ * and the first message are all chosen in the chat itself (the composer bar), like the Codex app,
+ * so they can be changed per turn.
+ */
+/** The field a submit's validation problem is shown under. `form` is the rare problem no field owns. */
+type ProblemField = "project" | "location" | "machine" | "folder" | "agent" | "role" | "harness" | "mode" | "form";
+/** The control a submit problem moved focus to, which is described by the problem's error. */
+type ProblemControl =
+  | "project" | "location" | "add-location" | "machine" | "folder" | "browse" | "agent" | "account"
+  | "retained-session" | "open-connections" | "role" | "defaults" | "orchestrator-retry" | "orchestrator"
+  | "harness" | "mode" | "execution-target" | "cloud-budget" | "create";
+
+/**
+ * The controls that live inside Options, which a submit problem opens before focusing. Role and its
+ * Orchestrator policy sit above Options, always visible (#3929), so their problems never open it.
+ */
+const OPTIONS_CONTROLS: ReadonlySet<ProblemControl> = new Set<ProblemControl>([
+  "defaults", "harness", "mode", "execution-target", "cloud-budget",
+]);
+
 /** Pre-selection for launches from a project's menu ("Create permanent worktree"). */
 export interface NewSessionPreset {
   runnerId?: string;
@@ -145,6 +187,8 @@ export function NewSessionDialog({
     projects: storedProjects,
     projectsSupported,
     projectLocationCreationSupported,
+    conn,
+    projectCreationRetrySupported,
     accessScopeManagementSupported,
     nativeTuiLaunchSupported,
     orchestratorRoleSupported,
@@ -167,28 +211,48 @@ export function NewSessionDialog({
     () => [...projects.values()].sort((left, right) => left.name.localeCompare(right.name) || left.id.localeCompare(right.id)),
     [projects],
   );
-  const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
-    const nameCounts = new Map<string, number>();
-    for (const project of projectList) nameCounts.set(project.name, (nameCounts.get(project.name) ?? 0) + 1);
-    return [
-      ...projectList.map((project) => ({
-        value: project.id,
-        label: `${projectSelectionLabel(project, (nameCounts.get(project.name) ?? 0) > 1)}${project.hidden ? " (Hidden)" : ""}`,
-        description: `${project.locations.length} Project Location${project.locations.length === 1 ? "" : "s"}${project.hidden ? ", hidden from the default Projects view" : ""}.`,
-      })),
-      {
-        value: NO_PROJECT_SELECTION,
-        label: "No Project",
-        description: "Run in the selected folder without adding this session to a Project.",
-      },
-    ];
-  }, [projectList]);
   const online = useMemo(() => [...runners.values()].filter((r) => r.status === "online"), [runners]);
   const boxByRunner = useMemo(() => {
     const m = new Map<string, BoxView>();
     for (const b of boxes.values()) m.set(b.runnerId, b);
     return m;
   }, [boxes]);
+  const machineName = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
+  // A project's option is its name; the second line says where it runs (§9.1). Two projects with
+  // one name keep that name in the list, and the closed field adds the machine to tell them apart.
+  const projectOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
+    const nameOf = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
+    const primaryOf = primaryProjectLocation;
+    const qualifiers = projectNameQualifiers(projectList, nameOf);
+    return [
+      ...projectList.map((project) => {
+        const primary = primaryOf(project);
+        const qualifier = qualifiers.get(project.id);
+        const machine = primary ? nameOf(primary.runnerId) : undefined;
+        // The second line leads with what tells this project apart: its machine, or more when that
+        // alone does not.
+        const where = qualifier && qualifier !== machine ? qualifier : machine;
+        const count = project.locations.length;
+        const summary = !primary ? (where ? `${where} · No locations yet` : "No locations yet")
+          : project.locations.every((location) => liveLocationAvailability(location, runners) === "runner_offline")
+            ? `${where} · offline`
+            : `${where} · ${count} location${count === 1 ? "" : "s"}`;
+        return {
+          value: project.id,
+          label: project.name,
+          description: project.hidden ? `Hidden · ${summary}` : summary,
+          ...(qualifier ? { selectedLabel: `${project.name} · ${qualifier}` } : {}),
+          keywords: project.locations.flatMap((location) => [nameOf(location.runnerId), location.path]),
+        };
+      }),
+      {
+        value: NO_PROJECT_SELECTION,
+        label: "No Project",
+        description: "Run in any folder on a machine, outside a project.",
+        separator: true,
+      },
+    ];
+  }, [boxByRunner, projectList, runners]);
   const machineLabels = useMemo(
     () => machineOptionLabels(online, (id) => boxByRunner.get(id)),
     [boxByRunner, online],
@@ -221,22 +285,21 @@ export function NewSessionDialog({
   const [projectLocationId, setProjectLocationId] = useState(initialProjectLocation?.id ?? "");
   const projectSelectionChangedRef = useRef(false);
   const [creatingProject, setCreatingProject] = useState(false);
-  // Which control opened Create Project, so closing it returns focus there rather than to the
-  // other one: the button below the picker, or the picker's own no-match row.
-  const [createProjectFromPicker, setCreateProjectFromPicker] = useState(false);
-  // A Project search that finds nothing offers to create one, beside the button that already does.
-  const createProjectOption: PickerCreateOption = {
-    label: "Create Project…",
-    onSelect: () => {
-      setCreateProjectFromPicker(true);
-      setCreatingProject(true);
-    },
-  };
+  // New Project… and Add Location… end their fields' lists (§9.1). New Session stays open under the
+  // dialogs they open (§7.1), and closing one returns focus to the field that opened it.
+  const newProjectAction: PickerFooterAction = { label: "New Project…", onSelect: () => setCreatingProject(true) };
   const [addingLocation, setAddingLocation] = useState(false);
-  // New Session stays open under Create Project and Add Location (§7.1): these return focus to the
-  // button inside it that opened them.
-  const createProjectButtonRef = useRef<HTMLButtonElement>(null);
-  const addLocationButtonRef = useRef<HTMLButtonElement>(null);
+  const addLocationAction: PickerFooterAction = { label: "Add Location…", onSelect: () => setAddingLocation(true) };
+  const locationFieldRef = useRef<HTMLDivElement>(null);
+  // The Location control as it is when Add Location closes: its Select, or the No Locations
+  // notice's Add Location… while the project has none.
+  const locationFocusRef = useMemo(() => ({
+    get current() {
+      return locationFieldRef.current?.querySelector<HTMLElement>(
+        '.ui-select-trigger, [data-validation-target="add-location"]',
+      ) ?? null;
+    },
+  }), []);
 
   const [agentDefaults, setAgentDefaults] = useState(() => loadAgentDefaults(instanceScope));
   const [runnerId, setRunnerId] = useState(
@@ -259,12 +322,14 @@ export function NewSessionDialog({
   // `undefined` until the user chooses: a saved Orchestrator harness default then selects the role
   // on the user's behalf, exactly as the saved preset did before the role became independent.
   const [roleOverride, setRoleOverride] = useState<"normal" | "orchestrator" | undefined>(undefined);
-  const [orchestratorDraft, setOrchestratorDraft] = useState<OrchestratorDefaults>(
-    () => cloneOrchestratorDefaults(DEFAULT_ORCHESTRATOR_DEFAULTS),
+  // The Orchestrator policy this session launches with (#2955): the saved defaults and the changes
+  // the Orchestrator Policy dialog applied. The dialog edits a copy; only Apply Policy changes this.
+  const [policyDraft, setPolicyDraft] = useState<OrchestratorPolicyDraft>(
+    () => policyDraftFromDefaults(DEFAULT_ORCHESTRATOR_DEFAULTS),
   );
-  const [orchestratorOverrides, setOrchestratorOverrides] = useState(() => new Set<string>());
-  const [controlPreview, setControlPreview] = useState<"custom" | "full_control">("custom");
-  const [liveChildLimitDraft, setLiveChildLimitDraft] = useState(String(DEFAULT_LIVE_CHILD_LIMIT));
+  // The tab the Orchestrator Policy dialog opens on, while it is open.
+  const [editingPolicy, setEditingPolicy] = useState<OrchestratorPolicyTab | null>(null);
+  const customizeRef = useRef<HTMLButtonElement>(null);
   const [harnessDefaults, setHarnessDefaults] = useState<{
     api: typeof api; scope: typeof instanceScope; view: AgentHarnessDefaultsView | null; error: boolean;
   } | null>(null);
@@ -292,12 +357,8 @@ export function NewSessionDialog({
     void api.orchestratorSettings().then(
       (view) => {
         if (cancelled) return;
-        const defaults = cloneOrchestratorDefaults(view.defaults);
         setOrchestratorSettings({ api, scope: instanceScope, view, error: null });
-        setOrchestratorDraft(defaults);
-        setControlPreview(defaults.controlMode ?? "custom");
-        setLiveChildLimitDraft(String(defaults.behavior.maximumConcurrentChildren));
-        setOrchestratorOverrides(new Set());
+        setPolicyDraft(policyDraftFromDefaults(view.defaults));
       },
       (caught) => {
         if (cancelled) return;
@@ -305,9 +366,9 @@ export function NewSessionDialog({
           api,
           scope: instanceScope,
           view: null,
-          error: caught instanceof ApiError && caught.status === 404
-            ? "This version of Wollipog does not support campaign policy. Update or restart Wollipog so it matches this dashboard."
-            : caught instanceof Error ? caught.message : "Could not load Orchestrator defaults.",
+          // One sentence for every failure (§13.2): the raw error says nothing a person can act on,
+          // and Retry is the way forward either way.
+          error: "Couldn't load your Orchestrator defaults.",
         });
       },
     );
@@ -330,12 +391,17 @@ export function NewSessionDialog({
   const workspaceRowRef = useRef<HTMLDivElement>(null);
   // Use a Workspace unmounts itself; once the commit shows the picker again, focus moves to it.
   const workspacePickerRestoredRef = useRef(false);
+  // Options (#2954): one closed row until something inside needs attention or the person opens it.
+  const [optionsOpen, setOptionsOpen] = useState(false);
+  const skillsNoticeRef = useRef<HTMLDivElement>(null);
   const [busy, setBusy] = useState(false);
   const busyRef = useRef(false);
-  const [validationError, setValidationError] = useState<string | null>(null);
-  const [requestError, setRequestError] = useState<string | null>(null);
+  // A submit that finds a problem names it under the field it is about (§8.5) and focuses that field.
+  const [fieldProblem, setFieldProblem] = useState<{
+    field: ProblemField; message: string; control?: ProblemControl;
+  } | null>(null);
+  const [requestFailure, setRequestFailure] = useState<{ sentence: string; detail: string } | null>(null);
   const [retainedSessionId, setRetainedSessionId] = useState<string | null>(null);
-  const retainedSessionButtonRef = useRef<HTMLButtonElement>(null);
   const formRef = useRef<HTMLFormElement>(null);
   const projectChoiceRef = useRef<HTMLDivElement>(null);
   // The Project control as it is when the dialog above it closes: the combobox, or on touch the
@@ -361,6 +427,13 @@ export function NewSessionDialog({
     // after the opening commit so a later touch-to-desktop presentation swap cannot steal focus.
     initialProjectAutoFocusRef.current = false;
   }, []);
+  // Opened with a project already chosen (from that project's sessions), Project holds focus with
+  // its name selected and the list closed, so the first character typed replaces the name with a
+  // search instead of extending it.
+  useEffect(() => {
+    const input = projectChoiceRef.current?.querySelector<HTMLInputElement>(".ui-searchable-combobox-input");
+    if (input && document.activeElement === input && input.value) input.select();
+  }, []);
   const previousTouchChoicePickerRef = useRef(touchChoicePicker);
   // Capture ownership DURING render, while the old control is still mounted. By the time a layout
   // effect runs after the media-query change, React has replaced the focused input or listbox and
@@ -383,11 +456,16 @@ export function NewSessionDialog({
       : region?.querySelector<HTMLInputElement>(".ui-searchable-combobox-input");
     replacement?.focus();
   }, [responsiveChoiceFocusBeforeRender, touchChoicePicker]);
-  const projectLocationOptionsId = `${generatedFormId}-project-locations`;
-  const permissionOptionsId = `${generatedFormId}-session-role`;
-  const liveChildLimitInputId = `${generatedFormId}-live-child-limit`;
-  const liveChildLimitHelpId = `${generatedFormId}-live-child-limit-help`;
-  const harnessOptionsId = `${generatedFormId}-harnesses`;
+  const problemId = (field: ProblemField) => `${generatedFormId}-${field}-error`;
+  const locationHelperId = `${generatedFormId}-location-helper`;
+  const blockedReasonId = `${generatedFormId}-blocked-reason`;
+  const cloudBudgetInputId = `${generatedFormId}-cloud-budget`;
+  // Sentences that describe the control a problem with no field error of its own lands on.
+  const noLocationsId = `${generatedFormId}-no-locations`;
+  const noMachinesId = `${generatedFormId}-no-machines`;
+  const failureSentenceId = `${generatedFormId}-failure`;
+  const accountReasonId = `${generatedFormId}-account-reason`;
+  const policyFailureId = `${generatedFormId}-policy-failure`;
   const selectedProjectId = projectSelection && projectSelection !== NO_PROJECT_SELECTION ? projectSelection : null;
   const selectedProject = selectedProjectId ? projects.get(selectedProjectId) ?? null : null;
   const selectedProjectLocation = selectedProject?.locations.find((location) => location.id === projectLocationId) ?? null;
@@ -399,18 +477,42 @@ export function NewSessionDialog({
     () => agentOptions(runner?.agents ?? []),
     [runner?.agents],
   );
-  const agentComboboxOptions = useMemo<SearchableComboboxOption<string>[]>(() => agentOpts.map((option) => {
-    const metadata = agentMeta(option.agent);
-    return {
-      value: option.agent.id,
-      label: option.label,
-      description: option.disabled ? undefined : metadata,
-      disabled: option.disabled,
-      disabledReason: option.disabled
-        ? `Needs setup. ${codexAppServerSetupReason(option.agent) ?? metadata}`
-        : undefined,
-    };
-  }), [agentOpts]);
+  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId], runner?.agents);
+  // The saved default this machine can start: the list leads with it and says so.
+  const savedDefaultAgentId = agentDefaults[runnerId] && !savedSelection.issue ? savedSelection.agentId : "";
+  const agentMachine = runner ? machineName(runnerId) : "";
+  const agentAvailabilityVerified = runnerSupportsProtocol(runner?.protocolVersion, "verifiedAgentAvailability");
+  // Ready on the machine first, led by the saved default, then Needs Setup, each in agentOptions'
+  // family order (#2953). A second line only says what changes the choice: the default, which
+  // installation, how the agent limits the session, or, for one that can't start, the fix.
+  const agentComboboxOptions = useMemo<SearchableComboboxOption<string>[]>(() => {
+    const ready = agentOpts.filter((option) => !option.disabled);
+    return [
+      ...ready.filter((option) => option.agent.id === savedDefaultAgentId),
+      ...ready.filter((option) => option.agent.id !== savedDefaultAgentId),
+      ...agentOpts.filter((option) => option.disabled),
+    ].map((option) => {
+      // The installation's path names its executable; the folder holding it tells two apart.
+      const path = option.installationPath;
+      const folder = path ? startTruncatedPath(path.replace(/[\\/]+[^\\/]*$/u, "") || path) : undefined;
+      const description = [
+        !option.disabled && option.agent.id === savedDefaultAgentId ? "Your default on this machine" : undefined,
+        folder,
+        ...(option.disabled ? [] : agentSessionLimits(option.agent)),
+      ].filter(Boolean).join(" · ");
+      return {
+        value: option.agent.id,
+        label: option.name,
+        ...(folder ? { selectedLabel: `${option.name} · ${folder}` } : {}),
+        group: option.disabled ? "Needs Setup" : `Ready on ${agentMachine}`,
+        ...(description ? { description } : {}),
+        disabled: option.disabled,
+        disabledReason: option.disabled
+          ? agentSetupReason(option.agent, agentMachine, agentAvailabilityVerified)
+          : undefined,
+      };
+    });
+  }, [agentOpts, savedDefaultAgentId, agentMachine, agentAvailabilityVerified]);
   const selectedAgentOption = agentOpts.find((option) => option.agent.id === agentId);
   const executionTargets = (runner?.executionTargets ?? []).filter((target) =>
     (!target.compatibleAgentIds || target.compatibleAgentIds.includes(agentId)) &&
@@ -420,6 +522,20 @@ export function NewSessionDialog({
     executionTargets.find((target) => target.adapter === "host" &&
       target.workspaceStrategy === (useWorktree ? "worktree" : "in_place"));
   const agent = selectedAgentOption?.agent;
+  // Run On is offered only when the machine has more than its two host placements.
+  const runOnOffered = executionTargets.length > 2;
+  // The skills a container or cloud target can't see, named before creation as the session names
+  // them after it (#2954).
+  const skillsUnavailable = useSessionSkillsUnavailable({ runnerId, agentId, adapter: executionTarget?.adapter });
+  // Choosing such a target brings its notice into view once, when it first shows in open Options.
+  const skillsNoticeScrolledRef = useRef(false);
+  useEffect(() => {
+    if (!skillsUnavailable) skillsNoticeScrolledRef.current = false;
+    else if (optionsOpen && !skillsNoticeScrolledRef.current && skillsNoticeRef.current) {
+      skillsNoticeScrolledRef.current = true;
+      skillsNoticeRef.current.scrollIntoView?.({ block: "nearest" });
+    }
+  }, [optionsOpen, skillsUnavailable]);
   // Inside the Agent field (§8.4), so its left edge lines up with Project's and every other field's.
   const agentIcon = <AgentIcon driver={agent?.driver ?? "acp"} agentName={agent?.name} size={16} />;
   const provider = agent?.driver === "claude-code" ? "claude"
@@ -447,82 +563,18 @@ export function NewSessionDialog({
     if (accountChosenByUser.current && providerAccounts.some((account) => account.id === providerAccountId)) return;
     accountChosenByUser.current = false;
     const preferred = savedProviderAccount?.accountId ?? agent?.defaultProviderAccountId;
+    // Like the control plane's implicit choice, never a profile only other control planes may use (#3240).
     setProviderAccountId(savedProviderAccountMissing ? "" :
-      providerAccounts.find((account) => account.id === preferred)?.id ?? providerAccounts[0]?.id ?? "");
+      providerAccounts.find((account) => account.id === preferred)?.id ??
+      providerAccounts.find((account) => account.profile?.access !== "not_granted")?.id ?? "");
   }, [accountSelectionKey, agent?.defaultProviderAccountId, savedProviderAccount?.accountId,
     savedProviderAccountMissing, providerAccountId, providerAccounts.map((account) => account.id).join("\0")]);
-  const nativeTuiAccountingExplanation = nativeTuiAccountingDetail(agent);
   const savedPermissionMode = savedSessionPermissionMode(defaultsReady ? harnessDefaults?.view ?? null : null, agent);
   const savedPiModeUnavailableForTarget = agent?.driver === "pi" && executionTarget !== undefined &&
     executionTarget.adapter !== "host" && savedPermissionMode !== undefined &&
     savedPermissionMode !== "bypassPermissions" && savedPermissionMode !== "orchestrator";
   const savedOrchestratorDefault = savedPermissionMode === "orchestrator";
   const orchestrator = roleOverride === "orchestrator" || (roleOverride === undefined && savedOrchestratorDefault);
-  const parentControlSupported = runnerSupportsProtocol(runner?.protocolVersion, "delegatedParentControl");
-  const parentControlUnavailable = runnerCapabilityRequirement(
-    runner?.protocolVersion,
-    "delegatedParentControl",
-    "parent control",
-  );
-  const typedDelegationSupported = runnerSupportsProtocol(runner?.protocolVersion, "typedWorkflowDecisionDelegation");
-  const typedDelegationUnavailable = runnerCapabilityRequirement(
-    runner?.protocolVersion,
-    "typedWorkflowDecisionDelegation",
-    "typed decision delegation",
-  );
-  const setOrchestratorBehavior = <K extends keyof OrchestratorDefaults["behavior"]>(
-    key: K,
-    value: OrchestratorDefaults["behavior"][K],
-  ) => {
-    setOrchestratorDraft((current) => ({ ...current, behavior: { ...current.behavior, [key]: value } }));
-    setOrchestratorOverrides((current) => new Set(current).add(`behavior.${key}`));
-  };
-  const setOrchestratorDelegation = (category: DelegatableWorkflowDecisionCategory, authority: "human" | "orchestrator") => {
-    setOrchestratorDraft((current) => ({
-      ...current,
-      delegation: {
-        ...current.delegation,
-        decisions: { ...current.delegation.decisions, [category]: authority },
-      },
-    }));
-    setOrchestratorOverrides((current) => new Set(current).add(`delegation.decisions.${category}`));
-  };
-  const setStrictProjectIsolation = (strictProjectIsolation: boolean) => {
-    setOrchestratorDraft((current) => ({
-      ...current,
-      execution: { ...current.execution, strictProjectIsolation },
-    }));
-    setOrchestratorOverrides((current) => new Set(current).add("execution.strictProjectIsolation"));
-  };
-  const setIntegrationIsolation = (integrationIsolation: boolean) => {
-    setOrchestratorDraft((current) => ({
-      ...current,
-      execution: { ...current.execution, integrationIsolation },
-    }));
-    setOrchestratorOverrides((current) => new Set(current).add("execution.integrationIsolation"));
-  };
-  const effectiveParentControl = !parentControlSupported &&
-      !orchestratorOverrides.has("delegation.parentControl")
-    ? "off" as const
-    : orchestratorDraft.delegation.parentControl;
-  const effectiveDecision = (category: DelegatableWorkflowDecisionCategory) => !typedDelegationSupported &&
-      !orchestratorOverrides.has(`delegation.decisions.${category}`)
-    ? "human" as const
-    : orchestratorDraft.delegation.decisions[category];
-  const orchestratorSource = (path: string) => {
-    if (path === "execution.integrationIsolation" && integrationIsolationImplied) {
-      return orchestratorSource("execution.strictProjectIsolation");
-    }
-    if (orchestratorOverrides.has(path)) return "Session Override";
-    if (path === "delegation.parentControl" && !parentControlSupported &&
-        orchestratorDraft.delegation.parentControl !== "off") return "Compatibility Fallback";
-    const category = path.startsWith("delegation.decisions.")
-      ? path.slice("delegation.decisions.".length) as DelegatableWorkflowDecisionCategory
-      : null;
-    if (category && !typedDelegationSupported &&
-        orchestratorDraft.delegation.decisions[category] === "orchestrator") return "Compatibility Fallback";
-    return orchestratorSettings?.view?.source === "user_default" ? "User Default" : "Wollipog Default";
-  };
   const orchestratorContext = agent?.context?.kind ?? "native";
   const directWslOrchestrator = orchestratorContext === "wsl" &&
     ["claude-code", "codex", "codex-app-server"].includes(agent?.driver ?? "acp") &&
@@ -545,97 +597,12 @@ export function NewSessionDialog({
     runnerSupportsOrchestration: runnerSupportsProtocol(runner?.protocolVersion, "sessionOrchestration"),
     agentOffersOrchestrator: agentOffersOrchestratorPreset || agentOffersAdditiveRole,
     agentOrchestratorRequirement: agent?.codexAppServer?.orchestratorApproval?.failure,
+    agentName: selectedAgentOption?.label,
     contextKind: orchestratorContext,
     directWslVerified: directWslOrchestrator,
     hostExecutionTarget,
   });
   const orchestratorSupported = orchestratorUnavailable === undefined;
-  const orchestratorCapabilities = orchestratorSettings?.view?.capabilities;
-  const harnessPolicyAvailable = orchestratorCapabilities?.harnesses !== undefined;
-  const childHarnessPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorChildHarnessPolicy");
-  const childHarnessPolicyUnavailable = orchestratorChildHarnessRequirement(runner?.protocolVersion).error;
-  const childHarnesses = orchestratorCapabilities?.harnesses ?? [];
-  const fixedChildHarness = orchestratorDraft.behavior.childHarness;
-  const fixedChildHarnessCapability = fixedChildHarness
-    ? childHarnesses.find((harness) => agentHarnessIdentityKey(harness) === agentHarnessIdentityKey(fixedChildHarness))
-    : undefined;
-  const candidateChildHarnesses = fixedChildHarness
-    ? (fixedChildHarnessCapability ? [fixedChildHarnessCapability] : [])
-    : childHarnesses;
-  const childHarnessOptions = [
-    {
-      value: AUTOMATIC_ORCHESTRATOR_VALUE,
-      label: "Automatic",
-      description: harnessPolicyAvailable
-        ? "Choose a compatible Agent Harness, model, and effort together at child creation."
-        : "Update Wollipog to configure a fixed Child Harness.",
-    },
-    ...childHarnesses.map((harness) => ({
-      value: agentHarnessIdentityKey(harness),
-      label: harness.installations > 0
-        ? agentHarnessOptionLabel(harness)
-        : `${agentHarnessOptionLabel(harness)} (Unavailable)`,
-      description: harness.installations > 0
-        ? agentHarnessMachinesDescription(harness)
-        : "No current installation advertises this saved Agent Harness.",
-    })),
-  ];
-  const scopedModels = new Map<string, { displayName: string; harnessNames: Set<string> }>();
-  if (harnessPolicyAvailable) {
-    for (const harness of candidateChildHarnesses) {
-      for (const model of harness.models) {
-        const current = scopedModels.get(model.id) ?? {
-          displayName: model.displayName ?? model.id,
-          harnessNames: new Set<string>(),
-        };
-        current.harnessNames.add(harness.name);
-        scopedModels.set(model.id, current);
-      }
-    }
-  } else {
-    for (const model of orchestratorCapabilities?.models ?? []) {
-      scopedModels.set(model.id, { displayName: model.displayName ?? model.id, harnessNames: new Set() });
-    }
-  }
-  const scopedEfforts = new Set(harnessPolicyAvailable
-    ? candidateChildHarnesses.flatMap((harness) => orchestratorDraft.behavior.childModel
-      ? harness.supportedPairs.filter((pair) => pair.modelId === orchestratorDraft.behavior.childModel)
-        .flatMap((pair) => pair.effortLevels)
-      : harness.effortLevels)
-    : orchestratorCapabilities?.effortLevels ?? []);
-  const fixedHarnessAvailable = !fixedChildHarness || (fixedChildHarnessCapability?.installations ?? 0) > 0;
-  const fixedHarnessSupported = !fixedChildHarness || childHarnessPolicySupported;
-  const fixedModelAvailable = !orchestratorDraft.behavior.childModel ||
-    scopedModels.has(orchestratorDraft.behavior.childModel);
-  const fixedEffortAvailable = !orchestratorDraft.behavior.childEffort ||
-    scopedEfforts.has(orchestratorDraft.behavior.childEffort);
-  const fixedPairAvailable = harnessPolicyAvailable
-    ? candidateChildHarnesses.some((harness) => harness.installations > 0 &&
-      (orchestratorDraft.behavior.childModel
-        ? harness.supportedPairs.some((pair) => pair.modelId === orchestratorDraft.behavior.childModel &&
-          (!orchestratorDraft.behavior.childEffort || pair.effortLevels.includes(orchestratorDraft.behavior.childEffort)))
-        : orchestratorDraft.behavior.childEffort
-          ? harness.effortLevels.includes(orchestratorDraft.behavior.childEffort)
-          : true))
-    : orchestratorCapabilities?.supportedPairs
-      ? orchestratorDraft.behavior.childModel
-        ? orchestratorCapabilities.supportedPairs.some((pair) =>
-          pair.modelId === orchestratorDraft.behavior.childModel &&
-          (!orchestratorDraft.behavior.childEffort || pair.effortLevels.includes(orchestratorDraft.behavior.childEffort)))
-        : orchestratorDraft.behavior.childEffort
-          ? orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
-          : orchestratorCapabilities.installations > 0
-      : orchestratorCapabilities?.status === "available";
-  const orchestratorCapabilitiesValid = !!fixedPairAvailable && fixedHarnessAvailable && fixedHarnessSupported &&
-    fixedModelAvailable && fixedEffortAvailable;
-  const orchestratorCapabilitiesError = fixedChildHarness && !fixedHarnessSupported
-    ? childHarnessPolicyUnavailable
-    : orchestratorCapabilities?.reason ??
-      "A saved Child Harness, Child Model, or Child Effort is no longer advertised. Choose an available value.";
-  const orchestratorDelegationValid =
-    (effectiveParentControl === "off" || parentControlSupported) &&
-    (!WORKFLOW_DECISION_CATEGORIES.some((category) => effectiveDecision(category) === "orchestrator") ||
-      typedDelegationSupported);
   const executionPolicySupported = runnerSupportsProtocol(runner?.protocolVersion, "orchestratorExecutionPolicy");
   // Strict Project Isolation is delivered only by the coupled preset, so an installation that
   // offers just the additive role cannot provide it however good its filesystem boundary is.
@@ -652,20 +619,23 @@ export function NewSessionDialog({
             (runner?.os === "macos" && runner?.runtime?.executionIsolation?.mode === "seatbelt")
           : false
   )));
-  // Which shape a non-strict Orchestrator would actually launch with. `orchestratorPresetReason`
-  // below asks the same question for the draft's own isolation setting; this one forces Strict
-  // Project Isolation off, because that is the only setting under which the availability derived
-  // from it is consulted, and the two non-strict shapes have genuinely different preconditions.
-  const nonStrictPresetPermissions = orchestratorPresetPermissionsReason({
+  // Why the coupled preset sets an Orchestrator's permissions under a given Strict Project
+  // Isolation, or undefined when it doesn't: the sentence that explains why the preset still applies
+  // is also what decides that it applies. The dialog asks it for its own draft.
+  const presetReasonFor = (strictProjectIsolation: boolean) => orchestratorPresetPermissionsReason({
     controlPlaneSupportsRole: orchestratorRoleSupported,
     runnerProtocolVersion: runner?.protocolVersion,
     driver: agent?.driver ?? "acp",
     contextKind: orchestratorContext,
     hostExecutionTarget,
     nativeTui: launchSurface === "native_tui",
-    strictProjectIsolation: false,
+    strictProjectIsolation,
     savedOrchestratorDefault,
-  }) !== undefined;
+  });
+  // Which shape a non-strict Orchestrator would actually launch with. This forces Strict Project
+  // Isolation off, because that is the only setting under which the availability derived from it is
+  // consulted, and the two non-strict shapes have genuinely different preconditions.
+  const nonStrictPresetPermissions = presetReasonFor(false) !== undefined;
   const providerExecutionAvailable = executionPolicySupported && orchestratorContext === "native" &&
     (nonStrictPresetPermissions
       // The non-strict COUPLED preset. It requires the PRESET advertisement, because a preset launch
@@ -689,101 +659,40 @@ export function NewSessionDialog({
     (agent?.driver !== "claude-code" ||
       (agent.capabilities?.supportsApprovals === true &&
         agent.capabilities.permissionModes?.includes("default") === true));
-  // The sentence that explains why the preset still applies is also what decides that it applies.
   const orchestratorPresetReason = orchestrator
-    ? orchestratorPresetPermissionsReason({
-      controlPlaneSupportsRole: orchestratorRoleSupported,
-      runnerProtocolVersion: runner?.protocolVersion,
-      driver: agent?.driver ?? "acp",
-      contextKind: orchestratorContext,
-      hostExecutionTarget,
-      nativeTui: launchSurface === "native_tui",
-      strictProjectIsolation: orchestratorDraft.execution.strictProjectIsolation,
-      savedOrchestratorDefault,
-    })
+    ? presetReasonFor(policyDraft.values.execution.strictProjectIsolation)
     : undefined;
   const providerPermissionsPreset = orchestrator && orchestratorPresetReason !== undefined;
   // Strict Project Isolation, and every coupled-preset launch, already launches without provider
   // integrations. The control is then implied rather than independent, and the server stores the
-  // same `true`, so showing anything else would advertise a shape the control plane refuses.
-  const integrationIsolationImplied = orchestratorDraft.execution.strictProjectIsolation ||
+  // same `true`, so the request withholds the choice in that state.
+  const integrationIsolationImplied = policyDraft.values.execution.strictProjectIsolation ||
     providerPermissionsPreset;
   const effectiveIntegrationIsolation = integrationIsolationImplied ||
-    orchestratorDraft.execution.integrationIsolation;
-  // BOTH peers have to know the policy, and they upgrade independently: a v164 runner can sit behind
-  // a v163 control plane, whose override parser rejects `execution.integrationIsolation` outright.
-  // The runner's protocol version cannot answer that, so the control plane's own settings payload
-  // does — it echoes the field only if it knows it.
+    policyDraft.values.execution.integrationIsolation;
+  // An older control plane's override parser rejects `execution.integrationIsolation` outright; its
+  // settings payload echoes the field only if it knows it.
   const integrationIsolationControlPlane = controlPlaneSupportsIntegrationIsolation(
     orchestratorSettings?.view?.defaults,
   );
-  // Only the additive shape needs anything new from the runner; the preset isolates on every
-  // runner. The additive gate itself already requires a native Claude Code, Codex, or Pi harness on
-  // the host, which is exactly the set that can enforce this policy, so no separate harness rule is
-  // needed here — only the protocol gate the control plane will apply.
-  const integrationIsolationSupported = integrationIsolationImplied ||
-    (integrationIsolationControlPlane &&
-      runnerSupportsProtocol(runner?.protocolVersion, "orchestratorIntegrationIsolation"));
-  // The policy differs by harness, so the copy follows the agent this session will actually launch.
-  const integrationIsolationCopy = integrationIsolationDisclosure(agent?.driver);
-  const integrationIsolationUnavailable = !integrationIsolationControlPlane
-    ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
-    : orchestratorIntegrationIsolationRequirement(runner?.protocolVersion).error;
-  const orchestratorExecutionValid = (orchestratorDraft.execution.strictProjectIsolation
-    ? strictProjectBoundaryAvailable
-    : providerExecutionAvailable) &&
-    (!effectiveIntegrationIsolation || integrationIsolationSupported);
-  const orchestratorExecutionUnavailable = orchestratorDraft.execution.strictProjectIsolation
-    ? (agentOffersOrchestratorPreset
-      ? "Strict Project Isolation needs an audited Codex sandbox, Direct WSL bubblewrap, or runner bubblewrap/Seatbelt isolation with the required Claude mode."
-      : "Strict Project Isolation is delivered by the Orchestrator preset, which this agent installation cannot launch here. Disable it to run this Orchestrator with ordinary provider permissions.")
-    : !executionPolicySupported
-      ? orchestratorExecutionPolicyRequirement(runner?.protocolVersion).error
-      : "Provider-mode orchestration requires a native Codex, approval-capable Claude Code, or bridge-verified Pi harness.";
-  const childModelOptions = [
-    { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Resolve from live child capabilities." },
-    ...(fixedChildHarness || !harnessPolicyAvailable ? [...scopedModels.entries()] : []).map(([modelId, model]) => ({
-      value: modelId,
-      label: model.displayName,
-      description: fixedChildHarness
-        ? `Use ${model.displayName} through the selected Child Harness.`
-        : model.harnessNames.size > 0
-          ? `Resolve through a compatible harness: ${[...model.harnessNames].sort().join(", ")}.`
-          : `Use ${model.displayName} for child sessions.`,
-    })),
-    ...(!fixedChildHarness && harnessPolicyAvailable && orchestratorDraft.behavior.childModel && fixedModelAvailable ? [{
-      value: orchestratorDraft.behavior.childModel,
-      label: `${scopedModels.get(orchestratorDraft.behavior.childModel)?.displayName ?? orchestratorDraft.behavior.childModel} (Legacy Automatic Harness)`,
-      description: "This legacy fixed model retains automatic harness resolution. Choose a fixed Child Harness before selecting a different model.",
-    }] : []),
-    ...(!fixedModelAvailable && orchestratorDraft.behavior.childModel ? [{
-      value: orchestratorDraft.behavior.childModel,
-      label: `${orchestratorDraft.behavior.childModel} (Unavailable)`,
-      description: "No current child installation advertises this saved model.",
-      disabled: true,
-      disabledReason: "Choose Automatic or a model advertised by a connected installation.",
-    }] : []),
-  ];
-  const childEffortOptions = [
-    { value: AUTOMATIC_ORCHESTRATOR_VALUE, label: "Automatic", description: "Use the child model's advertised default effort." },
-    ...(fixedChildHarness || !harnessPolicyAvailable ? [...scopedEfforts].sort() : []).map((effort) => ({
-      value: effort,
-      label: titleCaseLabel(effort),
-      description: `Use ${titleCaseLabel(effort)} effort for child sessions.`,
-    })),
-    ...(!fixedChildHarness && harnessPolicyAvailable && orchestratorDraft.behavior.childEffort && fixedEffortAvailable ? [{
-      value: orchestratorDraft.behavior.childEffort,
-      label: `${titleCaseLabel(orchestratorDraft.behavior.childEffort)} (Legacy Automatic Harness)`,
-      description: "This legacy fixed effort retains automatic harness resolution. Choose a fixed Child Harness before selecting a different effort.",
-    }] : []),
-    ...(!fixedEffortAvailable && orchestratorDraft.behavior.childEffort ? [{
-      value: orchestratorDraft.behavior.childEffort,
-      label: `${titleCaseLabel(orchestratorDraft.behavior.childEffort)} (Unavailable)`,
-      description: "No current child installation advertises this saved effort.",
-      disabled: true,
-      disabledReason: "Choose Automatic or an effort advertised by a connected installation.",
-    }] : []),
-  ];
+  // The policy (#2955): one evaluation of the applied draft, shared with the Orchestrator Policy
+  // dialog, which evaluates its own copy the same way.
+  const orchestratorPolicyView = orchestratorSettingsReady ? orchestratorSettings?.view ?? null : null;
+  const policyContext: OrchestratorPolicyContext | null = orchestratorPolicyView ? {
+    view: orchestratorPolicyView,
+    machine: runner ? machineName(runner.runnerId) : "this machine",
+    runnerProtocolVersion: runner?.protocolVersion,
+    driver: agent?.driver,
+    hostExecutionTarget,
+    agentOffersOrchestratorPreset,
+    strictProjectBoundaryAvailable,
+    providerExecutionAvailable,
+    presetReason: presetReasonFor,
+  } : null;
+  const policy = policyContext ? evaluateOrchestratorPolicy(policyContext, policyDraft) : null;
+  const policyProblem = policy?.problems[0] ?? null;
+  const orchestratorOverrides = policy?.overrides ?? new Set<string>();
+  const liveChildLimit = Number(policyDraft.limitText);
   const directWslRequiresSafeOrchestrator = orchestratorContext === "wsl" &&
     launchSurface !== "native_tui" && runner?.runtime?.executionIsolation?.mode === "bwrap" &&
     hostExecutionTarget;
@@ -823,9 +732,48 @@ export function NewSessionDialog({
   const directoryGrants = !browsedPath && (agent?.driver ?? "acp") === "acp"
     ? (workspace?.additionalDirectoryGrants ?? [])
     : [];
-  const savedSelection = savedAgentSelection(agentOpts, agentDefaults[runnerId], runner?.agents);
   const selectionIssue = currentAgentSelectionIssue(agentOpts, agentId, agentDefaults[runnerId], runner?.agents);
   const suggestedAgentOption = agentOpts.find((option) => option.agent.id === savedSelection.recommendedId);
+  // Agent lists what the chosen machine can start, so it waits for an online one (#2953).
+  const agentWaitsFor = projectsSupported && projectSelection !== NO_PROJECT_SELECTION
+    ? !selectedProjectLocation ? "Choose a Location First"
+      : !projectLocationLaunchable ? "Choose an Online Location First" : null
+    : !runner ? "Choose a Location First"
+      : runner.status !== "online" ? "Choose an Online Location First" : null;
+  // A saved default this machine can't start is the field's error; one that only needs updating is a
+  // warning whose button applies the fix (§8.5).
+  const savedAgentChoice = agentDefaults[runnerId];
+  const agentDefaultProblem: { tone: "error" | "warning"; message: string; fix?: { label: string; id: string } } | null =
+    agentWaitsFor || !runner ? null
+      : selectionIssue === "unavailable" && selectedAgentOption ? {
+        tone: "error",
+        message: agentSetupProblem(selectedAgentOption.agent, agentAvailabilityVerified) === "not_installed"
+          ? `${selectedAgentOption.name} isn't installed on ${agentMachine}. Choose another agent, or set it up in Connections.`
+          : `${selectedAgentOption.name} can't start on ${agentMachine} until it's set up. Choose another agent, or set it up in Connections.`,
+      }
+      : selectionIssue === "missing" && savedAgentChoice ? {
+        tone: "error",
+        message: `${savedAgentName(savedAgentChoice, runner.agents) ?? "Your saved agent"} isn't installed on ${agentMachine}. Choose another agent, or set it up in Connections.`,
+      }
+      : selectionIssue === "legacy" ? {
+        tone: "warning",
+        message: "Your saved default uses Codex non-interactive mode, which is no longer supported. Codex App Server supports interactive approvals and resumable conversations.",
+        ...(suggestedAgentOption && savedSelection.recommendedId !== savedAgentChoice
+          ? { fix: { label: `Use ${suggestedAgentOption.name}`, id: suggestedAgentOption.agent.id } } : {}),
+      }
+      : selectionIssue === "unbound" ? {
+        tone: "warning",
+        message: `Your saved default doesn't say which installation of ${
+          agentOpts.find((option) => option.agent.id === savedAgentChoice)?.name ?? "this agent"} it means.`,
+        ...(suggestedAgentOption ? {
+          fix: {
+            label: savedSelection.recommendedId === savedAgentChoice ? "Use This Installation" : `Use ${suggestedAgentOption.name}`,
+            id: suggestedAgentOption.agent.id,
+          },
+        } : {}),
+      }
+      : null;
+  const agentDefaultProblemId = `${generatedFormId}-agent-default`;
   // Browse the runner's filesystem in the selected agent's context (native host vs a WSL distro).
   const browseDistro = agent?.context?.kind === "wsl" ? agent.context.distro : undefined;
 
@@ -911,7 +859,7 @@ export function NewSessionDialog({
     // An editable combobox can commit its current value again. Unlike a native select, that is a
     // real event, but it is not a new Project decision and must not erase an explicit Location.
     if (value === projectSelection) return;
-    setValidationError(null);
+    setFieldProblem(null);
     projectSelectionChangedRef.current = true;
     setProjectSelection(value);
     setProjectLocationId("");
@@ -994,11 +942,6 @@ export function NewSessionDialog({
   const cloudBudgetValid = executionTarget?.adapter !== "cloud" || Boolean(executionTarget.policy &&
     Number.isFinite(cloudBudget) && cloudBudget >= executionTarget.policy.cost.minimumBudgetUsd &&
     cloudBudget <= executionTarget.policy.cost.maximumBudgetUsd);
-  const liveChildLimit = Number(liveChildLimitDraft);
-  const liveChildLimitValid = !orchestrator || (
-    liveChildLimitDraft.trim() !== "" && Number.isSafeInteger(liveChildLimit) &&
-    liveChildLimit >= 0 && liveChildLimit <= MAX_LIVE_CHILD_LIMIT
-  );
   const projectPlacementValid = !projectsSupported
     ? !!runnerId && (!!workspaceId || !!browsedPath)
     : projectSelection === NO_PROJECT_SELECTION
@@ -1006,7 +949,7 @@ export function NewSessionDialog({
       : !!selectedProject && projectLocationLaunchable;
   // Independent provider permissions (#1281, #1293): a non-strict native Claude Code or Codex
   // Orchestrator keeps the same permission mode, tools, hooks, and MCP servers as a normal session.
-  const savedPermissionTitle = !defaultsReady ? "Default (Not Loaded)"
+  const savedPermissionTitle = !defaultsReady ? (harnessDefaults?.error ? "Default (Not Loaded)" : "Loading…")
     : savedPiModeUnavailableForTarget ? "Target Default — Full Access"
     : savedPermissionMode ? `Saved Default — ${titleCaseLabel(permissionModeLabel(savedPermissionMode, agent?.driver))}`
     : "Harness Default";
@@ -1015,16 +958,40 @@ export function NewSessionDialog({
     (!executionTarget || executionTarget.available) && cloudBudgetValid &&
     (launchSurface !== "native_tui" || nativeTuiSupported) &&
     (defaultsReady || orchestrator) &&
-    (!orchestrator || (orchestratorSupported && orchestratorSettingsReady &&
-      orchestratorCapabilitiesValid && orchestratorDelegationValid && orchestratorExecutionValid)) &&
-    liveChildLimitValid &&
+    // Maximum Concurrent Children is part of the policy: under Full Control it is also the
+    // campaign's concurrency, which must be at least 1, so the policy refuses 0 there.
+    (!orchestrator || (orchestratorSupported && orchestratorSettingsReady && !policyProblem)) &&
     (!directWslRequiresSafeOrchestrator || (orchestrator && orchestratorSupported)) && !retainedSessionId;
-  const valid = launchSelectionValid && (!orchestrator || controlPreview !== "full_control");
+  const controlPreview = policyDraft.controlMode;
+  const valid = launchSelectionValid;
+  // Full Control starts like any Orchestrator (#2940); only the server's launch route admits it,
+  // never ordinary creation, and the person's first message in the session is its task.
+  const fullControlLaunch = orchestrator && orchestratorSettingsReady && controlPreview === "full_control";
+  // The chosen location, as the Location field reports it: why it can't host the session, if it can't.
+  const selectedLocationProblem = selectedProjectLocation && !projectLocationLaunchable
+    ? unavailableLocationSentence(
+      liveLocationAvailability(selectedProjectLocation, runners),
+      machineName(selectedProjectLocation.runnerId),
+    )
+    : null;
+  // Create Session is disabled only for what nothing further down the form can fix (§7.3, §8.5), and
+  // the footer says what that is. Anything else leaves it enabled: pressing it lands on the field.
+  const blockedReason = online.length === 0 ? "Connect a machine to continue."
+    : projectsSupported && selectedProject && selectedProject.locations.length === 0 ? "Add a location to continue."
+      : projectsSupported && selectedProject &&
+          (selectedProjectLocation ? !projectLocationLaunchable : projectLocationsAvailable.length === 0)
+        ? "Choose an online location to continue."
+        : runner && (!agentOpts.some((option) => !option.disabled) || selectedAgentOption?.disabled ||
+            agentDefaultProblem?.tone === "error")
+          ? "Choose an installed agent to continue."
+          // A policy that can't launch is fixed in Orchestrator Policy, and says so here too (#2955).
+          : orchestrator && orchestratorSupported && policyProblem ? policyProblem.message
+            : null;
 
   // Validation feedback describes the state that produced it. Once any value participating in
   // validation changes, remove that stale diagnosis; request failures remain until the next submit.
   useEffect(() => {
-    setValidationError(null);
+    setFieldProblem(null);
   }, [
     projectSelection, selectedProject?.id, projectLocationId, projectLocationLaunchable,
     runnerId, workspaceId, browsedPath, agentId, selectedAgentOption?.disabled, providerAccountId,
@@ -1032,9 +999,8 @@ export function NewSessionDialog({
     directWslRequiresSafeOrchestrator, launchSurface, nativeTuiSupported,
     executionTargetId, executionTarget?.id, executionTarget?.available,
     cloudBudgetUsd, cloudBudgetValid, retainedSessionId,
-    liveChildLimitDraft, liveChildLimitValid,
-    orchestratorSettingsReady, orchestratorSettings?.error, orchestratorOverrides,
-    orchestratorExecutionValid,
+    policyDraft, policyProblem?.message,
+    orchestratorSettingsReady, orchestratorSettings?.error,
   ]);
 
   // Keep the secondary shortcut local to this dialog. Unmodified Enter is native form behavior: an
@@ -1066,14 +1032,40 @@ export function NewSessionDialog({
     }
   };
 
-  const focusValidationProblem = (...selectors: Array<string | undefined>) => {
-    for (const selector of selectors) {
-      if (!selector) continue;
-      const target = formRef.current?.querySelector<HTMLElement>(selector);
+  /** Where each control a submit problem can land on is found, in the dialog (the form or its footer). */
+  const problemTargets: Record<ProblemControl, string> = {
+    project: '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
+    location: 'button[aria-label^="Location:"]:not([aria-disabled="true"])',
+    "add-location": '[data-validation-target="add-location"]',
+    machine: 'button[aria-label^="Machine:"]',
+    folder: 'button[aria-label^="Workspace:"]',
+    browse: '[data-validation-target="browse"]:not(:disabled)',
+    agent: '[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]',
+    account: 'button[aria-label^="Account:"]',
+    "retained-session": '[data-validation-target="retained-session"]',
+    "open-connections": '[data-validation-target="open-connections"]',
+    role: '.seg[aria-label="Role"] > .seg-option:not([aria-disabled="true"])',
+    defaults: '[data-validation-target="defaults"]',
+    "orchestrator-retry": 'button[data-validation-target="orchestrator-retry"]',
+    orchestrator: 'button[data-validation-target="orchestrator-policy"]',
+    harness: '.seg[aria-label="Harness"] > .seg-option:not([aria-disabled="true"])',
+    mode: '.seg[aria-label="Working Copy"] > .seg-option[aria-checked="true"]',
+    "execution-target": 'button[aria-label^="Run On:"]',
+    "cloud-budget": `[id="${cloudBudgetInputId}"]`,
+    create: '[data-validation-target="create"]',
+  };
+  /** Focus the first of `controls` that renders now, falling back to Create Session, and say which. */
+  const focusValidationProblem = (...controls: ProblemControl[]): ProblemControl => {
+    // A problem inside Options opens it first, in this commit, so its control can take focus.
+    if (controls[0] && OPTIONS_CONTROLS.has(controls[0]) && !optionsOpen) flushSync(() => setOptionsOpen(true));
+    const dialog = formRef.current?.closest<HTMLElement>('[role="dialog"]') ?? formRef.current;
+    for (const control of [...controls, "create" as const]) {
+      const target = dialog?.querySelector<HTMLElement>(problemTargets[control]);
       if (!target) continue;
       target.focus();
-      return;
+      return control;
     }
+    return "create";
   };
 
   const buildSessionRequest = (): CreateSessionRequest => {
@@ -1092,6 +1084,7 @@ export function NewSessionDialog({
         : {}),
       ...(executionTarget?.adapter === "cloud" ? { costBudgetUsd: cloudBudget } : {}),
     };
+    const orchestratorDraft = policyDraft.values;
     const decisionOverrides = Object.fromEntries(WORKFLOW_DECISION_CATEGORIES.flatMap((category) =>
       orchestratorOverrides.has(`delegation.decisions.${category}`)
         ? [[category, orchestratorDraft.delegation.decisions[category]]]
@@ -1147,105 +1140,329 @@ export function NewSessionDialog({
     // Re-entrancy guard: the Enter path bypasses the footer button's disabled attribute, and a
     // second submit while createSession is in flight would spawn a duplicate session.
     if (busyRef.current) return;
-    setValidationError(null);
-    setRequestError(null);
+    setFieldProblem(null);
+    // A kept session's failure stays: its Open Session is the way forward.
+    if (!retainedSessionId) setRequestFailure(null);
+    // Each problem is shown under its field, and focus moves to the first of its controls that renders
+    // now. That control carries `aria-invalid` where it has one, and its `aria-describedby` names the
+    // error, so focusing it announces why (§8.5). A problem with no message is already explained by
+    // what its control is described by (a notice, the account's reason).
+    const report = (field: ProblemField, message: string | null, ...controls: ProblemControl[]) => {
+      const control = focusValidationProblem(...controls);
+      setFieldProblem(message ? { field, message, control } : null);
+    };
     if (!valid) {
-      if (orchestrator && controlPreview === "full_control") {
-        setValidationError("Check the Full Control preflight, then use Authorize and Create Session, or choose Custom.");
-        focusValidationProblem('[data-control-mode="full_control"]');
-      } else if (retainedSessionId) {
-        setValidationError("Open the retained session before creating another one.");
-        retainedSessionButtonRef.current?.focus();
+      if (retainedSessionId) {
+        // The failure notice above the footer already says a session was kept; Open Session is next.
+        report("form", null, "retained-session");
+      } else if (online.length === 0) {
+        // No Machines Online says why; Open Connections is the way forward.
+        report("form", null, "open-connections");
       } else if (projectsSupported && !projectSelection) {
-        setValidationError("Choose a Project or No Project.");
-        focusValidationProblem('[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]');
+        report("project", "Choose a project, or choose No Project.", "project");
+      } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !selectedProject) {
+        report("project", "This project is no longer available. Choose another project.", "project");
+      } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && selectedProject &&
+          selectedProject.locations.length === 0) {
+        // The No Locations notice explains, and its Add Location… is next, unless only someone who
+        // manages the project can add one.
+        if (cannotAddLocation) {
+          report("project", "This project has no locations, and you can't add one. Choose another project.", "project");
+        } else {
+          report("location", null, "add-location");
+        }
       } else if (projectsSupported && projectSelection !== NO_PROJECT_SELECTION && !projectLocationLaunchable) {
-        setValidationError("Choose an available Project Location.");
-        focusValidationProblem(
-          `[id="${projectLocationOptionsId}"] input:not([aria-disabled="true"])`,
-          '[data-validation-target="add-location"]:not(:disabled)',
-          '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
-        );
+        // An unavailable choice already shows its own error under Location; an unchosen one needs one.
+        report("location", selectedProjectLocation
+          ? null
+          : projectLocationsAvailable.length > 0
+            ? "Choose where this session runs."
+            : "No location of this project is online. Start its machine, or add a location on another machine.",
+        "location", "project");
       } else if (!runnerId) {
-        setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem(
-          'button[aria-label^="Machine:"]',
-          '[role="combobox"][aria-label="Project"], button[aria-label^="Project:"]',
-        );
+        report("machine", "Choose a machine.", "machine", "project");
       } else if (!workspaceId && !browsedPath) {
-        setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem('button[aria-label^="Workspace:"]');
+        report("folder", "Choose a workspace, or browse for a folder.", "folder", "browse");
       } else if (!agentId || !selectedAgentOption || selectedAgentOption.disabled) {
-        setValidationError("Pick a runner, workspace, and agent.");
-        focusValidationProblem('[role="combobox"][aria-label="Agent"], button[aria-label^="Agent:"]');
+        report("agent", agentDefaultProblem?.tone === "error" ? null : "Choose an installed agent.", "agent");
       } else if (missingRequiredAccountChoice) {
-        setValidationError("Choose an account because the saved default is no longer available.");
-        focusValidationProblem('button[aria-label^="Account:"]');
+        // The Account field already says why, and its control is described by it.
+        report("form", null, "account");
       } else if (!defaultsReady && !orchestrator) {
-        setValidationError(harnessDefaults?.error
+        report("role", harnessDefaults?.error
           ? "Retry loading saved permission defaults before creating a session."
-          : "Wait for saved permission defaults to finish loading.");
-        focusValidationProblem('[data-validation-target="defaults"]');
+          : "Wait for saved permission defaults to finish loading.",
+        ...(harnessDefaults?.error ? ["defaults", "role"] as const : ["role"] as const));
       } else if (orchestrator && !orchestratorSupported) {
-        setValidationError("Choose an available Session Role.");
-        focusValidationProblem(`[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        report("role", "Choose an available Role.", "role");
       } else if (orchestrator && !orchestratorSettingsReady) {
-        setValidationError(orchestratorSettings?.error ?? "Wait for Orchestrator defaults to finish loading.");
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
-      } else if (orchestrator && !orchestratorCapabilitiesValid) {
-        setValidationError(orchestratorCapabilities?.reason ??
-          "Choose available Child Model and Child Effort values before creating this campaign.");
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
-      } else if (orchestrator && !orchestratorDelegationValid) {
-        setValidationError(effectiveParentControl !== "off" && !parentControlSupported
-          ? parentControlUnavailable ?? "Choose Human for Descendant Requests on this runner."
-          : typedDelegationUnavailable ?? "Choose Human for typed decisions on this runner.");
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
-      } else if (orchestrator && !orchestratorExecutionValid) {
-        setValidationError(orchestratorExecutionUnavailable);
-        focusValidationProblem('[data-validation-target="orchestrator-defaults"]');
-      } else if (!liveChildLimitValid) {
-        setValidationError(`Enter a Live Child Limit from 0 to ${MAX_LIVE_CHILD_LIMIT}.`);
-        focusValidationProblem(`[id="${liveChildLimitInputId}"]`);
+        // While the policy loads there is nothing of it to focus, so the Session Role answers. A
+        // failed load is its notice's to explain, and its Retry is described by it.
+        report("role", orchestratorSettings?.error ? null : "Wait for your Orchestrator defaults to finish loading.",
+          "orchestrator-retry", "role");
+      } else if (orchestrator && policyProblem) {
+        // The policy row already says what is wrong, and Customize… is described by it.
+        report("role", null, "orchestrator", "role");
       } else if (directWslRequiresSafeOrchestrator && !orchestrator) {
-        setValidationError("Choose Orchestrator or another execution context.");
-        focusValidationProblem(`[id="${permissionOptionsId}"] input:not([aria-disabled="true"])`);
+        report("role", "Choose Orchestrator or another execution context.", "role");
       } else if (launchSurface === "native_tui" && !nativeTuiSupported) {
-        setValidationError("Choose an available Harness.");
-        focusValidationProblem(`[id="${harnessOptionsId}"] input:not([aria-disabled="true"])`);
+        report("harness", "Choose an available Harness.", "harness");
       } else if (executionTarget && !executionTarget.available) {
-        setValidationError("Choose an available Execution Target.");
-        focusValidationProblem('button[aria-label^="Execution Target:"]');
+        report("mode", "Choose an available Run On target.", "execution-target", "mode");
       } else if (!cloudBudgetValid) {
-        setValidationError("Enter a Cloud Cost Budget within the allowed range.");
-        focusValidationProblem('input[type="number"]');
+        // The Cloud Budget field already shows its error, and the focused field is described by it.
+        report("mode", null, "cloud-budget", "execution-target", "mode");
       } else {
-        setValidationError("Complete the required session settings before creating a session.");
+        report("form", "Complete the required session settings before creating a session.", "create");
       }
       return;
     }
     busyRef.current = true;
     setBusy(true);
     try {
-      const session = await api.createSession(buildSessionRequest());
+      const session = fullControlLaunch
+        ? await launchFullControlCampaign(api, buildSessionRequest())
+        : await api.createSession(buildSessionRequest());
       navigate({ name: "session", id: session.id });
       if (launchSurface === "native_tui") onOpenTerminal?.();
       onClose();
     } catch (e) {
-      if (e instanceof ApiError &&
+      const keptSessionId = e instanceof ApiError &&
           (e.code === "NATIVE_TUI_LAUNCH_AMBIGUOUS" ||
             e.code === "NATIVE_TUI_COMPENSATION_FAILED") &&
-          typeof e.details?.sessionId === "string") {
-        setRetainedSessionId(e.details.sessionId);
-      }
-      setRequestError((e as Error).message);
+          typeof e.details?.sessionId === "string"
+        ? e.details.sessionId
+        : null;
+      if (keptSessionId) setRetainedSessionId(keptSessionId);
+      setRequestFailure({
+        // Only a genuine impossibility stops Full Control, and its reason is the sentence (#2940).
+        sentence: e instanceof FullControlBlockedError ? e.message : createFailureSentence(e, keptSessionId !== null),
+        detail: e instanceof Error ? e.message : String(e),
+      });
     } finally {
       busyRef.current = false;
       setBusy(false);
     }
   };
 
-  const error = requestError ?? validationError;
+  /** The error a submit left under `field`, with the id its control points `aria-describedby` at. */
+  const problemFor = (field: ProblemField) => fieldProblem?.field === field
+    ? <FieldError id={problemId(field)}>{fieldProblem.message}</FieldError>
+    : null;
+  /** Whether a submit's problem is about `control`, and its description: `own` plus the error. */
+  const controlInvalid = (control: ProblemControl) => fieldProblem?.control === control;
+  const controlDescribedBy = (control: ProblemControl, own?: string) =>
+    [own, fieldProblem?.control === control ? problemId(fieldProblem.field) : undefined].filter(Boolean).join(" ") || undefined;
+
+  const openConnections = () => {
+    onClose();
+    navigate({ name: "runners", section: "machines", ...(runner ? { machineId: runner.runnerId } : {}) });
+  };
+  // Machines in Connections lists each machine with its agents (#2953).
+  const setUpAgentsAction: PickerFooterAction = { label: "Set Up Agents in Connections", onSelect: openConnections };
+
+  // Project takes focus as the dialog opens, with its list closed (#1143, #2951): typing filters
+  // at once, Arrow Down opens it, and it never covers the form uninvited.
+  const projectField = (
+    <div className="field" ref={projectChoiceRef}>
+      <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : projectInputId}>Project</label>
+      {touchChoicePicker ? (
+        <Select<string>
+          className="new-session-choice-control"
+          label="Project"
+          value={projectSelection || null}
+          onChange={pickProject}
+          options={projectOptions}
+          placeholder="Choose a Project…"
+          emptyLabel="No Projects Available"
+          searchable
+          noun="projects"
+          footerAction={newProjectAction}
+          invalid={controlInvalid("project")}
+          describedBy={controlDescribedBy("project")}
+        />
+      ) : (
+        <SearchableCombobox<string>
+          inputId={projectInputId}
+          autoFocus={initialProjectAutoFocusRef.current}
+          openOnFocus={false}
+          className="new-session-choice-control"
+          label="Project"
+          value={projectSelection || null}
+          onChange={pickProject}
+          options={projectOptions}
+          placeholder="Choose a Project…"
+          emptyLabel="No Projects Available"
+          noun="projects"
+          footerAction={newProjectAction}
+          invalid={controlInvalid("project")}
+          describedBy={controlDescribedBy("project")}
+        />
+      )}
+      {problemFor("project")}
+    </div>
+  );
+
+  // Each location is its machine, with its status and folder on the second line. An unavailable one
+  // stays choosable so its reason can be read, and choosing it marks the field invalid (§8.5).
+  const locationMachineCounts = new Map<string, number>();
+  for (const location of selectedProject?.locations ?? []) {
+    locationMachineCounts.set(location.runnerId, (locationMachineCounts.get(location.runnerId) ?? 0) + 1);
+  }
+  const locationOptions: SelectOption<string>[] = (selectedProject?.locations ?? []).map((location) => {
+    const machine = machineName(location.runnerId);
+    const folder = location.path.split(/[\\/]+/u).filter(Boolean).at(-1) ?? location.path;
+    return {
+      value: location.id,
+      label: machine,
+      description: `${projectAvailabilityLabel(liveLocationAvailability(location, runners))} · ${startTruncatedPath(location.path)}`,
+      ...((locationMachineCounts.get(location.runnerId) ?? 0) > 1 ? { selectedLabel: `${machine} · ${folder}` } : {}),
+    };
+  });
+  const locationError = selectedLocationProblem ?? (fieldProblem?.field === "location" ? fieldProblem.message : null);
+  const cannotAddLocation = selectedProject?.canManage === false;
+  const locationField = (
+    <div className="field" ref={locationFieldRef}>
+      <span>Location</span>
+      {selectedProject && selectedProject.locations.length === 0 ? (
+        <Notice
+          tone="neutral"
+          compact
+          actions={cannotAddLocation ? undefined : (
+            <button
+              type="button"
+              className="btn sm"
+              data-validation-target="add-location"
+              aria-describedby={noLocationsId}
+              onClick={() => setAddingLocation(true)}
+            >
+              Add Location…
+            </button>
+          )}
+        >
+          <span id={noLocationsId}>This project has no locations yet. Add the folder where its sessions run.</span>
+        </Notice>
+      ) : (
+        <Select<string>
+          className="new-session-choice-control"
+          label="Location"
+          value={selectedProjectLocation ? selectedProjectLocation.id : null}
+          onChange={(id) => {
+            const location = selectedProject?.locations.find((item) => item.id === id);
+            if (location) pickProjectLocation(location);
+          }}
+          options={locationOptions}
+          placeholder={selectedProject ? "Choose a Location…" : "Choose a Project First"}
+          disabled={!selectedProject}
+          footerAction={selectedProject && !cannotAddLocation ? addLocationAction : undefined}
+          invalid={!!locationError}
+          describedBy={locationError ? problemId("location") : cannotAddLocation ? locationHelperId : undefined}
+        />
+      )}
+      {locationError
+        ? <FieldError id={problemId("location")}>{locationError}</FieldError>
+        : cannotAddLocation && <p className="field-helper" id={locationHelperId}>You can't add locations to this project.</p>}
+    </div>
+  );
+
+  // Always a Select, even with one machine online: it says where the session runs either way.
+  const machineField = online.length > 0 ? (
+    <div className="field">
+      <span>Machine</span>
+      <Select<string>
+        label="Machine"
+        value={runnerId || null}
+        onChange={pickRunner}
+        options={online.map((r) => ({
+          value: r.runnerId,
+          label: machineLabels.get(r.runnerId) ?? r.runnerId,
+        }))}
+        placeholder="Choose a Machine…"
+        invalid={controlInvalid("machine")}
+        describedBy={controlDescribedBy("machine")}
+      />
+      {problemFor("machine")}
+    </div>
+  ) : null;
+
+  const folderField = runner ? (
+    <div className="field">
+      {browsedPath
+        ? <label className="new-session-field-label" htmlFor={folderInputId}>Folder</label>
+        : <span>Workspace</span>}
+      {/* Browse… keeps its place in both states, so it is still there to take focus back
+          when Choose Folder closes after filling the Folder field. */}
+      <div className="folder-field-row" ref={workspaceRowRef}>
+        {browsedPath ? (
+          <input
+            id={folderInputId}
+            className="input folder-field-path is-read-only"
+            value={browsedPath}
+            title={browsedPath}
+            readOnly
+          />
+        ) : (
+          <Select<string>
+            label="Workspace"
+            value={workspaceId || null}
+            onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
+            options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
+            invalid={controlInvalid("folder")}
+            describedBy={controlDescribedBy("folder")}
+          />
+        )}
+        <button
+          ref={browseButtonRef}
+          type="button"
+          className="btn"
+          data-validation-target="browse"
+          onClick={() => setChoosingFolder(true)}
+          disabled={!browseSupported}
+          aria-describedby={browseSupported ? undefined : browseReasonId}
+        >
+          Browse…
+        </button>
+      </div>
+      {problemFor("folder") ?? (!browseSupported && <p className="field-helper" id={browseReasonId}>{browseHint}</p>)}
+      {browsedPath && (
+        <button
+          type="button"
+          className="btn ghost sm new-session-use-workspace"
+          onClick={() => {
+            workspacePickerRestoredRef.current = true;
+            setBrowsedPath(null);
+          }}
+        >
+          Use a Workspace
+        </button>
+      )}
+    </div>
+  ) : null;
+
+  // A server without projects keeps its workspace quick-pick, as the same Location Select. Every
+  // option can host a session: `locations` is already filtered to online, advertised workspaces.
+  const legacyLocationField = locations.length > 1 ? (
+    <div className="field">
+      <span>Location</span>
+      <Select<string>
+        label="Location"
+        value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
+        onChange={(key) => {
+          const picked = locations.find((loc) => workspaceLocationKey(loc.runnerId, loc.workspaceId) === key);
+          if (picked) pickLocation(picked);
+        }}
+        options={locations.map((loc) => {
+          const path = runners.get(loc.runnerId)?.workspaces.find((w) => w.id === loc.workspaceId)?.path;
+          return {
+            value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
+            label: machineName(loc.runnerId),
+            description: path ? startTruncatedPath(path) : loc.workspaceId,
+          };
+        })}
+        placeholder="Choose a Location…"
+      />
+    </div>
+  ) : null;
 
   useLayoutEffect(() => {
     if (!workspacePickerRestoredRef.current || browsedPath) return;
@@ -1253,35 +1470,70 @@ export function NewSessionDialog({
     (workspaceRowRef.current?.querySelector<HTMLElement>(".ui-select-trigger") ?? browseButtonRef.current)?.focus();
   });
 
+  // Options (#2954): the values its closed head lists, what inside needs attention, and the copy of
+  // its rows that depends on more than one choice.
+  const permissionsValue = providerPermissionsPreset && !savedOrchestratorDefault ? "Orchestrator Preset" : savedPermissionTitle;
+  const permissionsDescription = providerPermissionsPreset ? "The Orchestrator preset sets them for this session."
+    : savedPiModeUnavailableForTarget ? "This target can't show Pi's approval prompts, so commands run without them."
+    // An Orchestrator's sentence says only what the role does to them: the composer note would be a
+    // second sentence in the row's narrow text column (#2955's height budget).
+    : orchestrator
+      ? effectiveIntegrationIsolation
+        ? "An Orchestrator keeps them and adds only its orchestration tools."
+        : "An Orchestrator keeps them and its integrations, which typed decisions can't intercept."
+      : "Change them in the composer after the session opens.";
+  const defaultsFailureId = `${generatedFormId}-defaults-failure`;
+  const normalUnavailable = !orchestratorRoleSupported && savedOrchestratorDefault
+    ? "Orchestrator is your saved Agent Harness default. Change it in Settings to use another default."
+    : undefined;
+  const roleDescription = roleOverride === undefined && savedOrchestratorDefault && orchestratorRoleSupported
+    ? "Orchestrator is your saved default. Choose Normal to ignore it for this session, or change it in Settings."
+    : "An Orchestrator delegates work to child sessions.";
+  const roleUnavailableId = `${generatedFormId}-role-unavailable`;
+  const roleWslId = `${generatedFormId}-role-wsl`;
+  const savedOrchestratorUnavailable = orchestrator && !orchestratorSupported;
+  const orchestratorRequired = directWslRequiresSafeOrchestrator && !orchestrator;
+  const roleNoteIds = [savedOrchestratorUnavailable && roleUnavailableId, orchestratorRequired && roleWslId]
+    .filter(Boolean).join(" ");
+  const roleNotes = <>
+    {savedOrchestratorUnavailable && <FieldError id={roleUnavailableId}>
+      The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.
+    </FieldError>}
+    {orchestratorRequired && <FieldError id={roleWslId}>
+      Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.
+    </FieldError>}
+    {/* With a policy to show, the role's problem sits under the policy it is about. */}
+    {!(orchestrator && orchestratorSettingsReady) && problemFor("role")}
+  </>;
+  const optionsSummary = [
+    { key: "harness", icon: <TerminalIcon size={14} />, label: launchSurface === "native_tui" ? "Native TUI" : "Direct" },
+    { key: "working-copy", icon: useWorktree ? <BranchIcon size={14} /> : <FolderIcon size={14} />, label: useWorktree ? "Worktree" : "In Place" },
+    ...(runOnOffered && executionTarget ? [{ key: "run-on", icon: <ComputerIcon size={14} />, label: executionTarget.name }] : []),
+    { key: "permissions", icon: <ShieldIcon size={14} />, label: permissionsValue },
+  ];
+  const optionsAttention: SessionOptionsAttention[] = [
+    ...(skillsUnavailable ? [{ key: "skills", label: "Skills Unavailable" }] : []),
+    ...(!defaultsReady && harnessDefaults?.error ? [{ key: "defaults", label: "Permissions Not Loaded" }] : []),
+    ...(!cloudBudgetValid ? [{ key: "cloud-budget", label: "Budget Out of Range" }] : []),
+  ];
+
   return (
     <>
     <Modal
       title="New Session"
+      description="Choose the model and write your first message once it opens."
       onClose={onClose}
       phoneSheet="full"
       onKeyDown={submitOnModifiedEnter}
-      tertiary={retainedSessionId ? (
-        <button
-          ref={retainedSessionButtonRef}
-          type="button"
-          className="btn ghost"
-          onClick={() => {
-            navigate({ name: "session", id: retainedSessionId });
-            onClose();
-          }}
-        >
-          Open Retained Session
-        </button>
-      ) : undefined}
       footer={
         <>
-          {error && <span className="form-error" role="alert">{error}</span>}
+          {blockedReason && <p className="new-session-reason" id={blockedReasonId}>{blockedReason}</p>}
           <button type="button" className="btn" onClick={onClose}>
             Cancel
           </button>
-          <button type="submit" form={formId} className="btn primary" disabled={busy || !valid}>
-            {busy ? "Creating…" : "Create Session"}
-          </button>
+          <BusyButton type="submit" form={formId} className="btn primary" busy={busy} progress="Creating the session…"
+            disabled={!!blockedReason} data-validation-target="create"
+            aria-describedby={controlDescribedBy("create", blockedReason ? blockedReasonId : undefined)}>Create Session</BusyButton>
         </>
       }
     >
@@ -1292,252 +1544,44 @@ export function NewSessionDialog({
         noValidate
         onSubmit={(event) => { event.preventDefault(); void submit(); }}
       >
-        {online.length === 0 && <p className="muted">No runners online. Start a runner first.</p>}
-        {projectsSupported && (
-            <>
-              <div className="field" ref={projectChoiceRef}>
-                <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : projectInputId}>Project</label>
-                {touchChoicePicker ? (
-                  <Select<string>
-                    className="new-session-choice-control"
-                    label="Project"
-                    value={projectSelection || null}
-                    onChange={pickProject}
-                    options={projectOptions}
-                    placeholder="Choose a Project…"
-                    emptyLabel="No Projects Available"
-                    searchable
-                    noun="projects"
-                    createOption={createProjectOption}
-                  />
-                ) : (
-                  <SearchableCombobox<string>
-                    inputId={projectInputId}
-                    autoFocus={initialProjectAutoFocusRef.current}
-                    className="new-session-choice-control"
-                    label="Project"
-                    value={projectSelection || null}
-                    onChange={pickProject}
-                    options={projectOptions}
-                    placeholder="Choose a Project…"
-                    emptyLabel="No Projects Available"
-                    noun="projects"
-                    createOption={createProjectOption}
-                  />
-                )}
-              </div>
-              <div className="new-session-project-actions">
-                <span className="muted">
-                  {projectSelection === NO_PROJECT_SELECTION
-                    ? "This session will run in the selected folder without being added to a Project."
-                    : !selectedProject
-                      ? "Choose a Project to organize the new session, or choose No Project."
-                      : projectAudienceVisibilitySummary(selectedProject.audience)
-                      ? `A Project keeps related sessions together across Locations. ${projectAudienceVisibilitySummary(selectedProject.audience)}. New session transcripts use the Project's visibility.`
-                      : "A Project keeps related sessions together across Locations. Wollipog can't show who can see this Project."}
-                </span>
-                <button ref={createProjectButtonRef} type="button" className="btn ghost new-session-project-control" onClick={() => { setCreateProjectFromPicker(false); setCreatingProject(true); }}>Create Project…</button>
-              </div>
-            </>
-          )}
-
-          {projectsSupported && selectedProject && (
-            <div className="field">
-              <span>Project Location</span>
-              {selectedProject.locations.length > 0 ? (
-                <ChoiceRows<string>
-                  id={projectLocationOptionsId}
-                  label="Project Location"
-                  value={projectLocationId || null}
-                  onChange={(id) => {
-                    const location = selectedProject.locations.find((item) => item.id === id);
-                    if (location) pickProjectLocation(location);
-                  }}
-                  options={selectedProject.locations.map((location) => {
-                    const display = runnerDisplay(
-                      runners.get(location.runnerId),
-                      boxByRunner.get(location.runnerId),
-                      location.runnerId,
-                    );
-                    const launchable = isLaunchableProjectLocation(location, runners);
-                    return {
-                      value: location.id,
-                      title: display.name,
-                      // The kind and the availability are STATUS, not description: they say what
-                      // this Location is and whether it can host a session, which is the whole
-                      // basis for choosing between two of them.
-                      status: (
-                        <>
-                          <StatusBadge tone="neutral" noDot label={display.kind === "ssh" ? "SSH" : "Local"} />
-                          <StatusBadge meta={projectAvailabilityMeta(location.availability)} />
-                        </>
-                      ),
-                      description: <span title={location.path}>{shortenPath(location.path)}</span>,
-                      disabled: !launchable,
-                      // The availability label already names the cause — Runner Offline, Workspace
-                      // Missing, Runner Removed — so the reason restates it as a sentence rather
-                      // than inventing a second vocabulary for the same states.
-                      disabledReason: launchable
-                        ? undefined
-                        : `${projectAvailabilityLabel(location.availability)} — this Location cannot host a session right now.`,
-                    };
-                  })}
-                />
-              ) : (
-                <div className="project-manager-empty compact">
-                  <strong>No Project Locations</strong>
-                  <span>Add a Location to this Project before starting a session.</span>
-                </div>
-              )}
-              {selectedProject.locations.length > 0 && projectLocationsAvailable.length === 0 && (
-                <span className="project-location-reason">No Locations are currently available. Bring a linked machine online or update this Project’s Locations.</span>
-              )}
-              {projectLocationsAvailable.length > 1 && !projectLocationId && <span className="muted">Choose a Location for this session.</span>}
-              {selectedProjectLocation && !projectLocationLaunchable && projectLocationsAvailable.length > 0 && (
-                <span className="project-location-reason">The selected Location is unavailable. Choose another Location.</span>
-              )}
-              <button
-                ref={addLocationButtonRef}
-                type="button"
-                className="btn ghost new-session-project-control"
-                data-validation-target="add-location"
-                disabled={selectedProject.canManage === false}
-                title={selectedProject.canManage === false ? "Project management permission is required" : undefined}
-                onClick={() => setAddingLocation(true)}
-              >
-                Add Location…
-              </button>
-              {selectedProject.canManage === false && <span className="muted">You do not have permission to manage this Project’s Locations.</span>}
-            </div>
-          )}
-
-          {(!projectsSupported || projectSelection === NO_PROJECT_SELECTION) && (
-            <>
-          {locations.length > 1 && (
-            <div className="field">
-              <span>Location</span>
-              {/* The legacy workspace quick-pick, on the same primitive as Project Location so
-                  the two read identically. No option here is ever unavailable: `locations` is
-                  already filtered to runners that are online and still advertise the workspace. */}
-              <ChoiceRows<string>
-                label="Workspace Location"
-                value={browsedPath ? null : workspaceLocationKey(runnerId, workspaceId)}
-                onChange={(key) => {
-                  const picked = locations.find(
-                    (loc) => workspaceLocationKey(loc.runnerId, loc.workspaceId) === key,
-                  );
-                  if (picked) pickLocation(picked);
-                }}
-                options={locations.map((loc) => {
-                  const runnerForLocation = runners.get(loc.runnerId);
-                  const disp = runnerDisplay(runnerForLocation, boxByRunner.get(loc.runnerId), loc.runnerId);
-                  const ws = runnerForLocation?.workspaces.find((w) => w.id === loc.workspaceId);
-                  return {
-                    value: workspaceLocationKey(loc.runnerId, loc.workspaceId),
-                    title: disp.name,
-                    status: (
-                      <StatusBadge tone="neutral" noDot label={disp.kind === "ssh" ? "SSH" : "Local"} />
-                    ),
-                    description: (
-                      <span title={ws?.path}>{ws?.path ? shortenPath(ws.path) : loc.workspaceId}</span>
-                    ),
-                  };
-                })}
-              />
-              <span className="muted">Choose from {locations.length} known workspace Locations.</span>
-            </div>
-          )}
-          {online.length > 0 && <div className="field">
-            <span>Machine</span>
-            {online.length === 1 ? (
-              // With a single online runner there is nothing to choose — show where it runs.
-              <div className="static-pick">
-                <span className="cctx-dot online-dot" />
-                {runnerDisplay(online[0]!, boxByRunner.get(online[0]!.runnerId), online[0]!.runnerId).name}
-              </div>
-            ) : (
-              <Select<string>
-                label="Machine"
-                value={runnerId || null}
-                onChange={pickRunner}
-                options={online.map((r) => ({
-                  value: r.runnerId,
-                  label: machineLabels.get(r.runnerId) ?? r.runnerId,
-                }))}
-              />
-            )}
-          </div>}
-
-          {runner && <div className="field">
-            {browsedPath
-              ? <label className="new-session-field-label" htmlFor={folderInputId}>Folder</label>
-              : <span>Workspace</span>}
-            {/* Browse… keeps its place in both states, so it is still there to take focus back
-                when Choose Folder closes after filling the Folder field. */}
-            <div className="folder-field-row" ref={workspaceRowRef}>
-              {browsedPath ? (
-                <input
-                  id={folderInputId}
-                  className="input folder-field-path is-read-only"
-                  value={browsedPath}
-                  title={browsedPath}
-                  readOnly
-                />
-              ) : (
-                <Select<string>
-                  label="Workspace"
-                  value={workspaceId || null}
-                  onChange={(value) => { setWorkspaceId(value); setAdditionalDirectories([]); }}
-                  options={(runner?.workspaces ?? []).map((w) => ({ value: w.id, label: w.name }))}
-                />
-              )}
-              <button
-                ref={browseButtonRef}
-                type="button"
-                className="btn"
-                onClick={() => setChoosingFolder(true)}
-                disabled={!browseSupported}
-                aria-describedby={browseSupported ? undefined : browseReasonId}
-              >
-                Browse…
-              </button>
-            </div>
-            {!browseSupported && <p className="field-helper" id={browseReasonId}>{browseHint}</p>}
-            {browsedPath && (
+        {online.length === 0 && (
+          <Notice
+            tone="neutral"
+            title="No Machines Online"
+            actions={(
               <button
                 type="button"
-                className="btn ghost sm new-session-use-workspace"
-                onClick={() => {
-                  workspacePickerRestoredRef.current = true;
-                  setBrowsedPath(null);
-                }}
+                className="btn sm"
+                data-validation-target="open-connections"
+                aria-describedby={noMachinesId}
+                onClick={openConnections}
               >
-                Use a Workspace
+                Open Connections
               </button>
             )}
-          </div>}
-            </>
-          )}
-
-          {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
-            <fieldset className="field">
-              <legend>Additional Directories (Preview)</legend>
-              <span className="muted">Each directory expands this ACP agent's workspace access for this session only.</span>
-              <ChoiceRows<string>
-                multiple
-                label="Additional Directories"
-                value={additionalDirectories}
-                onChange={(path) => setAdditionalDirectories((current) => current.includes(path)
-                  ? current.filter((item) => item !== path)
-                  : [...current, path])}
-                options={directoryGrants.map((path) => ({
-                  value: path,
-                  title: shortenPath(path),
-                  description: <span title={path}>{path}</span>,
-                }))}
-              />
-            </fieldset>
-          )}
+          >
+            <span id={noMachinesId}>Start Wollipog on one of your machines, or connect a new one.</span>
+          </Notice>
+        )}
+        {/* Where (§8.1): Project and Location share one row; with No Project, Project and Machine do,
+            and Folder follows. A server without projects keeps Location, then Machine and Folder. */}
+        {projectsSupported ? (
+          <>
+            <div className="field-row">
+              {projectField}
+              {projectSelection === NO_PROJECT_SELECTION ? machineField : locationField}
+            </div>
+            {projectSelection === NO_PROJECT_SELECTION && folderField}
+          </>
+        ) : (
+          <>
+            {legacyLocationField}
+            <div className="field-row">
+              {machineField}
+              {folderField}
+            </div>
+          </>
+        )}
 
           <div className="field">
             <label className="new-session-field-label" htmlFor={touchChoicePicker ? undefined : agentInputId}>Agent</label>
@@ -1546,50 +1590,53 @@ export function NewSessionDialog({
                 <Select<string>
                   className="new-session-choice-control"
                   label="Agent"
-                  value={agentId || null}
+                  value={agentWaitsFor ? null : agentId || null}
                   onChange={selectAgent}
-                  options={agentComboboxOptions}
-                  placeholder="Choose an Agent…"
+                  options={agentWaitsFor ? [] : agentComboboxOptions}
+                  placeholder={agentWaitsFor ?? "Choose an Agent…"}
                   emptyLabel="No Agents Available"
-                  leadingIcon={agentIcon}
+                  leadingIcon={agentWaitsFor ? undefined : agentIcon}
                   searchable
                   noun="agents"
+                  footerAction={setUpAgentsAction}
+                  disabled={!!agentWaitsFor}
+                  invalid={controlInvalid("agent") || agentDefaultProblem?.tone === "error"}
+                  describedBy={controlDescribedBy("agent", agentDefaultProblem ? agentDefaultProblemId : undefined)}
                 />
               ) : (
                 <SearchableCombobox<string>
                   inputId={agentInputId}
                   className="new-session-choice-control"
                   label="Agent"
-                  value={agentId || null}
+                  value={agentWaitsFor ? null : agentId || null}
                   onChange={selectAgent}
-                  options={agentComboboxOptions}
-                  placeholder="Choose an Agent…"
+                  options={agentWaitsFor ? [] : agentComboboxOptions}
+                  placeholder={agentWaitsFor ?? "Choose an Agent…"}
                   emptyLabel="No Agents Available"
-                  leadingIcon={agentIcon}
+                  leadingIcon={agentWaitsFor ? undefined : agentIcon}
                   noun="agents"
+                  footerAction={setUpAgentsAction}
+                  disabled={!!agentWaitsFor}
+                  invalid={controlInvalid("agent") || agentDefaultProblem?.tone === "error"}
+                  describedBy={controlDescribedBy("agent", agentDefaultProblem ? agentDefaultProblemId : undefined)}
                 />
               )}
             </div>
-            {agent && <span className="muted agent-meta">{agentMeta(agent)}</span>}
-            {selectionIssue && (
-              <div className="agent-default-warning" role="alert">
-                <span>
-                  {selectionIssue === "legacy"
-                    ? "Your saved default uses Codex non-interactive mode, which is no longer supported. Codex App Server supports interactive approvals and resumable conversations."
-                    : selectionIssue === "unbound"
-                      ? "This older saved agent choice has no installation identity. Select the installation shown here to keep future sessions bound to it."
-                    : selectionIssue === "unavailable"
-                      ? "The selected agent is unavailable on this runner."
-                      : "Your saved installation is no longer available on this Machine. Select an available agent to recover."}
-                </span>
-                {suggestedAgentOption && (selectionIssue === "unbound" ||
-                  savedSelection.recommendedId !== agentDefaults[runnerId]) && (
-                  <button type="button" className="btn ghost sm" onClick={() => selectAgent(savedSelection.recommendedId)}>
-                    Use {suggestedAgentOption.label}
-                  </button>
-                )}
-              </div>
-            )}
+            {problemFor("agent")}
+            {agentDefaultProblem && (agentDefaultProblem.tone === "error"
+              ? <FieldError id={agentDefaultProblemId}>{agentDefaultProblem.message}</FieldError>
+              : (
+                <FieldWarning
+                  id={agentDefaultProblemId}
+                  action={agentDefaultProblem.fix && (
+                    <button type="button" className="btn sm" onClick={() => selectAgent(agentDefaultProblem.fix!.id)}>
+                      {agentDefaultProblem.fix.label}
+                    </button>
+                  )}
+                >
+                  {agentDefaultProblem.message}
+                </FieldWarning>
+              ))}
           </div>
 
           {hostExecutionTarget && (providerAccounts.length > 1 || savedProviderAccountMissing) && (
@@ -1613,435 +1660,240 @@ export function NewSessionDialog({
                 options={providerAccounts.map((account, index) => ({
                   value: account.id,
                   label: accountIdentifiersRevealed ? account.label : providerAccountTitles[index]!,
-                  description: account.authStatus === "authenticated" ? "Logged In" :
-                    account.authStatus === "unauthenticated" ? "Login Required" : "Login Unknown",
+                  description: providerAccountDescription(account.authStatus),
                 }))}
                 placeholder="Choose an Account…"
+                invalid={missingRequiredAccountChoice}
+                describedBy={missingRequiredAccountChoice ? accountReasonId : undefined}
               />
               {missingRequiredAccountChoice && (
-                <p className="hint" role="alert">The saved default account is no longer on this Machine. Choose an account or change the default in Machine settings.</p>
+                <FieldError id={accountReasonId}>
+                  The saved default account isn't on this machine anymore. Choose an account, or change the default in Machine Settings.
+                </FieldError>
               )}
             </div>
           )}
 
-          <div className="field">
-            <span>Session Role</span>
-            {/* Rows rather than the shared Select: two options that each need a sentence is the
-                shape ChoiceRows exist for, and hiding them behind a trigger is what produced
-                #832's clipping — a 76px menu over 98px of touch targets, with half of one of only
-                two choices below the fold. Always visible, there is no menu to mis-measure. */}
-            <ChoiceRows<"normal" | "orchestrator">
-              id={permissionOptionsId}
-              label="Session Role"
+          {/* Role is always visible (#3929): it decides what kind of session this is, can't change
+              later, and is the choice people switch most. Its Orchestrator policy goes with it. */}
+          <SettingsGroup className="new-session-role">
+            <SegmentedRow
+              title="Role"
+              description={roleDescription}
               value={orchestrator ? "orchestrator" : "normal"}
-              onChange={setRoleOverride}
+              onChange={(value) => setRoleOverride(value === "orchestrator" ? "orchestrator" : "normal")}
+              block
+              describedBy={[roleNoteIds, controlDescribedBy("role")].filter(Boolean).join(" ") || undefined}
+              invalid={controlInvalid("role")}
+              error={roleNotes}
               options={[
-                {
-                  value: "normal",
-                  title: "Normal",
-                  description: "Work directly in this session with the harness's ordinary tools and permissions.",
-                  // An older control plane resolves a saved Orchestrator default itself and cannot
-                  // be told otherwise, so Normal is unavailable rather than silently ignored.
-                  disabled: !orchestratorRoleSupported && savedOrchestratorDefault,
-                  disabledReason: !orchestratorRoleSupported && savedOrchestratorDefault
-                    ? "Orchestrator is your saved Agent Harness default. Change it in Settings to use another default."
-                    : undefined,
-                },
-                {
-                  value: "orchestrator",
-                  title: "Orchestrator",
-                  description: "Delegate implementation by default. Provider permissions, optional Strict Project Isolation, and decision delegation are configured separately below and cannot change after creation.",
-                  // Rendered disabled rather than omitted. The list used to drop this option
-                  // entirely when unsupported, leaving a one-option control that could not say
-                  // whether the runner, the agent, the context or the target was the reason.
-                  disabled: !orchestratorSupported,
-                  disabledReason: orchestratorUnavailable,
-                },
+                // An older control plane resolves a saved Orchestrator default itself and cannot be
+                // told otherwise, so Normal is unavailable rather than silently ignored.
+                { value: "normal", label: "Normal", disabled: normalUnavailable !== undefined, disabledReason: normalUnavailable },
+                // Kept in place while unavailable, so the row can say whether the runner, the agent,
+                // the context or the target is the reason.
+                { value: "orchestrator", label: "Orchestrator", disabled: !orchestratorSupported, disabledReason: orchestratorUnavailable },
               ]}
             />
-            <div className="new-session-provider-permissions" role="group" aria-label="Provider Permissions">
-              <span>Provider Permissions</span>
-              <span className="new-session-provider-permissions-value">
-                {providerPermissionsPreset && !savedOrchestratorDefault ? "Orchestrator Preset — Harness-Enforced" : savedPermissionTitle}
-              </span>
-              <span className="muted">
-                {providerPermissionsPreset
-                  ? orchestratorPresetReason
-                  : savedPiModeUnavailableForTarget
-                    ? "This target cannot host Pi's approval bridge, so commands run without interactive approvals."
-                    : orchestrator
-                      ? effectiveIntegrationIsolation
-                        ? `The same permission modes and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Integration Isolation is enabled: ${integrationIsolationCopy.removed.charAt(0).toLowerCase()}${integrationIsolationCopy.removed.slice(1)} ${integrationIsolationCopy.kept}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`} Change the mode in the composer after creation.`
-                        : "The same permission modes, integrations, and credentials as a normal session apply, and the Orchestrator role only adds Wollipog's orchestration tools. Typed workflow decisions do not govern integrations they cannot intercept. Change the mode in the composer after creation."
-                      : "Use the approval behavior saved for this agent harness. Change it in the composer after creation."}
-              </span>
-            </div>
-            {!defaultsReady && (harnessDefaults?.error ? <>
-              <span className="form-error">Could not load saved permission defaults. Retry before using Default.</span>
-              <button
-                type="button"
-                className="btn ghost sm"
-                data-validation-target="defaults"
-                onClick={() => setDefaultsRetry((value) => value + 1)}
-              >
-                Retry Defaults
-              </button>
-            </> : <span className="muted">Loading saved permission defaults…</span>)}
-            {orchestrator && <>
-              {roleOverride === undefined && savedOrchestratorDefault && orchestratorRoleSupported && <span className="muted">Orchestrator is your saved Agent Harness default. Choose Normal to ignore it for this session, or change it in Settings.</span>}
-              {!orchestratorSupported && <span className="form-error">The saved Orchestrator preset is unavailable here. {orchestratorUnavailable} Choose a compatible target or change the saved default in Settings.</span>}
-            </>}
-            {orchestrator && !orchestratorSettingsReady && <div className="orchestrator-policy-unavailable" role="status">
-              <span className={orchestratorSettings?.error ? "form-error" : "muted"}>
-                {orchestratorSettings?.error ?? "Loading effective Orchestrator policy…"}
-              </span>
-              {orchestratorSettings?.error && <button
-                type="button"
-                className="btn ghost sm"
-                data-validation-target="orchestrator-defaults"
-                onClick={() => setDefaultsRetry((value) => value + 1)}
-              >Retry Orchestrator Defaults</button>}
-            </div>}
-            {orchestrator && orchestratorSettingsReady && <div className="new-session-orchestrator-policy" data-validation-target="orchestrator-defaults">
-              <FullControlPreparation surface="launch" defaults={{ ...orchestratorDraft,
-                execution: { ...orchestratorDraft.execution, integrationIsolation: effectiveIntegrationIsolation } }} mode={controlPreview}
-                onChange={setControlPreview} disabled={busy}
-                launchRequest={buildSessionRequest} launchSelectionValid={launchSelectionValid}
-                onCampaignCreated={(id) => { navigate({ name: "session", id }); onClose(); }}
-                onLaunchActivity={() => setValidationError(null)}
-                root={{ driver: agent?.driver, permissionMode: roleOverride === "orchestrator" &&
-                  (providerPermissionsPreset || !orchestratorRoleSupported) ? "orchestrator" : savedPermissionMode }}
-                workspace={workspaceId || browsedPath} />
-              <fieldset className="orchestrator-policy-area">
-                <legend>Behavior</legend>
-                <p className="muted">These effective values are resolved and stored before the campaign's first turn.</p>
-                <div className="orchestrator-policy-control">
-                  <span>Child Harness <small aria-hidden="true">{orchestratorSource("behavior.childHarness")}</small></span>
-                  <Select<string>
-                    label="Child Harness"
-                    value={fixedChildHarness ? agentHarnessIdentityKey(fixedChildHarness) : AUTOMATIC_ORCHESTRATOR_VALUE}
-                    options={childHarnessOptions}
-                    disabled={!harnessPolicyAvailable}
-                    onChange={(value) => {
-                      const childHarness = value === AUTOMATIC_ORCHESTRATOR_VALUE
-                        ? null
-                        : (() => {
-                          const harness = childHarnesses.find((candidate) => agentHarnessIdentityKey(candidate) === value);
-                          return harness ? { agentId: harness.agentId, driver: harness.driver, context: harness.context } : null;
-                        })();
-                      setOrchestratorDraft((current) => ({
-                        ...current,
-                        behavior: { ...current.behavior, childHarness, childModel: null, childEffort: null },
-                      }));
-                      setOrchestratorOverrides((current) => new Set(current)
-                        .add("behavior.childHarness").add("behavior.childModel").add("behavior.childEffort"));
-                    }}
-                  />
-                  {!harnessPolicyAvailable && <small className="muted">Update or restart Wollipog to configure fixed Child Harness policy.</small>}
-                  {fixedChildHarness && !childHarnessPolicySupported && <small className="form-error">
-                    {childHarnessPolicyUnavailable}
-                  </small>}
-                </div>
-                <div className="orchestrator-policy-control">
-                  <span>Child Model <small aria-hidden="true">{orchestratorSource("behavior.childModel")}</small></span>
-                  <Select<string>
-                    label="Child Model"
-                    value={orchestratorDraft.behavior.childModel ?? AUTOMATIC_ORCHESTRATOR_VALUE}
-                    options={childModelOptions}
-                    onChange={(value) => {
-                      const childModel = value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value;
-                      const effortCompatible = !orchestratorDraft.behavior.childEffort || (harnessPolicyAvailable
-                        ? candidateChildHarnesses.some((harness) => childModel
-                          ? harness.supportedPairs.some((pair) => pair.modelId === childModel &&
-                            pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
-                          : harness.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
-                        : orchestratorCapabilities?.supportedPairs
-                          ? childModel
-                            ? orchestratorCapabilities.supportedPairs.some((pair) => pair.modelId === childModel &&
-                              pair.effortLevels.includes(orchestratorDraft.behavior.childEffort!))
-                            : orchestratorCapabilities.effortLevels.includes(orchestratorDraft.behavior.childEffort)
-                          : true);
-                      setOrchestratorBehavior("childModel", childModel);
-                      if (!effortCompatible) setOrchestratorBehavior("childEffort", null);
-                    }}
-                  />
-                </div>
-                <div className="orchestrator-policy-control">
-                  <span>Child Effort <small aria-hidden="true">{orchestratorSource("behavior.childEffort")}</small></span>
-                  <Select<string>
-                    label="Child Effort"
-                    value={orchestratorDraft.behavior.childEffort ?? AUTOMATIC_ORCHESTRATOR_VALUE}
-                    options={childEffortOptions}
-                    onChange={(value) => setOrchestratorBehavior("childEffort", value === AUTOMATIC_ORCHESTRATOR_VALUE ? null : value)}
-                  />
-                </div>
-                <label className="orchestrator-policy-control" htmlFor={liveChildLimitInputId}>
-                  <span>Maximum Concurrent Children <small aria-hidden="true">{orchestratorSource("behavior.maximumConcurrentChildren")}</small></span>
-                  <input
-                    id={liveChildLimitInputId}
-                    type="number"
-                    inputMode="numeric"
-                    min="0"
-                    max={String(MAX_LIVE_CHILD_LIMIT)}
-                    step="1"
-                    required
-                    value={liveChildLimitDraft}
-                    aria-invalid={!liveChildLimitValid}
-                    aria-describedby={liveChildLimitHelpId}
-                    onChange={(event) => {
-                      setLiveChildLimitDraft(event.currentTarget.value);
-                      const value = Number(event.currentTarget.value);
-                      setOrchestratorBehavior("maximumConcurrentChildren", value);
-                    }}
-                  />
-                </label>
-                <span id={liveChildLimitHelpId} className={liveChildLimitValid ? "muted" : "form-error"} role={liveChildLimitValid ? undefined : "alert"}>
-                  {liveChildLimitValid ? "Choose 0 to pause admission, or up to 64 live children." : "Enter a whole number from 0 to 64."}
-                </span>
-                <div className="orchestrator-policy-control">
-                  <span>Follow-Ups <small aria-hidden="true">{orchestratorSource("behavior.followUps")}</small></span>
-                  <Select<OrchestratorDefaults["behavior"]["followUps"]>
-                    label="Follow-Ups"
-                    value={orchestratorDraft.behavior.followUps}
-                    options={[
-                      { value: "recommend_only", label: "Recommend Only", description: "Recommend justified follow-ups and wait." },
-                      { value: "execute_approved", label: "Execute Approved", description: "Execute follow-ups only after approval." },
-                    ]}
-                    onChange={(value) => setOrchestratorBehavior("followUps", value)}
-                  />
-                </div>
-                <div className="orchestrator-policy-control">
-                  <span>Completion <small aria-hidden="true">{orchestratorSource("behavior.completion")}</small></span>
-                  <Select<OrchestratorDefaults["behavior"]["completion"]>
-                    label="Completion"
-                    value={orchestratorDraft.behavior.completion}
-                    options={[
-                      { value: "retain", label: "Retain", description: "Retain verified finished children for inspection." },
-                      { value: "stop_and_archive", label: "Stop and Archive", description: "Stop and archive only after verified completion." },
-                    ]}
-                    onChange={(value) => setOrchestratorBehavior("completion", value)}
-                  />
-                </div>
-              </fieldset>
-              <fieldset className="orchestrator-policy-area">
-                <legend>Execution Permissions</legend>
-                <div className="orchestrator-policy-control">
-                  <span>Strict Project Isolation <small aria-hidden="true">{orchestratorSource("execution.strictProjectIsolation")}</small></span>
-                  <Select<"disabled" | "enabled">
-                    label="Strict Project Isolation"
-                    value={orchestratorDraft.execution.strictProjectIsolation ? "enabled" : "disabled"}
-                    options={[
-                      {
-                        value: "disabled",
-                        label: "Disabled",
-                        description: "Use provider permissions. Explicit parent implementation must use a dedicated worktree.",
-                      },
-                      {
-                        value: "enabled",
-                        label: "Enabled",
-                        description: "Enforce a scratch-only project boundary with a compatible isolation backend.",
-                      },
-                    ]}
-                    onChange={(value) => setStrictProjectIsolation(value === "enabled")}
-                  />
-                </div>
-                <p className="muted">
-                  {orchestratorDraft.execution.strictProjectIsolation
-                    ? "Operating-system or audited provider sandbox enforcement blocks Project writes."
-                    : "Provider approval controls and governance still apply; no read-only operating-system boundary is claimed."}
-                </p>
-                <div className="orchestrator-policy-control">
-                  <span>Integration Isolation <small aria-hidden="true">{orchestratorSource("execution.integrationIsolation")}</small></span>
-                  <Select<"disabled" | "enabled">
-                    label="Integration Isolation"
-                    value={effectiveIntegrationIsolation ? "enabled" : "disabled"}
-                    disabled={integrationIsolationImplied || !integrationIsolationControlPlane}
-                    options={[
-                      {
-                        value: "disabled",
-                        label: "Disabled",
-                        description: "Load the same integrations as a normal session with this harness.",
-                      },
-                      {
-                        value: "enabled",
-                        label: "Enabled",
-                        description: integrationIsolationCopy.removed,
-                      },
-                    ]}
-                    onChange={(value) => setIntegrationIsolation(value === "enabled")}
-                  />
-                </div>
-                <p className="muted">
-                  {integrationIsolationImplied
-                    ? `${orchestratorDraft.execution.strictProjectIsolation ? "Strict Project Isolation" : "The Orchestrator preset"} already launches without provider integrations, so this policy is implied and cannot be disabled. ${ORCHESTRATOR_PRESET_INTEGRATION_DISCLOSURE}`
-                    : !integrationIsolationControlPlane
-                      ? INTEGRATION_ISOLATION_CONTROL_PLANE_REQUIRED
-                      : effectiveIntegrationIsolation
-                      ? `${integrationIsolationCopy.removed} ${integrationIsolationCopy.kept} ${INTEGRATION_ISOLATION_PRESERVED}${hostExecutionTarget ? "" : ` ${SKILLS_UNAVAILABLE_ON_TARGET}`}`
-                      : hostExecutionTarget
-                      ? "Hooks, plugins, extensions, skills, and configured MCP servers load exactly as they would for a normal session with this harness."
-                      : `Hooks, plugins, extensions, and configured MCP servers load exactly as they would for a normal session with this harness. ${SKILLS_UNAVAILABLE_ON_TARGET}`}
-                </p>
-                {!orchestratorExecutionValid && <p className="form-error" role="alert">
-                  {effectiveIntegrationIsolation && !integrationIsolationSupported
-                    ? integrationIsolationUnavailable
-                    : orchestratorExecutionUnavailable}
-                </p>}
-              </fieldset>
-              <fieldset className="orchestrator-policy-area">
-                <legend>Decision Delegation</legend>
-                <div className="orchestrator-policy-control">
-                  <span>Descendant Requests <small aria-hidden="true">{orchestratorSource("delegation.parentControl")}</small></span>
-                  <Select<ParentControlMode>
-                    label="Descendant Requests"
-                    value={effectiveParentControl}
-                    options={[
-                      { value: "off", label: "Human", description: "Keep descendant questions and approvals human-owned." },
-                      { value: "questions", label: "Questions", description: "Delegate non-secret descendant implementation questions.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
-                      { value: "questions_and_approvals", label: "Questions and Approvals", description: "Also delegate eligible one-time approvals.", disabled: !parentControlSupported, disabledReason: parentControlUnavailable },
-                    ]}
-                    onChange={(value) => {
-                      setOrchestratorDraft((current) => ({ ...current, delegation: { ...current.delegation, parentControl: value } }));
-                      setOrchestratorOverrides((current) => new Set(current).add("delegation.parentControl"));
-                    }}
-                  />
-                </div>
-                {!parentControlSupported && <span className="form-error">{parentControlUnavailable}</span>}
-                {WORKFLOW_DECISION_CATEGORIES.map((category) => <div className="orchestrator-policy-control" key={category}>
-                  <span>{ORCHESTRATOR_DECISION_LABELS[category]} <small aria-hidden="true">{orchestratorSource(`delegation.decisions.${category}`)}</small></span>
-                  <Select<"human" | "orchestrator">
-                    label={ORCHESTRATOR_DECISION_LABELS[category]}
-                    value={effectiveDecision(category)}
-                    options={[
-                      { value: "human", label: "Human", description: "Require a human decision for this exact gate." },
-                      { value: "orchestrator", label: "Orchestrator", description: "Delegate this typed gate to the campaign Orchestrator.", disabled: !typedDelegationSupported, disabledReason: typedDelegationUnavailable },
-                    ]}
-                    onChange={(value) => setOrchestratorDelegation(category, value)}
-                  />
-                </div>)}
-                <p className="muted">Secrets, authentication, persistent permission grants, governance changes, cost budgets, and tool guardrails stay human-only.</p>
-              </fieldset>
-              {!orchestratorCapabilitiesValid && <p className="form-error" role="alert">
-                {orchestratorCapabilitiesError}
-              </p>}
-              {!orchestratorDelegationValid && <p className="form-error" role="alert">
-                {effectiveParentControl !== "off" && !parentControlSupported
-                  ? `${parentControlUnavailable} Choose Human for Descendant Requests or update the runner.`
-                  : `${typedDelegationUnavailable} Choose Human for every typed decision or update the runner.`}
-              </p>}
-            </div>}
-            {directWslRequiresSafeOrchestrator && !orchestrator &&
-              <span className="form-error">Direct WSL with bubblewrap is available only through the verified Orchestrator launcher. Choose Orchestrator or another execution context.</span>}
-          </div>
-
-          <div className="field">
-            <span>Harness</span>
-            {/* Two fixed options that each need a sentence: the shape ChoiceRows exist for.
-                The six mutually exclusive muted spans that used to sit below this group are now the
-                unavailable option's own `disabledReason`, so the control and its explanation arrive
-                together instead of as siblings a screen reader meets separately. */}
-            <ChoiceRows<"direct" | "native_tui">
-              id={harnessOptionsId}
-              label="Harness"
-              value={launchSurface}
-              onChange={setLaunchSurface}
-              options={[
-                {
-                  value: "direct",
-                  title: "Direct",
-                  description: "Use structured chat, tool events, approval cards, and manager controls.",
-                },
-                {
-                  value: "native_tui",
-                  title: "Native TUI",
-                  description: "Open a separate provider conversation in Terminal. Usage accounting is unavailable.",
-                  // `aria-disabled` rather than the `disabled` attribute the bespoke button used:
-                  // that removed the option from the tab order entirely, so a keyboard user could
-                  // not reach the reason it is unavailable.
-                  disabled: !nativeTuiSupported,
-                  disabledReason: nativeTuiUnavailable,
-                },
-              ]}
-            />
-            {launchSurface === "native_tui" && (
-              <span className="muted">Usage Accounting: Unavailable. No structured events or approval cards. Native TUI spending and tool calls are not included in session usage or parent remaining-budget calculations. Sessions with cost budgets, cost checkpoints, or tool-call limits must use Direct. {nativeTuiAccountingExplanation && <>{nativeTuiAccountingExplanation} </>}Manager policy hook status appears after launch.</span>
+            {orchestrator && !orchestratorSettingsReady && !orchestratorSettings?.error && (
+              <SettingRow title="Orchestrator Policy" busy busyLabel="Loading your Orchestrator defaults…" />
             )}
-          </div>
+            {orchestrator && !orchestratorSettingsReady && orchestratorSettings?.error && (
+              <div className="session-options-inset">
+                <Notice
+                  tone="danger"
+                  compact
+                  actions={(
+                    <button
+                      type="button"
+                      className="btn sm"
+                      data-validation-target="orchestrator-retry"
+                      aria-describedby={controlDescribedBy("orchestrator-retry", policyFailureId)}
+                      onClick={() => setDefaultsRetry((value) => value + 1)}
+                    >
+                      Retry
+                    </button>
+                  )}
+                >
+                  <span id={policyFailureId}>{orchestratorSettings.error}</span>
+                </Notice>
+              </div>
+            )}
+            {orchestrator && policy && (
+              <OrchestratorPolicySummary
+                draft={policyDraft}
+                evaluation={policy}
+                disabled={busy}
+                describedBy={controlDescribedBy("orchestrator")}
+                customizeRef={customizeRef}
+                onCustomize={() => setEditingPolicy(policyProblem?.tab ?? "behavior")}
+              />
+            )}
+            {orchestrator && orchestratorSettingsReady && fieldProblem?.field === "role" && (
+              <div className="session-options-inset">{problemFor("role")}</div>
+            )}
+          </SettingsGroup>
 
-          <div className="field">
-            <span>Mode</span>
-            {/* §11.1's headline example: this dialog used THREE choice patterns at once inside
-                520px — a native select, aria-checked cards, and this bespoke `.seg`. One of them
-                goes here; the rest follow as their screens are migrated. */}
-            <SegmentedControl
-              className="new-session-mode"
-              label="Session Mode"
-              value={useWorktree ? "worktree" : "in-place"}
-              options={[
-                { value: "in-place", label: "In Place" },
-                { value: "worktree", label: "Worktree" },
-              ]}
-              onChange={(mode) => selectHostMode(mode === "worktree")}
-            />
-            {executionTargets.length > 2 && (
-              <div className="field">
-                <span>Execution Target</span>
-                <Select<string>
-                  label="Execution Target"
-                  value={executionTarget?.id ?? null}
+          {/* Everything else below Agent is one Options row (#2954), open when something in it needs
+              the person. The request it builds is the same as when every option was on the form. */}
+          <SessionOptions open={optionsOpen} onOpenChange={setOptionsOpen} summary={optionsSummary} attention={optionsAttention}>
+            <SettingsGroup>
+              <SegmentedRow
+                title="Harness"
+                value={launchSurface}
+                onChange={(value) => setLaunchSurface(value === "native_tui" ? "native_tui" : "direct")}
+                block
+                describedBy={controlDescribedBy("harness")}
+                invalid={controlInvalid("harness")}
+                error={problemFor("harness")}
+                options={[
+                  { value: "direct", label: "Direct", description: "Direct gives structured chat, approval cards and usage tracking." },
+                  {
+                    value: "native_tui",
+                    label: "Native TUI",
+                    description: "Native TUI opens the provider's own terminal UI. It doesn't track usage or show approval cards, so sessions with budgets must use Direct.",
+                    disabled: !nativeTuiSupported,
+                    disabledReason: nativeTuiUnavailable,
+                  },
+                ]}
+              />
+              <SegmentedRow
+                title="Working Copy"
+                description="A worktree keeps your checkout untouched. Recommended for code changes."
+                value={useWorktree ? "worktree" : "in_place"}
+                onChange={(value) => selectHostMode(value === "worktree")}
+                block
+                describedBy={controlDescribedBy("mode")}
+                invalid={controlInvalid("mode")}
+                error={runOnOffered ? undefined : problemFor("mode")}
+                options={[
+                  { value: "in_place", label: "In Place" },
+                  { value: "worktree", label: "Worktree" },
+                ]}
+              />
+              {runOnOffered && (
+                <SelectRow
+                  title="Run On"
+                  description={executionTarget ? describeBoundaries(executionTarget.boundaries) : undefined}
+                  value={executionTarget?.id ?? ""}
                   onChange={selectExecutionTarget}
+                  error={fieldProblem?.field === "mode" ? fieldProblem.message : null}
                   options={executionTargets.map((target) => ({
                     value: target.id,
                     label: target.name,
-                    // A native <option> cannot render a second line, so the reason used to be
-                    // glued onto the label with an em dash. The shared Select has a slot for it.
+                    // An unavailable target keeps its reason as the option's second line.
                     disabled: !target.available,
-                    disabledReason: target.available
-                      ? undefined
-                      : target.unavailableReason ?? "Unavailable on this runner.",
+                    disabledReason: target.available ? undefined : target.unavailableReason ?? "Unavailable on this machine.",
                   }))}
                 />
-              </div>
-            )}
-            <span className="muted">
-              {useWorktree
-                ? "Runs in an isolated git worktree — recommended for code changes."
-                : "Runs directly in the workspace directory."}
-            </span>
-            {executionTarget && (
-              <span className="muted">
-                Target: {executionTarget.name} · Network {executionTarget.boundaries.network} · Secrets {executionTarget.boundaries.secrets} · Billing {executionTarget.boundaries.billing}
-              </span>
-            )}
-            {!managedSkillsAvailableForTarget(executionTarget?.adapter) && (
-              <span className="muted">{SKILLS_UNAVAILABLE_ON_TARGET}</span>
-            )}
-            {executionTarget?.adapter === "cloud" && executionTarget.policy && (
-              <label>
-                <span>Cloud Cost Budget (USD)</span>
-                <input
-                  type="number"
+              )}
+              {skillsUnavailable && (
+                <div className="session-options-inset" ref={skillsNoticeRef}>
+                  <SkillsUnavailableNotice
+                    machine={runner ? runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId).name : ""}
+                    adapter={skillsUnavailable.adapter}
+                    skillNames={skillsUnavailable.skillNames}
+                    onOpenSkills={() => { onClose(); navigate({ name: "skills" }); }}
+                  />
+                </div>
+              )}
+              {executionTarget?.adapter === "cloud" && executionTarget.policy && (
+                <NumberRow
+                  title="Cloud Budget"
+                  description={`Stops the session at this amount. Between ${usd(executionTarget.policy.cost.minimumBudgetUsd)} and ${usd(executionTarget.policy.cost.maximumBudgetUsd)}, at about ${usd(executionTarget.policy.cost.estimatedHourlyRateUsd)} an hour.`}
+                  value={cloudBudgetUsd}
+                  onChange={setCloudBudgetUsd}
+                  unit="USD"
                   min={executionTarget.policy.cost.minimumBudgetUsd}
                   max={executionTarget.policy.cost.maximumBudgetUsd}
-                  step="0.01"
-                  value={cloudBudgetUsd}
-                  onChange={(event) => setCloudBudgetUsd(event.target.value)}
+                  step={0.01}
+                  inputId={cloudBudgetInputId}
+                  error={cloudBudgetValid ? null
+                    : `Enter an amount from ${usd(executionTarget.policy.cost.minimumBudgetUsd)} to ${usd(executionTarget.policy.cost.maximumBudgetUsd)}.`}
                 />
-                <span className="muted">
-                  Estimated ${executionTarget.policy.cost.estimatedHourlyRateUsd}/Hour · Budget ${executionTarget.policy.cost.minimumBudgetUsd}–${executionTarget.policy.cost.maximumBudgetUsd} · {executionTarget.policy.admission.maxConcurrentSessions} Concurrent
-                </span>
-              </label>
+              )}
+              {directoryGrants.length > 0 && executionTarget?.adapter === "host" && (
+                <SettingRow
+                  title="Extra Folders (Preview)"
+                  className="session-options-folders-row"
+                  description="Also let this agent use these folders, for this session only."
+                  control={(
+                    <div className="session-options-folders" role="group" aria-label="Extra Folders">
+                      {directoryGrants.map((path) => (
+                        <Checkbox
+                          key={path}
+                          className="session-options-folder"
+                          label={path}
+                          checked={additionalDirectories.includes(path)}
+                          onChange={() => setAdditionalDirectories((current) => current.includes(path)
+                            ? current.filter((item) => item !== path)
+                            : [...current, path])}
+                        />
+                      ))}
+                    </div>
+                  )}
+                />
+              )}
+              <ValueRow title="Permissions" value={permissionsValue} description={permissionsDescription} />
+            </SettingsGroup>
+            {providerPermissionsPreset && (
+              <Notice tone="warning" title="Permissions Set by the Orchestrator Preset">
+                <p>{orchestratorPresetReason}</p>
+              </Notice>
             )}
-          </div>
+            {!defaultsReady && harnessDefaults?.error && (
+              <Notice
+                tone="danger"
+                compact
+                actions={(
+                  <button
+                    type="button"
+                    className="btn sm"
+                    data-validation-target="defaults"
+                    aria-describedby={controlDescribedBy("defaults", defaultsFailureId)}
+                    onClick={() => setDefaultsRetry((value) => value + 1)}
+                  >
+                    Retry
+                  </button>
+                )}
+              >
+                <span id={defaultsFailureId}>Couldn't load your saved permissions.</span>
+              </Notice>
+            )}
+          </SessionOptions>
 
-          <p className="muted new-session-hint">
-            Pick the model, effort, and your first message once the session opens.
-          </p>
+          {problemFor("form")}
+          {/* A request failure sits at the body's end, directly above the footer (§7.3, §13.2). */}
+          {requestFailure && (
+            <Notice
+              tone="danger"
+              role="alert"
+              title="Couldn't Start the Session"
+              actions={retainedSessionId ? (
+                <button
+                  type="button"
+                  className="btn sm"
+                  data-validation-target="retained-session"
+                  aria-describedby={failureSentenceId}
+                  onClick={() => {
+                    navigate({ name: "session", id: retainedSessionId });
+                    onClose();
+                  }}
+                >
+                  Open Session
+                </button>
+              ) : undefined}
+              details={requestFailure ? <code>{requestFailure.detail}</code> : undefined}
+            >
+              <span id={failureSentenceId}>{requestFailure?.sentence}</span>
+            </Notice>
+          )}
         </form>
     </Modal>
     {choosingFolder && runner && (
       <ChooseFolderDialog
         runnerId={runner.runnerId}
+        machineName={runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId).name}
         protocolVersion={runner.protocolVersion}
         distro={browseDistro}
         returnFocusRef={browseButtonRef}
@@ -2052,10 +1904,23 @@ export function NewSessionDialog({
         }}
       />
     )}
+    {editingPolicy && policyContext && (
+      <OrchestratorPolicyDialog
+        context={policyContext}
+        draft={policyDraft}
+        initialTab={editingPolicy}
+        returnFocusRef={customizeRef}
+        onClose={() => setEditingPolicy(null)}
+        onApply={(draft) => { setPolicyDraft(draft); setEditingPolicy(null); }}
+      />
+    )}
     {creatingProject && (
       <CreateProjectDialog
         accessScopeManagementSupported={accessScopeManagementSupported}
-        returnFocusRef={createProjectFromPicker ? projectPickerFocusRef : createProjectButtonRef}
+        retrySupported={projectCreationRetryAvailable({ conn, projectCreationRetrySupported })}
+        projects={projectList}
+        stacked
+        returnFocusRef={projectPickerFocusRef}
         onClose={() => setCreatingProject(false)}
         onCreated={(project) => {
           projectSelectionChangedRef.current = true;
@@ -2075,27 +1940,15 @@ export function NewSessionDialog({
         boxes={boxes}
         canCreateLocation={projectLocationCreationSupported}
         accessScopeManagementSupported={accessScopeManagementSupported}
-        returnFocusRef={addLocationButtonRef}
+        returnFocusRef={locationFocusRef}
         onClose={() => setAddingLocation(false)}
         onManageConnections={() => {
           setAddingLocation(false);
           onClose();
           navigate({ name: "runners", section: "machines" });
         }}
-        onAdd={async (candidate: ProjectLocationCandidate) => {
-          const { project } = await api.addProjectLocation(selectedProject.id, {
-            runnerId: candidate.runnerId,
-            workspaceId: candidate.workspaceId,
-          });
+        onAdded={(project, location) => {
           applyProject(project);
-          const location = project.locations.find((item) => item.runnerId === candidate.runnerId && item.workspaceId === candidate.workspaceId);
-          if (location) pickProjectLocation(location);
-        }}
-        onCreate={async (created) => {
-          const { project } = await api.createProjectLocation(selectedProject.id, created);
-          applyProject(project);
-          const location = project.locations.find((item) =>
-            item.runnerId === created.runnerId && item.path === created.path);
           if (location) pickProjectLocation(location);
         }}
       />

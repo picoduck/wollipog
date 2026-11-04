@@ -1,4 +1,4 @@
-import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
+import type { ChildProcessWithoutNullStreams } from "node:child_process";
 import { createHash, randomBytes } from "node:crypto";
 import { accessSync, constants, lstatSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { constants as osConstants, tmpdir } from "node:os";
@@ -6,6 +6,7 @@ import { delimiter, isAbsolute, join, resolve, sep } from "node:path";
 import { EventEmitter } from "node:events";
 import { PassThrough, Writable } from "node:stream";
 import { claudeProviderPipeHelper } from "./claude-provider-pipe-helper.js";
+import { spawnWithLinuxCgroup, type LinuxCgroupBoundary } from "./linux-cgroup.js";
 import type { AgentProcess, BwrapSpawnIsolation, SpawnAgentOptions } from "./spawn.js";
 
 const HEADER = 26;
@@ -275,6 +276,7 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
   private buffered = Buffer.alloc(0);
   private errorText = "";
   private disposal: Promise<boolean> | undefined;
+  private readonly containment?: LinuxCgroupBoundary;
 
   constructor(
     readonly owner: object,
@@ -308,9 +310,11 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       const args = buildBwrapArgs({
         command: TARGET, args: ["--supervisor", this.token.toString("hex")], cwd: opts.cwd,
       }, isolation);
-      this.outer = spawn(isolation.command, args, {
-        cwd: opts.cwd, env, stdio: ["pipe", "pipe", "pipe"], detached: true,
+      const launch = spawnWithLinuxCgroup(isolation.command, args, {
+        cwd: opts.cwd, env, detached: true,
       });
+      this.outer = launch.child;
+      this.containment = launch.containment;
     } catch (error) {
       rmSync(this.tempRoot, { recursive: true, force: true });
       throw error;
@@ -337,8 +341,12 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
       } catch (error) {
         process.stderr.write(`Claude namespace task cleanup failed: ${(error as Error).message}\n`);
       } finally {
-        owners.delete(this.owner);
-        namespaces.delete(this);
+        if (owners.get(this.owner) === this) owners.delete(this.owner);
+        // Keep a closed namespace with surviving cgroup members visible to shutdown. Its outer
+        // PID/namespace teardown alone cannot release this stronger boundary.
+        if (this.containment) {
+          void this.containment.releaseIfEmpty().then((empty) => { if (empty) namespaces.delete(this); });
+        } else namespaces.delete(this);
       }
     });
   }
@@ -481,6 +489,11 @@ class ClaudeNamespace implements ClaudeNamespaceLifetime {
         this.terminateSent = true;
       } catch { /* kill timer handles a broken pipe */ }
       try { this.outer.stdin.end(); } catch { /* kill timer handles a broken pipe */ }
+    }).then(async (cleaned) => {
+      if (!this.containment) return cleaned;
+      const complete = await this.containment.terminate();
+      if (complete) namespaces.delete(this);
+      return cleaned && complete;
     });
     return this.disposal;
   }
@@ -533,7 +546,6 @@ export function claudeNamespaceFor(child: AgentProcess): ClaudeNamespaceLifetime
 }
 
 export function terminateClaudeNamespaces(owner?: object): Promise<boolean>[] {
-  if (!owner) return [...namespaces].map((namespace) => namespace.dispose());
-  const namespace = owners.get(owner);
-  return namespace ? [namespace.dispose()] : [];
+  return [...namespaces].filter((namespace) => owner === undefined || namespace.owner === owner)
+    .map((namespace) => namespace.dispose());
 }

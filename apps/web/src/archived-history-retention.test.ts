@@ -57,7 +57,7 @@ test("the confirmation names what goes, what stays, and when it starts", () => {
   assert.equal(on.title, "Prune Archived History");
   assert.equal(on.confirmLabel, "Prune History");
   assert.equal(on.message, "History of sessions archived more than 30 days ago is permanently removed from this control plane, "
-    + "starting Oct 16, 2026, 2:30 PM. Prompts, the final response, usage and cost, and attachments are kept. This cannot be undone here.");
+    + "starting Oct 16, 2026, 2:30 PM. Prompts, the final response, usage and cost, and attachments are kept. Capable machines also trim their session logs; Reprocess cannot restore full history afterward. This cannot be undone here.");
   assert.deepEqual(on.detailRows, [
     { label: "Sessions to Prune", meta: "3" },
     { label: "Events to Remove (Approx.)", meta: "1,200" },

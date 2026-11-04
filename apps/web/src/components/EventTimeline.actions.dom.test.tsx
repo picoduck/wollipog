@@ -6,10 +6,11 @@ import { Window } from "happy-dom";
 import type { TimelineItem } from "../timeline.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
-import { readTranscriptAction } from "../dom-test-transcript-actions.js";
+import { chooseTranscriptAction, readTranscriptAction } from "../dom-test-transcript-actions.js";
 import { EventTimeline } from "./EventTimeline.js";
 import { FeedbackContext } from "./FeedbackProvider.js";
 import { markdownPlainText as plainText } from "./markdown-plain-text.js";
+import { inPlaceHandoffTurns } from "@wollipog/protocol";
 
 const domWindow = new Window({ url: "http://localhost/" });
 let coarsePointer = false;
@@ -71,7 +72,7 @@ async function mount(props: Partial<React.ComponentProps<typeof EventTimeline>> 
     </FeedbackContext.Provider>,
   ));
   cleanup(() => act(async () => root.unmount()));
-  return { container, toasts };
+  return { container, toasts, unmount: () => act(async () => root.unmount()) };
 }
 
 test("More Turn Actions lists Your Message then This Turn, each under its section label", async () => {
@@ -99,6 +100,36 @@ test("More Turn Actions lists Your Message then This Turn, each under its sectio
   assert.equal(document.activeElement, menu.querySelector("[role='menuitem']"), "the first item takes focus");
 });
 
+test("in-place turns offer Hand Off without offering a native fork and show ambiguous-history reasons", async () => {
+  const payloads = [
+    { seq: 1, payload: { kind: "user_message" as const, text: "Task", final: true } },
+    { seq: 2, payload: { kind: "agent_message" as const, text: "Answer", final: true } },
+    { seq: 3, payload: { kind: "agent_response_completed" as const } },
+  ];
+  const inPlaceItems = items.filter((item) => item.kind !== "checkpoint" && item.kind !== "conversation_checkpoint");
+  const called: number[] = [];
+  const good = inPlaceHandoffTurns(payloads);
+  const { container, unmount } = await mount({ items: inPlaceItems,
+    handoff: { open: (turn) => called.push(turn), inPlaceTurns: new Map(good.turns.map((point) => [point.promptSeq, point])) } });
+  const handoff = await readTranscriptAction(container, "More Turn Actions", "Hand Off After This Turn…");
+  assert.ok(handoff);
+  assert.equal(handoff.disabled, false);
+  assert.equal(await readTranscriptAction(container, "More Turn Actions", "Fork After This Turn…"), null);
+  await chooseTranscriptAction(container, "More Turn Actions", "Hand Off After This Turn…");
+  assert.deepEqual(called, [1]);
+  await unmount();
+  for (const history of [payloads.slice(0, 2), payloads.slice(1)]) {
+    const projection = inPlaceHandoffTurns(history);
+    const mounted = await mount({ items: inPlaceItems,
+      handoff: { open: () => assert.fail("ambiguous turn must not hand off"),
+        inPlaceTurns: new Map(projection.turns.map((point) => [point.promptSeq, point])), historyReason: projection.reason } });
+    const disabled = await readTranscriptAction(mounted.container, "More Turn Actions", "Hand Off After This Turn…");
+    assert.ok(disabled?.disabled);
+    assert.match(disabled.reason!, /didn't finish|Load earlier messages/);
+    await mounted.unmount();
+  }
+});
+
 test("an unavailable item is disabled with its reason as a visible second line it is described by", async () => {
   coarsePointer = false;
   const reason = "Runner is offline.";
@@ -118,7 +149,7 @@ test("an unavailable item is disabled with its reason as a visible second line i
   }
 });
 
-test("a fine pointer gets the hover clusters; a coarse pointer gets only More Turn Actions", async () => {
+test("a coarse pointer keeps direct Copy Message alongside the turn menu", async () => {
   coarsePointer = false;
   const fine = await mount({ onEditAndResend: () => {} });
   const names = (root: HTMLElement) => [...root.querySelectorAll(".tl-message-actions button")].map((button) => button.getAttribute("aria-label"));
@@ -127,7 +158,7 @@ test("a fine pointer gets the hover clusters; a coarse pointer gets only More Tu
 
   coarsePointer = true;
   const coarse = await mount({ onEditAndResend: () => {} });
-  assert.deepEqual(names(coarse.container), ["More Turn Actions"], "no hover cluster renders on a coarse pointer");
+  assert.deepEqual(names(coarse.container), ["Copy Message", "More Turn Actions"], "direct Copy stays visible on touch screens");
   assertNoDomNode(coarse.container.querySelector(".tl-user-actions"), "no message cluster on a coarse pointer");
   const edit = await readTranscriptAction(coarse.container, "More Turn Actions", "Edit as a New Turn");
   assert.equal(edit?.disabled, false, "the turn menu still reaches every message action");
@@ -208,11 +239,31 @@ test("on a coarse pointer, a message no turn menu lists keeps More Message Actio
   const names = [...container.querySelectorAll(".tl-message-actions button")].map((button) => button.getAttribute("aria-label"));
   // The first prompt is in its settled turn's menu. The steer belongs to that turn but is not its
   // prompt, so it keeps its own menu before the footer; the running turn's prompt has no footer yet.
-  assert.deepEqual(names, ["More Message Actions", "More Turn Actions", "More Message Actions"]);
+  assert.deepEqual(names, ["Copy Message", "Copy Message", "More Message Actions", "More Turn Actions", "Copy Message", "More Message Actions"]);
+  clipboard.length = 0;
+  const copies = container.querySelectorAll<HTMLButtonElement>('button[aria-label="Copy Message"]');
+  for (const button of copies) await act(async () => { button.click(); });
+  assert.deepEqual(clipboard, ["First **question**", "A steer", "Second prompt"]);
   for (const index of [0, 1]) {
     const edit = await readTranscriptAction(container, "More Message Actions", "Edit as a New Turn", index);
     assert.equal(edit?.disabled, false);
+    // The direct Copy beside the menu is the message's one Copy (#3961).
+    const copy = await readTranscriptAction(container, "More Message Actions", "Copy Message", index);
+    assert.ok(copy === null, `More Message Actions #${index} does not repeat Copy Message`);
   }
+  coarsePointer = false;
+});
+
+test("on a coarse pointer, a message with no text keeps Copy Message in its menu, with the reason", async () => {
+  coarsePointer = true;
+  const { container } = await mount({
+    onEditAndResend: () => {},
+    items: [{ kind: "user_message", id: 1, text: "" }],
+  });
+  assertNoDomNode(container.querySelector('button[aria-label="Copy Message"]'), "no direct Copy without text");
+  const copy = await readTranscriptAction(container, "More Message Actions", "Copy Message");
+  assert.equal(copy?.disabled, true);
+  assert.equal(copy?.reason, "This message has no text to copy.");
   coarsePointer = false;
 });
 
@@ -251,6 +302,69 @@ test("Copy Response copies plain text and Copy Response as Markdown copies the s
   assert.deepEqual(toasts, ["Response copied.", "Response copied as Markdown."]);
 });
 
+/** A Clipboard API whose writes stay pending until the test settles them. */
+function deferredClipboard() {
+  const writes: Array<{ text: string; resolve: () => void }> = [];
+  const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+  });
+  return {
+    writes,
+    succeed: async () => { await act(async () => { writes.at(-1)!.resolve(); await Promise.resolve(); }); },
+    restore: () => {
+      if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+      else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+    },
+  };
+}
+
+/** Open More Turn Actions and choose `label`; returns the trigger. */
+async function chooseTurnAction(container: HTMLElement, label: string): Promise<HTMLButtonElement> {
+  const trigger = container.querySelector<HTMLButtonElement>('button[aria-label="More Turn Actions"]')!;
+  await act(async () => { trigger.click(); });
+  const item = [...document.querySelectorAll<HTMLButtonElement>("[role='menuitem']")]
+    .find((candidate) => candidate.dataset.menuLabel === label)!;
+  await act(async () => { item.click(); });
+  return trigger;
+}
+
+test("a Copy Response write that succeeds after the transcript unmounted shows no toast and moves no focus (#3582)", async () => {
+  coarsePointer = false;
+  const clipboard = deferredClipboard();
+  const { container, toasts, unmount } = await mount();
+  const elsewhere = document.createElement("button");
+  document.body.append(elsewhere);
+  try {
+    await chooseTurnAction(container, "Copy Response");
+    assert.equal(clipboard.writes.length, 1, "the copy started");
+    await unmount();
+    await act(async () => { elsewhere.focus(); });
+    await clipboard.succeed();
+    assert.deepEqual(toasts, [], "no toast for a menu that has gone");
+    assert.ok(document.activeElement === elsewhere, "focus stays where the person put it");
+  } finally {
+    elsewhere.remove();
+    clipboard.restore();
+  }
+});
+
+test("a Copy Response write that succeeds while the menu's trigger is still shown says so and leaves focus there (#3582)", async () => {
+  coarsePointer = false;
+  const clipboard = deferredClipboard();
+  const { container, toasts } = await mount();
+  try {
+    const trigger = await chooseTurnAction(container, "Copy Response");
+    assert.ok(document.activeElement === trigger, "the copy left focus on the trigger");
+    await clipboard.succeed();
+    assert.deepEqual(toasts, ["Response copied."]);
+    assert.ok(document.activeElement === trigger, "focus is still on the trigger");
+  } finally {
+    clipboard.restore();
+  }
+});
+
 test("Markdown's plain text keeps paragraphs, lists, code, tables, task boxes and image names", () => {
   // It renders into its own detached root, which this file's act environment expects inside act().
   const markdownPlainText = (markdown: string) => {
@@ -285,4 +399,18 @@ test("Insert into Draft appears only where a transcript supplies it, on top-leve
   await act(async () => { inserts[0]!.click(); });
   assert.deepEqual(inserted, ["## Result\n\nThe **answer** is [here](https://example.test).\n\n- one\n- two"],
     "the reply's own source text");
+});
+
+
+test("touch Copy Message preserves the complete multiline prompt without a menu", async () => {
+  coarsePointer = true;
+  clipboard.length = 0;
+  const text = "A long **prompt**\n\n" + "Keep every line.\n".repeat(100);
+  const { container } = await mount({ items: [{ kind: "user_message", id: 1, text }] });
+  const copy = container.querySelector<HTMLButtonElement>('button[aria-label="Copy Message"]');
+  assert.ok(copy, "a running prompt has direct Copy");
+  await act(async () => { copy.click(); });
+  assert.deepEqual(clipboard, [text]);
+  assertNoDomNode(document.querySelector('[role="menu"]'), "direct Copy opens no menu");
+  coarsePointer = false;
 });

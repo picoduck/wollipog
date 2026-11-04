@@ -545,9 +545,10 @@ test("an abstract socket relays a manager hook event for its own session, and st
   assert.equal(served.length, 1);
   // A caller that disconnects while parked aborts the evaluation on the runner's side.
   const parked = requestPolicyHookRelay(address, { key: "k", event: "PreToolUse", input: "park" });
+  const refused = assert.rejects(parked);
   await new Promise((resolvePromise) => setTimeout(resolvePromise, 50));
   await host.close("s_relay");
-  await assert.rejects(parked);
+  await refused;
   assert.equal(served.length, 2);
 });
 

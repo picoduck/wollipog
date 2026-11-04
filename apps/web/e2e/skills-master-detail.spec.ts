@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import { expectCenteredState } from "./page-state.js";
 
 /**
  * Agent Skills' frame (#1947; docs/design-system.md §4.2, §6, §6.2, §12, §15), in the real Shell:
@@ -144,6 +145,10 @@ test.describe("at desktop widths", () => {
     const [title, content] = await Promise.all([page.locator("#page-title").boundingBox(), state.boundingBox()]);
     expect(content!.x).toBe(title!.x);
     expect(content!.width).toBeGreaterThan(900);
+    // Centered in that content area (§12.1, #3875), with the steps as a centered block under it.
+    await expectCenteredState(state.locator(":scope > .state"));
+    const [stateBox, how] = await Promise.all([state.boundingBox(), state.locator(".skills-how").boundingBox()]);
+    expect(Math.abs(how!.x + how!.width / 2 - (stateBox!.x + stateBox!.width / 2))).toBeLessThanOrEqual(1);
   });
 
   test("loading shows skeleton rows and a skeleton detail; a failed load shows Couldn't Load Skills", async ({ page }) => {

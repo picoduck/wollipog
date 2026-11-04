@@ -1,0 +1,26 @@
+name: Main Rolling Relay
+
+on:
+  workflow_run:
+    workflows: [Main Rolling Validation, CI]
+    types: [completed]
+
+permissions: {}
+
+jobs:
+  wake:
+    if: github.ref == 'refs/heads/main' && github.event_name == 'workflow_run' && github.event.action == 'completed' && github.event.workflow_run.head_branch == 'main' && github.event.workflow_run.repository.full_name == github.repository && github.event.workflow_run.head_repository.full_name == github.repository && ((github.event.workflow_run.path == '.github/workflows/main-rolling-validation.yml' && github.event.workflow_run.event == 'workflow_dispatch') || (github.event.workflow_run.path == '.github/workflows/ci.yml' && github.event.workflow_run.event == 'push'))
+    name: Wake Authoritative Rolling Controller
+    runs-on: ubuntu-24.04
+    timeout-minutes: 2
+    permissions:
+      actions: write
+    # Coalesce short wake requests. The controller alone reads and mutates rolling state.
+    concurrency:
+      group: main-rolling-relay
+      cancel-in-progress: false
+    steps:
+      - name: Dispatch Rolling Reconciliation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run main-rolling-controller.yml --ref main --repo "$GITHUB_REPOSITORY"

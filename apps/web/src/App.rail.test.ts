@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import { MOBILE_BREAKPOINT_PX } from "./components/useIsMobile.js";
+import { projectDeleteMessage } from "./project-actions.js";
 
 const app = readFileSync(new URL("./App.tsx", import.meta.url), "utf8");
 const offlineBanner = readFileSync(new URL("./components/OfflineBanner.tsx", import.meta.url), "utf8");
@@ -18,6 +19,8 @@ const inboxRow = readFileSync(new URL("./components/InboxRow.tsx", import.meta.u
 const projectSplitMenu = readFileSync(new URL("./components/ProjectSplitMenu.tsx", import.meta.url), "utf8");
 const menuSurface = readFileSync(new URL("./components/Menu.tsx", import.meta.url), "utf8");
 const projectsView = readFileSync(new URL("./components/ProjectsView.tsx", import.meta.url), "utf8");
+const projectList = readFileSync(new URL("./components/ProjectList.tsx", import.meta.url), "utf8");
+const projectLocationRow = readFileSync(new URL("./components/ProjectLocationRow.tsx", import.meta.url), "utf8");
 const pageHeader = readFileSync(new URL("./components/PageHeader.tsx", import.meta.url), "utf8");
 const runsView = readFileSync(new URL("./components/RunsView.tsx", import.meta.url), "utf8");
 const podsView = readFileSync(new URL("./components/PodsView.tsx", import.meta.url), "utf8");
@@ -28,6 +31,7 @@ const detail = readFileSync(new URL("./components/SessionDetail.tsx", import.met
 const sessionHeader = readFileSync(new URL("./components/SessionHeader.tsx", import.meta.url), "utf8");
 const shortcuts = readFileSync(new URL("./shortcuts.ts", import.meta.url), "utf8");
 const newSessionShortcut = readFileSync(new URL("./useNewSessionShortcut.ts", import.meta.url), "utf8");
+const newSessionDialog = readFileSync(new URL("./components/NewSessionDialog.tsx", import.meta.url), "utf8");
 
 test("the application shell is rail-first and the legacy sidebar is fully retired", () => {
   const combined = [app, rail, inbox, shortcuts, css].join("\n");
@@ -37,7 +41,7 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
   // testable, the remote instance banner so the instance harness can show it (#1970), and the pairing
   // banner so its browser and desktop copy is DOM tested (#2303). The shell itself draws none.
   assert.doesNotMatch(app, /<Notice\b/, "the shell renders its banners through their components");
-  assert.match(app, /<PairingBanner connecting=\{conn === "connecting"\} \/>/);
+  assert.match(app, /<PairingBanner conn=\{conn\} \/>/);
   assert.equal(remoteInstanceBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
     "the remote instance banner renders the Notice page banner");
   assert.equal(offlineBanner.match(/<Notice pageBanner tone="warning" role="status"/g)?.length, 1,
@@ -178,21 +182,21 @@ test("the transcript's lower edge has one floating tail control, and context and
   assert.match(detail, /className="detail-main"[\s\S]*data-active-pane=\{activePane\}[\s\S]*onFocusCapture=\{\(\) => setActivePane\("reader"\)\}/);
   assert.match(detail, /className="composer"[\s\S]*onFocusCapture=\{\(\) => setActivePane\("composer"\)\}/);
   // The trailing cluster holds context, then cost, then the mic: only while the bar has room.
-  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
+  assert.match(detail, /<div className="cbar-right">[\s\S]*\{usagePlacement === "bar" && <>[\s\S]*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/>\}\s*\{dictation\.supported && \(/,
     "context and cost sit just before the mic in the composer bar's trailing cluster");
-  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} \/>\s*: null\}/,
+  assert.match(detail, /<ModelEffortControl[\s\S]*sessionUsage=\{usagePlacement === "model-settings"\s*\? <SessionUsageMenuGroup session=\{session\} resolution=\{contextWindow\} models=\{agentCaps\?\.models\} \/>\s*: null\}/,
     "otherwise Model Settings opens with the Session Usage group, and only then");
   assert.match(detail, /const composerUsageNarrow = isMobile \|\| composerColumnNarrow;/);
   assert.match(detail, /const usagePlacement = composerUsagePlacement\(\{\s*narrow: composerUsageNarrow,\s*modelSettingsOpenable: modelSettingsAvailable && composerControlsDisabledReason === null,\s*\}\);/);
   // A narrow column whose Model Settings cannot open gives the figures a row above the bar.
-  assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
+  assert.match(detail, /\{usagePlacement === "row" && \([\s\S]*<div className="composer-usage-row">\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/div>\s*\)\}\s*<div className="composer-bar">/);
   assert.match(detail, /<div\s+ref=\{composerBoxRef\}\s+className=\{`composer-box/, "the column measured is the composer card's own");
   assert.match(detail, /const contextWindow = resolveContextWindowCapacity\(session, agentCaps\?\.models \?\? \[\]\);/,
     "every meter placement consumes the shared capacity result");
   assert.equal(detail.match(/<ContextWindowMeter session=\{session\} resolution=\{contextWindow\}/g)?.length, 3,
     "the composer bar, its own row and Answer Mode each place the meter once; the preview has none (#2210)");
   // Answer Mode replaces the bar, Model Settings included, so it carries the two triggers itself.
-  assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} placement="bar" \/>\s*<SessionUsageControl session=\{session\} placement="bar" \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
+  assert.match(detail, /usage=\{composerAnswerActive \? <>\s*<ContextWindowMeter session=\{session\} resolution=\{contextWindow\} \/>\s*<SessionUsageControl session=\{session\} models=\{agentCaps\?\.models\} \/>\s*<\/> : null\}\s*usageOwnRow=\{composerUsageNarrow\}/);
   // The Reply shortcut's hint is a keycap in the idle, unfocused composer's placeholder row.
   assert.match(detail, /const composerReplyKeycap = sessionReadingKeys && canPrompt && activePane === "reader" && !composerHasText &&\s*!composerIdleCollapsed && !composerAnswerActive;/);
   assert.match(detail, /\{composerReplyKeycap && \([\s\S]*<div className="composer-reply-hint" aria-hidden="true">\s*<kbd>\{shortcutDisplay\("session-reading-reply"\)\}<\/kbd>\s*<\/div>\s*\)\}\s*<ComposerTextarea/,
@@ -263,7 +267,7 @@ test("Inbox focus, unread state, and shortcuts use non-overlapping visual treatm
   // and its own scroll; the list pane gives it the flexible area.
   assert.match(css, /\.master-detail-state\s*\{[^}]*min-height:\s*0;[^}]*overflow-y:\s*auto;/,
     "the page state scrolls on its own");
-  assert.match(css, /\.inbox-state \{ flex: 1; \}/, "the page state consumes the flexible list area");
+  assert.match(css, /\.inbox-state\s*\{[^}]*\bflex:\s*1;/, "the page state consumes the flexible list area");
   assert.doesNotMatch(css, /\.inbox-(list|preview)-pane:has\([^{]*focus-visible/,
     "the panes are never framed on focus; F6 marks a zone with a brief top-edge line instead");
   assert.match(css, /\.inbox-list:focus-visible,[\s\S]*?\.detail-scroll:focus-visible \{ outline: none; \}/,
@@ -355,16 +359,23 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
   // The intro paragraph became the page header's one-line description (#1801, §4.2: 80 characters).
   // The registry holds it now, beside the destination name (#1945).
   assert.match(projectsView, /const PROJECTS = destination\("projects"\);/);
-  assert.match(projectsView, /className="muted project-detail-meta">Project ID:/);
-  assert.match(projectsView, /className="muted project-detail-meta">\{projectAudienceVisibilitySummary/);
-  assert.match(css, /\.project-detail-meta\s*\{\s*display:\s*block;/,
-    "Project identity and audience metadata render on distinct lines");
-  assert.match(projectsView, /label="Sessions Visibility"/,
+  // The project's id is copied from ⋯, never printed in the detail (#2959); its DOM test reads the meta line.
+  assert.doesNotMatch(projectsView, /Project ID:/);
+  // The list's filter says whether a project has a Sessions tab (#2957), not who can see it.
+  assert.match(projectList, /label="Sessions Tabs"/,
     "the Sessions show-or-hide filter does not reuse the Project audience label");
-  for (const label of ["Create Project", "Add Location", "Make Default", "Archive Sessions", "Delete Project"]) {
+  for (const label of ["New Project", "Add Location", "Archive Sessions", "Delete Project"]) {
     assert.equal(projectsView.includes(label), true, label);
   }
-  assert.match(projectsView, /its sessions move to No Project[\s\S]*Sessions and files are not deleted/,
+  // A location's own actions live in its row's ⋯ (#2961).
+  assert.match(projectLocationRow, /"Make Default"/);
+  // #2957 retired the Projects list's compact empty state, and #2952 New Session's: a project with
+  // no locations is a compact Notice in the Location field's place, with Add Location….
+  assert.doesNotMatch(newSessionDialog, /project-manager-empty/);
+  assert.doesNotMatch(css, /\.project-manager-empty\.compact/,
+    "the compact empty state has no user left");
+  assert.match(projectsView, /message: projectDeleteMessage\(/, "Project deletion uses the tested message");
+  assert.match(projectDeleteMessage("Alpha", 3), /its 3 sessions move to No Project\. The sessions, their files and the location folders are kept\./,
     "Project deletion states its non-destructive consequences");
   // #2220: a group whose authoritative count says sessions are coming shows skeleton rows, never a
   // state card in between (sessions-states.test.ts covers the count).
@@ -374,36 +385,41 @@ test("Inbox unifies Session and Project creation while the shell exposes no dupl
     "the empty state waits for the skeleton");
   assert.match(createProjectDialog, /const close = \(\) => \{\s*if \(!busy\) onClose\(\);/,
     "create cannot be dismissed while its mutation is in flight");
-  assert.match(projectLocationDialog, /const close = \(\) => \{\s*if \(!busyKey\) onClose\(\);/,
+  assert.match(projectLocationDialog, /const close = \(\) => \{\s*if \(!busy\) onClose\(\);/,
     "location changes cannot be dismissed while their mutation is in flight");
-  assert.equal(projectsView.match(/const close = \(\) => \{\s*if \(!busy\) onClose\(\);/g)?.length, 1,
+  assert.match(projectsView, /title: "Delete Project",[\s\S]{0,800}cancelWhileRunning: false,[\s\S]{0,400}onConfirm:/,
     "delete confirmation cannot be dismissed while its mutation is in flight");
-  assert.match(projectLocationDialog, /candidates\.length === 0 \? "No Locations Found" : "No Matching Locations"/,
+  assert.match(projectLocationDialog, /candidates\.length === 0\s*\? "There are no locations to add yet\. Add a new folder instead\."\s*: "No locations match\./,
     "an empty search result stays distinct from having no Locations to manage");
-  assert.match(projectLocationDialog, /targetLink\?\.availability === "runner_removed"[\s\S]*"Relink Location"/,
+  assert.match(projectLocationDialog, /alreadyAdded \? "Already Added"\s*: relinkRequired \? "Relink"/,
     "a returned exact workspace offers stable-identity relinking instead of duplicating its tombstone");
   for (const contract of [
-    /await onCreate\(\{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: selectedScope\.owner/,
-    /Create New Location[\s\S]*<span>Machine<\/span>/,
-    /Browse for a Folder…/,
-    /<DirectoryPicker/,
+    /api\.createProjectLocation\(project\.id, \{[\s\S]*runnerId: selectedRunnerId,[\s\S]*path: selectedFolder,[\s\S]*owner: creationScope\.owner/,
+    /<span>Machine<\/span>\s*<Select[\s\S]*<span>Folder<\/span>\s*<DirectoryPicker[\s\S]*hideActions/,
   ]) assert.match(projectLocationDialog, contract,
-    "Add Location can register a browsed folder on a selected online machine");
+    "Add Location can register a browsed folder on a selected online machine, browsed under the Machine field");
+  // #2966: one switch between the two paths, Existing Location first while one can be added.
   assert.match(projectLocationDialog,
-    /const \[createExpanded, setCreateExpanded\] = useState\(false\)[\s\S]*aria-expanded=\{createExpanded\}[\s\S]*createExpanded &&/,
-    "new Location creation stays behind an explicit progressive disclosure");
-  assert.match(projectLocationDialog, /<strong>Existing Locations<\/strong>[\s\S]*<input\s+autoFocus/,
+    /useState<AddLocationMode>\(\(\) => addable \? "existing" : "new"\)[\s\S]*\{ value: "existing", label: "Existing Location"[^}]*\},\s*\{ value: "new", label: "New Folder"[^}]*\}/,
+    "Existing Location and New Folder are one segmented switch");
+  assert.doesNotMatch(projectLocationDialog, /Create New Location|aria-expanded/,
+    "the creation disclosure is gone");
+  assert.match(projectLocationDialog, /<input\s+type="search"\s+autoFocus/,
     "the common existing-Location path owns initial focus");
-  assert.match(projectLocationDialog, /"Add to Project"/);
+  assert.doesNotMatch(projectLocationDialog, /"Add to Project"|<select\b/);
   assert.doesNotMatch(projectLocationDialog, /Move (?:Here|to|Location)/,
     "adding a shared Location does not imply moving it from another Project");
-  assert.match(projectsView, /onCreate=\{async \(location, generateSetup\)[\s\S]*api\.createProjectLocation/,
+  // #3468: Add Location sends its own requests, so it can recover a lost reply; Projects only hears
+  // of the location once it is added.
+  assert.match(projectLocationDialog, /api\.createProjectLocation\(project\.id,/,
     "Project management uses the atomic Project-scoped Location creation API");
-  assert.match(css, /\.project-location-create-section > \.disclosure-trigger\s*\{[^}]*width:\s*100%;/,
-    "the collapsed creation disclosure remains a full-width readable target");
+  assert.match(projectsView, /onAdded=\{async \(project, location, generateSetup\)/);
+  assert.doesNotMatch(projectsView, /api\.(?:createProjectLocation|addProjectLocation)\(/);
+  assert.doesNotMatch(css, /\.add-location-list[^{]*\{[^}]*(?:overflow|max-height)/,
+    "the candidate list has no scroller of its own: the dialog body scrolls");
   // The phone Projects back control is the detail bar's (#1801): an `.icon-btn` named "Back to
   // Projects", one control height, which a touch screen makes 44px.
-  assert.match(projectsView, /const phoneDetail = isMobile && selected;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel=\{backLabel\("projects"\)\}/,
+  assert.match(projectsView, /const phoneDetail = isMobile && detailOpen && !spanningEmpty;[\s\S]*?\{phoneDetail && \(\s*<DetailBar[\s\S]*?backLabel=\{backLabel\("projects"\)\}/,
     "the mobile Projects back target is the detail bar's");
   assert.doesNotMatch(projectsView, /project-manager-back|← Back to Projects/);
   assert.match(pageHeader, /className="icon-btn detail-bar-back"[^>]*aria-label=\{backLabel\}/);
@@ -434,6 +450,13 @@ test("the software keyboard shrinks the layout viewport, not just the visual one
   assert.match(viewport!, /interactive-widget=resizes-content/,
     "without this the keyboard covers the bottom rail");
   assert.match(viewport!, /viewport-fit=cover/, "and the notch handling must survive");
+});
+
+test("a disabled rail item is faint ink with no hover fill (#3004)", () => {
+  assert.match(css, /\.rail-item\[aria-disabled="true"\] \{[^}]*color: var\(--text-faint\);[^}]*cursor: default;/,
+    "at rest it is the faint tier, below a normal item's --text-dim");
+  assert.match(css, /\.rail-item\[aria-disabled="true"\]:hover \{[^}]*color: var\(--text-faint\);[^}]*background: transparent;/,
+    "a hover neither brightens nor fills it");
 });
 
 test("an open More sheet suppresses the toast stack", () => {
@@ -489,7 +512,8 @@ test("Settings survives the breakpoint because it is a route", () => {
     "the phone entry point is a routed row in the More sheet");
   // Gated on the breakpoint, not on overflowItems: hiding every optional destination by experiment
   // would otherwise unmount the trigger and leave Settings no entry point in the phone chrome.
-  assert.match(rail, /const showMore = isMobile;[\s\S]*?\{showMore && \(/,
+  // A disabled rail (the desktop recovery screen, #3004) has no More: nothing behind it opens.
+  assert.match(rail, /const showMore = isMobile && !disabled;[\s\S]*?\{showMore && \(/,
     "the sheet survives an empty overflow list");
   assert.doesNotMatch(app, /SettingsDialog/, "the dialog is replaced by the route, not kept beside it");
   assert.doesNotMatch(app, /settingsOpen/, "there is no open state to hoist once it is a route");
@@ -515,11 +539,13 @@ test("the phone topbar cannot push its controls off-screen", () => {
 });
 
 test("the phone Session topbar owns Back and the live Session title without Open", () => {
-  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionTitle \?\? title\}<\/h1>/,
-    "the mobile app bar must replace its generic Session heading with Back and the live title");
+  assert.match(app, /view\.name === "session" \? \([\s\S]*?className="icon-btn sm mobile-session-back"[\s\S]*?aria-label=\{backLabel\("inbox"\)\}[\s\S]*?<h1 id="page-title"[^>]*>\{sessionType\}\{sessionTitle \?\? title\}<\/h1>/,
+    "the mobile app bar must replace its generic Session heading with Back and the live title, after its type mark");
   // Only the phone Session route mounts the app-level bar now; destinations draw a page header (#1801).
   assert.match(app, /\{view\.name === "session" && isMobile && !\(rightPanel\.open && activeSession\) && \(\s*<Header[\s\S]*?sessionTitle=\{activeSession\s*\? sessionDisplayTitle\(activeSession\.title\) \|\| "Session"\s*: routedSessionPlaceholder\(view\.id, routedSessionLookup, conn, snapshotLoaded\)\.title\}/,
     "the shell must pass the routed Session's one-line title, or its placeholder's title (#2202), into the app bar");
+  assert.match(app, /<Header[\s\S]*?sessionType=\{activeSession \? <SessionTypeIcon session=\{activeSession\} \/> : null\}/,
+    "the phone bar marks an Orchestrator or review session's title as the desktop session bar does (#4076)");
   assert.match(app, /\{!isMobile && \(\s*<>\s*<EditorSelect key=\{view\.id\} sessionId=\{view\.id\} \/>/,
     "Open destinations must not be mounted on the mobile Session route");
 });
@@ -557,19 +583,20 @@ test("the desktop app never reaches the phone layout, which is why no phone bar 
 });
 
 test("the Multi-Agent Run and Pod create actions are page header primaries", () => {
-  assert.match(runsView, /<PageHeader\s+title=\{runsDestination\.name\}\s+description=\{runsDestination\.description\}\s+primary=\{\{ label: "New Multi-Agent Run", onClick: onNewRun \}\}\s+\/>/);
-  // One verb per action (§17.2): the primary and the dialog it opens are both "New Pod".
-  assert.match(podsView, /<PageHeader\s+title=\{podsDestination\.name\}\s+description=\{podsDestination\.description\}\s+primary=\{\{ label: "New Pod", onClick: onNewPod \}\}\s+\/>/);
+  // Runs hides its primary while the empty state offers the one New Run (#2974); the dialog keeps
+  // its title, New Multi-Agent Run.
+  assert.match(runsView, /<PageHeader\s+title=\{runsDestination\.name\}\s+description=\{runsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Run", onClick: onNewRun \}\}\s+\/>/);
+  // One verb per action (§17.2): the primary and the dialog it opens are both "New Pod". Pods also
+  // hides its primary while the empty state offers the one New Pod (#2979).
+  assert.match(podsView, /<PageHeader\s+title=\{podsDestination\.name\}\s+description=\{podsDestination\.description\}\s+primary=\{empty \? undefined : \{ label: "New Pod", onClick: onNewPod \}\}\s+\/>/);
   assert.match(readFileSync(new URL("./components/NewPodDialog.tsx", import.meta.url), "utf8"),
     /<Modal\s+title="New Pod"/);
   assert.doesNotMatch(app, /topbar-create|NewPodHeaderButton/, "the top bar holds no create action");
-  // One `.btn.primary` with a `+` icon; on a phone it is the 44px `+` alone, and its label stays
-  // in the accessibility tree (clipped, never display: none) so the name still matches.
-  assert.match(pageHeader, /className="btn primary page-primary"[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
+  // One `.btn.primary` with a `+` icon; on a phone it is the quiet `+` icon button alone, and its
+  // label stays in the accessibility tree (clipped, never display: none) so the name still matches.
+  assert.match(pageHeader, /className=\{phone \? "icon-btn page-primary" : "btn primary page-primary"\}[\s\S]*?<PlusIcon \/>\s*<span className="page-primary-label">\{primary\.label\}<\/span>/);
   assert.match(css, /@media \(max-width: 760px\)[\s\S]*?\.page-primary-label \{[^}]*clip-path: inset\(50%\)/);
   assert.doesNotMatch(css, /\.page-primary-label \{[^}]*display: none/);
-  assert.match(css, /\.page-primary \{[^}]*width: var\(--control-h\);/,
-    "the phone primary is one square control height, 44px on touch");
 });
 
 test("keyboard reachability does not depend on optional viewport metadata alone", () => {

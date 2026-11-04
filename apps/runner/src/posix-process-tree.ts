@@ -1,5 +1,6 @@
 import { execFile } from "node:child_process";
 import { readFile } from "node:fs/promises";
+import type { LinuxCgroupBoundary, LinuxCgroupIdentity, ProviderProcessProofStandard } from "./linux-cgroup.js";
 
 /** A PID plus its kernel-reported start stamp. The stamp prevents a late cleanup pass from
  * signalling an unrelated process that reused one of the provider tree's PIDs. */
@@ -242,8 +243,8 @@ function refreshTable(): Promise<PosixProcessTable> {
 }
 
 async function refreshAll(): Promise<PosixProcessTable> {
-  const table = await refreshTable();
-  for (const boundary of boundaries) boundary.extend(table);
+  const table = [...boundaries].some((boundary) => !boundary.containmentIdentity) ? await refreshTable() : new Map();
+  for (const boundary of boundaries) if (!boundary.containmentIdentity) boundary.extend(table);
   for (const boundary of [...boundaries]) boundary.releaseFromMonitor(table);
   return table;
 }
@@ -286,13 +287,22 @@ export class PosixProcessBoundary {
     private readonly marker?: string,
     private readonly testRuntime?: PosixProcessBoundaryTestRuntime,
     private readonly scanner: PosixMarkerScanner = markerScanner,
+    private readonly containment?: LinuxCgroupBoundary,
   ) {
     boundaries.add(this);
     if (testRuntime) return;
     startMonitor();
     // Do not reuse a monitor read that may predate this spawn: the first ownership snapshot must
     // start after the provider PID exists.
-    void this.refreshFresh().catch(() => {});
+    if (!containment) void this.refreshFresh().catch(() => {});
+  }
+
+  get proofStandard(): ProviderProcessProofStandard {
+    return this.containment ? "linux-cgroup-v2" : "marker-parent-links";
+  }
+
+  get containmentIdentity(): Readonly<LinuxCgroupIdentity> | undefined {
+    return this.containment?.identity;
   }
 
   private async refreshFresh(): Promise<PosixProcessTable> {
@@ -377,6 +387,11 @@ export class PosixProcessBoundary {
 
   private async releaseIfEmptyOnce(): Promise<boolean> {
     try {
+      if (this.containment) {
+        if (!await this.containment.releaseIfEmpty()) return false;
+        this.release();
+        return true;
+      }
       // A shared monitor read may have started before the close event. Ownership release always
       // gets a fresh post-close process table.
       const table = await this.refreshFresh();
@@ -470,6 +485,14 @@ export class PosixProcessBoundary {
   }
 
   private async terminateOnce(): Promise<boolean> {
+    if (this.containment) {
+      const complete = await this.containment.terminate();
+      // A failed admission may leave the fixed wrapper stuck before entering the cgroup. It has
+      // executed no provider code; end only Node's unreaped root, and retain the failed proof.
+      if (!complete) this.signalUnreapedRoot("SIGKILL");
+      else this.release();
+      return complete;
+    }
     let table: PosixProcessTable | undefined;
     const frozen = new Map<number, PosixProcessIdentity>();
     // Stop the root itself before anything is enumerated. Descendant discovery reads the whole

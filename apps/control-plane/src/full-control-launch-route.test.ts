@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
-  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner,
   type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
@@ -11,11 +11,18 @@ import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { authorizeFullControl, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
+import { campaignBehaviorValues } from "./campaign-behavior.js";
+import { randomUUID } from "node:crypto";
 import { closureEvidence, publicationEvidence } from "./campaign-issue-authority.js";
 import { hostingEvidenceAuthorityDisclosures } from "./hosting-evidence-disclosures.js";
+import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
+import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { inspectCampaignWorkspace, registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "@wollipog/protocol";
+import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
@@ -28,20 +35,22 @@ const request: CreateSessionRequest = { runnerId: "r", workspaceId: "w", project
 const review: ControlledReviewCapability = { profile: CONTROLLED_REVIEW_PROFILE, controllerSha256: "c".repeat(64), executableSha256: "e".repeat(64),
   cliVersion: "2.1.296", accounting: "provider_list_estimate", account: "runner_default_claude", agentId: "claude" };
 const runtime: RunnerRuntimeInfo = { dataDir: "/fixture/data", worktreeRoot: "/fixture/data/worktrees", maxConcurrentSessions: 4,
-  campaignLaunchInspection: { version: 2 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
+  campaignLaunchInspection: { version: 3 }, campaignReview: review, executionIsolation: { mode: "provider", network: "inherit" } };
 const pacedVideoContract = { id: "wollipog-paced-video-review-v1", revision: 1 } as const;
+const reviewerAttestation = syntheticMediaReviewerAttestation("claude");
 
-function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean } = {}) {
+function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: number; priced?: boolean; images?: boolean; pacedVideo?: boolean;
+  hostingVideo?: boolean; videoPort?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const human: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
   const meta: RunnerMetadata = { runnerId: "r", hostname: "fixture", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Fixture Repo", path: "/fixture/repository" }],
     agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true,
-      capabilities: { models: [{ id: "claude-opus-5-5", default: true }, { id: "claude-sonnet-5-5" }], effortLevels: [], slashCommands: [],
+      capabilities: { models: [{ id: "claude-opus-5-5", default: true }, { id: "claude-sonnet-5-5" }], effortLevels: ["high"], slashCommands: [],
         permissionModes: ["default", "orchestrator"], supportsImages: true, supportsApprovals: true,
         ...(options.images === false ? {} : { imageToolResults: true }),
-        ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract } : {}) } }],
+        ...(options.pacedVideo ? { pacedVideoReviewContract: pacedVideoContract, mediaReviewerAttestation: reviewerAttestation } : {}) } }],
     runtime: "runtime" in options ? options.runtime : runtime };
   const reconnect = (at: number) => db.registerRunner(meta, at, options.protocolVersion ?? PROTOCOL_VERSION);
   reconnect(Date.now());
@@ -58,6 +67,14 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     inspect: (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
       ok: true, repository: "owner/repo", issueNumbers: message.issueNumbers, digest: "d".repeat(64) }),
   };
+  // Issue reads answer as the runner does: one number that is not an issue of the origin refuses
+  // the whole read. Synchronization echoes the revision it persisted.
+  const issues = { repository: "owner/repo" as string | null, notIssues: new Set<number>(), holdSync: null as Promise<void> | null,
+    // The fixture runner acknowledges each durable prompt it receives, as a live runner does.
+    ackDurable: true,
+    // Each epic's sub-issues, read as the runner reads them; an epic not listed has none.
+    epics: new Map<number, number[]>() };
+  let receipts: ((message: Extract<Parameters<SessionsService["onDurablePromptReceipt"]>[1], { type: "durable_session_command_result" }>) => void) | null = null;
   hub.sendToRunner = (_, message) => {
     sent.push(message);
     if (message.type === "start_session") starts.push(message);
@@ -65,15 +82,42 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
       const answer = state.inspect(message);
       if (answer) queueMicrotask(() => hub.resolveRunnerRequest(answer, "r"));
     }
+    if (message.type === "durable_session_command" && message.command.type === "prompt_session" && issues.ackDurable) {
+      const acknowledge = { type: "durable_session_command_result" as const, requestId: message.requestId, commandId: message.commandId,
+        sessionId: message.command.sessionId, state: "accepted" as const, duplicate: false };
+      queueMicrotask(() => receipts?.({ ...acknowledge, revision: (db.getSessionPromptCommand(message.commandId)?.revision ?? 0) + 1 }));
+    }
+    if (message.type === "campaign_issue_scope" && (message.operation === "inspect" || message.operation === "synchronize")) {
+      const requested = message.operation === "inspect" ? message.issues ?? [] : [];
+      const epic = message.operation === "inspect" ? message.epic : undefined;
+      const members = epic === undefined ? [] : issues.epics.get(epic) ?? [];
+      const candidate = (n: number, source: "umbrella" | "sub_issue" | "member_checklist") =>
+        ({ issue: { repository: issues.repository!, number: n }, title: `Issue ${n}`, source });
+      const answer = message.operation === "synchronize" ? { ok: true, repository: "owner/repo", revision: message.scope.revision }
+        : issues.repository && ![...requested, ...members, ...epic === undefined ? [] : [epic]].some((n) => issues.notIssues.has(n))
+          ? { ok: true, repository: issues.repository, candidates: [...epic === undefined ? [] : [candidate(epic, "umbrella")],
+            ...members.map((n) => candidate(n, "sub_issue")),
+            ...requested.filter((n) => n !== epic && !members.includes(n)).map((n) => candidate(n, "member_checklist"))] }
+          : { ok: false };
+      const respond = () => hub.resolveRunnerRequest({ type: "campaign_issue_scope_result", requestId: message.requestId,
+        sessionId: message.sessionId, ...answer }, "r");
+      if (message.operation === "synchronize" && issues.holdSync) void issues.holdSync.then(respond);
+      else queueMicrotask(respond);
+    }
     return true;
   };
   const disclosures = hostingEvidenceAuthorityDisclosures({
     organizationExists: (organizationId) => db.listOrganizationIds().includes(organizationId), listRunners: () => db.listRunners() });
+  // `hostingVideo` wires the service exactly as hosting does, with its inert video evidence pieces.
+  const video = options.hostingVideo ? composeHostingVideoEvidence(db) : undefined;
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined,
-    undefined, undefined, false, undefined, undefined, undefined, disclosures);
+    undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
+  receipts = (message) => { sessions.onDurablePromptReceipt("r", message); };
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
-  return { db, hub, sent, starts, state, sessions, human, scope, settings, disclosures, reconnect };
+  // `videoPort` also gives the launch route hosting's certification port, as index.ts does.
+  const videoCertification = video && options.videoPort ? (runnerId: string) => video.launchCertification(runnerId) : undefined;
+  return { db, hub, sent, starts, state, issues, sessions, human, scope, settings, disclosures, reconnect, video, videoCertification };
 }
 
 async function app(f: ReturnType<typeof fixture>, inspectionTimeoutMs?: number) {
@@ -97,7 +141,61 @@ async function preflight(server: Awaited<ReturnType<typeof app>>["server"], body
 }
 const sessionCount = (f: ReturnType<typeof fixture>) => f.db.raw().prepare("SELECT count(*) AS n FROM sessions").get()!.n;
 
-test("a ready Human launch admits one Full Control root that owns every authorized decision and controlled review", async () => {
+test("launch inspection and ordinary session launch use the same authorized dynamic location path (#4090)", async () => {
+  const f = fixture();
+  const workspace = f.db.createWorkspace("r", { name: "SSH Project", path: "/fixture/home/project" }, f.scope);
+  const location = f.db.findProjectLocation("r", workspace.id)!;
+  const body = { ...launch, workspaceId: workspace.id, projectId: location.projectId, projectLocationId: location.id };
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true);
+    const inspection = f.sent.find((message) => message.type === "campaign_launch_inspect");
+    assert.equal(inspection?.type === "campaign_launch_inspect" && inspection.workspacePath, "/fixture/home/project");
+    assert.equal(inspection?.type === "campaign_launch_inspect" && inspection.workspaceId, workspace.id);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "dynamic-location", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const start = f.starts.find((message) => message.type === "start_session");
+    assert.equal(start?.type === "start_session" && start.spec.workspacePath, "/fixture/home/project");
+    assert.doesNotMatch(JSON.stringify(checked), /\/fixture\/home\/project/);
+    const count = f.sent.length;
+    const injected = await preflight(server, { ...body, workspacePath: "/foreign" } as FullControlLaunchRequest);
+    assert.equal(injected.response.statusCode, 400);
+    assert.equal(f.sent.length, count, "browser paths never reach the runner");
+    const unknown = await preflight(server, { ...body, projectLocationId: "unknown" });
+    assert.equal(unknown.response.statusCode, 409);
+    assert.equal(f.sent.length, count, "unknown locations never start inspection");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("preflight shows only closed failure reasons and refuses old inspection runners with update guidance (#4090)", async () => {
+  for (const version of [1, 2] as const) {
+    const f = fixture({ runtime: { ...runtime, campaignLaunchInspection: { version } } });
+    const { server } = await app(f);
+    try {
+      const { preflight: checked } = await preflight(server, launch);
+      assert.equal(checked!.ready, false);
+      assert.match(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason, /update the runner/);
+      assert.equal(f.sent.some((message) => message.type === "campaign_launch_inspect"), false);
+    } finally { await server.close(); f.db.close(); }
+  }
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const [failure, reason] of Object.entries(CAMPAIGN_LAUNCH_INSPECTION_ERRORS)) {
+      f.state.inspect = (message) => ({ type: "campaign_launch_inspection_result", requestId: message.requestId,
+        workspaceId: message.workspaceId, ok: false, failure: failure as keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS,
+        error: "secret://token /private/path RAW_OUTPUT" });
+      const { preflight: checked } = await preflight(server, launch);
+      assert.equal(checked!.ready, false);
+      assert.equal(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason, reason);
+      assert.doesNotMatch(JSON.stringify(checked), /secret:\/\/token|private\/path|RAW_OUTPUT/);
+    }
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a ready Human launch preserves its authority while retired native review stays unavailable", async () => {
   const f = fixture();
   const { server, logs } = await app(f);
   try {
@@ -111,20 +209,23 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     for (const id of ["repository_scope", "authority_contract", "accounting_budget", "native_review", "execution_isolation", "image_evidence"]) {
       assert.equal(checked!.capabilities.find((item) => item.id === id)!.state, "verified", id);
     }
-    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "human_required").map((item) => item.id), ["video_evidence", "external_evidence"]);
+    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "orchestrator_decides").map((item) => item.id), ["video_evidence", "external_evidence"]);
+    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "human_required"), [], "Full Control routes no evidence to the Human (#2940)");
     const summary = checked!.summary;
     assert.equal(summary.repository, "owner/repo");
     assert.deepEqual(summary.issueNumbers, [7, 12]);
     assert.equal(summary.objective, "Deliver the launch issues");
     assert.deepEqual(summary.budget, { costUsd: 40, toolCalls: 400, concurrency: 4, acceptedFollowUps: 2, source: "override", reviewIncluded: true });
+    assert.deepEqual(summary.review, { controlled: true, statement: "Controlled cross-model review, charged to this campaign." });
     assert.deepEqual(summary.followUps, { policy: "execute_approved", relatedFollowUps: true, maxIssues: 4, closureReasons: ["completed"] });
     assert.equal(summary.root.completion, "stop_and_archive");
     assert.deepEqual(summary.root.isolation, { mode: "provider", network: "inherit" });
-    assert.equal(summary.evidence.statement, "The Orchestrator reviews screenshots. Video and external evidence need your review.");
+    assert.equal(summary.evidence.statement, "The Orchestrator reviews screenshots. For video and external evidence it asks for screenshots or denies the claim as unproven.");
     assert.equal(summary.evidence.provider!.retentionDisclosure, CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE);
     assert.equal(summary.evidence.destination.configurationId, `session_artifacts:${f.human.organizationId}`);
     assert.equal(summary.evidence.envelope, false, "no peer declares the private media contract");
-    assert.ok(summary.humanRequired.some((item) => item.exception === "Secrets and Sign-In"));
+    assert.deepEqual(summary.humanRequired, [], "no rule is marked Human Required, so nothing comes to the Human");
+    assert.match(summary.declinedNote!, /declined automatically and shown as blocked work/u);
     assert.deepEqual(summary.blockers, []);
     assert.deepEqual(checked!.advanced.controlledReview, review);
     assert.deepEqual(f.starts, []);
@@ -147,13 +248,18 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
     assert.equal(root.agentId, "claude");
     assert.equal(root.parentControlPolicy!.revision, control.boundary.revision);
     for (const category of [...WORKFLOW_DECISION_CATEGORIES, "issue_closure", "campaign_issue_scope"] as const) {
-      assert.equal(campaignWorkflowOwner(control, root.parentControlPolicy!.decisions, category, true), "orchestrator", category);
+      // Without peers that support its cap, extra review rounds stay outside Full Control (#3369, #4075).
+      assert.equal(campaignWorkflowOwner(control, root.parentControlPolicy!.decisions, category, true),
+        category === "review_round_extension" ? "human" : "orchestrator", category);
     }
+    // A current runner supports the cap, so the campaign owns every category, extensions within it.
     const projection = f.db.campaignProjection(root.id)!;
     for (const category of WORKFLOW_DECISION_CATEGORIES) assert.equal(projection.decisionOwners[category], "orchestrator", category);
+    assert.deepEqual(projection.reviewRoundExtensionCap, { scope: "pull_request", extraRounds: "configured_round_budget" });
     assert.equal(f.db.campaignBudgets.view(root.id)!.state, "active");
     assert.deepEqual(f.db.campaignBudgets.view(root.id)!.authority.controlledReview, review);
-    assert.equal(projection.budget!.requiredNativeReview!.supported, true, "the launched campaign can actually admit controlled review");
+    assert.equal(projection.budget!.requiredNativeReview!.supported, false);
+    assert.match(projection.budget!.requiredNativeReview!.reason, /retired.*review session/u);
     assert.equal(f.starts.length, 1);
     const start = f.starts[0]! as Extract<ControlPlaneToRunner, { type: "start_session" }>;
     assert.deepEqual(start.spec.orchestrator!.control, control);
@@ -178,17 +284,16 @@ test("a ready Human launch admits one Full Control root that owns every authoriz
   } finally { await server.close(); f.db.close(); }
 });
 
-test("each missing mandatory capability blocks launch with a specific reason and creates nothing", async () => {
+test("each genuine impossibility blocks launch with a specific reason and creates nothing", async () => {
   const cases: Array<{ name: string; options?: Parameters<typeof fixture>[0]; body?: FullControlLaunchRequest; id: string; reason: RegExp }> = [
-    { name: "no controlled reviewer", options: { runtime: { ...runtime, campaignReview: undefined } }, id: "native_review", reason: /executionIsolation\.mode "provider".*2\.1\.296/ },
-    { name: "no isolation report", options: { runtime: { ...runtime, executionIsolation: undefined } }, id: "execution_isolation", reason: /does not report the execution isolation/ },
-    { name: "unpriced model", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
-    { name: "no budget", body: { ...launch, overrides: { ...launch.overrides, budget: undefined } }, id: "accounting_budget", reason: /No campaign budget yet/ },
-    { name: "root session ceiling", body: { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
-      config: { model: "claude-opus-5-5", permissionMode: "orchestrator", costBudgetUsd: 50, maxToolCalls: 500 } } } },
-      id: "native_review", reason: /root session's own cost or tool-call limit/ },
-    { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract", reason: /protocol-v218/ },
-    { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the workspace/ },
+    // The launch sets an explicit cost ceiling, which cannot be enforced on unpriced usage.
+    { name: "unpriced model under a cost ceiling", options: { priced: false }, id: "accounting_budget", reason: /unpriced/ },
+    // Checkpoints are amounts within a cost ceiling; without one they are refused, never dropped.
+    { name: "cost checkpoints without a cost limit", body: { ...launch, overrides: { session: launch.overrides!.session, budget: { toolCalls: 400, checkpointsUsd: [5] } } },
+      id: "accounting_budget", reason: /^Cost checkpoints need a cost limit; enter one or remove the checkpoints\.$/ },
+    { name: "old runner", options: { protocolVersion: 217 }, id: "authority_contract",
+      reason: /^This machine needs a newer runner for campaign limits\. Update and restart the runner\.$/ },
+    { name: "no inspection", options: { runtime: { ...runtime, campaignLaunchInspection: undefined } }, id: "repository_scope", reason: /cannot inspect the authorized project location/ },
     { name: "unknown policy ask", body: { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } }, id: "authority_contract", reason: /missing/ },
   ];
   for (const item of cases) {
@@ -210,14 +315,119 @@ test("each missing mandatory capability blocks launch with a specific reason and
       assert.deepEqual(f.starts, [], item.name);
     } finally { await server.close(); f.db.close(); }
   }
-  const limited = fixture();
-  limited.db.setUsageDailyBudget(limited.human.organizationId, 5, Date.now());
-  const { server } = await app(limited);
+});
+
+test("infrastructure gaps never block launch: each is informational and the campaign uses the regular review workflow", async () => {
+  const unbudgeted: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
+  const cases: Array<{ name: string; options?: Parameters<typeof fixture>[0]; body?: FullControlLaunchRequest; daily?: boolean; id: string; reason: RegExp }> = [
+    { name: "no controlled reviewer", options: { runtime: { ...runtime, campaignReview: undefined } }, id: "native_review",
+      reason: /does not offer the controlled reviewer, which needs provider isolation \(current: provider\).*2\.1\.296.*regular cross-model review workflow\.$/ },
+    { name: "no isolation report", options: { runtime: { ...runtime, executionIsolation: undefined } }, id: "execution_isolation", reason: /does not report the execution isolation/ },
+    { name: "root session ceiling", body: { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator", costBudgetUsd: 50, maxToolCalls: 500 } } } },
+      id: "native_review", reason: /root session's own cost or tool-call limit; the campaign uses the regular cross-model review workflow\./ },
+    { name: "organization daily limit", daily: true, id: "native_review", reason: /per-user daily limit; the campaign uses the regular/ },
+    { name: "unpriced model with no ceiling", options: { priced: false }, body: unbudgeted, id: "accounting_budget", reason: /^No limit\. Managed workers' tool calls are counted, but this model's cost is not priced/ },
+  ];
+  for (const item of cases) {
+    const f = fixture(item.options);
+    if (item.daily) f.db.setUsageDailyBudget(f.human.organizationId, 5, Date.now());
+    const { server } = await app(f);
+    try {
+      const body = item.body ?? launch;
+      const { response, preflight: checked } = await preflight(server, body);
+      assert.equal(response.statusCode, 200, `${item.name}: ${response.body}`);
+      assert.equal(checked!.ready, true, `${item.name}: ${JSON.stringify(checked!.summary.blockers)}`);
+      assert.deepEqual(checked!.summary.blockers, [], item.name);
+      const capability = checked!.capabilities.find((entry) => entry.id === item.id)!;
+      assert.equal(capability.state, "informational", item.name);
+      assert.equal(capability.mandatory, false, item.name);
+      assert.match(capability.reason, item.reason, item.name);
+      const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+        payload: { ...body, requestId: "launch-1", preflightDigest: checked!.digest } });
+      assert.equal(admitted.statusCode, 201, `${item.name}: ${admitted.body}`);
+      const control = f.db.getSession(admitted.json().id)!.orchestratorPolicy!.control!;
+      if (control.mode !== "full_control") throw new Error("Full Control expected");
+      if (item.id === "native_review") {
+        assert.equal(checked!.summary.review.controlled, false, item.name);
+        assert.equal(checked!.summary.review.statement, "The regular cross-model review workflow, because controlled review is unavailable.");
+        assert.equal(checked!.summary.budget.reviewIncluded, false, item.name);
+        assert.equal(checked!.advanced.controlledReview, undefined, item.name);
+        assert.equal(control.boundary.budgetAuthority!.controlledReview, undefined, `${item.name}: no unusable reviewer enters the boundary`);
+      }
+      if (item.id === "accounting_budget") {
+        // What the summary promised holds at runtime: unpriced usage counts tool calls and never stops the campaign.
+        const rootId = admitted.json().id as string;
+        f.sessions.onSessionEvent(rootId, { kind: "token_usage", inputTokens: 100, outputTokens: 2, model: "claude-opus-5-5" });
+        f.sessions.onSessionEvent(rootId, { kind: "tool_call", toolCallId: "read", title: "Read", status: "completed" });
+        const view = f.db.campaignBudgets.view(rootId)!;
+        assert.deepEqual([view.state, view.costAccounting, view.actual.toolCalls], ["active", "unavailable", 1]);
+        assert.notEqual(f.db.getSession(rootId)!.status, "stopped");
+      }
+      assert.equal(f.starts.length, 1, item.name);
+    } finally { await server.close(); f.db.close(); }
+  }
+});
+
+test("with no budget the campaign launches unbounded and metered without reviving native review", async () => {
+  const f = fixture();
+  const { server } = await app(f);
   try {
-    const { preflight: checked } = await preflight(server, launch);
-    assert.match(checked!.capabilities.find((entry) => entry.id === "native_review")!.reason, /per-user daily limit/);
-    assert.equal(checked!.ready, false);
-  } finally { await server.close(); limited.db.close(); }
+    const body: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.deepEqual(checked!.summary.budget, { costUsd: null, toolCalls: null, concurrency: 4, acceptedFollowUps: 2, source: "unset", reviewIncluded: true });
+    const accounting = checked!.capabilities.find((item) => item.id === "accounting_budget")!;
+    assert.deepEqual([accounting.state, accounting.mandatory], ["verified", false]);
+    assert.equal(accounting.reason, "No limit. Managed workers are metered and priced, and Campaign Status shows the campaign's usage.");
+    assert.deepEqual(checked!.summary.blockers, []);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "unbounded", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const root = f.db.getSession(admitted.json().id)!;
+    const control = root.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    // No ceiling is absent, never a fake large amount.
+    assert.equal("costUsd" in control.boundary.budgetAuthority!, false);
+    assert.equal("toolCalls" in control.boundary.budgetAuthority!, false);
+    assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
+    const view = f.db.campaignBudgets.view(root.id)!;
+    assert.equal(view.state, "active");
+    assert.deepEqual(view.remaining, { costUsd: null, toolCalls: null });
+    assert.deepEqual(f.db.campaignBudgets.allocation(root.id), { sessionId: root.id }, "the root holds no allocation ceiling");
+    assert.equal(root.costBudgetUsd ?? null, null);
+    assert.equal(root.maxToolCalls ?? null, null);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, false);
+    assert.equal(f.starts.length, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an explicit ceiling, even on one amount, is the enforced campaign envelope", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const body: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session, budget: { costUsd: 15 } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.deepEqual([checked!.summary.budget.costUsd, checked!.summary.budget.toolCalls, checked!.summary.budget.source], [15, null, "override"]);
+    const accounting = checked!.capabilities.find((item) => item.id === "accounting_budget")!;
+    assert.deepEqual([accounting.state, accounting.mandatory], ["verified", true]);
+    assert.equal(accounting.reason, "Managed workers are metered and priced; the campaign is limited to $15.");
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "cost-only", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const root = f.db.getSession(admitted.json().id)!;
+    const control = root.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.equal(control.boundary.budgetAuthority!.costUsd, 15);
+    assert.equal("toolCalls" in control.boundary.budgetAuthority!, false);
+    const view = f.db.campaignBudgets.view(root.id)!;
+    assert.equal(view.remaining.toolCalls, null);
+    assert.ok(view.remaining.costUsd !== null && view.remaining.costUsd <= 15);
+    const allocation = f.db.campaignBudgets.allocation(root.id)!;
+    assert.ok(allocation.costUsd !== undefined && allocation.costUsd <= 15, "the root's allocation is bounded by the ceiling");
+    assert.equal(root.costBudgetUsd, allocation.costUsd);
+  } finally { await server.close(); f.db.close(); }
 });
 
 test("a non-Human caller, a changed digest and a stale runner generation are refused before any write", async () => {
@@ -245,7 +455,7 @@ test("a non-Human caller, a changed digest and a stale runner generation are ref
     assert.equal(stale.statusCode, 409);
     assert.match(stale.json().error, /preflight changed/);
     for (const payload of [{ ...launch, repository: "other/repo" }, { ...launch, overrides: { authorizedByUserId: "injected" } },
-      { runnerId: "r", workspaceId: "w" }, { ...launch, requestId: "x" }]) {
+      { runnerId: "r" }, { ...launch, requestId: "x" }]) {
       assert.equal((await preflight(server, payload as FullControlLaunchRequest)).response.statusCode, 400, JSON.stringify(payload));
     }
     assert.equal(sessionCount(f), 0);
@@ -253,18 +463,49 @@ test("a non-Human caller, a changed digest and a stale runner generation are ref
   } finally { await server.close(); f.db.close(); }
 });
 
-test("screenshots route to the Human when the Orchestrator model cannot review images, and the launch stays allowed", async () => {
+test("screenshots stay with the Orchestrator when its model cannot review images, which then asks or denies, and the launch stays allowed", async () => {
   const f = fixture({ images: false });
   const { server } = await app(f);
   try {
     const { preflight: checked } = await preflight(server, launch);
     assert.equal(checked!.ready, true);
     const image = checked!.capabilities.find((item) => item.id === "image_evidence")!;
-    assert.equal(image.state, "human_required");
+    assert.equal(image.state, "orchestrator_decides");
+    assert.match(image.reason, /It asks for inspectable evidence or denies the claim as unproven\.$/u);
     assert.equal(image.mandatory, false);
-    assert.equal(checked!.summary.evidence.provider, null);
+    assert.equal(checked!.summary.evidence.provider, null, "no image bytes are disclosed to a provider that cannot view them");
+    assert.equal(checked!.summary.evidence.statement,
+      "The Orchestrator decides UI evidence but can't view images, so it asks for inspectable evidence or denies the claim as unproven.");
+    assert.deepEqual(checked!.summary.humanRequired, []);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an authorization that leaves UI Evidence Approval out keeps all evidence with the Human", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, { ...launch, overrides: { ...launch.overrides, operations: ["implementation_question", "pr_merge"] } });
+    assert.deepEqual(checked!.capabilities.filter((item) => item.state === "human_required").map((item) => item.id),
+      ["image_evidence", "video_evidence", "external_evidence"]);
     assert.equal(checked!.summary.evidence.statement, "Screenshots, video and external evidence need your review.");
-    assert.ok(checked!.summary.humanRequired.some((item) => item.exception === "Screenshot Evidence Review"));
+    assert.deepEqual(checked!.summary.humanRequired.map((item) => item.exception),
+      ["Screenshot Evidence Review", "Video Evidence Review", "External Evidence Review"]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("only a rule a person marked Human Required is listed, and only while one is enabled", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired, []);
+    const rule = { policyId: "mine", name: "Mine", effect: "ask" as const, priority: 1, enabled: true, scope: { toolName: "Bash" },
+      conditions: { humanRequired: true } };
+    f.db.upsertGovernancePolicy(rule, Date.now());
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired.map((item) => item.exception), ["Human Required Governance Rules"]);
+    f.db.upsertGovernancePolicy({ ...rule, enabled: false }, Date.now());
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired, []);
+    f.db.upsertGovernancePolicy({ ...rule, conditions: undefined }, Date.now());
+    assert.deepEqual((await preflight(server, launch)).preflight!.summary.humanRequired, [], "an ordinary ask is the Orchestrator's");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -290,7 +531,125 @@ test("a peer declaring the private media contract gets the evidence envelope fro
   } finally { await server.close(); f.db.close(); }
 });
 
-test("Project child-session ceilings block controlled review, and a task alone launches with an empty issue scope", async () => {
+test("the hosting video composition flips no launch capability: uncertified video stays an Orchestrator ask-or-deny even with a paced peer and a live proof", async () => {
+  const plain = fixture({ pacedVideo: true });
+  const hosted = fixture({ pacedVideo: true, hostingVideo: true });
+  const video = hosted.video!;
+  const plainApp = await app(plain), hostedApp = await app(hosted);
+  try {
+    const before = video.readiness();
+    assert.equal(before.available ? "available" : before.code, "live_validation");
+    const peer = video.pacedPeers()[0]!;
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation: reviewerAttestation });
+    assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId)));
+    const readiness = video.readiness();
+    assert.equal(readiness.available ? "available" : readiness.code, "reviewer_unavailable",
+      "a recorded proof alone does not make video review available");
+    const [expected, checked] = [(await preflight(plainApp.server, launch)).preflight!, (await preflight(hostedApp.server, launch)).preflight!];
+    assert.deepEqual(checked.capabilities.map((item) => [item.id, item.state]), expected.capabilities.map((item) => [item.id, item.state]));
+    const videoCapability = checked.capabilities.find((item) => item.id === "video_evidence")!;
+    assert.equal(videoCapability.state, "orchestrator_decides");
+    assert.equal(videoCapability.reason, "The Orchestrator can't watch video yet, so it asks for screenshots or denies the claim as unproven.");
+    assert.ok(!checked.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
+    assert.equal(checked.summary.evidence.statement, expected.summary.evidence.statement);
+  } finally {
+    await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
+  }
+});
+
+test("a current live proof makes launch video review delegable only when the envelope names the certified reviewer", async () => {
+  const plain = fixture({ pacedVideo: true });
+  const hosted = fixture({ pacedVideo: true, hostingVideo: true, videoPort: true });
+  const video = hosted.video!;
+  const plainApp = await app(plain), hostedApp = await app(hosted);
+  const videoRow = (checked: CampaignLaunchPreflight) => checked.capabilities.find((item) => item.id === "video_evidence")!;
+  try {
+    const expected = (await preflight(plainApp.server, launch)).preflight!;
+    const unchanged = async () => {
+      const checked = (await preflight(hostedApp.server, launch)).preflight!;
+      assert.deepEqual(checked.capabilities, expected.capabilities, "without a current proof the preflight is exactly as before");
+      assert.deepEqual(checked.summary.evidence, expected.summary.evidence);
+      assert.deepEqual(checked.summary.humanRequired, expected.summary.humanRequired);
+    };
+    await unchanged();
+    const peer = video.pacedPeers()[0]!;
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation: reviewerAttestation });
+    // An expired proof is no certification.
+    assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId),
+      Date.now() - 31 * 24 * 60 * 60 * 1000));
+    await unchanged();
+    const proof = video.liveValidation.recordInspectedRuns(hosted.human, target, syntheticInspectedVideoRuns(target, hosted.human.userId))!;
+    assert.ok(proof);
+
+    const detached = (await preflight(hostedApp.server, launch)).preflight!;
+    assert.equal(videoRow(detached).state, "orchestrator_decides");
+    assert.equal(videoRow(detached).reason, "The Orchestrator can't watch video because Wollipog's video review service is not attached yet. It asks for screenshots or denies the claim as unproven.");
+    assert.ok(!detached.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
+
+    video.attach(hosted.sessions, hosted.hub);
+    const ready = (await preflight(hostedApp.server, launch)).preflight!;
+    assert.equal(videoRow(ready).state, "verified", videoRow(ready).reason);
+    assert.match(videoRow(ready).reason, /certified claude-code claude-opus-5-5 \(high effort\) media-only reviewer/u);
+    assert.ok(videoRow(ready).reason.includes(new Date(proof.expiresAt).toISOString()));
+    assert.ok(!ready.summary.humanRequired.some((item) => item.exception === "Video Evidence Review"));
+    assert.equal(ready.summary.evidence.statement,
+      "The Orchestrator reviews screenshots, and video through the certified media-only reviewer. For external evidence it asks for screenshots or denies the claim as unproven.");
+    assert.equal(ready.summary.evidence.envelope, true);
+    assert.equal(ready.ready, true);
+    // Delegable video changes no other capability.
+    assert.deepEqual(ready.capabilities.filter((item) => item.id !== "video_evidence"),
+      expected.capabilities.filter((item) => item.id !== "video_evidence"));
+
+    const sonnet = { ...launch, overrides: { ...launch.overrides, session: { ...launch.overrides!.session,
+      config: { model: "claude-sonnet-5-5", permissionMode: "orchestrator" as const } } } };
+    assert.equal(videoRow((await preflight(hostedApp.server, sonnet)).preflight!).reason,
+      "The Orchestrator can't watch video because the evidence envelope would name claude-code claude-sonnet-5-5, not the certified claude-code claude-opus-5-5 reviewer. It asks for screenshots or denies the claim as unproven.");
+    const humanEvidence = { ...launch, overrides: { ...launch.overrides, operations: ["implementation_question" as const, "pr_merge" as const] } };
+    assert.equal(videoRow((await preflight(hostedApp.server, humanEvidence)).preflight!).reason,
+      "Video evidence needs your review because UI evidence approval is not part of this campaign's authorization.");
+    const unbudgeted = { ...launch, overrides: { ...launch.overrides, budget: undefined } };
+    assert.equal(videoRow((await preflight(hostedApp.server, unbudgeted)).preflight!).state, "verified", "no limit never blocks the envelope");
+    const blocked = { ...launch, overrides: { ...launch.overrides, delegatablePolicyIds: ["missing"] } };
+    assert.equal(videoRow((await preflight(hostedApp.server, blocked)).preflight!).reason,
+      "The Orchestrator can't watch video because the launch is blocked, so no evidence envelope is minted. It asks for screenshots or denies the claim as unproven.");
+  } finally {
+    await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
+  }
+});
+
+test("a revoked proof or a changed attestation returns launch video review to the uncertified Orchestrator path, never the Human", async () => {
+  const plain = fixture({ pacedVideo: true });
+  const hosted = fixture({ pacedVideo: true, hostingVideo: true, videoPort: true });
+  const video = hosted.video!;
+  video.attach(hosted.sessions, hosted.hub);
+  const plainApp = await app(plain), hostedApp = await app(hosted);
+  const videoState = async () => (await preflight(hostedApp.server, launch)).preflight!.capabilities.find((item) => item.id === "video_evidence")!.state;
+  try {
+    const peer = video.pacedPeers()[0]!;
+    const target = syntheticVideoReviewerTarget({ ...peer, modelId: "claude-opus-5-5", attestation: reviewerAttestation });
+    const runs = () => syntheticInspectedVideoRuns(target, hosted.human.userId);
+    const proof = video.liveValidation.recordInspectedRuns(hosted.human, target, runs())!;
+    assert.equal(await videoState(), "verified");
+    assert.ok(video.liveValidation.revoke(hosted.human, proof.proofId));
+    const [expected, checked] = [(await preflight(plainApp.server, launch)).preflight!, (await preflight(hostedApp.server, launch)).preflight!];
+    assert.deepEqual(checked.capabilities, expected.capabilities);
+    assert.deepEqual(checked.summary.evidence, expected.summary.evidence);
+
+    assert.ok(video.liveValidation.recordInspectedRuns(hosted.human, target, runs()));
+    assert.equal(await videoState(), "verified");
+    // The runner re-registers with a different attestation: the proof no longer certifies it.
+    const runner = hosted.db.getRunner("r")!;
+    hosted.db.registerRunner({ runnerId: runner.runnerId, hostname: "fixture", os: "linux", version: "test", workspaces: runner.workspaces,
+      agents: runner.agents.map((agent) => ({ ...agent, capabilities: { ...agent.capabilities!,
+        mediaReviewerAttestation: syntheticMediaReviewerAttestation("claude", "changed") } })), runtime: runner.runtime } as never,
+    Date.now(), PROTOCOL_VERSION);
+    assert.equal(await videoState(), "orchestrator_decides");
+  } finally {
+    await plainApp.server.close(); await hostedApp.server.close(); plain.db.close(); hosted.db.close();
+  }
+});
+
+test("Project child-session ceilings route review to the regular workflow, and a task alone launches with an empty issue scope", async () => {
   const f = fixture();
   const organizationScope = { organizationId: f.human.organizationId, owner: { kind: "organization" as const, organizationId: f.human.organizationId } };
   const project = f.db.createProject({ name: "Fixture", scope: organizationScope });
@@ -300,11 +659,14 @@ test("Project child-session ceilings block controlled review, and a task alone l
   try {
     const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", projectId: project.id, task: "Investigate flaky tests",
       overrides: { session: { config: { model: "claude-opus-5-5", permissionMode: "orchestrator" } }, budget: { costUsd: 10, toolCalls: 100 } } };
-    const blocked = await preflight(server, body);
-    assert.equal(blocked.response.statusCode, 200, blocked.response.body);
-    assert.equal(blocked.preflight!.ready, false);
-    assert.match(blocked.preflight!.capabilities.find((item) => item.id === "native_review")!.reason, /child-session defaults/);
-    assert.equal(blocked.preflight!.summary.budget.source, "override", "saved per-session limits never become the campaign envelope");
+    const regular = await preflight(server, body);
+    assert.equal(regular.response.statusCode, 200, regular.response.body);
+    assert.equal(regular.preflight!.ready, true, "Project defaults only change which review the campaign uses");
+    const native = regular.preflight!.capabilities.find((item) => item.id === "native_review")!;
+    assert.equal(native.state, "informational");
+    assert.match(native.reason, /child-session defaults/);
+    assert.equal(regular.preflight!.summary.budget.reviewIncluded, false);
+    assert.equal(regular.preflight!.summary.budget.source, "override", "saved per-session limits never become the campaign envelope");
 
     f.db.updateProject(project.id, { childSessionDefaults: null });
     const { response, preflight: checked } = await preflight(server, body);
@@ -327,7 +689,7 @@ test("Project child-session ceilings block controlled review, and a task alone l
       projectLocationId: location.id, agentId: "claude" });
     assert.ok(ordinary.ok);
     assert.deepEqual(ordinary.scope, organizationScope);
-    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, true);
+    assert.equal(f.db.campaignProjection(root.id)!.budget!.requiredNativeReview!.supported, false);
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -480,8 +842,8 @@ test("a cancelled caller stops only its own inspection, and older runners report
   f.state.inspect = () => null;
   const runner = f.db.getRunner("r")!;
   const caller = new AbortController();
-  const pending = inspectCampaignWorkspace(f.hub, runner, "w", [1, 2, 3], caller.signal, 60_000);
-  const other = inspectCampaignWorkspace(f.hub, runner, "w", [4], new AbortController().signal, 60_000);
+  const pending = inspectCampaignWorkspace(f.hub, runner, "w", [1, 2, 3], caller.signal, 60_000, "/fixture/repository");
+  const other = inspectCampaignWorkspace(f.hub, runner, "w", [4], new AbortController().signal, 60_000, "/fixture/repository");
   const [mine, theirs] = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<{ requestId: string }>;
   caller.abort();
   assert.equal(await pending, undefined);
@@ -503,7 +865,7 @@ test("a cancelled caller stops only its own inspection, and older runners report
     assert.equal(legacy.sent.filter((message) => message.type === "campaign_launch_inspect_cancel").length, 0,
       "a version-1 runner is never sent a message it cannot parse");
     const taskOnly = await preflight(server, { runnerId: "r", workspaceId: "w", task: "No issues" });
-    assert.match(taskOnly.preflight!.capabilities.find((item) => item.id === "repository_scope")!.reason, /select issue numbers or update the runner/);
+    assert.match(taskOnly.preflight!.capabilities.find((item) => item.id === "repository_scope")!.reason, /update the runner/);
   } finally { await server.close(); legacy.db.close(); }
 });
 
@@ -603,8 +965,8 @@ test("the saved Full Control budget becomes the launch envelope, an override rep
     const plain: FullControlLaunchRequest = { ...launch, overrides: { session: launch.overrides!.session } };
     const unset = await preflight(server, plain);
     assert.equal(unset.preflight!.summary.budget.source, "unset");
-    assert.equal(unset.preflight!.capabilities.find((item) => item.id === "accounting_budget")!.reason,
-      "No campaign budget yet: enter a cost limit and a tool-call limit.");
+    assert.equal(unset.preflight!.ready, true, "no budget means no limit, never a launch blocker");
+    assert.match(unset.preflight!.capabilities.find((item) => item.id === "accounting_budget")!.reason, /^No limit\./);
     saveBudget(f, savedBudget);
     const saved = await preflight(server, plain);
     assert.equal(saved.preflight!.ready, true, JSON.stringify(saved.preflight!.summary.blockers));
@@ -684,6 +1046,7 @@ test("an existing campaign enables Full Control through one exact reviewed autho
     assert.equal(control.boundary.authorizedByUserId, f.human.userId);
     assert.deepEqual([control.boundary.budgetAuthority!.costUsd, control.boundary.budgetAuthority!.toolCalls], [30, 300]);
     assert.deepEqual(control.boundary.budgetAuthority!.controlledReview, review);
+    // Review round extensions included, within their per-pull-request cap (#4075).
     for (const category of WORKFLOW_DECISION_CATEGORIES) {
       assert.equal(f.db.campaignProjection(rootId)!.decisionOwners[category], "orchestrator", category);
     }
@@ -695,18 +1058,20 @@ test("an existing campaign enables Full Control through one exact reviewed autho
   } finally { await server.close(); f.db.close(); }
 });
 
-test("enabling an existing campaign is blocked by another person's scope, participant ceilings and a missing budget", async () => {
+test("enabling an existing campaign is blocked only by another person's scope; participant ceilings and no budget are informational", async () => {
   const f = fixture();
   const { server } = await app(f);
   const check = async (id: string, payload: object = {}) => (await server.inject({ method: "POST",
     url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload })).json().preflight as CampaignLaunchPreflight;
   try {
     const foreign = customCampaign(f, "foreign-root", "someone-else");
-    assert.equal((await check(foreign, { overrides: { budget: savedBudget } })).capabilities.find((item) => item.id === "repository_scope")!.reason,
+    const refused = await check(foreign, { overrides: { budget: savedBudget } });
+    assert.equal(refused.ready, false);
+    assert.equal(refused.capabilities.find((item) => item.id === "repository_scope")!.reason,
       "Only the person who established this campaign's issue scope can enable Full Control for it.");
     const rootId = customCampaign(f);
     const unbudgeted = await check(rootId);
-    assert.equal(unbudgeted.ready, false);
+    assert.equal(unbudgeted.ready, true, JSON.stringify(unbudgeted.summary.blockers));
     assert.equal(unbudgeted.summary.budget.source, "unset");
     assert.equal(unbudgeted.capabilities.find((item) => item.id === "native_review")!.state, "verified");
     f.db.createSession({ id: "limited-child", parentSessionId: rootId, runnerId: "r", workspaceId: "w", agentId: "claude", title: "child",
@@ -714,12 +1079,926 @@ test("enabling an existing campaign is blocked by another person's scope, partic
     f.db.updateSessionStatus("limited-child", "running", 4);
     f.db.updateSessionCostBudget("limited-child", 5, 4);
     const limited = await check(rootId, { overrides: { budget: savedBudget } });
-    assert.equal(limited.ready, false);
+    assert.equal(limited.ready, true, "a participant's own limit only routes review to the regular workflow");
+    assert.equal(limited.capabilities.find((item) => item.id === "native_review")!.state, "informational");
     assert.match(limited.capabilities.find((item) => item.id === "native_review")!.reason, /limits some of this campaign's sessions already hold/);
+    assert.equal(limited.summary.review.controlled, false);
     f.db.updateSessionStatus("limited-child", "completed", 5);
-    assert.equal((await check(rootId, { overrides: { budget: savedBudget } })).ready, true, "a finished participant no longer blocks");
+    assert.equal((await check(rootId, { overrides: { budget: savedBudget } })).summary.review.controlled, true,
+      "a finished participant no longer holds the campaign to the regular workflow");
+    // Enabling with no budget and a participant ceiling admits Full Control with no controlled reviewer.
+    f.db.updateSessionStatus("limited-child", "running", 6);
+    const { preflight: plain, expectedRevision } = (await server.inject({ method: "POST",
+      url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} })).json() as
+      { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: plain.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const control = f.db.getSession(rootId)!.orchestratorPolicy!.control!;
+    if (control.mode !== "full_control") throw new Error("Full Control expected");
+    assert.equal(control.boundary.budgetAuthority!.controlledReview, undefined);
+    assert.equal("costUsd" in control.boundary.budgetAuthority!, false);
     assert.equal((await server.inject({ method: "POST", url: `/api/sessions/${rootId}/orchestrator-campaign/full-control/preflight`,
       headers: { authorization: "Bearer human" }, payload: { overrides: { session: { agentId: "claude" } } } })).statusCode, 400,
       "an existing root's harness cannot be overridden");
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** A launch's first-message wait when every limit was derived (no Human override). */
+const PENDING = { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: true } };
+
+/** A launch with no task, as New Session sends it: the root starts idle like any Orchestrator. */
+async function firstMessageLaunch(f: ReturnType<typeof fixture>, server: Awaited<ReturnType<typeof app>>["server"],
+  limits: Pick<NonNullable<FullControlLaunchRequest["overrides"]>, "budget" | "issues"> = {}) {
+  const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+    config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "execute_approved" } } }, ...limits } };
+  const { preflight: checked } = await preflight(server, body);
+  assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+  const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+    payload: { ...body, requestId: `first-${sessionCount(f)}`, preflightDigest: checked!.digest } });
+  assert.equal(admitted.statusCode, 201, admitted.body);
+  const id = admitted.json().id as string;
+  f.db.updateSessionStatus(id, "idle", Date.now());
+  return { id, checked: checked! };
+}
+
+const boundaryOf = (f: ReturnType<typeof fixture>, id: string) => {
+  const control = f.db.getSession(id)!.orchestratorPolicy!.control!;
+  if (control.mode !== "full_control") throw new Error("Full Control expected");
+  return control.boundary;
+};
+
+test("a Full Control launch with no task starts idle, and its owner's first message sets the objective and same-repository issues before the first turn", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id, checked } = await firstMessageLaunch(f, server);
+    assert.equal(checked.summary.objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+    assert.deepEqual(checked.summary.issueNumbers, []);
+    assert.equal(f.starts.length, 1);
+    const start = f.starts[0] as Extract<ControlPlaneToRunner, { type: "start_session" }>;
+    assert.equal(start.initialPrompt, undefined, "no turn starts before the person's first message");
+    let root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, PENDING);
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(boundaryOf(f, id).objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+
+    // Nothing an agent sends reaches the campaign, or sets its scope, before the owner's message.
+    const agent = await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 7");
+    assert.equal(agent.ok, false);
+    assert.equal(agent.status, 409);
+    assert.match(agent.error!, /owner's first message/u);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session" || message.type === "durable_session_command").length, 0);
+
+    f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
+    // Only references the message asks the campaign to act on become scope (#3920): background and
+    // negated ones are verified the same way and kept as context, with no authority.
+    const text = "Ship #12 and owner/repo#7.\nAlso fix https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
+      "https://github.com/owner/repo/pull/8 or https://github.com/other/repo/issues/6; #3 was the earlier pull request.\n" +
+      "See #20 for background, and don't touch #21 (another campaign has it).";
+    const before = f.sent.length;
+    const result = await f.sessions.promptFromHuman(f.human, id, text);
+    assert.equal(result.ok, true, result.error ?? "the first message was delivered");
+    root = f.db.getSession(id)!;
+    const policy = root.orchestratorPolicy!;
+    assert.deepEqual(policy.issueScope, { repository: "owner/repo", issueNumbers: [7, 9, 12], revision: 2,
+      authorizedByUserId: f.human.userId, authorizedAt: policy.issueScope!.authorizedAt });
+    assert.deepEqual(policy.issueNumbers, [7, 9, 12]);
+    assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(text),
+      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [20, 21] });
+    const boundary = boundaryOf(f, id);
+    assert.equal(boundary.objective, firstMessageObjective(text));
+    assert.doesNotMatch(boundary.objective, /\n/u);
+    assert.equal(boundary.revision, 2);
+    assert.equal(root.parentControlPolicy!.revision, 2);
+    assert.equal(boundary.issueScopeRevision, 2);
+    assert.equal(boundary.authorizedByUserId, f.human.userId);
+    assert.deepEqual(boundary.issueAuthority!.epics, [7, 9, 12]);
+    assert.equal(boundary.budgetAuthority!.acceptedFollowUps, 3);
+    assert.ok(boundary.issueAuthority!.maxIssues >= 3 + boundary.budgetAuthority!.acceptedFollowUps);
+    assert.equal(campaignBoundaryCurrent(root), true);
+    assert.equal(f.db.campaignBudgets.view(id)!.state, "active");
+    // The runner holds the new scope and boundary before the message reaches the Orchestrator.
+    const after = f.sent.slice(before);
+    const sync = after.findIndex((message) => message.type === "campaign_issue_scope" && message.operation === "synchronize");
+    // The first message is admitted through the durable queue under its own delivery id.
+    const prompt = after.findIndex((message) => message.type === "durable_session_command" && message.command.type === "prompt_session");
+    assert.ok(sync >= 0 && prompt > sync, after.map((message) => message.type).join(","));
+    const synced = after[sync] as Extract<ControlPlaneToRunner, { type: "campaign_issue_scope"; operation: "synchronize" }>;
+    assert.equal(synced.scope.revision, 2);
+    assert.deepEqual(synced.control, policy.control);
+    const durable = after[prompt] as Extract<ControlPlaneToRunner, { type: "durable_session_command" }>;
+    assert.equal((durable.command as Extract<typeof durable.command, { type: "prompt_session" }>).text, text);
+    assert.equal(durable.commandId, (policy.firstMessageScope as { deliveryId?: string }).deliveryId ?? durable.commandId);
+    assert.match(durable.commandId, /^first_message_/u);
+
+    // Later messages, the owner's or an agent's, never change the scope the first one set.
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Also take #40.")).ok, true);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 41 and 42")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [7, 9, 12]);
+    assert.equal(boundaryOf(f, id).revision, 2);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message's background reference gets no scope or epic; Campaign Status shows it as context, and scope review promotes or removes (#3920)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    // The shape of a real launch: the targets follow "fix ...:", and one more issue appears only in a
+    // parenthetical citation that explains a command-guard behavior.
+    const text = "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #31, #32 and #33. " +
+      "Each issue specifies its acceptance criteria. Commands: the command guard refuses heredocs and pipelines that name " +
+      "the state directory (#90). The acceptance test for #91 is handled elsewhere.";
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    let root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 33]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31, 32, 33], "a cited issue is never an authorized epic");
+    assert.equal(campaignBoundaryCurrent(root), true);
+    const view = await f.sessions.campaignIssueScope(id);
+    assert.equal(view.ok, true, view.error ?? "");
+    assert.deepEqual(view.data!.issueNumbers, [31, 32, 33]);
+    assert.deepEqual(view.data!.contextIssueNumbers, [90, 91], "Campaign Status shows the derived scope beside the context-only references");
+
+    // The owner promotes a context reference and removes a derived issue through the existing scope review.
+    const proposed = await f.sessions.proposeCampaignIssueScope(id, { requestId: "promote-and-remove", expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 90 }], removals: [{ repository: "owner/repo", number: 33 }],
+      explanation: "Promote a context reference and remove a derived issue" }, () => true, f.human);
+    assert.equal(proposed.ok, true, proposed.error ?? "");
+    assert.equal(proposed.data!.authority, "human");
+    const approved = f.sessions.resolveWorkflowDecision(id, id, proposed.data!.occurrenceId, { outcome: "approve" }, "human",
+      { kind: "human", id: f.human.userId }, () => true);
+    assert.equal(approved.ok, true, approved.error ?? "");
+    root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 90]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31, 32], "a removed issue is no longer an epic; a promoted one is scope only");
+    assert.equal(campaignBoundaryCurrent(root), true);
+    assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.contextIssueNumbers, [91]);
+
+    // An epic removed from scope can no longer seed lineage additions.
+    const lineage = await f.sessions.proposeCampaignIssueScope(id, { requestId: "removed-epic-lineage", expectedRevision: 3,
+      additions: [{ repository: "owner/repo", number: 34 }], removals: [], explanation: "Member of a removed epic", lineage: { kind: "epic", epic: 33 } });
+    assert.equal(lineage.ok, false);
+    assert.equal(lineage.status, 403);
+    assert.equal(lineage.errorDetails?.code, "epic_not_authorized");
+
+    // The Orchestrator's own removal narrows the epics too.
+    const removal = await f.sessions.proposeCampaignIssueScope(id, { requestId: "orchestrator-removal", expectedRevision: 3,
+      additions: [], removals: [{ repository: "owner/repo", number: 32 }], explanation: "Drop a finished target" });
+    assert.equal(removal.ok, true, removal.error ?? "");
+    assert.equal(removal.data!.authority, "orchestrator");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, removal.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, true);
+    root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 90]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [31]);
+    assert.equal(campaignBoundaryCurrent(root), true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message's range scopes each verified issue, and a derived limit leaves room to add its target epic's members (#4061)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.issues.epics.set(40, [41, 42, 43, 44, 45, 46, 47, 48]);
+    const text = "Implement epic #40 in owner/repo: units #41–#42. Close #40 when all its units have merged.";
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42]);
+    // Three scoped issues, six verified members outside them and three derived follow-ups.
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 12);
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 3, "members never add follow-ups");
+    const members = [43, 44, 45, 46, 47, 48].map((number) => ({ repository: "owner/repo", number }));
+    const added = await f.sessions.proposeCampaignIssueScope(id, { requestId: "epic-members", expectedRevision: 2,
+      additions: members, removals: [], explanation: "Add the epic's remaining units", lineage: { kind: "epic", epic: 40 } });
+    assert.equal(added.ok, true, added.error ?? "");
+    assert.equal(added.data!.authority, "orchestrator");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, added.data!.occurrenceId, { outcome: "approve" }, "orchestrator",
+      { kind: "agent", id }, () => true).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42, 43, 44, 45, 46, 47, 48]);
+
+    // An explicit Maximum Issues never grows; the refusal names the limit and the owner's route to raise it.
+    const { id: capped } = await firstMessageLaunch(f, server, { issues: { maxIssues: 3 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, capped, text)).ok, true);
+    assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [40, 41, 42]);
+    assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 3);
+    const refused = await f.sessions.proposeCampaignIssueScope(capped, { requestId: "epic-members-capped", expectedRevision: 2,
+      additions: members, removals: [], explanation: "Add the epic's remaining units", lineage: { kind: "epic", epic: 40 } });
+    assert.equal(refused.ok, false);
+    assert.equal(refused.status, 409);
+    assert.deepEqual(refused.errorDetails, { code: "capacity_exhausted", limit: 3, requested: 9 });
+    assert.match(refused.error ?? "", /Maximum Issues/u);
+    assert.match(refused.error ?? "", /Only the person who authorized Full Control can raise it: in Campaign Status, raise the Follow-Up Limit/u);
+
+    // An issue in a range that is not an issue of the repository drops out like any unverified reference.
+    f.issues.notIssues.add(52);
+    const { id: ranged } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, ranged, "Fix #51 through #54. See #55..#56.")).ok, true);
+    assert.deepEqual(f.db.getSession(ranged)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 53, 54]);
+    assert.deepEqual((await f.sessions.campaignIssueScope(ranged)).data!.contextIssueNumbers, [55, 56]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("only the launching person's text message establishes the boundary; no references keep it task-only; an undelivered one reopens the wait", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const other: HumanPrincipal = { ...f.human, userId: "someone-else", actorId: "someone-else" };
+    assert.equal((await f.sessions.promptFromHuman(other, id, "Ship #12")).status, 403);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "", [], "compact")).status, 409, "a slash command is not the task");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+
+    // The message cannot be admitted: the boundary it set waits for the next first message.
+    const stage = outboxOf(f).stage.bind(outboxOf(f));
+    outboxOf(f).stage = () => { throw new Error("not persisted"); };
+    const dropped = await f.sessions.promptFromHuman(f.human, id, "Tidy the docs");
+    assert.equal(dropped.ok, false);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+    outboxOf(f).stage = stage;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+
+    // An unreadable origin verifies no reference, so the scope stays task-only.
+    f.issues.repository = null;
+    const text = "Tidy the README, as #12 asked.";
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
+    const root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(root.orchestratorPolicy!.issueScope!.revision, 3);
+    assert.equal(boundaryOf(f, id).objective, text);
+    assert.equal(boundaryOf(f, id).revision, 3);
+    assert.equal(campaignBoundaryCurrent(root), true);
+    assert.equal((root.orchestratorPolicy!.firstMessageScope as { messageDigest: string }).messageDigest, firstMessageDigest(text));
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("revoking a campaign that waits for its first message restores Custom: no message can set its scope", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const revoked = f.sessions.setCampaignControl(id, { mode: "custom" }, f.db.getSession(id)!.parentControlPolicy!.revision, f.human);
+    assert.equal(revoked.ok, true, revoked.error ?? "Revoke succeeded");
+    // Revoke stops the launch's allowance, and the campaign runs under Custom rules (#2940): its
+    // messages are admitted, but the first-message wait no longer applies, so none sets its scope.
+    assert.equal(f.db.campaignBudgets.view(id)!.state, "revoked");
+    for (const sent of [await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 7"),
+      await f.sessions.promptFromHuman(f.human, id, "Orchestrate issues 12 and 7")]) {
+      assert.equal(sent.ok, true, sent.error ?? "admitted under Custom");
+    }
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.control!.mode, "custom");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enabling Full Control on a campaign with no issue scope derives it from its repository and recorded request, or waits for a first message", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const enable = async (id: string) => {
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    return reviewed;
+  };
+  const unscoped = (id: string) => {
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    delete policy.issueScope; delete policy.issueNumbers;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+  };
+  try {
+    const messaged = customCampaign(f, "messaged-root");
+    unscoped(messaged);
+    // The owner's launch request recorded #12 and #44 (#44 is not an issue). The transcript records
+    // no author, so its references (here #7, as an agent could have sent) are never scope.
+    const recorded = f.db.getSession(messaged)!.orchestratorPolicy!;
+    recorded.issueNumbers = [12, 44];
+    recorded.issueNumbersSource = "human_launch_request";
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(recorded), messaged);
+    f.db.appendEvent(messaged, { kind: "user_message", text: "Fix #7 in this repository." }, Date.now());
+    f.issues.notIssues.add(44);
+    const reviewed = await enable(messaged);
+    assert.equal(reviewed.capabilities.find((item) => item.id === "repository_scope")!.reason,
+      "This campaign's Human-established scope is owner/repo with issues #12.");
+    let root = f.db.getSession(messaged)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope, { repository: "owner/repo", issueNumbers: [12], revision: 1,
+      authorizedByUserId: f.human.userId, authorizedAt: root.orchestratorPolicy!.issueScope!.authorizedAt });
+    assert.equal(boundaryOf(f, messaged).objective, "Deliver #12");
+    assert.equal(root.orchestratorPolicy!.firstMessageScope, undefined);
+    assert.equal(campaignBoundaryCurrent(root), true);
+
+    const silent = customCampaign(f, "silent-root");
+    unscoped(silent);
+    await enable(silent);
+    root = f.db.getSession(silent)!;
+    assert.deepEqual(root.orchestratorPolicy!.firstMessageScope, PENDING);
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, []);
+    assert.equal(boundaryOf(f, silent).objective, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE);
+    f.db.updateSessionStatus(silent, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, silent, "Deliver #12 end to end")).ok, true);
+    assert.deepEqual(f.db.getSession(silent)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(boundaryOf(f, silent).objective, "Deliver #12 end to end");
+
+    // An unverifiable repository is the one thing that blocks, with the fix in its reason.
+    const unverified = customCampaign(f, "unverified-root");
+    unscoped(unverified);
+    f.issues.repository = null;
+    const blocked = (await server.inject({ method: "POST", url: `/api/sessions/${unverified}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} })).json().preflight as CampaignLaunchPreflight;
+    assert.equal(blocked.ready, false);
+    assert.match(blocked.summary.blockers[0]!.reason, /could not verify this campaign's repository/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("Full Control never inherits Custom per-decision owners: with every toggle Human, launch and enable both give the Orchestrator all five", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const FIVE = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval"] as const;
+  const humanToggles = Object.fromEntries(FIVE.map((category) => [category, "human" as const]));
+  const assertOrchestratorOwnsFive = (id: string) => {
+    const root = f.db.getSession(id)!;
+    for (const category of FIVE) {
+      assert.equal(root.parentControlPolicy!.decisions[category], "human", `${category}'s Custom toggle is Human`);
+      assert.equal(f.db.campaignProjection(id)!.decisionOwners[category], "orchestrator", `${category} is the boundary's`);
+    }
+    const asked = f.sessions.createWorkflowDecision(id, { requestId: `q-${id}`, resourceKey: `q-${id}`, resourceSnapshot: {
+      category: "implementation_question", question: "Which parser should the campaign use?",
+      options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
+    assert.equal(asked.ok, true, asked.error ?? "the decision was requested");
+    assert.equal(asked.data!.authority, "orchestrator");
+  };
+  try {
+    // Launch: the session's Custom toggles say Human for every gate.
+    const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+      orchestrator: { delegation: { decisions: humanToggles } } } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "human-toggles", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const launched = admitted.json().id as string;
+    f.db.updateSessionStatus(launched, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, launched, "Deliver #12")).ok, true);
+    assertOrchestratorOwnsFive(launched);
+
+    // Enable: a Custom campaign whose saved owners are all Human.
+    const custom = customCampaign(f, "human-toggle-root");
+    const { preflight: reviewed, expectedRevision } = (await server.inject({ method: "POST",
+      url: `/api/sessions/${custom}/orchestrator-campaign/full-control/preflight`, headers: { authorization: "Bearer human" }, payload: {} })).json() as
+      { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${custom}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    assertOrchestratorOwnsFive(custom);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("explicit launch ceilings survive the first message: 0 follow-ups and 1 issue stay 0 and 1 (CR-1.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server, { budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+      { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: false } });
+    const before = boundaryOf(f, id);
+    assert.equal(before.budgetAuthority!.acceptedFollowUps, 0);
+    assert.equal(before.issueAuthority!.maxIssues, 1);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12")).ok, true);
+    const after = boundaryOf(f, id);
+    assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "an explicit follow-up ceiling never grows");
+    assert.equal(after.issueAuthority!.maxIssues, 1, "an explicit issue ceiling never grows");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "the campaign allowance keeps the ceiling");
+
+    // More references than the explicit Maximum Issues: the scope keeps only what the ceiling allows.
+    const { id: capped } = await firstMessageLaunch(f, server, { issues: { maxIssues: 1 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, capped, "Fix #12 and #13")).ok, true);
+    assert.deepEqual(f.db.getSession(capped)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(boundaryOf(f, capped).issueAuthority!.maxIssues, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a follow-up limit the person sets before the first message survives it: 0 stays 0 and No Limit stays omitted (#2940)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    for (const limit of [0, null] as const) {
+      // A taskless launch derives its follow-up limit until the person sets one.
+      const { id } = await firstMessageLaunch(f, server);
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+        { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: true } });
+      const edited = f.sessions.setCampaignFollowUpLimit(id,
+        { acceptedFollowUps: limit, expectedRevision: f.db.parentControlPolicy(id)!.revision }, f.human);
+      assert.equal(edited.ok, true, edited.error ?? "");
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+        { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: true } }, "the person's limit is explicit now");
+      assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+      const after = boundaryOf(f, id);
+      assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+      if (limit === null) {
+        assert.equal("acceptedFollowUps" in after.budgetAuthority!, false, "No Limit stays omitted, never a derived number");
+        assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, undefined);
+        assert.equal(after.issueAuthority!.maxIssues, 100, "with no follow-up limit the derived issue limit reaches its ceiling");
+      } else {
+        assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "an explicit 0 is not replaced by the derived count");
+        assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0);
+      }
+    }
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enable never trusts issue numbers a restart backfilled from an automation's first message (CR-1.2)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // An unscoped Human-created Custom root whose first transcript message an automation wrote.
+    const id = customCampaign(f, "backfilled-root");
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    delete policy.issueScope; delete policy.issueNumbers;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    f.db.appendEvent(id, { kind: "user_message", text: "Orchestrate issues 12 and 13" }, Date.now());
+    f.sessions.restart(id);
+    const backfilled = f.db.getSession(id)!.orchestratorPolicy!;
+    assert.deepEqual(backfilled.issueNumbers, [12, 13], "the restart backfill read the transcript");
+    assert.equal(backfilled.issueNumbersSource, undefined, "and recorded no Human launch provenance");
+    f.db.updateSessionStatus(id, "running", Date.now());
+
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.equal(reviewed.summary.objective, "Deliver #12", "a campaign with history keeps its existing task");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const root = f.db.getSession(id)!;
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [], "neither backfilled issue becomes scope");
+    assert.equal(root.orchestratorPolicy!.firstMessageScope, undefined, "a campaign with history is established at once, task-only");
+    assert.equal(campaignBoundaryCurrent(root), true);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Human create request marks its parsed issues as launch provenance; an agent-created root's never are (CR-1.2)", () => {
+  const f = fixture();
+  try {
+    const human = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+      prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope, false, false, false, { defaultOwnerUserId: f.human.userId });
+    assert.equal(human.ok, true, human.error ?? "the Human root was created");
+    assert.deepEqual(human.data!.orchestratorPolicy!.issueNumbers, [12, 7]);
+    assert.equal(human.data!.orchestratorPolicy!.issueNumbersSource, "human_launch_request");
+    const system = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+      prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope);
+    assert.equal(system.ok, true, system.error ?? "the system root was created");
+    assert.equal(system.data!.orchestratorPolicy!.issueNumbersSource, undefined);
+  } finally { f.db.close(); }
+});
+
+test("provider commands and direct steering wait for the owner's first message, including while it is being delivered (CR-1.3)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const command = { submissionId: "cmd-1", providerCommandId: "claude:review", catalogRevision: "rev-1", argumentText: "the repo" };
+    const refused = (result: { ok: boolean; status?: number; error?: string }) => {
+      assert.equal(result.ok, false);
+      assert.equal(result.status, 409);
+      assert.match(result.error!, /owner's first message/u);
+    };
+    const sentBefore = f.sent.length;
+    refused(f.sessions.invokeSessionCommand(id, command));
+    refused(await f.sessions.steer(id, { submissionId: "steer-1", turnId: "turn-1", text: "Do this instead" }));
+    assert.equal(f.sent.length, sentBefore, "nothing reaches the runner");
+    assert.equal(f.db.getSessionCommandInvocationBySubmission(id, "cmd-1"), null, "and nothing is staged");
+
+    // While the first message is being delivered (its runner synchronization held), the fence stays.
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const delivering = f.sessions.promptFromHuman(f.human, id, "Ship #12");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering");
+    refused(f.sessions.invokeSessionCommand(id, { ...command, submissionId: "cmd-2" }));
+    refused(await f.sessions.promptOrSteer(id, "Orchestrate issues 40 and 41"));
+    release();
+    assert.equal((await delivering).ok, true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a control-plane restart mid-delivery keeps the owner-only fence and never resends the first message (CR-1.4)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const text = "Ship #12 end to end";
+    void f.sessions.promptFromHuman(f.human, id, text);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    assert.equal(delivering.state, "delivering", "the wait is durably fenced before admission");
+    if (delivering.state !== "delivering") throw new Error("delivering expected");
+    assert.equal(delivering.messageDigest, firstMessageDigest(text));
+    assert.match(delivering.deliveryId, /^first_message_[a-f0-9-]{36}$/u);
+
+    // The process dies before admission; nothing it still holds can admit the message.
+    outboxOf(f).stage = () => { throw new Error("this process is gone"); };
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "an unadmitted message reopens the wait, still fenced");
+    assert.equal((await restarted.promptOrSteer(id, "Orchestrate issues 40 and 41")).status, 409, "an automation prompt is still refused");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "the dead process cannot settle it");
+    assert.equal(durableSends(f, id), 0, "the first message was never resent");
+    f.issues.holdSync = null;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await restarted.promptFromHuman(f.human, id, text)).ok, true, "the owner sends it again");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    assert.equal(durableSends(f, id), 1, "delivered exactly once");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("recovery delivers the exact first-message command before older held work, once, and settles on its acknowledgement (CR-3.2, CR-4.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // Another session owns the highest queue row, which is then removed, so row ids can be reused.
+    const { id: other } = await firstMessageLaunch(f, server);
+    outboxOf(f).stage(other, "r", { type: "prompt_session", sessionId: other, text: "Elsewhere" });
+    f.db.raw().prepare("DELETE FROM session_prompt_commands WHERE session_id=?").run(other);
+
+    const { id } = await firstMessageLaunch(f, server);
+    // Older retained work for the same root, queued before the owner's message.
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Retained: take #14" }, Date.now() - 1000);
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const text = "Fix #12";
+    void f.sessions.promptFromHuman(f.human, id, text);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const delivering = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    if (delivering.state !== "delivering") throw new Error("delivering expected");
+    // Admission commits the exact command, then the process dies before the runner acknowledges it.
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text }, Date.now(), delivering.deliveryId);
+    outboxOf(f).stage = () => { throw new Error("this process is gone"); };
+    f.issues.ackDurable = false;
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering", "admitted, so it stays fenced until acknowledged");
+    restarted.retryDuePrompts(Date.now() + 60_000);
+    const forSession = () => f.sent.filter((message): message is Extract<ControlPlaneToRunner, { type: "durable_session_command" }> =>
+      message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === id);
+    assert.deepEqual(forSession().map((message) => message.commandId), [delivering.deliveryId], "the owner's message goes first, alone");
+    assert.equal((await restarted.promptOrSteer(id, "Orchestrate issues 40 and 41")).status, 409, "nothing else before its acknowledgement");
+    const sent = forSession()[0]!;
+    restarted.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: sent.requestId, commandId: sent.commandId,
+      sessionId: id, state: "accepted", duplicate: false, revision: f.db.getSessionPromptCommand(sent.commandId)!.revision + 1 });
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "settled on its acknowledgement");
+    restarted.retryDuePrompts(Date.now() + 120_000);
+    const order = forSession().map((message) => (message.command as { text: string }).text);
+    assert.equal(order[0], text, "the owner's message reached the runner first");
+    assert.ok(order.indexOf("Retained: take #14") > 0, "the held older work follows it");
+    // The queue's redelivery of an unfinished command reuses its identity, which the runner deduplicates.
+    assert.deepEqual([...new Set(forSession().filter((message) => (message.command as { text: string }).text === text)
+      .map((message) => message.commandId))], [delivering.deliveryId], "the first message is one command, delivered once");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a first message the runner has not acknowledged keeps every other prompt out, even after its first send fails (CR-4.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    // The transport drops the first durable send.
+    const send = f.hub.sendToRunner;
+    let dropDurable = true;
+    f.hub.sendToRunner = (runnerId, message) => message.type === "durable_session_command" && dropDurable ? false : send(runnerId, message);
+    const owner = await f.sessions.promptFromHuman(f.human, id, "Ship #12");
+    assert.equal(owner.ok, true, owner.error ?? "the owner's message was admitted");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering", "persisted is not delivered");
+    // Transport returns, and an agent prompt arrives at once: it must not reach the runner first.
+    dropDurable = false;
+    const agent = await f.sessions.promptOrSteer(id, "Agent: ignore that and take #40");
+    assert.equal(agent.status, 409);
+    assert.match(agent.error!, /owner's first message/u);
+    assert.equal(f.sent.filter((message) => message.type === "prompt_session").length, 0);
+    f.sessions.retryDuePrompts(Date.now() + 60_000);
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "acknowledged on the retry");
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptOrSteer(id, "Agent: next step")).ok, true, "afterwards other prompts flow");
+    const ordered = f.sent.flatMap((message, index) =>
+      message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === id ? [{ index, owner: true }]
+      : message.type === "prompt_session" && message.sessionId === id ? [{ index, owner: false }] : []);
+    assert.equal(ordered[0]?.owner, true, "the owner's message reached the runner before any other");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("reauthorizing while the first message is being delivered is refused; the next authorization's ceilings bound the retry (CR-3.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  const reauthorize = async (id: string, payload: object) => {
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    return server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { ...payload, expectedRevision, preflightDigest: reviewed.digest } });
+  };
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const overrides = { budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } };
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const delivering = f.sessions.promptFromHuman(f.human, id, "Tidy the docs");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const refused = await reauthorize(id, { overrides });
+    assert.equal(refused.statusCode, 409);
+    assert.match(refused.json().error, /first message is being delivered; try again in a moment/u);
+    // The delivery then fails: the wait reopens with the launch's own provenance, unchanged.
+    const stage = outboxOf(f).stage.bind(outboxOf(f));
+    outboxOf(f).stage = () => { throw new Error("not persisted"); };
+    release();
+    assert.equal((await delivering).ok, false);
+    outboxOf(f).stage = stage;
+    f.issues.holdSync = null;
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+    assert.equal((await reauthorize(id, { overrides })).statusCode, 200);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "at most one issue");
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 0);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** Retained durable work, staged exactly as the service queues a prompt. */
+const outboxOf = (f: ReturnType<typeof fixture>) => (f.sessions as unknown as { promptOutbox: SessionPromptOutbox }).promptOutbox;
+const durableSends = (f: ReturnType<typeof fixture>, sessionId: string, text?: string) => f.sent.filter((message) =>
+  message.type === "durable_session_command" && message.command.type === "prompt_session" && message.command.sessionId === sessionId &&
+  (text === undefined || message.command.text === text)).length;
+
+test("reauthorizing a waiting campaign stores that request's own ceilings: 0 follow-ups and 1 issue hold for the first message (CR-2.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING);
+    const overrides = { budget: { acceptedFollowUps: 0 }, issues: { maxIssues: 1 } };
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: { overrides } });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { overrides, expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope,
+      { state: "pending", derivedLimits: { acceptedFollowUps: false, maxIssues: false } }, "the newer authorization's provenance replaces the launch's");
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "at most the explicit one issue");
+    const boundary = boundaryOf(f, id);
+    assert.equal(boundary.budgetAuthority!.acceptedFollowUps, 0);
+    assert.equal(boundary.issueAuthority!.maxIssues, 1);
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "and the campaign allowance keeps them");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("enabling a campaign with history establishes its scope at once: no wait, retained work runs, automation text is never scope (CR-2.3)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const id = customCampaign(f, "history-root");
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    delete policy.issueScope; delete policy.issueNumbers;
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    f.db.appendEvent(id, { kind: "user_message", text: "Orchestrate issues 12 and 13" }, Date.now());
+    // Retained work an automation queued: it waits on the busy root until the queue next flushes.
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Automation: also take #14" }, Date.now() + 60_000);
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    assert.equal(reviewed.ready, true, JSON.stringify(reviewed.summary.blockers));
+    assert.equal(reviewed.summary.objective, "Deliver #12", "the campaign's existing task is the objective");
+    const enabled = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(enabled.statusCode, 200, enabled.body);
+    const root = f.db.getSession(id)!;
+    assert.equal(root.orchestratorPolicy!.firstMessageScope, undefined, "a campaign with history never waits");
+    assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [], "task-only: no transcript or queued text is scope");
+    assert.equal(boundaryOf(f, id).objective, "Deliver #12");
+    assert.equal(campaignBoundaryCurrent(root), true);
+    f.sessions.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(durableSends(f, id), 1, "the retained work runs under the established boundary");
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 12 and 13")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("retained queued work never runs on a fresh root before its first owner message, and runs once it is established (CR-2.3)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Retained: take #14" });
+    f.sessions.retryDuePrompts(Date.now());
+    outboxOf(f).flush(Date.now());
+    assert.equal(durableSends(f, id), 0, "the outbox holds it while the root waits");
+    const retried = f.sessions.retryPendingPrompt(id, "prompt_missing");
+    assert.equal(retried.status, 409);
+    assert.match(retried.error!, /owner's first message/u);
+
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    const delivering = f.sessions.promptFromHuman(f.human, id, "Ship #12");
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.sessions.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(durableSends(f, id, "Retained: take #14"), 0, "and while it delivers");
+    release();
+    assert.equal((await delivering).ok, true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+    assert.equal(durableSends(f, id, "Ship #12"), 1, "the first message is delivered at once");
+    f.sessions.retryDuePrompts(Date.now() + 120_000);
+    assert.equal(durableSends(f, id, "Retained: take #14"), 1, "after the first message the retained work runs");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "and never becomes scope");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("recovery settles only on this delivery, never on identical earlier text (CR-2.2)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const text = "Fix #12";
+    // Identical text recorded and queued before the delivery begins is history, not this delivery.
+    f.db.appendEvent(id, { kind: "user_message", text }, Date.now());
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text });
+    let release: () => void = () => undefined;
+    f.issues.holdSync = new Promise<void>((resolve) => { release = resolve; });
+    void f.sessions.promptFromHuman(f.human, id, text);
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    assert.equal(first.state, "delivering");
+    const send = f.hub.sendToRunner;
+    f.hub.sendToRunner = (runnerId, message) => message.type === "prompt_session" ? false : send(runnerId, message);
+    new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "earlier identical text does not settle it");
+    release();
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    f.hub.sendToRunner = send;
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("reauthorizing a waiting root never ends its wait, even with retained queued work (security review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    // Retained work that is not the owner's, queued for the waiting root.
+    outboxOf(f).stage(id, "r", { type: "prompt_session", sessionId: id, text: "Automation: take #14" });
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload: {} });
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, PENDING, "the fence stays");
+    f.sessions.retryDuePrompts(Date.now() + 60_000);
+    assert.equal(durableSends(f, id), 0, "and the retained work stays held");
+    assert.equal((await f.sessions.promptOrSteer(id, "Orchestrate issues 14 and 15")).status, 409);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12")).ok, true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12], "only the owner's message sets scope");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a completed receipt arriving first settles the first message by its identity alone, and recovery agrees (CR-5.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    f.issues.ackDurable = false;
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12")).ok, true);
+    const first = f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!;
+    if (first.state !== "delivering") throw new Error("delivering expected");
+    const sent = f.sent.find((message): message is Extract<ControlPlaneToRunner, { type: "durable_session_command" }> =>
+      message.type === "durable_session_command" && message.commandId === first.deliveryId)!;
+    assert.ok(sent, "the owner's message went out under its delivery id");
+    // Only a completed receipt arrives, e.g. replayed from the runner journal after lost receipts.
+    assert.equal(f.sessions.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: sent.requestId,
+      commandId: sent.commandId, sessionId: id, state: "completed", duplicate: true,
+      revision: f.db.getSessionPromptCommand(sent.commandId)!.revision + 1 }), true);
+    const stored = f.db.raw().prepare("SELECT json_extract(payload_json, '$.text') AS payload FROM session_prompt_commands WHERE command_id=?").get(sent.commandId) as { payload: unknown };
+    assert.equal(stored.payload, null, "a completed receipt clears the stored message text");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "settled by the command id alone");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal((await f.sessions.promptOrSteer(id, "Agent: next step")).ok, true, "later prompts flow");
+    new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "established", "a rebuilt service still reads established");
+
+    // A delivery still waiting when the process stops, whose completed receipt the new process receives.
+    const { id: later } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, later, "Fix #13")).ok, true);
+    const pending = f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!;
+    if (pending.state !== "delivering") throw new Error("delivering expected");
+    const restarted = new SessionsService(f.db, f.hub, { info() {}, warn() {}, error() {} });
+    assert.equal(f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!.state, "delivering", "an admitted command stays fenced");
+    const laterSent = f.sent.find((message): message is Extract<ControlPlaneToRunner, { type: "durable_session_command" }> =>
+      message.type === "durable_session_command" && message.commandId === pending.deliveryId)!;
+    restarted.onDurablePromptReceipt("r", { type: "durable_session_command_result", requestId: laterSent.requestId,
+      commandId: laterSent.commandId, sessionId: later, state: "completed", duplicate: true,
+      revision: f.db.getSessionPromptCommand(laterSent.commandId)!.revision + 1 });
+    assert.equal(f.db.getSession(later)!.orchestratorPolicy!.firstMessageScope!.state, "established");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Follow-Ups change while the first message is delivering keeps the launch's follow-up limit when that delivery fails and the next arrives (#3580 CR-1.1)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    // A taskless Full Control launch with Recommend Only: it authorizes no follow-up without approval.
+    const body: FullControlLaunchRequest = { runnerId: "r", workspaceId: "w", overrides: { session: { agentId: "claude",
+      config: { model: "claude-opus-5-5", permissionMode: "orchestrator" }, orchestrator: { behavior: { followUps: "recommend_only" } } } } };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "recommend-only-first", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const id = admitted.json().id as string;
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    assert.equal(boundaryOf(f, id).budgetAuthority!.acceptedFollowUps, 0);
+
+    // The owner's first message reaches the delivering state, exactly as the prompt path takes it there.
+    const launched = f.db.getSession(id)!.orchestratorPolicy!;
+    const waiting = launched.firstMessageScope as { state: "pending"; derivedLimits: { acceptedFollowUps: boolean; maxIssues: boolean } };
+    assert.deepEqual(waiting.derivedLimits, { acceptedFollowUps: true, maxIssues: true });
+    const revision = f.db.parentControlPolicy(id)!.revision;
+    const text = "Fix #12";
+    const now = Date.now();
+    const scope = { repository: launched.issueScope!.repository, issueNumbers: [12], revision: launched.issueScope!.revision + 1,
+      authorizedByUserId: f.human.userId, authorizedAt: now };
+    assert.equal(f.db.establishFirstMessageScope(id, { control: { mode: "full_control", boundary: firstMessageBoundary(boundaryOf(f, id),
+      launched.behavior.followUps, [12], firstMessageObjective(text), revision + 1, scope.revision, now, waiting.derivedLimits) },
+    scope, messageDigest: firstMessageDigest(text), deliveryId: `first_message_${randomUUID()}`, expectedRevision: revision, now }), true);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "delivering");
+
+    // While it is delivered, the person switches Follow-Ups to Execute Approved.
+    const edited = f.sessions.setCampaignBehavior(id, { expectedRevision: 0,
+      behavior: { ...campaignBehaviorValues(launched), followUps: "execute_approved" } }, { kind: "human", id: f.human.userId }, () => null);
+    assert.equal(edited.ok, true, edited.error ?? "");
+
+    // The delivery fails, and the next first message is admitted through the real prompt path.
+    assert.equal(f.db.settleFirstMessageDelivery(id, firstMessageDigest(text), false, Date.now()), true);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13")).ok, true);
+    const after = boundaryOf(f, id);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12, 13]);
+    assert.equal(after.budgetAuthority!.acceptedFollowUps, 0, "the boundary keeps the follow-up limit the launch authorized");
+    assert.equal(f.db.campaignBudgets.view(id)!.authority.acceptedFollowUps, 0, "and so does the campaign allowance");
+    assert.equal(after.issueAuthority!.maxIssues, 2, "Maximum Issues grows only with the issues, not with derived follow-ups");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("context-only references stay disjoint from the scope, survive delivery, and include issues an explicit Maximum Issues left out (#3920)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server, { issues: { maxIssues: 1 } });
+    const launched = f.db.getSession(id)!.orchestratorPolicy!;
+    const revision = f.db.parentControlPolicy(id)!.revision;
+    const text = "Fix #12";
+    const now = Date.now();
+    const scope = { repository: launched.issueScope!.repository, issueNumbers: [12], revision: launched.issueScope!.revision + 1,
+      authorizedByUserId: f.human.userId, authorizedAt: now };
+    const establish = (contextIssueNumbers: number[]) => f.db.establishFirstMessageScope(id, { control: { mode: "full_control",
+      boundary: firstMessageBoundary(boundaryOf(f, id), launched.behavior.followUps, [12], firstMessageObjective(text), revision + 1, scope.revision, now) },
+    scope, contextIssueNumbers, messageDigest: firstMessageDigest(text), deliveryId: `first_message_${randomUUID()}`, expectedRevision: revision, now });
+    assert.equal(establish([12, 14]), false, "a scoped issue is never also context");
+    assert.equal(establish([14, 14]), false);
+    assert.equal(establish([0]), false);
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope!.state, "pending");
+    assert.equal(establish([14]), true);
+    assert.deepEqual((f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope as { contextIssueNumbers?: number[] }).contextIssueNumbers, [14]);
+    // A delivery that fails reopens the wait without the old message's context.
+    assert.equal(f.db.settleFirstMessageDelivery(id, firstMessageDigest(text), false, Date.now()), true);
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope, { state: "pending", derivedLimits: { acceptedFollowUps: true, maxIssues: false } });
+
+    // Through the real path: the explicit limit of one keeps #13 out of scope, so it is context with #14.
+    const next = "Fix #12 and #13. See #14.";
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, next)).ok, true);
+    const policy = f.db.getSession(id)!.orchestratorPolicy!;
+    assert.deepEqual(policy.issueScope!.issueNumbers, [12]);
+    assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [12]);
+    assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(next),
+      establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [13, 14] });
+    assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.contextIssueNumbers, [13, 14]);
   } finally { await server.close(); f.db.close(); }
 });

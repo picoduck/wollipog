@@ -8,6 +8,7 @@
  * git/gh can't wedge a request.
  */
 
+import { safeHttpUrl } from "@wollipog/protocol";
 import { execFile } from "node:child_process";
 import { AsyncLocalStorage } from "node:async_hooks";
 import { createHash, randomUUID } from "node:crypto";
@@ -42,6 +43,8 @@ import type {
   AgentContext,
 } from "@wollipog/protocol";
 import { runContextCommand } from "./context-command.js";
+
+export { safeHttpUrl };
 
 /** A git-action failure the UI reacts to by code (stale diff / index conflict → refetch). */
 export class GitOpError extends Error {
@@ -1370,6 +1373,7 @@ async function collectGitStatus(
     status: {
       branch,
       files,
+      changedPathCount: allFiles.length,
       hasChanges: allFiles.length > 0,
       ahead: baseCounts?.right ?? upstreamCounts?.right ?? 0,
       remoteUrl: remoteText.trim() || null,
@@ -2111,17 +2115,6 @@ export async function forgeSummary(
   }
 }
 
-/** Forge metadata is untrusted input. Only publish absolute web URLs to dashboard clients. */
-export function safeHttpUrl(value: unknown): string | null {
-  if (typeof value !== "string") return null;
-  try {
-    const url = new URL(value);
-    return url.protocol === "http:" || url.protocol === "https:" ? url.href : null;
-  } catch {
-    return null;
-  }
-}
-
 /** One read powering the pinned summary card: status bits plus provider-neutral forge metadata. */
 export async function gitSummary(cwd: string): Promise<GitSummaryInfo> {
   const { status, behindBase } = await collectGitStatus(cwd, { hashContent: false });
@@ -2778,6 +2771,26 @@ export interface GitActionSessionMeta {
   worktreePending?: boolean;
   context?: AgentContext;
   lastTurnBaseTree?: string | null;
+  /** Every worktree the session links, selected or not. */
+  worktrees?: ReadonlyArray<{ path: string; source: string }>;
+}
+
+/**
+ * A `status` read that names a worktree other than the selected one (v275): a campaign inspects
+ * every worktree it is about to retire, not only the selected one (#4070). A worktree the session
+ * still links is read in place; one it no longer links has nothing of the session's left to
+ * inspect, which `GIT_WORKTREE_UNLINKED` says. Null for any other action, which keeps refusing.
+ */
+function unselectedWorktreeStatus(
+  requestedWorktreePath: string,
+  action: GitAction,
+  meta: GitActionSessionMeta,
+): { cwd: string; context: GitActionContext } | null {
+  if (action.kind !== "status") return null;
+  const linked = meta.worktrees?.find((worktree) => cleanGitPath(worktree.path) === cleanGitPath(requestedWorktreePath));
+  if (!linked) throw new GitOpError("the session no longer links this worktree", "GIT_WORKTREE_UNLINKED");
+  if (linked.source === "attached") return null;
+  return { cwd: linked.path, context: { useWorktree: true, lastTurnBaseTree: null, context: meta.context } };
 }
 
 /** Resolve a Git request against runner-owned session metadata before executing anything. The wire
@@ -2794,6 +2807,8 @@ export function resolveGitActionExecution(
   if (meta.worktreePath) {
     if (requestedWorktreePath !== undefined &&
         cleanGitPath(requestedWorktreePath) !== cleanGitPath(meta.worktreePath)) {
+      const unselected = unselectedWorktreeStatus(requestedWorktreePath, action, meta);
+      if (unselected) return unselected;
       throw new Error("git action path does not match runner-owned session metadata");
     }
     return {
@@ -2806,6 +2821,8 @@ export function resolveGitActionExecution(
     };
   }
   if (requestedWorktreePath !== undefined) {
+    const unselected = unselectedWorktreeStatus(requestedWorktreePath, action, meta);
+    if (unselected) return unselected;
     throw new Error("a primary-checkout git read cannot supply a caller-selected path");
   }
   if (action.kind !== "status" && action.kind !== "summary") {

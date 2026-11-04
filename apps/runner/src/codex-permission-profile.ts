@@ -61,6 +61,7 @@
  */
 
 import { spawn as spawnProcess, type ChildProcess } from "node:child_process";
+import { startCodexProbe, type CodexProbeObserver } from "./codex-probe.js";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, realpathSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { delimiter, join } from "node:path";
@@ -328,37 +329,11 @@ export interface CodexProbeResult {
 export type CodexProbeRunner = (
   command: string,
   args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
+  options: CodexProbeObserver & { cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number },
 ) => Promise<CodexProbeResult>;
 
 const PROBE_TIMEOUT_MS = 20_000;
 const PROBE_OUTPUT_LIMIT = 256 * 1024;
-
-/**
- * Spawn a probe as the leader of its own process group, so the whole tree can be killed. The
- * configured command may be a wrapper that starts the real `codex` as a child without `exec`;
- * killing only the wrapper would leak one app-server per proof.
- */
-function spawnProbe(
-  spawn: typeof spawnProcess,
-  command: string,
-  args: string[],
-  options: { cwd: string; env: NodeJS.ProcessEnv; stdin: "pipe" | "ignore" },
-): ChildProcess {
-  return spawn(command, args, {
-    cwd: options.cwd, env: options.env, stdio: [options.stdin, "pipe", "pipe"],
-    detached: true, windowsHide: true,
-  });
-}
-
-/** Kill a probe's whole process group; an already-gone group is not an error. */
-function killProbeTree(child: ChildProcess | undefined): void {
-  if (!child) return;
-  if (typeof child.pid === "number") {
-    try { process.kill(-child.pid, "SIGKILL"); } catch { /* the group is already gone */ }
-  }
-  try { child.kill("SIGKILL"); } catch { /* already exited */ }
-}
 
 /**
  * Asynchronous, so a slow or hung `codex` never stalls the runner: every session, shell, and
@@ -369,19 +344,22 @@ export const runCodexProbe: CodexProbeRunner = (command, args, options) => new P
   let stderr = "";
   let settled = false;
   let child: ChildProcess | undefined;
+  let probe: ReturnType<typeof startCodexProbe> | undefined;
   const finish = (result: CodexProbeResult) => {
     if (settled) return;
     settled = true;
     clearTimeout(timer);
     // Whatever the outcome, nothing the probe started outlives it.
-    killProbeTree(child);
-    resolve(result);
+    void (probe?.finish() ?? Promise.resolve()).then(() => resolve(result));
   };
   const timer = setTimeout(() => {
     finish({ status: null, stdout, stderr, error: new Error(`timed out after ${options.timeoutMs}ms`) });
   }, options.timeoutMs);
   try {
-    child = spawnProbe(spawnProcess, command, args, { cwd: options.cwd, env: options.env, stdin: "ignore" });
+    probe = startCodexProbe({ ...options, command, args });
+    child = probe.child;
+    child.stdin?.on("error", () => {});
+    child.stdin?.end();
   } catch (error) {
     finish({ status: null, stdout: "", stderr: "", error: error as Error });
     return;
@@ -418,6 +396,7 @@ export async function verifyCodexPermissionProfileDeny(
      * runs and which configuration it resolves, so proving the deny under a different environment
      * proves nothing about the launch. */
     env: NodeJS.ProcessEnv;
+    onProcess?: CodexProbeObserver["onProcess"];
   },
   run: CodexProbeRunner = runCodexProbe,
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -448,6 +427,7 @@ export async function verifyCodexPermissionProfileDeny(
       `if [ "$rc" -eq 0 ]; then printf '%s%s' '${PROBE_READ_SENTINEL}' "$out"; ` +
       `else case "$out" in *"Permission denied"*|*"Operation not permitted"*) ` +
       `printf '%s' '${PROBE_DENIED_SENTINEL}';; *) printf '%s%s' '${PROBE_ERROR_SENTINEL}' "$out";; esac; fi`;
+    if (run !== runCodexProbe) launch.onProcess?.(Promise.resolve(false));
     const result = await run(launch.command, [
       "sandbox",
       "-P", CODEX_GUARD_PERMISSION_PROFILE_ID,
@@ -455,7 +435,7 @@ export async function verifyCodexPermissionProfileDeny(
       "-C", launch.cwd,
       "--",
       "/bin/sh", "-c", script, "wollipog-profile-probe", probeFile,
-    ], { cwd: launch.cwd, env: launch.env, timeoutMs: PROBE_TIMEOUT_MS });
+    ], { cwd: launch.cwd, env: launch.env, timeoutMs: PROBE_TIMEOUT_MS, onProcess: launch.onProcess });
     if (result.error) return { ok: false, reason: `probe failed: ${result.error.message}` };
     const output = `${result.stdout}${result.stderr}`;
     if (output.includes(marker) || output.includes(PROBE_READ_SENTINEL)) {
@@ -521,15 +501,17 @@ export function readCodexSandboxProjection(
     args: readonly string[];
     cwd: string;
     env: NodeJS.ProcessEnv;
+    onProcess?: CodexProbeObserver["onProcess"];
     /** The legacy mode to request, for an `explicit` launch; omitted for an `implicit` one. */
     sandboxMode?: "workspace-write" | "read-only";
   },
-  spawn: typeof spawnProcess = spawnProcess,
+  spawn?: typeof spawnProcess,
   timeoutMs: number = PROBE_TIMEOUT_MS,
 ): Promise<{ ok: true; projection: CodexSandboxProjection } | { ok: false; reason: string }> {
   return new Promise((resolve) => {
     let settled = false;
     let child: ChildProcess | undefined;
+    let probe: ReturnType<typeof startCodexProbe> | undefined;
     let stderr = "";
     const withStderr = (reason: string) => {
       const excerpt = stderr.trim().slice(0, 200);
@@ -540,17 +522,15 @@ export function readCodexSandboxProjection(
       settled = true;
       clearTimeout(timer);
       // Whatever the outcome, nothing the probe started outlives it.
-      killProbeTree(child);
-      resolve(verdict);
+      void (probe?.finish() ?? Promise.resolve()).then(() => resolve(verdict));
     };
     const timer = setTimeout(
       () => finish({ ok: false, reason: withStderr(`sandbox projection timed out after ${timeoutMs}ms`) }),
       timeoutMs,
     );
     try {
-      child = spawnProbe(spawn, launch.command, [...launch.args, "app-server"], {
-        cwd: launch.cwd, env: launch.env, stdin: "pipe",
-      });
+      probe = startCodexProbe({ ...launch, args: [...launch.args, "app-server"] }, spawn);
+      child = probe.child;
     } catch (error) {
       finish({ ok: false, reason: `sandbox projection could not start: ${(error as Error).message}` });
       return;
@@ -683,6 +663,7 @@ export const CODEX_PROFILE_RETRY_COOLDOWN_MS = 5 * 60_000;
 const provenProfileLaunches = new Map<string, {
   verdict: Promise<{ ok: true } | { ok: false; reason: string }>;
   at: number;
+  processProof: Promise<boolean>;
 }>();
 
 export interface CodexProfileProofDependencies {
@@ -708,6 +689,7 @@ export function provenCodexPermissionProfile(
     hookStateDir: string;
     cwd: string;
     env: NodeJS.ProcessEnv;
+    onProcess?: CodexProbeObserver["onProcess"];
   },
   dependencies: Partial<CodexProfileProofDependencies> = {},
 ): Promise<{ ok: true } | { ok: false; reason: string }> {
@@ -722,9 +704,16 @@ export function provenCodexPermissionProfile(
   ]);
   const now = deps.now();
   const cached = provenProfileLaunches.get(key);
-  if (cached && now - cached.at < CODEX_PROFILE_RETRY_COOLDOWN_MS) return cached.verdict;
+  if (cached && now - cached.at < CODEX_PROFILE_RETRY_COOLDOWN_MS) {
+    launch.onProcess?.(cached.processProof);
+    return cached.verdict;
+  }
+  const processes: Promise<boolean>[] = [];
+  const onProcess = (proof: Promise<boolean>) => { processes.push(proof); };
   const verdict = (async (): Promise<{ ok: true } | { ok: false; reason: string }> => {
+    if (dependencies.readProjection) onProcess(Promise.resolve(false));
     const projection = await deps.readProjection({
+      onProcess,
       command: launch.command,
       args: launch.args,
       cwd: launch.cwd,
@@ -736,12 +725,16 @@ export function provenCodexPermissionProfile(
     if (!projection.ok) return projection;
     const matches = codexLegacySandboxMatchesProfile(launch.legacy, launch.base, projection.projection);
     if (!matches.ok) return matches;
+    if (dependencies.verifyDeny) onProcess(Promise.resolve(false));
     return deps.verifyDeny({
+      onProcess,
       command: launch.command, base: launch.base, hookStateDir: launch.hookStateDir,
       cwd: launch.cwd, env: launch.env,
     });
   })().catch((error: unknown) => ({ ok: false as const, reason: `profile proof failed: ${String(error)}` }));
-  provenProfileLaunches.set(key, { verdict, at: now });
+  const processProof = verdict.then(async () => (await Promise.all(processes)).every(Boolean)).catch(() => false);
+  launch.onProcess?.(processProof);
+  provenProfileLaunches.set(key, { verdict, at: now, processProof });
   return verdict;
 }
 
@@ -768,6 +761,7 @@ export async function decideCodexPermissionProfile(
     cwd: string;
     /** The environment the provider will launch with; every probe must resolve the same way. */
     env: NodeJS.ProcessEnv;
+    onProcess?: CodexProbeObserver["onProcess"];
     /**
      * Whether this launch runs the local `codex` binary directly. A WSL, container, or cloud launch
      * goes through an adapter to a different filesystem and a different CLI, so a proof run on the
@@ -826,9 +820,10 @@ export async function decideCodexPermissionProfile(
   // reports its own reason rather than being masked by this one.
   const escalationLoss = codexPermissionProfileEscalationLoss(launch.legacy);
   if (escalationLoss) return { active: false, reason: escalationLoss };
+  if (prove !== provenCodexPermissionProfile) launch.onProcess?.(Promise.resolve(false));
   const proof = await prove({
     command: launch.command, args: launch.args, legacy: launch.legacy, base,
-    hookStateDir: launch.hookStateDir, cwd: launch.cwd, env: launch.env,
+    hookStateDir: launch.hookStateDir, cwd: launch.cwd, env: launch.env, onProcess: launch.onProcess,
   });
   if (!proof.ok) return { active: false, reason: proof.reason };
   return { active: true, base, args };

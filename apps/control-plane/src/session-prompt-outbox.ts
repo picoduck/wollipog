@@ -1,6 +1,9 @@
+import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { randomUUID } from "node:crypto";
+import { awaitsFirstMessage } from "./campaign-launch-admission.js";
 import {
   CODEX_EXEC_RETIRED_REASON,
+  campaignStatusTerminal,
   isDurableSessionCommandErrorCode,
   isRetiredCodexExec,
   runnerSupportsProtocol,
@@ -21,6 +24,9 @@ export type RetryablePendingPrompt = {
   errorCode: "PROVIDER_AUTHENTICATION_REQUIRED" | "WORKTREE_RECOVERY_REQUIRED";
 };
 
+export const REVIEW_CONTINUATION_UNSUPPORTED_REASON =
+  "runner no longer supports question-preserving review continuations";
+
 const RECEIPT_HORIZON_MS = 30 * 24 * 60 * 60_000;
 const MAX_RETRY_MS = 30_000;
 const CAMPAIGN_HOLD_RECHECK_MS = 10_000;
@@ -38,6 +44,7 @@ export class SessionPromptOutbox {
     private readonly db: ControlPlaneDb,
     private readonly hub: Hub,
     private readonly log: Logger,
+    private readonly beforeFlush: (now: number) => void = () => {},
   ) {}
 
   stage(
@@ -45,8 +52,9 @@ export class SessionPromptOutbox {
     runnerId: string,
     command: DurableSessionCommand,
     now = Date.now(),
+    /** A caller-chosen identity, such as a Full Control first message's delivery id (#2940). */
+    commandId = `prompt_${randomUUID()}`,
   ): SessionPromptCommandRecord {
-    const commandId = `prompt_${randomUUID()}`;
     const payloadJson = canonicalAutomationCommandJson(command);
     return this.db.stageSessionPromptCommand({
       commandId,
@@ -108,6 +116,52 @@ export class SessionPromptOutbox {
     });
   }
 
+  /** Stage the command that carries a requester's review continuation (#3369), bound to each
+   * review it names in the same transaction. Throws, staging nothing, unless each is still held. */
+  stageReviewContinuation(
+    reviewSessionIds: readonly string[],
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stageReviewContinuation({
+      reviewSessionIds,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
+    });
+  }
+
+  /** Stage the command that carries a parked session's watch wake (#4071), bound to each watch it
+   * names in the same transaction. Throws, staging nothing, unless each is still held. */
+  stagePullRequestWatchWake(
+    watchIds: readonly string[],
+    sessionId: string,
+    runnerId: string,
+    command: DurableSessionCommand,
+    now = Date.now(),
+  ): SessionPromptCommandRecord {
+    return this.db.stagePullRequestWatchWake({
+      watchIds,
+      command: {
+        commandId: `prompt_${randomUUID()}`,
+        sessionId,
+        runnerId,
+        payloadJson: canonicalAutomationCommandJson(command),
+        payloadSha256: automationCommandDigest(command),
+        expiresAt: now + RECEIPT_HORIZON_MS,
+        now,
+      },
+    });
+  }
+
   stageCampaignContinuation(input: {
     continuationId: string;
     campaignSessionId: string;
@@ -155,6 +209,7 @@ export class SessionPromptOutbox {
   }
 
   flush(now = Date.now(), runnerId?: string): number {
+    this.beforeFlush(now);
     let sent = 0;
     for (const row of this.db.dueSessionPromptCommands(now, runnerId, 100)) {
       if (!this.hub.isRunnerOnline(row.runnerId)) continue;
@@ -172,6 +227,15 @@ export class SessionPromptOutbox {
       // A prompt or answer queued for a persisted exec session before the retirement (#3259) never
       // reaches a runner that may still resume that driver. One already sent may have landed.
       const target = this.db.getSession(row.sessionId);
+      // Retained work never runs before a Full Control campaign's first owner message (#2940); it
+      // stays queued and runs once that message is established. The message's own durable command,
+      // admitted under its delivery id, is that delivery and runs.
+      const first = target?.orchestratorPolicy?.firstMessageScope;
+      const ownDelivery = first?.state === "delivering" && first.deliveryId === row.commandId;
+      if (awaitsFirstMessage(target?.orchestratorPolicy) && !ownDelivery) {
+        this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
+        continue;
+      }
       if (target && isRetiredCodexExec(target)) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
@@ -200,7 +264,7 @@ export class SessionPromptOutbox {
             this.db.campaignContinuationAdmission(row.sessionId).state !== "available") ||
             (projection.status === "waiting_human" &&
             !this.db.campaignMayContinueWhileHumanWaiting(command.campaignContinuation.campaignSessionId)) ||
-            projection.status === "verified_complete") {
+            campaignStatusTerminal(projection.status)) {
           this.db.deferSessionPromptCommand(row.commandId, now + CAMPAIGN_HOLD_RECHECK_MS, now);
           continue;
         }
@@ -210,7 +274,10 @@ export class SessionPromptOutbox {
         : command.type === "prompt_session" && command.campaignContinuation
           ? "campaignContinuations"
           : "durablePromptQueueIdentity";
-      if (!runnerSupportsProtocol(this.db.getRunner(row.runnerId)?.protocolVersion, capability)) {
+      const runner = this.db.getRunner(row.runnerId);
+      if (!runnerSupportsProtocol(runner?.protocolVersion, capability) ||
+          (command.type === "prompt_session" && command.reviewContinuation &&
+            !runnerSupportsReviewQuestionPreservation(runner))) {
         this.db.recordSessionPromptCommandReceipt({
           commandId: row.commandId,
           runnerId: row.runnerId,
@@ -221,7 +288,9 @@ export class SessionPromptOutbox {
             ? "runner no longer supports resumable structured-question answers"
             : command.type === "prompt_session" && command.campaignContinuation
               ? "runner no longer supports durable campaign continuations"
-              : "runner no longer supports durable queued prompt identity",
+              : command.type === "prompt_session" && command.reviewContinuation
+                ? REVIEW_CONTINUATION_UNSUPPORTED_REASON
+                : "runner no longer supports durable queued prompt identity",
           now,
         });
         this.hub.sessionChangedById(row.sessionId);

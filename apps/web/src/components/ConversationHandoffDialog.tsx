@@ -41,11 +41,12 @@ export function handoffAgentUnavailableReason(agent: AgentDefinition, source: { 
   return null;
 }
 
-export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId, sourceServiceTier, machineName, turn, refusal = null, onClose, onCreate }: {
+export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId, sourceServiceTier, machineName, turn, inPlace = false, refusal = null, onClose, onCreate }: {
   agents: AgentDefinition[]; sourceDriver: string; sourceAgentId?: string; sourceServiceTier?: string;
   /** The Machine the agents run on, named in a sign-in reason. */
   machineName?: string;
   turn: number;
+  inPlace?: boolean;
   /** Why the signed-in person may not hand off, when that changes while the dialog is open (#1864). */
   refusal?: string | null;
   onClose: () => void;
@@ -105,7 +106,9 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
       onChange={(value) => setConfig({ ...config, permissionMode: value || undefined })} /></div>
   );
   return <Modal title="Hand Off to Another Agent"
-    description={`Start a fresh conversation with another agent, using this session's files and dialogue up to Turn ${turn}.`}
+    description={inPlace
+      ? `Start a fresh conversation with another agent, using the repository's current files and dialogue up to Turn ${turn}.`
+      : `Start a fresh conversation with another agent, using this session's files and dialogue up to Turn ${turn}.`}
     onClose={busy ? () => {} : onClose} footer={<>
       {footerReason && <p className="handoff-reason" id={REASON_ID}>{footerReason}</p>}
       <button className="btn" type="button" onClick={onClose} disabled={busy}>Cancel</button>
@@ -117,7 +120,9 @@ export function ConversationHandoffDialog({ agents, sourceDriver, sourceAgentId,
         <summary><ChevronRightIcon className="disclosure-chevron" />What Carries Over</summary>
         <div className="disclosure-body">
           <dl className="facts">
-            <div><dt>Files</dt><dd>The checkpoint after Turn {turn}.</dd></div>
+            <div><dt>Files</dt><dd>{inPlace
+              ? "The repository at hand-off time, not the selected turn. Tracked files and non-ignored untracked files carry over; ignored untracked files are left out."
+              : <>The checkpoint after Turn {turn}.</>}</dd></div>
             <div><dt>Conversation</dt><dd>Visible user and agent messages, up to 24,000 characters.</dd></div>
             <div><dt>Left Out</dt><dd>Tool output, reasoning, questions and approvals.</dd></div>
             <div><dt>This Session</dt><dd>Unchanged.</dd></div>

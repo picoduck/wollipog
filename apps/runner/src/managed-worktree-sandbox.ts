@@ -56,6 +56,19 @@ export function managedWorktreeAdminMatches(worktreePath: string, worktreeGitDir
 }
 
 /**
+ * The canonical shared Git directory and admin directory of a runner-created linked worktree, or
+ * null. The shared directory comes from the runner-recorded repository, and the admin directory
+ * counts only when its read-only `gitdir` back-pointer names this worktree (#3316).
+ */
+export function managedWorktreeGitLayout(
+  worktreePath: string,
+  repoPath: string,
+): { commonGitDir: string; worktreeGitDir: string } | null {
+  const layout = linkedWorktreeGitLayout(worktreePath, repoPath);
+  return layout && managedWorktreeAdminMatches(worktreePath, layout.worktreeGitDir) ? layout : null;
+}
+
+/**
  * Absolute paths a sandbox should present read-only while the rest of each managed worktree stays
  * writable. Attached operator worktrees never reach this list: the caller derives `protections`
  * from runner-created identities only, exactly as the command-approval boundary does.
@@ -138,4 +151,30 @@ export function managedWorktreeGitWritableRoots(
     }
   }
   return [...roots];
+}
+
+/**
+ * Extra roots Codex's own workspace sandbox needs for the session's other managed worktrees
+ * (#3316): exactly the root and admin directory of each one the runner's bwrap boundary already
+ * binds writable, never a worktree it does not. The shared objects, refs, and logs come with the
+ * selected worktree's roots. Codex keeps each root's `.git` link read-only by itself; its link
+ * target is reopened only because the admin directory is named explicitly.
+ *
+ * A worktree retired since launch is skipped, so the policy never names a path that is gone.
+ */
+export function ownedWorktreeWritableRoots(
+  cwd: string,
+  ownedWorktrees: readonly { path: string; gitAdmin: string }[],
+): string[] {
+  const roots: string[] = [];
+  for (const { path, gitAdmin } of ownedWorktrees) {
+    if (!isAbsolute(path) || !isAbsolute(gitAdmin) || samePath(path, cwd) || roots.includes(path)) continue;
+    try {
+      if (!lstatSync(join(path, ".git")).isFile() || !lstatSync(gitAdmin).isDirectory()) continue;
+    } catch {
+      continue;
+    }
+    roots.push(path, gitAdmin);
+  }
+  return roots;
 }

@@ -1,146 +1,74 @@
-import { useEffect, useMemo, useRef, useState, type FormEvent } from "react";
-import { StatusBadge } from "./StatusBadge.js";
-import {
-  runnerCapabilityRequirement,
-  runnerSupportsProtocol,
-  type BoxView,
-  type ProjectLocationView,
-  type ProjectView,
-  type WorktreeSetupConfigStatus,
-} from "@wollipog/protocol";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
+import type { BoxView, ProjectLocationView, ProjectView, UpdateProjectRequest } from "@wollipog/protocol";
+import { ApiError } from "../api.js";
 import { useApi } from "../api-context.js";
-import { archiveProjectWithFeedback, projectArchiveMessage } from "../project-actions.js";
-import { ProjectMemorySharingSettings } from "./ProjectMemorySharing.js";
-import { ProjectChildDefaults } from "./ProjectChildDefaults.js";
+import {
+  archiveProjectWithFeedback,
+  projectArchiveMessage,
+  projectDeleteMessage,
+  projectNoLocationsLeftNote,
+  projectRemoveLocationMessage,
+  sessionCountLabel,
+} from "../project-actions.js";
+import { ProjectSettings } from "./ProjectSettings.js";
 import { sessionArchiveRequiresStop } from "../archive-actions.js";
 import {
   filterManagedProjects,
-  locationSessionCount,
   projectAfterRemoval,
-  projectAvailabilityLabel,
-  projectAvailabilityMeta,
-  type ProjectLocationCandidate,
+  type LocationMachineName,
   type ProjectVisibilityFilter,
 } from "../project-management.js";
 import { runnerDisplay } from "../runners.js";
-import { useStoreActions, useStoreSelector } from "../store.js";
+import { projectCreationRetryAvailable, useStoreActions, useStoreSelector } from "../store.js";
 import { CreateProjectDialog } from "./CreateProjectDialog.js";
 import { AccessScopeSettings, useAccessScopeIdentity } from "./AccessScopeControls.js";
-import { useFeedback } from "./FeedbackProvider.js";
-import { PlusIcon, SearchIcon } from "./Icons.js";
-import { DetailBar, PageHeader } from "./PageHeader.js";
-import { backLabel, destination } from "../navigation.js";
+import { ConfirmationFailure, useFeedback } from "./FeedbackProvider.js";
+import { PlusIcon, ProjectsIcon } from "./Icons.js";
+import { DetailBar, PageHeader, type ActionsMenuChoice } from "./PageHeader.js";
+import { archiveDetailRows } from "./ProjectSplitMenu.js";
+import { backLabel, destination, type ProjectsPane } from "../navigation.js";
 import { useIsMobile } from "./useIsMobile.js";
 import type { NewSessionPreset } from "./NewSessionDialog.js";
 import { ProjectLocationDialog } from "./ProjectLocationDialog.js";
-import { projectAudienceVisibilitySummary } from "../session-project-assignment.js";
-import { Modal, Skeleton } from "./common.js";
-import { SegmentedControl } from "./ui/ChoiceControls.js";
+import { ProjectLocationRow, ProjectLocationsEmpty } from "./ProjectLocationRow.js";
+import { suggestedProjectLocation } from "../project-session-selection.js";
+import { accessScopeLabel } from "../access-scopes.js";
+import { writeClipboardText } from "../clipboard.js";
+import { DetailSection } from "./DetailSection.js";
+import { PROJECT_ACTIONS_LABEL, ProjectDetailHeader, projectDetailMenu, projectNewSessionBlocker } from "./ProjectDetailHeader.js";
+import { DetailSkeleton } from "./common.js";
+import { Notice } from "./Notice.js";
+import { ProjectList } from "./ProjectList.js";
+import { ProjectsOverview } from "./ProjectsOverview.js";
+import { projectsOverviewAttention } from "../projects-overview.js";
+import { State } from "./State.js";
 
 type DialogState =
   | { kind: "create" }
-  | { kind: "add-location"; onboarding?: boolean }
-  | { kind: "delete" };
+  | { kind: "add-location"; projectId: string; onboarding?: boolean };
 
-function ProjectLocationWorktreeSetup({ project, location, runnerProtocolVersion }: {
-  project: ProjectView;
-  location: ProjectLocationView;
-  runnerProtocolVersion?: number | null;
-}) {
-  const api = useApi();
-  const supported = runnerSupportsProtocol(runnerProtocolVersion, "worktreeSetupConfig");
-  const [status, setStatus] = useState<WorktreeSetupConfigStatus | null>(null);
-  const [busy, setBusy] = useState(false);
-  const [error, setError] = useState<string | null>(null);
-  useEffect(() => {
-    if (!supported || location.availability !== "available") return;
-    let active = true;
-    setStatus(null);
-    setError(null);
-    void api.projectLocationWorktreeSetup(project.id, location.id).then((result) => {
-      if (active) setStatus(result.status);
-    }).catch((cause) => {
-      if (active) setError((cause as Error).message);
-    });
-    return () => { active = false; };
-  }, [api, location.availability, location.id, project.id, supported]);
-  if (!supported) return <span className="project-location-reason">Setup Status: Update this Machine to validate configuration.</span>;
-  if (location.availability !== "available") return <span className="project-location-reason">Setup Status: Unavailable while this Location is offline.</span>;
-  return (
-    <div className="project-location-setup-status">
-      <span>
-        <strong>Setup Status: </strong>
-        {status?.status === "valid" ? "Valid" : status?.status === "absent" ? "Not Configured"
-          : status?.status === "invalid" ? "Invalid" : error ? "Unavailable" : "Checking…"}
-      </span>
-      {status?.status === "invalid" && <code role="alert">{status.error}</code>}
-      {error && <span className="project-location-reason" role="alert">{error}</span>}
-      {status?.status === "absent" && project.canManage !== false && (
-        <button type="button" className="btn sm" disabled={busy} onClick={() => {
-          setBusy(true);
-          setError(null);
-          void api.generateProjectLocationWorktreeSetup(project.id, location.id)
-            .then((result) => {
-              setStatus(result.status);
-              return api.dismissWorktreeSetupNotice(project.id);
-            })
-            .catch((cause) => setError((cause as Error).message))
-            .finally(() => setBusy(false));
-        }}>{busy ? "Generating…" : "Generate Starter Config"}</button>
-      )}
-    </div>
-  );
+/** A failed project action: the sentence the detail's notice leads with, and the raw message behind
+ * its Show Details (§13.2). */
+interface ProjectActionError {
+  sentence: string;
+  detail: string;
 }
 
-function DeleteProjectDialog({ project, busy, error, onClose, onDelete }: {
-  project: ProjectView;
-  busy: boolean;
-  error: string | null;
-  onClose: () => void;
-  onDelete: () => Promise<void>;
-}) {
-  const [confirmation, setConfirmation] = useState("");
-  const close = () => {
-    if (!busy) onClose();
-  };
-  return (
-    <Modal
-      title="Delete Project"
-      size="sm"
-      tone="danger"
-      closeButton={false}
-      onClose={close}
-      describedBy="delete-project-consequences"
-      footer={(
-        <>
-          <button type="button" className="btn" disabled={busy} onClick={close}>Cancel</button>
-          <button type="button" className="btn danger" disabled={busy || confirmation !== project.name} onClick={() => void onDelete()}>
-            {busy ? "Deleting…" : "Delete Project"}
-          </button>
-        </>
-      )}
-    >
-      <div className="form">
-        <div id="delete-project-consequences" className="danger-note">
-          “{project.name}” is permanently deleted: its sessions move to No Project and its Locations are unlinked. Sessions and files are not deleted, and archived sessions stay archived.
-        </div>
-        <label className="field">
-          <span>Type {project.name} to Confirm</span>
-          <input autoFocus value={confirmation} onChange={(event) => setConfirmation(event.target.value)} />
-        </label>
-        {error && <div className="form-error" role="alert">{error}</div>}
-      </div>
-    </Modal>
-  );
-}
+/** A confirmation chosen from a ⋯ sheet replaces it on a phone, and Back brings it back (§7.5).
+ * A ⋯ unmounts with what it acts on (a removed location's row, a project gone from the route), so
+ * Back from a confirmation whose object has gone reopens nothing. */
+const backToMenu = ({ reopen }: ActionsMenuChoice) => ({ label: "Back to More Actions", run: reopen });
 
 const PROJECTS = destination("projects");
 
 export function ProjectsView({
   selectedProjectId,
+  pane,
   onNewSession,
 }: {
   selectedProjectId?: string;
+  /** `/projects/overview`: the Projects Overview as its own route, which a phone opens from the list. */
+  pane?: ProjectsPane;
   onNewSession: (preset?: NewSessionPreset) => void;
 }) {
   const api = useApi();
@@ -152,6 +80,7 @@ export function ProjectsView({
   const projectsSupported = useStoreSelector((state) => state.projectsSupported);
   const projectLocationCreationSupported = useStoreSelector((state) => state.projectLocationCreationSupported);
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
+  const projectCreationRetrySupported = useStoreSelector(projectCreationRetryAvailable);
   const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
@@ -163,10 +92,22 @@ export function ProjectsView({
   const [visibility, setVisibility] = useState<ProjectVisibilityFilter>("all");
   const [dialog, setDialog] = useState<DialogState | null>(null);
   const [busy, setBusy] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
-  const [renameDraft, setRenameDraft] = useState("");
+  const [error, setError] = useState<ProjectActionError | null>(null);
+  /** The project whose Delete Project is open. It can go missing meanwhile (a removal before the
+   * answer, or a snapshot without it), and the confirmation settles where the route goes once it
+   * closes, not the missing-route fallback. */
+  const [confirmingDelete, setConfirmingDelete] = useState<string | null>(null);
+  /** False once the page has gone: a confirmation that outlives it must not move the route. */
+  const mounted = useRef(true);
+  useEffect(() => {
+    mounted.current = true;
+    return () => { mounted.current = false; };
+  }, []);
   const { identity: accessIdentity, error: accessIdentityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const createButtonRef = useRef<HTMLButtonElement>(null);
+  const nameInputRef = useRef<HTMLInputElement>(null);
+  /** The project whose Name field takes focus once its detail shows (the overview's Rename…). */
+  const [focusNameOf, setFocusNameOf] = useState<string | null>(null);
 
   const projectMap = useMemo(() => {
     const map = new Map(storedProjects);
@@ -174,24 +115,65 @@ export function ProjectsView({
     for (const id of deletedIds) map.delete(id);
     return map;
   }, [deletedIds, overrides, storedProjects]);
-  const allProjects = useMemo(() => filterManagedProjects(projectMap.values(), "", "all"), [projectMap]);
-  const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility), [projectMap, query, visibility]);
-  const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
   const boxByRunner = useMemo(() => new Map([...boxes.values()].map((box: BoxView) => [box.runnerId, box])), [boxes]);
+  const machineName = useCallback<LocationMachineName>((location) =>
+    runnerDisplay(runners.get(location.runnerId), boxByRunner.get(location.runnerId), location.runnerId).name,
+  [boxByRunner, runners]);
+  const allProjects = useMemo(() => filterManagedProjects(projectMap.values(), "", "all"), [projectMap]);
+  /** The list when a confirmation settles, which can be well after it opened. */
+  const latestProjects = useRef(allProjects);
+  latestProjects.current = allProjects;
+  /** The route's project when a confirmation settles, which Back can have changed meanwhile. */
+  const routeProjectId = useRef(selectedProjectId);
+  routeProjectId.current = selectedProjectId;
+  const visibleProjects = useMemo(() => filterManagedProjects(projectMap.values(), query, visibility, machineName),
+    [machineName, projectMap, query, visibility]);
+  const selected = selectedProjectId ? projectMap.get(selectedProjectId) ?? null : null;
+  const dialogProject = dialog?.kind === "add-location" ? projectMap.get(dialog.projectId) ?? null : null;
+  // One list for the overview's Needs Attention and the phone's Projects Overview row, so the two
+  // counts cannot differ.
+  const overviewAttention = useMemo(() => projectsOverviewAttention(allProjects, runners, machineName),
+    [allProjects, machineName, runners]);
   const selectedStopsRuntime = selected ? [...sessions.values()].some((session) =>
     session.projectId === selected.id && !session.archived && sessionArchiveRequiresStop(session, stopBeforeArchiveSupported)
   ) : false;
 
   useEffect(() => {
-    if (!selected && selectedProjectId && snapshotLoaded) {
+    // While its Delete Project is open, the confirmation decides where to go once it closes.
+    if (!selected && selectedProjectId && snapshotLoaded && confirmingDelete !== selectedProjectId) {
       const fallback = visibleProjects[0] ?? allProjects[0];
       navigate(fallback ? { name: "projects", id: fallback.id } : { name: "projects" });
     }
-  }, [allProjects, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
+  }, [allProjects, confirmingDelete, navigate, selected, selectedProjectId, snapshotLoaded, visibleProjects]);
+  // Each pane scrolls on its own (§6). A new route starts the detail at its top; on a phone, where
+  // the route swaps the whole screen, focus moves to the new page title, which shows no ring (§16.1).
+  const listBodyRef = useRef<HTMLDivElement>(null);
+  const detailRef = useRef<HTMLDivElement>(null);
+  const routeKey = selectedProjectId ?? pane;
+  const previousRoute = useRef(routeKey);
+  useLayoutEffect(() => {
+    if (previousRoute.current === routeKey) return;
+    previousRoute.current = routeKey;
+    if (detailRef.current) detailRef.current.scrollTop = 0;
+    if (isMobile) document.getElementById("page-title")?.focus({ preventScroll: true });
+  }, [routeKey, isMobile]);
+  // Rename… lands on the Name field once its project's detail is on screen, after the page title
+  // has taken focus above, so the field is what keeps it.
   useEffect(() => {
-    setRenameDraft(selected?.name ?? "");
+    if (!focusNameOf || selected?.id !== focusNameOf) return;
+    setFocusNameOf(null);
+    nameInputRef.current?.focus();
+  }, [focusNameOf, selected?.id]);
+  // A phone hides the list while a detail is open, which loses its scroll position; Back puts the
+  // list back where it was (§6.2). Recorded only while the list is on screen.
+  const listScrollTop = useRef(0);
+  const detailOpen = Boolean(selectedProjectId || pane);
+  useLayoutEffect(() => {
+    if (!detailOpen && listBodyRef.current) listBodyRef.current.scrollTop = listScrollTop.current;
+  }, [detailOpen]);
+  useEffect(() => {
     setError(null);
-  }, [selected?.id, selected?.name]);
+  }, [selected?.id]);
   useEffect(() => {
     if (overrides.size === 0) return;
     setOverrides((current) => {
@@ -215,7 +197,9 @@ export function ProjectsView({
     setError(null);
     setDialog(next);
   };
-  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>, reportError = true) => {
+  const fail = (sentence: string, cause: unknown) => setError({ sentence, detail: (cause as Error).message });
+  /** `failure` is the notice's sentence; null where the form that saved shows its own error. */
+  const runProjectMutation = async (key: string, action: () => Promise<ProjectView>, failure: string | null) => {
     if (busy) return;
     setBusy(key);
     setError(null);
@@ -224,40 +208,41 @@ export function ProjectsView({
       applyProject(project);
       return project;
     } catch (cause) {
-      if (reportError) setError((cause as Error).message);
+      if (failure) fail(failure, cause);
       throw cause;
     } finally {
       setBusy(null);
     }
   };
 
-  const rename = async (event: FormEvent) => {
-    event.preventDefault();
-    if (!selected || !renameDraft.trim() || renameDraft.trim() === selected.name) return;
-    try {
-      await runProjectMutation("rename", async () => (await api.updateProject(selected.id, { name: renameDraft.trim() })).project);
-      showToast("Project renamed.");
-    } catch { /* inline error */ }
-  };
-  const toggleHidden = async () => {
+  /** A change from the settings editor, which shows its own failure: the save bar's, or the row's. */
+  const updateSettings = async (key: string, changes: UpdateProjectRequest) => {
     if (!selected) return;
-    try {
-      await runProjectMutation("visibility", async () => (await api.updateProject(selected.id, { hidden: !selected.hidden })).project);
-      showToast(selected.hidden ? "Project shown in Sessions." : "Project hidden from Sessions.");
-    } catch { /* inline error */ }
+    const project = await runProjectMutation(key, async () => (await api.updateProject(selected.id, changes)).project, null);
+    if (!project) throw new Error("Another change to this project is still saving.");
   };
-  const archiveSessions = async () => {
+  const archiveSessions = async (choice: ActionsMenuChoice) => {
     if (!selected || selected.unarchivedSessionCount === 0) return;
+    const count = selected.unarchivedSessionCount;
+    // The sessions the page has loaded, with their shared status; the server archives every
+    // unarchived one, so those it has not loaded join "and N more" (#2051).
+    const { rows, overflow } = archiveDetailRows(
+      [...sessions.values()].filter((session) => session.projectId === selected.id && !session.archived),
+      count,
+    );
     const accepted = await confirm({
-      title: selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions",
+      title: selectedStopsRuntime ? `Archive and Stop ${sessionCountLabel(count)}` : `Archive ${sessionCountLabel(count)}`,
       message: projectArchiveMessage({
         projectName: selected.name,
-        count: selected.unarchivedSessionCount,
+        count,
         stops: selectedStopsRuntime,
         onProjectPage: true,
       }),
+      detailRows: rows,
+      detailRowsOverflow: overflow,
       confirmLabel: selectedStopsRuntime ? "Archive and Stop" : "Archive Sessions",
       ...(selectedStopsRuntime ? { tone: "danger" as const } : {}),
+      back: backToMenu(choice),
     });
     if (!accepted) return;
     setBusy("archive");
@@ -265,30 +250,37 @@ export function ProjectsView({
     try {
       await archiveProjectWithFeedback({ projectId: selected.id, projectName: selected.name, api, showToast, showUndo });
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Couldn't archive the project's sessions.", cause);
     } finally {
       setBusy(null);
     }
   };
-  const removeLocation = async (location: ProjectLocationView) => {
+  const removeLocation = async (location: ProjectLocationView, choice: ActionsMenuChoice) => {
     if (!selected) return;
-    const last = selected.locations.length === 1;
     const accepted = await confirm({
       title: "Remove Location",
-      message: `New sessions in “${selected.name}” will no longer use “${location.name}” at ${location.path}. The folder is not deleted, and existing sessions and other Projects are unaffected${last ? "; this Project will have no Locations left" : ""}.`,
+      message: projectRemoveLocationMessage(selected.name, machineName(location)),
+      ...(selected.locations.length === 1
+        ? { details: <p className="confirmation-note">{projectNoLocationsLeftNote(selected.name)}</p> }
+        : {}),
+      // The path is its own mono row rather than wrapping mid-sentence (§11.3).
+      detailRows: [{ label: location.path, labelStyle: "mono" }],
       confirmLabel: "Remove Location",
       tone: "danger",
+      back: backToMenu(choice),
     });
     if (!accepted) return;
     try {
-      await runProjectMutation(`remove:${location.id}`, async () => (await api.removeProjectLocation(selected.id, location.id)).project);
+      await runProjectMutation(`remove:${location.id}`, async () => (await api.removeProjectLocation(selected.id, location.id)).project,
+        "Couldn't remove the location.");
       showToast("Location removed. The folder and sessions were not deleted.");
     } catch { /* inline error */ }
   };
   const makeDefault = async (location: ProjectLocationView) => {
     if (!selected) return;
     try {
-      await runProjectMutation(`default:${location.id}`, async () => (await api.setDefaultProjectLocation(selected.id, location.id)).project);
+      await runProjectMutation(`default:${location.id}`, async () => (await api.setDefaultProjectLocation(selected.id, location.id)).project,
+        "Couldn't make that location the default.");
     } catch { /* inline error */ }
   };
   const reveal = async (location: ProjectLocationView) => {
@@ -296,386 +288,387 @@ export function ProjectsView({
     try {
       await api.revealWorkspace(location.runnerId, location.path);
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Couldn't reveal the location in the file manager.", cause);
     }
   };
-  const deleteProject = async () => {
-    if (!selected) return;
-    setBusy("delete");
+  const deleteProject = async (choice: ActionsMenuChoice) => {
+    // One Delete Project at a time: a second would share the first's route suppression.
+    if (!selected || busy || confirmingDelete !== null) return;
+    const project = selected;
     setError(null);
-    try {
-      await api.deleteProject(selected.id);
-      const next = projectAfterRemoval(allProjects, selected.id);
-      setDeletedIds((current) => new Set(current).add(selected.id));
-      setDialog(null);
-      navigate(next ? { name: "projects", id: next.id } : { name: "projects" });
-      showToast("Project deleted. Sessions moved to No Project.");
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusy(null);
+    // Where to go if the project is gone when the confirmation closes: its neighbour, chosen while
+    // the list still holds it, and chosen again as the request is sent. A removal broadcast can
+    // arrive before the answer, and a list read after it no longer holds the project.
+    let successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? null;
+    // While the confirmation is open it decides where the route goes, not the missing-route fallback.
+    setConfirmingDelete(project.id);
+    const deleted = await confirm({
+      title: "Delete Project",
+      message: projectDeleteMessage(project.name, project.totalSessionCount),
+      confirmLabel: "Delete Project",
+      tone: "danger",
+      // A fixed label: a long name would make "Type <name> to Confirm" a paragraph. The helper names it.
+      typeToConfirm: project.name,
+      typeToConfirmLabel: "Type the Project Name to Confirm",
+      progress: "Deleting the project…",
+      // The request cannot be withdrawn once sent, so Cancel waits for its answer.
+      cancelWhileRunning: false,
+      back: backToMenu(choice),
+      // The dialog stays open with the button busy, and a failure stays in it with the typed name (§7.4).
+      onConfirm: async () => {
+        successor = projectAfterRemoval(latestProjects.current, project.id)?.id ?? successor;
+        setBusy("delete");
+        try {
+          await api.deleteProject(project.id);
+        } catch (cause) {
+          throw new ConfirmationFailure("Couldn't delete the project. Nothing was changed.", (cause as Error).message);
+        } finally {
+          setBusy(null);
+        }
+      },
+    });
+    // Two separate things once the confirmation closes, in one step whatever the order of the
+    // answer and any broadcast.
+    // 1. Deletion: only a DELETE this client sent and the server confirmed hides the project and
+    //    says so. A project that is merely absent (a removal after a lost answer, or a snapshot
+    //    without it after access changed) is the store's to show or hide.
+    // 2. The route: if the page is still on the project and it is deleted or absent, the route
+    //    goes to the neighbour if it is still there, else the first project, else the overview.
+    //    A replace, so the route that cannot be shown is not left behind.
+    const absent = deleted || !latestProjects.current.some((candidate) => candidate.id === project.id);
+    if (absent && mounted.current && routeProjectId.current === project.id) {
+      const remaining = latestProjects.current.filter((candidate) => candidate.id !== project.id);
+      const next = remaining.find((candidate) => candidate.id === successor) ?? remaining[0] ?? null;
+      // Before clearing `confirmingDelete`, so the render that re-enables the fallback sees it.
+      navigate(next ? { name: "projects", id: next.id } : { name: "projects" }, { replace: true });
     }
+    if (deleted) setDeletedIds((current) => new Set(current).add(project.id));
+    setConfirmingDelete(null);
+    if (deleted) showToast("Project deleted. Sessions moved to No Project.");
   };
   const manageConnections = () => navigate({ name: "runners", section: "machines" });
   const refreshSelectedProject = async () => {
     if (!selected) return;
     try {
       applyProject((await api.project(selected.id)).project);
-      showToast("Access scope updated.");
+      showToast("Access changed.");
     } catch (cause) {
-      setError((cause as Error).message);
+      fail("Access changed, but the project couldn't be reloaded.", cause);
     }
   };
+  /** Copies `text` from a ⋯ item and confirms it with a toast that shows what was copied. */
+  const copyFromMenu = async (text: string, copiedMessage: string, failedMessage: string) => {
+    // ⋯ has handed focus back to its trigger; a write reports, and a refused one falls back, only
+    // while the page is mounted and focus is still there or nowhere.
+    const from = document.activeElement;
+    const current = () => mounted.current && (document.activeElement === null ||
+      document.activeElement === document.body || document.activeElement === from);
+    const copied = await writeClipboardText(text, current);
+    if (copied === null) return;
+    if (from instanceof HTMLElement && (document.activeElement === document.body || document.activeElement === null)) from.focus();
+    if (copied) showToast(copiedMessage, { tone: "success", detail: text, detailStyle: "mono" });
+    else showToast(failedMessage, { tone: "error" });
+  };
+  /** The project with its default location chosen, or the only one that can host a session. With
+   * several and no default, New Session asks which. */
+  const newSessionPreset = (project: ProjectView): NewSessionPreset => {
+    const location = suggestedProjectLocation(project, runners);
+    return location
+      ? { runnerId: location.runnerId, workspaceId: location.workspaceId, projectId: project.id, projectLocationId: location.id }
+      : { projectId: project.id };
+  };
 
-  if (!snapshotLoaded) {
-    // The placeholder renders the REAL intro and the REAL grid shell, because neither depends on
-    // the snapshot — the intro is static copy and the grid's minimum height is its own. Sizing a
-    // standalone Skeleton to match instead needs a number copied from the stylesheet, and the
-    // copy was wrong: six 44px rows reserved ~296px for a layout whose grid alone has a 720px
-    // minimum, so the load finished with a ~500px jump. `.skeleton { flex: 1 }` did not save it —
-    // `.main-body` is a flex ITEM, not a flex container, so the rule never applied.
+  /** The starter setup file onboarding offers for the location it just added. The location exists
+   * whatever happens here, so a failure is a warning about the file, not Add Location's error, and
+   * the location's ⋯ offers Create Starter Setup File again (#2965). Only a refusal proves there is
+   * no file; after a lost reply the warning says so, and the row's own read decides whether its ⋯
+   * still offers one. */
+  const createStarterSetup = async (project: ProjectView, added: ProjectLocationView | undefined) => {
+    const warn = (refused: boolean, raw: string) => showToast(refused
+      ? "Location added, but its starter setup file couldn't be created."
+      : "Location added, but Wollipog couldn't confirm its starter setup file.", {
+      tone: "warning",
+      detail: `${refused
+        ? "Try again from the location's ⋯ menu."
+        : "If the location has none, its ⋯ menu offers Create Starter Setup File."}${raw ? ` ${raw}` : ""}`,
+    });
+    if (!added) {
+      warn(true, "The new location wasn't in Wollipog's reply.");
+      return;
+    }
+    try {
+      await api.generateProjectLocationWorktreeSetup(project.id, added.id);
+    } catch (cause) {
+      warn(cause instanceof ApiError && cause.status < 500,
+        cause instanceof Error ? cause.message.trim() : String(cause).trim());
+      return;
+    }
+    // Best effort, as from the location's ⋯: the session's setup suggestion keeps its own Dismiss.
+    void api.dismissWorktreeSetupNotice(project.id).catch((cause: unknown) => {
+      console.warn("Dismissing the worktree setup notice failed", cause);
+    });
+  };
+
+  const openProject = (projectId: string) => navigate({ name: "projects", id: projectId });
+  const renameProject = (projectId: string) => {
+    setFocusNameOf(projectId);
+    openProject(projectId);
+  };
+
+  const header = (primary: boolean) => (
+    <PageHeader
+      title={PROJECTS.name}
+      description={PROJECTS.description}
+      // Disabled while loading rather than omitted: it holds its own width, and there is nothing to
+      // create a project against until the snapshot says which machines are connected.
+      primary={primary ? {
+        label: "New Project",
+        buttonRef: createButtonRef,
+        disabled: !snapshotLoaded,
+        onClick: () => openDialog({ kind: "create" }),
+      } : undefined}
+    />
+  );
+
+  if (snapshotLoaded && !projectsSupported) {
     return (
-      <div className="page full projects-view">
-        {/* Disabled rather than omitted: it holds its own width, and there is nothing to create
-            a Project against until the snapshot says which machines are connected. */}
-        <PageHeader
-          title={PROJECTS.name}
-          description={PROJECTS.description}
-          primary={{ label: "Create Project", onClick: () => undefined, disabled: true }}
-        />
-        <div className="project-manager-grid">
-          <Skeleton rows={6} announce="Loading projects" />
+      <section className="page full fill">
+        <PageHeader title={PROJECTS.name} description={PROJECTS.description} />
+        <div className="master-detail-state">
+          <Notice tone="warning" title="Projects Need an Update" headingLevel={2}>
+            Update Wollipog to manage projects and locations. Your sessions aren’t affected.
+          </Notice>
         </div>
-      </div>
+      </section>
     );
   }
-  if (!projectsSupported) {
-    return (
-      <div className="page full projects-view">
-        <PageHeader title={PROJECTS.name} />
-        <div className="project-manager-unavailable">
-          <strong>Project Management Unavailable</strong>
-          <span>Wollipog on the server needs an update to manage Projects and Locations.</span>
-        </div>
-      </div>
-    );
-  }
 
-  // On a phone the list and the detail are two routes, so the open Project takes the detail bar
-  // and its back control (§4.3, §6.2). The bar is full-bleed like every detail bar, so it sits
-  // outside the padded page container; on wider screens both panes share the page header.
-  const phoneDetail = isMobile && selected;
+  // No projects is one state across both panes (§6.1, §12.1), and that state offers creation, so the
+  // header's primary steps aside while it shows.
+  const spanningEmpty = snapshotLoaded && allProjects.length === 0;
+  // On a phone the list and the open project, or the overview, are two routes, so the open detail
+  // takes the detail bar and its Back (§4.3, §6.2). The bar sits inside the fill page, where it is full-bleed like
+  // every detail bar and shares the column's height with the panes.
+  const phoneDetail = isMobile && detailOpen && !spanningEmpty;
+  const newSessionBlocker = selected ? projectNewSessionBlocker(selected, runners, machineName) : null;
+  // The saved scope, the one the access field below reads, so the two never disagree. A team or a
+  // person is named only once the identity directory has loaded; until then the field says it is
+  // loading, and the meta line shows no access rather than "Unknown Team".
+  const accessLabel = accessScopeManagementSupported && selected?.scope &&
+    (accessIdentity !== null || selected.scope.owner.kind === "organization")
+    ? accessScopeLabel(selected.scope, accessIdentity) : null;
+  const newSession = selected ? {
+    label: "New Session",
+    disabled: newSessionBlocker !== null,
+    onClick: () => onNewSession(newSessionPreset(selected)),
+  } : null;
+  const detailMenu = selected ? projectDetailMenu(selected, { stopsRuntime: selectedStopsRuntime, busy: busy !== null }, {
+    onCopyId: () => void copyFromMenu(selected.id, "Project ID copied.", "Couldn't copy the project ID."),
+    onArchive: (choice) => void archiveSessions(choice),
+    onDelete: (choice) => void deleteProject(choice),
+  }) : [];
   return (
-    <>
-    {phoneDetail && (
-      <DetailBar
-        title={selected.name}
-        backLabel={backLabel("projects")}
-        onBack={() => navigate({ name: "projects" })}
-      />
-    )}
-    <div className="page full projects-view">
-      {!phoneDetail && (
-        <PageHeader
-          title={PROJECTS.name}
-          description={PROJECTS.description}
-          primary={{ label: "Create Project", buttonRef: createButtonRef, onClick: () => openDialog({ kind: "create" }) }}
+    <section className="page full fill">
+      {phoneDetail && (
+        <DetailBar
+          title={selected?.name ?? (selectedProjectId ? "Project" : "Projects Overview")}
+          backLabel={backLabel("projects")}
+          onBack={() => navigate({ name: "projects" })}
+          primary={newSession ? { ...newSession, icon: <PlusIcon />, title: newSessionBlocker ?? undefined } : undefined}
+          menu={detailMenu}
+          menuLabel={PROJECT_ACTIONS_LABEL}
         />
       )}
-      <div className="project-manager-grid">
-        <aside className={`project-manager-list${selected ? " has-selection" : ""}`} aria-label="Projects" data-focus-zone="list" tabIndex={-1}>
-          <label className="project-manager-search">
-            <span className="sr-only">Search Projects</span>
-            <SearchIcon />
-            <input value={query} onChange={(event) => setQuery(event.target.value)} placeholder="Search projects" />
-          </label>
-          {/* Was `role="group"` with `aria-pressed`, which describes three independent toggles
-              rather than one choice of three. */}
-          <SegmentedControl
-            className="block"
-            label="Sessions Visibility"
-            value={visibility}
-            options={[
-              { value: "all", label: "All" },
-              { value: "visible", label: "Visible" },
-              { value: "hidden", label: "Hidden" },
-            ]}
-            onChange={setVisibility}
-          />
-          <div className="project-manager-items clip-focus">
-            {visibleProjects.map((project) => {
-              const active = project.id === selected?.id;
-              const available = project.locations.filter((location) => location.availability === "available").length;
-              return (
-                <button
-                  type="button"
-                  key={project.id}
-                  className={`row row-2${active ? " is-selected" : ""}`}
-                  aria-current={active ? "true" : undefined}
-                  onClick={() => navigate({ name: "projects", id: project.id })}
-                >
-                  <span className="row-body">
-                    <span className="row-line">
-                      <span className="row-title">{project.name}</span>
-                      {project.hidden && <span className="project-hidden-badge">Hidden</span>}
-                    </span>
-                    <span className="row-sub">
-                      {project.unarchivedSessionCount} Session{project.unarchivedSessionCount === 1 ? "" : "s"} · {project.locations.length} Location{project.locations.length === 1 ? "" : "s"} · {available > 0 ? `${available} Available` : project.locations.length ? "No Locations Available" : "No Locations"}
-                    </span>
-                  </span>
+      {!phoneDetail && header(!spanningEmpty)}
+      {spanningEmpty ? (
+        <div className="master-detail-state">
+          <State
+            pageLevel
+            icon={<ProjectsIcon />}
+            title={`No ${PROJECTS.name} Yet`}
+            headingLevel={2}
+            actions={
+              <>
+                <button type="button" className="btn primary lg" onClick={() => openDialog({ kind: "create" })}>
+                  <PlusIcon />
+                  New Project
                 </button>
-              );
-            })}
-            {visibleProjects.length === 0 && (
-              <div className="project-manager-empty compact">
-                <strong>{`No ${PROJECTS.name} Found`}</strong>
-                <span>{allProjects.length ? "Try another search or Sessions visibility filter." : "Create a Project to organize related sessions."}</span>
-              </div>
-            )}
-          </div>
-        </aside>
-        <main className={`project-manager-detail${selected ? " is-open" : ""}`} data-focus-zone="main" tabIndex={-1}>
-          {!selected ? (
-            <div className="project-manager-empty">
-              <strong>{allProjects.length ? "Select a Project" : "Create Your First Project"}</strong>
-              <span>{allProjects.length ? "Choose a Project to manage its Locations and sessions." : "Projects remain available even when they have no sessions or every machine is offline."}</span>
-              {!allProjects.length && <button type="button" className="btn primary" onClick={() => openDialog({ kind: "create" })}>Create Project</button>}
-            </div>
+                <button type="button" className="btn" onClick={manageConnections}>Connect a Machine</button>
+              </>
+            }
+          >
+            A project is a repository on one or more of your machines. Sessions start inside a project.
+          </State>
+        </div>
+      ) : (
+      <div className="master-detail" data-detail-open={detailOpen ? "" : undefined}>
+        <ProjectList
+          projects={snapshotLoaded ? allProjects : null}
+          shown={visibleProjects}
+          query={query}
+          onQueryChange={setQuery}
+          visibility={visibility}
+          onVisibilityChange={setVisibility}
+          machineName={machineName}
+          selectedId={selected?.id ?? null}
+          onSelect={openProject}
+          // On a phone the overview is a route of its own, opened from the list's first row (§6.2).
+          overview={isMobile ? { count: overviewAttention.length, onOpen: () => navigate({ name: "projects", pane: "overview" }) } : undefined}
+          bodyRef={listBodyRef}
+          onBodyScroll={(event) => {
+            // A hidden list reports 0; that is not where the person left it.
+            if (event.currentTarget.clientHeight > 0) listScrollTop.current = event.currentTarget.scrollTop;
+          }}
+        />
+        <div ref={detailRef} className="master-detail-detail" data-focus-zone="main" tabIndex={-1}>
+          {!snapshotLoaded ? (
+            // While the snapshot loads, the list's skeleton is the one announcement.
+            <DetailSkeleton />
+          ) : !selected ? (
+            // The default detail (§6.1): /projects beside the list, and /projects/overview on its own.
+            // A search changes only the list, so the overview always counts every project.
+            <ProjectsOverview
+              projects={allProjects}
+              attention={overviewAttention}
+              machineName={machineName}
+              showTitle={!phoneDetail}
+              onOpenProject={openProject}
+              onAddLocation={(projectId) => openDialog({ kind: "add-location", projectId })}
+              onRename={renameProject}
+              onNewProject={() => openDialog({ kind: "create" })}
+              onConnectMachine={manageConnections}
+            />
           ) : (
-            <>
-              <div className="project-detail-heading">
-                <div>
-                  <h2>{selected.name}</h2>
-                  <span className="muted project-detail-meta">Project ID: {selected.id}</span>
-                  {projectAudienceVisibilitySummary(selected.audience) && (
-                    <span className="muted project-detail-meta">{projectAudienceVisibilitySummary(selected.audience)}</span>
-                  )}
-                </div>
-                <span className={`project-visibility-state${selected.hidden ? " is-hidden" : ""}`}>
-                  {selected.hidden ? "Hidden from Sessions" : "Shown in Sessions"}
-                </span>
-              </div>
+            // The header, then the notices, then one section recipe in a fixed order (#2959). Each
+            // location is a ProjectLocationRow (#2961); Settings, Memory Sharing and Child Session
+            // Defaults are setting rows saved by one save bar at the end (ProjectSettings, #2962, #2963).
+            <div className="project-detail">
+              <ProjectDetailHeader
+                project={selected}
+                showTitle={!phoneDetail}
+                newSession={newSession!}
+                blocker={newSessionBlocker}
+                menu={detailMenu}
+                access={accessLabel}
+              />
               {selected.canManage === false && (
-                <div className="project-permission-note" role="note">
-                  You can view this Project, but you don’t have permission to manage it.
-                </div>
+                <Notice tone="neutral" compact role="note">You can view this project, but you can't change it.</Notice>
               )}
-              {error && <div className="form-error project-manager-error" role="alert">{error}</div>}
+              {error && (
+                <Notice tone="danger" role="alert" onDismiss={() => setError(null)}
+                  details={<div className="code-well"><code>{error.detail}</code></div>}>
+                  {error.sentence}
+                </Notice>
+              )}
               {accessIdentityError && (
-                <div className="form-error project-manager-error" role="alert">
-                  Access controls could not be loaded: {accessIdentityError}
-                </div>
+                <Notice tone="danger" role="alert" details={<div className="code-well"><code>{accessIdentityError}</code></div>}>
+                  Access controls couldn't be loaded, so access can't be changed here.
+                </Notice>
               )}
-              <section className="project-detail-section" aria-labelledby="project-details-heading">
-                <div className="project-section-heading">
-                  <div><h3 id="project-details-heading">Project Details</h3><p>Renaming a Project does not rename its folders or Locations.</p></div>
-                </div>
-                <form className="project-name-form" onSubmit={(event) => void rename(event)}>
-                  <label className="field">
-                    <span>Project Name</span>
-                    <input value={renameDraft} disabled={selected.canManage === false || busy !== null} maxLength={120} onChange={(event) => setRenameDraft(event.target.value)} />
-                  </label>
-                  <button type="submit" className="btn" disabled={selected.canManage === false || busy !== null || !renameDraft.trim() || renameDraft.trim() === selected.name}>
-                    <span>{busy === "rename" ? "Saving…" : "Save Changes"}</span>
+              <DetailSection
+                title="Locations"
+                note="The folders this project runs in; new sessions use the default first when it's available."
+                // No Locations carries its own Add Location… (§12.1), so the head's steps aside.
+                actions={selected.locations.length > 0 && (
+                  <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "add-location", projectId: selected.id })}>
+                    <PlusIcon />
+                    <span>Add Location…</span>
                   </button>
-                </form>
-                <div className="project-counts" aria-label="Project Counts">
-                  <div><strong>{selected.activeSessionCount}</strong><span>Active Sessions</span></div>
-                  <div><strong>{selected.unarchivedSessionCount}</strong><span>Unarchived Sessions</span></div>
-                  <div><strong>{selected.totalSessionCount}</strong><span>Total Sessions</span></div>
-                  <div><strong>{selected.locations.length}</strong><span>Locations</span></div>
-                </div>
-                <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => void toggleHidden()}>
-                  {busy === "visibility" ? "Saving…" : selected.hidden ? "Show Project" : "Hide Project"}
-                </button>
-                {accessScopeManagementSupported && selected.scope && (
+                )}
+              >
+                {selected.locations.length === 0 ? (
+                  <ProjectLocationsEmpty
+                    canManage={selected.canManage !== false}
+                    machineOnline={[...runners.values()].some((runner) => runner.status === "online")}
+                    onAdd={() => openDialog({ kind: "add-location", projectId: selected.id })}
+                    onOpenConnections={manageConnections}
+                  />
+                ) : (
+                  <ul className="surface project-locations" aria-label="Locations">
+                    {selected.locations.map((location) => (
+                      <ProjectLocationRow
+                        key={location.id}
+                        project={selected}
+                        location={location}
+                        runner={runners.get(location.runnerId)}
+                        machine={runnerDisplay(runners.get(location.runnerId), boxByRunner.get(location.runnerId), location.runnerId)}
+                        setupSupported={worktreeSetupConfigSupported}
+                        accessSupported={accessScopeManagementSupported}
+                        identity={accessIdentity}
+                        identityError={accessIdentityError}
+                        busy={busy !== null}
+                        onNewSession={() => onNewSession({
+                          runnerId: location.runnerId,
+                          workspaceId: location.workspaceId,
+                          projectId: selected.id,
+                          projectLocationId: location.id,
+                        })}
+                        onReveal={() => void reveal(location)}
+                        onCopyPath={() => void copyFromMenu(location.path, "Path copied.", "Couldn't copy the path.")}
+                        onMakeDefault={() => void makeDefault(location)}
+                        onRemove={(choice) => void removeLocation(location, choice)}
+                        onAccessChanged={() => void refreshSelectedProject()}
+                      />
+                    ))}
+                  </ul>
+                )}
+              </DetailSection>
+              <ProjectSettings
+                key={selected.id}
+                project={selected}
+                busy={busy}
+                nameInputRef={nameInputRef}
+                access={accessScopeManagementSupported && selected.scope && (
                   <AccessScopeSettings
-                    resource={{ kind: "project", projectId: selected.id, name: selected.name }}
+                    resource={{ kind: "project", projectId: selected.id, name: selected.name, locations: selected.locations }}
                     scope={selected.scope}
                     identity={accessIdentity}
-                    disabled={selected.canManage === false || busy !== null}
+                    readOnly={selected.canManage === false}
+                    disabled={busy !== null}
                     onUpdated={() => void refreshSelectedProject()}
                   />
                 )}
-              </section>
-              <ProjectMemorySharingSettings key={`memory:${selected.id}`} project={selected} runners={runners}
-                disabled={selected.canManage === false || busy !== null}
-                onSave={async (memorySharing) => {
-                  const result = await runProjectMutation("memory-sharing",
-                    async () => (await api.updateProject(selected.id, { memorySharing })).project, false);
-                  if (!result) throw new Error("Could not save the memory policy.");
-                }} />
-              {selected.childSessionDefaults !== undefined && <ProjectChildDefaults
-                key={selected.id}
-                project={selected}
-                disabled={selected.canManage === false || busy !== null}
-                onSave={async (childSessionDefaults) => {
-                  const result = await runProjectMutation("child-defaults",
-                    // This form owns its error alert; do not announce the rejection twice.
-                    async () => (await api.updateProject(selected.id, { childSessionDefaults })).project, false);
-                  if (!result) throw new Error("Could not save child session defaults.");
-                }}
-              />}
-              <section className="project-detail-section" aria-labelledby="project-locations-heading">
-                <div className="project-section-heading">
-                  <div><h3 id="project-locations-heading">Locations</h3><p>Exact folders where this Project can run. The default is used first when available.</p></div>
-                  <button type="button" className="btn" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "add-location" })}>
-                    <PlusIcon />
-                    <span>Add Location</span>
-                  </button>
-                </div>
-                {selected.locations.length === 0 ? (
-                  <div className="project-manager-empty location-empty">
-                    <strong>No Project Locations</strong>
-                    <span>Add a folder on a connected machine to start sessions here.</span>
-                    <div>
-                      <button type="button" className="btn primary" disabled={selected.canManage === false} onClick={() => openDialog({ kind: "add-location" })}>Add Location</button>
-                      <button type="button" className="btn" onClick={manageConnections}>Manage Connections</button>
-                    </div>
-                  </div>
-                ) : (
-                  <div className="project-location-list">
-                    {selected.locations.map((location) => {
-                      const runner = runners.get(location.runnerId);
-                      const display = runnerDisplay(runner, boxByRunner.get(location.runnerId), location.runnerId);
-                      const count = locationSessionCount(location);
-                      const hostActionsSupported = runnerSupportsProtocol(runner?.protocolVersion, "hostActions");
-                      const wslOnWindows = runner?.os === "windows" && location.path.startsWith("/");
-                      const canLaunch = location.availability === "available";
-                      const canReveal = canLaunch && hostActionsSupported && !wslOnWindows;
-                      const revealReason = !canLaunch
-                        ? `${projectAvailabilityLabel(location.availability)} Locations cannot be revealed.`
-                        : wslOnWindows
-                          ? "WSL workspace paths cannot be revealed from this machine."
-                          : !hostActionsSupported
-                            ? runnerCapabilityRequirement(runner?.protocolVersion, "hostActions", "revealing files in the file manager")
-                            : null;
-                      return (
-                        <article className="project-location-row" key={location.id}>
-                          <div className="project-location-main">
-                            <div className="project-location-heading">
-                              <strong>{location.name}</strong>
-                              {location.isDefault && <span className="project-default-badge">Default</span>}
-                              <StatusBadge meta={projectAvailabilityMeta(location.availability)} />
-                            </div>
-                            <code title={location.path}>{location.path}</code>
-                            <span className="muted">{display.name} · {display.kind === "ssh" ? "SSH" : "Native Runner"}{count === null ? "" : ` · ${count} Session${count === 1 ? "" : "s"}`}</span>
-                            {accessScopeManagementSupported && location.scope && (
-                              <AccessScopeSettings
-                                resource={{
-                                  kind: "workspace",
-                                  runnerId: location.runnerId,
-                                  workspaceId: location.workspaceId,
-                                  name: location.name,
-                                }}
-                                scope={location.scope}
-                                identity={accessIdentity}
-                                disabled={location.canManage === false || selected.canManage === false || busy !== null}
-                                onUpdated={() => void refreshSelectedProject()}
-                              />
-                            )}
-                            {revealReason && <span className="project-location-reason">{revealReason}</span>}
-                            {worktreeSetupConfigSupported && (
-                              <ProjectLocationWorktreeSetup project={selected} location={location}
-                                runnerProtocolVersion={runner?.protocolVersion} />
-                            )}
-                          </div>
-                          <div className="project-location-actions">
-                            <button
-                              type="button"
-                              className="btn sm"
-                              disabled={!canLaunch}
-                              onClick={() => onNewSession({
-                                runnerId: location.runnerId,
-                                workspaceId: location.workspaceId,
-                                projectId: selected.id,
-                                projectLocationId: location.id,
-                              })}
-                            >
-                              New Session Here
-                            </button>
-                            <button type="button" className="btn sm" disabled={!canReveal} onClick={() => void reveal(location)}>Reveal in File Manager</button>
-                            <button type="button" className="btn sm" disabled={selected.canManage === false || location.isDefault || location.availability === "runner_removed" || busy !== null} onClick={() => void makeDefault(location)}>Make Default</button>
-                            <button type="button" className="btn sm danger-text" disabled={selected.canManage === false || busy !== null} onClick={() => void removeLocation(location)}>Remove Location</button>
-                          </div>
-                        </article>
-                      );
-                    })}
-                  </div>
-                )}
-              </section>
-              <section className="project-detail-section" aria-labelledby="project-session-actions-heading">
-                <div className="project-section-heading"><div><h3 id="project-session-actions-heading">Session Actions</h3><p>Archiving sessions leaves this Project and its Locations in place.</p></div></div>
-                <button type="button" className="btn" disabled={selected.canManage === false || selected.unarchivedSessionCount === 0 || busy !== null} onClick={() => void archiveSessions()}>
-                  {busy === "archive" ? "Archiving…" : selectedStopsRuntime ? "Archive and Stop Sessions" : "Archive Sessions"}
-                </button>
-              </section>
-              <section className="project-detail-section project-danger-zone" aria-labelledby="project-danger-heading">
-                <div className="project-section-heading"><div><h3 id="project-danger-heading">Danger Zone</h3><p>Deleting removes only Project metadata. Sessions and files are retained.</p></div></div>
-                <button type="button" className="btn ghost danger" disabled={selected.canManage === false || busy !== null} onClick={() => openDialog({ kind: "delete" })}>Delete Project</button>
-              </section>
-            </>
+                runners={runners}
+                machine={(runnerId) => runnerDisplay(runners.get(runnerId), boxByRunner.get(runnerId), runnerId)}
+                onSave={(changes) => updateSettings("settings", changes)}
+                onSetSessionsTab={(shown) => updateSettings("visibility", { hidden: !shown })}
+              />
+            </div>
           )}
-        </main>
+        </div>
       </div>
+      )}
       {dialog?.kind === "create" && (
         <CreateProjectDialog
           accessScopeManagementSupported={accessScopeManagementSupported}
+          retrySupported={projectCreationRetrySupported}
+          projects={allProjects}
           onClose={() => setDialog(null)}
           onCreated={(project) => {
             applyProject(project);
             navigate({ name: "projects", id: project.id });
-            setDialog({ kind: "add-location", onboarding: true });
+            setDialog({ kind: "add-location", projectId: project.id, onboarding: true });
           }}
         />
       )}
-      {dialog?.kind === "add-location" && selected && (
+      {dialog?.kind === "add-location" && dialogProject && (
         <ProjectLocationDialog
-          project={selected}
+          project={dialogProject}
           projects={allProjects}
           runners={runners}
           boxes={boxes}
           canCreateLocation={projectLocationCreationSupported}
           accessScopeManagementSupported={accessScopeManagementSupported}
-          onboarding={dialog.onboarding && worktreeSetupConfigSupported}
+          onboarding={dialog.onboarding}
+          setupFileSupported={worktreeSetupConfigSupported}
           onClose={() => setDialog(null)}
           onManageConnections={manageConnections}
-          onAdd={async (candidate: ProjectLocationCandidate, generateSetup) => {
-            const { project } = await api.addProjectLocation(selected.id, { runnerId: candidate.runnerId, workspaceId: candidate.workspaceId });
+          onAdded={async (project, location, generateSetup) => {
             applyProject(project);
-            if (generateSetup) {
-              const added = project.locations.find((location) =>
-                location.runnerId === candidate.runnerId && location.workspaceId === candidate.workspaceId);
-              if (!added) throw new Error("Location was added, but its setup configuration could not be generated. Retry from Project Settings.");
-              try {
-                await api.generateProjectLocationWorktreeSetup(project.id, added.id);
-                await api.dismissWorktreeSetupNotice(project.id);
-              } catch (cause) {
-                throw new Error(`Location was added, but setup generation failed: ${(cause as Error).message}. Retry from Project Settings.`);
-              }
-            }
-          }}
-          onCreate={async (location, generateSetup) => {
-            const { project } = await api.createProjectLocation(selected.id, location);
-            applyProject(project);
-            if (generateSetup) {
-              const added = project.locations.find((candidate) =>
-                candidate.runnerId === location.runnerId && candidate.path === location.path);
-              if (!added) throw new Error("Location was added, but its setup configuration could not be generated. Retry from Project Settings.");
-              try {
-                await api.generateProjectLocationWorktreeSetup(project.id, added.id);
-                await api.dismissWorktreeSetupNotice(project.id);
-              } catch (cause) {
-                throw new Error(`Location was added, but setup generation failed: ${(cause as Error).message}. Retry from Project Settings.`);
-              }
-            }
+            if (generateSetup) await createStarterSetup(project, location);
           }}
         />
       )}
-      {dialog?.kind === "delete" && selected && (
-        <DeleteProjectDialog project={selected} busy={busy === "delete"} error={error} onClose={() => setDialog(null)} onDelete={deleteProject} />
-      )}
-    </div>
-    </>
+    </section>
   );
 }

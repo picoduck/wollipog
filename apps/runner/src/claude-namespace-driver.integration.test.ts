@@ -113,9 +113,9 @@ function driver(persistent: boolean): { driver: ClaudeCodeDriver; stderr: string
 }
 
 /** Host PIDs of the lingering task; the host sees processes inside the provider's PID namespace. */
-function lingeringTasks(): number[] {
+function lingeringTasks(knownPids?: readonly number[]): number[] {
   const pids: number[] = [];
-  for (const name of readdirSync("/proc")) {
+  for (const name of knownPids?.map(String) ?? readdirSync("/proc")) {
     if (!/^\d+$/.test(name)) continue;
     try {
       if (readFileSync(`/proc/${name}/cmdline`, "utf8").split("\0").includes(lingerMarker)) pids.push(Number(name));
@@ -221,11 +221,14 @@ test("real bwrap Claude driver proves its namespace gone after disposal ends a r
     await harness.driver.newSession(worktree);
     assert.equal(await harness.driver.prompt("linger"), "end_turn", harness.stderr.join("\n"));
     await waitForFile(lingerStarted);
-    assert.notDeepEqual(lingeringTasks(), [], "the background task outlived its provider turn");
+    const tasks = lingeringTasks();
+    assert.notDeepEqual(tasks, [], "the background task outlived its provider turn");
 
     harness.driver.dispose();
     assert.equal(await harness.driver.proveProcessTreeExit({ terminate: true }), true, harness.stderr.join("\n"));
-    assert.deepEqual(lingeringTasks(), [], "the proven namespace took its background task with it");
+    // Check the captured identities immediately: scanning all of /proc first
+    // can give an asynchronous namespace teardown enough time to hide the race.
+    assert.deepEqual(lingeringTasks(tasks), [], "the proven namespace took its background task with it");
   } finally {
     harness.driver.dispose({ forceImmediate: true });
     assert.equal(await waitForPendingKills(6_000), true);

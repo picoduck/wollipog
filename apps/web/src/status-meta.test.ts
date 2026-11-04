@@ -29,6 +29,8 @@ const TABLE: readonly Row[] = [
   ["session", "stopping", "Stopping", "info"],
   ["session", "idle", "Awaiting Prompt", "neutral"],
   ["session", "ready_for_review", "Ready for Review", "review"],
+  ["session", "campaign_complete", "Campaign Complete", "success"],
+  ["session", "campaign_active", "Campaign Active", "info"],
   ["session", "stalled", "Stalled", "danger"],
   ["session", "failed", "Failed", "danger"],
   ["session", "stop_failed", "Stop Failed", "danger"],
@@ -43,6 +45,7 @@ const TABLE: readonly Row[] = [
   ["machine", "connecting", "Connecting", "info"],
   ["machine", "offline", "Offline", "neutral"],
   ["machine", "update_required", "Update Required", "warning"],
+  ["machine", "approval_required", "Approval Required", "warning"],
   ["machine", "sign_in_required", "Sign-In Required", "warning"],
   ["machine", "pairing_required", "Pairing Required", "warning"],
   ["machine", "unreachable", "Unreachable", "danger"],
@@ -58,6 +61,24 @@ const TABLE: readonly Row[] = [
   ["automation", "paused", "Paused", "neutral"],
   ["automation", "running", "Running", "info"],
   ["automation", "failed", "Failed", "danger"],
+  ["automation", "last_run_failed", "Last Run Failed", "danger"],
+  ["automation_run", "succeeded", "Succeeded", "success"],
+  ["automation_run", "failed", "Failed", "danger"],
+  ["automation_run", "dispatching", "Starting", "info"],
+  ["automation_run", "running", "Running", "info"],
+  ["automation_run", "skipped", "Skipped", "neutral"],
+  ["automation_run", "expired", "Expired", "warning"],
+  ["automation_step", "completed", "Done", "success"],
+  ["automation_step", "rejected", "Failed", "danger"],
+  ["automation_step", "uncertain", "Unconfirmed", "warning"],
+  ["automation_step", "superseded", "Retried", "neutral"],
+  // Outbound event subscription and delivery (#2973)
+  ["subscription", "active", "Active", "success"],
+  ["subscription", "paused", "Paused", "neutral"],
+  ["subscription", "delivery_failed", "Delivery Failed", "danger"],
+  ["outbound_delivery", "delivered", "Delivered", "success"],
+  ["outbound_delivery", "pending", "Pending", "neutral"],
+  ["outbound_delivery", "dropped", "Dropped", "neutral"],
   // Tool call
   ["tool", "pending", "Pending", "neutral"],
   ["tool", "running", "Running", "info"],
@@ -79,7 +100,7 @@ const TABLE: readonly Row[] = [
   // Background Work turn group (#2858); Waiting and Finished carry their counts in the label
   ["jobGroup", "waiting", "Waiting for Jobs", "info"],
   ["jobGroup", "finished", "Finished", "neutral"],
-  ["jobGroup", "returning", "Returning Result", "info"],
+  ["jobGroup", "returning", "Follow-Up Pending", "neutral"],
   ["jobGroup", "returned", "Result Returned", "success"],
   ["jobGroup", "result_missing", "Result Missing", "warning"],
   ["jobGroup", "missing_acknowledged", "Missing Result Acknowledged", "neutral"],
@@ -142,14 +163,35 @@ const TABLE: readonly Row[] = [
   ["pod", "paused", "Paused", "neutral"],
   ["pod", "conflicted", "Conflicted", "warning"],
   ["pod", "failed", "Failed", "danger"],
+  ["podMerge", "running", "Running", "info"],
+  ["podMerge", "applied", "Merged", "success"],
+  ["podMerge", "already_applied", "Already Up to Date", "neutral"],
+  ["podMerge", "conflicted", "Conflicted", "warning"],
+  ["podMerge", "failed", "Failed", "danger"],
   // Provider account
   // Member
+  // Workflow run step (#2977)
+  ["workflowNode", "pending", "Waiting", "neutral"],
+  ["workflowNode", "ready", "Ready", "info"],
+  ["workflowNode", "running", "Running", "info"],
+  ["workflowNode", "waiting_gate", "Awaiting Decision", "warning"],
+  ["workflowNode", "succeeded", "Succeeded", "success"],
+  ["workflowNode", "failed", "Failed", "danger"],
+  ["workflowNode", "skipped", "Skipped", "neutral"],
+  ["workflowNode", "stopped", "Stopped", "neutral"],
+  // Multi-Agent Run row (#2974)
+  ["run", "awaiting_decision", "Awaiting Decision", "warning"],
+  ["run", "approval_required", "Approval Required", "warning"],
+  ["run", "running", "Running", "info"],
+  ["run", "failed", "Failed", "danger"],
   ["member", "active", "Active", "success"],
-  ["member", "suspended", "Suspended", "danger"],
+  ["member", "suspended", "Suspended", "neutral"],
   ["provider_account", "signed_in", "Signed In", "success"],
   ["provider_account", "sign_in_required", "Sign-In Required", "warning"],
+  ["provider_account", "signing_in", "Signing In", "info"],
   ["provider_account", "signed_out", "Signed Out", "neutral"],
   ["provider_account", "status_unknown", "Status Unknown", "neutral"],
+  ["provider_account", "not_added", "Not Added", "neutral"],
   // Terminal tab
   ["shell", "exited", "Exited", "neutral"],
   ["shell", "reconnecting", "Reconnecting", "info"],
@@ -161,6 +203,31 @@ const TABLE: readonly Row[] = [
   ["usage", "available", "Available", "success"],
   ["usage", "approaching_limit", "Approaching Limit", "warning"],
   ["usage", "temporarily_unavailable", "Temporarily Unavailable", "danger"],
+  ["usageBudget", "reached", "Budget Reached", "warning"],
+  // Agent on a machine
+  ["agent", "ready", "Ready", "success"],
+  ["agent", "not_installed", "Not Installed", "neutral"],
+  ["agent", "sign_in_required", "Sign-In Required", "warning"],
+  ["agent", "update_required", "Update Required", "warning"],
+  ["agent", "approval_required", "Approval Required", "warning"],
+  ["agent", "unavailable", "Unavailable", "danger"],
+  ["agent", "ready_when_last_seen", "Ready When Last Seen", "neutral"],
+  // Cross-model review
+  ["reviewRun", "requested", "Requested", "neutral"],
+  ["reviewRun", "running", "Reviewing", "info"],
+  ["reviewRun", "upvote", "Upvote", "success"],
+  ["reviewRun", "downvote", "Downvote", "warning"],
+  ["reviewRun", "unvalidated", "Not Validated", "neutral"],
+  ["reviewRun", "invalid", "Invalid", "danger"],
+  ["reviewRun", "failed", "Failed", "danger"],
+  ["reviewRun", "canceled", "Canceled", "neutral"],
+  // Cross-model review run
+  ["reviewPhase", "requested", "Review Requested", "neutral"],
+  ["reviewPhase", "reviewing", "Reviewing", "info"],
+  ["reviewPhase", "re_reviewing", "Re-Reviewing", "info"],
+  ["reviewPhase", "delivering", "Delivering Findings", "info"],
+  ["reviewPhase", "fixing", "Fixing", "warning"],
+  ["reviewPhase", "settled", "Settled", "success"],
 ];
 
 test("statusMeta holds every row of the §11.2 vocabulary with its label and tone", () => {
@@ -177,12 +244,21 @@ test("only actively progressing work pulses, and an unverified source draws a ho
   // A Stop waiting on an offline runner is not being delivered, so it does not claim progress (#208).
   assert.equal(statusMeta("session", "stop_waiting_for_runner").pulse, false);
   assert.equal(statusMeta("job", "running").pulse, true);
+  assert.deepEqual(pulsing("run"), ["running"]);
+  assert.deepEqual(pulsing("workflowNode"), ["running"]);
   assert.deepEqual(pulsing("queuedMessage"), ["sent", "started", "steering"]);
   // Sending is a spinner beside the word, never a pulsing badge (#2171).
   assert.deepEqual(pulsing("messageReceipt"), []);
+  assert.deepEqual(pulsing("reviewRun"), ["running"]);
+  assert.deepEqual(pulsing("reviewPhase"), ["reviewing", "re_reviewing"]);
   assert.equal(statusMeta("job", "stalled").pulse, false);
   assert.equal(statusMeta("machine", "offline").hollow, true);
   assert.equal(statusMeta("job", "unverified").hollow, true);
+  // An agent not on the machine, or one whose machine is not online, is not a current fact (#2990).
+  assert.deepEqual(statusValues("agent").filter((value) => statusMeta("agent", value).hollow),
+    ["not_installed", "ready_when_last_seen"]);
+  // A new account that was never added, because it is already on the machine (#2996).
+  assert.deepEqual(statusValues("provider_account").filter((value) => statusMeta("provider_account", value).hollow), ["not_added"]);
 });
 
 test("an unknown value reads Status Unavailable, never its raw enum or a prototype member", () => {
@@ -192,9 +268,9 @@ test("an unknown value reads Status Unavailable, never its raw enum or a prototy
 });
 
 test("every label is Title Case copy, with no glyph and no CSS transform needed", () => {
-  for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "tool", "family",
-    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "pod", "member", "provider_account",
-    "shell", "share", "usage"] as const) {
+  for (const domain of ["attention", "session", "machine", "project_location", "skill", "automation", "automation_run", "automation_step", "subscription", "outbound_delivery", "tool", "family",
+    "job", "jobGroup", "background_work", "queuedMessage", "messageReceipt", "delivery", "notification", "workflow", "workflowNode", "run", "pod", "podMerge", "member", "provider_account",
+    "shell", "share", "usage", "usageBudget", "agent"] as const) {
     for (const value of statusValues(domain)) {
       const { label } = statusMeta(domain, value);
       for (const text of [label]) {

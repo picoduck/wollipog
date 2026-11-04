@@ -5,9 +5,11 @@ import type {
   RevokeProviderProfileGrantResultMessage,
 } from "@wollipog/protocol";
 import type { RunnerProviderAccount } from "./config.js";
+import { accountConfigPublicationErrorMessage, accountConfigPublicationMayHaveOccurred, type AccountConfigPreimage } from "./provider-account-config-publication.js";
 import { ProviderHomeLeaseError } from "./provider-home-lease-worker-protocol.js";
 import type { ProviderAccountRemovalOptions } from "./provider-login.js";
 import type { ProviderProfileGrants, StaleProviderProfileGrant } from "./provider-profile-grants.js";
+import { managedProviderProfileIdFor } from "./provider-profile-home.js";
 import {
   isProviderProfileGrantId,
   isProviderProfileId,
@@ -29,10 +31,16 @@ export interface ProviderProfileCommandDeps {
   /** Drop one exact grant of this control plane from the HOME's marker under the HOME's lease. */
   revoke(home: string, provider: "claude" | "codex", profileId: string, grantId: string): Promise<boolean>;
   /** Under a removed account HOME's lease: drop this control plane's grants and report whether the
-   * HOME may be deleted (no other reference here, no other control plane granted). */
-  retire(home: string, provider: "claude" | "codex"): Promise<boolean>;
-  /** Atomically replace the configured accounts (writeProviderAccountsConfig). */
-  persistAccounts(accounts: RunnerProviderAccount[]): void;
+   * reference was last and the marker unshared. This is not physical deletion authority. With
+   * `expectedProfileId` a marker holding another identity, or none, is kept unchanged (false). */
+  retire(home: string, provider: "claude" | "codex", expectedProfileId?: string): Promise<boolean>;
+  /** The managed profile root (`~/.agent-manager/profiles`); accounts at `<root>/<profileId>` are
+   * managed profile HOMEs whose removal requires the marker to still hold that identity. */
+  profileRoot?: string;
+  /** Capture the source revision before awaiting a marker adoption. */
+  captureAccountsPreimage(): AccountConfigPreimage;
+  /** Publish the configured accounts against that exact source revision. */
+  persistAccounts(accounts: RunnerProviderAccount[], preimage: AccountConfigPreimage): void;
   removeAccount(accountId: string, options: ProviderAccountRemovalOptions): Promise<{ credentialsRetained: boolean }>;
   readMarker?: (account: RunnerProviderAccount) => ProviderProfileRead;
   /** Re-send the account inventory so the control plane sees the new profile state. */
@@ -70,42 +78,73 @@ export async function adoptProviderProfileCommand(
   if (!deps.controlPlaneInstanceId || !deps.grants.supportsProfiles()) {
     return fail("This control plane did not negotiate provider profiles.");
   }
-  let profileId: string;
+  const ticket = deps.grants.captureAdoptionTicket(msg.grantId);
+  if (!ticket) return fail("Provider profile adoption capacity is unavailable.");
+  // Immutable marker target: a later account-array mutation must not retarget cleanup.
+  const target = { ...account };
   try {
-    ({ profileId } = await deps.adopt(account.directory, account.provider, msg.grantId));
-  } catch (error) {
-    if (error instanceof ProviderHomeLeaseError && HOME_IN_USE.has(error.code)) return fail(error.message, "HOME_IN_USE");
-    if (error instanceof ProviderHomeLeaseError && PROFILE_EXISTS.has(error.code)) return fail(error.message, "PROFILE_EXISTS");
-    return fail(error instanceof Error ? error.message : "The provider profile could not be adopted.");
-  }
-  // The marker now grants this control plane, but the grant becomes usable only once the whole
-  // adoption has succeeded. An uncoded failure leaves the control plane's row pending (or revoked by
-  // an Owner or Admin meanwhile, which it could not tell this runner), so anything failing after the
-  // marker write takes this grant back out of the marker and never records it.
-  if (account.profileId !== profileId) {
+    let preimage: AccountConfigPreimage;
+    try { preimage = deps.captureAccountsPreimage(); }
+    catch (error) { return fail(accountConfigPublicationErrorMessage(error, "The runner configuration account source could not be verified.")); }
+    const beforeMarker = read(deps, target);
+    const persisted = preimage.accounts.find(candidate => candidate.id === target.id &&
+      candidate.provider === target.provider && candidate.directory === target.directory);
+    // A readable existing marker or a persisted binding can prove a prior exact CP grant.
+    // An unreadable marker is ambiguous; it never proves that this attempt introduced a grant.
+    const markerProfileId = beforeMarker.state === "present" &&
+      providerProfileGrantFor(beforeMarker.marker, deps.controlPlaneInstanceId)?.grantId === msg.grantId
+      ? beforeMarker.marker.profileId : undefined;
+    const priorKnownProfiles = [persisted?.profileId, markerProfileId].filter((id): id is string =>
+      id !== undefined && deps.grants.hasKnownGrant(id, msg.grantId));
+    let profileId: string;
     try {
-      deps.persistAccounts(deps.accounts().map((candidate) => candidate === account ? { ...candidate, profileId } : candidate));
-    } catch {
-      await rollBackAdoption(deps, account, profileId, msg.grantId);
-      deps.publish();
-      return fail("The runner configuration could not be updated.");
+      ({ profileId } = await deps.adopt(target.directory, target.provider, msg.grantId));
+    } catch (error) {
+      if (error instanceof ProviderHomeLeaseError && HOME_IN_USE.has(error.code)) return fail(error.message, "HOME_IN_USE");
+      if (error instanceof ProviderHomeLeaseError && PROFILE_EXISTS.has(error.code)) return fail(error.message, "PROFILE_EXISTS");
+      return fail(error instanceof Error ? error.message : "The provider profile could not be adopted.");
     }
+    const stale = () => {
+      // The current CP snapshot/revocation owns current grants. Never delete one to compensate
+      // an older command, including an unrelated global fence or remove/re-add ABA.
+      deps.publish();
+      return fail("The adoption authorization changed; its marker was retained and no local grant was activated.");
+    };
+    if (!deps.grants.adoptionTicketCurrent(ticket)) return stale();
+    try {
+      // Config generation remains independently fenced; no account-specific merge or retry.
+      deps.persistAccounts(preimage.accounts.map(candidate => candidate.id === target.id ? { ...candidate, profileId } : { ...candidate }), preimage);
+    } catch (error) {
+      if (!deps.grants.adoptionTicketCurrent(ticket)) {
+        deps.publish();
+        return fail(accountConfigPublicationErrorMessage(error, "The adoption authorization changed; evidence was retained without local activation."));
+      }
+      if (accountConfigPublicationMayHaveOccurred(error)) {
+        deps.grants.recordRevoked(undefined, msg.grantId);
+      } else {
+        const current = read(deps, target);
+        const configured = deps.accounts().some(candidate => candidate.id === target.id && candidate.provider === target.provider &&
+          candidate.directory === target.directory && candidate.profileId === profileId);
+        const retainedKnownGrant = deps.grants.hasKnownGrant(profileId, msg.grantId) &&
+          (priorKnownProfiles.includes(profileId) || configured);
+        // Preserve both proven preexisting grants and unproved marker provenance. Even when
+        // these reads suggest a newly introduced grant, an async revoke cannot carry this
+        // command's CP generation into the worker's later mutation. Do not start that rollback.
+        if (!retainedKnownGrant) deps.log(beforeMarker.state === "unverifiable" || current.state === "unverifiable"
+          ? "a failed adoption retained unverifiable marker evidence without activating a new local grant"
+          : "a failed adoption retained its marker without activating a new local grant");
+      }
+      deps.publish();
+      return fail(accountConfigPublicationErrorMessage(error, "The runner configuration could not be updated."));
+    }
+    // Atomically recheck/consume the CP capability immediately before local activation. A map
+    // entry after a snapshot ABA cannot make the old capability valid again.
+    if (!deps.grants.activateAdoption(profileId, ticket)) return stale();
     account.profileId = profileId;
-  }
-  deps.grants.recordAdopted(profileId, msg.grantId);
-  deps.publish();
-  return { type: "adopt_provider_profile_result", requestId: msg.requestId, ok: true, profileId };
-}
-
-/** Undo a failed adoption's marker write under the HOME's lease. The grant was never recorded as
- * usable; if the marker update fails too, the grant stays unusable here and the next registration
- * removes it once the control plane no longer lists it. */
-async function rollBackAdoption(deps: ProviderProfileCommandDeps, account: RunnerProviderAccount, profileId: string, grantId: string): Promise<void> {
-  deps.grants.recordRevoked(undefined, grantId);
-  try {
-    await deps.revoke(account.directory, account.provider, profileId, grantId);
-  } catch (error) {
-    deps.log(`a failed provider profile adoption could not be removed from the HOME's marker: ${error instanceof Error ? error.message : "unknown error"}`);
+    deps.publish();
+    return { type: "adopt_provider_profile_result", requestId: msg.requestId, ok: true, profileId };
+  } finally {
+    deps.grants.releaseAdoptionTicket(ticket);
   }
 }
 
@@ -137,9 +176,13 @@ export async function revokeProviderProfileGrantCommand(
 
 /** `remove_provider_account` against a v225 control plane. This control plane's grant stops at
  * once and leaves the marker before removal is attempted, so it holds even when the removal is
- * refused (an agent default, a running sign-in, a configuration write). Whether the HOME is kept for
- * other control planes is decided under its lease at deletion time; reading the marker here only
- * skips deletion early. A HOME only this control plane was granted keeps today's deletion. */
+ * refused (an agent default, a running sign-in, a configuration write). Physical cleanup retains
+ * every HOME until exact retirement authority is proved (#3157); grant retirement still runs under
+ * the lease for an unshared marker, but its legacy boolean never authorizes deletion.
+ *
+ * A managed profile HOME (`<root>/<profileId>`) must still hold the identity its account recorded.
+ * When the directory holds another profile (or no readable marker) it is no longer this account's
+ * HOME: its grants are left alone and it is kept, and grant retirement re-checks the identity. */
 export async function removeProviderAccountWithProfile(
   deps: ProviderProfileCommandDeps,
   accountId: string,
@@ -147,16 +190,18 @@ export async function removeProviderAccountWithProfile(
   const account = deps.accounts().find((candidate) => candidate.id === accountId);
   const marker = account ? read(deps, account) : { state: "absent" as const };
   const present = marker.state === "present" ? marker.marker : undefined;
-  const mine = present ? providerProfileGrantFor(present, deps.controlPlaneInstanceId) : undefined;
+  const expectedProfileId = account ? managedProviderProfileIdFor(deps.profileRoot, account) : undefined;
+  const substituted = expectedProfileId !== undefined && present?.profileId !== expectedProfileId;
+  const mine = present && !substituted ? providerProfileGrantFor(present, deps.controlPlaneInstanceId) : undefined;
   let markerRevoked = true;
   if (account && present && mine) {
     deps.grants.recordRevoked(present.profileId, mine.grantId);
     markerRevoked = await dropGrant(deps, account, present.profileId, mine.grantId);
   }
   // Only an optimisation: a grant another runner records later is caught under the lease below.
-  const shared = providerProfileHomeShared(marker, deps.controlPlaneInstanceId);
+  const shared = substituted || providerProfileHomeShared(marker, deps.controlPlaneInstanceId);
   const removed = await deps.removeAccount(accountId, shared ? { retainCredentialHome: true } : {
-    retireCredentialHome: (removedAccount) => deps.retire(removedAccount.directory, removedAccount.provider),
+    retireCredentialHome: (removedAccount) => deps.retire(removedAccount.directory, removedAccount.provider, expectedProfileId),
     retainCredentialHomeIf: (removedAccount) => providerProfileHomeShared(read(deps, removedAccount), deps.controlPlaneInstanceId),
   });
   // A retained HOME must stop granting this control plane; retry a marker update that failed above.

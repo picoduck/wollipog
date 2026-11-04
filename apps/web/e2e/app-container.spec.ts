@@ -277,7 +277,7 @@ test("the F6 zone line measures its containing block only when its zone moves", 
 });
 
 test.describe("the `app` container query", () => {
-  const listPaneWidth = (page: Page) => page.locator(".project-manager-grid").evaluate((grid) =>
+  const listPaneWidth = (page: Page) => page.locator(".master-detail").evaluate((grid) =>
     Number.parseFloat(getComputedStyle(grid).gridTemplateColumns.split(" ")[0]!));
 
   // 761/834/940/1099 are compact by viewport and by column alike: unchanged by the move to @container.
@@ -299,7 +299,7 @@ test.describe("the `app` container query", () => {
         await expect(page.locator(".app-rail.labelled")).toBeVisible();
       }
       const rail = await page.locator(".app-rail").evaluate((element) => element.getBoundingClientRect().width);
-      expect(await listPaneWidth(page)).toBe(310);
+      expect(await listPaneWidth(page)).toBe(320);
       // From 1100px to 1100px plus the rail, the viewport is desktop but the column is compact.
       for (const width of [1100, 1100 + Math.ceil(rail) - 1]) {
         await page.setViewportSize({ width, height: 900 });
@@ -309,7 +309,7 @@ test.describe("the `app` container query", () => {
       }
       await evidence(page, `projects-list-pane-${labelled ? "labelled" : "icon"}-rail-${1100 + Math.ceil(rail) - 1}`);
       await page.setViewportSize({ width: 1100 + Math.ceil(rail), height: 900 });
-      await expect.poll(() => listPaneWidth(page), "310px once the column reaches 1100px").toBe(310);
+      await expect.poll(() => listPaneWidth(page), "320px once the column reaches 1100px").toBe(320);
     });
   }
 

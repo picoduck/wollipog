@@ -1,6 +1,8 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "./review-retirement.js";
 /** Exact installed review controller. This is a review-only job, never an interactive harness. */
 export const CONTROLLED_REVIEW_PROFILE = "native_opus_5_5_high_read_only" as const;
 const REVIEW_FAILURE_REASONS=new Set([
+  REVIEW_JOBS_RETIRED_REASON,
   "controlled native review accounting supports audited Linux hosts only","installed review controller differs from the audited version",
   "native reviewer usage provenance is unsupported for this CLI version","native reviewer repository identity is outside its authorized target",
   "review epoch differs from the current canonical forge target","native reviewer init identity/tool policy mismatch",

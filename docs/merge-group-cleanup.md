@@ -50,7 +50,15 @@ is active, or after 35 polls or 35 minutes, whichever comes first; the job has a
 40-minute budget. When it exits at its budget, the next merge-group CI event starts
 another.
 
-Unknown entries, missing heads, GraphQL errors, more than 100 refs or entries,
+An entry in GitHub's `QUEUED` state with an explicitly null `headCommit` has not been assigned an
+integration by build-concurrency admission. It contributes no head to the dependency set. A computed
+head protects its integration in every recognised state, including `QUEUED`; missing fields,
+malformed heads, and null heads in other states remain ambiguous. The complete queue-ref listing,
+two observations, exact attempt identity, and immediate final queue recheck are still required.
+See GitHub's [queue entry schema](https://docs.github.com/en/graphql/reference/pulls#mergequeueentry)
+and [build-concurrency setting](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/managing-a-merge-queue).
+
+Unknown entries, other missing heads, GraphQL errors, more than 100 refs or entries,
 partial connections, and API failures retain CI. A run older than the newest 100
 merge-group runs is not watched; it only keeps running. Logs identify each run,
 attempt, and SHA and record evidence, withheld/requested cancellation, idle exit,

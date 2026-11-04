@@ -521,6 +521,66 @@ test("Clear and Copy Lines: Clear keeps Select Lines on, Copy Lines copies the t
   }
 });
 
+/** A Clipboard API whose writes stay pending until the test settles them. */
+function deferredClipboard() {
+  const writes: Array<{ text: string; resolve: () => void }> = [];
+  const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+  Object.defineProperty(domWindow.navigator, "clipboard", {
+    configurable: true,
+    value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+  });
+  return {
+    writes,
+    succeed: async () => { await act(async () => { writes.at(-1)!.resolve(); await Promise.resolve(); }); },
+    restore: () => {
+      if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+      else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+    },
+  };
+}
+
+test("a Copy Lines write that succeeds after Review closed shows no toast and moves no focus (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  const harness = await mountReview();
+  const elsewhere = doc().createElement("button");
+  doc().body.append(elsewhere);
+  try {
+    await selectLines(harness);
+    await click(button(harness.container, "Select Line 1"));
+    const copy = button(requiredBar(harness), "Copy Lines");
+    await act(async () => { copy.focus(); });
+    await click(copy);
+    assert.deepEqual(clipboard.writes.map((write) => write.text), ["const one = 1;"], "the copy started");
+    await harness.unmount();
+    await act(async () => { elsewhere.focus(); });
+    await clipboard.succeed();
+    assert.deepEqual(harness.calls.toasts, [], "no toast for a selection bar that has gone");
+    assert.ok(doc().activeElement === elsewhere, "focus stays where the person put it");
+  } finally {
+    elsewhere.remove();
+    await harness.unmount();
+    clipboard.restore();
+  }
+});
+
+test("a Copy Lines write that succeeds while the bar is still shown says so and leaves focus on Copy Lines (#3582)", async () => {
+  const clipboard = deferredClipboard();
+  const harness = await mountReview();
+  try {
+    await selectLines(harness);
+    await click(button(harness.container, "Select Line 1"));
+    const copy = button(requiredBar(harness), "Copy Lines");
+    await act(async () => { copy.focus(); });
+    await click(copy);
+    await clipboard.succeed();
+    assert.deepEqual(harness.calls.toasts, ["Copied 1 line."]);
+    assert.ok(doc().activeElement === copy, "focus is still on Copy Lines");
+  } finally {
+    await harness.unmount();
+    clipboard.restore();
+  }
+});
+
 test("on a coarse pointer no + renders, and the line number's menu adds a finding, selects or opens the line (#2849)", async () => {
   coarsePointer = true;
   const harness = await mountReview();

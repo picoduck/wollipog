@@ -4,7 +4,7 @@ import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import type { DurableSessionCommand, PacedVideoTransportGrant } from "@wollipog/protocol";
 import { reviewerBudgetAdmissionDigest, type EvidenceReviewerBudgetAdmission } from "./evidence-review-admission.js";
-import { PreparedMediaSessions, type PreparedMediaBinding, type PreparedMediaIdentity,
+import { PreparedMediaSessions, pacedGrantPlanDigest, type PreparedMediaBinding, type PreparedMediaIdentity,
   type PreparedMediaSessionPorts, type PreparedMediaRecord } from "./prepared-media-sessions.js";
 
 const digest = (text: string) => createHash("sha256").update(text).digest("hex");
@@ -42,8 +42,9 @@ function harness() {
   const grant: PacedVideoTransportGrant = { reviewId: "review", reviewerSessionId: "worker", childSessionId: "child",
     occurrenceId: "original-occurrence", policyRevision: 4, sourceEvidenceId: "original-video", sourceArtifactId: "source",
     sourceSha256: digest("source"), manifestSha256: digest("complete manifest"), bindingSha256: digest("binding"),
-    criteriaSha256: digest("criteria"), expiresAt: now + 60_000,
+    criteriaSha256: digest("criteria"), expiresAt: now + 60_000, deliveryPlanSha256: "",
     frames: [{ index: 0, ptsUs: 0, durationUs: 33_333, sha256: digest("native frame"), sizeBytes: 1024 }] };
+  grant.deliveryPlanSha256 = pacedGrantPlanDigest(grant.frames)!;
   const binding: PreparedMediaBinding = { grant, namespaceLaunchSha256: digest("actual worker namespace launch"),
     namespacePolicySha256: digest("validated namespace"), authoritySha256: digest("exact current policy and disclosure") };
   const store = new PreparedMediaSessions(db, ports, () => now);

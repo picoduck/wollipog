@@ -117,7 +117,7 @@ export class SessionCommandReceiptStore {
   private readonly now: () => number;
   private readonly maxReceipts: number;
   private readonly ownerStaleMs: number;
-  private readonly activeHandles = new Set<string>();
+  private readonly activeHandles = new Map<string, SessionCommandReceiptHandle>();
   /** One startup scan seeds these indexes. The 10-second recovery path reads only nonterminal
    * candidates and expiry metadata; it never enumerates a journal full of terminal history. */
   private readonly knownRecordFiles = new Set<string>();
@@ -338,8 +338,14 @@ export class SessionCommandReceiptStore {
     return next;
   }
 
-  activateHandle(invocationId: string): void { this.activeHandles.add(invocationId); }
-  releaseHandle(invocationId: string): void { this.activeHandles.delete(invocationId); }
+  activateHandle(invocationId: string, handle: SessionCommandReceiptHandle): void {
+    this.activeHandles.set(invocationId, handle);
+  }
+
+  releaseHandle(invocationId: string, handle: SessionCommandReceiptHandle): void {
+    // A stale callback may fail after a retry has reclaimed this invocation.
+    if (this.activeHandles.get(invocationId) === handle) this.activeHandles.delete(invocationId);
+  }
 
   private transitionLocked(
     prior: SessionCommandReceiptRecord,
@@ -540,7 +546,7 @@ export class SessionCommandReceiptStore {
 
 export class SessionCommandReceiptHandle {
   constructor(private readonly store: SessionCommandReceiptStore, private record: SessionCommandReceiptRecord) {
-    this.store.activateHandle(record.invocationId);
+    this.store.activateHandle(record.invocationId, this);
   }
 
   get invocationId(): string { return this.record.invocationId; }
@@ -572,7 +578,7 @@ export class SessionCommandReceiptHandle {
       this.record = run();
       return this.current;
     } catch (error) {
-      this.store.releaseHandle(this.record.invocationId);
+      this.store.releaseHandle(this.record.invocationId, this);
       throw error;
     }
   }
@@ -582,7 +588,7 @@ export class SessionCommandReceiptHandle {
       this.record = run();
       return this.current;
     } finally {
-      this.store.releaseHandle(this.record.invocationId);
+      this.store.releaseHandle(this.record.invocationId, this);
     }
   }
 }

@@ -1,10 +1,12 @@
 import { spawnSync } from "node:child_process";
+import { createHash } from "node:crypto";
 import { chmodSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { getAsset, isSea } from "node:sea";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { windowsLeaseIoCommand } from "./provider-home-lease-windows-io.js";
 import { leaseHelperParent, LeaseHelperArtifact } from "./provider-home-lease-staging.js";
+import { LEASE_CHECKPOINT_LIMITS } from "./provider-home-lease-checkpoint.js";
 
 const ASSET = "wollipog/provider-home-lease-io";
 export type LeaseIoWork = { records: number; bytes: number };
@@ -80,15 +82,22 @@ function nativeExecutable(): string {
       return executable.path;
     } catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
   }
+  // Establish the trusted digest before staging can create or change any file.
+  let embedded: Uint8Array | undefined;
+  let expectedSha256: string | undefined;
+  if (isSea()) {
+    try {
+      embedded = new Uint8Array(getAsset(ASSET));
+      expectedSha256 = createHash("sha256").update(embedded).digest("hex");
+    } catch { throw new LeaseIoError("unavailable", HELPER_UNAVAILABLE); }
+  }
   for (const parent of stagingRoots()) {
     let artifact: LeaseHelperArtifact | undefined;
     try {
       artifact = new LeaseHelperArtifact(parent, "lease-io");
       const path = artifact.path;
-      if (isSea()) {
-        let bytes: Uint8Array;
-        try { bytes = new Uint8Array(getAsset(ASSET)); } catch { throw new Error("the packaged provider-HOME lease helper is unavailable"); }
-        writeFileSync(path, bytes, { flag: "wx", mode: 0o700 });
+      if (embedded) {
+        writeFileSync(path, embedded, { flag: "wx", mode: 0o700 });
       } else {
         const source = fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url ?? pathToFileURL(__filename).href));
         const compiler = process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc";
@@ -97,7 +106,7 @@ function nativeExecutable(): string {
         if (compiled.error || compiled.status !== 0) throw new Error("the fixed provider-HOME lease helper could not be compiled", { cause: new Error((compiled.stderr ?? "").slice(0, 2_048)) });
         chmodSync(path, 0o700);
       }
-      artifact.capture();
+      artifact.capture(expectedSha256);
       const probe = spawnSync(path, ["--probe"], { timeout: 10_000, maxBuffer: 1024, env: {} });
       artifact.verify();
       if (probe.error || probe.status !== 0 || rejectProbeForTest?.(path)) throw new Error("helper execution probe failed");
@@ -180,7 +189,7 @@ export function readLeaseIoSnapshot(root: string, budget = DEFAULT_BUDGET): Leas
   const rootIdentity = reader.identity(); const hasLock = reader.u8();
   if (hasLock > 1) throw new Error("invalid lease directory response");
   const lockIdentity = hasLock ? reader.identity() : undefined;
-  const count = reader.u32(); if (count > 8192) throw new Error("lease snapshot entry limit exceeded");
+  const count = reader.u32(); if (count > LEASE_CHECKPOINT_LIMITS.retirementEntries) throw new Error("lease snapshot entry limit exceeded");
   const entries: LeaseIoEntry[] = []; const seen = new Set<string>();
   for (let i = 0; i < count; i++) {
     const directory = reader.u8(); const name = reader.text(255); const identity = reader.identity(); const stamp = reader.text(160);

@@ -2,10 +2,11 @@ import type { AuthPrincipal } from "./identity.js";
 import { supportsPacedVideoReviewPeer } from "@wollipog/protocol";
 import type { VideoProfileLiveProof, EvidenceReviewerTarget } from "./evidence-review-worker.js";
 import { validVideoLiveProof } from "./evidence-review-worker.js";
-import { VideoEvidenceRuntime, type VideoReviewBinding,
+import { VideoEvidenceRuntime, VideoReviewRefused, type VideoReviewBinding,
   type VideoReviewCriterion, type VideoReviewRecord, type VideoReviewStore, type VideoReviewVerdict } from "./video-evidence-runtime.js";
 import { planEvidenceRecovery, type EvidenceRecoveryPlan } from "./evidence-review-recovery.js";
 import type { EvidenceRecoveryExecutor, RecoveryExecutionResult } from "./evidence-review-recovery-executor.js";
+import type { VideoPreparationFailureCode } from "./video-evidence-preparation.js";
 
 export interface PendingVideoReviewRequest {
   childSessionId: string;
@@ -25,7 +26,7 @@ export interface ResolvedVideoReviewRequest {
 export interface EvidenceReviewAuditEvent {
   event: "video_evidence_prepared" | "video_evidence_recovery" | "video_evidence_delivery" |
     "video_evidence_acknowledged" | "video_evidence_verdict" | "video_evidence_provenance";
-  entryPoint: "owner_prepare" | "reviewer_media" | "reviewer_verdict" | "owner_provenance";
+  entryPoint: "owner_prepare" | "reviewer_media" | "reviewer_verdict" | "owner_provenance" | "human_validation";
   occurrenceId: string;
   rootSessionId: string;
   childSessionId: string;
@@ -60,7 +61,8 @@ export interface EvidenceReviewServiceAdapter {
 export type PrepareEvidenceReviewResult =
   | { ok: true; review: VideoReviewRecord }
   | { ok: false; code: "not_authorized" | "custom_fallback" | "live_validation" | "mixed_peer" |
-      "preparation"; recovery?: EvidenceRecoveryPlan; execution?: RecoveryExecutionResult };
+      "preparation"; recovery?: EvidenceRecoveryPlan; preparationCode?: VideoPreparationFailureCode;
+      execution?: RecoveryExecutionResult };
 const agentSession = (principal: AuthPrincipal) => principal.kind === "agent" ? principal.credentialSessionId : null;
 
 /** Authenticated service boundary for the independent runtime. Agent routes/MCP exposure and
@@ -120,7 +122,10 @@ export class EvidenceReviewService {
           durationMs: Math.max(0, this.clock() - started), attempt });
         return result;
       }
-      const recovery = planEvidenceRecovery(current.mode, result.code, attempt);
+      // `attempt` counts bounded decoder-busy retries of this one source. It is never a replacement
+      // capture count, so any other refusal plans as the source's first; capture exhaustion is
+      // decided only by the owner's durable lineage (#2938).
+      const recovery = planEvidenceRecovery(current.mode, result.code, result.code === "decoder_busy" ? attempt : 0);
       this.adapter.audit({ event: "video_evidence_recovery", entryPoint: "owner_prepare",
         occurrenceId: current.binding.occurrenceId, rootSessionId: current.binding.rootSessionId,
         childSessionId: current.binding.childSessionId, reviewerSessionId: current.binding.reviewerSessionId,
@@ -135,11 +140,31 @@ export class EvidenceReviewService {
             criteriaSha256: b.criteriaSha256, workerAdmissionSha256: b.workerAdmissionSha256 }, recovery) : undefined;
         // Replacement subjects start new exact occurrences; this original snapshot cannot be
         // rewritten or approved with substituted media. Unknown operations reconcile only.
-        return { ok: false, code: "preparation", recovery, ...(execution ? { execution } : {}) };
+        return { ok: false, code: "preparation", recovery, preparationCode: result.code, ...(execution ? { execution } : {}) };
       }
       await this.delay(recovery.delayMs);
     }
     return { ok: false, code: "preparation" };
+  }
+
+  /** Human validation derivation (#1321): server-internal, after the Human route authenticated the
+   * permit's minting Human. The binding is the permit's own server binding, never caller JSON, and
+   * must carry its validation purpose; the runtime rechecks it and selects the permit's profile. */
+  async deriveValidation(binding: VideoReviewBinding, mediaType: "video/webm" | "video/mp4", criteria: readonly VideoReviewCriterion[]) {
+    if (!binding.operatorValidation) throw new VideoReviewRefused("stale");
+    const result = await this.runtime.derive(binding, mediaType, criteria);
+    if (result.ok) this.audit(result.review, "video_evidence_prepared", "human_validation", {});
+    return result;
+  }
+
+  /** The finished validation run's verified observation for the Human's own inspection. It is
+   * never approval provenance, and the runtime refuses it for any production review. */
+  validationObservation(reviewId: string): VideoReviewVerdict {
+    const review = this.store.getReview(reviewId);
+    if (!review?.binding.operatorValidation) throw new VideoReviewRefused("verdict");
+    const verdict = this.runtime.validationObservation(reviewId, review.binding.reviewerSessionId);
+    this.audit(review, "video_evidence_provenance", "human_validation", { verdictId: verdict.verdictId });
+    return verdict;
   }
 
   private authenticatedReviewer(principal: AuthPrincipal, reviewId: string): string {
@@ -190,6 +215,13 @@ export class EvidenceReviewService {
     return verdict;
   }
   ownerProvenance(principal: AuthPrincipal, reviewId: string): VideoReviewVerdict {
+    return this.ownerVerdict(principal, reviewId, "approval");
+  }
+  /** Either outcome, for the owner's decision; never usable as approval provenance by itself. */
+  ownerObservation(principal: AuthPrincipal, reviewId: string): VideoReviewVerdict {
+    return this.ownerVerdict(principal, reviewId, "observation");
+  }
+  private ownerVerdict(principal: AuthPrincipal, reviewId: string, purpose: "approval" | "observation"): VideoReviewVerdict {
     const root = agentSession(principal);
     const review = this.store.getReview(reviewId);
     if (principal.kind !== "agent" || principal.orchestrator !== true || !root || !review ||
@@ -198,7 +230,8 @@ export class EvidenceReviewService {
       throw new Error("Only the exact current workflow decision owner with supported private peers can inspect approval provenance.");
     }
     // Server chooses the authenticated admitted reviewer from the stored grant, not owner JSON.
-    const verdict = this.runtime.approvalProvenance(reviewId, review.binding.reviewerSessionId);
+    const verdict = purpose === "approval" ? this.runtime.approvalProvenance(reviewId, review.binding.reviewerSessionId)
+      : this.runtime.ownerObservation(reviewId, review.binding.reviewerSessionId);
     this.audit(review, "video_evidence_provenance", "owner_provenance", { verdictId: verdict.verdictId });
     return verdict;
   }

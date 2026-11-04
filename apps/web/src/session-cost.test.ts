@@ -36,11 +36,12 @@ test("a priced session shows the formatted cost and names it as usage", () => {
   });
 });
 
-test("an unpriced session with real tokens says the cost is unavailable, never $0.00", () => {
+test("an unpriced session with real tokens shows its token count, named Unpriced, never $0.00", () => {
   const label = sessionCostLabel(session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 }));
-  assert.equal(label?.text, "$—");
+  assert.equal(label?.text, "26K Tokens");
   assert.equal(label?.priced, false);
-  assert.equal(label?.ariaLabel, "Session Usage: Cost Unavailable");
+  assert.equal(label?.ariaLabel, "Session Usage: 26K Tokens, Unpriced");
+  assert.doesNotMatch(label!.text, /\$/);
   assert.doesNotMatch(label!.text, /0\.00/);
 });
 
@@ -120,7 +121,7 @@ test("a caught-up ledger reports its own total verbatim", () => {
 test("a provider-reported zero is a real amount once the ledger says so", () => {
   const free = session({ tokensIn: 25_000, tokensOut: 900, costUsd: 0 });
   // Before the ledger answers, the strip cannot tell "free" from "nobody priced it".
-  assert.equal(sessionCostLabel(free)?.text, "$—");
+  assert.equal(sessionCostLabel(free)?.text, "26K Tokens");
   const priced = sessionCostLabel(free, response({
     totals: amount({ costSource: "providerReported", processedTokens: 25_900 }),
   }));
@@ -128,7 +129,7 @@ test("a provider-reported zero is a real amount once the ledger says so", () => 
   // An unpriced ledger still refuses to invent an amount.
   assert.equal(
     sessionCostLabel(free, response({ totals: amount({ costSource: "unpriced", unpricedRecords: 2 }) }))?.text,
-    "$—",
+    "26K Tokens",
   );
   // A session that has processed nothing renders nothing, ledger or not.
   assert.equal(sessionCostLabel(session(), response({ totals: amount({ costSource: "providerReported" }) })), null);
@@ -147,7 +148,7 @@ test("a caught-up snapshot renders a provider-reported zero before usage detail 
     tokensOut: 900,
     costUsd: 0,
     costSource: "unpriced",
-  }))?.text, "$—");
+  }))?.text, "26K Tokens");
 });
 
 test("stale detail cannot claim that newer live usage was free", () => {
@@ -160,7 +161,7 @@ test("stale detail cannot claim that newer live usage was free", () => {
       costSource: "providerReported",
     }),
   });
-  assert.equal(sessionCostLabel(live, stale)?.text, "$—");
+  assert.equal(sessionCostLabel(live, stale)?.text, "26K Tokens");
 });
 
 test("a running Claude turn's live usage counts beside settled totals without changing which totals apply", () => {
@@ -178,12 +179,12 @@ test("a running Claude turn's live usage counts beside settled totals without ch
     processedTokens: 15, cacheSavingsUsd: 0, costUsd: 0.02, detailed: false,
   });
   assert.equal(sessionCostLabel(settled, ledger)?.text, "$0.03");
-  assert.equal(sessionCostLabel(session({ liveUsage: { ...liveUsage, costUsd: 0 } }))?.text, "$—", "unpriced live tokens are not free");
+  assert.equal(sessionCostLabel(session({ liveUsage: { ...liveUsage, costUsd: 0 } }))?.text, "15 Tokens", "unpriced live tokens are not free");
   // A caught-up ledger's priced zero (a local `/context` result) cannot price a live request.
   const pricedZero = response({ totals: amount({ inputTokens: 1, outputTokens: 1, processedTokens: 2, costSource: "modelPriced" }) });
   assert.equal(sessionCostLabel(session({ tokensIn: 1, tokensOut: 1 }), pricedZero)?.text, "$0.00");
   assert.deepEqual(sessionCostLabel(session({ tokensIn: 1, tokensOut: 1, liveUsage: { ...liveUsage, costUsd: 0 } }), pricedZero),
-    { text: "$—", priced: false, ariaLabel: "Session Usage: Cost Unavailable" });
+    { text: "17 Tokens", priced: false, ariaLabel: "Session Usage: 17 Tokens, Unpriced" });
 });
 
 test("the ledger's cost is used when the session's running total lags behind it", () => {

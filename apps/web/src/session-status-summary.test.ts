@@ -20,6 +20,47 @@ function session(overrides: Partial<SessionStatusSource> = {}): SessionStatusSou
 const labels = (source: SessionStatusSource, context = {}) =>
   sessionStatusSummary(source, context).conditions.map((condition) => condition.meta.label);
 
+test("follow-ups distinguish queued work from an executing turn and known blockers", () => {
+  const queued = session({ backgroundWorkState: "continuation_pending",
+    backgroundFollowUp: { state: "queued", queuedAt: 1_000, retryScheduled: true } });
+  const summary = sessionStatusSummary(queued);
+  assert.equal(summary.primary.meta.label, "Follow-Up Queued");
+  assert.equal(summary.primary.meta.tone, "neutral");
+  assert.equal(summary.primary.meta.pulse, false);
+  assert.match(summary.primary.description, /automatic retry is scheduled/);
+  const unrelatedTurn = sessionStatusSummary({ ...queued, status: "running" });
+  assert.equal(unrelatedTurn.primary.meta.label, "Running");
+  assert.equal(unrelatedTurn.conditions.find((c) => c.kind === "background_work")?.meta.label, "Follow-Up Queued");
+  const running = sessionStatusSummary({ ...queued, status: "running", backgroundFollowUp: { state: "running" } });
+  assert.match(running.conditions.find((c) => c.kind === "background_work")!.description, /agent is processing/);
+  const blocked = sessionStatusSummary({ ...queued, backgroundFollowUp: { state: "blocked", blocker: "budget" } });
+  assert.equal(blocked.primary.meta.label, "Follow-Up Blocked");
+  assert.equal(blocked.primary.meta.tone, "warning");
+  assert.match(blocked.primary.description, /cost budget/);
+  assert.equal(blocked.conditions.filter((c) => c.kind === "background_work").length, 1);
+  const withApproval = sessionStatusSummary({ ...queued, pendingApproval: approval,
+    backgroundFollowUp: { state: "blocked", blocker: "input" } });
+  assert.equal(withApproval.primary.meta.label, "Approval Required");
+  assert.ok(withApproval.conditions.some((c) => c.meta.label === "Follow-Up Blocked"));
+});
+
+test("offline, mixed-version and inconsistent follow-up facts never claim execution", () => {
+  for (const backgroundFollowUp of [undefined, { state: "running" as const }]) {
+    const source = session({ backgroundWorkState: "continuation_pending", backgroundFollowUp });
+    const background = sessionStatusSummary(source).conditions.find((c) => c.kind === "background_work")!;
+    assert.equal(background.meta.label, "Follow-Up Pending");
+    assert.equal(background.meta.tone, "neutral");
+    assert.equal(background.meta.pulse, false);
+  }
+  const offline = sessionStatusSummary(session({ status: "running", backgroundWorkState: "continuation_pending",
+    backgroundFollowUp: { state: "running" } }), { runnerOnline: false });
+  const background = offline.conditions.find((c) => c.kind === "background_work")!;
+  assert.equal(background.meta.label, "Follow-Up Pending");
+  assert.match(background.description, /unverified/);
+  assert.equal(sessionStatusSummary(session({ backgroundFollowUp: { state: "running" } }))
+    .conditions.some((c) => c.kind === "background_work"), false, "settled state clears even retained display facts");
+});
+
 test("rule 1: the first attention kind in the breakdown's order leads, and +N counts the other kinds", () => {
   const source = session({ status: "input_required", pendingApproval: { ...question, additionalRequests: [approval] } });
   const summary = sessionStatusSummary(source);
@@ -119,7 +160,7 @@ test("rule 4: an idle session with running background work shows Waiting on Exte
   assert.equal(summary.primary.meta.label, "Waiting on External Job");
   assert.deepEqual(labels(session({ backgroundWorkState: "running" })), ["Waiting on External Job", "Awaiting Prompt"]);
   assert.equal(sessionStatusSummary(session({ backgroundWorkState: "continuation_pending" })).primary.meta.label,
-    "Continuation Pending");
+    "Follow-Up Pending");
   // While the agent is busy its lifecycle leads, and background work is a row in the popover.
   assert.deepEqual(labels(session({ status: "running", backgroundWorkState: "running" })),
     ["Running", "Waiting on External Job"]);
@@ -194,4 +235,36 @@ test("every condition says what it means in one sentence", () => {
   for (const condition of summary.conditions) {
     assert.match(condition.description, /^[A-Z0-9].*\.$/u, condition.meta.label);
   }
+});
+
+test("a session relaunching in the worktree it switched to reads Switching Worktree (#3810)", () => {
+  const pending = { phase: "pending" as const, branch: "fix/issue-3810", since: 1_000 };
+  const idle = sessionStatusSummary(session({ status: "idle", worktreeSwitch: pending }));
+  assert.equal(idle.primary.meta.label, "Switching Worktree");
+  assert.equal(idle.primary.meta.tone, "info");
+  assert.equal(idle.primary.meta.pulse, true);
+  assert.equal(idle.primary.needsYou, false);
+  assert.equal(idle.more, 0);
+  assert.equal(idle.primary.description, "The session is about to relaunch in worktree fix/issue-3810.");
+  assert.deepEqual(idle.conditions.map((condition) => condition.kind), ["worktree_switch", "lifecycle"],
+    "the lifecycle is still listed behind it");
+
+  const relaunching = sessionStatusSummary(session({ status: "starting", worktreeSwitch: { ...pending, phase: "relaunching" } }));
+  assert.equal(relaunching.primary.meta.label, "Switching Worktree");
+  assert.equal(relaunching.primary.description, "The session is relaunching in worktree fix/issue-3810.");
+
+  // The turn that made the switch is still the session's news while it runs.
+  assert.equal(sessionStatusSummary(session({ status: "running", worktreeSwitch: pending })).primary.meta.label, "Running");
+  // A request still comes first, with the switch behind it.
+  const asking = sessionStatusSummary(session({ status: "input_required", pendingApproval: question, worktreeSwitch: pending }));
+  assert.equal(asking.primary.kind, "attention");
+  assert.ok(asking.conditions.some((condition) => condition.meta.label === "Switching Worktree"));
+  // A prompt held behind the handoff already says why it waits.
+  const held = session({ status: "queued", worktreeSwitch: pending,
+    queueHold: { kind: "worktree_rebind", holdId: "worktree-rebind:1", since: 1, target: "/w", queuedPrompts: 1,
+      unfinishedBackgroundJobs: 1, restartKeepsQueue: true } } as Partial<SessionStatusSource>);
+  assert.equal(labels(held).includes("Switching Worktree"), false);
+  assert.ok(labels(held).includes("Worktree Handoff"));
+  // A finished session is switching nothing.
+  assert.equal(labels(session({ status: "stopped", worktreeSwitch: pending })).includes("Switching Worktree"), false);
 });

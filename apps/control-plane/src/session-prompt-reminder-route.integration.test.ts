@@ -364,7 +364,7 @@ test("prompt route acknowledges fired reminders only for accepted human principa
     "content-type": "application/json",
   });
   assert.equal(agentRead.response.status, 401);
-  assert.match(agentRead.body.error ?? "", /unauthorized/i);
+  assert.match(agentRead.body.error ?? "", /session agent credential refused:.*check the requested operation, session state and delegated access/i);
   assert.equal(agentRead.body.reminder, undefined);
 
   const offline = await fetch(`${baseUrl}/api/sessions/${SESSION_ID}/prompt`, {

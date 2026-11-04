@@ -81,10 +81,12 @@ function samePolicySettings(left: OrchestratorCampaignPolicy, right: Orchestrato
 export class SessionRoleConversions {
   private readonly advancing = new Map<string, Promise<void>>();
   constructor(private readonly db: ControlPlaneDb, private readonly hub: Hub,
-    private readonly log: (event: string, fields: Record<string, unknown>) => void = () => {}) {}
+    private readonly log: (event: string, fields: Record<string, unknown>) => void = () => {},
+    private readonly settleExpiredDecisions: () => void = () => {}) {}
 
   preview(id: string, targetRole: SessionRole, defaults: OrchestratorSettingsView,
     validate: (policy: OrchestratorCampaignPolicy) => string | null, overrides: OrchestratorCampaignOverrides = {}): SessionRoleConversionPreview {
+    this.settleExpiredDecisions();
     const session = this.db.getSession(id);
     if (!session) throw new Error("session not found");
     const currentRole = sessionRole(session);
@@ -110,6 +112,7 @@ export class SessionRoleConversions {
       return refuse("Resume this session and wait until it is idle before changing its role. Finish or stop active work first.");
     }
     if (session.runId || this.db.sideChatParent(id)) return refuse("Workflow and side-chat sessions cannot change roles. Use a standalone session.");
+    if (this.db.reviewSessions.isReviewSession(id)) return refuse("A review session cannot change roles.");
     if (this.db.listShells(id).some((shell) => shell.kind === "agent_tui" && shell.status !== "exited")) {
       return refuse("Close the Native TUI before changing roles so the previous provider tools can be retired safely.");
     }

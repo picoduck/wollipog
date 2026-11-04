@@ -1,3 +1,4 @@
+import { targetHasHostHome as managedSkillsAvailableForTarget } from "@wollipog/protocol";
 import { useCallback, useEffect, useMemo, useState, type ReactNode } from "react";
 import { Notice } from "./Notice.js";
 import type { ExecutionTargetDefinition, ExecutionTargetRef } from "@wollipog/protocol";
@@ -6,13 +7,9 @@ import { useInstanceScope } from "../instance-scope.js";
 import { loadInstanceStorageValue, saveInstanceStorageValue } from "../instance-storage.js";
 import type { RunnerDesiredSkill } from "../skills.js";
 
-type TargetAdapter = ExecutionTargetRef["adapter"] | undefined;
+export { managedSkillsAvailableForTarget };
 
-/** Managed skills are deployed into the Machine's home directory, which container and cloud
- * targets never mount. Mirrors the runner's `includeClaudeUserCommandsForTarget` gate. */
-export function managedSkillsAvailableForTarget(adapter: TargetAdapter): boolean {
-  return adapter !== "container" && adapter !== "cloud";
-}
+type TargetAdapter = ExecutionTargetRef["adapter"] | undefined;
 
 export const SKILLS_UNAVAILABLE_ON_TARGET =
   "Managed skills from this Machine are unavailable on container and cloud targets, because only the workspace is mounted.";

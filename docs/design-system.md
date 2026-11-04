@@ -328,8 +328,8 @@ elevation with `1px solid var(--border-strong)` in both themes. The modal backdr
 | `--title-bar-h` | 40px | The macOS desktop app's strip at the top of the rail, which the traffic lights sit in (§4.1). |
 | `--bar-h` | 48px | Every bar: desktop session bar, detail bar, phone app bar, compact page header. §4.4. |
 | `--page-gutter` | 24px (16px phone) | Left and right padding of the page container. |
-| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods. Left-aligned. |
-| `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost, Archived Sessions. Left-aligned. |
+| `--page-max` | 960px | List pages: Automations, Connections, Multi-Agent Runs, Pods, Archived Sessions. Left-aligned. |
+| `--page-max-wide` | 1200px | Tables, charts and card grids: Usage and Cost. Left-aligned. |
 | `--page-max-form` | 760px | Settings content, single-form pages. |
 | `--measure` | 68ch | Prose. |
 | `--list-pane-w` | 320px (280–440 resizable) | Master list in side-by-side master-detail. |
@@ -386,9 +386,10 @@ needs extra clearance from it. The attachment tray's 20px Remove (#2561) takes t
 its 56px thumbnail rather than reaching past the tile, and a 36px reference chip keeps 4px above and
 below itself for its Remove's centered 44px.
 
-**One hit-area block.** Segmented options, switches and inline text links get their 44px
-coarse-pointer hit area from this block, once, in the shared stylesheet. A segmented option borrows
-the track's 2px inset and 1px edge; the switch uses `::before` because its thumb is `::after`; a link
+**One hit-area block.** Segmented options, switches, inline disclosures (`.disclosure.inline`, §5.5)
+and inline text links get their 44px coarse-pointer hit area from this block, once, in the shared
+stylesheet. A segmented option borrows the track's 2px inset and 1px edge; the switch uses `::before`
+because its thumb is `::after`; an inline disclosure's trigger borrows 4px above and below; a link
 gets a 44px band centered on its line. Components never add their own copies of these rules. A link
 whose line sits closer than 12px to another target (dense prose) keeps its visual size and relies on
 the surrounding row being the target.
@@ -450,7 +451,7 @@ One definition of each tier, shared by components and the stylesheet (#1969):
   inline-size`. A rule that depends on the room the column has after the rail and any docked panel
   queries it with `@container app (max-width: 1099px)`, not the viewport; the Projects list pane is
   the first such rule. A rule whose edge is its own content's fit rather than the tier uses the same
-  container with that edge: the Archived Sessions fold (§14) ends at a 1220px column. A phone has
+  container with that edge so the name column stays readable (§14). A phone has
   no `app` container. There the column is the viewport's width, and the phone's full-screen right
   panel and editor note are placed in viewport coordinates.
 - **Nothing fixed inside the column may assume the viewport.** At the build floor (Chrome 111–128,
@@ -572,7 +573,7 @@ Rules
   One exception: in a request notice inside a narrow card (under 360px wide, such as a
   board card), Approve and Deny may stretch as an **equal pair** that fills the row, matching the
   phone sheet footer rule (§7.5). Only that pair, never a single button. The session notice slot's
-  resolving action below 760px is the other exception (§13.2).
+  resolving action below 760px, while the slot is at most 480px wide, is the other exception (§13.2).
 - Labels are verb plus object in Title Case: "New Skill", "Import from Git…", "Delete Skill". The
   ellipsis means "opens a dialog or menu that asks for more input before anything happens" (§17).
 - A leading `+` icon marks create actions; no other decorative icons in text buttons unless the
@@ -582,7 +583,8 @@ Rules
 
 - Order in any horizontal action group: **[destructive tertiary] … spacer … [ghost] [secondary] [⋯]
   [primary]**. Primary is last (rightmost on desktop). The overflow ⋯ sits immediately before the
-  primary because it holds more secondaries.
+  primary because it holds more secondaries. The phone app bar is the exception: its trailing icons
+  are Search, the primary `+`, then ⋯ (§15.1).
 - Gap 8px between buttons. Groups never mix heights: every control in one row uses the same
   control-height token.
 - Segmented and split buttons count as one control.
@@ -600,12 +602,12 @@ Rules
 
 | Region | Holds | Visible limit before ⋯ |
 | --- | --- | --- |
-| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a 44px `+` icon button (label in `aria-label`), everything else in ⋯. |
+| Page header (§4.2) | Create and import for the destination; destination-level settings. | Desktop: 1 primary + 2 secondary. Compact: 1 primary + 1 secondary. Phone: primary as a quiet `+` icon button before ⋯ (`.icon-btn`; the label is its accessible name and tooltip), everything else in ⋯. |
 | Detail bar (§4.3) | Actions on the open entity. | Desktop: 1 primary + 1 secondary + ⋯. Destructive actions live **only** in ⋯, last, after a separator, in `--danger-text`. |
 | List row | Open (row click) plus one inline action and ⋯. | Inline actions show on hover or focus on fine pointers, always on coarse. |
 | Dialog footer (§7.3) | Cancel and the dialog's one primary, optional destructive tertiary on the left. | 3 on desktop; 2 on phone. |
 | Section (in page) | At most one action, in the section title row, right-aligned (`.section-head .actions`). | 1 + ⋯. |
-| Notice | Its resolving action(s), bottom-left of the copy on desktop, full width on phone. | 2. |
+| Notice | Its resolving action(s), bottom-left of the copy on desktop; in a notice slot, filling the row on a phone held upright (slot at most 480px, #2157). | 2. |
 | Toast | One action plus close. | 1. |
 
 ---
@@ -648,11 +650,12 @@ Rules
   item's square, which has no fill or border at rest. Its monogram (12px/600) is the first letter of
   each of the profile label's first two words; there are no per-instance colors, because color
   means state. The corner dot is `instanceAvailabilityMeta`'s tone (§11.2), hollow when offline.
-  While the shell shows the offline or sign-in banner, the tile agrees with it
-  (`activeInstanceConnection`): hollow and neutral, "Reconnecting…", never Online. The active
-  instance's card in Connections › Instances reads the same truth, which the shell provides once
-  (`ActiveInstanceConnectionProvider`), for This Machine as for a remote, and offers Retry while the
-  connection is lost; every card's dot is its badge's tone and hollow state (#2102). Accessible
+  While the shell shows the offline or pairing banner, the tile agrees with it
+  (`activeInstanceConnection`, through `instanceStatus`): hollow and neutral Offline, or Pairing
+  Required, never Online. The active instance's row in Connections › Instances reads the same truth,
+  which the shell provides once (`ActiveInstanceConnectionProvider`), for This Machine as for a
+  remote, and offers Retry while the connection is lost; every row's tile dot is its badge's tone
+  and hollow state (#2102, #3002). Accessible
   name "Switch Instance: <label>"; the tooltip gives the name and the status in sentence case. It
   opens the instance menu as a 300px flyout to the right of the rail, top-aligned with the tile
   (§9.1): `menuitemradio` rows with a 24px monogram, the name, and the origin ("On this machine"
@@ -662,6 +665,25 @@ Rules
   (ellipsized) and the status text, the monogram stays centred at x = 32px, and there is no
   tooltip. The browser build keeps the decorative brand. No phone bar
   carries a switcher: the desktop app's 940px minimum width never reaches the phone layout (#1970).
+- **Instance recovery screen (desktop app).** While the chosen instance loads, connects, fails or is
+  missing, the shell keeps its frame (#3004): the 64px rail with the instance tile, every destination
+  and Settings `aria-disabled` in `--text-faint` with the tooltip "Open an instance first.", and no
+  Search, attention, More or labels switch (`Rail disabled`). The page is a `.page` whose heading is
+  one `State` (`h1#page-title`, `--type-page-title`, wrapping rather than clamping a long name; the
+  window title is its title) with an icon tile in the status word's tone (§11.2: Connecting is an
+  info spinner), one sentence, a fact line and the one next step, then Connections › Instances 40px
+  below in its `recovery` variant: the active row shows its address and last connection with an
+  empty slot, and while a link names a missing instance no row is current.
+
+  | State | Title | Sentence and actions |
+  | --- | --- | --- |
+  | Loading | Loading Instances | Skeleton rows after 300ms; no actions. |
+  | Connecting | Connecting to {name} | "Opening a secure connection to {host}." and "Trying for {n}s"; **Go to This Machine** at once, **Retry** after 20s. |
+  | Offline | Can't Reach {name} | "It didn't answer at {host}. It may be asleep, or Wollipog isn't running there." ("It refused the connection…" when refused); "Last connected 5h ago"; **Retry** (primary), **Go to This Machine**; the raw error behind Show Details. |
+  | Pairing Required | {name} Needs a New Pairing | "It no longer accepts this app's saved credential. Create a pairing link on {name} and paste it here to reconnect."; **Re-Pair…** (primary), **Go to This Machine**. |
+  | Update Required | {name} Needs an Update | "It runs an older Wollipog that this app can't use. Update Wollipog on that computer, then retry."; **Go to This Machine** (primary), **Retry**. |
+  | Not Found | Instance Not Found | "This link points to an instance that isn't saved in this app anymore. Choose one below, or go back to this computer."; **Go to This Machine**. |
+  | This Machine unavailable | Can't Reach Wollipog on This Machine | "Wollipog on this computer didn't answer. It may still be starting."; **Retry**. |
 - **Window (desktop app).** On macOS the window has no separate title bar (`titleBarStyle: "Overlay"`,
   `hiddenTitle`). The traffic lights sit in the rail's top-left (`trafficLightPosition` x 8, y 18,
   so all three clear the rail's 1px hairline) inside a `--title-bar-h` strip of rail padding, above
@@ -687,8 +709,12 @@ Rules
   Board View" / "Switch to List View", "Show Navigation Labels" / "Hide Navigation Labels"). An empty
   query shows Recent, Go To and Actions. A session matched by title and by transcript is one row,
   with the snippet as its third line. Sessions show a status dot, transcript hits a file-text icon,
-  destinations their own icon. Transcript search starts at three characters (a hint row says so),
-  keeps earlier hits until new ones arrive and shows "Searching transcripts…" meanwhile; no results
+  destinations their own icon. A session's second line names the status its dot shows, so a pending
+  request reads as the Sessions list says it ("Approval Required"), not as its lifecycle. A Recent
+  row trails line 1 with its last-activity time ("4m ago", `--text-faint`, tabular, §5.2). On fine
+  pointers the field ends with an Esc keycap (§11.5), and with an empty query the footer's trailing
+  end says "Transcripts are searched from 3 characters." Transcript search starts at three
+  characters (a hint row says so for a one- or two-character query), keeps earlier hits until new ones arrive and shows "Searching transcripts…" meanwhile; no results
   is §12.2's sentence with Clear Search and Search Archived Sessions. Desktop: 640px, 96px from the
   top, `--radius-lg`, `--elev-3`, a 48px search bar, the active row in `--surface-selected` with a
   2px accent bar, and a 36px key-hint footer on fine pointers. At 760px and below it fills the
@@ -719,13 +745,22 @@ Replaces both the 54px `.topbar` and every in-page `h2` (`.view-heading`, `.skil
 | Height | 64px title only, 88px with the description, 124px with description and tabs (20 + 28 + 4 + 20 + 12 + 40). This replaces a 54px bar plus 130–180px of in-page heading. |
 
 Phones: the page header becomes the **app bar** (§15.1): 48px, title `--type-title` (16/600), a
-search icon, the primary as a 44px `+` icon button, and ⋯.
+search icon, the primary as a quiet `+` icon button, and ⋯, in that order to the eye and to Tab.
+The `+` is the `.icon-btn` recipe Search uses (§3.1): transparent at rest, its icon `--text-dim`,
+a 44px target on touch, named and titled by the primary's label (#2229). From 761px up the
+labelled primary stays last, after ⋯.
 
 A secondary may be a **menu button** (`PageHeader`'s `items`): its label and a 14px caret open the
 shared menu, one item per choice with a one-line description (Agent Skills' Import). A secondary
 may also use the ghost variant (`variant: "ghost"`) for destination-level configuration such as
 Manage Groups…. A menu button takes one slot like any secondary. When it folds into ⋯, its items
 appear there individually and in order, never as a nested menu (#1947).
+
+The primary may be a menu button too, when the one thing a destination creates has several ways in
+(Connections' **Add Machine**, #2984): its `+`, its label and a 14px caret open the same two-line
+menu. It never folds, so on phones the app bar's quiet `+`, still named by the label, opens the items
+as a menu sheet with the grabber (§9.2). A destination with tabs supplies its header actions per
+tab (`PageHeaderActions`), so each tab brings its own primary to the one header.
 
 ### 4.3 Detail Bar (Entity Pages and the Session)
 
@@ -784,9 +819,12 @@ extending the settled one-bar session chrome app-wide.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
   (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
-  Blocked offers Stop Job… (the Job Detail page's danger confirmation, §4.10) when Stop Job is
-  available and exactly one job of the blocked turn is still running, and Result Missing offers
-  Acknowledge Missing Result; otherwise either opens Background Work. The step closes the popover and
+  Blocked offers **Acknowledge** for the currently reported alerts; its helper explains that jobs and
+  held results are kept. Recovery stays available in Background Work and the session menu, including
+  Restart for acknowledged historical results. An older control plane without acknowledgement
+  support offers Stop Job… (the Job Detail page's danger confirmation, §4.10) when exactly one job
+  is still running and Stop Job is available, otherwise Open Background Work. Result Missing offers
+  Acknowledge Missing Result. The step closes the popover and
   leaves focus on the Session Status control; reopened while its request runs, the row's button is
   busy, and a failure is an error toast (#2275). The lifecycle is always listed, after what needs the
   person, so a request never hides that the agent is Running (#3073). Queue reasons are rows, not
@@ -816,7 +854,7 @@ everywhere also ends the 54 / 57 / 50 / 40px jumps between routes. The session's
 - Sections within a page: `--type-section` title row (title left, one action right), 12px to content,
   32px between sections. Sections are not boxed (§5.1).
 - Why 960 for list pages: a row's trailing status and actions should stay within one eye movement
-  of its title. The People and Devices tab, the calmest list page, runs at about 880px; at 1200px a machine row's Manage button sits 1,100px from the name.
+  of its title. The People and Devices tab, the calmest list page, runs at this 960px measure (#2997); at 1200px a machine row's Manage button sits 1,100px from the name.
   Wide content (tables with 5+ columns, the usage chart, card grids) opts into `.page.wide`.
 - A component never uses negative margins to escape its parent's padding (`.subagents-panel {
   margin: -12px -14px }`). Hosts offer a flush modifier instead. Optical bleed inside one component
@@ -945,16 +983,26 @@ A row of tools above the content they act on: search, filters, view switches and
 
 - `.toolbar`: one row, `display: flex; align-items: center; gap: var(--space-2); min-width: 0`.
   Every control in it uses one control height (§3.2).
-- The toolbar is only the row. Where it sits (the Archive filter card, the space above a machine
+- The toolbar is only the row. Where it sits (the space above Archived Sessions or a machine
   list) is the region's decision, written as that region's rule on `.toolbar`. Regions do not
   define their own toolbar class. The Sessions tab row's tools, the Board's Machine and Agent
   filters included, sit in its tab bar's `.tabs-tools` (§10.1); the Board has no toolbar of its own.
 - `.filter-btn` (`FilterButton`) is the phone "Filters" button that opens the filter sheet (§15.1):
   a `.btn` that says "Filters", with `aria-haspopup="dialog"`. While any filter is applied it is
   `.is-set`, which gives it the `--control-outline` edge of a chosen control (§3.1), and it shows
-  the number applied. No screen uses it yet.
+  the number applied. Archived Sessions also uses it in a main column narrower than 1100px.
+  Desktop filter menu triggers use `.filter-btn` too: they keep their field name visible and
+  take `.is-set` while applied; the accessible name and removable chip include the chosen value.
 - Replaces `.agent-defaults-toolbar`, `.archive-toolbar`, `.board-toolbar`, `.connections-toolbar`
-  with `.view-toolbar`, `.inbox-toolbar` and `.usage-toolbar-controls`.
+  with `.view-toolbar`, `.inbox-toolbar`, `.usage-toolbar-controls`, and Usage and Cost's API Usage
+  card with its `.usage-desktop-controls` and `.usage-mobile-controls` (#3010).
+- Usage and Cost's API Usage tab (#3010) has one toolbar: Metric (Cost | Tokens), a Range menu
+  button reading "Last 30 Days", Group By (Hour | Day | Week, Hour omitted for a range longer than
+  hourly retention), then About These Numbers at the trailing end, the `InfoPopover` with a visible
+  label. The toolbar follows the main column (§2.10), not the viewport (#4029): in a column no wider
+  than a phone (760px), on a phone or beside a docked panel, About is the icon alone and Range and
+  Group By are one button, "30 Days, Daily", that opens a Range and a Group By section (a sheet on
+  phones).
 
 ### 4.8 Breadcrumbs
 
@@ -964,6 +1012,10 @@ A path trail, such as the Files panel's folder path.
 - Each ancestor is a `button.crumb` in `--accent` (it navigates, like a link, and underlines on
   hover). The current segment is `.crumb.is-current` in `--text`. A disabled crumb is `--text-dim`.
 - Separators are `.crumb-sep` (`/`, `--text-faint`, `aria-hidden`).
+- Files' first crumb is the session's root (`sessionRootName()`, #2852): the workspace's name for a
+  session in a managed worktree, whose folder is named after the session id, otherwise the folder's
+  own name. Its tooltip is the folder's full path. Session Tools' Files row ("Browse acme-storefront")
+  and Go to File's "N matches in …" and "Nothing in … matches that name." use the same name.
 - Replaces `.files-crumbs` and `.files-crumb`.
 
 ### 4.9 Side Panel Frame
@@ -989,8 +1041,9 @@ Requests, Decision History, and Terminal in Right Panel placement, #2868) opens 
   `SESSION_TOOLS`, top-aligned under the header and scrolling on its own: the Code, Work and
   Decisions groups under `.group-label` headers (§5.2), each tool a `.row.row-2` with a 32px icon
   tile (`--bg-elev-2`, `--radius-sm`), its name, and a live sentence-case fact on line two (Review's
-  uncommitted changes and required findings, Agents' one status badge, Requests' count badge of what
-  waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
+  uncommitted changes and required findings, or, with nothing uncommitted in a worktree whose branch
+  is ahead, the "3 commits ahead of main" Review opens on Branch to show, in its summary's words;
+  Agents' one status badge, Requests' count badge of what waits for you, and so on). No card borders; hover fills on fine pointers. A tool that cannot open
   stays focusable (`aria-disabled`), its reason the second line in `--text-faint` and its
   description, its tile hollow (an inset 1px `--border`), never an opacity. On an older runner one
   neutral compact Notice above the list names the machine to update, and Files and Terminal say
@@ -1117,8 +1170,11 @@ and whether their result came back. It is one list of turn groups, never a card 
   transcript to the turn, loading earlier activity a page at a time until it is there. An unknown
   turn, or one the fully loaded transcript does not hold, has no View Turn. The heading never wraps
   View Turn under its label; the label gives way first.
-- **Job rows.** `.row.row-2`: line 1 is the job's name, its kind and the last six characters of its
-  id in mono `--text-faint` ("Shell Job a1f3c9", `backgroundJobLabel()`, the same name everywhere),
+- **Job rows.** `.row.row-2`: line 1 is the job's name, its kind and a six-character suffix of its
+  id in mono `--text-faint` ("Shell Job a1f3c9", `backgroundJobLabel()`, the same name everywhere,
+  the Agents roster's job rows included). The suffix is the id's last six characters when they read
+  as random (letters and digits only, with at least one digit), otherwise six hex characters of a
+  hash of the whole id, so a readable id never shows a cut word ("onitor"),
   and its `job` badge; line 2 is one sentence about its result ("Started 10m ago", "Result waits for
   the other job", "Result returned 50m ago", "Last seen 12m ago") with the duration trailing, then a
   chevron. A row pushes the job's **Job Detail** page (§4.9 Pages). A turn with only a retained
@@ -1132,19 +1188,32 @@ and whether their result came back. It is one list of turn groups, never a card 
   then a sentence under it says what happened, or a compact danger notice says why it failed.
   Unavailable, the button stays disabled with its reason as visible text it is described by.
 - **Recovery notices** (`BackgroundRecoveryNotice`, #2859): a result that went wrong is one §13.2
-  `Notice` per delivery at the top of its turn group, under the heading, never a definition list of
-  explanations. Its sentence names the job ("Shell job a1f3c9 …", `backgroundJobSentenceName()`).
+  `Notice` per delivery, never a definition list of explanations, and each is an entry of the panel's
+  one notice slot (§4.9, #2871): the panel shows one notice and the rest wait behind "+N More"; no
+  notice renders inside a turn group. Its title names the state and the turn ("Result Missing in
+  Turn 4", "… in the Turn at 2:14 PM", "… in an Earlier Turn", "… in an Unknown Turn";
+  `inBackgroundTurn()`), and its sentence names the job ("Shell job a1f3c9 …",
+  `backgroundJobSentenceName()`). After Machine Offline and Lost, the warnings come first, then the
+  info entries, each in the groups' order and then the turn's delivery order. Each group's badge keeps
+  its state (Result Missing, Retry Exhausted, Result Blocked) while its notice waits behind "+N More".
   - **Result Missing** (warning): "Shell job a1f3c9 finished, but its result never reached this
     conversation. Wollipog won't retry on its own, so the step can't run twice." then
     **Acknowledge** (a `.btn.sm` `BusyButton`) and Show Details. A failed acknowledgement's message
-    sits under the actions and the notice stays. While it shows, the group's badge is omitted, so the
-    state word appears once in the group; once acknowledged the notice goes and the badge reads
-    Missing Result Acknowledged (neutral).
-  - **Result Blocked** (warning): the finished job's sentence, then **Stop <job name>…** for the turn's
-    one unfinished job, behind Job Detail's confirmation. Unavailable, the button stays disabled,
-    described by its reason as a body line; with several unfinished jobs the line says to open one.
-  - **Result Pending, Transcript Delayed, Notification Pending** (compact info): one sentence ("Returning
-    shell job a1f3c9's result to this conversation."), no action.
+    sits under the actions, the notice stays and focus stays on Acknowledge. Once acknowledged the
+    notice goes, focus moves to its turn's heading, and the badge reads Missing Result Acknowledged
+    (neutral). Retry Exhausted works the same way.
+  - **Result Blocked** (warning): the finished job's sentence, then **Acknowledge** to clear all
+    currently reported blocked-result alerts without confirmation. Helper: "Clears this alert from
+    session status. Background jobs and held results are kept." Each acknowledged one becomes a
+    dismissible info entry, **Blocked Result Acknowledged in Turn 4**, with its time, after every
+    recovery entry; focus moves to the turn's heading, and the session's next relevant status appears
+    immediately. New blocked results raise fresh attention. Recovery stays separate: **Stop <job
+    name>…** for the turn's one unfinished job, behind Job Detail's confirmation. Unavailable, the
+    button stays disabled, described by its reason as a body line; with several unfinished jobs the
+    line says to open one.
+  - **Result Pending, Transcript Delayed, Notification Pending** (compact info): the title and one
+    sentence ("Returning shell job a1f3c9's result to this conversation."), no action but the slot's
+    Dismiss.
   - Show Details is a `.facts` list: Finished, then Missing Since and Acknowledge ("Clears the alert. It
     doesn't rerun the job or resend the result.") for Result Missing or Other Ways (stopping or
     restarting the session) for Result Blocked, then Diagnostic: the pipeline code and its
@@ -1252,7 +1321,7 @@ time under column tabs instead (§15.1, #2216).
 | Single-line | `--row-h` 40 | `[16 icon] Title ........ [meta] [badge] [action]` |
 | Two-line | `--row-h-2` 56 | Line 1: title (`--type-body-strong`, 1 line, ellipsis) + trailing status badge or time. Line 2: meta or description (`--type-small`, `--text-dim`, **1 line, ellipsis**). |
 | Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities, except a confirmation's read-only list of what it affects (§7.4). |
-| Card row (sessions list) | `--row-h-2` on desktop and tablet; the three-line card on phone | **Desktop and tablet (#2209):** two lines, exactly `--row-h-2` whatever the row carries, with no gap between rows. Line 1, the status line: agent icon and "Agent · Project" (gives up width first), the branch only when there is one and the list is 600px or wider (`BranchIcon`, its base as "from <ref>", a pull request as `PullRequestIcon` and its state word), then trailing: the one status badge with a neutral "+N" (§11.1), the activity strip, the flags (pin, unread dot) and the time (tabular, `--text-faint`; a snoozed row shows its return time after an alarm clock instead). Line 2, the title line: the title (`--type-body-strong`, one line, ellipsis, `sessionDisplayTitle()`) and the family chip, nothing else. **Phone:** the three-line card (#882, #934): the sender with the flags, the title, then the status line with the badge, the strip, the branch and the time. **Activity strip:** 48×12px, bars in `--blue`, `role="img"` named "Tool activity in the last 30 minutes", only while the session is Running or Starting or had tool activity in the last 10 minutes; always on the status line after the badge, never on the title line, and idle rows reserve no space for it. **Selected:** `--surface-selected` and the 2px `--accent` leading bar. **Unread:** an 8px `--blue` dot in the flags and a 600-weight title, never a fill, border or bar; a row that is both shows both. **Focus:** while the list has keyboard focus, its active row shows one inset `--focus` ring. Phones show no selected row. In the stacked layout, when the list is 880px or wider, the same two lines move status, activity, flags and time into fixed trailing columns, with the actions in a column of their own, and a parent's family chip moves under its status badge (§6.3, #2218, #3175). No row repeats a transcript excerpt or request after its title (#3175). **Snoozed time:** the return time reads in the zone the Snooze dialog names (`reminderDisplayZone()`, the browser's), whatever zone the reminder was saved from, in the row, its tooltip and the dialog alike. **Actions (#2214):** Snooze, Archive (`sessionArchiveControlLabel()`: "Archive", "Archive and Stop…", "Retry Stop…") and ⋯, trailing at the end of the title line over the row's own fill, so the status and time stay in view; on fine pointers on hover or focus-within, on coarse pointers only ⋯, always, at 44px in a column the row keeps free. Each tooltip names its key. ⋯, right-click, long-press and Shift+F10 open the session's context menu, which on desktop selects the row first, so the menu, the preview and the keys act on one session. The menu, in order, each item after its 16px icon with its keycap trailing: Reply (R), Rename Session…, Pin Session / Unpin Session (S), Mark Unread / Mark Read (U), Fork Conversation… (F; absent where the session can never fork, disabled with its reason otherwise), the reminder item (H), Dismiss Reminder (a returned reminder only), a separator, then the archive item (E). There is no shortcut rail or activity footer: counts live on the tabs and the rail, keys on tooltips, menu keycaps and the Keyboard Shortcuts reference. |
+| Card row (sessions list) | `--row-h-2` on desktop and tablet; the three-line card on phone | **Desktop and tablet (#2209):** two lines, exactly `--row-h-2` whatever the row carries, with no gap between rows. Line 1, the status line: agent icon and "Agent · Project" (gives up width first), the branch only when there is one and the list is 600px or wider (`BranchIcon`, its base as "from <ref>", a pull request as `PullRequestIcon` and its state word), then trailing: the one status badge with a neutral "+N" (§11.1), the activity strip, the flags (pin, unread dot) and the time (tabular, `--text-faint`; a snoozed row shows its return time after an alarm clock instead). Line 2, the title line: the title (`--type-body-strong`, one line, ellipsis, `sessionDisplayTitle()`) and the family chip, nothing else. **Phone:** the three-line card (#882, #934): the sender with the flags, the title, then the status line with the badge, the strip, the branch and the time. **Activity strip:** 48×12px, bars in `--blue`, `role="img"` named "Tool activity in the last 30 minutes", only while the session is Running or Starting or had tool activity in the last 10 minutes; always on the status line after the badge, never on the title line, and idle rows reserve no space for it. **Selected:** `--surface-selected` and the 2px `--accent` leading bar. **Unread:** an 8px `--blue` dot in the flags and a 600-weight title, never a fill, border or bar; a row that is both shows both. **Focus:** while the list has keyboard focus, its active row shows one inset `--focus` ring. Phones show no selected row. In the stacked layout, when the list is 880px or wider, the same two lines move status, activity, flags and time into fixed trailing columns, with the actions in a column of their own, and a parent's family chip moves under its status badge (§6.3, #2218, #3175). No row repeats a transcript excerpt or request after its title (#3175). **Snoozed time:** the return time reads in the zone the Snooze dialog names (`reminderDisplayZone()`, the browser's), whatever zone the reminder was saved from, in the row, its tooltip and the dialog alike. **Actions (#2214):** Snooze, Archive (`sessionArchiveControlLabel()`: "Archive", "Archive and Stop…", "Retry Stop…") and ⋯, trailing at the end of the title line over the row's own fill, so the status and time stay in view; on fine pointers on hover or focus-within, on coarse pointers only ⋯, always, at 44px in a column the row keeps free. Each tooltip names its key. ⋯, right-click, long-press and Shift+F10 open the session's context menu, which on desktop selects the row first, so the menu, the preview and the keys act on one session. The menu, in order, each item after its 16px icon with its keycap trailing: Reply (R), Rename Session…, Pin Session / Unpin Session (S), Mark Unread / Mark Read (U), Fork Conversation… (F; absent where the session can never fork, disabled with its reason otherwise), the reminder item (H), Dismiss Reminder (a returned reminder only), a separator, Copy Session ID (#3897; offered to everyone, a Viewer included, its toast showing the copied id in mono), a separator, then the archive item (E). There is no shortcut rail or activity footer: counts live on the tabs and the rail, keys on tooltips, menu keycaps and the Keyboard Shortcuts reference. |
 
 Rules
 
@@ -1275,7 +1344,10 @@ Rules
   focus-within; on coarse pointers always visible or behind the row's ⋯.
 - A description equal to the name (case-insensitive) is not shown.
 - Group headers inside a list: `--type-label` in `--text-dim`, 32px tall, Title Case exactly as
-  written, optional count in `--text-faint`. Not sticky unless the list is long (>30).
+  written, optional plain count in `--text-faint` at the header's trailing edge, in line with the
+  rows' trailing badges. Groups follow each other with no margin: the header is the gap. Not sticky
+  unless the list is long (>30). In a master-detail list pane (Agent Skills) the rows bleed their
+  12px inset into the gutter, so row text and group labels start at the filter field's left edge.
 - **Thread families (#896, #2215)** in the Sessions list. A parent row's chevron is the §5.5 one: a
   14px `ChevronRight` in `--text-dim` inside a 28px `.icon-btn.sm` (36px to look and 44px to hit on
   touch), in the row's leading padding and centred on line one, turning 90° while the thread is open
@@ -1294,15 +1366,35 @@ Rules
   Working**, or **Child Work Pending** without a pulse when no descendant is progressing. Human
   questions and approvals keep priority. Filtered children still contribute to status; an expand
   control appears only when child rows are available to show.
-  Children indent under a 2px `--border-strong` spine with a tick into each row. A stalled parent or
+  Children indent under a 2px `--border-strong` spine with a tick into each row. A child's review or
+  child indents one more step under its own spine (#4077); anything deeper indents no further. A
+  spine ends at its last sibling, a child with descendants collapses like a top-level parent, and the
+  family chip names direct reviews as reviews ("2 Children · 1 Review"). A stalled parent or
   child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
   the leading edge is the selection bar.
 
 ### 5.3 Cards (Grid)
 
 Use cards only when items are browsed visually side by side and each item is one object with a few
-facts (automation templates, instance tiles). Machines, instances, runs and pods are **lists** by
+facts (automation templates). Machines, instances, runs and pods are **lists** by
 default (converge on the People & Devices anatomy).
+
+**Connections › Instances (#3002)** is the instance list: a `.page` under the shared Connections
+header, whose one primary is **Add Remote Instance…**, then one `.surface` of `.row.row-2` rows in
+registry order, This Machine first. A row leads with the instance tile at 32px (§4.1) and its corner
+dot; line 1 is the name (one line, ellipsis, the full name in a tooltip) and the one status badge
+(§11.2, none for an instance not tried yet); line 2 is "On this machine", or a remote's mono address
+(one line, ellipsis, the origin in a tooltip) and "Last connected 40d ago" / "Never connected", or,
+when something is wrong, one `describeInstanceFailure()` sentence ("Didn't answer.", "Refused the
+connection.", "No longer accepts the saved pairing.", "Runs an older Wollipog. Update it on that
+computer.") and the last connection. Raw transport errors never show in a row. The row ends with one
+`.btn.sm` slot chosen by state: a check and "Current" as text for the current, online instance;
+**Retry** while its connection is lost; **Re-Pair…** for Pairing Required; nothing for Update
+Required; otherwise **Switch**, a `BusyButton` that keeps its label and width while the row reads
+Connecting. A remote then has ⋯ "More Actions for {name}": Edit…, Re-Pair…, Copy Address, a
+separator and Remove… (danger, last). This Machine has no menu and keeps its room. A failed switch,
+retry or removal is a compact danger notice under its row, inside the surface, with the raw message
+behind Show Details. The tab is not shown at 760px and below (#2984).
 
 - `display: grid; grid-template-columns: repeat(auto-fill, minmax(280px, 1fr)); align-items: start`.
 - Card: `.surface` + padding 16, `--radius-md`. Title 1 line, description clamp 2, meta row, actions
@@ -1345,7 +1437,10 @@ One recipe for every read-only label and value list. It is the §19.4 merge of t
 - `.facts.strip` is the summary strip above a table or chart (Usage totals, later Archive): the
   pairs side by side between two hairlines, separated by vertical hairlines, the value in
   `--type-title` with tabular figures. Under 760px the strip becomes rows, label left and value
-  right. It is a modifier, not a second class.
+  right. It is a modifier, not a second class. In a compact main column Usage and Cost's strip
+  (`.usage-facts`) keeps five facts on one row and wraps six to three columns by two rows, so it
+  never squeezes its labels or leaves an empty cell; a main column under 640px (a docked panel
+  beside it) gets the phone's rows.
 - A region may set the list's spacing or size but not its structure.
 - Replaces `.agent-details-grid`, `.background-work-job-meta`, `.usage-totals`,
   `.subscription-buckets`, `.skills-orphan-facts` and `.settings-about`. Ten more `<dl>` recipes
@@ -1363,6 +1458,11 @@ open, with a `--dur-base` transition.
 - The revealed content is `.disclosure-body`: a column with a 12px gap and 8px above.
 - A region may size the trigger to its surroundings (the transcript's Worked row keeps
   `--type-small` in `--text-faint` and fills its row) but keeps the chevron and its rotation.
+- Touch (§2.8): `.disclosure.inline` opts a disclosure in to a small control's target, 36px to
+  look and borrowing 4px above and below for 44px. How to Call in the New Webhook Trigger sheet
+  uses it. It is opt-in because a trigger that fills a list row (the Outbound Events rows, a tool
+  step) or sits flush on a list (the request dock's More Requests) would take its neighbour's
+  taps. Give the modifier only to a disclosure with 4px clear above and below its trigger.
 - Replaces `.access-manual-disclosure`, `.project-location-create-disclosure` (with its `+`/`−`
   text glyph), `.runner-disclosure-chevron` and `.tl-disclosure` (with its `▸` glyph).
   `.share-disclosure` was a risk warning, not an expand and collapse; it moved to a warning Notice
@@ -1419,6 +1519,58 @@ variant by default and offers side by side as a user preference (§6.3).
   detail's `scrollTop` on each route, and on a phone it restores the list's position on Back. The
   side-by-side resize handle is built for Sessions' Preview Right (#2219, §6.3), and its stacked
   divider (#2217); Agent Skills' list pane does not resize yet.
+- **Connections › Machines (#2985).** The Machines tab is the same grid in a `.page.full.fill`
+  page under the Connections header and its tabs. `MachineList` is one `button.row.row-2` per
+  machine: the name (its tooltip the full name) and the one `machineStatus()` badge on line 1, and as
+  §11.3 meta its kind ("Native Runner" or "SSH") and, when its runner reports Runner Capacity, "29
+  of 40 Units". Rows sort by `machineSortKey`, `[attentionRank, online ? 0 : 1, displayName]`:
+  whatever is not Online or Connecting first. Past eight machines the head adds "Filter Machines"
+  and the rows sit under Needs Attention, Online and Offline with plain counts. The selection is
+  `/connections/machines/~<runnerId>` (an SSH machine by its box's runner id); `/connections/machines`
+  selects nothing and shows the All Machines overview (§6.1) on desktop and compact widths, under
+  the list's first row, All Machines. An unknown id is a compact "Machine Not Found" with Show All Machines;
+  before the first snapshot the list shows three skeleton rows beside `DetailSkeleton`; while
+  disconnected the last-known rows stay in `StaleContent` under a compact "Reconnecting…" notice
+  in the list head. A phone's machine route replaces the header and its tabs with a `DetailBar`,
+  "Back to Connections" and the machine's name. Connecting a machine over SSH selects it.
+- **Machine detail (#2988).** Every machine, native or SSH, is one `MachineDetail`
+  (`MachineDetail.tsx`), never a card. Its title row is the name as an `h2` (`--type-title`, one
+  line, its tooltip the full name), the one `machineStatus()` badge, **Settings…** (owners, admins
+  and the machine's own manager) and ⋯ **Machine Actions**; under it one §11.3 meta line, the kind
+  with its icon, the host (the hostname, or the SSH target), the OS from `osLabel()` and, when
+  offline, "Last seen 4m ago". It stays on one line and truncates, the host first. ⋯ holds, in
+  order, Rediscover Agents (native) or Reconnect (SSH), Find Agent Sessions… (online), Connection
+  Details…, and after a separator Delete Machine… (disabled with "Stop the runner to delete." while
+  a native runner is online); Repair Connection… replaces the first two while a native runner is
+  offline, and a viewer's ⋯ holds Connection Details… alone. On a phone the detail bar carries the
+  name and the same ⋯ led by Settings…, and the body keeps the badge and the meta line. Under the
+  header is at most one lifecycle notice, the first that applies (`machineNoticeKind()`): This
+  Machine Is Offline (neutral, `WifiOff`), Couldn't Connect to <name> (danger, the
+  `describeSshFailure()` sentence with ssh's words behind Show Details), Connecting… (info), Runner
+  Update Required (warning) and Older Runner Data Found (warning). Update Runner…, Reconnect and
+  Adopt Legacy Data… ask to interrupt the sessions a `409 BOX_HAS_ACTIVE_SESSIONS` names, and their
+  results are toasts. `confirmDeleteMachine()` is the one Delete Machine confirmation, here and in
+  Machine Settings. Connection Details is one `.facts` list for every machine, "Not available" in
+  `--text-faint` for a missing value, with Copy All beside Done.
+- **Agents (#2990).** The machine's Agents section (`MachineAgentsSection.tsx`), with its count,
+  lists each agent as a `button.row.row-2` that opens Agent Details: the `agentDisplayName()` name
+  (a name two agents share gains the version, or where it runs when the versions match) and the
+  one `agentStatus()` badge on line 1, Ready inline; §11.3 meta on line 2, the integration, where
+  it runs and the version, of which a phone keeps only the integration. No chips, dots, sentences
+  or commands sit in a row. Not-installed agents fold into a closed `.disclosure` at the end ("3
+  Agents Not Installed"). With none Ready, a compact "No Agents Ready" state gives the install
+  commands in code wells; until the runner first reports, three skeleton rows. **Agent Details**
+  is titled by the name with "On <machine>" under it, and leads with a status notice whenever the
+  agent is not Ready (warning or danger by its status, neutral for Not Installed): one sentence and
+  the fix, a command in a code well, **Approve Launch…**, or **Choose Another Installation…**,
+  which opens Machine Settings at its installations. Then one `.facts` list, whose Updates fact
+  gives the `harnessUpdateLabel()` and under it, in `--type-small` and `--text-dim`, the runner's
+  release guidance from `harnessUpdateGuidance()` unless the notice already quotes it (#3523); the Launch Command in
+  a code well with copy (only for an installed agent whose launch can be copied; a reference-only
+  Windows launch keeps its Executable and Arguments facts), and a closed Release Details
+  disclosure. Its footer is ghost **Find Sessions…** where the agent can be scanned, ghost danger
+  **Revoke Approval…** once a Registry launch is approved, and **Done**. Approve Launch is a
+  non-destructive confirmation with the exact install preview; Revoke Approval is a danger one.
 - **Settings (#3018).** Each section is a route, and the list takes the width's shape. Desktop: a
   sticky 192px `nav.settings-nav` of `.row.settings-nav-item` links at `--control-h`, each a 16px
   icon and the section name; the current one is `aria-current="page"` with the §5.2 selected state
@@ -1454,6 +1606,32 @@ Never a centered sentence. Pick the first rule that applies:
 If the **collection is empty**, the list pane and detail pane are replaced by one empty state spanning
 the content area (§12.1), not an empty list beside a void.
 
+**Projects Overview (#2958).** Projects follows rule 1. Needs Attention lists each project that can't
+start sessions (every location out of reach, or none yet) and each name more than one project shares,
+ignoring case, each row with one action: Open, Add Location… or Rename… (which opens the project with
+its Name field focused); a project the person can't change offers Open. Most Active takes Recently
+Changed's place: up to five projects by unarchived sessions. A search changes only the list. On a
+phone the list leads with a Projects Overview row carrying the Needs Attention count (§11.4), which
+opens `/projects/overview`.
+
+**All Machines (#2986).** Connections › Machines follows rule 1 on desktop and compact widths: with
+nothing selected, the detail is `MachinesOverview`, and the list's first row is All Machines (`.row`,
+`AllMachinesIcon`, the machine count as plain trailing text), selected while the overview shows. The
+title row is "All Machines" and "4 machines, 3 online. 44 of 80 units in use on the online machines."
+(the units sentence only while an online machine reports its use). Needs Attention has a row for
+every machine whose `machineStatus()` is not Online or Connecting and every machine the rail's
+Connections dot counts (`machineAttentionReason`, §11.4), in list order: the name and its badge, the
+top reason in one sentence, and Repair Connection… (an offline native runner) or Reconnect (an
+offline, unreachable or failed SSH machine) for owners and admins, otherwise Review. With nothing to
+review it is "Every machine is online and ready." Capacity, with "Units in Use / Limit" as quiet
+text in its head, is a Surface of rows that each open the machine: the name, a `.meter` (§11.6),
+"29 / 40" and "3 Queued" while sessions wait; an offline machine has an empty meter and "Offline",
+and one reporting no use "Capacity Unknown". Past eight rows the rest are one line, "and N more
+machines", with their units summed. A `.section-note` says what a unit counts. While the snapshot
+loads the detail is `DetailSkeleton`; while disconnected, the last-known overview in `StaleContent`.
+A phone has no overview and no All Machines row: its list, sorted by attention with every badge, is
+the overview.
+
 ### 6.2 Phone
 
 List and detail are two routes. Tapping a row pushes the detail route; the app bar shows ‹ Back and the
@@ -1473,7 +1651,7 @@ master-detail pages stay side by side.
 │  Row          whole rows only, 45% of the area, at least 3, own scroll   │
 ├─────────────────────────────────── ▬ ────────────────────────────────────┤
 │ Detail bar: title, status ............ actions, Open Session             │
-│ Preview body, left-aligned at the page gutter, max 860px, own scroll     │
+│              Preview body, centered, max 860px, own scroll               │
 └──────────────────────────────────────────────────────────────────────────┘
 ```
 
@@ -1483,8 +1661,10 @@ master-detail pages stay side by side.
   never under 3 rows, and never so tall that the preview drops under 240px. At 1440×900 that is 6 rows
   of `--row-h-2`; the divider never cuts a row. Rows must be exactly their row token for this to hold.
 - **Panes.** Both panes are flush (no card) and span the page between the gutters, so the page
-  title, the tab row, the rows and the preview all start at one left edge. The list body and the
-  preview body each scroll on their own; the page never scrolls. Notices above the list (order
+  title, the tab row, the rows and the preview's bar and meta line all start at one left edge. The
+  preview's reading column (the docked request and the transcript) is at most `--chat-max` wide and
+  centered in the preview, as in the open session, so a session reads the same in both. The list
+  body and the preview body each scroll on their own; the page never scrolls. Notices above the list (order
   changed, sign-in) take list height in whole rows; they do not push the divider, and no row is cut
   at it (#2221, the list notice slot of §13.2). A new selection resets the
   preview's scroll to its request or latest turn; resizing never scrolls either pane.
@@ -1529,9 +1709,9 @@ master-detail pages stay side by side.
   hidden at 760px and below as well (#3020); the stored choice is kept.
 - **Empty.** An empty list replaces both panes with one state (§6.1); no divider is drawn.
   **Built (#2220).** `.inbox-state.master-detail-state` takes the list pane's place on the page grid,
-  and the preview and divider are not rendered. The state follows the §12 order: Reconnecting… while
-  disconnected with nothing loaded, then skeleton rows while sessions arrive (§12.3), then No Matches
-  (§12.2), then one state for the group's situation (`sessions-states.ts`, `SessionsStates.tsx`):
+  the state is a page-level state centered in it (§12.1, #3869), and the preview and divider are not rendered. The state
+  follows the §12 order: Reconnecting… while disconnected with nothing loaded, then skeleton rows
+  while sessions arrive (§12.3), then No Matches (§12.2), then one state for the group's situation (`sessions-states.ts`, `SessionsStates.tsx`):
 
   | Situation | Icon | Title | Actions |
   | --- | --- | --- | --- |
@@ -1577,9 +1757,9 @@ master-detail pages stay side by side.
   touch, which cannot hover, keeps a 6×40px pill grip. `aria-orientation="vertical"` and
   `aria-valuenow` in pixels; ←/→ move 16px, Home and End go to 280px and 440px, Enter or a
   double-click restores 400px, and only a release or a key stores a width. The preview pane is
-  isolated so its docked request stays under the band. The preview's bar, meta line, docked request
-  and transcript start at `--preview-inset`: the page gutter when stacked, `--space-6` from the
-  divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
+  isolated so its docked request stays under the band. The preview's bar and meta line start at
+  `--preview-inset`, which is also the least gutter of its centered reading column: the page gutter
+  when stacked, `--space-6` from the divider in Preview Right. The 400px column is under 880px, so rows keep #2209's two-line anatomy,
   and a notice above the list tops the list column only. The preview bar's badge collapses on the
   preview's own width, not the window's tier (#2221): wherever the full badge would leave the title
   truncated under 200px (`DETAIL_TITLE_READABLE_PX`), as in Preview Right at 1100px, the badge is its
@@ -1663,9 +1843,12 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 
 - Right-aligned: **Cancel** (`.btn`, secondary, never ghost) then the **primary**. The primary label
   repeats the dialog's verb ("Create Session", never "OK", "Submit" or "Continue").
-- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 3) the
+- **Steppers.** On an intermediate step of a stepper dialog (Pair Device step 1 of 2) the
   primary may be **Continue**, with Back as the secondary from step 2 on. The final step's primary
-  names the outcome ("Pair Device"), never Continue.
+  names the outcome ("Create Pairing Link"), never Continue. A stepper keeps one title; its
+  description names the step ("Step 2 of 2: Name the device."), and a stepper whose steps differ in
+  height anchors near the top (`Modal`'s `grows`, a local `data-grows` on the backdrop, §19.4) so
+  its top edge never moves.
 - A destructive tertiary action (Delete Team, Remove Location) goes far left as `.btn.ghost.danger`
   and opens its own confirmation.
 - A harmless extra action (Show Sessions) is a `.btn.ghost` after the spacer and before Cancel
@@ -1713,6 +1896,10 @@ stacks on the first. Desktop keeps stacked dialogs as above.
 - **Type-to-confirm dialogs focus the name field**, not Cancel: the user must type before
   anything else can happen, and the danger button stays disabled until the name matches, so focus
   there cannot confirm by accident.
+- The field's label names the text: "Type Review Team to Confirm". Where that text can be long, a
+  project's name for Delete Project, `typeToConfirmLabel` gives a fixed label instead ("Type the
+  Project Name to Confirm") and the helper names the text: "Enter <name> exactly.", the name as an
+  inline code chip that shows every space, since the match is exact (#2964).
 - Non-destructive confirmations (Recover Session) use a primary button and no tone icon, and open
   with focus on the primary.
 - `window.confirm` is banned; every confirmation goes through `useFeedback().confirm`.
@@ -1821,10 +2008,10 @@ Only a disabled row dims, and only its title (`--text-faint`, never opacity, §3
 
 | Component | Control | Notes |
 | --- | --- | --- |
-| `SwitchRow` | The whole row is the `Switch` (`.setting-row-switch`); the track at the column's right edge. | `saved` and `failure` (in place, with Try Again) as before; `busy` keeps the confirmed value. |
+| `SwitchRow` | The whole row is the `Switch` (`.setting-row-switch`); the track at the column's right edge. | `saved` and `failure` (in place, with Try Again) as before; `busy` keeps the confirmed value. A disabled row's `disabledReason` is a `.setting-row-reason` line under the description, which the switch is also described by ("You can't change this project."). |
 | `SegmentedRow` | `.seg` filling the column. | For two or three options whose labels fit the column (labels never wrap); a `Select` otherwise. `disabledReason` under the pills. |
 | `SelectRow` | `Select` filling the column. | Its `.menu.listbox` is at least as wide as the trigger and 280px, and 360px when options carry descriptions, by default. `disabledReason` is visible under the trigger and part of its description. |
-| `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5). |
+| `NumberRow` | A `.w-xs` (96px) field with its unit inside (§8.3). | Named by the title and unit; a long unit goes in the title or description. An invalid value is `aria-invalid` with a `FieldError` under the field (§8.5), or, with `errorPlacement="description"`, in the description's place where the description is the field's helper ("A whole number."), so the two never show at once. `placeholder` says what an empty field means ("No limit"); `readOnly` takes the §8.1 read-only treatment. |
 | `ValueRow` | A read-only value, right-aligned. | `mono` for addresses, versions and ids; `copy` adds Copy, an `.icon-btn.sm` named "Copy <Title>", or `copyLabel` where the title does not name the value ("Copy Address" beside Connected To). It confirms with its icon. A value is one line, cut to an ellipsis with its full text in the tooltip; `wrap` is for a value that is only useful whole, an address (Connected To): it wraps on lines of even length, breaking only after `.`, `/` and `:`, never at a hyphen. |
 | `LinkRow` | Trailing `ChevronRight`, after an optional trailing word. | Navigation only; the whole row is the button. |
 | `ActionRow` | One `.btn` (`--control-h`), such as Edit…, with an optional 14px icon before its label. | Named by its label and the row's title ("Edit… Claude Code"). |
@@ -1839,12 +2026,18 @@ check: before the track on a switch row, at the end of the text cell otherwise, 
 polite region beside the control. A failed instant save that is
 not a switch is the group's failure notice (below). A `SettingRow` with no value to show until a read
 succeeds (Settings › Network's Tailnet Access before its status is known) takes `failure` too, in
-place of its description with Try Again, so an unknown value is never drawn as a control.
+place of its description with Try Again, so an unknown value is never drawn as a control. A
+`SettingRow` holding a field in an editor (a project's Name, #2962) takes `error` and `errorId`: the
+`FieldError` in the description's place, which the caller's field marks `aria-invalid` and points
+at.
 
 **Narrow.** Under a 560px **container** the control drops below the text at full width; switch, link
 and action rows (`.setting-row-trailing`) keep their control trailing. The container is the group's
 surface, never the viewport, so the rule holds in the settings panel, a dialog and a detail pane
-alike.
+alike. One exception: New Session's Options (#2955) keeps select, segmented, number and value
+controls beside their text down to a 480px surface, so the desktop dialog's 520px surface stays
+within its height budget; phones stack as usual. Extra Folders, rows without a control and
+trailing rows keep their usual layout.
 
 **Group.** `SettingsGroup` (also in `ui/SettingsRows.tsx`, exported for any screen) is a §5.1
 section: an optional head (the title in `--type-section`, written in Title Case with no
@@ -1905,14 +2098,14 @@ wide as the trigger and at least 280px, never narrower, so descriptions do not w
 | Control | Spec |
 | --- | --- |
 | Text input / textarea | As §8.1. Textarea starts at 3 rows and grows to 12. `resize: vertical`. |
-| Select | Custom `Select` everywhere (native `<select>` removed). Trigger shows a `ChevronDown` 14px. `leadingIcon` draws a 16px icon inside the trigger, before the value. `searchable` leads the open list with a filter field, focused on open (16px text on touch, so iOS does not zoom); the list keeps the side it opened on while the filter narrows it, so the filter never moves. It is the touch form of the Combobox. `invalid` marks the trigger `aria-invalid` for a field error (§8.5), with `describedBy` naming the error. |
-| Combobox | Same trigger with `ChevronDown`; typing filters; brand icons sit inside the field, not outside. Built by `SearchableCombobox`: the chevron opens and closes the list without moving the caret, `leadingIcon` is the same 16px slot as Select's, and focus opens the list with the caret after the value (it never selects the value). A search with no results shows the §12.2 sentence, "No projects match “wolipog”.", from the caller's plural `noun`; an optional `createOption` row ("Create Project…") follows it. Other footer actions belong to the area that owns the picker. |
+| Select | Custom `Select` everywhere (native `<select>` removed). Trigger shows a `ChevronDown` 14px. `leadingIcon` draws a 16px icon inside the trigger, before the value. `searchable` leads the open list with a filter field, focused on open (16px text on touch, so iOS does not zoom); the list keeps the side it opened on while the filter narrows it, so the filter never moves. It is the touch form of the Combobox. `invalid` marks the trigger `aria-invalid` for a field error (§8.5), with `describedBy` naming the error. An option's `group` lists it under a §9.1 section label, the chosen option draws the trailing check, and `footerAction` adds the list's footer action row, as the Combobox's do; in a searchable list the footer row stays under the filtered rows. |
+| Combobox | Same trigger with `ChevronDown`; typing filters; brand icons sit inside the field, not outside. Built by `SearchableCombobox`: the chevron opens and closes the list without moving the caret, `leadingIcon` is the same 16px slot as Select's, and focus opens the list with the caret after the value (it never selects the value). A search with no results shows the §12.2 sentence, "No projects match “wolipog”.", from the caller's plural `noun`; an optional `createOption` row ("Create Project…") follows it. An option's `group` lists consecutive options under one §9.1 section label inside a `role="group"` named by it, and a search keeps a section's label only while one of its options matches. The chosen option draws Select's trailing 14px check; the keyboard highlight (`aria-selected`, the active descendant) moves separately. `footerAction` (a Title Case label, an optional 16px leading icon) is the list's last row, after a separator, with or without a search and after the no-match sentence, below the create row when both show. Arrows, Home and End reach it as they reach an option, but a search that found nothing never highlights it for Enter; Enter or a click closes the list, puts focus back on the field and then runs it, so a dialog it opens can return focus there. It is never the chosen value and draws no check. An area adds at most one footer action row. `openOnFocus={false}` is for a field a dialog focuses as it opens (New Session, #1143): focus leaves the list closed with the caret after the value; typing, Arrow Down, Alt+Arrow Down, a click in the field or the chevron opens it, and the first character typed starts the query. New Session opened from a project's sessions selects that project's name once, as it opens, so the first character typed replaces it (#2952). An option's `separator` draws a separator before it, unless it is the first row shown (New Session's No Project, the last option); its `selectedLabel` is what the closed field shows once it is chosen, where the label alone would not tell two chosen values apart ("Docs Site · Studio Mac"), while the list still shows the label. `invalid` marks the field `aria-invalid` for a field error (§8.5), as Select's does. Select's options take the same `separator` and `selectedLabel`. |
 | Checkbox | 16px box, `--radius-xs`, `--control-outline`; checked = `--accent` fill with a check. Label to the right, 8px gap, the whole row is the target (≥32px, 44px coarse). Used for multi-select and consent. Consent labels are sentences and stay in sentence case ("Open the session after creating it"). Built by `Checkbox` (`.checkbox`, a `<label>` around the input): `label` is required and visible, `helper` is an optional second line announced as the description, `consent` marks a sentence label, `ariaLabel` gives a fuller name that contains the visible label where the label repeats down a list, and `labelHidden` is the icon-only form (the bare box with its `aria-label`). |
 | Radio | 16px circle; checked = accent ring plus dot. Used inside ChoiceRows. The marker (`.radio-mark`, `.checkbox-mark`) is the restyled native input itself, so focus, `:checked` and `:disabled` belong to what the user sees. |
 | Switch | 32×18 track (40×24 on touch), `--radius-pill`, `--control-outline` edge; on = `--accent` track. **For settings that apply instantly.** Label is the row title, and `aria-label` matches it. Never a button that says "On"/"Off". Built by `Switch` (`.ui-switch-control`, `SettingsRows.tsx`): `SwitchRow` renders it with the row's title and description inside, so the whole row is the target, named by its title and described by its description; standalone, beside other controls in a row, it is the bare track, named by its `label` or `aria-labelledby`, with the 44px coarse-pointer hit area. |
 | ChoiceRow | One component for radio cards, member checklists, instance pickers: leading control, title, one-line description, trailing meta; selected = `--surface-selected` + accent control; hover distinct. Markers align in one column. **Selection follows the checked input**: the row's selected look and its `aria-checked` (or `:checked`) come from one value, so the look never disagrees with what is announced. Built by `ChoiceRows` (`.choice-rows`; `multiple` for checkboxes) over `ChoiceRow` (`.choice-row`, a `<label>` around a native radio or checkbox): the marker sits on the title's first line, the description is one ellipsized line on desktop and at most two on phones (full text in the tooltip and the accessible description), and rows are `--row-h` tall at least (40px, 48px coarse). A refused choice passes `error`: a §8.5 field error (`.field-error`) in the second line's place, the input `aria-invalid` and described by it. A row with one control of its own (Choose Another Account's Sign In) passes `action`: the row becomes a `div` holding its `<label>` (`.choice-row-main`) and the control (`.choice-row-action`) beside it, because a label may hold no second control, so pressing it never checks the row. An unavailable row keeps its size, reads faint, shows its reason in place of the description, and is `aria-disabled` rather than `disabled`, so arrows still reach it and announce the reason while selection is refused. `ChoiceList` (`.choice-list`) is the compact form: radio rows with a trailing value and no description, for pickers inside sheets. A list beside a detail (Import from Git's skills beside their files) passes `show`: the marker becomes a target of its own, the rest of the row is a button that shows the row without changing its marker, the fill follows the row shown (`aria-current`), and the meta moves onto the title's line so the description has the row's width. |
 | ChoiceTiles | Equal tiles for a few short presets whose second line is the reason to pick one: Snooze's presets, each with the time it resolves to (#2181). A `radiogroup` of `radio` buttons, three across and two on a phone, each at least `--row-h` (48px on a phone); the label (`--type-body-strong`) is the tile's name and its detail (`--type-small`, `--text-dim`) its description. Selected is the choice row's `--surface-selected` with a trailing 16px accent check; arrows move and select. An unavailable tile stays reachable, reads faint and says why in its detail. `onChange` reports whether a pointer chose the tile, so a tile that reveals a field (Custom…) moves focus there only for a pointer. In a form, `onEnter` makes Enter on a tile answer as on a native radio, and `onType` takes a typed character to the free-text choice: Snooze submits a preset on Enter, and typing on any tile chooses Custom… with the character in its field. Built by `ChoiceTiles` (`.choice-tiles`, `.choice-tile`). |
-| Search field | An `.input-affix` text field with a 14px `Search` prefix, always open and one width: focusing or typing never resizes it or moves what sits beside it. Its placeholder names what it searches and its tooltip what it matches. Sessions' (#2200, `SessionsSearchField`) ends the tab row's tools: 240px, 200px in the compact tier, and on a phone the app bar's Search mode, the bar's whole width beside Cancel (#2211); placeholder "Search sessions", tooltip "Searches titles, agents, projects and the latest message.", a `/` keycap suffix on fine pointers (§11.5, §16.2). Escape clears it; Enter moves focus to the first result. While it holds a query the tab counts follow the results (§10.1), the preview follows the first result when the selected session leaves them, and a query with none shows No Matches (§12.2). Files' Go to File (#2852, `FilesPanel.tsx`) is the Files tool's toolbar (§4.9): placeholder "Go to file", the Ctrl/⌘+P keycap suffix on fine pointers and a Clear button once it has text. It is a `combobox` over a `listbox` of the runner's bounded search, files only: dense rows (§5.2) with the name, its folder in `--type-small` `--text-dim` and the matched text underlined, git-changed and recently opened files first, then name matches before path matches, under a count line ("4 matches in wollipog", or "Showing the first matches only. Type more to narrow them." when the runner truncated). Up and Down move the active row, Enter opens it, Escape clears the field and then follows the panel's ladder. Ctrl/⌘+P opens the panel on Files when needed, never closes it, and focuses the field. An open file adds one more `.toolbar` row under it that never wraps (#2853): Go to Symbol, an `.input-affix` with a 14px `Locate` prefix that takes the row's remaining width (source only, never on rendered Markdown, whose Preview and Source `.seg.sm` leads the row; in a panel narrower than its 400px default those options show only their `Eye` and `Code` icons, keeping their names, and the placeholder shortens to "Symbol", so the field still shows it whole, #2913), then Attach to Prompt, Copy Link and the ⋯ File Actions menu as `.icon-btn.sm`. Enter submits; once a target is set, Clear Target is an `.icon-btn.sm` inside the field, so nothing moves. A symbol the file lacks is the field's `FieldError` under the row ("No symbol named “calculateTax” in this file."). File Actions lists Open in each editor found (or Open in Editor…, unavailable with its reason, "No editor found on Studio Mac."), Copy Path and, for a changed file, Show Changes in Review. Under the path a §11.3 meta line gives the language, line count, size and git state, and source renders as lines through the diff's highlighter in `.codeview`, which scrolls sideways only, with sticky line numbers. |
+| Search field | An `.input-affix` text field with a 14px `Search` prefix, always open and one width: focusing or typing never resizes it or moves what sits beside it. Its placeholder names what it searches and its tooltip what it matches. Sessions' (#2200, `SessionsSearchField`) ends the tab row's tools: 240px, 200px in the compact tier, and on a phone the app bar's Search mode, the bar's whole width beside Cancel (#2211); placeholder "Search sessions", tooltip "Searches titles, agents, projects and the latest message.", a `/` keycap suffix on fine pointers (§11.5, §16.2). Escape clears it; Enter moves focus to the first result. While it holds a query the tab counts follow the results (§10.1), the preview follows the first result when the selected session leaves them, and a query with none shows No Matches (§12.2). Files' Go to File (#2852, `FilesPanel.tsx`) is the Files tool's toolbar (§4.9): placeholder "Go to file", the Ctrl/⌘+P keycap suffix on fine pointers and a Clear button once it has text. It is a `combobox` over a `listbox` of the runner's bounded search, files only, matched fuzzily (#1263: the query's letters in order, so "sdtsx" finds `SessionDetail.tsx`): dense rows (§5.2) with the name, its folder in `--type-small` `--text-dim` and each matched run underlined, git-changed and recently opened files first when their match is clean (each matched run starts a word or is three or more letters of the name, so a scattered coincidence never tops a stronger match), then the best match (word starts, runs and the file name count most), under a count line ("4 matches in wollipog"; when the runner truncated, "Showing the best matches only. Type more to narrow them.", or "The workspace is too large to search in full, so some files may be missing." when its traversal cap cut the walk, or an older runner's "Showing the first matches only. Type more to narrow them."). Up and Down move the active row, Enter opens it, Escape clears the field and then follows the panel's ladder. Ctrl/⌘+P opens the panel on Files when needed, never closes it, and focuses the field. An open file adds one more `.toolbar` row under it that never wraps (#2853): Go to Symbol, an `.input-affix` with a 14px `Locate` prefix that takes the row's remaining width (source only, never on rendered Markdown, whose Preview and Source `.seg.sm` leads the row; in a panel narrower than its 400px default those options show only their `Eye` and `Code` icons, keeping their names, and the placeholder shortens to "Symbol", so the field still shows it whole, #2913), then Attach to Prompt, Copy Link and the ⋯ File Actions menu as `.icon-btn.sm`. Enter submits; once a target is set, Clear Target is an `.icon-btn.sm` inside the field, so nothing moves. A symbol the file lacks is the field's `FieldError` under the row ("No symbol named “calculateTax” in this file."). File Actions lists Open in each editor found (or Open in Editor…, unavailable with its reason, "No editor found on Studio Mac."), Copy Path and, for a changed file, Show Changes in Review. Under the path a §11.3 meta line gives the language, line count, size and git state, and source renders as lines through the diff's highlighter in `.codeview`, which scrolls sideways only, with sticky line numbers. |
 | File picker | A dropzone row: icon, "Drop files here or", `.btn.sm` "Choose Folder…". Never the native "Choose Files / No file chosen". |
 | Number with unit | `.w-xs` input with the unit as a suffix inside the field ("30 s"). The field's end padding is the 12px inset, the unit as drawn and a 4px gap: `affixSuffixRef` on the unit measures it into `--affix-suffix-w` (2em until measured, #3185), because the unit is set in the row's type and the system face, not the field's. A number input with a unit has no spin buttons, whose room would cost a digit; the arrow keys still step it. |
 
@@ -1976,6 +2169,14 @@ Agent and Custom Endpoint open their setup dialog, and the stored choice changes
 dialog saves (Cancel keeps the previous one selected and stored). Once set up, an `ActionRow` under
 it says which, in sentence case, with Edit….
 
+A Dialog whose fields save through separate endpoints still has one Save Changes. Machine Settings
+(#2991) sends only the fields that differ from the last saved snapshot, one request each with its
+revision, in the form's order. When one fails, the dialog stays open, every field that saved becomes
+the new baseline, and a danger Notice above the footer names what wasn't saved ("Capacity Limit
+wasn't saved.") with the server's words behind Show Details; Save Changes then retries only those.
+A change that needs consent (turning on automatic account switching) asks in a stacked,
+non-destructive confirmation before anything is sent.
+
 The editor save bar is `.save-bar` (`SaveBar`): sticky at the bottom of its region, `--bg-elev`,
 1px `--border-strong`, `--radius-md`, `--elev-2`, padding 12px 16px, gap 8px, and rendered only
 while there is something to save or a save failed. When a save fails it becomes `.save-bar.is-error`:
@@ -1988,6 +2189,16 @@ settings panel's own children so the bar is too, a field error at a setting (`Nu
 page with a dirty draft asks **Keep Editing** or **Discard Changes** first (`useLeaveGuard`). Browser
 Back and Forward ask too (#3218): the editor's entry is put back while it asks, so Keep Editing loses
 no forward entry, and Discard Changes completes the move.
+
+A project's detail is the second (#2962): Name, the Memory Sharing choice (#2963) and the two
+child-session limits are one draft, saved by one bar sticky 16px above the bottom of the detail pane
+in one update request carrying only the changed fields, while Show as a Sessions Tab beside them
+applies at once. Choosing Share Project Memory while it is not the saved choice shows its consent
+notice under the row, so sharing is only saved by a Save pressed after it was shown. Each field validates on
+leaving it after an edit and on Save, which moves focus to the first invalid field; a shown error
+blocks Save with "Fix N fields to save". A failed save keeps the draft and reads "Couldn't save the
+changes. Nothing was changed." with Try Again. Leaving the project with a dirty draft asks first, as
+Settings › Orchestrator does.
 
 An editor names its actions and states with four props, and changes nothing in `SaveBar` itself:
 
@@ -2067,6 +2278,12 @@ workflow step list is a different component and keeps a local name.
   appears in place, without the menu's entrance motion. It is not portalled: it stays beside its
   field and takes the field's font. Its placement is measured against its real containing block
   (§2.10), so an ancestor container cannot move it.
+  It lists grouped options under `.menu-label` section labels, each run in a `role="group"` named
+  by its label, and marks the chosen option with the trailing check while the highlight moves on
+  its own. An optional footer action row ends it after a `.menu-sep`: an option-height row with an
+  optional 16px leading icon (`.menu-icon`), 32px or 44px on touch, reached by the arrows like an
+  option and never chosen. The height cap budgets a section label as one 28px row and the footer
+  as one single-line option plus its separator.
   It replaced `.ui-select-list`. Focused, it draws no ring of its own while an option is highlighted:
   the highlighted option's fill shows where focus is, and in forced colors that option carries the
   ring instead. A list with no option to highlight keeps its ring (#3020).
@@ -2075,7 +2292,10 @@ workflow step list is a different component and keeps a local name.
 
 Anchored, 8px from the trigger, same container recipe as the menu, padding 16px, width 280–360px.
 Optional title row (`--type-section` + close icon). Used for inline detail (usage cost breakdown,
-context window). Rules for both menus and popovers:
+context window). A field's rules that would otherwise sit under the form as body copy go in an
+`InfoPopover` whose `.icon-btn.sm` sits beside the field's label, overhanging the label's line on a
+fine pointer so the label stays 8px above its control (the Automation editor's About Time Zones,
+#2971). Rules for both menus and popovers:
 
 - `consumeEscape: true` by default (fixes Escape leaving the session).
 - Close on outside click and on ancestor scroll (or re-anchor); never float over a dialog header.
@@ -2202,13 +2422,20 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Machine / instance | Connecting | info |
 | Machine / instance | Offline | neutral (hollow dot) |
 | Machine / instance / device | Update Required, Sign-In Required, Pairing Required | warning |
+| Instance (`instanceAvailabilityMeta`, #3002: the Instances rows, the rail tile and its tooltip, the instance menu and the banner) | Online: success · Connecting: info (pulse) · Offline: neutral (hollow dot) · Pairing Required (a rejected or missing saved pairing; the fix is Re-Pair…): warning · Update Required: warning · none for an instance not tried in this session. Sign-In Required is never an instance's word, and "Saved" is retired. While the banner is shown the active instance reads its word, never Online (`instanceStatus`). |
+| Machine | Approval Required (a Registry agent waits for its exact launch to be approved) | warning |
 | Machine / instance | Unreachable, Error | danger |
+| Person account (`member`, People and Devices, #2997) | Suspended: neutral (hollow dot). Active shows nothing: status appears only as an exception. |
 | Skill deployment | Linked | success |
 | Skill deployment | Pending | neutral |
 | Skill deployment | Edited (a machine copy differs from the library) | warning |
 | Skill deployment | Update Held (a Git or built-in update waits for review) | warning |
 | Skill deployment | Error | danger |
-| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger |
+| Automation / run | Enabled | success · Paused: neutral · Running: info · Failed: danger · Last Run Failed: danger (the automation page's one badge when its latest run failed, ahead of Enabled or Paused, #2968) · Target Unavailable: warning. An Automations list row (#2969) shows at most one: Last Run Failed, else Target Unavailable, and none otherwise; its group and its Enabled switch say whether it is scheduled or paused. |
+| Automation run (`automation_run`: the page's Last Run fact, Run History's Result and Run Details, inline) | Starting, Running: info (pulse) · Succeeded: success · Failed: danger · Expired: warning · Skipped: neutral |
+| Automation run step (`automation_step`: Run Details' Steps, inline) | Running: info (pulse) · Sent, Accepted: info · Done: success · Failed: danger · Unconfirmed: warning · Queued, Retried: neutral |
+| Outbound event subscription (`subscription`, #2973) | Active: success · Paused: neutral · Delivery Failed: danger (its latest settled delivery failed, which includes a pause the failures caused). The automation words Enabled and Paused are not used here. |
+| Outbound event delivery (`outbound_delivery`, the Deliveries table's Result, inline) | Delivered: success · the failure in words ("HTTP 500", "Connection Refused", "Timed Out"): danger · Sending: info (pulse) · Pending, Dropped: neutral |
 | Tool call | Running: info · Completed: success (inline, no pill) · Failed: danger |
 | Session family rollup chip | Needs Your Input (or "N Awaiting Input") when a child waits on the user: warning. Ready for Review: review (purple). Otherwise neutral. Input takes priority over review. |
 | Subagent / background job | Queued, Canceled: neutral · Running: info (pulse) · Stalled: warning (still listed by its runner with no result past the stall bound) · Completed: success · Failed: danger · Unverified: neutral, hollow dot (its runner is offline) · Lost: danger (replaces Orphaned) · Result Missing: warning (finished, but the result never arrived) |
@@ -2218,15 +2445,23 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Queued message (`queuedMessage`: the composer queue) | Pending, Queued, Canceled: neutral · Sending, Starting, Steering…: info (pulse) · Accepted, Pending Delivery: info · Held, Delivery Uncertain: warning · Delivery Failed, Not Sent: danger. Rendered as the inline badge. |
 | Message receipt (`messageReceipt`: the one line under a sent message in the transcript — pending prompts, steering, provider commands, the rename) | Sending: a spinner and the word, no badge · Queued, Canceled, Dismissed: neutral · Delivered, Steered the Current Turn: success (inline) · Delivery Uncertain: warning · Delivery Failed, Not Sent, Not Accepted, Rejected, Rename Failed: danger. Rendered as the inline badge. |
 | Workflow gate / run decision | Awaiting Decision: warning · Approved: success (inline) · Rejected: neutral |
+| Workflow run step (`workflowNode`, #2977: a step's badge and marker on the workflow run page) | Waiting, Skipped, Stopped: neutral · Ready: info · Running: info (pulse) · Awaiting Decision: warning · Succeeded: success · Failed: danger. Amber is Awaiting Decision's alone. |
+| Multi-Agent Run (`run`, `runStatus()`, #2974: the Runs list row) | Awaiting Decision (a workflow node waits at a gate), Approval Required (a member needs the person): warning · Running: info (pulse) · Failed (the workflow failed): danger. In that order; none while every member is idle. |
+| Run follow-up (`followUp`, #2976: each member's send in the run's Follow Up dialog) | Delivered: success (inline) · Failed: danger (inline, with the reason beside it) |
 | Request decision (`requestDecision`: the outcome of every Decision Record and of the settled question row, #2204) | Allowed, Answered, Answered by Policy, Answered by Parent, Rechecked Automatically: success · Rejected, Dismissed, Dismissed by Parent, Ended Early, Replaced, Expired, Resolved by Provider, Another Account Selected, Escalated, Resolved: neutral · Blocked (by a policy, or fail-closed by Wollipog): danger · Timed Out: warning. Always past tense, never a provider's option id. |
-| Pod | Active: info · Paused: neutral · Conflicted: warning · Failed: danger |
+| Pod (`podBadgeStatus()`, #2981: the pod page's bar) | Active (open, nothing running): info · Running (automatic turns or any member's turn): info (pulse) · Closed: neutral |
+| Pods list row (`podRowStatus()`, #2979) | Closed: neutral · Conflicted (the newest merge conflicted): warning · Failed (the newest merge failed): danger · Running (automatic turns or any member's turn): info (pulse). In that order; none for an idle open pod. |
 | Campaign work item (`campaignWork`, Campaign Status) | Planned, Queued, Canceled, Scope Removed: neutral · Running: info (pulse) · Waiting: warning · Blocked: danger · Delivered: success. Rendered as the inline badge on work rows. |
-| Provider account | Signed In: success (inline) · Sign-In Required: warning · Signed Out, Status Unknown: neutral |
+| Provider account | Signed In: success (inline) · Sign-In Required: warning · Signing In: info (pulse) · Signed Out, Status Unknown: neutral · Not Added: neutral (hollow dot; a new account's sign-in ended because the account is already on the machine, #2996) |
 | Usage (provider availability) | Available: success · Approaching Limit: warning · Temporarily Unavailable: danger |
+| Usage daily budget (`usageBudget`, Usage and Cost's By Person, #3013) | Budget Reached: warning, once a person's spend today (settled plus the estimate for their running turns, as the daily-budget gate counts it) is at or over the per-person daily budget. Below it there is no badge; the Today cell's meter shows the level. |
+| Agent on a machine (`agent`, `agentStatus()`, #2990: the machine's agent rows, Agent Details and Set Up This Machine) | Ready: success (inline) · Not Installed: neutral (hollow dot) · Sign-In Required, Update Required, Approval Required: warning · Unavailable: danger · Ready When Last Seen: neutral (hollow dot; a ready agent on a machine that is not online). One per agent, the most limiting first; the machine's Update Required, Approval Required and Sign-In Required roll up from it. |
 | Terminal tab (`shell`, #2864) | Exited: neutral · Reconnecting: info. Rendered as the inline badge after the tab's label; a running shell has none. |
 | Transcript share link | Active: success · Expired, Revoked: neutral. Rendered as the inline badge on Share Transcript's link rows. |
 | Pull request | Open, Draft, Merged and Closed are **facts**: row meta with the Git icon, not status badges. |
 | Pull request checks (Review's summary, #2846) | Checks Failing: danger · Checks Running: info, pulsing. Passing checks get no badge. |
+| Cross-model review run (`reviewPhase`, the Cross-Model Reviews section's summary, from its newest review, #3369) | Review Requested: neutral · Reviewing, Re-Reviewing (a later round or epoch): info (pulse) · Delivering Findings (a downvote's continuation not yet with the requester): info · Fixing (delivered, the requester's turn): warning · Settled (a valid upvote): success. A newest attempt that did not vote shows its `reviewRun` state instead. |
+| Cross-model review (`reviewRun`, Review's Cross-Model Reviews, #3369) | Requested, Canceled, Not Validated (an older runner that does not check reports): neutral · Reviewing: info (pulse) · Upvote: success · Downvote: warning · Invalid, Failed: danger. Only a valid report votes. A review of a head the pull request has moved past adds a separate neutral Stale badge (no dot). |
 
 "Orphaned" is retired everywhere, including the session header badge, which reads "Background Work
 Lost". Update Required applies to machines, instances and devices alike.
@@ -2238,12 +2473,19 @@ uppercase transform.
 
 **Queue tray** (`QueuedMessages`, #2178). Messages not yet sent wait in `.queue`, docked on the
 composer card: inset `--space-3` from its edges with no gap, a solid `--border` edge, top corners
-`--radius-md`, and a hairline between rows. It starts collapsed to one summary line (#2788): a
-full-width §5.5 disclosure trigger, `--control-h` tall, reading "1 Queued Message" or "<n> Queued
-Messages" and carrying the one Held badge when the whole queue is held. While collapsed it also
+`--radius-md`, and a hairline between rows. Two or more messages start collapsed to one summary line
+(#2788): a full-width §5.5 disclosure trigger, `--control-h` tall, reading "<n> Queued Messages" and
+carrying the one Held badge when the whole queue is held. While collapsed it also
 carries the most severe row status that needs the person (Delivery Failed, else Delivery Uncertain).
 Only the summary opens or closes the tray: arrivals, removals and status changes never do, the choice
-lasts while the session stays open, and every session starts collapsed. Expanded, the tray says once
+lasts while the session stays open, and every session starts collapsed. A queue held behind a
+worktree or account handoff (#3752) says why in one sentence-case `.queue-note` right under the
+summary, collapsed or expanded (`.queue-hold`), followed by Proceed Now… (`.btn.sm`) when the runner
+can release the hold and the reader may stop the session's background jobs; a Viewer reads only the
+sentence. Proceed Now… asks first in the danger confirmation titled Proceed Now, with Cancel focused,
+saying that every unfinished background job ends and is recorded as killed and that the handoff and
+the queued messages then run in order; a refusal is a compact danger notice under the button, as
+Stop Job's is. Expanded, the tray says once
 in sentence case what holds for every row: the held explanation, a steering reason every row shares
 ("Claude Code can't take steering mid-turn, so these send when the turn ends."), a cancel none of
 them can use, or a Viewer's refusal. A row carries
@@ -2255,6 +2497,16 @@ reason referenced by `aria-describedby`. Below 760px a row is its text and one 4
 Actions" ⋯ button whose menu sheet lists Steer into This Turn, Edit Message and Cancel Message (or
 Dismiss Message), each disabled one with its reason as the second line. A delivery failure's reason
 is a notice of the slot (§13.2), not part of the row.
+
+One queued message is its own row in place of the summary (#3962), so steering it takes one tap:
+the same single line, with the Held badge after its words when the queue is held. On desktop its
+row is the expanded row above, and what the expanded tray would say about it is said under it. Below
+760px, while the message can be steered and the reader may manage the queue, a 44px Steer
+(`.btn.sm.ghost`) sits before the ⋯ button and the sheet leaves Steer into This Turn out; otherwise
+there is no Steer button and the sheet lists Steer into This Turn, disabled, with its reason. When a
+second message arrives the summary returns as the person last left it, opened only if focus was in
+the lone row, so the control they hold stays shown; when the queue drops back to one, focus on the
+summary moves to the row.
 
 **Message receipts** (#2171). What happened to a message after it was sent is one `.tl-receipt` line
 under that message, inside the scrolling transcript: after the last canonical item and before the
@@ -2338,9 +2590,10 @@ from an older runner or control plane, or one Wollipog made itself, names nobody
 guessing: the audit cannot be tied to one occurrence of a reused provider request id. The
 body is a §5.4 `.facts` list, each fact once: Decided By (a parent session's title links to it),
 Tool, Path, Branch, the command in a §11.7 code well, Risk for a review, and Recorded as one absolute
-time with seconds. Ids (request, audit, policy, session, review) are never shown; Copy Audit ID copies
-them. The chosen option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel`
-Ended Early, even though the runner records a chosen Cancel as a dismissal); the runner's own
+time with seconds. A Decision Record never shows its ids (request, audit, policy, session, review);
+Copy Audit ID copies them. (A session's own id is a Pinned Summary fact, §11.3.) The chosen
+option's kind decides the word (`allow_*` Allowed, `reject_*` Rejected, `cancel` Ended Early, even
+though the runner records a chosen Cancel as a dismissal); the runner's own
 sign-in resolutions keep their words.
 
 **Decision History** (#2213) is the side panel's list of every decision in the session: what the
@@ -2373,7 +2626,10 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
   is a **neutral badge**, `.status.t-neutral.no-dot`, not a chip. `.chip` stays for facts
   you can click or remove.
 - IDs, hashes and paths: `--font-mono` 12px, shortened (12 characters for hashes, directory-first
-  truncation for paths), with a copy button. Full ids live behind "Show Details" or copy only.
+  truncation for paths), with a copy button. Full ids live behind "Show Details" or copy only. A
+  session's id (`s_` and 12 characters) is already that short, so the Pinned Summary's Session
+  section shows it whole, as a Session ID row after Account with an icon-only Copy Session ID
+  button (#3897).
 
 ### 11.4 Counts
 
@@ -2455,9 +2711,14 @@ pointers only; its tooltip names the chord.
 - `.meter.t-warning` and `.meter.t-danger` fill with the tone when the level needs attention. The
   context window is warning from 75% and danger from 90%, and its ring takes the same tone classes
   on `.context-control`; below 75% the ring's fill is the neutral `--text-dim` on a `--bg-elev-3`
-  track.
+  track. A subscription window fills by what is left (`usageLeftPercent()`, "N% left"): warning
+  (Approaching Limit) under 25% left or when the provider warns, danger (Exhausted) when nothing is
+  left. Switch Account and Usage's Subscriptions tab read it through one `usageWindowAttention()`,
+  so a window never reads differently in the two (#3014).
 - The element carries `role="progressbar"` with `aria-valuemin`, `aria-valuemax`, `aria-valuenow`
-  and a Title Case `aria-label`.
+  and a Title Case `aria-label`. A meter that compares a level across rows, such as All Machines'
+  Capacity (§6.1, #2986), is instead `role="img"` named by its level in sentence case ("29 of 40
+  units in use"), and the figures beside it are hidden from assistive technology.
 - Replaces the context meter's bar (`.context-popover-bar`). The context control itself (the ring
   button and its popover) is `.context-control`, which is local to the composer.
 
@@ -2528,10 +2789,14 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
   (`PanelPageTitle`) take the switcher's place, and that Back is the one back control at every width,
   a 400px panel and a 390px phone alike. The Artifacts and Web Preview tabs give way to the page, and
   the list waits mounted and hidden under it. Escape pops the page as Back does; focus returns to the
-  artifact's row (`data-panel-page-key`) with the list scrolled where it was. Under the header, the
-  panel's toolbar slot holds `.art-bar`, a 48px `.toolbar` (§4.4) of **Enlarge** (`Maximize2`, for an
-  image or HTML preview once shown) and **Download** at its trailing edge, with no back and no title
-  of its own, so it stays put while the meta line and the body scroll. Being a page, an open artifact
+  artifact's row (`data-panel-page-key`) with the list scrolled where it was. The page's actions
+  render in the header's action slot through `PanelHeaderActions` (§4.9, #3036), after the title and
+  before Expand Panel and Close Panel: **Enlarge** (`Maximize2`, for an image or HTML preview once
+  shown), then **Download** as an `.icon-btn` named "Download" that opens the menu below, then the
+  tool's own **About Browser**, which keeps the slot's trailing end as it does over the list. The
+  title truncates first; on a phone the actions follow it in the sheet's one bar, each a 44px target,
+  and Download's menu opens as a sheet. The page has no bar of its own: the meta line follows the
+  header directly and scrolls with the body. Being a page, an open artifact
   clears on a tool switch or when the panel closes, and the Browser reopens on its list; the tab, the
   address and the open page stay in panel scratch (#1202). Run detail opens the same preview in a
   `Modal` of size `lg` (a sheet on phones, §7.5), whose title is the artifact's name, with Enlarge
@@ -2539,7 +2804,8 @@ One anatomy for a workflow artifact, in the Browser tool and in Run detail (#285
 - **Meta line.** `.art-meta` (§11.3): the kind (`labelFor`), the size (`formatBytes`), who saved it
   by name ("Claude", "You", a member's name or Wollipog; never a session or user id) and, once the
   bytes match their checksum, `ShieldCheck` **Verified**. The MIME type and the hash are not shown.
-- **Download.** A `.btn` menu (§9.1): **Download Original File**, whose description is the one
+- **Download.** A menu (§9.1), opened from the Browser header's icon button and elsewhere from a `.btn`
+  labelled Download (Run detail's footer, a transcript row): **Download Original File**, whose description is the one
   warning ("Not redacted. It may contain secrets or personal data."), and **Copy Checksum**, which
   copies the full SHA-256. No paragraph under the meta line repeats the warning.
 - **Bodies.** Markdown with the shared renderer, without a leading H1 that repeats the title; text
@@ -2575,9 +2841,21 @@ One `State` component with variants; the states are **mutually exclusive** in th
  [+ New Skill]  [Import from Git…]              primary (lg on page) + secondary
 ```
 
-- Top-aligned and **left-aligned with the page grid**, `padding-top: var(--space-12)`, max-width
-  480px. It spans the whole content area when the collection is empty (not squeezed into a list
-  column). In a narrow panel it is left-aligned at the panel's padding.
+- Top-aligned, `padding-top: var(--space-12)`, at a 480px measure. It spans the whole content area
+  when the collection is empty (not squeezed into a list column).
+- **A state that replaces a whole page or content area is centered in it** (#3869, #3875): pass
+  `pageLevel` to `State`. It fills the area and centers its icon, title, sentence and actions at the
+  480px measure, with its text center-aligned, so the container's own margins and gutter still
+  hold. A danger notice (§12.4) is centered as a block and keeps its own anatomy. Content a page
+  shows under the state (Skills' "How Skills Work" steps, Machines' method rows at the form
+  measure) is a centered block whose rows keep their own alignment. This covers every empty list
+  page (Sessions, Skills, Projects, Machines, Pods, Multi-Agent Runs, Automations, Outbound Events,
+  an empty Archive), a turned-off experiment, the app crash state, a missing session, run, pod or
+  automation, and the shared transcript page. Where the area takes keyboard focus (Sessions), its
+  inline padding keeps the content clear of the focus ring.
+- **Every other state is left-aligned** at its surface's padding: compact states in list columns and
+  detail panes, side panels, dialogs, settings surfaces, and inline no-results rows in a list
+  (including Archive's "No Matching Sessions" under its filters).
 - Title in Title Case, one or two sentences in sentence case, at least one action. The action is not a
   duplicate of the page header's primary if that is visible: the header primary is hidden while the
   empty state shows it.
@@ -2625,20 +2903,29 @@ Transcripts** (`.btn.ghost`), which opens the command palette with the query. Bu
 
 A danger Notice (§13.2) in place of the content: title "Couldn't Load Skills", one sentence in user
 terms, **Retry** as the action, raw detail behind "Show Details" in mono. Render-error boundary uses
-the same notice with Reload and Copy Error Details, top-left in the content area.
+the same notice with Reload and Copy Error Details; a page-level error is centered as a block (§12.1).
 
 - **A crashed view** (`ErrorBoundary`) is titled with the destination's name, "Automations Couldn't
   Be Shown" ("This Session" inside a session), over "Part of this page failed to display. Nothing was
-  changed." Its actions are **Reload Page** (primary) and **Copy Error Details**; Show Details opens a
-  code well with the error message and the first three component frames, which is also what Copy
-  copies. There is no Try Again: re-rendering the same data crashes the same way. The route's page
-  header stays above it, and navigating elsewhere clears it.
+  changed." Its actions are **Reload Page** (primary, with the 14px `RefreshCw` icon, §3.1) and
+  **Copy Error Details**; Show Details opens a code well with the error message and the first three
+  component frames, which is also what Copy copies. There is no Try Again: re-rendering the same data
+  crashes the same way. The route's page header stays above it, in the route's own container
+  (`viewPageWidth`), so the header's hairline does not move: `.page.wide` for Usage and Cost,
+  `.page.full` for Sessions, Projects, Agent Skills, Connections › Machines and Settings, and `.page`
+  elsewhere. Archived Sessions keeps its `.page` list container, matching its normal 960px rows.
+  On a destination route the redrawn header keeps the destination's one-line description from the
+  registry (`viewDescription`), so it is as tall as the working page's and nothing moves on reload;
+  like every description it is hidden on phones (§4.2). Entity pages, the Automations editor,
+  Settings and the Session keep their own headers.
 - **A crashed shell** has no header or rail to sit under: a full-window `State`, "Wollipog Couldn't
   Show This Screen", with **Reload Wollipog**, Copy Error Details and the same details.
-- **A turned-off experiment's route** is not an error: it keeps its page header, and below it an
-  empty-style `State` with a flask icon, "{Name} Are Turned Off", a sentence on why it is hidden and
-  what turning it on adds, **Turn On** (primary, the same switch as Settings › Experimental; the
-  feature mounts in place) and Open Experimental Settings.
+- **A turned-off experiment's route** is not an error: it keeps its page header, with the
+  destination's description on a destination route as for a crashed view, so the feature mounts
+  without the header moving. Below it is an empty-style `State` with a flask icon, "{Name} Are Turned
+  Off", a sentence on why it is hidden and what turning it on adds, **Turn On {Name}** ("Turn On
+  Multi-Agent Runs", "Turn On Pods"; primary, the same switch as Settings › Experimental; the feature
+  mounts in place) and Open Experimental Settings.
 - Below 760px the actions of all three stack at full width and are 44px tall.
 
 ### 12.5 Offline
@@ -2709,7 +2996,9 @@ scroll to trigger it (#313).
   - `--toast-clear` is the height of whatever is docked at the bottom of the view: the tab bar on
     phones, the composer in a session (measured), 0 elsewhere. A toast never covers Send, the tab bar
     or a dialog footer. Phones show the newest toast only.
-  - The "+N More" list opens upward from the stack.
+  - The "+N More" list opens upward from the stack. While it is open only the newest toast stays
+    below it, and the rest are in the list, so a dialog footer that sits high (a short New Session)
+    never leaves the open list without room.
 - Container recipe of a menu (`--bg-elev`, `--border-strong`, `--radius-md`, `--elev-2`). No colored
   left stripe. Tone is carried by a 16px icon in the tone color (Info, CircleCheck, TriangleAlert,
   CircleAlert).
@@ -2755,9 +3044,9 @@ scroll to trigger it (#313).
 | Icon | 16px tone icon at the title's first line. |
 | Title | Optional, `--type-body-strong`, Title Case. |
 | Title row | With a title, trailing controls (the slot's "+N More", then the dismiss button) sit in the title row only, so the body and the actions use the full width. |
-| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details" (`Notice`'s `details`): a `.btn.sm.ghost` toggle at the end of the action row that reads "Hide Details" while open; the details are not in the DOM until it opens. |
+| Body | `--type-body`, 1–2 sentences, sentence case. Everything else behind "Show Details" (`Notice`'s `details`): a `.btn.sm.ghost` toggle at the end of the action row that reads "Hide Details" while open; the details are not in the DOM until it opens. When the toggle is the row's only action, its label lines up with the body's text (#3511). |
 | Actions | `.btn.sm` row under the body, left-aligned; the resolving action first (primary only if it is the page's main next step). An action a person cannot take now keeps a visible reason line in the body ("Build Box is offline.", a Viewer's refusal) that the button references with `aria-describedby`, never only a `title`. |
-| Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. |
+| Compact | One line: icon + sentence + one `.btn.sm` trailing, 40px. For inline field-group and composer notices. When it wraps, titled or not, the icon stays on the first line, level with the title or the sentence's first line, and whatever shares that line (the sentence beside a title, the actions, the dismiss button) lines up on it (#3522). |
 | Placement | Directly where the problem is: above the composer for session state, above the footer for submit errors, at the top of a section for section state. Aligned to that column's edges. |
 | Budget | **One notice slot between the transcript and the composer.** When several session conditions hold (quarantine, recovery, a queued-message error), the highest severity shows and the rest collapse into its trailing "+2 More" menu. Receipts and queued rows are not notices and do not share this slot: receipts are rows of the transcript under their message (§11.2), and queued rows belong to the composer. This is the bottom-edge counterpart of the one-bar rule for the top of the session. A pending request (the request dock below) takes this slot ahead of every notice. |
 
@@ -2864,8 +3153,12 @@ exactly one: the most severe, then the lowest rank.
   a Skills: Not Available row) and the Project setup suggestion (dismissed for the Project on the
   server). A suggestion about a Project rather than one session also shows once above that
   Project's Sessions tab, never inside a list row.
-- Below 760px the action row is one row: the resolving action fills it (the one exception to "buttons
-  never stretch", §3.1) and a disclosure toggle such as Show Details keeps its own width.
+- Below 760px, while the slot is at most 480px wide (a phone held upright), the action row is one
+  row: the resolving action fills it (the one exception to "buttons never stretch", §3.1) and a
+  disclosure toggle such as Show Details keeps its own width. The slot's own width decides, not the
+  viewport's (#2157): `.session-notice-slot` and `.campaign-notices` are the `notice-slot` inline-size
+  container below 760px, so on a phone on its side or a small tablet the actions keep their own
+  width, left-aligned, as on desktop. Their height is the touch height either way (§2.8).
 
 Replaces `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`,
 `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`,
@@ -2897,13 +3190,15 @@ so every host of the terminal shows the same ones.
 `PanelNoticeSlot`, directly under the side panel's header (§4.9), with its menu named "Panel Notices"
 and its ranks in `PANEL_NOTICE_RANK`: runner offline 1, load error 2, attention 3, inventory error 4,
 earlier activity not loaded 5, ambiguous identity 6, workflow details unavailable 7, older history
-truncated 8, background work lost 9, stale attention link 10. Unlike the other slots it orders by
+truncated 8, background work lost 9, stale attention link 10, Background Work's recovery deliveries
+11 and acknowledged blocked results 12 (#2871; each a band, which the panel orders itself as §4.10
+says, giving the i-th of n entries the rank base + i / n). Unlike the other slots it orders by
 this table alone, with severity only breaking a tie (#2861): an offline machine explains the errors
 under it, so Machine Offline leads Couldn't Load Recorded Workers, Background Work's Lost and Side
 Chat's Couldn't Refresh, and a worker's request leads an inventory error. Each tool adds its own
 entries in its own unit; Review, Files and Browser keep the notices at the top of their scrollers.
 Below 760px its notices' buttons, "+N More" included, are 44px, and the resolving action fills the
-action row.
+action row while the slot is at most 480px wide, as in the session notice slot.
 
 - **Machine sign-in** (`MachineSignInNotice`): "Sign In to {Provider} on {Machine}", one sentence for
   the sign-in's state, the device code inline after it in a `.code-well` with its copy button, then
@@ -3132,8 +3427,8 @@ follows these rules so it never crowds out the conversation it asks about:
   `Ban` on the card, and Choose Another Account… leaves that request's footer. With no other account
   the dialog is the compact No Other Accounts state with Open Connections. While a sign-in
   runs, Cancel Sign-In is the only button, the sentence carries the sign-in's status, and the runner's
-  sign-in renders in the body without repeating the account, so Open Provider Sign-In and the code
-  field are in view. An agent
+  sign-in renders in the body without repeating the account, so Open Provider Sign-In, the device
+  code in a code well (§11.7) with its icon Copy Device Code (#3521), and the code field are in view. An agent
   with several sign-in methods lists them as ChoiceRows with their descriptions visible and one
   Start Sign-In. A machine-owner-only Start Sign-In is disabled with its reason as the card's
   foot-note. No control in the card has a `title`: every name is visible or is its accessible name.
@@ -3186,7 +3481,20 @@ follows these rules so it never crowds out the conversation it asks about:
 
 A Notice variant spanning the top of the main area (under the rail's top, above the page header):
 36px, no radius, no side borders, bottom hairline in the tone. For offline and pairing states only.
-It pushes content down with a `--dur-base` height transition. A held desktop update is a decision,
+It pushes content down with a `--dur-base` height transition.
+
+- One sentence and its actions; never a field. The sentence wraps in its own column and the actions
+  stay at the top right at every width (#2465). At 760px and below a banner with two actions moves
+  them to one row under the sentence, each 44px tall, with the tone icon on the first line (#3005).
+- Unpaired: "This device isn't paired with Wollipog yet." and **Pair This Device…**, which opens the
+  Pair This Device dialog: Pairing Link or Code (a password field), Where Do I Find the Link? (the
+  `wollipog pair url` code well and `--print-pair-url`), a field error for a paste that isn't a link,
+  and a danger Notice above the footer, "Wollipog Didn't Accept This Link", for one the server
+  refuses. The desktop app that couldn't read its saved pairing offers **Retry Pairing** and
+  **Paste a Link…**, with the desktop's own words behind Show Details.
+- A remote instance: "Can't reach {name}. Last connected 5h ago." with **Retry** and **Open
+  Instances**, or "{name} needs a new pairing before it can reconnect." with **Re-Pair…** (the
+  Re-Pair Instance dialog, in place) and **Open Instances**. The address is the Instances row's. A held desktop update is a decision,
 so it is the Restart to Install Update confirmation (§13.1), never a banner or a notice.
 
 ---
@@ -3205,7 +3513,11 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - The first column is the row's name and is the open target (the whole row is clickable).
 - Actions column: last, right-aligned, one inline `.btn.sm.ghost` plus `.icon-btn.sm` ⋯. No
   wrapping, no 2–4 text buttons.
-- Totals row: `--type-body-strong`, top hairline in `--border-strong`.
+- Totals row: `--type-body-strong`, top hairline in `--border-strong`, in the table's `<tfoot>`.
+- **Compact (`.table.compact`)**: a table inside a popover (§9.2), such as Session Cost's table by
+  model (#3017). 32px rows, 8px between cells and none at the table's edges, no row hover (its rows
+  open nothing), and at most three short columns, so it keeps its columns at every width and never
+  folds into the two-line rows below.
 - Sortable headers are buttons; on touch the header row is 44px tall.
 - Wide tables sit in a scroll wrapper with a right edge fade; the name column is sticky.
 - **Phone (and containers under 560px): tables become two-line rows**: name + status on line 1, the
@@ -3213,15 +3525,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 - **Compact tier (761–1099px): a table whose declared widths exceed the tier folds its secondary
   columns into the name cell** as a meta line under the name, and hides those columns, so it never
   scrolls sideways and the name keeps about 150px at 761px. The meta line wraps between values
-  rather than truncating, so every value stays on screen. Archived Sessions does this for Project,
-  Location and Agent, and narrows State to 188px, room for its longest badge, so its badges stack
-  (§15.2).
-- **The fold ends where the full layout fits, not at the tier's edge.** A folding table answers to
-  the main column (`@container app`, §2.10), not the viewport, and keeps its fold until the column
-  holds its declared widths plus 200px for the name, its wrapper's borders and the page gutters.
-  Archived Sessions' six declared columns need 970px, so it folds below a 1220px column: up to a
-  1283px window with the icon rail and a 1427px window with the labelled rail (#2114).
-  `tokens.test.ts` derives that edge from the declared widths.
+  rather than truncating, so every value stays on screen.
+- Archived Sessions uses a 960px list of two-line, 56px rows (§5.2), or 76px with a labelled,
+  highlighted search snippet. Each row opens on click or Enter; its title is also a link.
+  Project and Location form one fact, with Location omitted when equal to Project. One exception
+  badge follows the title, moving before the meta on phones. Time and the fixed action slot stay
+  trailing on desktop; phones keep only More Actions. It never folds table columns.
 
 ---
 
@@ -3232,8 +3541,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Element | Phone behavior |
 | --- | --- |
 | Rail | Bottom tab bar, 56px + safe area, **labeled** (24px icon + 11px label). Default slots: Sessions, Projects, Connections, Automations, More. Experimental destinations never take a primary slot by default. Active: accent icon and label plus a tinted pill behind the icon (not a bar below it). `phoneBarViews()` in `rail-preferences.ts` is the one source for the slots: an optional per-instance `phoneBar` list replaces the default, and a hidden or turned-off slot is filled in place by the next visible non-experimental destination in rail order. From 600px the tabs keep a 480px centered measure. |
-| More | A real bottom sheet with a scrim and a "More" title; rows 48px with icons; Settings last after a separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
-| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯). Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
+| More | A real bottom sheet with a scrim and a 48px "More" title row over a 1px `--border` hairline; rows 48px with icons; the title and the rows' content start at the 16px gutter, as in every menu sheet; Settings last after a full-width separator. It holds every other visible destination in rail order. A tap opens it focused on the sheet itself, with no ring; closing it hands focus back to More only from the keyboard (Escape, or Enter on a row). At 420px tall and below the rows form two columns, so every row fits a 568×320 screen. While a destination in the sheet needs the user, the More tab carries one mark for them all (§11.4). |
+| App bar | 48px: ‹ Back (on detail routes) or nothing, title 16/600 (truncates), trailing icons (search, primary `+`, ⋯), in that order to the eye and to Tab. The `+` is an `.icon-btn` like Search, never a filled primary: transparent at rest, `--text-dim`, named and titled by the primary's label. Icons are 36px visual with 44px hit areas, as in the settled phone session header. No page description. |
 | Page header actions | Primary as `+` icon (accessible name "New Skill"), all others in ⋯ sheet. |
 | Master-detail | Two routes (§6.2). |
 | Dialogs, menus, popovers | Bottom sheets (§7.5, §9.2), each with the 36px grabber. |
@@ -3241,7 +3550,7 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
 | Tables | Rows (§14). |
 | Toolbars and filters | One row: search field + a "Filters" button that opens a sheet with the filters and a result count. Native selects that size to their longest option are removed. |
 | Tabs | Scroll with fade and active-into-view; more than 4 become a view picker. |
-| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name; and the 44px `+` New Session. In Board mode, Filters follows Search (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
+| Sessions app bar | One 48px bar (`SessionsAppBar`, #2211) replaces the page header, its action row and the group tabs, so the first row starts 56px down. The title is the group picker: the group's name, a caret and its attention count badges (none in Snoozed), named with the attention in words; it opens the Session Groups sheet of §10.1's All Groups rows. Then Search, which swaps the bar for the full-width search field (focused) and Cancel, which clears the query and restores the bar; it filters the list as §8.4's field does and never opens the palette. Then the quiet `+` New Session, the app bar's `.icon-btn` named and titled "New Session"; and ⋯, a sheet with View (List, Board) and Show (Active Sessions, Snoozed Sessions with its count) as radio items, New Project…, and the current project's actions under a section label with its name. In Board mode, Filters follows Search, before the `+` (see Board below). While Snoozed is on, a strip under the bar says "Showing snoozed sessions." with Show Active. A confirmation opened from a sheet replaces it with Back (§7.5). |
 | Board | One column at a time (#2216). Under the app bar, the column tabs (§10.1) in the order Needs Input, Running, Review, Done, Queued, each with its plain count, Needs Input's a warning count badge while above zero; each tab is named "Running, 13" and is at least 44px wide. The row scrolls with the edge fade when the tabs do not fit. Below it, the chosen column's cards run the width inside the gutter and scroll on their own; an empty column says "No sessions are in Done." The Board opens on the first column with a card in that order and keeps its column, the opening one or the one chosen, while it stays open: a live update never moves it. Each tab is also a drop target for a card dragged with a mouse. The app bar's **Filters** (`FilterIcon`, `.icon-btn`) follows Search: named "Filters" or "Filters, 1 Active", `aria-pressed` and showing the plain number applied while any filter is set. It opens the Filters sheet: the result count ("Showing 10 of 29", which also describes the sheet), the Machine group and the Agent group of §10.1's rows (44px on touch), then Clear Filters after a separator while any is set. A choice applies at once and the sheet stays open, so the count answers it; the scrim, Escape or Tab closes it. While a filter is set, a strip under the Snoozed strip says what is filtered and how many remain ("Machine: Studio Mac. Agent: Codex. Showing 3 of 29.", a long name ending in an ellipsis, the count never) with **Clear Filters**, which hands focus to Filters. |
 | Toasts | Bottom center above the tab bar or composer, inside the safe area; one visible (§13.1). |
 | Request dock | Mobile session questions start as a 44px strip. Expand Request opens full reading mode directly; Collapse Question returns to the strip (#3308). Other compact cards cap at 50% of the chat column (60% in a landscape column under 480px, #2828), 40% while the software keyboard is open; its body scrolls, and it shrinks to the 44px strip while reading back (§13.2). An explicitly expanded question or workflow decision takes the whole column instead, keyboard or not, with Collapse Question or Collapse Decision in its head line (#2786, #2874). A press on a docked card's button, row or label while a text field has focus (the card's own, or the composer) keeps that field focused until the click lands (`holdFieldFocus`, #2205, #2675), so the cap never changes between press and click and the tap lands where it was aimed. |
@@ -3260,13 +3569,8 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   height. It does this by redefining `--control-h-lg` on the rail. Touch keeps 48px items (§15.3).
 - Master-detail list pane 280px. Sessions is always stacked here (§6.3); its Preview Right option
   applies at 1100px and wider.
-- Page content follows the tier too (#2106). The Archived Sessions table folds Project, Location and
-  Agent into its Session cell (§14), and keeps that fold above the tier until the main column fits
-  the full layout. The Usage API card's description takes the line and its three segmented
-  controls follow as one group: beside the description while it keeps 220px (about 30 characters),
-  otherwise together on their own line below it. The Pod Orchestration Controls keep their five
-  fields on one row; each column is at least as wide as its label on one line, and Arbitration as
-  wide as its longest mode.
+- Page content follows the tier too (#2106). Archived Sessions keeps its two-line rows (§14) at every tier. Usage and Cost's API Usage toolbar keeps its desktop row
+  (Metric, the Range menu button, Group By and About These Numbers) on one line (#3010).
 - Session and detail bars: the status badge collapses to a dot + label only if it fits, else a dot
   with the label in its tooltip, keeping the session bar's `+N`; the project crumb is dropped;
   text buttons become icon buttons with tooltips. `DetailBar` (Run, Pod, Project) does this now. Its
@@ -3290,6 +3594,12 @@ so it is the Restart to Install Update confirmation (§13.1), never a banner or 
   Restore Panel returns to the overlay (§4.9). Phones keep their full-screen panel.
 
 ### 15.3 Touch on Any Width
+
+User messages containing text keep an always-visible **Copy Message** icon button on touch
+screens. It sits in a row immediately below the bubble, with space for the shared 44px touch
+targets. A message without a settled turn menu also keeps **More Message Actions** in that row.
+The settled turn's **More Turn Actions** menu remains available; copying a prompt never requires
+scrolling past the response or opening that menu. Fine pointers retain the hover cluster.
 
 `@media (pointer: coarse)` applies the control and row sizes in §2.8 regardless of width (tablets at
 834px get 44px targets). Hover styles are wrapped in `@media (hover: hover)`.
@@ -3431,7 +3741,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | literal radii 2/3/5/7/9px | nearest tier | 2–5→`--radius-xs`, 7→`--radius-sm`, 9→`--radius-md`. |
 | `--shadow` | `--elev-2` (popovers) / `--elev-3` (dialogs) | Removed. |
 | `--primary-to`, `--primary-hover-to`, `--primary-active-to`, `--primary-*-border`, `--primary-hover-inset` | unused | Flat primary; keep in schemes until regeneration, then drop. |
-| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--agent-row-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
+| `--row-pad-*`, `--inbox-row-pad-*`, `--project-row-pad-*`, `--card-pad-*`, `--finding-row-pad-*`, `--ext-row-pad-*`, `--artifact-row-pad-*`, `--run-card-pad-*`, `--runner-card-pad-*`, `--ws-row-pad-*`, `--files-entry-pad-*`, `--usage-cell-pad-*` | `--row-pad-x` + `--row-h*` | Density changes row height, not per-family padding. |
 | `--bp-tablet` 900 / `--bp-desktop` 1240 | `--bp-compact` 1100 / `--bp-wide` 1440 | Documentation tokens; media queries use 760 / 1100 / 1440. |
 | where `--radius-sm/-md` live | edit the values in the `:root, :root[data-theme="dark"]` block | They are declared only there, and `:root` also matches in light, so one edit covers both themes. Do not redeclare them in the shared token block (its comment explains the specificity trap). |
 | `--mobile-session-action-gap` 7px | `--space-2` | |
@@ -3462,7 +3772,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `.quarantine-banner`, `.skills-unavailable-notice`, `.worktree-setup-notice`, `.campaign-continuation-notice`, `.campaign-held-children`, `.box-hint`, `.composer-error`, `.composer-attachment-notice`, `.queued-error`, `.settings-inline-error`, `.settings-pending-reason`, `.skills-git-held`, `.error-boundary` | `.notice` (`.t-*`, `.compact`) |
 | `.toast` + 4px left stripe, `.toast-region` under the bar | `.toast` + tone icon; `.toast-region` bottom right (bottom center on phones) above `--toast-clear` (§13.1) |
 | offline banner, pairing banner | `.notice.page-banner` |
-| `.empty` (bordered card), `.empty-title` 15px, `.inbox-zero-mark ✓`, `.sidechat-empty`, `.background-work-empty`, `.subagents-empty`, `.rp-launcher` centring, "Select a …" detail placeholders | `.state` (`.state-icon`, `.state-title`, `.state-body`, `.actions`), top-left aligned; `.overview` default detail |
+| `.empty` (bordered card), `.empty-title` 15px, `.inbox-zero-mark ✓`, `.sidechat-empty`, `.background-work-empty`, `.subagents-empty`, `.rp-launcher` centring, "Select a …" detail placeholders | `.state` (`.state-icon`, `.state-title`, `.state-body`, `.actions`), top-aligned, centered when page-level and left-aligned otherwise (§12.1); `.overview` default detail |
 | `.skeleton` (flat bars, 16px inset) | `.skeleton-row` shaped like the real row |
 | `.skills-section` (all tiers), `.project-location-card` in cards, `.runner-card` stacks | `.section` / `.surface` / `.notice` tiers |
 | `.skills-item`, `.project-manager-item`, `.run-card` (button) | `.row` (`.row-2` for two-line) or `article.card` |
@@ -3473,7 +3783,7 @@ Never use CSS `text-transform` to achieve either. Enum values pass through `stat
 | `ChoiceCards` (`.ui-choice-cards`, `.ui-choice-card*`, trailing `.ui-choice-mark`), `.workflow-preset`, `.agent-pick`, `.pod-member-pick`, `.access-choice`, the People member checklist | `ChoiceRows` (`.choice-row`, leading `.radio-mark` / `.checkbox-mark`) or `ChoiceList` (`.choice-list`) (#1952) |
 | `.field` / `.access-form` (two systems) | `.field` (label, control, helper/error) |
 | `.ui-row`, `.ui-row-choice`, `.orchestrator-number-row`, `.orchestrator-policy-control`, `.rail-order-row`, `.agent-defaults-editor` grids | `.setting-row` (the row components moved with #2947 and Settings' hand-built rows with #3019; `.agent-defaults-editor` moves with #3024, and New Session's `.orchestrator-policy-control` with its own unit). `.rail-order-row` became the Navigation editor's fixed-column `.rail-nav-row` (#3021, §8.2) |
-| `.archive-table`, `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
+| `.usage-table`, `.skills-table`, assignment matrix | `.table` (fixed layout) with phone row fallback |
 | `.shortcut-row kbd`, `.shortcut-hint kbd` (9px) | `kbd` (one recipe) |
 | `code` global chip | `:not(pre) > code` chip only |
 | `a` (unstyled) | `a, .link { color: var(--accent) }`; `accent-color: var(--accent)` on `:root` |
@@ -3616,12 +3926,16 @@ local name so the two do not collide.
 - **Settings:** `.setting-row` details, `.set-sublabel`, `.update-block`, `.modal-body.allow-overflow`
   (unneeded once #1800 portals menus out of dialogs).
 
-**Remaining `<dl>` recipes.** Ten other label and value lists still carry their own rules and
-move onto `.facts` with their area: `.context-popover-facts`, `.session-usage-facts`,
-`.auth-recovery-identity`, `.shortcut-list`, `.instance-meta`, `.governance-decision-facts`,
-`.runner-meta`, `.connection-details-list`, `.approval-selector-context` and `.automation-facts`.
-(`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177, and
-`.campaign-held-child-hold` with Held Children, #2157.)
+**Remaining `<dl>` recipes.** Four other label and value lists still carry their own rules and
+move onto `.facts` with their area: `.auth-recovery-identity`, `.shortcut-list`,
+`.governance-decision-facts` and `.approval-selector-context`.
+(`.context-popover-facts` and `.session-usage-facts` moved onto `.facts` with the Context Window
+and Session Cost popovers, #3017,
+`.workspace-reference-details` moved onto `.facts` with the File Reference dialog, #2177,
+`.campaign-held-child-hold` with Held Children, #2157, `.runner-meta` and
+`.connection-details-list` with the machine detail's Connection Details, #2988, and
+`.automation-facts` with the automation page's Rules and Limits, #2968, and `.instance-meta` went
+with the Instances cards, #3002.)
 
 ---
 

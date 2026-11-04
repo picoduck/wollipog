@@ -1,7 +1,34 @@
-import type { ExecutionTargetRef, SessionLaunchSpec } from "@wollipog/protocol";
+import type { ExecutionTargetRef, HostExecutionTargetRefusalReason, SessionLaunchSpec } from "@wollipog/protocol";
 import type { RunnerExecutionIsolation } from "./config.js";
 import type { ContainerTargetRegistry } from "./container-target.js";
 import type { CloudTargetRegistry } from "./cloud-target.js";
+
+export function hostExecutionTargetRefusal(
+  target: ExecutionTargetRef | undefined,
+  runnerId: string,
+  useWorktree: boolean,
+  isolation: RunnerExecutionIsolation,
+): { reason: HostExecutionTargetRefusalReason; error: string } | null {
+  if (!target) return null; // rolling compatibility with pre-v60 control planes
+  const refuse = (reason: HostExecutionTargetRefusalReason, error: string) => ({ reason, error });
+  const strategy = useWorktree ? "worktree" : "in_place";
+  const expectedId = `runner:${encodeURIComponent(runnerId)}:host:${strategy}`;
+  if (target.runnerId !== runnerId) return refuse("runner_mismatch", "execution target does not belong to this runner");
+  // A container/cloud identity is not a foreign host identity. Identify its adapter first.
+  if (target.adapter !== "host" || (target.kind !== "local" && target.kind !== "ssh")) {
+    return refuse("unsupported_adapter", "execution target requires an unsupported adapter");
+  }
+  if (target.id !== expectedId) return refuse("runner_mismatch", "execution target does not belong to this runner");
+  if (target.workspaceStrategy !== strategy) return refuse("workspace_mismatch", "execution target workspace strategy conflicts with the launch");
+  if (target.boundaries.filesystem !== (useWorktree ? "worktree" : "host")) {
+    return refuse("filesystem_mismatch", "execution target filesystem boundary conflicts with the launch");
+  }
+  if (target.boundaries.network !== isolation.network) return refuse("stale_network_policy", "execution target network boundary is stale");
+  if (target.boundaries.secrets !== "runner_local" || target.boundaries.billing !== "agent_account") {
+    return refuse("unsupported_host_boundaries", "execution target secret or billing boundary is unsupported for a host launch");
+  }
+  return null;
+}
 
 export function validateHostExecutionTarget(
   target: ExecutionTargetRef | undefined,
@@ -9,22 +36,7 @@ export function validateHostExecutionTarget(
   useWorktree: boolean,
   isolation: RunnerExecutionIsolation,
 ): string | null {
-  if (!target) return null; // rolling compatibility with pre-v60 control planes
-  const strategy = useWorktree ? "worktree" : "in_place";
-  const expectedId = `runner:${encodeURIComponent(runnerId)}:host:${strategy}`;
-  if (target.runnerId !== runnerId || target.id !== expectedId) return "execution target does not belong to this runner";
-  if (target.adapter !== "host" || (target.kind !== "local" && target.kind !== "ssh")) {
-    return "execution target requires an unsupported adapter";
-  }
-  if (target.workspaceStrategy !== strategy) return "execution target workspace strategy conflicts with the launch";
-  if (target.boundaries.filesystem !== (useWorktree ? "worktree" : "host")) {
-    return "execution target filesystem boundary conflicts with the launch";
-  }
-  if (target.boundaries.network !== isolation.network) return "execution target network boundary is stale";
-  if (target.boundaries.secrets !== "runner_local" || target.boundaries.billing !== "agent_account") {
-    return "execution target secret or billing boundary is unsupported for a host launch";
-  }
-  return null;
+  return hostExecutionTargetRefusal(target, runnerId, useWorktree, isolation)?.error ?? null;
 }
 
 export function executionTargetLaunchError(

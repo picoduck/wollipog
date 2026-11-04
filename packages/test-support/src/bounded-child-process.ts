@@ -1,9 +1,11 @@
-import {
+import childProcess, {
   execFileSync as nodeExecFileSync,
   spawnSync as nodeSpawnSync,
   type ExecFileSyncOptions,
   type SpawnSyncOptions,
+  type SpawnSyncReturns,
 } from "node:child_process";
+import { syncBuiltinESMExports } from "node:module";
 
 /**
  * Drop-in replacements for the synchronous `node:child_process` helpers that apply a default
@@ -82,6 +84,37 @@ function splitInvocation<O>(
   return Array.isArray(args)
     ? { args, options }
     : { args: [], options: (args as O | undefined) ?? options };
+}
+
+/**
+ * Replace selected synchronous results while testing code that imports the native builtin.
+ * Return undefined to forward: every real call still receives this module's timeout/kill defaults.
+ * The callback receives normalized arguments and bounded options, never the raw process API.
+ * Use only in isolated tests, and restore in finally (nested interceptors must restore in LIFO order).
+ */
+export function interceptSpawnSyncForTest(
+  intercept: (
+    file: string,
+    args: readonly string[],
+    options: SpawnSyncOptions,
+  ) => SpawnSyncReturns<string | Buffer> | undefined,
+): () => void {
+  const original = childProcess.spawnSync;
+  childProcess.spawnSync = ((
+    file: string,
+    args?: readonly string[] | SpawnSyncOptions,
+    options?: SpawnSyncOptions,
+  ) => {
+    const call = splitInvocation<SpawnSyncOptions>(args, options);
+    const bounded = withDefaultTimeout(call.options);
+    const result = intercept(file, call.args, bounded);
+    return result === undefined ? original(file, call.args, bounded) : result;
+  }) as typeof nodeSpawnSync;
+  syncBuiltinESMExports();
+  return () => {
+    childProcess.spawnSync = original;
+    syncBuiltinESMExports();
+  };
 }
 
 export const execFileSync = ((

@@ -1198,6 +1198,50 @@ test("a disabled segmented row says who took it away", async () => {
   }
 });
 
+test("an unavailable option keeps its place, and its reason replaces the row's description (#2954)", async () => {
+  // New Session's Role: Orchestrator can be refused while Normal is chosen. The reason belongs where
+  // the row's sentence is, not in a tooltip, and arrowing onto the option says the same thing.
+  const { container, cleanup } = await render(
+    <SegmentedRow
+      title="Role"
+      description="An Orchestrator delegates work to child sessions."
+      value="normal"
+      block
+      describedBy="role-error"
+      invalid
+      error={<p id="role-error">Choose an available Role.</p>}
+      options={[
+        { value: "normal", label: "Normal" },
+        { value: "orchestrator", label: "Orchestrator", disabled: true, disabledReason: "Claude Code doesn't offer the Orchestrator role." },
+      ]}
+      onChange={() => undefined}
+    />,
+  );
+  try {
+    const group = container.querySelector<HTMLElement>('[role="radiogroup"]')!;
+    assert.ok(group.matches(".seg.block"), "block fills the control column with equal options");
+    assert.equal(group.getAttribute("aria-invalid"), "true");
+    assert.match(group.getAttribute("aria-describedby") ?? "", /role-error/);
+    const [normal, orchestrator] = [...group.querySelectorAll<HTMLButtonElement>('[role="radio"]')];
+    assert.equal(orchestrator!.getAttribute("aria-disabled"), "true");
+    assert.equal(normal!.getAttribute("aria-disabled"), null, "only that option is refused");
+    assert.equal(container.querySelector(".setting-row-desc")?.textContent, "Claude Code doesn't offer the Orchestrator role.");
+    assert.equal(container.querySelector(".setting-row-desc")?.getAttribute("aria-hidden"), "true",
+      "the option carries the sentence, so the row does not say it twice");
+    const described = domWindow.document.getElementById(orchestrator!.getAttribute("aria-describedby")!);
+    assert.equal(described?.textContent, "Claude Code doesn't offer the Orchestrator role.");
+    assert.equal(container.querySelector(".setting-row-control #role-error")?.textContent, "Choose an available Role.",
+      "a form's error sits under the pills");
+    normal!.focus();
+    await act(async () => {
+      normal!.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "ArrowRight", bubbles: true }) as never);
+    });
+    assert.ok(domWindow.document.activeElement === (orchestrator as never), "the refused option is in the arrow order");
+  } finally {
+    await cleanup();
+  }
+});
+
 test("the picker's trigger names the setting AND its current value", async () => {
   // `aria-label` naming only the setting was the defect the primitive already fixed: the control
   // read as "Colour Scheme" whether it said Dracula or nothing at all. A row whose closed state
@@ -1803,6 +1847,99 @@ test("an invalid number is aria-invalid with a field error under the field, whic
     assert.deepEqual(describedBy(input), ["Enter a whole number from 0 to 64.", "Choose 0 to pause child admission."]);
   } finally {
     await cleanup();
+  }
+});
+
+test("a number row whose description is its helper shows the error in the description's place, never beside it", async () => {
+  const { container, cleanup } = await render(
+    <NumberRow
+      title="Cost Limit per Child"
+      description="Leave both empty for no limits."
+      unit="USD"
+      placeholder="No limit"
+      textEntry
+      value="-2"
+      onChange={() => undefined}
+      error="Enter an amount above 0."
+      errorPlacement="description"
+    />,
+  );
+  try {
+    const input = container.querySelector<HTMLInputElement>(".setting-row-number input")!;
+    assert.equal(input.getAttribute("aria-invalid"), "true");
+    assert.equal(input.placeholder, "No limit");
+    assertNoDomNode(container.querySelector(".setting-row-control .field-error"), "nothing under the field");
+    const slot = container.querySelector(".setting-row-text .setting-row-desc-slot.is-failed")!;
+    assert.ok(slot, "the description's slot holds the error");
+    assert.equal(slot.querySelector(".field-error")?.textContent, "Enter an amount above 0.");
+    const description = slot.querySelector(":scope > .setting-row-desc")!;
+    assert.equal(description.getAttribute("aria-hidden"), "true", "the helper stays underneath, hidden, so the row keeps its height");
+    assert.deepEqual(describedBy(input), ["Enter an amount above 0."], "the error alone describes the field");
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a read-only number row keeps its value in the tab order with the read-only treatment", async () => {
+  const { container, cleanup } = await render(
+    <NumberRow title="Tool Calls per Child" value="30" onChange={() => undefined} readOnly />,
+  );
+  try {
+    const input = container.querySelector<HTMLInputElement>(".setting-row-number input")!;
+    assert.equal(input.readOnly, true);
+    assert.equal(input.disabled, false);
+    assert.ok(input.classList.contains("is-read-only"));
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a setting row's error takes the description's place, and the caller's field points at it", async () => {
+  const { container, cleanup } = await render(
+    <SettingRow
+      title="Name"
+      description="Renaming doesn't rename its folders or locations."
+      error="Enter a name for the project."
+      errorId="name-error"
+      control={<span className="field"><input aria-invalid="true" aria-describedby="name-error" /></span>}
+    />,
+  );
+  try {
+    const error = container.querySelector(".setting-row-desc-slot.is-failed .field-error")!;
+    assert.equal(error.id, "name-error");
+    assert.equal(error.textContent, "Enter a name for the project.");
+    assert.equal(container.querySelector(".setting-row-desc-slot > .setting-row-desc")?.getAttribute("aria-hidden"), "true");
+    assert.deepEqual(describedBy(container.querySelector("input")!), ["Enter a name for the project."]);
+  } finally {
+    await cleanup();
+  }
+});
+
+test("a disabled switch row says why under its description, and the switch is described by both", async () => {
+  const { container, cleanup } = await render(
+    <SwitchRow
+      title="Show as a Sessions Tab"
+      description="Adds a tab for this project above the Sessions list."
+      checked
+      disabled
+      disabledReason="You can't change this project."
+    />,
+  );
+  try {
+    const control = container.querySelector<HTMLButtonElement>('[role="switch"]')!;
+    assert.equal(control.disabled, true);
+    assert.equal(container.querySelector(".setting-row-reason")?.textContent, "You can't change this project.");
+    assert.deepEqual(describedBy(control), ["Adds a tab for this project above the Sessions list.", "You can't change this project."]);
+  } finally {
+    await cleanup();
+  }
+  const enabled = await render(
+    <SwitchRow title="Show as a Sessions Tab" checked disabledReason="You can't change this project." />,
+  );
+  try {
+    assertNoDomNode(enabled.container.querySelector(".setting-row-reason"), "an enabled switch has no reason to give");
+  } finally {
+    await enabled.cleanup();
   }
 });
 

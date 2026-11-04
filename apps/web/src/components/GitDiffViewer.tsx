@@ -26,7 +26,7 @@ import { diffLineLabel, diffLineRef, type DiffLineRef } from "../diff-line-selec
 import { FINDING_SEVERITY } from "../review-finding-copy.js";
 import { Spinner } from "./common.js";
 import { DiffFileActions, type DiffFileAction } from "./DiffFileActions.js";
-import { CheckIcon, ChevronRightIcon, PlusIcon } from "./Icons.js";
+import { CheckIcon, ChevronRightIcon, FindingIcon, PlusIcon } from "./Icons.js";
 import { DiffInlineFinding } from "./DiffInlineFinding.js";
 import { FieldError } from "./FieldError.js";
 import { useAccessibleMenu } from "./interactions.js";
@@ -740,6 +740,14 @@ function DiffFileSection({
 }
 
 /**
+ * The finding editor's caption, which names the line it is written against (#2851): "Finding on
+ * line 26", or "Finding on lines 26–31" for a range.
+ */
+export function findingEditorCaption(line: number, endLine: number = line): string {
+  return endLine > line ? `Finding on lines ${line}–${endLine}` : `Finding on line ${line}`;
+}
+
+/**
  * The inline finding editor for one anchor.
  *
  * Its own component, holding the fields in local state and mirroring every change into the viewer's
@@ -817,6 +825,7 @@ function DiffCommentEditor({
   const ids = useId().replace(/:/g, "");
   const errorId = `${ids}-error`;
   const helperId = `${ids}-required`;
+  const captionId = `${ids}-caption`;
   const growRef = useAutoGrowTextarea(draft.body);
   const setBody = useCallback((field: HTMLTextAreaElement | null) => {
     bodyRef.current = field;
@@ -885,13 +894,17 @@ function DiffCommentEditor({
         </Notice>
       )}
       <div className="field">
+        <p className="dedit-caption" id={captionId}>
+          <FindingIcon size={14} />
+          <span>{findingEditorCaption(anchor.line)}</span>
+        </p>
         <textarea
           ref={setBody}
           value={draft.body}
           onChange={(event) => update({ body: event.target.value })}
           rows={3}
           maxLength={4000}
-          aria-label="Finding"
+          aria-labelledby={captionId}
           aria-invalid={empty || undefined}
           aria-describedby={empty ? errorId : undefined}
           placeholder="Describe the issue and the fix you expect"

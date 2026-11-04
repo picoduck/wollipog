@@ -1,1 +1,0 @@
-|.pod-member-setting select|padding|4px

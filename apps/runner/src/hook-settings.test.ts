@@ -31,6 +31,7 @@ import {
   POLICY_HOOK_ENV,
   readHookCircuitState,
   refreshClaudeGuardProtections,
+  requiresClaudeManagerHook,
   resetClaudeGuardState,
   removeClaudeHookFiles,
   runnerSettingsArgument,
@@ -523,12 +524,13 @@ test("default/auto and old control planes preserve provider-native approval tran
       "v65 cannot claim the Phase 4 human-ask transport",
     );
     const oldControlPlane = spec({ sessionId: "old_cp" });
-    provisionClaudeHooks(
+    assert.throws(() => provisionClaudeHooks(
       oldControlPlane,
       { ...config, controlPlaneProtocolVersion: null },
       () => {},
       host(dir),
-    );
+    ), /waiting for control-plane registration/u);
+    provisionClaudeHooks(oldControlPlane, { ...config, controlPlaneProtocolVersion: 64 }, () => {}, host(dir));
     assert.deepEqual(oldControlPlane.args, []);
   });
 });
@@ -870,6 +872,8 @@ test("bwrap refuses manager hooks with a launch reason while keeping the socket-
   assert.equal(existsSync(claudeHookCircuitPath(file)), false);
   assert.equal(prepareClaudeHookArgs(launch.args).guardActive, true);
   assert.equal(prepareClaudeHookArgs(launch.args).hookAskCapable, false);
+  assert.equal(prepareClaudeHookArgs(launch.args).managerActive, false);
+  assert.equal(requiresClaudeManagerHook(launch, true), true, "fixed-rule turns must fail closed even under bwrap");
   assert.deepEqual(launch.capabilities?.elicitation?.acceptEdits, ["none"]);
   assert.equal(notices.length, 1);
   assert.match(notices[0]!, /executionIsolation\.mode to provider/u);

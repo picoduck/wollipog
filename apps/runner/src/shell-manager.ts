@@ -7,9 +7,10 @@
  */
 
 import { StringDecoder } from "node:string_decoder";
+import { ReviewWriterRegistry } from "./review-writers.js";
 import type { AgentContext, ShellKind, ShellOutputChunk, ShellSnapshotMessage } from "@wollipog/protocol";
 import { run } from "./discovery/resolve.js";
-import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, type AgentProcess } from "./spawn.js";
+import { killTree, killTreeAndWait, provenProcessTreeExit, spawnAgent, trackPendingKill, type AgentProcess } from "./spawn.js";
 import { openWindowsConpty, WindowsConptyProcess } from "./windows-conpty.js";
 import { sameWorktreePath } from "./worktree.js";
 
@@ -80,8 +81,9 @@ export interface ShellProcessLaunch {
 
 /** The provider-HOME reference one Agent TUI launch holds (#3238). */
 export interface AgentTuiProviderHome {
-  /** The preparation is about to start a provider process outside any provable boundary (a Codex
-   * probe), so the settlement keeps the reference until shutdown whatever the TUI's own proof. */
+  /** Every preparation probe contributes its complete tree proof before the TUI starts. */
+  onProcess?(proof: Promise<boolean>): void;
+  /** A partial write or uninstrumented process retains the reference whatever the TUI's proof. */
   markUnprovable(): void;
   /** Settle once: `true`/`false` is the TUI's own process-tree proof after it ended, `null` means no
    * TUI process was started. Releases only when everything the launch started is proven gone. */
@@ -183,10 +185,26 @@ export function shellProcessTreeProof(child: AgentProcess | WindowsConptyProcess
 
 export class ShellManager {
   private readonly shells = new Map<string, LiveShell>();
+  /** Agent TUIs have no runner filesystem boundary. Observe them without blocking reviews;
+   * retain observations of uncertain descendants after their terminal tab is forgotten. */
+  private readonly agentTuiWriterTokens = new Map<string, string>();
+  private readonly reviewWriters: ReviewWriterRegistry;
   /** Set by runner shutdown; ended callbacks are not reported after it. */
   private disposed = false;
 
-  constructor(private readonly cb: ShellCallbacks) {}
+  constructor(private readonly cb: ShellCallbacks, directory?: string, registry?: ReviewWriterRegistry) {
+    this.reviewWriters = registry ?? new ReviewWriterRegistry(directory);
+  }
+
+  unprotectedAgentTuiSessions(): string[] {
+    return [...new Set([...this.reviewWriters.sessions("agent_tui"),
+      ...this.reviewWriters.unsandboxedSessions().filter((entry) => entry.kind === "agent_tui").map((entry) => entry.sessionId)])];
+  }
+
+  private retireAgentTuiWriter(shellId: string, proven: boolean): void {
+    const token = this.agentTuiWriterTokens.get(shellId);
+    if (token && this.reviewWriters.retire(token, proven)) this.agentTuiWriterTokens.delete(shellId);
+  }
 
   count(sessionId: string): number {
     let n = 0;
@@ -240,7 +258,12 @@ export class ShellManager {
       : shellLaunchFor(context, cols, rows);
     const { command, args, pty, ttyFile } = selected;
     const launchCwd = meta?.launch?.cwd ?? cwd;
-    const child = process.platform === "win32" && context.kind === "native"
+    if (meta?.kind === "agent_tui") {
+      // No runner filesystem sandbox is applied to this launch. Provider-internal permissions
+      // do not change that boundary. Current and legacy records are diagnostics only.
+      this.agentTuiWriterTokens.set(shellId, this.reviewWriters.observeUnsandboxed(sessionId, "agent_tui"));
+    }
+    const spawn = () => process.platform === "win32" && context.kind === "native"
       ? openWindowsConpty({
           command: meta?.launch?.command ?? command,
           args: meta?.launch?.args ?? args,
@@ -264,6 +287,8 @@ export class ShellManager {
           trackDescendants: meta?.kind === "agent_tui" || meta?.cleanupOwnsDescendants === true,
           descendantMarker: meta?.cleanupDescendantMarker,
         });
+    const group = this.reviewWriters.group(this.agentTuiWriterTokens.get(shellId));
+    const child = group ? group.run(spawn) : spawn();
     const live: LiveShell = {
       sessionId,
       root: cwd,
@@ -328,12 +353,13 @@ export class ShellManager {
     let endReported = false;
     const reportEnded = () => {
       const onEnded = meta?.onEnded;
-      if (!onEnded || endReported || this.disposed) return;
+      if (((!onEnded || this.disposed) && live.kind !== "agent_tui") || endReported) return;
       endReported = true;
       void shellProcessTreeProof(child).then((proven) => {
+        this.retireAgentTuiWriter(shellId, proven);
         if (this.disposed) return;
         try {
-          onEnded(proven);
+          onEnded?.(proven);
         } catch {
           /* the observer owns its own failures; a shell exit must never crash the runner */
         }
@@ -493,7 +519,15 @@ export class ShellManager {
   /** Kill everything (runner shutdown). */
   dispose(): void {
     this.disposed = true;
-    for (const s of this.shells.values()) this.kill(s);
+    for (const [shellId, s] of this.shells) {
+      this.kill(s);
+      // Await the exact TUI proof (including marker unlink) in the bounded shutdown drain.
+      // Close callbacks alone can race process.exit after the kill promise settles.
+      const token = this.agentTuiWriterTokens.get(shellId);
+      if (token) trackPendingKill(shellProcessTreeProof(s.child).then((proven) => {
+        this.retireAgentTuiWriter(shellId, proven);
+      }));
+    }
   }
 
   private kill(shell: LiveShell): void {

@@ -69,7 +69,7 @@ for (const width of [320, 390, 700, 1280]) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null });
     });
     for (const [state, label] of [
-      ["continuation_pending", "Continuation Pending"],
+      ["continuation_pending", "Follow-Up Pending"],
       ["orphaned", "Background Work Lost"],
       ["resumed", null],
       ["running", "Waiting on External Job"],
@@ -98,7 +98,7 @@ for (const width of [320, 390, 700, 1280]) {
     // background work is a row of the Session Status popover, and the live region keeps announcing it.
     for (const [state, label, announced] of [
       ["running", "Waiting on External Job", "Waiting on External Job"],
-      ["continuation_pending", "Continuation Pending", "Continuation Pending"],
+      ["continuation_pending", "Follow-Up Pending", "Follow-Up Pending"],
       ["orphaned", "Background Work Lost", "Lost"],
     ] as const) {
       await page.evaluate((backgroundWorkState) => {
@@ -234,13 +234,15 @@ for (const width of [320, 1280]) {
       await expect(panel).toBeVisible();
       const highlighted = panel.locator(`[data-watchdog-state="${watchdogState}"]`);
       await expect(highlighted).toBeVisible();
-      // #2859: one notice per delivery at the top of its group; its explanation waits behind Show Details.
-      const notice = highlighted.locator(`.notice[data-state="${watchdogState}"]`);
+      // #2859, #2871: one notice per delivery, in the panel's one notice slot rather than its group,
+      // titled with its turn; its explanation waits behind Show Details.
+      const notice = panel.locator(`.panel-notice-slot .notice[data-state="${watchdogState}"]`);
       await expect(notice).toBeVisible();
-      await expect(highlighted.locator(".notice")).toHaveCount(1);
-      await expect(highlighted.locator(".notice-details-body")).toHaveCount(0);
+      await expect(panel.locator(".notice")).toHaveCount(1);
+      await expect(highlighted.locator(".notice")).toHaveCount(0);
+      await expect(panel.locator(".notice-details-body")).toHaveCount(0);
+      await expect(notice.locator(".notice-title")).toHaveText(`${label} in an Earlier Turn`);
       if (watchdogState === "accepted_without_result" || watchdogState === "continuation_blocked") {
-        await expect(notice.locator(".notice-title")).toHaveText(label);
         const toggle = notice.getByRole("button", { name: "Show Details" });
         await toggle.click();
         await expect(notice.getByRole("button", { name: "Hide Details" })).toBeVisible();
@@ -252,13 +254,15 @@ for (const width of [320, 1280]) {
         await notice.getByRole("button", { name: "Hide Details" }).click();
       } else {
         await expect(notice).toHaveClass(/\bcompact\b/u);
-        await expect(notice.getByRole("button")).toHaveCount(0);
+        // Nothing to do but the slot's Dismiss.
+        await expect(notice.getByRole("button")).toHaveCount(1);
+        await expect(notice.getByRole("button", { name: "Dismiss", exact: true })).toBeVisible();
       }
       if (watchdogState === "accepted_without_result") {
         await expect(notice).toContainText("A background job finished, but its result never reached this conversation.");
         const acknowledge = notice.getByRole("button", { name: "Acknowledge", exact: true });
         await expect(acknowledge).toBeVisible();
-        await expect(highlighted.getByRole("button", { name: /Retry|Rerun/i })).toHaveCount(0);
+        await expect(panel.getByRole("button", { name: /Retry|Rerun/i })).toHaveCount(0);
         await acknowledge.click();
         await expect(panel.locator(".background-work-turn-head .status")).toHaveText("Missing Result Acknowledged");
         await expect(panel.locator('.notice[data-state="accepted_without_result"]')).toHaveCount(0);
@@ -338,7 +342,7 @@ for (const width of [320, 1280]) {
     await resultBlocked(page);
     let panel = await openPanel();
     const notice = panel.locator('.notice[data-state="continuation_blocked"]');
-    await expect(notice.locator(".notice-title")).toHaveText("Result Blocked");
+    await expect(notice.locator(".notice-title")).toHaveText("Result Blocked in an Earlier Turn");
     await expect(notice).toContainText(
       "Agent job 04d2e1 finished, but its result is held because another job has no confirmed end.");
     const noticeStop = notice.getByRole("button", { name: "Stop Monitor Job 7be210…" });
@@ -364,14 +368,14 @@ for (const width of [320, 1280]) {
     await closePanel(panel);
 
     // A current runner: the notice and the unfinished job's page both offer Stop behind the confirmation
-    // titled with its name, and its restart reports the result to the new conversation instead (#1779).
+    // titled with its name, and its restart reports the result after relaunch instead (#1779).
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await resultBlocked(page);
     panel = await openPanel("Stop Job…");
     await expect(noticeStop).toBeEnabled();
     await notice.getByRole("button", { name: "Show Details" }).click();
     await expect(notice.locator(".facts")).toContainText("Stopping the session also ends the unfinished job but discards " +
-      "this result. Restarting the session ends every job and reports this result to the new conversation.");
+      "this result. Restarting the session ends every job and reports this result after the restart.");
     await noticeStop.click();
     const noticeConfirmation = page.getByRole("alertdialog").or(page.getByRole("dialog", { name: "Stop Monitor Job 7be210" }));
     await expect(noticeConfirmation).toContainText("Stop Monitor Job 7be210");
@@ -485,7 +489,10 @@ for (const width of [390, 1440]) {
     for (const part of parts) {
       await expect(part).toBeInViewport({ ratio: 1 });
     }
-    await expect(panel.locator(".background-work-turn").first()).toContainText("Result Missing");
+    // #2871: the notice is the panel slot's; its group says Result Missing once, in its badge.
+    await expect(notice.locator(".notice-title")).toHaveText("Result Missing in an Earlier Turn");
+    await expect(panel.locator(".background-work-turn .notice")).toHaveCount(0);
+    await expect(panel.locator(".background-work-turn-head .status").first()).toHaveText("Result Missing");
     expect(await panel.locator(".background-work-turn").first().evaluate((group) =>
       (group.textContent ?? "").split("Result Missing").length - 1)).toBe(1);
     await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/u }).click();
@@ -594,7 +601,7 @@ for (const width of [390, 1440]) {
     const panel = page.locator('#right-panel[data-mode="background"]');
     const notice = panel.locator('.notice[data-state="capacity_retry_exhausted"]');
     await expect(notice).toBeVisible();
-    await expect(notice.locator(".notice-title")).toHaveText("Retry Exhausted");
+    await expect(notice.locator(".notice-title")).toHaveText("Retry Exhausted in an Earlier Turn");
     await expect(notice).toContainText("The return step was not confirmed.");
     await expect(panel).toContainText("Result return stopped");
     await expect(notice.getByRole("button", { name: "Acknowledge", exact: true })).toBeVisible();

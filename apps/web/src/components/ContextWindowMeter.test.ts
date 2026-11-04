@@ -12,7 +12,7 @@ const css = readFileSync(new URL("../styles.css", import.meta.url), "utf8");
  * popover is exactly the regression that once made the trailing cost figure unreadable.
  */
 test("the context popover reports occupancy and capacity, and no session billing", () => {
-  assert.match(meter, /<dt>Used<\/dt>[\s\S]*<dt>Capacity<\/dt>[\s\S]*<dt>Remaining<\/dt>/,
+  assert.match(meter, /<dt>Used<\/dt>[\s\S]*<dt>Remaining<\/dt>[\s\S]*<dt>Window<\/dt>/,
     "the popover states the current occupancy figures it is responsible for");
   assert.match(meter, /compactionNote\(session\.driver\)/,
     "compaction behaviour stays with the context window");
@@ -36,7 +36,7 @@ test("the meter consumes the one capacity resolution SessionDetail makes", () =>
 });
 
 test("the two controls stay visually distinct and their popovers stay separate", () => {
-  assert.match(meter, /"aria-label": `Context Window \$\{fill\.formatPct\} Used`/);
+  assert.match(meter, /aria-label=\{`Context Window \$\{fill\.formatPct\} Used`\}/);
   assert.match(css, /\.context-ring-fill\s*\{/, "only the context control draws a ring");
   assert.doesNotMatch(css, /\.context-popover-model/,
     "the per-model rules moved to the Session Usage popover rather than being shared");

@@ -6,7 +6,12 @@ const actions: Record<CampaignRecoveryRecord["action"], string> = {
   answer_request: "Answer Request", review_evidence: "Review Evidence", recover_hold: "Recover Held Work",
   replace_worker: "Replace Failed Worker", reformulate_request: "Reformulate Request", repair_checks: "Repair Checks",
   rereview: "Repair and Re-Review", reconcile_outcome: "Reconcile Original Outcome", continue_campaign: "Continue Campaign",
+  continue_without_request: "Continue Without the Request",
 };
+// A stopped worker was not necessarily a failed one (#3362): an intentional, denied or unverified stop.
+const stopReasons = new Set<CampaignRecoveryRecord["reason"]>(["hard_denial", "intentional_stop", "unverified_stop"]);
+const actionLabel = (record: CampaignRecoveryRecord, action: CampaignRecoveryRecord["action"]) =>
+  action === "replace_worker" && stopReasons.has(record.reason) ? "Replace Stopped Worker" : actions[action];
 const inputs: Record<CampaignRecoveryRecord["requiredInput"], string> = {
   answer_existing_request: "Answer the existing request with the missing information.",
   restore_existing_access: "Restore the required access through the existing human authentication flow.",
@@ -21,12 +26,15 @@ const inputs: Record<CampaignRecoveryRecord["requiredInput"], string> = {
 export function CampaignRecoveryNotice({ record }: { record: CampaignRecoveryRecord }) {
   const human = record.state === "waiting_human";
   const blocked = record.state === "blocked";
+  const declined = record.reason === "request_declined";
+  // A finished campaign reads every record as resolved (#4070): nothing is left to recover.
+  const resolved = record.state === "resolved";
   return (
     <Notice tone={human || blocked ? "warning" : "neutral"}
-      title={human ? "Human Input Required" : blocked ? "Recovery Blocked" : "Authorized Recovery"}
+      title={resolved ? "Recovery Resolved" : human ? "Human Input Required" : declined ? "Request Declined" : blocked ? "Recovery Blocked" : "Authorized Recovery"}
       details={(
         <dl className="facts">
-          <div><dt>Action</dt><dd>{actions[record.action]}</dd></div>
+          <div><dt>Action</dt><dd>{actionLabel(record, record.action)}</dd></div>
           <div><dt>Resource</dt><dd>{record.resource.repository && record.resource.pullRequest
             ? `${record.resource.repository}#${record.resource.pullRequest}` : record.resource.sessionId}
             <span className="campaign-status-meta">{record.resource.occurrenceId}</span></dd></div>
@@ -34,13 +42,15 @@ export function CampaignRecoveryNotice({ record }: { record: CampaignRecoveryRec
           <div><dt>Reason</dt><dd>{titleCaseLabel(record.reason.replaceAll("_", " "))}</dd></div>
           <div><dt>Recovery Attempts</dt><dd>{record.attempts} of {record.maxAttempts}</dd></div>
           <div><dt>Attempted Recovery</dt><dd>{record.attemptedRecovery.length
-            ? record.attemptedRecovery.map(action => actions[action]).join(", ")
-            : "No authorized recovery attempt is available yet."}</dd></div>
-          <div><dt>Required Input</dt><dd>{inputs[record.requiredInput]}</dd></div>
+            ? record.attemptedRecovery.map(action => actionLabel(record, action)).join(", ")
+            : resolved ? "None needed." : declined ? "None. The request stays declined." : "No authorized recovery attempt is available yet."}</dd></div>
+          <div><dt>Required Input</dt><dd>{inputs[resolved ? "none" : record.requiredInput]}</dd></div>
         </dl>
       )}
     >
-      {record.explanation}
+      {resolved
+        ? "The campaign has finished, so this record needs no further recovery. Any handed-off work is listed under Handed Off."
+        : record.explanation}
     </Notice>
   );
 }

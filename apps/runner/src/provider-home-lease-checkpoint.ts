@@ -4,8 +4,10 @@ export const LEASE_CHECKPOINT_LIMITS = Object.freeze({
   compactAfter: 16,
   hardTransitions: 32,
   directoryEntries: 256,
-  migrationEntries: 4_096,
-  retirementEntries: 8_192,
+  // Legacy writers admitted 4,096 transitions plus their genesis. Leave bounded room
+  // for the acquiring successor, permanent guard and interrupted migration staging.
+  migrationEntries: 4_104,
+  retirementEntries: 8_208,
   checkpointBytes: 2_097_152,
   retainedEntries: 32,
   verificationRecords: 131_072,

@@ -53,9 +53,8 @@ A capability floor whose only non-definition references are assertions in
 `packages/protocol/src/index.test.ts` is a floor awaiting its consumer, not a stale one, when its
 line falls inside the 7-day window: the protocol key lands first and the reader follows in the
 next slice. Record it for the next run rather than reporting it. Three of the last four protocol
-candidates (`contextWindowVariants` twice, `orchestratorCampaignManagement` once) were exactly
-this shape. Once the line is outside the window and still has no production reader, it is the
-unread-floor finding above.
+candidates were exactly this shape, with one candidate appearing in two runs. Once the line is
+outside the window and still has no production reader, it is the unread-floor finding above.
 
 Count readers with one fixed command per key, and treat zero as the candidate:
 `git grep -n -w <key> origin/main -- apps packages scripts | grep -v packages/protocol/src/index.test.ts | grep -v '<key>:'`

@@ -1,1 +1,0 @@
-|.btn-rediscover|border-radius|999

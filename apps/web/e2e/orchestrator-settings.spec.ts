@@ -18,6 +18,36 @@ async function inView(page: Page, selector: string) {
 }
 
 for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844 }]) {
+  for (const theme of ["dark", "light"]) {
+    test(`Video Evidence Review shows each machine's certification at ${viewport.width}px in ${theme}`, async ({ page }, testInfo) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/settings-rows-e2e.html?theme=${theme}&section=orchestrator&video=status`);
+      const group = page.locator("section.settings-group").filter({ has: page.getByRole("heading", { name: "Video Evidence Review", exact: true }) });
+      await expect(group).toBeVisible();
+      await expect(group).toContainText("The Orchestrator can delegate video evidence to a certified media-only reviewer.");
+      const rows = group.locator(".setting-row");
+      await expect(rows).toHaveCount(6);
+      await expect(rows.locator(".status")).toHaveText(["Certified", "Expired", "Revoked", "Not Certified", "Unavailable", "Unavailable"]);
+      await expect(rows.locator(".setting-row-title")).toHaveText(["Studio Workstation", "Travel Laptop", "Build Server",
+        "Spare Mac mini", "Codex Host", "Old Desktop"]);
+      await group.getByText("About Video Evidence Review").click();
+      await expect(group.locator(".disclosure-body")).toContainText("Only MP4 and WebM recordings attached as private Session artifacts can be delegated.");
+      await expect(group.getByRole("link", { name: "certification runbook" }))
+        .toHaveAttribute("href", "https://github.com/picoduck/wollipog/blob/main/docs/video-review-certification-runbook.md");
+      await expectTextFits(group, "Video Evidence Review");
+      // The delegation disclosure states the same certified exception, not that video always goes to a person (#1321).
+      const delegation = page.locator("details.disclosure").filter({ hasText: "About UI Evidence Delegation" });
+      await delegation.locator("summary").click();
+      await expect(delegation).toContainText("Video evidence otherwise requires human review, including video attached as a Session artifact, " +
+        "unless a Full Control campaign's certified media-only reviewer is available.");
+      await expect(delegation).toContainText("Video routes to a human unless a Full Control campaign's certified media-only reviewer is available");
+      const horizontalOverflow = await page.evaluate(() => document.documentElement.scrollWidth - document.documentElement.clientWidth);
+      expect(horizontalOverflow).toBeLessThanOrEqual(0);
+      await group.scrollIntoViewIfNeeded();
+      await group.screenshot({ path: testInfo.outputPath(`video-evidence-review-${viewport.width}-${theme}.png`) });
+    });
+  }
+
   test(`Orchestrator settings are responsive and keyboard operable at ${viewport.width}px`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator");
@@ -67,13 +97,13 @@ for (const viewport of [{ width: 1280, height: 1000 }, { width: 390, height: 844
   });
 }
 
-test("at 1440px the section fits in 1,200px with every disclosure closed, and the save bar stays in view", async ({ page }) => {
+test("at 1440px the section fits in 1,500px with every disclosure closed, and the save bar stays in view", async ({ page }) => {
   await page.setViewportSize({ width: 1440, height: 900 });
   await page.goto("/settings-rows-e2e.html?theme=dark&section=orchestrator");
   await expect(page.getByRole("heading", { name: "Decision Delegation", exact: true })).toBeVisible();
   await expect(page.locator("details.disclosure[open]")).toHaveCount(0);
   const height = await page.locator(".settings-panel").evaluate((element) => element.getBoundingClientRect().height);
-  expect(height, "the section was about 1,850px before #3026").toBeLessThanOrEqual(1200);
+  expect(height, "four review-policy rows extend the 1,200px section without new disclosures or stylesheet debt").toBeLessThanOrEqual(1500);
 
   await makeDirty(page);
   const scroller = page.locator(".main-body");

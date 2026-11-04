@@ -10,16 +10,17 @@ import { ApiProvider } from "../api-context.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
 import { ViewerIdentityContext, type ViewerIdentity } from "../resolver-identity.js";
+import { FeedbackContext } from "./FeedbackProvider.js";
 import {
+  ArtifactPageActions,
   ArtifactPreviewBody,
   ArtifactPreviewDialog,
-  ArtifactPreviewBar,
   ArtifactPreviewMeta,
   DOWNLOAD_WARNING,
   useArtifactPreview,
 } from "./ArtifactPreview.js";
 
-const domWindow = new Window({ url: "http://localhost/", settings: { disableIframePageLoading: true } });
+const domWindow = new Window({ url: "http://localhost/" });
 for (const [name, value] of Object.entries({
   window: domWindow, document: domWindow.document, navigator: domWindow.navigator,
   localStorage: domWindow.localStorage, Element: domWindow.Element, HTMLElement: domWindow.HTMLElement,
@@ -44,12 +45,13 @@ function artifact(kind: WorkflowArtifactKind, name: string, body: string | Uint8
 
 const viewer: ViewerIdentity = { userId: "usr_8f2c41", shared: false, names: new Map() };
 
-/** The Browser's anatomy without the panel: the bar, the meta line and the body over one load. */
+/** The Browser's anatomy without the panel: the header's actions (in a stand-in for its action
+ * slot), the meta line and the body over one load. */
 function Preview({ item }: { item: WorkflowArtifactView }) {
   const model = useArtifactPreview(item);
   return (
     <div className="art-view">
-      <ArtifactPreviewBar model={model} />
+      <div className="rpanel-actions"><ArtifactPageActions model={model} /></div>
       <ArtifactPreviewMeta model={model} />
       <ArtifactPreviewBody model={model} />
     </div>
@@ -101,17 +103,24 @@ const buttonNamed = (scope: ParentNode, name: string) =>
     .find((button) => (button.getAttribute("aria-label") ?? button.textContent?.trim()) === name) ?? null;
 
 describe("the artifact preview's header and meta line (#2855)", () => {
-  test("one bar of Enlarge and Download, with no back and no title of its own (#2914)", async () => {
+  test("Download is a header icon button that opens its menu, with no bar, back or title of its own (#2914, #3036)", async () => {
     const item = artifact("test_log", "web unit suite.log", "ok 1\n");
     const container = await render(<Preview item={item} />, exporting(item, "ok 1\n"));
     await settle(ready(container), "the log");
-    const bar = container.querySelector(".art-bar")!;
-    assert.ok(bar.classList.contains("toolbar"));
+    assertNoDomNode(container.querySelector(".toolbar"), "the page draws no bar of its own");
+    const slot = container.querySelector(".rpanel-actions")!;
     // Download's progress line is a visually hidden sibling, not a control; a log has no Enlarge.
-    const controls = [...bar.querySelectorAll(":scope > button, :scope > h2")]
+    const controls = [...slot.querySelectorAll(":scope > button, :scope > h2")]
       .map((child) => child.getAttribute("aria-label") ?? child.textContent?.trim());
-    assert.deepEqual(controls, ["Download"], "the panel header carries Back and the title, so the bar has neither");
-    assertNoDomNode(bar.querySelector("h2"), "the title is shown once, in the panel header");
+    assert.deepEqual(controls, ["Download"], "the panel header carries Back and the title, so the actions are neither");
+    const download = buttonNamed(slot, "Download")!;
+    assert.ok(download.classList.contains("icon-btn"), "the slot's 32px icon button, 44px on touch");
+    assert.equal(download.classList.contains("btn"), false);
+    assert.equal(download.getAttribute("title"), "Download");
+    assert.equal(download.textContent, "", "no visible label or caret");
+    assert.ok(download.querySelector("svg"), "the Download icon");
+    // It opens the same menu (see the Download menu's tests below).
+    assert.equal(download.getAttribute("aria-haspopup"), "menu");
     assert.doesNotMatch(container.textContent ?? "", /‹/u, "no text-glyph back");
   });
 
@@ -166,6 +175,90 @@ describe("the artifact preview's Download menu (#2855)", () => {
     await act(async () => { (items[1] as HTMLElement).click(); await new Promise((resolve) => setTimeout(resolve, 0)); });
     assert.deepEqual(copied, [item.sha256]);
     assert.equal(copied[0]!.length, 64);
+  });
+});
+
+describe("a Copy Checksum write that settles late (#3582)", () => {
+  /** A Clipboard API whose writes stay pending until the test settles them. */
+  function deferredClipboard() {
+    const writes: Array<{ text: string; resolve: () => void }> = [];
+    const original = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: (text: string) => new Promise<void>((resolve) => { writes.push({ text, resolve }); }) },
+    });
+    return {
+      writes,
+      succeed: async () => {
+        await act(async () => { writes.at(-1)!.resolve(); await new Promise((resolve) => setTimeout(resolve, 0)); });
+      },
+      restore: () => {
+        if (original) Object.defineProperty(domWindow.navigator, "clipboard", original);
+        else delete (domWindow.navigator as unknown as { clipboard?: unknown }).clipboard;
+      },
+    };
+  }
+
+  let close: () => void = () => {};
+  /** The preview behind a recording toast, which `close` removes as closing its panel would. */
+  function Closable({ item, toasts }: { item: WorkflowArtifactView; toasts: string[] }) {
+    const [open, setOpen] = React.useState(true);
+    close = () => setOpen(false);
+    const feedback = {
+      confirm: async () => false,
+      showToast: (message: string) => toasts.push(message),
+      showUndo: () => -1,
+      dismissToast: () => undefined,
+    };
+    return <FeedbackContext.Provider value={feedback}>{open && <Preview item={item} />}</FeedbackContext.Provider>;
+  }
+
+  async function copyChecksum(item: WorkflowArtifactView, toasts: string[]): Promise<{ container: HTMLDivElement; trigger: HTMLButtonElement }> {
+    const container = await render(<Closable item={item} toasts={toasts} />, exporting(item, "built\n"));
+    await settle(ready(container), "the log");
+    const trigger = buttonNamed(container, "Download")!;
+    await act(async () => trigger.click());
+    const copy = [...document.querySelectorAll<HTMLElement>('[role="menu"] [role="menuitem"]')]
+      .find((entry) => entry.querySelector(".menu-text")?.textContent === "Copy Checksum")!;
+    await act(async () => copy.click());
+    return { container, trigger };
+  }
+
+  test("a write that succeeds after the preview closed shows no toast and moves no focus", async () => {
+    const item = artifact("test_log", "build.log", "built\n");
+    const clipboard = deferredClipboard();
+    const toasts: string[] = [];
+    const elsewhere = document.createElement("button");
+    document.body.append(elsewhere);
+    try {
+      const { container } = await copyChecksum(item, toasts);
+      assert.deepEqual(clipboard.writes.map((write) => write.text), [item.sha256], "the copy started");
+      await act(async () => close());
+      assertNoDomNode(buttonNamed(container, "Download"), "the menu's owner has gone");
+      await act(async () => { elsewhere.focus(); });
+      await clipboard.succeed();
+      assert.deepEqual(toasts, [], "no toast for a preview that has gone");
+      assert.ok(document.activeElement === elsewhere, "focus stays where the person put it");
+    } finally {
+      elsewhere.remove();
+      clipboard.restore();
+    }
+  });
+
+  test("a write that succeeds while focus is still on Download shows the toast and keeps focus there", async () => {
+    const item = artifact("test_log", "build.log", "built\n");
+    const clipboard = deferredClipboard();
+    const toasts: string[] = [];
+    try {
+      const { trigger } = await copyChecksum(item, toasts);
+      assert.equal(clipboard.writes.length, 1, "the copy started");
+      assert.ok(document.activeElement === trigger, "the menu closed onto Download");
+      await clipboard.succeed();
+      assert.deepEqual(toasts, ["Copied the checksum."]);
+      assert.ok(document.activeElement === trigger, "focus stays on Download");
+    } finally {
+      clipboard.restore();
+    }
   });
 });
 
@@ -247,7 +340,7 @@ describe("the artifact preview's bodies (#2855)", () => {
     assert.equal(frame.getAttribute("referrerpolicy"), "no-referrer");
     assert.match(frame.getAttribute("srcdoc") ?? "", /Content-Security-Policy/u);
     assert.equal(container.querySelector("figcaption")?.textContent, "Sandboxed: scripts, forms and links are turned off.");
-    assert.ok(buttonNamed(container.querySelector(".art-bar")!, "Enlarge"), "HTML can be enlarged");
+    assert.ok(buttonNamed(container.querySelector(".rpanel-actions")!, "Enlarge"), "HTML can be enlarged");
   });
 
   test("Enlarge opens an image in a full dialog, and Done returns focus to Enlarge", async () => {
@@ -261,7 +354,7 @@ describe("the artifact preview's bodies (#2855)", () => {
       const container = await render(<Preview item={item} />, exporting(item, bytes));
       await settle(ready(container), "the screenshot");
       assert.ok(container.querySelector(".art-checker img.art-image"), "the image sits on a checkerboard well");
-      const enlarge = buttonNamed(container.querySelector(".art-bar")!, "Enlarge")!;
+      const enlarge = buttonNamed(container.querySelector(".rpanel-actions")!, "Enlarge")!;
       enlarge.focus();
       await act(async () => enlarge.click());
       const dialog = document.querySelector('[role="dialog"].art-enlarged')!;

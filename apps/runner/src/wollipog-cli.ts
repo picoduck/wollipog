@@ -1,3 +1,5 @@
+import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
+import { sessionCredentialRefusal } from "./session-credential-error.js";
 /** Provider-neutral Wollipog CLI plus the general stdio MCP entrypoint. */
 
 import { readFileSync } from "node:fs";
@@ -7,6 +9,7 @@ import {
   PROTOCOL_VERSION,
   RUNNER_CAPABILITY_MIN_PROTOCOL,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
+  canonicalIssueReference,
 } from "@wollipog/protocol";
 import {
   executeManagerTool,
@@ -15,9 +18,12 @@ import {
   type McpFetch,
   type ToolResult,
 } from "./session-management-mcp.js";
+import { UI_EVIDENCE_REVIEWER_PRESET } from "./orchestrator-preset.js";
 import { VERSION } from "./version.js";
 import { contextGhRunner, type GhRunner } from "./campaign-forge-status.js";
-import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
+import type { GlabRunner } from "./campaign-gitlab-status.js";
+import { PULL_REQUEST_WAIT_DEFAULT_TIMEOUT_MS, PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS, parsePullRequestRef } from "./pull-request-wait.js";
+import { inspectPullRequestClosures, pullRequestClosures } from "./github-merge-preflight.js";
 import { defaultHostAdminIo, hostAdminUsage, runHostAdminCli, type HostAdminIo } from "./host-admin-cli.js";
 import { defaultServiceHost, defaultServiceIo, runServiceCli, serviceUsage } from "./service-cli.js";
 import {
@@ -70,6 +76,15 @@ function option(args: string[], name: string): string | undefined {
   return undefined;
 }
 
+function options(args: string[], name: string): string[] {
+  const values: string[] = [];
+  for (let i = 0; i < args.length; i++) {
+    if (args[i] === name && args[i + 1] !== undefined) values.push(args[++i]!);
+    else if (args[i]?.startsWith(`${name}=`)) values.push(args[i]!.slice(name.length + 1));
+  }
+  return values;
+}
+
 function flag(args: string[], name: string): boolean {
   return args.includes(name);
 }
@@ -85,7 +100,7 @@ function positional(args: string[], extraValueOptions: readonly string[] = []): 
     "--title", "--model", "--effort", "--permission-mode", "--after", "--limit", "--for", "--timeout",
     "--interval", "--cost-budget", "--max-tool-calls", "--session", "--branch", "--base", "--base-ref",
     "--max-child-sessions", "--offset", "--event-epoch", "--work-item",
-    "--revision",
+    "--revision", "--ref",
     ...extraValueOptions,
   ]);
   for (let i = 0; i < args.length; i++) {
@@ -170,12 +185,15 @@ export async function runPullRequestCli(
   signal?: AbortSignal,
   /** Test hook for PULL_REQUEST_WAIT_READ_GRACE_MS. */
   graceMs = PULL_REQUEST_WAIT_READ_GRACE_MS,
+  /** `glab` for a GitLab merge request (#3602); defaults to this machine's own login. */
+  glab?: GlabRunner,
 ): Promise<number> {
   const fail = (message: string, code: number): number => {
     (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
     return code;
   };
-  const words = positional(args, ["--repo", "--head"]);
+  const words = positional(args, ["--repo", "--head", "--file", "--intended"]);
+  if (words[1] === "closures") return runPullRequestClosuresCli(args, words, json, io, gh, signal);
   if (words[1] !== "wait" || words.length !== 3) return fail(pullRequestHelp(), 2);
   const timeoutMs = numeric(option(args, "--timeout"));
   const intervalMs = numeric(option(args, "--interval"));
@@ -211,6 +229,7 @@ export async function runPullRequestCli(
     ...(flag(args, "--any-failure") ? { returnOnAnyFailure: true } : {}),
   }, {
     fetch: () => Promise.reject(new Error("no control plane")), cpUrl: "", selfSessionId: "", token: "", gh,
+    ...(glab ? { glab } : {}),
     ...(signal ? { signal } : {}),
     ...(readGraceMs !== undefined ? { pullRequestReadGraceMs: readGraceMs } : {}),
   });
@@ -220,6 +239,77 @@ export async function runPullRequestCli(
   const outcome = (data as { outcome?: unknown }).outcome;
   if (outcome === "timeout") return 124;
   return PULL_REQUEST_WAIT_SUCCESS.has(String(outcome)) ? 0 : 3;
+}
+
+/** The largest draft description `pr closures --file` reads; GitHub's own limit is 65,536 characters. */
+const CLOSURES_FILE_MAX_BYTES = 1024 * 1024;
+
+/**
+ * `wollipog pr closures` (#3713): every issue merging a pull request would close, or a draft
+ * description would, compared with the ones meant to close (`--intended`). Local and read-only, like
+ * `pr wait`, and the same read the control plane makes before a GitHub merge decision.
+ */
+async function runPullRequestClosuresCli(
+  args: string[],
+  words: string[],
+  json: boolean,
+  io: { stdout: Write; stderr: Write },
+  gh: GhRunner,
+  signal?: AbortSignal,
+): Promise<number> {
+  const fail = (message: string, code: number): number => {
+    (json ? io.stdout : io.stderr)(json ? `${JSON.stringify({ error: message })}\n` : `${message}\n`);
+    return code;
+  };
+  const file = option(args, "--file");
+  if ((optionPresent(args, "--file") && (!file || file.startsWith("--"))) || (file ? words.length !== 2 : words.length !== 3) ||
+      options(args, "--intended").length !== args.filter((arg) => arg === "--intended" || arg.startsWith("--intended=")).length) {
+    return fail(pullRequestHelp(), 2);
+  }
+  let repository = option(args, "--repo");
+  if (!repository && (file || /^#?\d+$/u.test(words[2]!))) {
+    const resolved = await gh(["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], signal);
+    repository = resolved.code === null ? resolved.stdout.trim() : "";
+    if (!repository) return fail("could not resolve this directory's GitHub repository; pass --repo <owner/name>", 1);
+  }
+  let pullRequest: number | undefined;
+  if (!file) {
+    const parsed = parsePullRequestRef(words[2], repository);
+    if ("error" in parsed) return fail(parsed.error, 2);
+    repository = parsed.repository;
+    pullRequest = parsed.number;
+  }
+  if (!/^[A-Za-z0-9][A-Za-z0-9-]{0,38}\/[A-Za-z0-9._-]{1,100}$/u.test(repository!)) {
+    return fail("pr closures reads GitHub pull requests only; pass a GitHub owner/name", 2);
+  }
+  const intended: string[] = [];
+  for (const value of options(args, "--intended")) {
+    const issue = canonicalIssueReference(value, repository);
+    if (!issue) return fail(`--intended takes #N, owner/name#N, or a GitHub issue URL, not ${JSON.stringify(value)}`, 2);
+    if (!intended.includes(issue)) intended.push(issue);
+  }
+  let read: { state?: string; headSha?: string; closures: ReturnType<typeof pullRequestClosures> };
+  if (file) {
+    let text: string;
+    try {
+      const bytes = readFileSync(resolvePath(file));
+      if (bytes.length > CLOSURES_FILE_MAX_BYTES) return fail(`${file} is larger than ${CLOSURES_FILE_MAX_BYTES} bytes`, 2);
+      text = bytes.toString("utf8");
+    } catch {
+      return fail(`could not read ${file}`, 1);
+    }
+    read = { closures: pullRequestClosures(text, repository!, []) };
+  } else {
+    const inspected = await inspectPullRequestClosures(repository!, pullRequest!, gh, signal);
+    if (!inspected.ok) return fail(inspected.reason, 1);
+    read = inspected;
+  }
+  const undeclared = read.closures.map((closure) => closure.issue).filter((issue) => !intended.includes(issue));
+  const unmade = intended.filter((issue) => !read.closures.some((closure) => closure.issue === issue));
+  const data = { repository, ...(pullRequest ? { pullRequest, state: read.state, headSha: read.headSha } : {}),
+    closures: read.closures, undeclared, unmade };
+  io.stdout(json ? `${JSON.stringify(data)}\n` : `${JSON.stringify(data, null, 2)}\n`);
+  return undeclared.length || unmade.length ? 3 : 0;
 }
 
 function invocationArgs(argv: string[]): string[] {
@@ -232,6 +322,22 @@ function invocationArgs(argv: string[]): string[] {
 
 function command(args: string[]): { tool: string; input: Record<string, unknown> } | { error: string } {
   const words = positional(args);
+  if (words[0] === "automation") {
+    if (optionPresent(args, "--session")) return { error: "automation commands act only on the injected session" };
+    const groupIndex = args.indexOf("automation");
+    const verb = args[groupIndex + 1];
+    if (verb === "request") {
+      const proposal = jsonObjectOption(args, "--proposal");
+      return "error" in proposal ? proposal : { tool: "request_automation_creation", input: proposal.value };
+    }
+    const occurrenceId = args[groupIndex + 2];
+    if (verb === "get" && occurrenceId && !occurrenceId.startsWith("--")) return { tool: "get_automation_creation", input: { occurrenceId } };
+    const resourceDigest = option(args, "--digest");
+    if (verb === "execute" && occurrenceId && !occurrenceId.startsWith("--") && resourceDigest) {
+      return { tool: "execute_automation_creation", input: { occurrenceId, resourceDigest } };
+    }
+    return { error: "use automation request --proposal <json>, automation get <occurrence-id>, or automation execute <occurrence-id> --digest <digest>" };
+  }
   if (words[0] === "issue-scope") {
     if (optionPresent(args, "--session")) return { error: "issue-scope commands act only on the injected session" };
     if (words[1] === "get") {
@@ -275,13 +381,9 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       const body = input();
       return "error" in body ? body : { tool: "allocate_campaign_budget", input: body.value };
     }
-    if (verb === "review") {
-      const body=jsonObjectOption(args,"--input");
-      return "error" in body?body:{tool:"run_campaign_review_job",input:body.value};
+    if (["review", "review-job", "review-jobs", "review-report"].includes(verb ?? "")) {
+      return { error: REVIEW_JOBS_RETIRED_REASON };
     }
-    if(verb==="review-job") return {tool:"get_campaign_review_job",input:{jobId:operand(2)}};
-    if(verb==="review-report") return {tool:"get_campaign_review_report",input:{jobId:operand(2)}};
-    if(verb==="review-jobs") return {tool:"list_campaign_review_jobs",input:{limit:numeric(option(args,"--limit")),afterJobId:option(args,"--cursor"),workItemId:option(args,"--item")}};
     if (verb === "plan") {
       const body = input();
       return "error" in body ? body : { tool: "record_campaign_plan", input: body.value };
@@ -289,6 +391,10 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
     if (verb === "update-item" && operand(2)) {
       const body = input();
       return "error" in body ? body : { tool: "update_campaign_work_item", input: { ...body.value, workItemId: operand(2) } };
+    }
+    if (verb === "deliver" && operand(2)) {
+      const body = input();
+      return "error" in body ? body : { tool: "record_campaign_work_item_delivery", input: { ...body.value, workItemId: operand(2) } };
     }
     if (verb === "assign" && operand(2) && operand(3)) {
       return { tool: "assign_campaign_work_item", input: { workItemId: operand(2), childSessionId: operand(3) } };
@@ -316,7 +422,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       if (flag(args, "--recommendations")) query.includeRecommendations = true;
       return { tool: "get_campaign_work_items", input: query };
     }
-    return { error: "use campaign plan, update-item, assign, adjudicate, or work-items; see wollipog help campaign" };
+    return { error: "use campaign plan, update-item, deliver, assign, adjudicate, or work-items; see wollipog help campaign" };
   }
   // Like artifact, this group reads only its fixed leading words. Keeping its JSON value options
   // out of the shared positional-option set ensures an unrelated command cannot become valid just
@@ -326,8 +432,43 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       ["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(arg));
     const verb = args[groupIndex + 1];
     const occurrenceId = args[groupIndex + 2];
-    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list") {
+    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw" && verb !== "hand-to-owner") {
       return { error: "decision commands act only on the injected session and do not accept --session" };
+    }
+    if (verb === "ask-owner") {
+      const input: Record<string, unknown> = {};
+      for (const [optionName, key] of [["--request-id", "requestId"], ["--resource-key", "resourceKey"], ["--question", "question"]] as const) {
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `decision ask-owner requires ${optionName}` };
+        input[key] = value;
+      }
+      const raw = option(args, "--options");
+      if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
+      try {
+        input.options = JSON.parse(raw) as unknown;
+      } catch {
+        return { error: "--options must be valid JSON" };
+      }
+      if (!Array.isArray(input.options)) return { error: "--options requires a JSON array of {optionId, label, description?}" };
+      for (const [optionName, key] of [["--recommended", "recommendedOptionId"], ["--material", "material"]] as const) {
+        if (!optionPresent(args, optionName)) continue;
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `${optionName} requires a value` };
+        input[key] = value;
+      }
+      return { tool: "request_owner_decision", input };
+    }
+    if (verb === "hand-to-owner") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision hand-to-owner requires an occurrence id" };
+      }
+      const reason = option(args, "--reason");
+      if (!reason || reason.startsWith("--") || !reason.trim()) return { error: "decision hand-to-owner requires --reason" };
+      const sessionId = option(args, "--session");
+      if (optionPresent(args, "--session") && (!sessionId || sessionId.startsWith("--"))) {
+        return { error: "--session requires a session id" };
+      }
+      return { tool: "hand_workflow_decision_to_owner", input: { occurrenceId, reason, ...(sessionId ? { sessionId } : {}) } };
     }
     if (verb === "request") {
       const requestId = option(args, "--request-id");
@@ -399,6 +540,31 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         input: { occurrenceId, resourceSnapshot: snapshot.value },
       };
     }
+    if (verb === "execute") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision execute requires an occurrence id" };
+      }
+      const resourceDigest = option(args, "--resource-digest");
+      if (!resourceDigest || !/^[0-9a-f]{64}$/u.test(resourceDigest)) {
+        return { error: "decision execute requires --resource-digest <64 hex characters>" };
+      }
+      return { tool: "execute_workflow_decision", input: { occurrenceId, resourceDigest } };
+    }
+    if (verb === "withdraw") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision withdraw requires an occurrence id" };
+      }
+      const reason = option(args, "--reason");
+      if (!reason || reason.startsWith("--") || !reason.trim()) return { error: "decision withdraw requires --reason" };
+      const sessionId = option(args, "--session");
+      if (optionPresent(args, "--session") && (!sessionId || sessionId.startsWith("--"))) {
+        return { error: "--session requires a session id" };
+      }
+      return {
+        tool: "withdraw_workflow_decision",
+        input: { occurrenceId, reason, ...(sessionId ? { sessionId } : {}) },
+      };
+    }
     return { error: decisionHelp() };
   }
   // Only the group and verb are read positionally, so --file and --name are deliberately not added
@@ -437,6 +603,20 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
         },
       };
     }
+    if (verb === "delete-refs") {
+      if (sessionId) return { error: "worktree delete-refs acts only on the injected session and does not accept --session" };
+      const refs: Array<{ ref: string; oldOid: string }> = [];
+      for (const value of options(args, "--ref")) {
+        const separator = value.lastIndexOf("=");
+        if (separator <= 0 || separator === value.length - 1) {
+          return { error: "each --ref must be <ref>=<expected-object-id>" };
+        }
+        refs.push({ ref: value.slice(0, separator), oldOid: value.slice(separator + 1) });
+      }
+      if (!refs.length) return { error: "worktree delete-refs requires at least one --ref <ref>=<expected-object-id>" };
+      const path = option(args, "--path");
+      return { tool: "delete_worktree_refs", input: { ...(path ? { path } : {}), refs } };
+    }
     if (verb === "attach" || verb === "select" || verb === "discard") {
       const path = option(args, "--path");
       if (!path) return { error: `worktree ${verb} requires --path` };
@@ -449,45 +629,38 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
     }
     return { error: worktreeHelp() };
   }
-  if (words[0] === "review") {
+  if (words[0] === "review" && words[1] === "session") {
     if (optionPresent(args, "--session")) return { error: "review commands act only on the injected session and do not accept --session" };
-    const verb = words[1];
+    const verb = words[2];
     if (verb === "run") {
       const repository = option(args, "--repo");
       const number = option(args, "--pr");
       const headSha = option(args, "--head");
-      if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha) {
-        return { error: "review run requires --repo <owner/name>, --pr <number>, and --head <sha>" };
-      }
-      const scope = option(args, "--scope");
-      if (optionPresent(args, "--scope") && scope !== "delta" && scope !== "full") return { error: "review run --scope is delta or full" };
-      const fullReason = option(args, "--full-reason");
-      if (optionPresent(args, "--full-reason") && (scope !== "full" || !fullReason?.trim() || fullReason.startsWith("--"))) {
-        return { error: "review run --full-reason needs text and --scope full" };
-      }
       const briefFile = option(args, "--brief-file");
-      let brief: string | undefined;
-      if (optionPresent(args, "--brief-file")) {
-        if (!briefFile || briefFile.startsWith("--")) return { error: "review run --brief-file requires a path" };
-        try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
-        catch (error) { return { error: `could not read the brief: ${(error as Error).message}` }; }
+      if (!repository || !number || !/^[1-9][0-9]*$/u.test(number) || !headSha || !briefFile || briefFile.startsWith("--")) {
+        return { error: "review session run requires --repo <owner/name or GitLab host/group/project>, --pr <number or merge request IID>, --head <sha> and --brief-file <path>" };
       }
-      return {
-        tool: "request_cross_model_review",
-        input: {
-          repository, number: Number(number), headSha,
-          ...(brief !== undefined ? { brief } : {}),
-          ...(scope ? { scope } : {}),
-          ...(fullReason ? { fullReason } : {}),
-        },
-      };
+      let brief: string;
+      try { brief = readFileSync(resolvePath(briefFile), "utf8"); }
+      catch (error) { return { error: `could not read the brief: ${(error as Error).message}` }; }
+      const fullReason = option(args, "--full-reason");
+      if (optionPresent(args, "--full-reason") && (!fullReason?.trim() || fullReason.startsWith("--"))) {
+        return { error: "review session run --full-reason needs text" };
+      }
+      return { tool: "request_review_session", input: { repository, number: Number(number), headSha, brief, ...(fullReason ? { fullReason } : {}) } };
     }
-    if ((verb === "get" || verb === "cancel") && words[2]) {
-      return { tool: verb === "get" ? "get_cross_model_review" : "cancel_cross_model_review", input: { jobId: words[2] } };
+    if ((verb === "get" || verb === "cancel") && words[3]) {
+      return { tool: verb === "get" ? "get_review_session" : "cancel_review_session", input: { reviewSessionId: words[3] } };
     }
     if (verb === "list") {
-      return { tool: "list_cross_model_reviews", input: { limit: numeric(option(args, "--limit")), afterJobId: option(args, "--cursor") } };
+      return { tool: "list_review_sessions", input: { limit: numeric(option(args, "--limit")), afterReviewSessionId: option(args, "--cursor") } };
     }
+    return { error: reviewHelp() };
+  }
+  if (words[0] === "review") {
+    if (optionPresent(args, "--session")) return { error: "review commands act only on the injected session and do not accept --session" };
+    const verb = words[1];
+    if (["run", "get", "list", "cancel"].includes(verb ?? "")) return { error: REVIEW_JOBS_RETIRED_REASON };
     return { error: reviewHelp() };
   }
   if (words[0] !== "session" && words[0] !== "sessions") return { error: usage() };
@@ -613,6 +786,7 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
               states: (option(args, "--for") ?? "input_required,completed,failed,stopped").split(",").filter(Boolean),
               timeoutMs: numeric(option(args, "--timeout")),
               intervalMs: numeric(option(args, "--interval")),
+              ...(flag(args, "--full") ? { fullMetadata: true } : {}),
             },
           }
         : { error: "session wait requires an id" };
@@ -622,10 +796,16 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       return words[2] && words[3]
         ? { tool: "stop_background_job", input: { sessionId: words[2], jobId: words[3] } }
         : { error: "session stop-job requires a session id and a job id" };
+    case "release-hold":
+      return words[2] && words[3]
+        ? { tool: "release_queue_hold", input: { sessionId: words[2], holdId: words[3] } }
+        : { error: "session release-hold requires a session id and a hold id" };
     case "restart":
       return words[2] ? { tool: "restart_session", input: { sessionId: words[2] } } : { error: "session restart requires an id" };
     case "archive":
       return words[2] ? { tool: "archive_session", input: { sessionId: words[2] } } : { error: "session archive requires an id" };
+    case "unarchive":
+      return words[2] ? { tool: "unarchive_session", input: { sessionId: words[2] } } : { error: "session unarchive requires an id" };
     case "guardrails":
       return words[2]
         ? {
@@ -679,6 +859,7 @@ async function compatible(
         const body = JSON.parse(await response.text()) as { error?: unknown };
         if (typeof body.error === "string") detail = `: ${body.error}`;
       } catch { /* Keep the status alone when the body is not a JSON error. */ }
+      if (response.status === 401 && sessionId) detail = `: ${sessionCredentialRefusal(detail.replace(/^: /u, ""))}`;
       return { error: `control plane compatibility check failed: HTTP ${response.status}${detail}` };
     }
     const body = JSON.parse(await response.text()) as { protocolVersion?: unknown };
@@ -818,18 +999,28 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.descendantWorkflowDecisionInspection
     : parsed.tool === "discard_worktree"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRetirement
+    : parsed.tool === "delete_worktree_refs"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion
     : parsed.tool === "attach_session_artifact"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionArtifactFileAttach
     : parsed.tool === "reconcile_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionActionReconciliation
+    : parsed.tool === "withdraw_workflow_decision"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
+    : parsed.tool === "execute_workflow_decision"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.orchestratorIssueClosure
-    : ["allocate_campaign_budget","run_campaign_review_job","get_campaign_review_job","list_campaign_review_jobs","get_campaign_review_report"].includes(parsed.tool)
+    : parsed.tool === "allocate_campaign_budget"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignBudgetAdmission
-    : ["request_cross_model_review", "get_cross_model_review", "list_cross_model_reviews", "cancel_cross_model_review"].includes(parsed.tool)
-    ? RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob
+    : ["request_review_session", "get_review_session", "list_review_sessions", "cancel_review_session"].includes(parsed.tool)
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession
+    : parsed.tool === "record_campaign_work_item_delivery"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignHandoffs
     : ["record_campaign_plan", "update_campaign_work_item", "assign_campaign_work_item",
       "adjudicate_campaign_recommendation", "get_campaign_work_items"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorkLedger
@@ -850,6 +1041,7 @@ export async function runWollipogCli(
     token,
     actorHeader: sessionId ? WOLLIPOG_AGENT_ACTOR_SESSION_HEADER : null,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    uiEvidenceReviewer: env.WOLLIPOG_PERMISSION_PRESET === UI_EVIDENCE_REVIEWER_PRESET,
     controlPlaneProtocolVersion: compatibility.protocolVersion,
   });
   const data = payload(result);
@@ -917,6 +1109,7 @@ export async function runAgentControlMcp(env: NodeJS.ProcessEnv): Promise<void> 
     token,
     actorHeader: WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
     orchestrator: env.WOLLIPOG_PERMISSION_PRESET === "orchestrator",
+    uiEvidenceReviewer: env.WOLLIPOG_PERMISSION_PRESET === UI_EVIDENCE_REVIEWER_PRESET,
   };
   serveSessionManagementMcp(process.stdin, process.stdout, deps);
   process.stdin.on("end", () => process.exit(0));

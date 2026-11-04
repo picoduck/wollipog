@@ -9,21 +9,30 @@ import {
  * same stable deep link must re-focus its exact request without creating duplicate browser history. */
 export type AttentionTarget = { eventEpoch: number; requestId?: string; activationId?: number };
 
+/** The session's Browser → Artifacts tab, optionally on one artifact (#3924). As for an attention
+ * target, `activationId` is ephemeral: arriving again on the same link opens the artifact again. */
+export type ArtifactsTarget = { artifactId?: string; activationId?: number };
+
 export type View =
   | { name: "inbox"; split?: SessionsTab }
   | { name: "board"; split?: SessionsTab }
-  | { name: "runners"; section?: ConnectionSection }
+  | { name: "runners"; section?: ConnectionSection; machineId?: string; accounts?: MachineAccountsIntent }
   | { name: "runs" }
   | { name: "pods" }
-  | { name: "automations" }
+  | { name: "automations"; editor?: AutomationEditorRoute; tab?: AutomationsTab }
+  | { name: "automation"; id: string }
   | { name: "skills"; id?: string; pane?: SkillsPane }
-  | { name: "usage" }
-  | { name: "archived" }
-  | { name: "projects"; id?: string }
-  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget }
-  | { name: "run"; id: string }
+  | { name: "usage"; tab?: UsageTab }
+  /** Archive visit intents are memory-only; viewPath deliberately serializes neither field. */
+  | { name: "archived"; archiveSearch?: string; browseVisit?: { restore: boolean; activationId: number } }
+  | { name: "projects"; id?: string; pane?: ProjectsPane }
+  | { name: "session"; id: string; location?: SourceLocation; attention?: AttentionTarget; artifacts?: ArtifactsTarget }
+  /** `member`: the comparison member a phone shows (#2975); wider layouts show every member. */
+  | { name: "run"; id: string; member?: string }
   | { name: "settings"; section?: SettingsSection; policyId?: string; focus?: SettingsFocus }
-  | { name: "pod"; id: string };
+  /** The tab a phone shows (#2981): the Huddle (`tab: "huddle"`, also the default) or one
+   * `member`; wider layouts show the huddle beside every member. */
+  | { name: "pod"; id: string; tab?: "huddle"; member?: string };
 
 /**
  * Settings sections, as ROUTES rather than dialog tabs.
@@ -33,7 +42,7 @@ export type View =
  * section is deep-linkable, which is what makes "see Settings → Appearance" a thing you can send
  * someone.
  */
-export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "orchestrator" | "network" | "storage" | "experimental" | "about";
+export type SettingsSection = "appearance" | "notifications" | "behavior" | "approvals" | "reviews" | "orchestrator" | "network" | "storage" | "experimental" | "about";
 
 /**
  * A control a redirect lands on, so an old link arrives where its setting went (#3023):
@@ -41,6 +50,15 @@ export type SettingsSection = "appearance" | "notifications" | "behavior" | "app
  * `AttentionTarget.activationId`: `viewPath` omits it, so the replaced address is the section's.
  * The store gives each arrival its own `activationId`, so arriving again focuses it again.
  */
+/**
+ * What a Machine's Provider Accounts section opens on arrival (#3240): Add Account for a provider,
+ * or Recover Existing Profile for one account. Ephemeral like `SettingsFocus`: `viewPath` omits it,
+ * and the store gives each arrival its own `activationId`, so arriving again opens it again.
+ */
+export type MachineAccountsIntent =
+  | { kind: "add_account"; provider: "claude" | "codex"; activationId?: number }
+  | { kind: "recover_profile"; accountId: string; activationId?: number };
+
 export type SettingsFocusTarget = "keyboard-shortcuts";
 export type SettingsFocus = { target: SettingsFocusTarget; activationId?: number };
 
@@ -83,6 +101,9 @@ export interface SettingsSectionEntry {
  */
 export const EXPERIMENT_OFF_EFFECT = "Turning one off hides it from navigation and search.";
 
+/** The Settings page header's one line (§4.2), hidden on phones as every page description is. */
+export const SETTINGS_DESCRIPTION = "Preferences for this device and your account.";
+
 export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   { id: "appearance", title: "Appearance", description: "Theme, colors, density and navigation.", scope: "This Device" },
   {
@@ -94,6 +115,7 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   },
   { id: "behavior", title: "Behavior", description: "Typing, privacy and agent defaults." },
   { id: "approvals", title: "Approvals", description: "Question answers and tool policies." },
+  { id: "reviews", title: "Reviews", description: "Reviewers, rounds and project rules.", scope: "Your Account" },
   // No scope: the panel names where its defaults come from instead, "Your Defaults" or "Wollipog
   // Defaults", once it has loaded them (#3026).
   { id: "orchestrator", title: "Orchestrator", description: "Defaults for sessions that run others." },
@@ -101,8 +123,8 @@ export const SETTINGS_SECTIONS: ReadonlyArray<SettingsSectionEntry> = [
   {
     id: "storage",
     title: "Storage",
-    description: "History kept for archived sessions.",
-    panelDescription: "How long archived sessions keep their full history in this control plane.",
+    description: "Session and workflow history.",
+    panelDescription: "How long archived sessions and completed workflows keep their full history in this control plane. Capable machines also trim archived session logs.",
     scope: "Your Organization",
   },
   {
@@ -133,12 +155,38 @@ export function approvalsPolicyAnchorId(policyId: string): string {
 export type ConnectionSection = "instances" | "machines" | "people";
 
 /**
+ * The Automation editor's two routes (#2967): `/automations/new` and `/automations/~<id>/edit`. A
+ * route rather than a card in the list, so the editor has an address, a reload keeps it and Back
+ * leaves it.
+ */
+export type AutomationEditorRoute = { kind: "new" } | { kind: "edit"; automationId: string };
+
+/**
+ * The Automations page's tabs (#2969): the list at `/automations`, and Outbound Events at
+ * `/automations/outbound`. Absent is the list; the editor routes have no tab.
+ */
+export type AutomationsTab = "outbound";
+
+/**
+ * Usage and Cost's tabs (#3010): API Usage at `/usage`, and Subscriptions at `/usage/subscriptions`.
+ * Absent is API Usage.
+ */
+export type UsageTab = "subscriptions";
+
+/**
  * Agent Skills panes that are not a skill (docs/design-system.md §6): the Orphaned Copies pane and
  * the Library Overview. A skill id wins over a pane, so a view never names both. `/skills` itself
  * shows the list with the default detail; `/skills/overview` is the same content as its own route,
  * which is what a phone opens from the list (§6.2).
  */
 export type SkillsPane = "orphans" | "overview";
+
+/**
+ * The Projects pane that is not a project (#2958): the Projects Overview. `/projects` shows the list
+ * with the overview beside it; `/projects/overview` is the same content as its own route, which is
+ * what a phone opens from the list (§6.2). A project id wins over the pane.
+ */
+export type ProjectsPane = "overview";
 
 export type GlobalViewName = Extract<View["name"], "inbox" | "projects" | "runs" | "pods" | "automations" | "usage" | "runners" | "archived" | "skills">;
 
@@ -203,11 +251,11 @@ export const GLOBAL_VIEW_ITEMS: ReadonlyArray<GlobalViewItem> = [
     description: "Write a skill once, then choose which machines and agents get it.",
     group: "oversight",
   },
-  { id: "archived", name: "Archived Sessions", group: "records" },
+  { id: "archived", name: "Archived Sessions", description: "Archived sessions keep their transcripts. Restore one to keep working.", group: "records" },
   {
     id: "usage",
     name: "Usage and Cost",
-    description: "What your agents spent, by day, agent and project.",
+    description: "What your sessions would cost at API rates and what's left on each subscription.",
     group: "records",
   },
 ];
@@ -227,6 +275,7 @@ export const ENTITY_FALLBACK_TITLES = {
   session: "Session",
   run: "Multi-Agent Run",
   pod: "Pod",
+  automation: "Automation",
 } as const;
 
 /**
@@ -245,11 +294,15 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     // Board mode belongs to the Sessions destination; its page title matches the rail name.
     case "board":
       return destination("inbox").name;
+    case "automations":
+      // The editor is titled by what it edits; the list by its destination.
+      if (view.editor?.kind === "new") return "New Automation";
+      if (view.editor?.kind === "edit") return entityTitle ? `Edit ${entityTitle}` : "Edit Automation";
+      return destination(view.name).name;
     case "inbox":
     case "projects":
     case "runs":
     case "pods":
-    case "automations":
     case "usage":
     case "runners":
     case "archived":
@@ -260,6 +313,7 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
     case "session":
     case "run":
     case "pod":
+    case "automation":
       return entityTitle || ENTITY_FALLBACK_TITLES[view.name];
     // The section is the <h2> inside the page; repeating it here would say it twice.
     case "settings": return "Settings";
@@ -270,12 +324,98 @@ export function viewTitle(view: View, entityTitle?: string | null): string {
 }
 
 /**
+ * The one-line description under a route's page title (§4.2), or undefined for a route that draws
+ * none. A destination's list page reads it from the registry, and Settings, which is not in it,
+ * from its own line; an entity page and the Automations editor draw a bar instead. The turned-off
+ * and crashed states redraw the header with it, so the header keeps its height and nothing moves
+ * when the route recovers (docs/design-system.md §12.4).
+ */
+export function viewDescription(view: View): string | undefined {
+  switch (view.name) {
+    case "automations":
+      return view.editor ? undefined : destination(view.name).description;
+    case "board":
+      return destination("inbox").description;
+    case "inbox":
+    case "projects":
+    case "runs":
+    case "pods":
+    case "usage":
+    case "runners":
+    case "archived":
+    case "skills":
+      return destination(view.name).description;
+    case "settings":
+      return SETTINGS_DESCRIPTION;
+    case "session":
+    case "run":
+    case "pod":
+    case "automation":
+      return undefined;
+  }
+  // No default branch: this line stops compiling when a view is added without a decision here.
+  const unhandled: never = view;
+  return unhandled;
+}
+
+/**
+ * The width of the page container a route draws (§4.5): `.page.wide`, `.page.full`, `fill` for a
+ * full page whose content fills the column edge to edge (`.page.full.fill`), or null for the default
+ * `.page`. A crashed route's notice is drawn in the same container, so the header's hairline does
+ * not jump when the route fails.
+ */
+export function viewPageWidth(view: View): "wide" | "full" | "fill" | null {
+  switch (view.name) {
+    case "usage":
+      return "wide";
+    case "inbox":
+    case "board":
+      return "fill";
+    case "projects":
+    case "skills":
+    case "settings":
+      return "full";
+    // Machines is a master-detail; the other Connections tabs are list pages.
+    case "runners":
+      return (view.section ?? "machines") === "machines" ? "fill" : null;
+    default:
+      return null;
+  }
+}
+
+/**
+ * Whether a route's page header ends in a tab row (§4.2, §10.1) at the current width. The crashed
+ * state reserves that row, so the header keeps its height and its hairline stays put. Sessions has
+ * no page header on a phone, Settings shows its section tabs only in the compact tier, and an open
+ * machine on a phone replaces the Connections header with its detail bar.
+ */
+export function viewHasHeaderTabs(view: View, layout: { phone: boolean; compact: boolean }): boolean {
+  switch (view.name) {
+    case "automations":
+      return !view.editor;
+    case "usage":
+      return true;
+    case "inbox":
+    case "board":
+      return !layout.phone;
+    case "runners":
+      return !(layout.phone && (view.section ?? "machines") === "machines" && view.machineId !== undefined);
+    case "settings":
+      return layout.compact;
+    default:
+      return false;
+  }
+}
+
+/**
  * The view as the subject of a sentence ("Automations Couldn't Be Shown"). A destination reads as
  * its page title; one item of a kind reads as "This Session", since "Session Couldn't Be Shown"
  * names a type rather than the thing on screen.
  */
 export function viewSubjectName(view: View): string {
-  if (view.name === "session" || view.name === "run" || view.name === "pod") return `This ${viewTitle(view)}`;
+  if (view.name === "session" || view.name === "run" || view.name === "pod" || view.name === "automation") {
+    return `This ${viewTitle(view)}`;
+  }
   return viewTitle(view);
 }
 
@@ -386,24 +526,32 @@ export function viewPath(view: View): string {
   switch (view.name) {
     case "inbox": return `/${sessionsTabSearch(view.split)}`;
     case "board": return `/board${sessionsTabSearch(view.split)}`;
-    case "runners": return `/connections/${view.section ?? "machines"}`;
+    // A machine is selected on the Machines tab alone (#2985), so a machine id names that tab.
+    case "runners": return view.machineId !== undefined
+      ? `/connections/machines/~${encodeResourceId(view.machineId)}`
+      : `/connections/${view.section ?? "machines"}`;
     case "runs": return "/runs";
     case "pods": return "/pods";
-    case "automations": return "/automations";
+    case "automations": return view.editor?.kind === "new" ? "/automations/new"
+      : view.editor?.kind === "edit" ? `/automations/~${encodeResourceId(view.editor.automationId)}/edit`
+        : view.tab === "outbound" ? "/automations/outbound" : "/automations";
+    case "automation": return `/automations/~${encodeResourceId(view.id)}`;
     case "skills": return view.id ? `/skills/~${encodeResourceId(view.id)}` : view.pane ? `/skills/${view.pane}` : "/skills";
-    case "usage": return "/usage";
+    case "usage": return view.tab === "subscriptions" ? "/usage/subscriptions" : "/usage";
     case "archived": return "/archived";
-    case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : "/projects";
+    case "projects": return view.id ? `/projects/~${encodeResourceId(view.id)}` : view.pane ? `/projects/${view.pane}` : "/projects";
     case "session": return view.location
       ? `/sessions/~${encodeResourceId(view.id)}/files/~${encodeOpaque(view.location.path)}${sourceLocationSearch(view.location)}`
+      : view.artifacts
+      ? `/sessions/~${encodeResourceId(view.id)}/artifacts${view.artifacts.artifactId === undefined ? "" : `/~${encodeResourceId(view.artifacts.artifactId)}`}`
       : view.attention
       ? `/sessions/~${encodeResourceId(view.id)}/attention${view.attention.requestId === undefined ? "" : `/~${encodeOpaque(view.attention.requestId)}`}?epoch=${view.attention.eventEpoch}`
       : `/sessions/~${encodeResourceId(view.id)}`;
-    case "run": return `/runs/~${encodeResourceId(view.id)}`;
+    case "run": return `/runs/~${encodeResourceId(view.id)}${runMemberSearch(view.member)}`;
     case "settings": return view.section === "approvals" && view.policyId !== undefined
       ? `/settings/approvals/~${encodeResourceId(view.policyId)}`
       : view.section ? `/settings/${view.section}` : "/settings";
-    case "pod": return `/pods/~${encodeResourceId(view.id)}`;
+    case "pod": return `/pods/~${encodeResourceId(view.id)}${podTabSearch(view)}`;
   }
 }
 
@@ -430,12 +578,51 @@ function locationFromSearch(path: string, search: string): SourceLocation | null
   });
 }
 
-function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string): View | null {
+const RUN_MEMBER_PARAM = "member";
+
+function runMemberSearch(member: string | undefined): string {
+  return member === undefined ? "" : `?${new URLSearchParams({ [RUN_MEMBER_PARAM]: member }).toString()}`;
+}
+
+/** The member a run URL names: undefined when it names none or its query is not a member. */
+function runMemberFromSearch(search: string): string | undefined {
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  if (keys.length !== 1 || keys[0] !== RUN_MEMBER_PARAM) return undefined;
+  const member = params.get(RUN_MEMBER_PARAM) ?? "";
+  return !member.trim() || member.length > MAX_RESOURCE_ID_LENGTH ? undefined : member;
+}
+
+const POD_TAB_PARAM = "tab";
+const POD_TAB_HUDDLE = "huddle";
+
+function podTabSearch(view: { tab?: "huddle"; member?: string }): string {
+  if (view.member !== undefined) return runMemberSearch(view.member);
+  return view.tab === POD_TAB_HUDDLE ? `?${new URLSearchParams({ [POD_TAB_PARAM]: POD_TAB_HUDDLE }).toString()}` : "";
+}
+
+/** The tab a pod URL names: the Huddle, one member, or neither when its query is anything else. */
+function podTabFromSearch(search: string): { tab: "huddle" } | { member: string } | Record<string, never> {
+  const member = runMemberFromSearch(search);
+  if (member !== undefined) return { member };
+  const params = new URLSearchParams(search.startsWith("?") ? search.slice(1) : search);
+  const keys = [...params.keys()];
+  return keys.length === 1 && keys[0] === POD_TAB_PARAM && params.get(POD_TAB_PARAM) === POD_TAB_HUDDLE
+    ? { tab: POD_TAB_HUDDLE }
+    : {};
+}
+
+function resourceView(kind: "sessions" | "runs" | "pods", encodedId: string, search: string): View | null {
   const id = decodeResourceId(encodedId);
   if (id === null) return null;
   if (kind === "sessions") return { name: "session", id };
-  if (kind === "runs") return { name: "run", id };
-  return { name: "pod", id };
+  if (kind === "runs") {
+    // A query that is not a member keeps the run open rather than failing the route.
+    const member = runMemberFromSearch(search);
+    return member === undefined ? { name: "run", id } : { name: "run", id, member };
+  }
+  // As for a run, a query that names no tab keeps the pod open on its default tab.
+  return { name: "pod", id, ...podTabFromSearch(search) };
 }
 
 /** Parse only the dashboard's explicit route vocabulary. Unknown and malformed paths are not
@@ -451,9 +638,26 @@ export function viewFromPath(pathname: string, search = ""): View | null {
   if (connectionsMatch) {
     return { name: "runners", section: connectionsMatch[1] as ConnectionSection };
   }
+  const machineMatch = /^\/connections\/machines\/~([^/]+)$/.exec(path);
+  if (machineMatch) {
+    const machineId = decodeResourceId(machineMatch[1]!);
+    return machineId === null ? null : { name: "runners", section: "machines", machineId };
+  }
   if (path === "/runs") return { name: "runs" };
   if (path === "/pods") return { name: "pods" };
   if (path === "/automations") return { name: "automations" };
+  if (path === "/automations/new") return { name: "automations", editor: { kind: "new" } };
+  if (path === "/automations/outbound") return { name: "automations", tab: "outbound" };
+  const automationEditMatch = /^\/automations\/~([^/]+)\/edit$/.exec(path);
+  if (automationEditMatch) {
+    const automationId = decodeResourceId(automationEditMatch[1]!);
+    return automationId === null ? null : { name: "automations", editor: { kind: "edit", automationId } };
+  }
+  const automationMatch = /^\/automations\/~([^/]+)$/.exec(path);
+  if (automationMatch) {
+    const id = decodeResourceId(automationMatch[1]!);
+    return id === null ? null : { name: "automation", id };
+  }
   if (path === "/skills") return { name: "skills" };
   const skillsPaneMatch = /^\/skills\/(orphans|overview)$/.exec(path);
   if (skillsPaneMatch) return { name: "skills", pane: skillsPaneMatch[1] as SkillsPane };
@@ -463,12 +667,13 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return id === null ? null : { name: "skills", id };
   }
   if (path === "/usage") return { name: "usage" };
+  if (path === "/usage/subscriptions") return { name: "usage", tab: "subscriptions" };
   if (path === "/archived") return { name: "archived" };
   // No section: a phone shows the section index, and wider layouts open the first section (§6.1, §6.2).
   if (path === "/settings") return { name: "settings" };
   // Keep old bookmarks useful: a copy, so a caller that annotates the view cannot change the table.
   if (isSettingsAlias(path)) return structuredClone(SETTINGS_ALIASES[path]!);
-  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|orchestrator|network|storage|experimental|about)$/.exec(path);
+  const settingsMatch = /^\/settings\/(appearance|notifications|behavior|approvals|reviews|orchestrator|network|storage|experimental|about)$/.exec(path);
   if (settingsMatch) return { name: "settings", section: settingsMatch[1] as SettingsSection };
   const approvalsPolicyMatch = /^\/settings\/approvals\/~([^/]+)$/.exec(path);
   if (approvalsPolicyMatch) {
@@ -476,6 +681,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return policyId === null ? null : approvalsPolicyView(policyId);
   }
   if (path === "/projects") return { name: "projects" };
+  if (path === "/projects/overview") return { name: "projects", pane: "overview" };
   const projectMatch = /^\/projects\/~([^/]+)$/.exec(path);
   if (projectMatch) {
     const id = decodeResourceId(projectMatch[1]!);
@@ -491,6 +697,14 @@ export function viewFromPath(pathname: string, search = ""): View | null {
         epoch === null || !/^(0|[1-9]\d*)$/.test(epoch) || !Number.isSafeInteger(Number(epoch))) return null;
     return { name: "session", id, attention: { eventEpoch: Number(epoch), ...(requestId === undefined ? {} : { requestId }) } };
   }
+  const artifactsMatch = /^\/sessions\/~([^/]+)\/artifacts(?:\/~([^/]+))?$/.exec(path);
+  if (artifactsMatch) {
+    const id = decodeResourceId(artifactsMatch[1]!);
+    const artifactId = artifactsMatch[2] === undefined ? undefined : decodeResourceId(artifactsMatch[2]);
+    // The path names everything the link opens; a query makes it some other link.
+    if (id === null || artifactId === null || (search !== "" && search !== "?")) return null;
+    return { name: "session", id, artifacts: artifactId === undefined ? {} : { artifactId } };
+  }
   const fileMatch = /^\/sessions\/~([^/]+)\/files\/~([^/]+)$/.exec(path);
   if (fileMatch) {
     const id = decodeResourceId(fileMatch[1]!);
@@ -500,7 +714,7 @@ export function viewFromPath(pathname: string, search = ""): View | null {
     return location ? { name: "session", id, location } : null;
   }
   const match = /^\/(sessions|runs|pods)\/~([^/]+)$/.exec(path);
-  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!) : null;
+  return match ? resourceView(match[1] as "sessions" | "runs" | "pods", match[2]!, search) : null;
 }
 
 /** Compatibility bridge for notification links created by older service workers. */
@@ -581,9 +795,19 @@ export interface NavigationWindow {
   removeEventListener(type: "popstate", listener: () => void): void;
 }
 
+export interface NavigateOptions {
+  /**
+   * Replace the current history entry instead of adding one: for a route that cannot be shown here
+   * and lands somewhere else (Connections › Instances on a phone), so Back does not return to it.
+   */
+  replace?: boolean;
+}
+
 export interface ViewNavigation {
   current(): View;
   push(view: View): void;
+  /** Absent in a harness that only records pushes; the store pushes instead. */
+  replace?(view: View): void;
   /** Browser Back and Forward. A move that can be held comes with its traversal (#3218). */
   listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void;
   activate?(view: View): void;
@@ -616,6 +840,11 @@ export class BrowserNavigation implements ViewNavigation {
     const path = viewPath(view);
     if (`${this.target.location.pathname}${this.target.location.search}` === path && !this.target.location.hash) return;
     this.positions.push(path);
+  }
+
+  replace(view: View): void {
+    // The entry keeps its state, and with it its history position.
+    this.target.history.replaceState(this.target.history.state, "", viewPath(view));
   }
 
   listen(onView: (view: View, traversal?: HistoryTraversal) => void): () => void {

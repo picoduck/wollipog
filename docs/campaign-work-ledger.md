@@ -35,7 +35,7 @@ One unit of committed or proposed campaign work, with or without an issue or a s
 | Field | Meaning |
 | --- | --- |
 | `key` | Stable Orchestrator-chosen identity, unique per campaign, used for idempotent upsert (`picoduck/wollipog#2417`, `plan:read-api`). |
-| `issue` | Optional repository-qualified issue `{repository, number}`. |
+| `issue` | Optional repository-qualified issue `{repository, number}`. `repository` is a GitHub `owner/repo`, or a GitLab project with its host and full namespace, `<gitlab-host>/group[/subgroup…]/project` (#3539). A bare nested path is refused rather than guessed to be gitlab.com, and a GitHub repository is never host-qualified. Pull request refs use the same form; a GitLab merge request's `number` is its IID. |
 | `title` | Optional display title. |
 | `origin` | `original` (initial scope, issue or not) or `follow_up` (accepted from a recommendation). |
 | `generation` | `0` for original scope; for a follow-up, one more than the highest generation among its origin items, or `1` when the recommendation names no origin item (for example, one recorded before the ledger existed). |
@@ -89,6 +89,40 @@ Unlike session-level child verification, a later execution of the same child doe
 invalidate it: reassigning a child to item B leaves item A's verification, attempt, and accounting
 intact.
 
+### Recorded Delivery (`cwd_…`, v275, #4070)
+
+`record_campaign_work_item_delivery` records delivery that `verify_campaign_child` cannot, such as an
+item whose child was reassigned before it was verified for it. The control plane checks the evidence
+itself and inspects no worktree:
+
+- **Pull requests:** each must be in the campaign repository (the issue scope's, else the item's
+  issue's), be named by the item's reported stage, and be read from the forge at that moment as
+  merged into the repository's default branch. GitHub only: GitLab merge requests are refused, and
+  so is a runner that does not report the default branch.
+- **A report:** the exact completed top-level response of one of the caller's campaign children,
+  inside that child's attempt on this item (after its start boundary and, for a closed attempt, at or
+  before its end boundary, in the same event epoch). An attempt closed as `reassigned`,
+  `superseded`, or `delivered` counts; one the Orchestrator ended as `abandoned` or `failed` does
+  not. An open attempt's report counts only once that child's turn has finished. A report also adds
+  an ordinary `delivered` work-item verification of that attempt, so issue-closure proof reads it as
+  before.
+
+Either or both may be given, and everything given is checked. A later attempt on the item whose
+session is still working refuses the delivery, even when it is the same child's. Every check runs
+again after the forge answers, in the same turn as the write, so a change while the forge was being
+read cannot be recorded over. The record keeps the pull requests'
+merge commits and base branch, the report's child, attempt and sequence, a note, the recording
+Orchestrator, and the time. Recording closes the item's open attempt: as `delivered` when it is the
+report's attempt, else as `superseded`. The record holds while no attempt is opened on the item after
+it. It never closes an issue, merges, publishes, verifies or archives a child.
+
+### Handoff (v275, #4070)
+
+`update_campaign_work_item {handoff: {responsibleActor, reason, nextAction}}` records that the agent
+work on an item is done and who acts next; `null` withdraws it, and assigning the item again deletes
+it. An unfinished committed item handed to `human` or `external` no longer holds the campaign open
+(see Campaign Completion). A handoff to `orchestrator` or `child` still counts as agent work.
+
 ### Reported Stage
 
 `implementing`, `in_review`, `awaiting_checks`, `awaiting_approval`, `merge_queued`, `merged`, or
@@ -116,8 +150,9 @@ attempts, the observed status of the open attempt's session, its dependencies' d
 its verifications. The state is never stored. The first matching rule wins:
 
 1. `commitment` is `cancelled` → **cancelled**; `scope_removed` → **removed**.
-2. The item's latest attempt has a `delivered` verification → **delivered**. Opening a new attempt
-   on a delivered item reopens it visibly.
+2. The item's latest attempt has a `delivered` verification, or its latest recorded delivery
+   postdates every attempt → **delivered**. Opening a new attempt on a delivered item reopens it
+   visibly.
 3. The item has an open attempt:
    1. a recorded blocker → **blocked** (`recorded_blocker`);
    2. the session is deleted → **blocked** (`attempt_session_unavailable`);
@@ -139,12 +174,33 @@ its verifications. The state is never stored. The first matching rule wins:
    In both of the last two cases the item also carries the cause `dependency_unfinished` while any
    dependency is unfinished, so a planned item says what it is waiting on just as a queued one does.
 
-`delivered` therefore requires a work-item verification with outcome `delivered`. An idle session,
-a closed issue, a successful command, a reported `merged` stage, or a pull request in the merge
-queue never sets it.
+`delivered` therefore requires a work-item verification with outcome `delivered` or a recorded
+delivery the control plane checked. An idle session, a closed issue, a successful command, a reported
+`merged` stage, or a pull request in the merge queue never sets it.
 
 The unfinished states are `planned`, `queued`, `running`, `waiting`, and `blocked`. Accepted work
 waiting on dependencies or approvals stays unfinished.
+
+### Campaign Completion (#4070)
+
+`campaignTerminalStatus` in `db.ts` is the one place the end state is decided, once every child is
+verified (and, under Stop and Archive, archived and cleaned up) and nothing is pending:
+
+1. Original scoped work with eligible recovery keeps the campaign going; without eligible recovery
+   it is **blocked**, as before. Items handed to `human` or `external` are left out of this check.
+2. With no such handoff the campaign is **Verified Complete**, except that under Full Control any
+   unfinished committed item an agent still owns (an unhanded follow-up, or one whose handoff was
+   withdrawn or given to an agent) leaves it **blocked**. A Custom campaign reads its children alone,
+   as before.
+3. With one, it is **Complete with Handoffs** (`complete_with_handoffs`) only while every unfinished
+   committed item is handed to `human` or `external`; any other unfinished committed item, handed to
+   `orchestrator` or `child` or not handed at all, leaves it **blocked**.
+
+Both terminal statuses stop continuations, end Campaign Elapsed, and read the campaign's recovery
+records as resolved. A handed-off item that is assigned again, delivered, or joined by new unfinished
+work reopens the campaign on the next read. The projection's `handoffs` lists the handed-off items
+for the owner, and Campaign Status shows them under Handed Off. Dashboards older than v275 receive
+`complete_with_handoffs` as `waiting_human`.
 
 ## Orchestrator Operations
 
@@ -159,7 +215,8 @@ refused, not truncated.
 | Operation | Effect |
 | --- | --- |
 | `record_campaign_plan {items[], planComplete}` | Idempotent upsert by `key`, at most 100 items per call. Supplied fields replace; omitted fields are unchanged. Dependencies are named by key, within the call or already recorded. It never changes commitment, attempts, or verification. |
-| `update_campaign_work_item {workItemId, …}` | Title, issue, dispatch state, queue position, dependencies, commitment, stage, blocker, next action, and `endAttempt {reason: abandoned \| failed}`. `null` clears. |
+| `update_campaign_work_item {workItemId, …}` | Title, issue, dispatch state, queue position, dependencies, commitment, stage, blocker, next action, `handoff` (v275), and `endAttempt {reason: abandoned \| failed}`. `null` clears. |
+| `record_campaign_work_item_delivery {workItemId, pullRequests?, report?, note?}` | v275. Records delivery from checked evidence; see Recorded Delivery. |
 | `assign_campaign_work_item {workItemId, childSessionId}` | Opens an attempt; closes earlier open attempts as described above. The child must be a descendant of the calling Orchestrator (the same scope `verify_campaign_child` uses) and visible to it. Cancelled or removed items cannot be assigned until recommitted. |
 | `create_session {…, campaignWorkItemId}` | Protocol v220 (#3106). The Orchestrator names the child's work item when it creates the child. The item is checked before anything is written, and the child's attempt opens under the `assign_campaign_work_item` rules before the launch is sent, so the creation result already carries the open attempt in `campaignMembership`. If the attempt cannot be recorded (unknown item, an item in another campaign, a cancelled or removed item, or a caller that is not a campaign Orchestrator), no session is created, and the error names the reason. The session row, its campaign reservation and parent charges, and the attempt are written in one transaction, so a refused or failed recording leaves none of them behind. Pre-staged creation and creation with prompt images refuse the field. The runner's tool and CLI (`session create --work-item`) refuse it against a pre-v220 control plane, which would otherwise ignore it. Omitting it leaves the child unattributed until assigned, as before. |
 | `verify_campaign_child {…, workItem?: {id, outcome}}` | Existing verification, plus a work-item verification for the child's open attempt on that item. Without `workItem`, no item becomes delivered. |
@@ -421,8 +478,8 @@ queued before it was first assigned can show more Waiting or Queue Time than Ite
 durations are also measured on the server up to `times.asOf`, while a reader computes an open Item
 Elapsed against its own clock, so the two can differ by the age of the response.
 
-**Campaign Elapsed** ends at the time the campaign projection first observed `verified_complete`
-(`campaign_work_completion`). Completion is derived on read rather than written by any operation,
+**Campaign Elapsed** ends at the time the campaign projection first observed a terminal status,
+`verified_complete` or `complete_with_handoffs` (`campaign_work_completion`). Completion is derived on read rather than written by any operation,
 so the projection records the observation, and an observation of an unfinished campaign deletes it:
 a reopened campaign runs again until it next completes. A campaign created before recording began
 whose first observation is already complete finished before anything could see it, so it uses its
@@ -483,8 +540,8 @@ Server-observed review, check, and merge-queue facts for the pull requests a cam
 name. The implementation is `apps/control-plane/src/campaign-forge-observations.ts` (storage,
 derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
 
-- **Supported forge:** GitHub (github.com) only. A repository that is not a GitHub `owner/name`
-  is `unavailable{forge_unsupported}` and is never put in a query.
+- **Supported forges:** GitHub (github.com) and, since #3600, GitLab. Any other repository is
+  `unavailable{forge_unsupported}` and is never put in a query. See GitLab Merge Requests below.
 - **Credentials:** the control plane stores no forge credential and never sees a token. It asks the
   runner hosting the **root campaign session** to read, and that runner runs `gh api graphql
   --hostname github.com` in the root Orchestrator's own repository context: its agent context,
@@ -552,6 +609,46 @@ does not make an item delivered.
 
 **Retention:** observations are keyed by the root campaign with `ON DELETE CASCADE` and hold status
 data only.
+
+### GitLab Merge Requests (#3600)
+
+A host-qualified GitLab ref (`<gitlab-host>/group[/subgroup…]/project`, see Work Item) is read
+through the same runner, in the same context and environment, with its `glab` login. The control
+plane marks each observe request `gitlab: true`; an older control plane omits it and would reject a
+GitLab answer, so the runner then keeps GitLab refs `forge_unsupported`, as an older runner does.
+
+- **Hosts:** gitlab.com, or a host global `glab` configuration names (`glab config get api_protocol
+  --host <host> --global`, the forge summary's own non-secret check). Any other host is
+  `forge_unsupported` and never contacted. Every API call names `--hostname`; a bare project path is
+  never given to `glab`.
+- **What is read, in GitLab's terms** (`CampaignForgeGitLabMergeRequestObservation`): state (`locked`
+  reads `open`), draft, head SHA, target branch, approvals (whether the project's rules are
+  satisfied, how many approved, how many more are needed), the head pipeline (its id and status,
+  which is the merged-results pipeline where the project runs them), the merge-train car (status and
+  1-based position for an open merge request; null when it is not on a train or the project has no
+  trains), and the merge or squash commit. GitHub's review decision, required checks, and merge queue
+  are not imitated.
+- **Calls and bounds:** per merge request, its detail and approvals, then for an open one its train
+  car and, when on a train, the train's order (100 cars). At most four merge requests are read at
+  once, each `glab` call has a 15-second timeout, and a host's first call runs alone: when it fails
+  as a whole (not signed in, unreachable, rate limited, or no `glab`), that host's other merge
+  requests take the same reason without another call. All GitLab reads of one runner request stop
+  after 35 seconds, inside the control plane's 45-second `requestTimeoutMs`; a merge request not
+  finished by then is `forge_unreachable`, and every other result still arrives.
+- **Approvals:** `left` is GitLab's remaining rule count (an Enterprise Edition field). Without it,
+  an unapproved merge request reads "Not Approved", never "Approval Required", because Community
+  Edition's `approved` only says whether anyone approved.
+- **Fail closed:** only a `success` pipeline reads as passed. Skipped, manual, canceled, running,
+  pending, and unknown statuses never do, and no pipeline at all is not passing.
+- **Isolation:** GitHub and GitLab refs in one request are read side by side, and a GitHub batch
+  failure then fails only the GitHub refs, so neither forge makes the other's refs unavailable.
+- **Recovery:** a fresh failed pipeline on an open merge request raises the same `repair_checks`
+  observation as failing GitHub checks. GitLab has no "changes requested" decision, so nothing maps to
+  `rereview`.
+- **Reasons** keep the table above, read for GitLab: `forge_cli_missing` is no `glab`,
+  `forge_unauthenticated` is `glab` not signed in to that host, `forge_unsupported` is a host `glab`
+  is not configured for (or a runner or control plane that predates GitLab status), and
+  `forge_not_found` is a merge request the login cannot see.
 
 ## Compatibility
 

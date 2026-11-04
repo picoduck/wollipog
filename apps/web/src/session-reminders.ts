@@ -7,7 +7,7 @@ import {
 } from "@wollipog/protocol";
 import { formatReminderInstant, reminderDisplayZone } from "./reminder-schedule.js";
 import { sortInboxSessions } from "./inbox.js";
-import { sessionFollowUp } from "./session-follow-up.js";
+import { FIRED_REMINDER_RESULT_REVISION, sessionFollowUp } from "./session-follow-up.js";
 import {
   BACKGROUND_DELIVERY_STATUS,
   backgroundDeliveryAccessibleName,
@@ -105,7 +105,7 @@ export function sortSessionsForReminders(
       return reminder?.state === "fired" && sessionFollowUp(session).priority < 2
         ? { ...session, attention: { version: 1 as const, humanActions: session.attention?.humanActions ?? [],
             meaningfulAt: session.attention?.meaningfulAt ?? session.createdAt,
-            result: { revision: "reminder", at: reminder.firedAt ?? session.createdAt, owner: "human" as const },
+            result: { revision: FIRED_REMINDER_RESULT_REVISION, at: reminder.firedAt ?? session.createdAt, owner: "human" as const },
             acknowledgedRevision: null } } : session;
     });
     return sortInboxSessions(withDueFollowUp, pins, new Set(), familySessions).map((session) => original.get(session.id)!);

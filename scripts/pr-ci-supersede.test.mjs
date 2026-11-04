@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import vm from "node:vm";
 import { currentReadyHead, MAX_PAGES, supersede, supersededRuns, targetFromEvent } from "./pr-ci-supersede.mjs";
 
 const repository = "example/project";
@@ -13,7 +14,7 @@ const workflowRun = (changes = {}) => ({
   path: ".github/workflows/ci.yml", repository: { full_name: repository },
   head_repository: { full_name: repository }, head_branch: branch, head_sha: head, ...changes,
 });
-const event = (changes = {}) => ({ action: "in_progress", workflow_run: workflowRun(changes) });
+const event = (changes = {}) => ({ action: "requested", workflow_run: workflowRun({ status: "queued", ...changes }) });
 const pull = (changes = {}) => ({
   draft: false, head: { sha: head, ref: branch, repo: { full_name: repository } }, ...changes,
 });
@@ -44,8 +45,11 @@ function fakeApi({ pulls = [pull()], runs = [], pullsAfter, failCancel = new Set
   return { api, calls, cancels: () => calls.filter((call) => call.path.endsWith("/cancel")).map((call) => call.path) };
 }
 
-test("only an in-progress same-repository pull-request CI run is eligible", () => {
+test("only requested CI or an in-progress rerun of same-repository pull-request CI is eligible", () => {
   assert.deepEqual(targetFromEvent(event(), repository), target);
+  assert.deepEqual(targetFromEvent({ action: "in_progress", workflow_run: workflowRun({ run_attempt: 2 }) }, repository), target);
+  assert.throws(() => targetFromEvent({ ...event(), action: "in_progress" }, repository),
+    "initial in_progress must not duplicate requested cleanup");
   assert.deepEqual(targetFromEvent(event({ head_repository: { full_name: "fork/project" } }), repository),
     { ...target, headRepository: "fork/project" }, "a fork's pull request is still this repository's CI run");
   for (const changes of [
@@ -54,6 +58,7 @@ test("only an in-progress same-repository pull-request CI run is eligible", () =
     { repository: { full_name: "other/repo" } }, { head_repository: { full_name: "bad name" } },
     { head_branch: "-option" }, { head_branch: "a..b" }, { head_branch: "has space" }, { head_branch: "x\ny" },
     { head_sha: "bad" }, { id: 0 }, { workflow_id: 0 },
+    { run_attempt: 0 }, { run_attempt: undefined }, { run_attempt: 1.5 }, { run_attempt: "2" },
   ]) assert.throws(() => targetFromEvent(event(changes), repository), JSON.stringify(changes));
   assert.throws(() => targetFromEvent({ ...event(), action: "completed" }, repository));
   assert.throws(() => targetFromEvent(event(), "not a repository"));
@@ -199,9 +204,90 @@ test("run listings are paged to a bound", async () => {
   assert.equal(pages, MAX_PAGES);
 });
 
+// Evaluate the actual job admission before calling the actual selector against an inert API.
+// This models event delivery and live PR changes, not GitHub's scheduler or runner availability.
+const supersedeWorkflow = readFileSync(".github/workflows/pr-ci-supersede.yml", "utf8");
+const activities = supersedeWorkflow.match(/types: \[([^\]]+)\]/)[1].split(", ");
+const jobCondition = supersedeWorkflow.match(/^    if: (.+)$/m)[1];
+async function deliver(wakeup, fake) {
+  const admitted = activities.includes(wakeup.action) && vm.runInNewContext(jobCondition, {
+    github: { repository, event: wakeup },
+  }, { timeout: 1_000 });
+  if (!admitted) return [];
+  return supersede(targetFromEvent(wakeup, repository), { api: fake.api, log: () => {} });
+}
+
+test("requested cleanup acts while all CI jobs are queued and duplicate same-head wakeups retain each other", async () => {
+  const runs = [workflowRun({ id: 150, head_sha: older, status: "queued" }),
+    workflowRun({ id: 200, status: "queued" }), workflowRun({ id: 201, status: "queued" })];
+  for (const id of [200, 201]) {
+    const fake = fakeApi({ runs });
+    assert.deepEqual(await deliver(event({ id }), fake), [150]);
+    assert.equal(fake.cancels().length, 1, "neither current-head duplicate is cancelled");
+  }
+});
+
+test("cleanup reads live readiness when the same request is delivered before and after a draft-to-ready transition", async () => {
+  const runs = [workflowRun({ id: 150, head_sha: older })];
+  const livePulls = [pull({ draft: true })];
+  const fake = fakeApi({ pulls: livePulls, runs });
+  const request = event();
+  assert.deepEqual(await deliver(request, fake), []);
+  assert.deepEqual(fake.cancels(), []);
+  // workflow_run carries no source PR draft flag. Re-delivering the identical request after
+  // readiness changes must read the live API state. The separate PR-event contract tests cover
+  // CI's ready_for_review admission when its original PR payload still says draft.
+  livePulls[0] = pull({ draft: false });
+  assert.deepEqual(await deliver(request, fake), [150]);
+  assert.deepEqual(fake.cancels(), ["/repos/example/project/actions/runs/150/cancel"]);
+});
+
+test("reordered requests use the live head, and a later draft change stops a pending cancel", async () => {
+  const newest = "c".repeat(40);
+  const live = [pull({ head: { ...pull().head, sha: newest } })];
+  const runs = [workflowRun({ id: 150, head_sha: older }), workflowRun({ id: 200 }),
+    workflowRun({ id: 300, head_sha: newest }), workflowRun({ id: 301, head_sha: newest })];
+  assert.deepEqual(await deliver(event({ id: 300, head_sha: newest }), fakeApi({ pulls: live, runs })), [150, 200]);
+  const stale = fakeApi({ pulls: live, runs });
+  assert.deepEqual(await deliver(event(), stale), []);
+  assert.deepEqual(stale.cancels(), [], "the delayed older request cannot cancel the newer head");
+  const becameDraft = fakeApi({ runs, pullsAfter: [pull({ draft: true })] });
+  assert.deepEqual(await deliver(event(), becameDraft), []);
+  assert.deepEqual(becameDraft.cancels(), [], "readiness is checked again before mutation");
+});
+
+test("A to B to A retains all current A runs when a B request is delivered late", async () => {
+  const runs = [workflowRun({ id: 100 }), workflowRun({ id: 150, head_sha: older }), workflowRun()];
+  const delayedB = fakeApi({ runs });
+  assert.deepEqual(await deliver(event({ id: 150, head_sha: older }), delayedB), []);
+  assert.deepEqual(delayedB.cancels(), []);
+  assert.deepEqual(await deliver(event(), fakeApi({ runs })), [150], "only B is obsolete after returning to A");
+  const pushedBackBeforeCancel = fakeApi({
+    pulls: [pull({ head: { ...pull().head, sha: older } })], runs, pullsAfter: [pull()],
+  });
+  assert.deepEqual(await deliver(event({ id: 150, head_sha: older }), pushedBackBeforeCancel), []);
+  assert.deepEqual(pushedBackBeforeCancel.cancels(), [], "the per-candidate live-head recheck protects A");
+});
+
+test("initial in_progress jobs are skipped before requesting a runner; reruns retain cleanup", async () => {
+  const runs = [workflowRun({ id: 150, head_sha: older }), workflowRun({ id: 201, run_attempt: 2 })];
+  const skipped = fakeApi({ runs });
+  assert.deepEqual(await deliver({ ...event(), action: "in_progress" }, skipped), []);
+  assert.deepEqual(skipped.calls, [], "job-level false must prevent any runner or API work");
+  for (const run_attempt of [2, 3]) {
+    assert.deepEqual(await deliver({ action: "in_progress", workflow_run: workflowRun({ run_attempt }) }, fakeApi({ runs })), [150]);
+    const stale = fakeApi({ runs });
+    assert.deepEqual(await deliver({ action: "in_progress", workflow_run: workflowRun({ run_attempt, head_sha: older }) }, stale), []);
+    assert.deepEqual(stale.cancels(), [], "rerunning an obsolete head cannot supersede current CI");
+  }
+  const completed = fakeApi({ runs });
+  assert.deepEqual(await deliver({ ...event(), action: "completed" }, completed), []);
+  assert.deepEqual(completed.calls, []);
+});
+
 test("privileged superseding checks out only trusted workflow_run code and stays outside required CI", () => {
   const text = readFileSync(".github/workflows/pr-ci-supersede.yml", "utf8");
-  assert.match(text, /workflows: \[CI\]\s+types: \[in_progress\]/);
+  assert.match(text, /workflows: \[CI\]\s+types: \[requested, in_progress\]/);
   assert.match(text, /ref: \$\{\{ github.sha \}\}/);
   assert.match(text, /persist-credentials: false/);
   assert.doesNotMatch(text, /workflow_run\.(head_sha|head_branch)|download-artifact|pull_request_target|github\.head_ref/);

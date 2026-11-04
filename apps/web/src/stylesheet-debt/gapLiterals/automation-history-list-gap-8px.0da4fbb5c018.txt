@@ -1,1 +1,0 @@
-|.automation-history-list|gap|8px

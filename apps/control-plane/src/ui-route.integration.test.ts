@@ -5,6 +5,7 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { createRequire } from "node:module";
+import { DatabaseSync } from "node:sqlite";
 import { test } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -14,6 +15,7 @@ import {
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   type ResourceScope,
   type RunnerMetadata,
+  type SessionView,
 } from "@wollipog/protocol";
 import { hashToken } from "./auth.js";
 
@@ -27,7 +29,7 @@ interface UpgradeRefusal {
 }
 const PAGED_READER_REFUSAL = "This machine needs a newer runner for paged session event reads. Update and restart the runner. " +
   "To read now, request an explicit limit and eventEpoch.";
-import { ControlPlaneDb } from "./db.js";
+import { ATTACHED_DB_BUSY_TIMEOUT_MS, ControlPlaneDb } from "./db.js";
 import { defaultLocalDeviceTokenPath, loadOrCreateLocalDeviceToken } from "./local-device-credential.js";
 import { MAX_UI_CLIENT_MESSAGE_BYTES } from "./ui-channel.js";
 
@@ -92,7 +94,7 @@ test("missing-limit event reads page 50,000 cached events with exact continuatio
   await waitForHealth(base, child, () => output);
   // Startup settles orphaned sessions. Restore only these disposable credential actors as live,
   // so the production auth path, rather than a forged header, determines the reader's runner.
-  const actors = ControlPlaneDb.open(databasePath);
+  const actors = ControlPlaneDb.attach(databasePath);
   actors.updateSessionStatus("default-events", "running", Date.now());
   actors.updateSessionStatus("v221-event-reader", "running", Date.now());
   actors.updateSessionStatus("current-event-reader", "running", Date.now());
@@ -791,8 +793,20 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     },
   );
   const providerLoginCommand = await runnerInbox.take((message) => message.type === "start_provider_login");
+  const publications = new DatabaseSync(databasePath, { timeout: ATTACHED_DB_BUSY_TIMEOUT_MS });
+  t.after(() => publications.close());
+  const publicationIntent = publications.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?")
+    .get(`request:${providerLoginCommand.requestId}`) as { record: string } | undefined;
+  assert.ok(publicationIntent, "actual HTTP Add Account committed enrollment before its stub runner received the RPC");
+  const loginTicket = JSON.parse(publicationIntent.record) as { grantId: string; ticket: string; profileId: string | null; kind: string };
+  assert.equal(loginTicket.grantId, providerLoginCommand.profileGrantId);
+  assert.equal(loginTicket.kind, "login");
+  assert.equal(loginTicket.profileId, null, "a dispatch does not invent the future HOME identity");
+  assert.match(loginTicket.ticket, /^[a-f0-9]{64}$/u);
   assert.equal(providerLoginCommand.provider, "claude");
   assert.equal(providerLoginCommand.label, "Work");
+  assert.match(String(providerLoginCommand.profileGrantId), /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u,
+    "a v225 runner creates the new account as a managed profile granted to this control plane (#3239)");
   const providerLogin = {
     operationId: "login_12345678-1234-4123-8123-123456789abc",
     accountId: "work",
@@ -824,6 +838,10 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   );
   const codeCommand = await runnerInbox.take((message) => message.type === "submit_provider_login_code");
   assert.equal(codeCommand.code, "transient-response");
+  const evidenceRows = publications.prepare("SELECT record FROM provider_profile_publication_events ORDER BY seq LIMIT 65")
+    .all() as unknown as Array<{ record: string }>;
+  assert.doesNotMatch(JSON.stringify(evidenceRows), /transient-response|Blocked Fixture|Still Blocked/,
+    "the publication ledger does not store auth codes or account labels");
   runner.send(JSON.stringify({
     type: "provider_login_result",
     requestId: codeCommand.requestId,
@@ -847,6 +865,9 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     login: { ...providerLogin, status: "cancelled", expectsCode: false, verificationUrl: undefined },
   }));
   assert.equal((await cancelLoginResponse).status, 200);
+  assert.equal((publications.prepare("SELECT record FROM provider_profile_publication_intents WHERE intent_key=?")
+    .get(`request:${providerLoginCommand.requestId}`) as { record: string }).record, publicationIntent.record,
+  "cancellation preserves the exact durable intent");
 
   runner.send(JSON.stringify({ type: "provider_logins_updated", runnerId: "runner-ui-route", logins: [providerLogin] }));
   const projectedProviderLogins = await waitForValue(
@@ -921,14 +942,20 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
       available: true,
       context: { kind: "native" },
     }],
-    providerAccounts: [{ id: "work", label: "Work", provider: "claude", authStatus: "authenticated" }],
+    providerAccounts: [
+      { id: "work", label: "Work", provider: "claude", authStatus: "authenticated" },
+      // Another control plane's profile on the same Machine (#3240).
+      { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated",
+        profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
+    ],
   }));
   await waitForValue(
     async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
       runners: Array<{ runnerId: string; providerAccounts?: Array<{ id: string }> }>;
     }).runners.find((candidate) => candidate.runnerId === "runner-ui-route")?.providerAccounts,
-    (accounts) => accounts?.some((account) => account.id === "work") === true,
-    "the advertised provider account in the Machine view",
+    (accounts) => accounts?.some((account) => account.id === "work") === true &&
+      accounts.some((account) => account.id === "theirs"),
+    "the advertised provider accounts in the Machine view",
   );
   const defaultUrl = `${httpBase}/api/runners/runner-ui-route/provider-account-defaults/claude`;
   const defaultBody = { accountId: "work", expectedRevision: 0 };
@@ -952,6 +979,11 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     method: "PUT", body: JSON.stringify(defaultBody), headers: { "content-type": "application/json" },
   });
   assert.equal(staleDefaultChange.status, 409);
+  const notGrantedDefault = await fetchWithBearer(defaultUrl, ownerToken, {
+    method: "PUT", body: JSON.stringify({ accountId: "theirs", expectedRevision: 1 }), headers: { "content-type": "application/json" },
+  });
+  assert.equal(notGrantedDefault.status, 409, "a profile only other control planes may use is not a default here (#3240)");
+  assert.equal((await notGrantedDefault.json() as { code?: string }).code, "PROVIDER_PROFILE_NOT_GRANTED");
   const projectedDefaults = await waitForValue(
     async () => (await (await fetchWithBearer(`${httpBase}/api/runners`, ownerToken)).json() as {
       runners: Array<{ runnerId: string; providerAccountDefaults?: Array<{ provider: string; accountId: string }> }>;
@@ -1243,6 +1275,37 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     `/api/sessions/${createdSessionId}/shells/${initialTui.shellId}`,
     { method: "DELETE" },
   )).status, 204);
+  // #3338: a TUI its account lease refused carries the session's typed refusal to the client, and a
+  // malformed one falls back to the runner's sentence.
+  const busyRefusal = {
+    code: "busy", provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 7,
+  };
+  for (const [providerHomeRefusal, expected] of [
+    [busyRefusal, busyRefusal],
+    [{ ...busyRefusal, homePath: "/private/account" }, undefined],
+  ] as const) {
+    const refusedOpen = ownerFetch(`/api/sessions/${createdSessionId}/shells`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ kind: "agent_tui" }),
+    });
+    const refusedRequest = await runnerInbox.take((message) =>
+      message.type === "shell_open" && message.sessionId === createdSessionId &&
+      message.shellId !== initialTui.shellId);
+    runner.send(JSON.stringify({
+      type: "shell_open_result",
+      requestId: refusedRequest.requestId,
+      ok: false,
+      error: "provider home is busy",
+      providerHomeRefusal,
+    }));
+    const refused = await refusedOpen;
+    assert.equal(refused.status, 502);
+    assert.deepEqual(await refused.json(), {
+      error: "provider home is busy",
+      ...(expected ? { providerHomeRefusal: expected } : {}),
+    });
+  }
   const manualOpen = ownerFetch(`/api/sessions/${createdSessionId}/shells`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -1329,6 +1392,7 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     currentTurnOpening: true,
     projects: true,
     createProjectLocations: true,
+    idempotentProjectCreation: true,
     accessScopeManagement: true,
     nativeTuiLaunch: true,
     stopFailureRecovery: true,
@@ -1371,6 +1435,49 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
     "snapshot",
     "a paired device can authenticate the real /ui WebSocket route",
   );
+
+  // A dashboard can clear only the exact blocked snapshots it saw, with no provider command.
+  const blockedJobs = ["turn-blocked", "unknown"].flatMap((parentTurnId) => [{
+    id: `finished-${parentTurnId}`, parentTurnId, runnerId: "runner-ui-route", workspaceId: "workspace-1",
+    context: { kind: "native" as const }, launchType: "agent" as const, registeredAt: 1_000,
+    terminalStatus: "completed" as const, terminalObservedAt: 2_000, continuationRequired: true,
+  }, {
+    id: `monitor-${parentTurnId}`, parentTurnId, runnerId: "runner-ui-route", workspaceId: "workspace-1",
+    context: { kind: "native" as const }, launchType: "monitor" as const, registeredAt: 1_000,
+  }]);
+  runner.send(JSON.stringify({ type: "session_runtime_updated", snapshot: {
+    ...sessionSnapshot("session-target"), status: "idle", backgroundWorkTracking: "managed",
+    backgroundWorkState: "running", backgroundJobs: blockedJobs,
+  } }));
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as SessionView | undefined)?.backgroundDeliveries?.filter((delivery) =>
+        delivery.watchdogState === "continuation_blocked").length === 2);
+  }
+  const blockedSession = (await (await ownerFetch("/api/sessions/session-target")).json() as { session: SessionView }).session;
+  const blockedTargets = blockedSession.backgroundDeliveries!.filter((delivery) => delivery.blockedResultRevision)
+    .map((delivery) => ({ parentTurnId: delivery.parentTurnId, revision: delivery.blockedResultRevision! }));
+  const blockedPath = "/api/sessions/session-target/background-deliveries/acknowledge-blocked-results";
+  const blockedRequest = { method: "POST", headers: { "content-type": "application/json" },
+    body: JSON.stringify({ targets: blockedTargets }) };
+  assert.equal((await fetch(`${httpBase}${blockedPath}`, blockedRequest)).status, 401);
+  assert.equal((await ownerFetch(blockedPath, { ...blockedRequest, body: JSON.stringify({ targets: [{}] }) })).status, 400);
+  assert.equal((await ownerFetch(blockedPath, { ...blockedRequest,
+    body: JSON.stringify({ targets: blockedTargets.map((target) => ({ ...target, revision: "stale" })) }) })).status, 200);
+  assert.equal(((await (await ownerFetch("/api/sessions/session-target")).json()) as { session: SessionView }).session
+    .backgroundDeliveries!.filter((delivery) => delivery.watchdogState === "continuation_blocked").length, 2);
+  const blockedAckResponse = await ownerFetch(blockedPath, blockedRequest);
+  assert.equal(blockedAckResponse.status, 200, await blockedAckResponse.clone().text());
+  const blockedAckSession = await blockedAckResponse.json() as SessionView;
+  assert.equal(blockedAckSession.backgroundDeliveries!.filter((delivery) => delivery.blockedResultAcknowledgedAt).length, 2);
+  assert.ok(blockedAckSession.backgroundDeliveries!.every((delivery) => delivery.watchdogState == null));
+  assert.deepEqual(blockedAckSession.backgroundJobs, blockedSession.backgroundJobs);
+  assert.equal((await ownerFetch(blockedPath, blockedRequest)).status, 200, "repeat acknowledgement is harmless");
+  for (const inbox of [uiInbox, operatorUiInbox]) {
+    await inbox.take((message) => message.type === "session_upsert" &&
+      (message.session as SessionView | undefined)?.backgroundDeliveries?.filter((delivery) =>
+        delivery.blockedResultAcknowledgedAt != null).length === 2);
+  }
 
   const terminalMissingJobs = Array.from({ length: 33 }, (_, index) => ({
     id: `route-missing-job-${String(index).padStart(3, "0")}`,
@@ -1904,6 +2011,61 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   assert.equal(createdProject.canManage, true);
   await uiInbox.take((message) => message.type === "project_upsert" && message.project.id === createdProject.id);
 
+  // New Project's retry identity (#3468): a repeat returns the first request's project, another
+  // human's identical id is theirs alone, and the id can't be reused for another name.
+  const createWithRequest = (token: string | null, body: Record<string, unknown>) => token
+    ? fetch(`${httpBase}/api/projects`, {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify(body),
+    })
+    : ownerFetch("/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+  const projectIdOf = async (response: Response) =>
+    (await response.json() as { project: { id: string } }).project.id;
+  const requestedFirst = await createWithRequest(null, { name: "Retried Project", requestId: "req-retried" });
+  assert.equal(requestedFirst.status, 201);
+  const retriedProjectId = await projectIdOf(requestedFirst);
+  const requestedRepeat = await createWithRequest(null, { name: " Retried Project ", requestId: "req-retried" });
+  assert.equal(requestedRepeat.status, 200);
+  assert.equal(await projectIdOf(requestedRepeat), retriedProjectId);
+  const reusedRequest = await createWithRequest(null, { name: "Another Name", requestId: "req-retried" });
+  assert.equal(reusedRequest.status, 409);
+  assert.equal((await reusedRequest.json() as { code?: string }).code, "PROJECT_REQUEST_ID_REUSED");
+  const operatorSameRequest = await createWithRequest(operatorToken, { name: "Retried Project", requestId: "req-retried" });
+  assert.equal(operatorSameRequest.status, 201);
+  const operatorRetriedProjectId = await projectIdOf(operatorSameRequest);
+  assert.notEqual(operatorRetriedProjectId, retriedProjectId,
+    "another human's request id never returns this human's project");
+  assert.equal((await createWithRequest(null, { name: "Bad Id", requestId: "has spaces" })).status, 400);
+  const ownerProjects = (await (await ownerFetch("/api/projects")).json() as { projects: Array<{ id: string; name: string }> }).projects;
+  assert.deepEqual(ownerProjects
+    .filter((project) => project.name === "Retried Project" && project.id !== operatorRetriedProjectId)
+    .map((project) => project.id), [retriedProjectId], "the owner's retries made one project");
+  // A replay never hands over a project its requester can no longer see: here an admin narrows
+  // the operator's new team project to themselves, and the operator's retry is refused.
+  const teamRequest = { name: "Narrowed Later", requestId: "req-narrowed", owner: { kind: "team", teamId: scopeTeam.teamId } };
+  const narrowedFirst = await createWithRequest(operatorToken, teamRequest);
+  assert.equal(narrowedFirst.status, 201);
+  const narrowedProjectId = await projectIdOf(narrowedFirst);
+  const narrowPreview = (await (await ownerFetch(
+    `/api/projects/${narrowedProjectId}/access-scope?ownerKind=user&ownerId=${identity.userId}`,
+  )).json() as { preview: { confirmationToken?: string } }).preview;
+  const narrowed = await ownerFetch(`/api/projects/${narrowedProjectId}/access-scope`, {
+    method: "PUT",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ owner: { kind: "user", userId: identity.userId }, confirmationToken: narrowPreview.confirmationToken }),
+  });
+  assert.equal(narrowed.status, 200);
+  const narrowedReplay = await createWithRequest(operatorToken, teamRequest);
+  assert.equal(narrowedReplay.status, 409);
+  const narrowedBody = await narrowedReplay.json() as { code?: string; project?: unknown };
+  assert.equal(narrowedBody.code, "PROJECT_REQUEST_UNAVAILABLE");
+  assert.equal(narrowedBody.project, undefined, "the narrowed project is not in the refusal");
+
   const deniedOperatorOrganizationProject = await fetch(`${httpBase}/api/projects`, {
     method: "POST",
     headers: {
@@ -2208,6 +2370,26 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   await uiInbox.take((message) => message.type === "project_upsert" && message.project.id === createdProject.id &&
     message.project.locations.some((location) => location.path === "/repos/browsed-location"));
 
+  // A repeat of that request, as after a lost reply, is refused with a code Add Location reads (#3468).
+  const repeatedLocationRequest = ownerFetch(`/api/projects/${createdProject.id}/locations/new`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ runnerId: "runner-ui-route", name: "Browsed Location", path: "/repos/browsed-location" }),
+  });
+  const repeatedBrowseRequest = await runnerInbox.take((message) =>
+    message.type === "list_directory" && message.path === "/repos/browsed-location");
+  runner.send(JSON.stringify({
+    type: "list_directory_result",
+    requestId: repeatedBrowseRequest.requestId,
+    ok: true,
+    path: "/repos/browsed-location",
+    parent: "/repos",
+    entries: [],
+  }));
+  const repeatedLocationResponse = await repeatedLocationRequest;
+  assert.equal(repeatedLocationResponse.status, 409);
+  assert.equal((await repeatedLocationResponse.json() as { code?: string }).code, "LOCATION_ALREADY_REGISTERED");
+
   const missingLocationRequest = ownerFetch(`/api/projects/${createdProject.id}/locations/new`, {
     method: "POST",
     headers: { "content-type": "application/json" },
@@ -2469,6 +2651,43 @@ test("real /ui route advertises and acknowledges targeted bounded subscriptions"
   });
   assert.equal(missingRestore.status, 404);
   assert.deepEqual(Object.keys(await missingRestore.json() as Record<string, unknown>), ["error"]);
+
+  // Permanent fault injection follows all existing grant-producing scenarios.
+  let refusedStarts = 0;
+  const rejectUnexpectedLogin = (event: MessageEvent) => {
+    const command = JSON.parse(String(event.data)) as { type: string; requestId: string };
+    if (command.type !== "start_provider_login") return;
+    refusedStarts++;
+    // Make a regression fail promptly instead of waiting for an unanswered runner RPC timeout.
+    runner.send(JSON.stringify({ type: "provider_login_result", requestId: command.requestId,
+      action: "start", ok: false, error: "Unexpected fixture sign-in command" }));
+  };
+  runner.addEventListener("message", rejectUnexpectedLogin);
+  const placeholderCount = (status: "pending" | "revoked") => (publications.prepare(`SELECT count(*) AS n
+    FROM provider_profile_grants WHERE origin='created' AND status=? AND provider_account_id LIKE 'login:%'`)
+    .get(status) as { n: number }).n;
+  const pendingPlaceholders = placeholderCount("pending"), revokedPlaceholders = placeholderCount("revoked");
+  publications.exec(`CREATE TRIGGER publication_login_fault BEFORE INSERT ON provider_profile_publication_events
+    WHEN json_extract(NEW.record,'$.kind')='login' BEGIN SELECT RAISE(ABORT,'fixture publication unavailable'); END`);
+  const deniedLogin = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Blocked Fixture" }),
+  });
+  assert.equal(deniedLogin.status, 503, await deniedLogin.clone().text());
+  assert.equal((await deniedLogin.json() as { code: string }).code, "PROVIDER_PUBLICATION_UNAVAILABLE");
+  assert.equal(refusedStarts, 0, "dispatch-write failure must not silently fall through to ungranted Add Account");
+  assert.equal(placeholderCount("pending"), pendingPlaceholders, "failed enrollment must not publish a new unbindable pending grant");
+  assert.equal(placeholderCount("revoked"), revokedPlaceholders + 1, "the fresh grant is spent under the same writer lock");
+  assert.equal((publications.prepare("SELECT degraded FROM provider_profile_publication_source").get() as { degraded: number }).degraded, 1);
+  publications.exec("DROP TRIGGER publication_login_fault");
+  const degradedLogin = await fetchWithBearer(`${httpBase}/api/runners/runner-ui-route/provider-logins`, ownerToken, {
+    method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ provider: "claude", label: "Still Blocked" }),
+  });
+  assert.equal(degradedLogin.status, 503, "committed degradation continues to refuse after the write fault disappears");
+  assert.equal(placeholderCount("pending"), pendingPlaceholders);
+  assert.equal(placeholderCount("revoked"), revokedPlaceholders + 1, "already-degraded refusal creates no additional grant");
+  assert.equal(refusedStarts, 0);
+  runner.removeEventListener("message", rejectUnexpectedLogin);
+
 });
 
 test("legacy workspace rename cannot bypass durable Project management authority", { timeout: 30_000 }, async (t) => {
@@ -2788,12 +3007,27 @@ test("legacy workspace rename cannot bypass durable Project management authority
   );
 });
 
-test("adding an organization member reconnects its UI clients so they reload the directory (#2527)", { timeout: 30_000 }, async (t) => {
+test("directory changes refresh dashboards in place; only a member's own access change closes theirs (#2606)", { timeout: 30_000 }, async (t) => {
   const port = await reservePort();
-  const temp = mkdtempSync(join(tmpdir(), "wollipog-member-reconnect-"));
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-member-directory-"));
   const databasePath = join(temp, "control-plane.db");
   const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
-  ControlPlaneDb.open(databasePath).close();
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  const members = [
+    { userId: "usr_directory_ada", name: "Ada", deviceToken: "directory-ada-device-token" },
+    { userId: "usr_directory_lin", name: "Lin", deviceToken: "directory-lin-device-token" },
+  ];
+  for (const [index, member] of members.entries()) {
+    seed.createIdentityMember({
+      userId: member.userId, displayName: member.name, organizationId: identity.organizationId, role: "operator", now: 1,
+    });
+    seed.createDevice({
+      id: `dev_directory_${index}`, name: `${member.name} Device`, tokenHash: hashToken(member.deviceToken),
+      userId: member.userId, organizationId: identity.organizationId, now: 2,
+    });
+  }
+  seed.close();
 
   let output = "";
   const child = spawn(
@@ -2824,22 +3058,267 @@ test("adding an organization member reconnects its UI clients so they reload the
 
   const httpBase = `http://127.0.0.1:${port}`;
   await waitForHealth(httpBase, child, () => output);
-  const ui = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, ownerToken));
-  // A single-member organization reads every answer as the viewer's own; once a second member
-  // exists, a tab that kept its old directory would keep calling that member "you".
-  let created: Promise<Response> | undefined;
-  const closed = await closeAfter(ui, () => {
-    created = fetchWithBearer(`${httpBase}/api/identity/users`, ownerToken, {
-      method: "POST",
-      headers: { "content-type": "application/json" },
-      body: JSON.stringify({ displayName: "Grace Hopper", role: "operator" }),
+  const json = { "content-type": "application/json" };
+  const tokens = [ownerToken, members[0]!.deviceToken, members[1]!.deviceToken];
+  const dashboards = await Promise.all(tokens.map(async (token) => {
+    const socket = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, token));
+    const dashboard = { socket, refreshes: 0, closed: null as { code: number; reason: string } | null };
+    socket.on("message", (raw) => {
+      if ((JSON.parse(raw.toString()) as { type?: string }).type === "identity_directory_changed") dashboard.refreshes++;
     });
+    socket.once("close", (code, reason) => { dashboard.closed = { code, reason: reason.toString("utf8") }; });
+    return dashboard;
+  }));
+  t.after(() => dashboards.forEach(({ socket }) => socket.close()));
+  const [owner, ada, lin] = dashboards as [typeof dashboards[0], typeof dashboards[0], typeof dashboards[0]];
+  const refreshedTo = (expected: number[], description: string) => waitForValue(
+    () => dashboards.map(({ refreshes }) => refreshes),
+    (counts) => counts.every((count, index) => count === expected[index]),
+    description,
+  );
+
+  // A new member makes every session shared, so a transcript must stop calling their answers "you"
+  // (#2527); nobody's access changed, so every dashboard refreshes in place.
+  const created = await fetchWithBearer(`${httpBase}/api/identity/users`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ displayName: "Grace Hopper", role: "operator" }),
   });
-  assert.equal((await created!).status, 201);
-  assert.deepEqual(closed, { code: 1000, reason: "organization directory changed" },
-    "a new member is an ordinary reconnect, not an authorization failure");
-  const identity = await (await fetchWithBearer(`${httpBase}/api/identity`, ownerToken)).json() as {
+  assert.equal(created.status, 201);
+  await refreshedTo([1, 1, 1], "every dashboard to refresh after a member is added");
+  const directory = await (await fetchWithBearer(`${httpBase}/api/identity`, members[0]!.deviceToken)).json() as {
     memberships: Array<{ userName: string }>;
   };
-  assert.ok(identity.memberships.some((membership) => membership.userName === "Grace Hopper"));
+  assert.ok(directory.memberships.some((membership) => membership.userName === "Grace Hopper"));
+
+  // A rename, even of a connected member, changes nobody's access.
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/users/${members[0]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Ada Lovelace" }),
+  });
+  assert.equal(renamed.status, 200);
+  await refreshedTo([2, 2, 2], "every dashboard to refresh after a rename");
+  // Resending the same role and status is still only a rename.
+  const unchanged = await fetchWithBearer(`${httpBase}/api/identity/users/${members[0]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Ada L.", role: "operator", status: "active" }),
+  });
+  assert.equal(unchanged.status, 200);
+  await refreshedTo([3, 3, 3], "every dashboard to refresh after an unchanged-access edit");
+  await delay(250);
+  assert.deepEqual(dashboards.map(({ closed }) => closed), [null, null, null],
+    "adding or renaming a member closes no dashboard");
+
+  // A role change revokes that member's cached privileges with the authorization close; everyone
+  // else only refreshes.
+  const demoted = await fetchWithBearer(`${httpBase}/api/identity/users/${members[0]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ role: "viewer" }),
+  });
+  assert.equal(demoted.status, 200);
+  await waitForValue(() => ada.closed, (closed) => closed !== null, "the demoted member's dashboard to close");
+  assert.deepEqual(ada.closed, { code: 1008, reason: "authorization changed" });
+  await waitForValue(() => [owner.refreshes, lin.refreshes], ([a, b]) => a === 4 && b === 4,
+    "the other dashboards to refresh after a role change");
+
+  // Suspension does the same for the suspended member, on every device.
+  const suspended = await fetchWithBearer(`${httpBase}/api/identity/users/${members[1]!.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ status: "suspended" }),
+  });
+  assert.equal(suspended.status, 200);
+  await waitForValue(() => lin.closed, (closed) => closed !== null, "the suspended member's dashboard to close");
+  assert.deepEqual(lin.closed, { code: 1008, reason: "authorization changed" });
+  await waitForValue(() => owner.refreshes, (count) => count === 5, "the owner's dashboard to refresh after a suspension");
+  await delay(250);
+  assert.equal(owner.closed, null, "another member's role or status change never closes this dashboard");
+  assert.equal(ada.refreshes, 3, "a closed dashboard receives nothing more");
+
+  // The demoted member reconnects as a viewer, and the suspended member cannot reconnect.
+  const reconnected = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, members[0]!.deviceToken));
+  reconnected.close();
+  const viewerMutation = await fetchWithBearer(`${httpBase}/api/identity/users`, members[0]!.deviceToken, {
+    method: "POST", headers: json, body: JSON.stringify({ displayName: "Nope", role: "viewer" }),
+  });
+  assert.equal(viewerMutation.status, 403);
+  const refused = await rejectedSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, members[1]!.deviceToken));
+  assert.equal(refused.code, 1008);
+});
+
+test("saving your own name ends the default name and reconnects no dashboard (#3001)", { timeout: 30_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-own-name-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const secondOwnerToken = "own-name-second-owner-token";
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.createIdentityMember({
+    userId: "usr_own_name_grace", displayName: "Grace", organizationId: identity.organizationId, role: "owner", now: 1,
+  });
+  seed.createDevice({
+    id: "dev_own_name_grace", name: "Grace Device", tokenHash: hashToken(secondOwnerToken),
+    userId: "usr_own_name_grace", organizationId: identity.organizationId, now: 2,
+  });
+  seed.close();
+
+  let output = "";
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "apps/control-plane/src/index.ts"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const capture = (chunk: unknown) => {
+    output = (output + String(chunk)).slice(-32_768);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const json = { "content-type": "application/json" };
+  type Context = { userId: string; userName: string; defaultName?: true };
+  const contextOf = async (token: string) =>
+    ((await (await fetchWithBearer(`${httpBase}/api/identity`, token)).json()) as { context: Context }).context;
+
+  const before = await contextOf(ownerToken);
+  assert.equal(before.userName, "Owner");
+  assert.equal(before.defaultName, true);
+  assert.equal("defaultName" in await contextOf(secondOwnerToken), false, "only the bootstrap owner is asked");
+
+  // Another owner changing the bootstrap owner's access, with the name unchanged, does not save it.
+  const roleOnly = await fetchWithBearer(`${httpBase}/api/identity/users/${before.userId}`, secondOwnerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Owner", role: "owner" }),
+  });
+  assert.equal(roleOnly.status, 200);
+  assert.equal((await contextOf(ownerToken)).defaultName, true);
+
+  const socket = await openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, ownerToken));
+  const dashboard = { refreshes: 0, closed: null as number | null };
+  socket.on("message", (raw) => {
+    if ((JSON.parse(raw.toString()) as { type?: string }).type === "identity_directory_changed") dashboard.refreshes++;
+  });
+  socket.once("close", (code) => { dashboard.closed = code; });
+  t.after(() => socket.close());
+
+  // Saving your own name, even the same "Owner", sends only the name and ends the default.
+  const saved = await fetchWithBearer(`${httpBase}/api/identity/users/${before.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Owner" }),
+  });
+  assert.equal(saved.status, 200);
+  const membership = ((await saved.json()) as { membership: { userName: string; role: string; userStatus: string } }).membership;
+  assert.deepEqual([membership.userName, membership.role, membership.userStatus], ["Owner", "owner", "active"]);
+  await waitForValue(() => dashboard.refreshes, (count) => count === 1, "the dashboard to refresh in place");
+  const after = await contextOf(ownerToken);
+  assert.equal(after.userName, "Owner");
+  assert.equal("defaultName" in after, false);
+
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/users/${before.userId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ displayName: "Misko" }),
+  });
+  assert.equal(renamed.status, 200);
+  await waitForValue(() => dashboard.refreshes, (count) => count === 2, "the dashboard to refresh after the rename");
+  await delay(250);
+  assert.equal(dashboard.closed, null, "renaming yourself closes no dashboard");
+  assert.equal((await contextOf(ownerToken)).userName, "Misko");
+});
+
+test("renaming a team is audited and reconnects no UI client, unlike a membership change (#3000)", { timeout: 30_000 }, async (t) => {
+  const port = await reservePort();
+  const temp = mkdtempSync(join(tmpdir(), "wollipog-team-rename-"));
+  const databasePath = join(temp, "control-plane.db");
+  const ownerToken = loadOrCreateLocalDeviceToken(defaultLocalDeviceTokenPath(databasePath));
+  const operatorToken = "team-rename-operator-token";
+  const seed = ControlPlaneDb.open(databasePath);
+  const identity = seed.localIdentityContext();
+  seed.createIdentityMember({
+    userId: "usr_team_operator", displayName: "Team Operator", organizationId: identity.organizationId, role: "operator", now: 1,
+  });
+  seed.createDevice({
+    id: "dev_team_operator", name: "Team Operator Device", tokenHash: hashToken(operatorToken),
+    userId: "usr_team_operator", organizationId: identity.organizationId, now: 2,
+  });
+  seed.close();
+
+  let output = "";
+  const child = spawn(
+    process.execPath,
+    ["--import", "tsx", "apps/control-plane/src/index.ts"],
+    {
+      cwd: REPO_ROOT,
+      env: {
+        ...process.env,
+        CONTROL_PLANE_HOST: "127.0.0.1",
+        CONTROL_PLANE_PORT: String(port),
+        CONTROL_PLANE_DB: databasePath,
+        CONTROL_PLANE_TOKEN,
+      },
+      stdio: ["ignore", "pipe", "pipe"],
+      windowsHide: true,
+    },
+  );
+  const capture = (chunk: unknown) => {
+    output = (output + String(chunk)).slice(-32_768);
+  };
+  child.stdout?.on("data", capture);
+  child.stderr?.on("data", capture);
+  t.after(async () => {
+    await stopChild(child);
+    rmSync(temp, { recursive: true, force: true });
+  });
+
+  const httpBase = `http://127.0.0.1:${port}`;
+  await waitForHealth(httpBase, child, () => output);
+  const json = { "content-type": "application/json" };
+  const created = await fetchWithBearer(`${httpBase}/api/identity/teams`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ name: "Support", memberUserIds: [] }),
+  });
+  assert.equal(created.status, 201);
+  const { team } = await created.json() as { team: { teamId: string } };
+
+  // An admin's dashboard and a scoped member's: membership changes close the scoped one (and an
+  // organization directory change would close both); a rename closes neither.
+  const sockets = await Promise.all([ownerToken, operatorToken].map((token) =>
+    openStrictSocket(authenticatedUiUrl(`ws://127.0.0.1:${port}`, token))));
+  const closedEarly: number[] = [];
+  sockets.forEach((socket, index) => socket.once("close", () => { closedEarly.push(index); }));
+  const renamed = await fetchWithBearer(`${httpBase}/api/identity/teams/${team.teamId}`, ownerToken, {
+    method: "PATCH", headers: json, body: JSON.stringify({ name: "Help Desk" }),
+  });
+  assert.equal(renamed.status, 200);
+  assert.equal((await renamed.json() as { team: { name: string } }).team.name, "Help Desk");
+  await delay(250);
+  assert.deepEqual(closedEarly, [], "a rename changes nobody's access, so it closes no dashboard");
+  sockets.forEach((socket) => socket.removeAllListeners("close"));
+
+  // The member's socket is closed by a membership change, so the quiet rename was not a dead socket.
+  const closed = await closeAfter(sockets[1]!, () => {
+    void fetchWithBearer(`${httpBase}/api/identity/teams/${team.teamId}/members`, ownerToken, {
+      method: "PUT", headers: json, body: JSON.stringify({ memberUserIds: [] }),
+    });
+  });
+  assert.ok(closed.code > 0);
+  sockets[0]!.close();
+
+  // Creating a team under a taken name is refused with the same stable code as a rename.
+  const duplicate = await fetchWithBearer(`${httpBase}/api/identity/teams`, ownerToken, {
+    method: "POST", headers: json, body: JSON.stringify({ name: " Help Desk ", memberUserIds: [] }),
+  });
+  assert.equal(duplicate.status, 409);
+  assert.equal((await duplicate.json() as { code?: string }).code, "team_name_taken");
+
+  const { audit } = await (await fetchWithBearer(`${httpBase}/api/identity/mutation-audit`, ownerToken)).json() as {
+    audit: Array<{ method: string; route: string; targetId?: string; statusCode: number }>;
+  };
+  assert.ok(audit.some((entry) => entry.method === "PATCH" && entry.route === "/api/identity/teams/:teamId" &&
+    entry.targetId === team.teamId && entry.statusCode === 200), "the rename is in the identity mutation audit");
 });

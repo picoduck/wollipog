@@ -2,9 +2,12 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   PI_AGENT_CONTROL_PROBE_COMMAND,
+  PI_PROJECT_TRUST_DECLINED,
+  PI_PROJECT_TRUST_NONCE_ENV,
+  PI_PROJECT_TRUST_NOT_REQUESTED,
+  PI_PROJECT_TRUST_STATUS_KEY,
   PI_SECURITY_REQUEST_NONCE_ENV,
   PI_SECURITY_REQUEST_PREFIX,
-  PI_SECURITY_REQUEST_TITLE,
   piAgentControlExtensionSource,
   piAgentControlProbeSource,
 } from "./pi-agent-control-extension.js";
@@ -59,14 +62,7 @@ test("Pi Agent Control probe reports readiness only after the pre-load trust hoo
   assert.deepEqual(statuses, [["wollipog-agent-control-probe", "probe-nonce"]]);
 });
 
-test("generated Pi Agent Control extension makes trust durable and blocks tools fail-closed", async (t) => {
-  const originalNonce = process.env[PI_SECURITY_REQUEST_NONCE_ENV];
-  process.env[PI_SECURITY_REQUEST_NONCE_ENV] = "security-nonce";
-  t.after(() => {
-    if (originalNonce === undefined) delete process.env[PI_SECURITY_REQUEST_NONCE_ENV];
-    else process.env[PI_SECURITY_REQUEST_NONCE_ENV] = originalNonce;
-  });
-  const bridge = await import(`data:text/javascript;base64,${Buffer.from(piAgentControlExtensionSource()).toString("base64")}`);
+function loadExtensionHandlers(bridge: { default(pi: unknown): void }): Map<string, (...args: any[]) => any> {
   const handlers = new Map<string, (...args: any[]) => any>();
   bridge.default({
     on: (name: string, handler: (...args: any[]) => any) => handlers.set(name, handler),
@@ -74,8 +70,69 @@ test("generated Pi Agent Control extension makes trust durable and blocks tools 
     getActiveTools: () => [],
     setActiveTools: () => {},
   });
-  const messages: Array<{ title: string; message?: string; options?: string[] }> = [];
-  let trustChoice: string | undefined = "Trust This Project";
+  return handlers;
+}
+
+function withEnv(t: { after(fn: () => void): void }, values: Record<string, string | undefined>): void {
+  const original = Object.fromEntries(Object.keys(values).map((key) => [key, process.env[key]]));
+  for (const [key, value] of Object.entries(values)) {
+    if (value === undefined) delete process.env[key];
+    else process.env[key] = value;
+  }
+  t.after(() => {
+    for (const [key, value] of Object.entries(original)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+}
+
+test("generated Pi Agent Control extension declines project trust without remembering, even when offered a UI", async (t) => {
+  withEnv(t, {
+    [PI_SECURITY_REQUEST_NONCE_ENV]: "security-nonce",
+    [PI_PROJECT_TRUST_NONCE_ENV]: "launch-nonce",
+    WOLLIPOG_PI_AGENT_CONTROL_COMMAND: undefined,
+  });
+  const source = piAgentControlExtensionSource();
+  const encodedSource = Buffer.from(source).toString("base64");
+  const statusOf = async (dispatchedCwd?: string) => {
+    // A fresh module instance per launch, as Pi loads the extension once per process.
+    const bridge = await import(`data:text/javascript;base64,${encodedSource}#${Math.random()}`);
+    const handlers = loadExtensionHandlers(bridge);
+    const selects: string[] = [];
+    const statuses: Array<[string, string]> = [];
+    const ctx = {
+      hasUI: true,
+      ui: {
+        select: async (title: string) => { selects.push(title); return "Trust This Project"; },
+        confirm: async () => true,
+        setStatus: (key: string, text: string) => statuses.push([key, text]),
+        notify: () => {},
+      },
+    };
+    if (dispatchedCwd !== undefined) {
+      assert.deepEqual(await handlers.get("project_trust")?.({ type: "project_trust", cwd: dispatchedCwd }, ctx),
+        { trusted: "no" }, "the decline is never remembered in Pi's trust store");
+    }
+    // Agent Control launch metadata is absent here, so startup fails after the trust report.
+    await assert.rejects(handlers.get("session_start")?.({}, ctx), /launch metadata is invalid/);
+    assert.deepEqual(selects, [], "an offered UI is never used to decide project trust");
+    return statuses.filter(([key]) => key === PI_PROJECT_TRUST_STATUS_KEY).map(([, text]) => text);
+  };
+  const cwd = "/repo/project";
+  assert.deepEqual(await statusOf(cwd),
+    [`launch-nonce.${PI_PROJECT_TRUST_DECLINED}.${Buffer.from(cwd).toString("base64url")}`]);
+  assert.deepEqual(await statusOf(), [`launch-nonce.${PI_PROJECT_TRUST_NOT_REQUESTED}.`]);
+
+  delete process.env[PI_PROJECT_TRUST_NONCE_ENV];
+  assert.deepEqual(await statusOf(cwd), [], "a launch without its own nonce reports nothing");
+});
+
+test("generated Pi Agent Control extension blocks tools fail-closed", async (t) => {
+  withEnv(t, { [PI_SECURITY_REQUEST_NONCE_ENV]: "security-nonce" });
+  const bridge = await import(`data:text/javascript;base64,${Buffer.from(piAgentControlExtensionSource()).toString("base64")}`);
+  const handlers = loadExtensionHandlers(bridge);
+  const messages: Array<{ title: string; message?: string }> = [];
   const ctx = {
     hasUI: true,
     ui: {
@@ -83,28 +140,8 @@ test("generated Pi Agent Control extension makes trust durable and blocks tools 
         messages.push({ title, message });
         return true;
       },
-      select: async (title: string, options: string[]) => {
-        messages.push({ title, options });
-        return trustChoice;
-      },
     },
   };
-  assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
-    trusted: "yes",
-    remember: true,
-  });
-  assert.match(messages[0]?.title ?? "",
-    new RegExp(`^${PI_SECURITY_REQUEST_TITLE}\\n${PI_SECURITY_REQUEST_PREFIX}security-nonce\\.`));
-  assert.deepEqual(messages[0]?.options, ["Trust This Project", "Skip Project Resources"]);
-  trustChoice = "Skip Project Resources";
-  assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
-    trusted: "no",
-    remember: true,
-  });
-  trustChoice = undefined;
-  assert.deepEqual(await handlers.get("project_trust")?.({ cwd: "/repo" }, ctx), {
-    trusted: "no",
-  }, "cancelling trust fails closed without persisting a decision");
   assert.equal(await handlers.get("tool_call")?.({
     toolCallId: "call-1",
     toolName: "bash",

@@ -1,7 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  forgeActionBranchName,
   queueHoldReason,
+  validProviderHomeLaunchRefusal,
+  validProviderHomeWait,
+  validWorktreeSwitch,
+  isProviderLoginFailureCode,
+  isSessionLaunchFailureCode,
+  PROVIDER_LOGIN_FAILURE_CODES,
   queueHoldRecoveryAction,
   sessionHolds,
   worktreeRecoveryAction,
@@ -53,6 +60,7 @@ import {
   orchestratorExecutionPolicyRequirement,
   orchestratorIntegrationIsolationRequirement,
   runnerSupportsProtocol,
+  campaignStatusTerminal,
   BOARD_COLUMNS,
   archiveRequiresStop,
   scopeAudienceContained,
@@ -107,11 +115,12 @@ import {
   type EditQueuedPromptResultMessage,
   type ReadQueuedPromptMessage,
   type ReadQueuedPromptResultMessage,
+  validProviderCredentialImportCapability,
 } from "./index.js";
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 225);
+  assert.equal(PROTOCOL_VERSION, 284);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -264,11 +273,210 @@ test("older peers never receive display-only live Claude usage, but still accoun
   assert.equal(projectSessionEventPayloadForProtocol(provisional, 216), provisional);
 });
 
-test("PROTOCOL_VERSION is 225", () => {
-  assert.equal(PROTOCOL_VERSION, 225);
+test("campaign review sessions require accounting-aware runners", () => {
+  assert.equal(runnerSupportsProtocol(231, "campaignReviewSessions"), false);
+  assert.equal(runnerSupportsProtocol(232, "campaignReviewSessions"), true);
+});
+
+test("provider-HOME launch refusals require v233 runners", () => {
+  assert.equal(runnerSupportsProtocol(232, "providerHomeLaunchRefusals"), false);
+  assert.equal(runnerSupportsProtocol(233, "providerHomeLaunchRefusals"), true);
+});
+
+test("a provider-HOME launch refusal is accepted only when well formed and content-free", () => {
+  const refusal = { code: "foreign_owner", provider: "claude", providerAccountId: "work", providerAccountLabel: "Work", detectedAt: 5 };
+  assert.deepEqual(validProviderHomeLaunchRefusal(refusal), refusal);
+  assert.deepEqual(validProviderHomeLaunchRefusal({ code: "busy", provider: "codex", detectedAt: 0 }),
+    { code: "busy", provider: "codex", detectedAt: 0 }, "the runner's own HOME names no account");
+  for (const invalid of [
+    null, [], "busy",
+    { ...refusal, code: "cancelled" },
+    { ...refusal, provider: "pi" },
+    { ...refusal, detectedAt: Number.NaN },
+    { ...refusal, home: "/home/user/.claude" },
+    { ...refusal, providerAccountId: "../work" },
+    { ...refusal, providerAccountLabel: "" },
+    { ...refusal, providerAccountLabel: "x".repeat(201) },
+    { code: "busy", provider: "claude", providerAccountLabel: "Work", detectedAt: 1 },
+  ]) assert.equal(validProviderHomeLaunchRefusal(invalid), null, JSON.stringify(invalid));
+});
+
+test("waiting for a busy provider account requires v248 runners", () => {
+  assert.equal(runnerSupportsProtocol(247, "providerHomeWait"), false);
+  assert.equal(runnerSupportsProtocol(248, "providerHomeWait"), true);
+  assert.equal(runnerSupportsProtocol(247, "providerHomeForkRefusals"), false);
+  assert.equal(runnerSupportsProtocol(248, "providerHomeForkRefusals"), true);
+});
+
+test("a provider-HOME wait is accepted only when well formed and content-free", () => {
+  const wait = { provider: "claude", cause: "holder_alive", providerAccountId: "work", providerAccountLabel: "Work", waitingSince: 5, waitUntil: 10 };
+  assert.deepEqual(validProviderHomeWait(wait), wait);
+  assert.deepEqual(validProviderHomeWait({ provider: "codex", waitingSince: 0, waitUntil: 0 }),
+    { provider: "codex", waitingSince: 0, waitUntil: 0 }, "the runner's own HOME names no account");
+  for (const invalid of [
+    null, [], "busy",
+    { ...wait, provider: "pi" },
+    { ...wait, cause: "no_reboot_proof" },
+    { ...wait, waitingSince: Number.NaN },
+    { ...wait, waitUntil: 4 },
+    { ...wait, home: "/home/user/.claude" },
+    { ...wait, providerAccountId: "../work" },
+    { ...wait, providerAccountLabel: "" },
+    { provider: "claude", providerAccountLabel: "Work", waitingSince: 1, waitUntil: 2 },
+  ]) assert.equal(validProviderHomeWait(invalid), null, JSON.stringify(invalid));
+});
+
+test("a provider sign-in failure code is accepted only from the closed set (#3519)", () => {
+  assert.deepEqual(PROVIDER_LOGIN_FAILURE_CODES, ["account_already_on_machine", "unrecognized"]);
+  assert.equal(isProviderLoginFailureCode("account_already_on_machine"), true);
+  assert.equal(isProviderLoginFailureCode("unrecognized"), true);
+  for (const value of ["", "Account_Already_On_Machine", "account_already_on_machine ", "unknown_code", 1, null, undefined, {}]) {
+    assert.equal(isProviderLoginFailureCode(value), false, JSON.stringify(value));
+  }
+});
+
+test("a worktree switch is accepted only as its exact display shape (#3810)", () => {
+  const pending = { phase: "pending", branch: "fix/issue-3810", since: 1_700 };
+  assert.deepEqual(validWorktreeSwitch(pending), pending);
+  assert.deepEqual(validWorktreeSwitch({ ...pending, phase: "relaunching" }), { ...pending, phase: "relaunching" });
+  for (const invalid of [
+    null, undefined, [], "pending", { ...pending, phase: "done" }, { ...pending, branch: "" },
+    { ...pending, branch: "x".repeat(256) }, { ...pending, branch: "fix\nnext" }, { ...pending, since: -1 },
+    { ...pending, since: 1.5 }, { ...pending, path: "/home/user/worktrees/fix" }, { phase: "pending", branch: "fix" },
+  ]) assert.equal(validWorktreeSwitch(invalid), null, JSON.stringify(invalid));
+});
+
+test("session restart capability overlays controls without freezing the agent catalog", () => {
+  const catalog = { models: [], effortLevels: ["high"], slashCommands: [], supportsImages: true, supportsApprovals: true };
+  for (const restartResumesConversation of [true, false]) {
+    assert.deepEqual(mergeSessionCapabilities(catalog, { restartResumesConversation }),
+      { ...catalog, restartResumesConversation });
+  }
+  const marker = { ...catalog, effortLevels: [], permissionModes: ["orchestrator"],
+    elicitation: { orchestrator: ["none" as const] } };
+  assert.equal(mergeSessionCapabilities(marker, { restartResumesConversation: false }), undefined,
+    "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
+});
+
+test("PROTOCOL_VERSION is 284", () => {
+  assert.equal(PROTOCOL_VERSION, 284);
+  assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), false);
+  assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
+  // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
+  for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
+    assert.equal(forgeActionBranchName(name), true, name);
+  }
+  for (const name of ["", "-d", "/x", "x/", "a..b", "a//b", ".hidden", "a/.b", "x.lock", "a/b.lock/c", "x.", "a b", "a~1", "a:b",
+    "a^b", "a?b", "a*b", "a[b", "a\\b", "a@{b", "@", "a\u0001b", "x".repeat(256)]) {
+    assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
+  }
+  // Full Control response text rides only on a runner that can carry it (#4063), which also has
+  // the owner-decision tools its root guidance names.
+  assert.equal(runnerSupportsProtocol(281, "fullControlResponseAttribution"), false);
+  assert.equal(runnerSupportsProtocol(282, "fullControlResponseAttribution"), true);
+  assert.ok(RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlResponseAttribution >= RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions);
+  // Owner decisions need a v281 root runner and control plane (#4064).
+  assert.equal(runnerSupportsProtocol(280, "ownerDecisions"), false);
+  assert.equal(runnerSupportsProtocol(281, "ownerDecisions"), true);
+  assert.equal(runnerSupportsProtocol(278, "workspaceRemoval"), false);
+  assert.equal(runnerSupportsProtocol(279, "workspaceRemoval"), true);
+  // An epic's closure reads its members only from a runner that returns them (#4060).
+  assert.equal(runnerSupportsProtocol(277, "epicClosureMembers"), false);
+  assert.equal(runnerSupportsProtocol(278, "epicClosureMembers"), true);
+  for (const capability of ["reviewBaseMergeRounds", "fullControlReviewExtensions"] as const) {
+    assert.equal(runnerSupportsProtocol(276, capability), false);
+    assert.equal(runnerSupportsProtocol(277, capability), true);
+  }
+  assert.equal(runnerSupportsProtocol(275, "delegatedImageEvidenceReview"), false);
+  assert.equal(runnerSupportsProtocol(276, "delegatedImageEvidenceReview"), true);
+  assert.equal(runnerSupportsProtocol(274, "campaignHandoffs"), false);
+  assert.equal(runnerSupportsProtocol(275, "campaignHandoffs"), true);
+  assert.equal(campaignStatusTerminal("verified_complete"), true);
+  assert.equal(campaignStatusTerminal("complete_with_handoffs"), true);
+  for (const status of ["waiting_human", "active", "blocked", null, undefined] as const) assert.equal(campaignStatusTerminal(status), false);
+  assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
+  assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
+  assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);
+  assert.equal(runnerSupportsProtocol(270, "runnerProcessingBarriers"), true);
+  assert.equal(runnerSupportsProtocol(282, "providerAccountReadiness"), false);
+  assert.equal(runnerSupportsProtocol(283, "providerAccountReadiness"), true);
+  assert.equal(runnerSupportsProtocol(268, "workflowDecisionWithdrawal"), false);
+  assert.equal(runnerSupportsProtocol(269, "workflowDecisionWithdrawal"), true);
+  assert.equal(runnerSupportsProtocol(267, "campaignFixedBy"), false);
+  assert.equal(runnerSupportsProtocol(268, "campaignFixedBy"), true);
+  assert.equal(runnerSupportsProtocol(260, "sessionRestartResume"), false);
+  assert.equal(runnerSupportsProtocol(262, "sessionRestartResume"), false);
+  assert.equal(runnerSupportsProtocol(263, "sessionRestartResume"), true);
+  // A v259 runner never receives an import, and a v260 runner only with a valid capability (#3719).
+  assert.equal(runnerSupportsProtocol(259, "providerCredentialImport"), false);
+  assert.equal(runnerSupportsProtocol(260, "providerCredentialImport"), true);
+  assert.equal(validProviderCredentialImportCapability({ version: 1, providers: ["codex"] }), true);
+  for (const value of [undefined, null, {}, { version: 2, providers: ["codex"] }, { version: 1, providers: ["claude"] },
+    { version: 1, providers: ["codex", "claude"] }, { version: 1, providers: [] }, { version: 1, providers: ["codex"], extra: true }]) {
+    assert.equal(validProviderCredentialImportCapability(value), false, JSON.stringify(value));
+  }
+  // A v259 runner names a launch that failed because its command sandbox cannot start (#3843).
+  assert.equal(isSessionLaunchFailureCode("codex_sandbox_unavailable"), true);
+  for (const value of ["", "Command_Sandbox_Unavailable", "unknown_code", 1, null, undefined, {}]) {
+    assert.equal(isSessionLaunchFailureCode(value), false, JSON.stringify(value));
+  }
+  // A v257 runner reports a refused Agent TUI open by its sentence alone (#3338).
+  assert.equal(runnerSupportsProtocol(257, "providerHomeAgentTuiRefusals"), false);
+  assert.equal(runnerSupportsProtocol(258, "providerHomeAgentTuiRefusals"), true);
+  // A v255 runner never says that a session is switching worktrees (#3810).
+  assert.equal(runnerSupportsProtocol(255, "worktreeSwitchStatus"), false);
+  assert.equal(runnerSupportsProtocol(256, "worktreeSwitchStatus"), true);
+  // A v254 runner cannot continue a session's own worktree switch after its relaunch (#3810).
+  assert.equal(runnerSupportsProtocol(254, "worktreeSwitchContinuation"), false);
+  assert.equal(runnerSupportsProtocol(255, "worktreeSwitchContinuation"), true);
+  // A v252 runner reports a duplicate-account sign-in by its sentence alone (#3519).
+  assert.equal(runnerSupportsProtocol(252, "providerLoginFailureCode"), false);
+  assert.equal(runnerSupportsProtocol(253, "providerLoginFailureCode"), true);
+  // A v249 runner does not name the unlisted work a queue hold waits on (#3752).
+  assert.equal(runnerSupportsProtocol(249, "queueHoldUnlistedJobs"), false);
+  assert.equal(runnerSupportsProtocol(250, "queueHoldUnlistedJobs"), true);
+  // A v246 runner cannot release a queue hold on request (#3752).
+  assert.equal(runnerSupportsProtocol(246, "queueHoldRelease"), false);
+  assert.equal(runnerSupportsProtocol(247, "queueHoldRelease"), true);
+  // A v241 runner cannot report the closing references of a GitHub merge (#3713).
+  assert.equal(runnerSupportsProtocol(241, "githubMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(242, "githubMergeClosingReferences"), true);
+  // A v243 runner cannot bind a review session to a GitLab merge request (#3539).
+  assert.equal(runnerSupportsProtocol(243, "gitlabReviewSessions"), false);
+  assert.equal(runnerSupportsProtocol(244, "gitlabReviewSessions"), true);
+  // A v248 runner cannot inspect, close or scope GitLab issues (#3539).
+  assert.equal(runnerSupportsProtocol(248, "gitlabCampaignIssues"), false);
+  assert.equal(runnerSupportsProtocol(249, "gitlabCampaignIssues"), true);
+  assert.equal(runnerSupportsProtocol(235, "agentAutomationCreation"), false);
+  assert.equal(runnerSupportsProtocol(236, "agentAutomationCreation"), true);
+  // A v238 runner cannot answer the GitLab merge preflight (#3602).
+  assert.equal(runnerSupportsProtocol(238, "gitlabMergeDecisions"), false);
+  assert.equal(runnerSupportsProtocol(239, "gitlabMergeDecisions"), true);
+  // A v229 runner cannot attest Full Control worktree containment (#2940).
+  assert.equal(runnerSupportsProtocol(229, "campaignWorktreeContainment"), false);
+  assert.equal(runnerSupportsProtocol(230, "campaignWorktreeContainment"), true);
+  // A v229 runner refuses a Dismiss Recovery while the provider turn settles (#2940 CR-8.1).
+  assert.equal(runnerSupportsProtocol(229, "durableAuthDismissal"), false);
+  assert.equal(runnerSupportsProtocol(230, "durableAuthDismissal"), true);
+  assert.equal(runnerSupportsProtocol(230, "runnerHistoryRetention"), false);
+  assert.equal(runnerSupportsProtocol(231, "runnerHistoryRetention"), true);
+  // A v227 runner launches review sessions but neither plans rounds nor validates attempts (#3369).
+  assert.equal(runnerSupportsProtocol(227, "reviewRuns"), false);
+  assert.equal(runnerSupportsProtocol(228, "reviewRuns"), true);
+  assert.equal(runnerSupportsProtocol(236, "postUpvoteReviewExtensions"), false);
+  assert.equal(runnerSupportsProtocol(237, "postUpvoteReviewExtensions"), true);
+  // A v228 runner cannot inspect or recover a stale provider-HOME lease (#3241).
+  assert.equal(runnerSupportsProtocol(228, "providerHomeLeaseRecovery"), false);
+  assert.equal(runnerSupportsProtocol(229, "providerHomeLeaseRecovery"), true);
+  // A v226 runner has review sessions but cannot delete an isolated session's refs (#3316).
+  assert.equal(runnerSupportsProtocol(226, "sessionWorktreeRefDeletion"), false);
+  assert.equal(runnerSupportsProtocol(227, "sessionWorktreeRefDeletion"), true);
   assert.equal(runnerSupportsProtocol(223, "providerProfiles"), false);
   assert.equal(runnerSupportsProtocol(225, "providerProfiles"), true);
   assert.equal(runnerSupportsProtocol(null, "providerProfiles"), false);
+  // A v225 runner has provider profiles but no review sessions.
+  assert.equal(runnerSupportsProtocol(225, "reviewSession"), false);
+  assert.equal(runnerSupportsProtocol(226, "reviewSession"), true);
   assert.equal(runnerSupportsProtocol(222, "sessionReviewJob"), false);
   assert.equal(runnerSupportsProtocol(223, "sessionReviewJob"), true);
   assert.equal(runnerSupportsProtocol(218, "ratePricedSnapshotUsage"), false);
@@ -295,8 +503,6 @@ test("PROTOCOL_VERSION is 225", () => {
   assert.equal(runnerSupportsProtocol(201, "artifactSessionGuidance"), true);
   assert.equal(runnerSupportsProtocol(197, "campaignForgeStatus"), false);
   assert.equal(runnerSupportsProtocol(198, "campaignForgeStatus"), true);
-  assert.equal(runnerSupportsProtocol(198, "costReconciliation"), false);
-  assert.equal(runnerSupportsProtocol(199, "costReconciliation"), true);
   assert.equal(runnerSupportsProtocol(209, "costReconciliationIdentity"), false);
   assert.equal(runnerSupportsProtocol(210, "costReconciliationIdentity"), true);
   for (const version of [undefined, 197, 198, 199, 200, 201, 202]) {
@@ -368,8 +574,6 @@ test("PROTOCOL_VERSION is 225", () => {
   assert.equal(runnerSupportsProtocol(138, "sessionAgentControlReasoningEffort"), true);
   assert.equal(runnerSupportsProtocol(138, "typedWorkflowDecisionDelegation"), false);
   assert.equal(runnerSupportsProtocol(139, "typedWorkflowDecisionDelegation"), true);
-  assert.equal(runnerSupportsProtocol(139, "orchestratorCampaignManagement"), false);
-  assert.equal(runnerSupportsProtocol(140, "orchestratorCampaignManagement"), true);
   assert.equal(runnerSupportsProtocol(150, "workflowDecisionActionAdmission"), false);
   assert.equal(runnerSupportsProtocol(151, "workflowDecisionActionAdmission"), true);
   assert.equal(runnerSupportsProtocol(148, "campaignContinuations"), false);
@@ -402,8 +606,6 @@ test("PROTOCOL_VERSION is 225", () => {
   assert.equal(runnerSupportsProtocol(132, "machineRunnerCapacity"), true);
   assert.equal(runnerSupportsProtocol(127, "providerHistoryQuarantine"), false);
   assert.equal(runnerSupportsProtocol(128, "providerHistoryQuarantine"), true);
-  assert.equal(runnerSupportsProtocol(121, "contextWindowVariants"), false);
-  assert.equal(runnerSupportsProtocol(122, "contextWindowVariants"), true);
   assert.equal(runnerSupportsProtocol(122, "wslAgentControlBridge"), false);
   assert.equal(runnerSupportsProtocol(123, "wslAgentControlBridge"), true);
   assert.equal(runnerSupportsProtocol(123, "wslSafeLauncher"), false);
@@ -462,12 +664,6 @@ test("PROTOCOL_VERSION is 225", () => {
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences, 106);
   assert.equal(runnerSupportsProtocol(105, "workspaceReferences"), false);
   assert.equal(runnerSupportsProtocol(106, "workspaceReferences"), true);
-  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageEventModel, 104);
-  assert.equal(runnerSupportsProtocol(103, "usageEventModel"), false);
-  assert.equal(runnerSupportsProtocol(104, "usageEventModel"), true);
-  assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.usageTokenBuckets, 103);
-  assert.equal(runnerSupportsProtocol(102, "usageTokenBuckets"), false);
-  assert.equal(runnerSupportsProtocol(103, "usageTokenBuckets"), true);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktrees, 101);
   assert.equal(runnerSupportsProtocol(100, "sessionWorktrees"), false);
   assert.equal(runnerSupportsProtocol(101, "sessionWorktrees"), true);
@@ -1871,7 +2067,7 @@ test("a hold whose runner keeps the queue across a restart states what a restart
     "Wait for the unfinished background job to end; the handoff and the queued messages then proceed on their own. " +
     "If it never ends (a monitor whose condition never fires ends only with its provider process), restart the session " +
     "with restart_session, knowing what that costs: the provider and its background job end, with unfinished work " +
-    "recorded as killed and unrecoverable and a finished result still owed reported to the new conversation; " +
+    "recorded as killed and unrecoverable and a finished result still owed reported after the restart; " +
     "the queued messages are kept and run after the restart; " +
     "and any approved workflow decision the session has not yet consumed is revoked, and the restarted session is told " +
     "which ones to request again.");
@@ -1880,7 +2076,7 @@ test("a hold whose runner keeps the queue across a restart states what a restart
     { ...queueHold, endsAt: Date.UTC(2026, 8, 25, 1, 48, 43) },
   ]) {
     const action = queueHoldRecoveryAction(hold);
-    assert.match(action, /to restarting the session: a restart keeps the queued messages but ends every background job and starts a new conversation\.$/u);
+    assert.match(action, /to restarting the session: a restart keeps the queued messages but ends every background job and relaunches the provider\.$/u);
     assert.doesNotMatch(action, /discard/u);
   }
   assert.match(queueHoldRecoveryAction({ ...queueHold, restartKeepsQueue: undefined }),
@@ -1934,4 +2130,47 @@ test("queue-hold advice written for a reader names only the actions that reader 
     "only when someone who can act on this session steps in; ask its owner.");
   assert.equal(queueHoldRecoveryAction(base, { canStopJobs: false, canRestart: true }), queueHoldRecoveryAction(base),
     "a hold its runner cannot stop names restarting to anyone allowed to restart");
+});
+
+test("a releasable hold names Proceed Now only to a reader who may stop its jobs (#3752)", () => {
+  // The observed case: one pending id with no listed job, so nothing can be stopped by id.
+  const hold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:9", since: 9, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1, endsAt: Date.UTC(2026, 9, 28, 5, 40),
+    canRelease: true as const, restartKeepsQueue: true as const,
+  };
+  const owner = queueHoldRecoveryAction(hold, { canStopJobs: true, canRestart: true });
+  assert.equal(owner, queueHoldRecoveryAction(hold), "a reader allowed everything reads the server's copy");
+  assert.match(owner, /release the hold with release_queue_hold \(hold worktree-rebind:9\) or with Proceed Now/u);
+  assert.match(owner, /records each as killed at your request, and then runs the handoff and the queued message in order/u);
+  assert.match(owner, /Wollipog also ends any job still running at 2026-10-28T05:40Z\./u);
+  assert.match(owner, /Prefer proceeding now to restarting the session/u);
+  assert.doesNotMatch(owner, /stop_background_job/u, "no job can be stopped by id");
+
+  const stoppable = queueHoldRecoveryAction({ ...hold, canStopJobs: true }, { canStopJobs: true, canRestart: true });
+  assert.match(stoppable, /To end only one job instead, stop it by its job id with stop_background_job/u);
+
+  const viewer = queueHoldRecoveryAction(hold, { canStopJobs: false, canRestart: false });
+  assert.match(viewer, /Only the session owner or its controlling Orchestrator can end it sooner/u);
+  assert.doesNotMatch(viewer, /release_queue_hold|Proceed Now|restart/u);
+});
+
+test("a hold's reason says when Background Work does not list the work it waits on (#3752)", () => {
+  const hold = {
+    kind: "worktree_rebind" as const, holdId: "worktree-rebind:9", since: 9, target: "/w/next",
+    queuedPrompts: 1, unfinishedBackgroundJobs: 1,
+  };
+  const listed = queueHoldReason(hold);
+  assert.match(listed, /waits for 1 background job with no terminal status\.$/u);
+  assert.match(queueHoldReason({ ...hold, unlistedJobs: [{ id: "tool:toolu_1", kind: "provisional" }] }),
+    /waits for 1 background job with no terminal status, which Background Work does not list\.$/u);
+  assert.match(queueHoldReason({
+    ...hold, unfinishedBackgroundJobs: 2,
+    unlistedJobs: [{ id: "a", kind: "unregistered" }, { id: "b", kind: "unregistered" }],
+  }), /waits for 2 background jobs with no terminal status, none of which Background Work lists\.$/u);
+  assert.match(queueHoldReason({
+    ...hold, unfinishedBackgroundJobs: 3,
+    oldestUnfinishedJob: { launchType: "shell", startedAt: Date.UTC(2026, 9, 28, 4, 0) },
+    unlistedJobs: [{ id: "tool:toolu_1", kind: "provisional" }],
+  }), /\(the oldest, a shell command started at 2026-10-28T04:00Z\), 1 of which Background Work does not list\.$/u);
 });

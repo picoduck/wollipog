@@ -1,0 +1,10 @@
+{
+  "version": 1,
+  "kind": "inert-path-and-outcome-exercises-not-new-CI-samples",
+  "cases": [
+    { "issue": 3617, "symptom": "Automation trigger fixture crosses the UTC day boundary", "path": "apps/web/src/e2e/automations-main.tsx", "regressionFile": "apps/web/e2e/automation-triggers.spec.ts", "expectedGroup": "browser-remaining" },
+    { "issue": 3517, "symptom": "Escape intermittently leaves the offline Composer Response open; cause unresolved", "path": "apps/web/src/components/CommandInbox.tsx", "regressionFile": "apps/web/e2e/command-inbox-projects.spec.ts", "expectedGroup": "browser-remaining" },
+    { "issue": 2601, "symptom": "Runner-channel handshake stalls during retained-child reconciliation on a web-only change; cause unresolved", "path": "apps/web/src/components/SessionDetail.tsx", "regressionFile": "apps/control-plane/src/runner-channel.integration.test.ts", "expectedGroup": "node-fast" },
+    { "issue": 2452, "symptom": "Cancelled PR aggregation must not report a passing check", "path": ".github/workflows/ci.yml", "expectedMode": "full" }
+  ]
+}

@@ -1,4 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import type {
   AgentDefinition,
   AgentContext,
@@ -131,7 +132,7 @@ export function sanitizeSessionNamingCustomModelResult(
 }
 
 function accountForAgent(agent: AgentDefinition | undefined): Omit<SessionNamingAccountBoundary, "machineCount"> | null {
-  if (!agent || agent.available !== true || agent.authStatus !== "authenticated") return null;
+  if (!agent || !agentAvailableForImplicitLaunch(agent) || agent.authStatus !== "authenticated") return null;
   const driver = agent.driver ?? "acp";
   if ((driver === "codex" || driver === "codex-app-server") && agent.codexAppServer?.status === "supported" &&
       agent.codexAppServer.sessionNaming === true) {

@@ -46,7 +46,10 @@ The runner injects these non-transcript environment values at launch:
 - `WOLLIPOG_AGENT_CONTROL_RELAY_FIFO`: native Linux provider-mode FIFO channel directory for the
   same relay. Only the CLI reads it; the MCP adapter keeps the loopback endpoint.
 - `WOLLIPOG_CLI`: directly executable session CLI launcher on POSIX and WSL.
-- `WOLLIPOG_CLI_ARGS`: empty on POSIX and WSL; native Windows retains JSON-encoded re-entry arguments. The launcher never contains a bearer credential.
+- `WOLLIPOG_CLI_ARGS`: the empty string on POSIX and WSL, where the launcher already carries its
+  re-entry arguments, so `"$WOLLIPOG_CLI" $WOLLIPOG_CLI_ARGS session list --json` adds nothing.
+  Native Windows retains a JSON-encoded re-entry argument array. The launcher never contains a
+  bearer credential.
 
 The standalone installer publishes the same verified SEA bytes as both `wollipog-runner` and
 `wollipog` (`wollipog.exe` on Windows). The invocation name selects the user-facing CLI; no Node
@@ -77,12 +80,14 @@ created in that one directory:
 
 | Codex mode | Before | After |
 | --- | --- | --- |
-| Auto-review (default), on-request, untrusted, on-failure, legacy workspace-write | No sockets; writes only in the workspace | Unchanged, plus the session's FIFO channel |
+| Auto-review (default), on-request, untrusted, on-failure, legacy workspace-write | No sockets; writes in the workspace and permitted temporary directories | Unchanged, plus the session's FIFO channel |
 | Read-only | No sockets; no writes | Unchanged, plus the session's FIFO channel |
 | Full access without a managed worktree, Orchestrator preset | Network on | Unchanged; the CLI takes the FIFO channel there too |
 
 No network access, writable root, socket, port, seccomp rule or namespace setting changes. The
-directory is not a writable root, and the sandbox cannot create files there.
+channel directory is not added as a writable root. When runner state is outside the policy's
+existing writable roots, the sandbox cannot create files there. Codex's built-in `:workspace`
+profile permits `/tmp`, so state deliberately placed there retains that existing write permission.
 
 Every other session's sandboxed commands run as the same user and can read the whole disk, so a
 channel must not be findable. The channel layout:
@@ -127,9 +132,19 @@ discards what it writes there. Node's own `child_process` pipes are socketpairs,
 that spawns the CLI inside the sandbox must give it a real pipe or a file. A shell pipeline or
 command substitution already does, as does Codex's own command runner.
 
-`agent-control-sandbox-cli.integration.test.ts` proves all of this on a real kernel in the Platform
-Isolation Ubuntu job, which fails if the test skips. Opt-in variants run the same probes under the
-real `codex sandbox` wherever a Codex install can start one.
+`agent-control-sandbox-cli.integration.test.ts` proves the explicit bubblewrap profiles on a real
+kernel in the Platform Isolation Ubuntu job, which requires all three modeled cases without skips.
+Additional variants run the same probes under the real `codex sandbox` when it is available.
+The Codex Sandbox workflow pins 0.162.1 and 0.163.0 and requires all six cases without skips, both
+with ordinary parent configuration and with a deliberately malformed parent configuration.
+
+The read-only FIFO fixture lives outside `/tmp`; the test separately verifies that real
+`:workspace` permits temporary writes and `:read-only` refuses them. Synthetic `HOME`, `CODEX_HOME`
+and `TMPDIR` values prevent operator configuration from changing the measurement. The capability
+probe and actual command use the same working directory, profile and synthetic environment.
+Diagnostics identify the measured version, profile and fixture locations. If neither the checkout
+nor `HOME` can hold a fixture outside `/tmp`, the real workspace case explicitly skips; the native
+CI job treats that skip as a failure rather than coverage.
 
 ## Commands
 
@@ -142,7 +157,7 @@ wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json
 wollipog session resolve-steering ID SUBMISSION_ID queue_again|dismiss --json
-wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
+wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] [--full] --json
 wollipog session stop ID --json
 wollipog session restart ID --json
 wollipog session archive ID --json
@@ -151,12 +166,13 @@ wollipog worktree create [--session ID] --branch NAME [--base REF] --json
 wollipog worktree attach [--session ID] --path PATH --json
 wollipog worktree select [--session ID] --path PATH --json
 wollipog worktree discard [--session ID] --path PATH --json
+wollipog worktree delete-refs [--path PATH] --ref REF=OBJECT_ID [--ref REF=OBJECT_ID ...] --json
 wollipog artifact attach --file PATH [--name NAME] [--session ID] --json
-wollipog pr wait PR [--repo OWNER/NAME] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
-wollipog review run --repo OWNER/NAME --pr N --head SHA [--brief-file PATH] [--scope delta|full] [--full-reason TEXT] --json
-wollipog review get JOB_ID --json
-wollipog review list [--limit N] [--cursor JOB_ID] --json
-wollipog review cancel JOB_ID --json
+wollipog pr wait PR [--repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT] [--head SHA] [--timeout MS] [--interval MS] [--any-failure] --json
+wollipog review session run --repo OWNER/NAME|GITLAB-HOST/GROUP/PROJECT --pr N --head SHA --brief-file PATH [--full-reason TEXT] --json
+wollipog review session get REVIEW_SESSION_ID --json
+wollipog review session list [--limit N] [--cursor REVIEW_SESSION_ID] --json
+wollipog review session cancel REVIEW_SESSION_ID --json
 wollipog decision request --request-id ID --resource-key KEY --snapshot JSON --json
 wollipog decision get OCCURRENCE_ID --json
 wollipog decision consume OCCURRENCE_ID --snapshot JSON [--action JSON] --json
@@ -188,7 +204,15 @@ GitHub's `mergeStateStatus` to confirm it, because an unseen context could still
 `no_required_checks` at once. An unreadable base is an error, never an empty requirement, and a
 GraphQL answer carrying any error is retried rather than trusted. A queue
 entry that disappears without a merge is reported as `queue_ejected` only once it has stayed missing
-for 10 seconds. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
+for 10 seconds. The same query reads the latest merge-queue timeline event and the latest force push
+(#3712), so a call that starts after GitHub removed the entry also reports `queue_ejected`, confirmed
+over the same 10 seconds from its first observation (a different removal restarts the interval), with
+`mergeQueueRemoval` carrying GitHub's `reason` and `removedAt`. The removal counts only when it is
+the latest merge-queue event, no force push happened at or after it, and the open head has a check
+suite created for the pull request's own head branch after the latest force push (or in its second
+when that push left this very commit) and before the removal; a suite's time is its creating push or
+event, so a delayed or re-run job cannot move it. A pull request never enqueued, one queued again, or a head pushed after the removal (including
+a commit already tested on another branch) keeps reporting its own checks. A failed merge-group check alone never ends the wait (#3121): when an entry ahead
 caused it, GitHub drops that entry and rebuilds this one's group on a new commit, so the wait keeps
 reading until GitHub itself gives up on the entry or it merges; `--any-failure` applies to the head's
 checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads share that budget, so no read
@@ -196,100 +220,347 @@ starts more than 20 seconds past it and one still in flight then is abandoned. R
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
 
-`wollipog review run` (MCP `request_cross_model_review`, #3306) asks the runner to run the installed
-cross-model review controller for the calling session's own pull request, outside the session's
-sandbox. A protected native Linux session cannot run the controller itself: its root is read-only and
-a reviewer's sandbox cannot nest inside the session's user namespace. The runner runs it instead, with
-the other model family as the reviewer (Codex for a Claude Code session, Claude Code for a Codex
-session) under that reviewer's normal read-only sandbox. The reviewer reads a snapshot checked out
-from a runner-owned mirror at the exact head, so nothing writes to the session's worktree or its Git
-metadata, and the session can keep working during the review. The runner refuses, and reports a fixed
-reason for, any request outside scope: the session must own a native managed worktree it created; the
-pull request must be open, from the same repository as the session's project (fork pull requests are
-refused), and on the worktree's branch; and `--head` must be its pushed head. The first round of a
-pull request needs `--brief-file` (MCP `brief`, at most 100 KiB: intent, acceptance criteria and
-verification); the runner keeps it, and later rounds review only the changes since the last valid
-round unless `--scope full` is given with `--full-reason`. The controller's limits apply per pull
-request: four valid rounds and two consumed attempts per round, with a rebase or force-push starting
-a new review epoch. A head that does not descend from the head the epoch was reviewed at (its last
-valid round's or, before any valid round, its most recent attempt's) counts as a rebase, so attempts
-spent before a rebase do not block the rebased head. One review runs per session at a time, and a runner at its review concurrency
-limit refuses a request as busy instead of queueing it.
+MCP `park_on_pull_request` (#4071, protocol 272) lets a session stop waiting inside a turn. The
+session names its own enqueued GitHub pull request and exact head, gets a watch back, and ends its
+turn. The control plane stores the watch (`POST /api/sessions/:id/pull-request-watch`, own session
+credential only) and sends `pull_request_watch_start` to the session's runner. The runner repeats
+3-hour `wait_pull_request` waits through its own read-only `gh` login and reports the first outcome
+other than `timeout` (`merged`, `closed`, `queue_failed`, `queue_ejected`, `head_changed`, or for a
+pull request that is not queued, its checks' outcome) in `pull_request_watch_update`. The control
+plane accepts only the first report from the watch's runner, then wakes the session once: an idle
+session receives one durable `[Wollipog Pull Request Watch — <id>]` prompt with the outcome and the
+bounded wait summary (at most 16 KiB, on one line), carried exactly like a review continuation.
+Every runner registration resends the watches still watching on it, so a runner restart resumes
+them. A runner that cannot watch any more (an older version), or one that could not read GitHub
+for about half an hour, reports the watch `lost`, and the wake says so. Parking again replaces the
+watch; an ended or archived session's watch is cancelled and owes no wake. `get_session` shows the
+watch as `pullRequestWatch`, and `get_campaign` lists parked children as `parkedChildren`. While a
+child is parked (watching, or its wake not yet started), its turn end is no `child_ready`
+continuation for its Orchestrator; the woken child's next turn end is. The wake is an ordinary
+prompt and grants nothing: enqueueing, merging and branch deletion keep their typed gates. GitLab
+merge requests, older runners and older control planes are refused, so those sessions keep
+blocking waits.
 
-The request returns a job at once in state `requested`; the runner then reports `running` and finally
-`completed`, `failed`, or `not_launched` with a fixed reason. `review get` (`get_cross_model_review`)
-reads the job; once `terminal` is true it also returns the controller's one-line summary, its
-`report.json` and the tail of the runner-owned ledger (each at most 256 KiB, with `reportTruncated`
-and `ledgerTruncated`). Pass `include` to the MCP tool to fetch only the report or the ledger. The
-ledger is read-only to the session; adjudication stays in the pull request. `review list`
-(`list_cross_model_reviews`) pages the session's jobs newest first, and `review cancel`
-(`cancel_cross_model_review`) stops an unfinished one; a cancelled launched attempt still counts.
-Jobs are durable: a runner that reconnects receives every unfinished job again and reports its
-result, and it recovers a review that was running when it restarted.
+A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
+timeout, interval, budget, and read-only contract. Give it as a merge request URL,
+`<gitlab-host>/group/project!IID`, or an IID with `--repo <gitlab-host>/group/project`; the host is
+always required, because a bare path would make `glab` resolve against gitlab.com, and every read
+passes `--hostname`. Each poll reads the merge request (its head pipeline is the merged-results
+pipeline where the project runs them) and, while it is open, its merge-train car; the project's
+"pipelines must succeed" setting is read once. Outcomes: `checks_passed` only for a `success`
+pipeline; `checks_failed` for a failed or canceled one; `checks_blocked` for a skipped pipeline or one
+waiting for a manual action, which will not finish on its own; `no_required_checks` when the project
+does not require a pipeline and the merge request has none; `queue_failed` when the train pipeline
+fails or is canceled; `queue_ejected` when the car stays gone for 10 seconds without a merge; and
+`merged`, `closed`, `head_changed`, or `timeout` as for GitHub. The summary carries `forge: "gitlab"`,
+the pipeline and train state, and GitLab's `detailed_merge_status`. A bare IID without `--repo` still
+resolves only a GitHub repository.
 
-The routes are `/api/sessions/:id/cross-model-reviews` (POST to request, GET to list),
-`.../:jobId`, `.../:jobId/artifacts` and `.../:jobId/cancel` (POST). Only the session's own credential
-may request or cancel; the session and people with access to it may read. Orchestrator sessions do not
-have these tools. A session in a campaign with an allowance is refused, so the allowance cannot be
-bypassed: its Orchestrator runs the campaign's controlled review job (`run_campaign_review_job`,
-[campaign limits](./campaign-limits.md)) instead. The feature needs protocol 223 on both the control
-plane and the runner, and a Linux runner that advertises `runtime.sessionReview`.
+### Retired Review Jobs
 
-The runner discovers the installation at each registration and runs only files no session can
-change. The controller is read from its installed skill directory (`~/.devbox/skills/cross-model-review`,
-or `WOLLIPOG_SESSION_REVIEW_SKILL_DIR` in the runner's environment), never through a provider home's
-`skills` link. The controller, `python3`, `git`, `gh` (which the runner itself runs to read the pull
-request), and the `codex` and `claude` reviewer CLIs found on the runner's `PATH` must each be owned
-by the runner's user or root, have no path component writable by other users, and lie outside every
-root a session can write: provider credential homes (`~/.codex` and `~/.claude`, every configured
-provider account's directory, provider homes an agent's or a session's environment names, and each
-session's current and pending credential homes), the shared package caches, temporary directories,
-project checkouts and worktrees, and the runner's data directory. The first trusted candidate on
-`PATH` is used and an untrusted one earlier on it is skipped, never run; without a trusted
-`python3`, `git` and `gh` nothing is advertised. A reviewer installed under `~/.codex` or `~/.claude`
-is therefore refused; install it elsewhere, for example with npm into `~/.local` or a system prefix,
-and put that location on the runner's `PATH`. A reviewer that is a script run through `env` (npm's
-`#!/usr/bin/env node`, with Node from nvm or fnm, for example) also needs that program, `node`,
-on the runner's `PATH` and trusted by the same checks; otherwise the reviewer is unavailable and
-the reason says so. The runner advertises what it found and why anything is unavailable, and
-records a digest of the controller's files with each job. Reviewers use the runner's default Codex
-and Claude sign-ins.
+Use [Review Sessions](#review-sessions) for your own pushed PR, including from an isolated campaign
+child. Protocol 254 retires the runner-mediated review bridge and controlled campaign review job.
+Their MCP tools and CLI commands are no longer advertised or callable. Old tool names and command
+spellings receive an explicit migration refusal pointing to `request_review_session` and
+`wollipog review session run`; they are never silently forwarded or retried through another route.
+The legacy HTTP admission routes return 410 after their existing identity/audience checks.
 
-Nothing the runner runs for a review finds a program through the runner's own `PATH`, which could
-name a directory a session can write. The `git` and `gh` commands that read the pull request and
-build the snapshot, and the controller's recovery step, run with `PATH` set to a runner-private
-directory of links to the verified `git`, `gh` and `ssh`, followed by `/usr/bin:/bin`, and without
-the runner's `GIT_*` and `*ASKPASS` variables. `HOME` is kept, so your own git and GitHub CLI
-configuration and credentials still apply, but a credential helper must be named by an absolute
-path or live in a system directory. A fetch over SSH runs the verified `ssh` by its path
-(`GIT_SSH_COMMAND`); when no trusted `ssh` is found, the mirror is fetched over HTTPS only, whatever
-the origin's spelling. The controller's own `PATH` holds links to the verified reviewer, `git` and
-the reviewer's `env` program, then `/usr/bin:/bin`.
+Upgrade in this order:
 
-The controller runs under `python3 -I`, with only its own installed directory added for its sibling
-modules. A controller preflight failure launches nothing and consumes no attempt: the job completes
-with the controller's summary (`attempt_consumed: false`, its `failure_class` and
-`validation_errors`), and the round's attempts are unchanged. A job stays running, with its snapshot
-and its share of the concurrency limit, until both the controller and the reviewer it started have
-exited, so a reviewer that outlives a killed controller is still supervised, cancelled through the
-controller's process group, and stopped by the time limit. When the controller dies without a
-result, its recovery step runs once; until it finishes, neither a repeated request nor a cancel
-ends the job, and its recovered result is what the job reports.
+1. Drain every legacy job's execution with its prior runner and retain its final receipt and usage,
+   including terminal `accounting_unavailable` receipts. These cannot be turned into priced
+   receipts by repeating cancellation; unknown cost remains unknown after execution has stopped.
+   Do not delete job records or infer zero cost from missing state. Unknown campaign usage keeps
+   its reservation and blocks protected admission until authenticated settlement.
+2. Upgrade the control plane. It admits no new legacy jobs; reconnect recovery sends only
+   cancellation, never a legacy dispatch. Older runners can still provide authenticated final
+   receipts to settle previously admitted work. Their cancel handlers do not re-send already-finished
+   or unknown jobs: a lost final update or never-delivered request stays pending until the runner is
+   upgraded to replay its historical receipt or explicitly refuse missing state. Existing archive
+   read routes retain their audience checks, bounded output, historical charges and deduplicated receipts.
+3. Upgrade the runner. A new runner refuses an older or unverified control plane at registration
+   with an actionable version error. Older servers sanitize unknown job refusal messages and can
+   replay dispatch, so silently accepting that pairing would hide the migration. Startup also
+   refuses unfinished, malformed or still-live/uninspectable local legacy execution without changing
+   records or launching a controller. A drained terminal unpriced receipt permits upgrade and replays
+   unchanged, retaining its unknown cost and reservation. Recorded process identities and surviving
+   controller groups must be gone; use the prior runner to drain them before upgrading.
+4. Request review sessions. Campaign members request their own sessions against the campaign
+   allowance. A human must replace any obsolete controlled-review profile boundary; no authority
+   or budget is silently converted. Missing reviewer/admission/budget support remains a blocker.
 
-Before the controller is spawned, the job is saved with a per-launch marker that the controller
-(and the reviewer it starts) carries in its environment. A runner that restarts before it recorded
-the controller's process looks for that marker: a live process is adopted and supervised as usual;
-an attempt directory or controller output with no live process is a controller that died, and is
-recovered; with neither, the job reports `not_launched` and the attempt is not charged. If the
-runner cannot record a controller it has just started, it stops that controller and reports the
-job failed.
+No controller discovery, native subprocess launcher or recovery executor remains. Compatibility
+message types and database ledgers remain only for refusal, cancellation and historical settlement.
+A new runner replays an exact settled legacy receipt; a missing receipt is an unknown outcome and
+never a zero-cost refund. See [ADR 0013](./adr/0013-review-sessions-replace-native-review-jobs.md).
+
+### Review Sessions
+
+#### Optional Merge Decision Evidence
+
+Protocol 243 adds `mergeReviewEvidence`. A `pr_merge` snapshot may cite `reviewSessionId`, the
+immutable attempt that upvoted its exact `headSha`. It is optional: uncited decisions preserve
+their existing behavior. The control plane checks that the attempt exists, belongs to the
+requester's own review run on that repository and PR, completed with a server-validated UPVOTE,
+and has not been superseded by a newer valid UPVOTE or DOWNVOTE on that PR. Repository matching is
+case insensitive. A newer invalid, cancelled, failed or unfinished attempt does not supersede it.
+A refusal identifies the mismatch or the superseding review session and head and directs the
+requester to obtain and cite a valid review session for the exact head.
+
+`get_workflow_decision` and `list_workflow_decisions` return current server-derived
+`reviewEvidence`: `verified` with the reviewer, requester, PR, head, vote, epoch, round, attempt and
+completion time, or `refused` with its reason. Orchestrators read these facts from the server;
+`reviewResult` remains the requester's recommendation. Evidence is checked at request, approval,
+arming, and the correlated merge authorization boundary. Record-only reconciliation and lifecycle
+settlement still require the exact armed command, current authority and forge proof of the merged
+head; a later vote cannot erase a completed action. A new vote can revoke a stale grant.
+The review records survive reconnect and restart; ordinary stop/restart decision revocation still
+applies. Review approval never grants human approval, merge authorization or passing CI checks.
+
+Upgrade the control plane and runner before using citations. A current runner refuses to send a
+cited snapshot to an older or unverified control plane, rather than letting it drop the citation;
+a current control plane refuses citations from an older runner. The CLI shares the MCP transport
+gate. Neither side silently retries without the citation. An uncited decision remains available
+under its existing review and authority rules; removing a citation changes the exact snapshot and
+requires a new decision.
+
+Settings → Reviews stores personal reviewer choices in the control plane, so they follow the user
+across devices. Each configured implementing harness can select a trusted, discovered native Codex
+or Claude Code reviewer, a discovered model and an effort. Automatic uses that reviewer's discovered
+default model and high effort. A missing configured combination refuses the review with an
+actionable reason; it never substitutes another reviewer. Same-family reviews require explicit
+consent, checked at admission and again by the runner against the implementing session's model.
+
+The round budget applies to all harnesses (1–32 valid rounds, default four). A review run pins its
+initial budget; changing settings does not expand an existing run, whose additional rounds still
+require the exact typed extension. The Project selector creates a personal project override by
+copying the user's current settings. That document replaces all user defaults for the user's
+sessions in that project; Reset to User Settings removes it. Missing settings rows retain the
+original opposite-family, high-effort, four-round launch without new configuration fields.
+
+`GET` and `PUT /api/review-settings?projectId=…` require a human principal and project access; PUT
+accepts `{ settings }`, or `{ settings: null }` to reset. The caller's user ID is server-derived.
+Configured reviews require the runner's `runtime.reviewSession.configuration` capability. Older
+runners keep the original launch when there are no settings rows, and refuse configured launches
+with update guidance. The permission preset, trusted command checks and read-only snapshot remain
+runner-owned. The `review_session_requested` event records the resolved configuration; admission
+refusals emit `review_configuration_refused`, correlated by the requesting session ID.
+
+Settings → Orchestrator and the launch policy editor expose Review Harness, Review Model, Review
+Effort and Review Round Budget when `reviewPolicySupported` is advertised. Each accepts Automatic
+or a fixed discovered choice (a round budget is 1–32). Automatic inherits the launching user's
+complete project override, then personal settings, then built-in defaults. Fixed campaign fields
+take precedence. New campaigns carry `reviewPolicySnapshotVersion: 1`; each child's selected fields,
+including its concrete discovered model when available, are persisted atomically at launch and
+projected as `SessionView.reviewPolicy`. Later settings or campaign edits affect future children.
+Same-family consent is never frozen: admission rechecks the current user's effective project-over-user
+rule. Its explicit consent applies only when that rule selects the actual reviewer harness; a retained
+toggle on another harness cannot authorize a campaign override.
+Missing configured harnesses and models refuse with an actionable reason and no fallback. Legacy
+campaigns without the marker retain their existing behavior; older clients omitting the fields
+preserve saved review policy. `campaign_child_review_policy_snapshot` logs the selected launch
+snapshot with the child and parent session IDs, without exposing the user's other review rules.
+
+`wollipog review session run` (MCP `request_review_session`, #561) is the default route for a
+session, including an isolated campaign child, to obtain its own PR's cross-model review. It starts a
+**review session**: a typed, immutable session kind whose reviewer runs as its own Wollipog
+session, with a live and recorded transcript, instead of as an external controller. It reviews the
+calling session's own pull request at its pushed head. The scope is a
+native managed worktree the session created, an open pull request from the same repository on that
+worktree's branch, and `--head` equal to its pushed head. `--brief-file` (MCP `brief`, at most
+100 KiB) is required and is the reviewer's only context besides the pinned patch.
+
+Protocol v244 (#3539) adds GitLab merge requests. `--repo` (MCP `repository`) names the project by
+its host and full namespace, `<host>/group[/subgroup…]/project`, and `--pr` (MCP `number`) is the
+merge request's IID. The project checkout's `origin` must name exactly that host and project. Because
+that origin is session-writable configuration, a self-managed host must also be named by the user's
+global glab configuration (`glab config get api_protocol --host <host> --global`, the same local check
+every GitLab reader makes); otherwise the review is refused with `the runner's glab is not configured
+for this GitLab host` before any authenticated request. gitlab.com needs no such proof. The
+runner reads the merge request with a trusted `glab` (`glab api projects/<project>/merge_requests/<iid>
+--hostname <host>`, with the user's own glab login) and requires it to be `opened` (a `locked` merge
+request is not), from the same project, on the worktree's branch, at `--head`. The base is GitLab's
+merge base for that head (`diff_refs.base_sha`), so the head and base normally come from the session's
+own branch without a forge fetch. The runner needs a trusted `gh` only for GitHub reviews and a
+trusted `glab` only for GitLab reviews; it refuses with `the runner is missing a trusted glab for
+GitLab reviews` (or `gh for GitHub reviews`) otherwise. A pre-v244 runner is refused with an update
+message, and review-round extensions name a GitLab run the same way.
+
+
+The control plane creates the review session on the requester's runner. By default, the reviewer is the other
+model family, through the native agent the runner advertises for that harness in
+`runtime.reviewSession`. The runner proves the scope again against the requester's runner-recorded
+worktree, fills the same verified mirror as the bridge, and checks out the exact head into a
+runner-owned directory, with symbolic links checked out as plain files. That checkout is the review
+session's working directory. The reviewer launches outside every runner sandbox (the requester's
+namespace would stop Codex's own sandbox from nesting), through the normal managed driver, with a
+launch preset the runner owns and nothing can widen:
+
+- Claude Code: only `Read`, `Grep` and `Glob`, allowed only inside the checkout with its `.git`
+  denied, `dontAsk`, `--setting-sources ""`, every hook disabled, an empty strict MCP configuration,
+  slash commands and skills disabled, the review contract as the system prompt, and the review
+  output schema through `--json-schema`.
+- Codex: `--strict-config`; apps, plugins, hooks, other agents, browser and computer use, and image
+  generation disabled; no MCP servers and no automatically loaded project instructions; a read-only
+  sandbox without network access, approvals never asked, the contract as developer instructions,
+  and the schema as the turn's output schema.
+
+No hook, guard, Wollipog tool, agent-control credential, plugin or project memory is provisioned.
+The reviewer CLI must pass the bridge's trust checks as the first match on the `PATH` its provider
+is spawned with, and the runner re-checks the exact authorized agent and command at launch. The
+review contract and output schema (version 2) are ported from the cross-model-review skill
+(Apache-2.0, attributed).
+
+A review session is exempt from every session limit: it takes no runner slot, per-agent limit or
+active turn, and it is not a child, so it takes no delegation slot or charge and gives the requester
+no descendant authority. The requester's original human cost ceiling, if it has one, bounds its
+own spending and review attempts together. Campaign members use this same interface: the server
+reserves allowance before launch and records actual Session usage against the campaign allowance
+when present. Exhausted, stopped or unavailable allowances refuse admission with a reason;
+admission failures cannot be bypassed through the bridge. A worker's campaign allocation does
+not cap its reviews, which reserve allowance separately.
+A requester has one active review session at a time. A review session runs one turn: it takes no
+further messages, steering, configuration or commands, cannot be restarted, relaunched, forked or
+converted to another role, and has no worktree, terminal, Native TUI, side chat or children. It is never
+parked. Every MCP server Codex would load, from user or project configuration, is disabled by name.
+
+The request returns `reviewSessionId` at once in state `requested`; the review session's own status
+moves it to `running`, and the runner reports exactly one outcome: `completed` with the reviewer's
+structured output (at most 256 KiB, `outputTruncated` beyond that), or `failed` or `cancelled` with
+a fixed reason. A reviewer has 30 minutes; past that its turn is judged as timed out.
+
+#### Review Runs
+
+A requester's review sessions of one pull request form a review run (#3369), with the policy of the
+cross-model-review skill. The control plane sends the run's current epoch with each request, and the
+runner, which can prove commit ancestry from its mirror, plans the attempt (`round`: epoch, round,
+attempt, mode, base and the files in scope):
+
+- The first round reviews the whole pull request (`full`). A later round reviews only the changes
+  since the last valid round's head (`delta`), lists the pull request's other changed files as
+  context only, and carries that round's findings for the reviewer to report again or drop. A
+  request with `fullReason` (at most 500 characters, `--full-reason`) reviews in full instead.
+- A head that does not descend from the last valid head (a rebase or force-push) starts a new
+  epoch: its first round reviews the range-diff from the earlier base and head (`rebase`), scoped
+  to the changed files the rewrite touched, with the open findings carried forward. Without the
+  earlier commits, or with `fullReason`, it reviews in full. Until the new epoch has a valid round,
+  the earlier epoch's last valid review stands: a retry reviews the same range-diff with the same
+  findings.
+- An epoch has at most 4 valid rounds and each round 2 counted attempts. An invalid attempt is
+  retried in the same round; an attempt that timed out or failed before producing a report does
+  not count. A head with an upvote, a head unchanged since the last valid round, a spent round
+  budget and a spent round are refused with fixed reasons.
+- Integrating the moved base branch is treated like a rebase (#4075, protocol 277 runner and
+  control plane). The runner proves strictly that a head's only change since the last valid round
+  is one merge of the moved base: a two-parent merge whose first parent is the last valid head,
+  whose second is a commit of the pull request's current base that head did not contain, and whose
+  tree differs from Git's own merge only inside its conflicted hunks. Such a head gets a
+  base-merge round (`round.baseMerge`): a delta round scoped to the merge's effect on the pull
+  request's own diff, which does not count against the epoch's budget and needs no extension. When
+  the last valid round was an upvote and the merge leaves the pull request's own diff byte-identical
+  (each changed path's mode and blobs against its merge base), no reviewer runs: the run records a
+  reviewed-head equivalence (`round.mode` `equivalent`, `round.equivalentTo`) that carries the
+  upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
+  claim against the run's current epoch and last valid head before recording it. An octopus
+  merge, a merged parent outside the base branch, a path-level conflict, a change outside a
+  conflict block, any commit after the merge, or a requested full review is an ordinary commit and
+  counts as before. Older peers keep counting every round.
+- An epoch that used its rounds takes more only through a typed
+  `review_round_extension` workflow decision (`request_workflow_decision`).
+  - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
+    of the last valid round, 1 to 4 extra rounds, and a reason of at most 1000 characters.
+  - **Resource key:** `review_round_extension:<owner/name>#<number>:epoch-<epoch>:rounds-<rounds>`.
+  - **Checks:** the control plane checks the request against the run as it records it. A run with
+    rounds left or any other epoch, round count or blocking count is refused. After an upvote,
+    protocol 237+ requires `upvotedHeadSha` naming the last valid upvoted head and a different
+    `headSha`. An unchanged upvoted head keeps the existing refusal. The granted round (including
+    retries) reviews only the delta since that upvote; `fullReason` cannot broaden it. Older peers
+    fail closed. Merge decisions for an existing review run require a valid review of their head.
+    Unused grants are rechecked against the run at consumption and admission; stale and superseded
+    grants do not add rounds. Extensions keep the normal campaign admission and cost accounting.
+  - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
+    itself, and a person resolves it from its card. Under an Orchestrator an explicit Parent Control
+    grant delegates it without a cap. Under Full Control it is also the controlling Orchestrator's
+    within a server-enforced cap per pull request (#4075, which the owner approved in place of the
+    #3369 rule that Full Control never takes it): every approved or consumed Orchestrator-owned
+    extension of that pull request, from any epoch or requester, counts toward at most the run's
+    configured round budget of extra rounds in total. The count is durable, so a re-request
+    cannot reset it. Past the cap, under a stale boundary, from a root Orchestrator's own run, in
+    every Custom campaign, and whenever the requester's or the controller's runner is older than
+    protocol 277, it stays the person's (reason `review_extension_cap_reached` past the cap).
+    `get_campaign` reports it as Orchestrator-owned with `reviewRoundExtensionCap`, and each
+    occurrence's `authorityEvaluation` records whose decision it is. A grant adds only review
+    rounds, spent from the campaign's review allowance like every review; it grants no merge,
+    filesystem, shell or network authority.
+  - **Effect:** approved and consumed extensions add their rounds to that epoch's budget. The next
+    review request consumes an approved one, so a session restart, which revokes unconsumed
+    decisions, cannot take back rounds already granted. A policy stored before this category
+    existed reads it as human-owned.
+
+Each finished attempt is judged against the review contract (`verdict`: `valid`, `consumed`,
+`effectiveVote`, `failureClass`, at most 8 `validationErrors`): the report must name the reviewed
+head, classify each file in scope exactly once and cite only tracked files, the reviewer may not
+have been refused a tool, and the runner's checkout must still be exactly that head with nothing
+changed. The control plane checks a valid report again against the stored head and scope; only a
+valid report's vote and `findings` count. `validated` is true once a verdict is recorded, and
+`stale` is true once a newer review of the pull request covers another head. A runner below
+protocol 228 reviews every request in full without a verdict. `review session get`
+(`get_review_session`) reads it, `review session list` (`list_review_sessions`) pages them newest
+first, and `review session cancel` (`cancel_review_session`) stops the review session. The runner
+persists the outcome before reporting it and re-sends it at each registration; a runner restart
+fails any unsettled review session for good, and the checkout is removed once the review settles.
+
+#### Review Continuation
+
+End the requesting turn when you have no independent work: there is no need to poll mid-turn.
+Read the full verdict and report with `review session get` on continuation; use that read to
+recover a missing notification, or poll every minute or two on older peers without continuations.
+A finished review owes its requester exactly one continuation (#3369), recorded with the review's
+outcome so a crash cannot lose it. A review the requester cancelled, or one whose launch was
+refused at once, owes nothing. The continuation is a framed prompt,
+`[Wollipog Cross-Model Review — <reviewSessionId>]` … `[End Wollipog Cross-Model Review]`:
+- the reviewer, the pull request, its head, and the round and epoch;
+- the outcome: a valid UPVOTE or DOWNVOTE with its findings (up to 20, one bounded line each), an
+  invalid attempt with its first reason, or the fixed reason a review failed;
+- an instruction to read the full report with `get_review_session`, adjudicate every finding,
+  and request the next round once fixes are pushed.
+
+Like a restart notice, it goes only to an idle requester that nothing would refuse it for. A
+requester mid-turn takes it after its turn settles, through the control plane's retry sweep. A
+worktree-backed session receives it as a durable command that a reconnect or runner restart
+delivers exactly once; any other session receives it on the immediate lane, recorded as
+delivered before the send. A requester that ends for good is owed nothing more. The review's
+`continuation` field reads `pending`, `delivered`, `uncertain`, `failed` or `abandoned`, or
+null when nothing was owed.
+
+In the web app, a review session is titled **Codex Review** or **Claude Review** of its pull
+request. The requester's Review panel lists its reviews under Cross-Model Reviews, newest first:
+each with its round and epoch, one state badge (Requested, Reviewing, Upvote, Downvote, Invalid,
+Failed, Canceled, or Not Validated from an older runner), Stale once a newer review covers another
+head, why an invalid or failed review did not vote, a valid report's findings with their files, and
+Open Transcript. The list is read-only; the requester's own view carries a summary of its reviews
+(`reviewRuns`: count, active, updatedAt), and the panel reads them again whenever it changes.
+
+The routes are `/api/sessions/:id/review-sessions` (POST to request, GET to list),
+`.../:reviewSessionId` and `.../:reviewSessionId/cancel` (POST), with the bridge's credential rules.
+Orchestrator sessions do not have these tools. Campaign members request their own review sessions;
+unlike the bridge, this route admits them against their campaign allowance. The feature needs
+protocol 226 on both the control plane and the runner, and a Linux runner that advertises
+`runtime.reviewSession`; review runs need protocol 228. Campaign charging requires protocol 232;
+older runners refuse campaign review sessions with upgrade guidance.
+
+A Codex reviewer's read-only sandbox can still read files outside the checkout: Codex's read-only
+sandbox policy has no readable-roots restriction. Network access is off for its commands, but what it
+reads reaches the model and can appear in its output, as with the bridge.
 
 `wollipog session wait` (MCP `wait_session`) polls a session until its status is one of `--for`
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it
 `reached`, and the session's metadata. A bounded wait usually ends at its timeout (1 ms–1 hour,
 default 60 seconds), so that is a normal result rather than a tool error (#3269):
-`outcome: "timeout"`, the states it was `waitingFor`, and the session's metadata from its last read.
-Call again to keep waiting. A state outside `queued`, `starting`, `running`, `input_required`,
+`outcome: "timeout"`, the states it was `waitingFor`, and a compact status from its last read
+(`id`, `status`, `attentionRevision`, `pendingRequestCount`, `lastActivityAt`) whose size does not
+grow with the session's metadata (#4071). Pass `fullMetadata: true` (CLI `--full`) for the full
+metadata instead. Call again to keep waiting, or end the turn rather than polling a long wait. A state outside `queued`, `starting`, `running`, `input_required`,
 `idle`, `completed`, `failed`, and `stopped` is refused before any read, with the valid list. A
 missing session, a control-plane failure, and cancellation remain errors. The CLI exits 0 when
 reached, 124 on timeout, and 1 on an error.
@@ -301,6 +572,18 @@ successful replies, and ambiguous steering errors identify the exact submission 
 `session resolve-steering` (`resolve_steering_attempt`) uses the dashboard's existing Queue Again
 and Dismiss path. Agent reads and resolution have the same descendant scope and visibility checks
 as `prompt_session`; an agent cannot use them on itself, ancestors, siblings, or unrelated sessions.
+
+A turn started by a durable command refuses ordinary steering. One exception (#4022): a child's
+controlling Orchestrator can steer `prompt_session` text into a running turn that the control plane
+started from its own prompt outbox (an assignment, an Orchestrator prompt, a decision resume, or a
+continuation). The sender must be the child's immediate parent and also its outermost
+policy-bearing Orchestrator. The control plane passes the exact started command to the runner, and
+the runner admits the steer only when that command started the active turn. Turns started by an
+automation, recovered answers, recovery continuations, nested Orchestrators, grandparents and
+people keep the existing refusal, and every other steering guard still applies. The steering
+attempt gets its own receipt, and the outbox command still settles at its own turn boundary. A
+refused steer still falls back to the queue, and so does every steer on a runner that predates this
+exception.
 
 Queue Again explicitly admits one ordinary queued message; it cannot prove that an uncertain
 provider write was never delivered. Inspect the attempt and session events before choosing an
@@ -420,6 +703,38 @@ at 300 seconds. The setting sits inside the `wollipog` entry alone: no other MCP
 configuration changes, and other Wollipog tools keep their own shorter bounds (control-plane
 requests 30 seconds, `wait_session` one hour).
 
+**Code mode (#4023).** Some models put Codex in code mode: every GPT-6 model in codex-cli 0.164.0
+and 0.165.0 sets `tool_mode = "code_mode_only"` in its catalog entry. Those models reach MCP tools
+only from an `exec` script cell. `exec` hands a still-running cell back to the model. To get the
+result, the model then has to call `wait` on the cell, which blocks for the `yield_time_ms` it
+asks for. Real models asked for about a minute at a time, often with sleeps in between. One long
+`wait_pull_request` call therefore cost one full-context model request a minute. In one campaign
+child, 531 of 616 requests were spent this way. The runner adds
+`-c features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]` directly after its own entry.
+Codex then offers the `wollipog` tools as ordinary direct tools again, outside `exec`, so a wait
+blocks in one tool call with no model request. This holds for sessions and for native-host
+Orchestrators that start from their worktree or repository. Measured on codex-cli 0.165.0, the setting has no effect without code mode,
+with the hybrid `code_mode` mode, or with a user's own `features.code_mode = true` (which stays
+enabled). Codex refuses its whole configuration when `features.code_mode` contains a field it does
+not know. So the runner adds the setting only when a `codex mcp list --json` read with it still
+loads the `wollipog` entry. On a Codex without the field, the launch is exactly what it was before,
+and the runner log says so. Resume removes the setting only when it directly follows the runner's
+own entry; a user's identical setting anywhere else is kept.
+
+A `-c` array replaces the configured value rather than merging into it, so the setting would drop
+namespaces a user already keeps out of code mode. The runner therefore adds nothing if the launch
+arguments or a Codex configuration file it can read already name `direct_only_tool_namespaces`.
+Those files are the Codex home's `config.toml`, and each `.codex/config.toml` from the launch
+directory up and from every directory a `-C`/`--cd` argument names. They also include
+`/etc/codex/config.toml` and `managed_config.toml`. A mention in a profile or a comment counts too.
+The log then says to add `"mcp__wollipog"` to that list. Two kinds of Orchestrator get no setting
+and keep today's behavior, because the runner cannot read the configuration that applies:
+- A preset Orchestrator with Strict Project Isolation, which starts from a session scratch
+  directory chosen after this check.
+- A target-local WSL Orchestrator, which is launched inside its distribution. A session or Orchestrator whose tools stay inside
+`exec` should follow the shipped skill's code-mode guidance: one call, then one long `wait`, never
+short polls.
+
 **What a session without the Orchestrator role gains.** The entry starts the same
 `--agent-control-mcp` re-entry Claude sessions already run, with the same session-scoped transport
 the injected CLI already uses: a token-file path, or in `provider` mode the relay coordinates
@@ -455,7 +770,38 @@ and disables the rest.
 `pnpm probe:codex-mcp-wait` re-measures this against a real `codex app-server`, a scripted local
 model, and a stub `wait_pull_request` behind the exact entry the runner builds. It counts every
 model request while the call blocks and can show the default cutoff (`--default-limit`) and the
-reviewer request (`--without-approval`).
+reviewer request (`--without-approval`). `--code-mode` runs the same wait for a code-mode-only
+model, with the direct-tools setting and without it. On codex-cli 0.165.0, a 150-second wait made
+no model request with the setting. Without it, the call ran from an `exec` cell that two model
+requests polled.
+
+### Claude Code Sessions and the `wollipog` MCP Server
+
+Claude Code aborts a stdio MCP call that sends no response or progress for 30 minutes, whatever
+`timeoutMs` the call asked for (#4072). The `wollipog` server sends nothing while a wait blocks, so
+before this limit was raised a `wait_pull_request` of 40 or 50 minutes, or a `wait_session` of 50,
+failed at exactly 1800 seconds instead of returning its own result.
+
+**Per-call limit.** Every runner-written Claude `wollipog` entry sets the per-server
+`"timeout": 10860000` (3 hours 1 minute, `CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS`, the same as Codex's).
+The native `--mcp-config` file and the WSL bridge's `mcp.json` are both built by
+`claudeWollipogMcpServer`, so the two launch paths carry the same entry. In claude 2.1.312 the
+per-server `timeout` does two things for that server alone:
+- Its idle limit becomes the larger of the `timeout` and the global idle limit. A user's
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` still turns it off.
+- Its total per-call limit becomes the `timeout`, in place of `MCP_TOOL_TIMEOUT` and the 27.8-hour
+  default. No `wollipog` tool runs that long: `wait_pull_request` ends within 3 hours and 20
+  seconds, and `wait_session` within one hour.
+
+The setting sits in the runner-written file's `wollipog` entry alone, so other MCP servers and the
+user's own Claude settings are unchanged. The server sends no `notifications/progress`. Claude Code
+would accept them, but the configuration-only change covers the same calls without new protocol
+traffic for every harness.
+
+`pnpm probe:claude-mcp-wait` re-measures this against a real `claude -p`, a scripted local
+Messages API, and the runner's own `wait_pull_request` and `wait_session` handlers with stubbed
+reads, behind the exact entry the runner builds. `--without-limit` also runs the entry without its
+`timeout`, and `--idle-ms` scales the global idle limit down for a quick check.
 
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
@@ -581,7 +927,7 @@ builds to write inside the worktree or another authorized scratch path.
 An ACP provider in a selected managed Linux worktree cannot launch under `provider` mode because
 the runner does not know which provider state root to preserve. Git commands that write shared
 administration outside `objects`, `refs`, and `logs` can also fail inside this boundary. These
-include deleting a ref (so a rebase or cherry-pick leaves `CHERRY_PICK_HEAD` behind; #3316),
+include deleting a ref (see [Deleting the Session's Own Refs](#deleting-the-sessions-own-refs)),
 repository config changes, setting an upstream with `git push -u`, and creating a worktree
 directly with Git; use the runner's managed worktree operation for the latter. Git layouts that
 cannot supply canonical linked-worktree administration and all four narrow writable Git roots fail
@@ -602,6 +948,16 @@ worktree boundary is the read-only parent of that selected child. A newly reques
 therefore not writable during the current turn. Select it and relaunch before editing it. This
 keeps the selected root and Git registration intact; it does not preserve writable file contents.
 
+Create, attach, and select results report this as `isolation.writableNow`, read from the live
+process's boundary rather than the configured mode, so a `provider`-mode runner whose provider runs
+in this boundary reports it too. A worktree counts as writable only when its Git admin directory is,
+which this boundary grants only to the launch worktree and the worktrees bound with it. When the
+session's own turn makes such a switch, the result also reports `continuesAfterRelaunch` (protocol
+v255, #3810). The turn's end relaunches the session in that worktree, and the runner submits one
+automatic continuation turn there. It does not when a prompt is already waiting (that prompt runs
+instead), the turn was interrupted or stopped, the relaunch failed, or the session is held. A switch
+made by a person or another session relaunches the same way and then waits for the next prompt.
+
 ### Other Managed Worktrees of the Session
 
 A protected launch also binds every other runner-created worktree the session owns in the same
@@ -611,7 +967,137 @@ the session can commit in it and fast-forward it, and its `.git` link and `gitdi
 mount point, so it cannot be renamed or removed from inside. A worktree is bound only when its admin
 directory's `gitdir` back-pointer names it, so a rewritten `.git` link cannot claim another
 session's admin directory. Attached worktrees and every other session's worktrees are never bound.
-Codex's own workspace sandbox still grants only the selected worktree.
+Codex App Server's own workspace sandbox grants the same set: each turn's `writableRoots` add the
+root and admin directory of every worktree this launch's boundary binds, and only those, so a Codex
+turn can commit there too. Codex keeps each root's `.git` link read-only. A worktree retired since
+launch is left out of the turn's roots.
+
+### Codex's Sandbox Inside This Boundary
+
+Codex App Server's workspace sandbox starts its own bubblewrap. On a host that restricts
+unprivileged user namespaces, such as recent Ubuntu with `kernel.apparmor_restrict_unprivileged_userns=1`
+and the stock `bwrap-userns-restrict` AppArmor profile, a bubblewrap started inside this boundary
+cannot create its namespace. Every command then fails before it runs and asks to run outside the
+sandbox (#3843).
+
+Before a native Linux Codex session starts its thread, the driver runs a probe through the App
+Server's `command/exec` under the same policy its turns will send. Nothing a session can write
+decides the result:
+
+- The probe is a system `printf` that prints a sentinel, by absolute path (`/usr/bin/printf` or
+  `/bin/printf`). At every launch the runner walks that path component by component as the kernel
+  does. It follows each symlink, intermediate directory links included, up to 16 links. Every
+  directory, link and the final file it visits must be owned by root, and every directory and
+  the file must be writable by no one else. None may lie under `/proc`, `/dev`, `/tmp` or `/sys`,
+  which the boundary mounts afresh. The final file must be an executable under `/usr` or `/bin`.
+  It runs the original path, not the resolved target, so a `printf` that links to a multicall
+  binary such as BusyBox still selects its `printf` applet.
+- No path the walk visits may lie under a root this boundary makes writable.
+- It runs with `PATH=/usr/bin:/bin` and with `LD_PRELOAD`, `LD_LIBRARY_PATH` and `LD_AUDIT`
+  unset.
+- A failure counts only when the sentinel never printed (the command never started) and stderr,
+  apart from the Codex CLI's own `WARNING:` notices, is exactly one line: bubblewrap's namespace
+  refusal.
+
+Without a trusted `printf`, as for a runner that itself runs inside a user namespace, the probe
+does not run and nothing changes. Otherwise:
+
+- If the command runs, nothing changes.
+- If it fails because bubblewrap may not create a user namespace, and this boundary encloses the
+  process, the turns send `externalSandbox` in place of a workspace-write policy. This boundary is
+  then the single sandbox. It already limits writes to the roots described above and keeps the
+  runner's entries read-only. Network access follows the runner's `executionIsolation.network`:
+  `deny` keeps `--unshare-net`, and `inherit` allows it. Codex does not enforce
+  `networkAccess: "restricted"` itself (measured with codex-cli 0.165.0); the value only tells the
+  model what to expect. The approval policy, the reviewer, the guard hook and Full Control's tool
+  rules are unchanged, so an escalation or permission request still reaches them. A read-only
+  turn keeps its own policy, because this boundary would let it write. The runner logs the
+  switch as `codex_command_sandbox_outer_boundary`.
+- Under that fallback, and only then, Codex's commands can write everything this boundary binds
+  writable for the provider process, as Claude Code sessions' commands already can in this
+  boundary (`~/.claude` included). In the default `provider` isolation mode that is the whole Codex
+  credential directory (`~/.codex`, with its `auth.json` and `config.toml`) and the managed Linux
+  caches. In configured `bwrap` mode it is the per-session transcript directory. It also includes
+  `.git` or `.codex` entries inside the worktree that are not runner-owned, which Codex's own
+  sandbox kept read-only. A writable `config.toml` can change later sessions. Binding it read-only
+  is not done: the App Server writes it at runtime (`config/value/write`, `config/batchWrite`,
+  `skills/config/write`), and its temp-file-and-rename writes would fail on a bound file.
+- Any other probe failure keeps Codex's policy and is only logged, inside this boundary or not. It
+  is not proof that the sandbox cannot start.
+- On a namespace denial without this boundary, the launch fails. Its `failed` status carries `launchFailure:
+  "codex_sandbox_unavailable"` (protocol v259), and a campaign shows that child as blocked work
+  for the person (`replace_worker`, reason `unsupported_capability`) rather than as a retry. The
+  runner keeps the reason with the failed state and reports it in the session snapshot, so it
+  survives a runner restart and reconnect hydration. A failed status that arrives after
+  hydration has already marked the session failed still records it.
+
+Discovery runs the same probe through `codex sandbox` on the host as well. When it reports the same namespace
+denial, the Codex installation is unsupported with failure code `codex_sandbox_unavailable`. Its
+`unavailableReason` names the fix and appears in Machine settings and `get_agent_capabilities`,
+and `create_session` refuses it with that reason. Contexts other than native Linux are unchanged.
+
+### Deleting the Session's Own Refs
+
+Git takes `packed-refs.lock` in the shared Git directory before it deletes any ref: a worktree's
+own `CHERRY_PICK_HEAD` or `AUTO_MERGE`, and a ref that exists only as a loose file, included. Inside
+the boundary that directory stays read-only, because making it writable would let the sandbox
+create files host Git reads, such as `commondir` or `config.worktree`. No layout that Git 2.43
+through 2.55 accepts lets the sandbox take the lock without such a path: a bind of `packed-refs`
+still needs the lock beside it and pins a stale copy once host Git repacks, a symlinked
+`packed-refs` fails `git fsck`, and `git refs migrate` to reftable refuses repositories with
+worktrees. So, inside the sandbox, `git rebase` and `git cherry-pick` still print
+`Unable to create '…/packed-refs.lock'` and leave `CHERRY_PICK_HEAD` or `AUTO_MERGE` behind, and
+`git cherry-pick --quit`, `git branch -d` and `git update-ref -d` fail with the same error (#3316).
+
+The runner deletes those refs instead, outside the sandbox, through `delete_worktree_refs` (CLI
+`wollipog worktree delete-refs`, protocol v227). Only the session's own credential can call it,
+and only for the session's runner-recorded, runner-created worktrees:
+
+- the worktree's `CHERRY_PICK_HEAD`, `REVERT_HEAD` and `AUTO_MERGE`, cleared as
+  `git cherry-pick --quit` would. It is refused while a rebase or merge is in progress there, and
+  while a cherry-pick or revert sequence is recorded: run `git cherry-pick --quit` (or `--abort`)
+  first, which removes the sequence and leaves only the refs it could not delete;
+- `refs/heads/<branch>` for a branch the runner recorded for one of the session's worktrees, while
+  no worktree has it checked out or is rebasing it;
+- `refs/remotes/<remote>/<branch>` for such a branch and a configured remote.
+
+Every ref names the object id the caller expects, and one `git update-ref --no-deref --stdin`
+transaction deletes all of them or none; a ref already gone is reported as absent, so a repeated
+call succeeds. A call names at most 16 refs. Host Git runs as plumbing with explicit `GIT_DIR` and
+`GIT_COMMON_DIR`, no hooks, no fsmonitor, no global or system config and a minimal environment, and
+a ref path the sandbox redirected through a symlink is refused before Git runs. Because the session
+could still swap a directory after that check, the runner runs this Git only in its own bubblewrap
+mount view: only the shared Git directory's `refs`, `logs`, `packed-refs` and lock files and the
+worktree's own admin directory are writable, so a redirected path reaches nothing the session could
+not already write. A runner that cannot build that view refuses the operation: every non-Linux
+runner, including macOS, and a Linux runner without `bwrap`.
+
+While it deletes a branch, the runner holds every worktree's `HEAD.lock` and `index.lock`, the main
+worktree's included. Git moves a HEAD only through `HEAD.lock`, and a checkout holds `index.lock`
+while it rewrites the working tree, so a checkout of that branch in another worktree fails until the
+deletion finishes, and a lock that already exists refuses the deletion. If a HEAD is pointed at the
+branch anyway, by a writer that ignores Git's locks, every ref the call deleted is restored and the
+call is refused. Each lock file the runner creates holds a marker naming the runner and the
+operation, and is listed in a journal under the runner's data directory before it is created:
+
+- runner shutdown stops admitting deletions and cancels running ones: a cancelled deletion creates
+  no further lock and starts no further Git step before its transaction (one already committed
+  still finishes its check). Shutdown waits up to five seconds for them to stop and release their
+  own locks. One that does not stop in time keeps its journal entry, and the runner exits;
+- at startup the runner removes only the marked locks that a journaled, no-longer-running operation
+  of its own left behind. A lock Git created, or one marked for another runner or operation, is never
+  touched.
+
+One window remains: a checkout that has written its index but not yet taken `HEAD.lock` when the
+runner locks. That checkout's HEAD update then fails on `HEAD.lock`, leaving its worktree with the
+branch's files while HEAD still names the previous branch, and the branch is deleted. The operation
+returns, and its audit event records, every deleted ref with the object id it held, so the branch
+can be recreated with `git branch <branch> <object-id>`.
+
+Each call, refused
+or not, records a `worktree_refs_deleted` session event with every deleted ref and the object id it
+held (`deletedRefs`), including any a refusal could not restore; its refusal reasons are fixed
+runner strings that never echo repository content.
 
 ## Runner Hook State at the Sandbox Boundary
 
@@ -849,10 +1335,16 @@ host launch the runner does not sandbox, **the sidecar holds nothing and the run
 | --- | --- | --- |
 | Runner `provider`, Claude, native Linux | **Runner memory, relayed over the abstract socket.** Nothing in the hook state directory is a credential, and a circuit written there is ignored | `policy-hook-relay.test.ts` (real provisioning, real socket, real sidecar entry point), and a real claude 2.1.278 run |
 | Runner `seatbelt`, native macOS | Files, granted back through the mask's `managerTransport` rules (#1447), unchanged | **macOS CI only** (`managed-worktree-guard-seatbelt.integration.test.ts`) |
-| Runner `bwrap`, native Linux | Manager hooks are omitted with a session launch notice; the separate managed-worktree guard remains available through its verdict socket. Switch to `provider` isolation for the manager policy relay | `hook-settings.test.ts` |
+| Runner `bwrap`, native Linux | Manager hooks are unavailable; with manager hooks enabled, fixed-rule Claude turns fail closed. Switch to `provider` isolation for the manager policy relay, or use Default or Auto. The separate managed-worktree guard remains available through its verdict socket | `hook-settings.test.ts` |
 | Runner `provider`, Claude, macOS and Windows | Files, unchanged: readable and writable by the provider | Existing `policy-hook.test.ts` and `hook-settings.test.ts` |
 | A launch whose abstract socket could not be created or proven | Files, as before, and the runner log says the guard reads its file | `policy-hook-relay.test.ts` |
 | WSL, container, and cloud launches | No manager hooks (not provisioned there) | Unchanged |
+
+With manager hooks enabled, native host Claude turns in Accept Edits, Plan, or Bypass Permissions
+also fail closed when the registered control plane is too old or the agent does not support that
+mode's hook transport. Restore hook support or use Default or Auto. An unknown control-plane
+protocol waits for registration during launch preparation; a disconnected live turn is refused
+until registration completes.
 
 Measured with the runner's own provisioning, the real socket and sidecar, a stand-in control plane,
 and claude 2.1.278 in `bypassPermissions`: all three events arrived with the runner-held bearer, a
@@ -1029,6 +1521,25 @@ Known limits of the `provider`-mode form:
   command-text veto remains the only control over READING the directory; what the directory no
   longer does, on native Linux, is decide the guard's verdict.
 
+### Parameter Operators in the Hook-State Veto
+
+The hook-state command-text veto refuses shell parameter operators it cannot inspect (#4031),
+including pattern removal/substitution, substring/length, default/alternate/assignment/error,
+case conversion, indirection/name enumeration and `@` transformations (including prompt expansion).
+Only plain identifiers, positional digits and single special parameters retain the existing
+variable treatment. Operator expressions refuse even in non-path positions such as `echo ${#x}`;
+this conservative restriction avoids emulating Bash and covers partial operands and nested forms.
+Single-quoted or escaped literal text and already admitted inert copy-only heredoc bodies retain
+their existing treatment. No new command allowance is introduced.
+
+Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
+includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as
+described above; native Windows and WSL launches must likewise not assume a filesystem deny unless
+their selected isolation boundary enforces one. OS-isolated launches retain the veto as defense in
+depth. It is not a sandbox: plain unknown variables remain opaque, quoted command substitution
+(#3322) and script-file indirection remain limitations; #1336 tracks the OS boundary. The separate
+misleading managed-worktree refusal wording tracked under #1734 is unchanged here.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking
@@ -1060,6 +1571,70 @@ arms that exact command while the decision remains approved. The matching one-sh
 command permission is then admitted and the decision is marked consumed only after the allow
 response is delivered to the runner. A changed command, failed delivery, stale policy, changed
 ancestry, ambiguous match, persistent grant, or unsupported provider cannot consume the grant.
+
+Protocol v239 (#3602) adds GitLab merge requests. The snapshot's `repository` is the project with
+its host and full namespace (`<gitlab-host>/group/subgroup/project`), `pullRequest` is the merge
+request IID, and three fields exist only for GitLab and are then required: `mergeMethod`
+(`merge_train` or `merge`), `squash`, and `removeSourceBranch`. GitHub snapshots and their digests
+are unchanged. The canonical command is one `glab api` call pinned to the approved head with `sha=`
+and always naming the host:
+
+- `merge_train`: `glab api --method POST projects/<url-encoded project>/merge_trains/merge_requests/<iid>
+  --hostname <host> -f sha=<approved-head-sha> -F squash=<true|false>`. It omits
+  `when_pipeline_succeeds`, which GitLab 17.7 rejects for a merge request that is already mergeable.
+- `merge`: `glab api --method PUT projects/<url-encoded project>/merge_requests/<iid>/merge --hostname
+  <host> -f sha=<approved-head-sha> -F squash=<true|false> -F should_remove_source_branch=<true|false>`.
+
+Before arming it, the control plane asks the child's runner (v239) for `gitlab_merge_preflight`,
+which reads GitLab through the child's own `glab` login and context. A merge request that is not
+open or is a draft, a head that moved since approval, a direct merge on a project that runs merge
+trains (GitLab would merge it straight past the train), a train merge on a project without them or
+on an instance older than the merge-train API (15.11), squash outside the project's squash option,
+or a train whose merge request deletes its source branch differently from the approval revokes the
+decision. GitLab being unreadable proves nothing, so nothing is armed and the child may try again.
+The forge proof reads the merge request's own URL through `glab`. A failed train pipeline is not
+retried: `wait_pull_request` reports it as `queue_failed`, and the child requests a new decision.
+
+### Closing References in GitHub Merges
+
+GitHub closes an issue when a merged pull request's description puts a closing keyword (close, fix
+or resolve, in any tense, any case, optionally followed by a colon) directly before the issue's
+reference, whatever the sentence says. "This PR does not close #3635" closed #3635 on 2026-10-26,
+"does not resolve #3157's" closed #3157, and "must not auto-close #N" would have closed #N. An issue
+linked by hand in the pull request's Development section closes the same way. A campaign that closes
+issues through the typed `issue_closure` route therefore writes "Refs #N" and never puts a closing
+verb before a reference that must stay open (#3713).
+
+Protocol v242 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
+`pr_merge` snapshot may carry `intendedClosures`: every issue the merge is meant to close, as `#N`,
+`owner/repo#N`, or an issue URL, normalized to sorted unique `owner/repo#N`. It is omitted when the
+merge must close nothing, so earlier digests are unchanged; GitLab snapshots refuse it. When the
+child's runner is v242, the control plane asks it for `github_merge_preflight` before creating the
+decision. The runner reads the open pull request through the child's own `gh` login: its head, its
+description and GitHub's `closingIssuesReferences`. It reports every issue either would close, with
+the description's line for each. The decision is created only when those issues are exactly the
+declared ones. Otherwise the request is refused, naming each undeclared issue with its line (or as
+linked on GitHub) and each declared issue the merge would not close, and nothing is pending for a
+reviewer. The created decision records the read as `closingReferenceCheck`, which the request card
+shows as **Closes on Merge**. Consuming the approval reads GitHub again, because the description can
+change after approval: a different set of closures, a moved head, or a pull request that is no
+longer open revokes the decision, and GitHub being unreadable arms nothing and may be retried. A
+pre-v242 child runner is not asked; its decisions carry no `closingReferenceCheck`, and the card says
+the closures were not checked.
+
+The description matcher follows GitHub's measured behavior (each case was checked against
+`closingIssuesReferences` on a draft pull request): `#N`, `GH-N`, `owner/repo#N`, an `https` issue or
+pull URL, and a Markdown link to one all count, in any block outside code; inline code, fenced and
+indented code, HTML comments, a line break or no-break space between keyword and reference, a missing
+space, a parenthesis, emphasis that ends between the two, and a second reference after one keyword
+(`Closes #1, #2` closes only #1) do not. Where the matcher is unsure it reports rather than hides:
+an unclosed fence, a fence left by its quote or list item, fences and backticks inside raw HTML
+blocks, code spans and inline comments that cross a line, comments only one of cmark-gfm and the
+HTML parser would hide, and indented code are all read as visible text. The
+title and commit messages are not read: GitHub never links from the title, and a merge-queue squash
+commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
+an open pull request, or for a draft description with `--file`, compared with `--intended`.
+
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign
 child verification settles an approved evidence decision as consumed instead of requiring the child
@@ -1250,19 +1825,51 @@ queued behind a turn that had never started.
   hold but not the wait: the hold keeps its identity and deadline, and the work is ended as soon as
   that turn settles if the deadline has passed. Orphaned work is not bounded: its one recovery turn
   already crosses the barrier.
-- **The way out is stated.** For a bounded hold, or one whose runner can stop a single job, the
+- **It can be released now (#3752).** On protocol v247, a hold whose live provider can end its
+  background work carries `canRelease`, whether or not the bound is enabled. MCP
+  `release_queue_hold` with the session and the hold's `holdId` (CLI
+  `wollipog session release-hold <session-id> <hold-id>`), `POST /api/sessions/:id/queue-hold/release`
+  with `{ "holdId": "..." }`, or **Proceed Now** beside the queued messages runs the deadline's path
+  at once: every unfinished job ends and is recorded as `killed` with `endedBy` naming the requester
+  and the reason `stop_request`, the timeline notice names the jobs and who released the hold after
+  how long, a finished sibling's result is still delivered, and the handoff and the queued prompts
+  then run in their original order. The conversation keeps running. The answer lists the ended
+  `jobIds`. Releasing takes exactly the authority of stopping one job (#1780): the session owner or
+  its controlling Orchestrator (the direct parent), never the session itself, and the reader's
+  `canStopJobs` verdict covers both. The `holdId` must be the hold the requester read, so a request
+  that raced a cleared or replaced hold ends nothing. The request is refused with 409 when the hold
+  changed (`hold_changed`), no hold remains (`no_hold`), a turn started meanwhile (`turn_active`),
+  the work is already being ended (`in_progress`), no live provider process owns it
+  (`no_live_process`; only orphan recovery or a restart clears that hold), the provider reported
+  nothing to end (`nothing_to_end`), the harness cannot end its work (`unsupported`), or the runner
+  is offline or older than v247; with 504 when the runner does not answer in time.
+- **It names work Background Work does not list (#3752).** On protocol v250, a pending id with no
+  unfinished job record is listed in the hold's `unlistedJobs` (at most 20, sorted; the count still
+  covers all of them): `provisional` for a launch the provider has not confirmed as a task yet
+  (`tool:<tool-use-id>`), `unregistered` for a task id the runner tracks without a job record. The
+  hold's reason says how many of its jobs Background Work does not list, and Background Work shows a
+  **Handoff Waiting on Unlisted Work** notice naming each one and, for a reader who may take it,
+  Proceed Now. A pending id whose job this conversation already recorded as ended no longer counts:
+  it cannot be running, so it holds no handoff and no queued prompt.
+- **The way out is stated.** A releasable hold's recovery action, for a reader who may stop jobs,
+  names `release_queue_hold` with its hold id and **Proceed Now** first, then stopping a single job
+  where the runner can. For a bounded hold, or one whose runner can stop a single job, the
   recovery action says to wait or stop that job and advises against a restart. Otherwise — an older
   runner, a disabled bound, or a provider that cannot end its work — it says to wait for the job,
   or, if it never ends, to restart the session, and what that costs. What a restart costs depends
   on the runner, and the hold says which applies (`restartKeepsQueue`, v191):
   - **A v191 runner keeps the queued work (#1779).** Every prompt still in the queue, decision
     resumes included, runs after the restart in its original order and can still be removed
-    before it starts. A Claude Code restart starts a new conversation, and the old provider
-    process ends with every job it ran, so the runner carries the job records instead of dropping
-    them: an unfinished job, and a pending or orphaned task id with no record, is recorded as
+    before it starts. Restart ends the old provider process with every job it ran, so the runner
+    carries the job records instead of dropping them: an unfinished job, and a pending or orphaned
+    task id with no record, is recorded as
     `killed` by the restart, and its result is unrecoverable. A finished job whose result still
-    waited for its continuation joins one managed continuation into the new conversation. That
-    continuation names each job, its status, and a finished job's provider output file, under
+    waited for its continuation joins one managed continuation after the restart. Current runners
+    resume established Claude Code, Codex App Server and Pi conversations; the session-scoped
+    `agentCapabilities.restartResumesConversation` capability (v263) advertises that guarantee.
+    A session without an established provider id starts fresh. Older runners omit the capability,
+    so clients keep Retry Turn disabled for terminal sessions rather than assuming continuity.
+    The continuation names each job, its status, and a finished job's provider output file, under
     the ordinary at-most-once fences and governance holds. A continuation already submitted to the
     old conversation is never repeated; it is recorded as missing its result, as is an owed result
     when the restart moves the session to another provider. Prompts the overtaken launch of a
@@ -1279,9 +1886,14 @@ queued behind a turn that had never started.
   sibling from the same turn is unfinished waits passively (the session reads **Waiting on External
   Job**) while its parent turn runs and until an hour has passed since it finished
   (`BACKGROUND_HANDOFF_WAIT_MAX_MS`, the runner's default handoff bound; #3073). After both, it is a
-  `continuation_blocked` delivery, shown as **Result Blocked** with the step that clears it (ask the
+  `continuation_blocked` delivery, shown as **Result Blocked**. A dashboard's **Acknowledge** clears
+  attention for the exact currently reported result snapshots without ending jobs, discarding
+  results, granting retry authority or releasing execution barriers (#3408). The acknowledgement
+  persists in the control plane and is independent of runner snapshots; a new held result gets a
+  different snapshot identity and raises fresh attention. Background Work keeps acknowledged
+  entries inspectable. Recovery remains separate (ask the
   session to stop the unfinished job; a stop or a restart ends every job, a stop discards the result,
-  and a v191 restart reports it to the new conversation), rather than **Result Pending** with "No
+  and a v191 restart reports it after the relaunch), rather than **Result Pending** with "No
   action is needed".
   Older runners leave all of this absent, and a queued prompt behind such a barrier stays invisible
   to them as before.
@@ -1295,7 +1907,8 @@ queued behind a turn that had never started.
   `endedBy`, and a v191 or older runner sends none, so its killed row names no actor.
 - **The advice is written for its reader (#1857, #1863).** The server's copy of a hold's recovery
   action names every way out. An agent credential reads a copy that names only the tools its
-  routes admit: `stop_background_job` only for the controlling Orchestrator (the direct parent),
+  routes admit: `stop_background_job` and `release_queue_hold` only for the controlling
+  Orchestrator (the direct parent),
   restarting only for an ancestor (a session cannot restart itself), and `select_worktree` and
   `create_worktree` only for a credential that may manage that session's worktrees (a worker its
   own session; an Orchestrator its descendants, and itself unless Strict Project Isolation is on).
@@ -1465,6 +2078,112 @@ are spent by resolution and revoked with the decision, so a policy-revision or o
 supersession, or revocation invalidates them. The resolution audit lists evidence identifier and
 digest pairs and the receipt ids spent; each delivery is a `review`-stage audit entry.
 
+Video evidence is reviewed by a separate managed reviewer, never by the Orchestrator itself.
+`prepare_descendant_video_evidence_review` (`sessionId`, `occurrenceId`, `evidenceId`) asks the
+control plane to admit, derive and dispatch a media-only Claude Code reviewer for one video item of a
+pending decision this Orchestrator owns; it returns the review id, frame and window counts, or a
+specific refusal (`custom_fallback`, `mixed_peer`, `live_validation`, `reviewer_unavailable`,
+`allowance`, `preparation`, `reviewer_busy_exhausted`), or `pending` with reason `host_busy` while a
+busy reviewer host is retried. `get_descendant_video_evidence_provenance` (`reviewId`) returns
+`pending` until the reviewer finished and its priced usage settled, then the verdict with its
+observations. An accepted verdict also carries the exact `delegatedVideoEvidence` reference to pass
+to `resolve_descendant_workflow_decision`; a rejection is evidence for denying. Neither tool
+sends anything unless `/api/compatibility` declares the paced video review contract, and both are
+listed only for Orchestrators. See `docs/video-evidence-production.md`.
+
+#### Delegated Image Review
+
+Protocol v276 (#4074) lets an Orchestrator review a decision's images without loading them into its
+own conversation. With direct review, each image stays in the Orchestrator's context for the rest
+of the campaign, and every later turn pays to read it again.
+`prepare_descendant_ui_evidence_review` (`sessionId`, `occurrenceId`, `brief`) instead hands every
+image of a pending decision this root Orchestrator owns to a **delegated image reviewer**. The
+reviewer is a managed Session with a fresh context. The `brief`, at most 16,000 characters, holds
+the child's claims and the UI acceptance criteria. It is the reviewer's only context besides the
+images.
+
+`get_descendant_ui_evidence_review` (`reviewId`) returns the review's state. Once the reviewer
+finishes, it also returns a bounded verdict:
+
+- a pass or fail for each image, with at most 10 observed defects of 500 characters each;
+- a summary of at most 2,000 characters;
+- an approve or deny recommendation.
+
+The Orchestrator resolves the decision as before, with `resolve_descendant_workflow_decision`. It
+lists every evidence id in `evidenceReviewed` and passes the exact `delegatedImageReview`
+reference (`reviewId`, `verdictId`, `reviewerSessionId`) the read returned.
+
+The reviewer follows the video reviewer's provenance pattern, but for images:
+
+- **Same gates as direct review.** Preparing, each delivery, each acknowledgement and the verdict
+  re-run every gate direct review runs: root campaign controller, ancestry, audience, pending
+  status, policy revision and current authority. Only a decision whose evidence is all
+  artifact-backed images can be delegated, and only one the Orchestrator could inspect directly
+  right now. Delegation therefore never reaches evidence or a provider that direct review would
+  not.
+- **Audience is rechecked on every call.** As direct review does on every delivery, each reviewer
+  call requires the reviewer's own credential to reach the root and the child. The reviewer's
+  audience must also sit inside both of theirs. An Orchestrator whose audience reaches beyond the
+  child's cannot delegate. A later scope change that breaks containment ends the review before
+  any bytes or receipt are produced, and blocks approval on its verdict.
+- **Created by the server.** The reviewer runs on the root's own runner, agent and model, as a
+  child of the root. It gets a server-pinned review prompt and no campaign assignment. Its cost is
+  bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
+  member like any child, so its cost is reserved against the allowance and shows in campaign
+  accounting. Like a review session, it holds no concurrency slot.
+- **Two tools only.** The runner launches it as a native Claude Code session with no built-in
+  tools, no slash commands, no user or project settings, and only the runner's management MCP
+  server. That server exposes exactly `review_evidence_image` and `submit_evidence_verdict`. The
+  control plane narrows the reviewer's credential to the matching three routes under
+  `/api/sessions/:id/delegated-image-review/` (`image`, `acknowledge`, `verdict`) plus
+  `GET /api/compatibility`. It also refuses prompts, steering, configuration, restarts and
+  children for a reviewer. Stop and archival still work.
+- **Never relaunched.** A runner never relaunches a reviewer, and it refuses the marker for any
+  other harness, an Orchestrator launch, a non-native context or an older control plane, before a
+  credential exists.
+- **Receipts recorded against the reviewer.** `review_evidence_image` uses the same digest-verified
+  handoff as `review_descendant_ui_evidence`. The server reads and re-hashes the bytes, revokes
+  the decision on a mismatch, and records a receipt bound to the reviewer, child, occurrence,
+  policy revision, evidence identifier, artifact and digest. The reviewer's runner re-hashes the
+  bytes and acknowledges the exact receipt before the image reaches the model.
+- **One verdict, only after every image.** The verdict is accepted once, and only when the
+  reviewer holds a current acknowledged receipt for every item. Nothing is delivered after it.
+  The child that produced the evidence, and the Orchestrator itself, can never be the reviewer.
+- **Approval checks everything again.** An approval on a reviewer verdict re-checks the
+  following against the server's own records:
+  - the review, the verdict and its digest;
+  - the reviewer identity, which must be neither the child nor the root;
+  - the occurrence, policy revision, resource digest and evidence digests the review was
+    prepared against;
+  - an approve recommendation;
+  - an unexpired, unconsumed and unrevoked reviewer receipt for every item, as named by the
+    verdict.
+
+  Repeated identifiers, a plain message forwarded from the reviewer, a deny recommendation, or a
+  reference with a single field changed are all refused. Approval spends the receipts and the
+  verdict. The resolution audit lists the receipt ids and the reviewer's identity, verdict id,
+  recommendation and verdict digest. The decision records the `delegatedImageReview` it rested on.
+- **Stale evidence fails closed.** Anything that revokes or supersedes the decision ends its review
+  with the reviewer's receipts: supersession, a policy or ownership change, an authority loss, or
+  a digest mismatch. A resolved decision ends any other live review. Receipts expire after an hour,
+  as they do under direct review, so an old verdict has to be prepared again.
+- **One review at a time.** An occurrence has at most one live review, and preparing again returns
+  it. Some reviews can no longer back an approval: the reviewer ended its turn or Session without a
+  verdict, or one of its verdict's receipts expired. Such a review is retired, and preparing again
+  starts a fresh reviewer.
+
+The path adds no setting, form or confirmation. It uses the existing UI Evidence Approval
+authority, and decision ownership does not change. Direct `review_descendant_ui_evidence` keeps
+working, and remains the route for one image or a targeted follow-up look.
+
+Where the path is unavailable, the Orchestrator keeps direct review and preparing refuses with the
+reason:
+
+- a runner before v276, refused with the shared capability sentence;
+- a control plane before v276, where the runner tools refuse before sending anything;
+- an Orchestrator not on Claude Code;
+- an offline runner.
+
 This boundary governs actions performed through Wollipog's workflow-decision tools. It cannot
 intercept a separate shell, forge client, browser, or other credential that can independently
 perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,
@@ -1486,6 +2205,81 @@ it reports the approved head merged. One merged head settles one occurrence. Whe
 restarts, or its provider session ends with an armed merge still approved, the occurrence is revoked
 at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
 and moves it to consumed if the approved head merged.
+
+A provider's own permission check can refuse an approved command: Claude Code's `auto` classifier
+decides inline, so a refusal never reaches the runner's permission channel. Wollipog then performs
+the one approved forge action itself (protocol v284, #4067) through `execute_workflow_decision`
+(CLI `decision execute <occurrence-id> --resource-digest <sha256>`,
+`POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute`). The classifier is not
+changed or worked around, and the agent's own commands stay subject to it. Only the requester may
+execute. It may execute its approved `merged_branch_deletion` when the snapshot names the merged
+`pullRequest` and `headSha`, whether or not it consumed the approval before its own command was
+refused. It may also execute its approved and armed GitHub `pr_merge`. Every consumption check
+applies again: live ancestry, the policy revision, current authority, and, for a merge, review
+evidence, the reviewed head, and GitHub's closing references re-read before dispatch. The control
+plane then sends `forge_decision_action` to the child's runner. The runner acts through the
+child's own `gh` login, using only `gh api` and `gh pr merge` against the explicit repository, run
+from the filesystem root. No `git` runs in the child's worktree, so no repository configuration the
+agent can write (hooks, `core.sshCommand`, credential helpers, URL rewrites, a changed `origin`) is
+read or executed on its behalf:
+
+- A deletion first proves that the pull request merged the approved head from that branch in the
+  same repository with the approved merge commit, and that no open pull request targets the
+  branch. It then deletes the ref with GitHub's `updateRefs` mutation, with `beforeOid` set to the
+  approved head and an all-zero `afterOid`, so GitHub itself refuses the deletion if the tip moved
+  after the read.
+- An enqueue first proves that the pull request is open at the approved head (already queued or
+  already merged at that head counts as done). It then runs
+  `gh pr merge <url> --squash --match-head-commit <sha>`, never `--delete-branch`.
+
+The decision records `forgeAction` (`kind`, `attempts`, `outcome`, `refusal`). A success consumes
+the approval once. A deletion uses ordinary consumption, an enqueue uses a receipt unique to its
+occurrence, and an already merged head uses the forge receipt that no other occurrence can reuse.
+A refusal proving the snapshot stale (`tip_moved`, `dependent_pull_request_open`,
+`pull_request_mismatch`, `closure_mismatch`) revokes the approval. Any other refusal changed
+nothing and leaves the approval in place, armed for a merge, so it can be retried or reconciled, up
+to five attempts. An uncertain enqueue is never replayed; reconcile it once the forge reads MERGED.
+An enqueue Wollipog ran left no provider receipt in any harness, so for every harness, Codex App
+Server included, reconciliation and a lifecycle end settle it from the forge alone. The runner
+reads the pull request (a separate `pr_merge_observe` action, from the filesystem root, which a
+runner that does not know it refuses) and never enqueues.
+An uncertain deletion may be executed again, because a compare-and-delete pinned to the approved
+head cannot do more than the approval allowed. The consume result for a merge or deletion names
+this fallback (`forgeActionFallback`).
+
+`get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
+child merged through a consumed `pr_merge`, or through one whose enqueue Wollipog performed (a
+success or an uncertain attempt, even if a new request superseded or a revocation ended that
+occurrence while it ran), it gives the head branch the forge last reported as
+`deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
+or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
+too, and a handoff retains it even before the first read. A pending branch keeps
+`campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
+finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
+until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
+A merged pull request whose branch the forge does not name usably, including one read before branches
+were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
+be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
+every campaign observed by a runner older than v284 are not tracked, so those campaigns complete
+as before.
+
+An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
+`decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol
+v269, #3917) and a required reason, rather than by consuming it with a stale snapshot. `:id` is
+always the caller's own credential session. The requester withdraws its own pending or approved
+occurrence; its controlling Orchestrator names the child in `sessionId` and may withdraw only one it
+owns, under the same ancestry and current-authority checks as resolution. The write is conditional
+on the occurrence still being pending or approved, unconsumed and unarmed, so it never approves,
+consumes or re-arms anything. The occurrence ends `revoked` with `withdrawal` provenance naming the
+withdrawing session and its reason; the governance audit records that session as the resolver and
+only the reason's digest, without the `revocation` cause a server revocation carries. It no longer
+blocks `verify_campaign_child`, archival or role changes. A child still waiting on a pending
+occurrence is resumed with the reason; one already holding an approval is not woken. A withdrawal
+the campaign's own Orchestrator did not make reaches it as `request_resolved` with outcome
+`withdrawn`, the withdrawing session and the reason. Consumed occurrences, an armed `pr_merge`
+(reconcile it instead), another session's occurrences, a person-owned occurrence the caller did not
+request, and person-owned issue closure, scope, follow-up admission and automation requests are
+refused.
 
 Before creating a child, an Orchestrator can call `get_agent_capabilities` with an exact `runnerId`
 and `agentId`. The matching CLI command is:

@@ -65,11 +65,46 @@ test("the ledger counts a folded retry once and a failure by its latest attempt"
     { kind: "review_decision", id: 6, reviewId: "r", reviewer: { kind: "policy" }, outcome: "allowed", riskLevel: "medium" },
   ]);
   assert.deepEqual(ledger, {
-    tools: 2, edits: 1, thoughts: 1, failed: 1, autoApproved: 1, highestReviewRisk: "medium", startedAt: 500, finishedAt: 27_000,
+    tools: 2, commands: 2, edits: 1, thoughts: 1, failed: 1, autoApproved: 1, highestReviewRisk: "medium",
+    startedAt: 500, finishedAt: 27_000,
   });
-  assert.deepEqual(mergeWork(ledger, summarizeWork([tool(7, "Bash: x", "failed")])), { ...ledger, tools: 3, failed: 2 });
-  assert.deepEqual(summarizeWork([]), { tools: 0, edits: 0, thoughts: 0, failed: 0, autoApproved: 0 },
+  assert.deepEqual(mergeWork(ledger, summarizeWork([tool(7, "Bash: x", "failed")])),
+    { ...ledger, tools: 3, commands: 3, failed: 2 });
+  assert.deepEqual(summarizeWork([]), { tools: 0, commands: 0, edits: 0, thoughts: 0, failed: 0, autoApproved: 0 },
     "an absent risk or span is omitted, never undefined, so incremental and full rows compare equal");
+});
+
+test("only shell commands count as commands: reads, searches, fetches and an edit with its file edit do not (#3514)", () => {
+  const ledger = summarizeWork([
+    tool(1, "Bash: npm ci", "completed"),
+    tool(2, "Read: /repo/src/a.ts", "completed", "read"),
+    tool(3, "Read: /repo/src/b.ts", "failed", "read"),
+    tool(4, "Edit: /repo/src/a.ts", "completed", "edit"),
+    { kind: "file_edit", id: 5, path: "/repo/src/a.ts" },
+    tool(6, "WebFetch: https://example.com", "completed", "fetch"),
+    tool(7, "Bash: npm test", "failed"),
+  ]);
+  assert.deepEqual([ledger.commands, ledger.edits], [2, 1], "two commands and one edit, the Edit call counted once");
+  assert.equal(ledger.tools, 6);
+  assert.equal(ledger.failed, 2, "a failed read still counts as a failure");
+});
+
+test("a retried command folded into one step is one command", () => {
+  const ledger = summarizeWork([
+    tool(1, "Bash: make validate", "failed"),
+    tool(2, "Bash: make validate", "failed"),
+    tool(3, "Bash: make validate", "completed"),
+  ]);
+  assert.deepEqual([ledger.commands, ledger.failed], [1, 0]);
+});
+
+test("a run of only reads and searches counts no commands", () => {
+  const ledger = summarizeWork([
+    tool(1, "Read: /repo/src/a.ts", "completed", "read"),
+    tool(2, "Grep: Header", "completed", "search"),
+    tool(3, "Glob: src/**/*.ts", "completed", "search"),
+  ]);
+  assert.deepEqual([ledger.tools, ledger.commands, ledger.edits, ledger.failed], [3, 0, 0, 0]);
 });
 
 test("a provider title becomes a verb and a workspace-relative object", () => {

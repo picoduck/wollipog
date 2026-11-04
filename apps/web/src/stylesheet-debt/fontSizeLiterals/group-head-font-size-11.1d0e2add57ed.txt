@@ -1,1 +1,0 @@
-|.group-head|font-size|11

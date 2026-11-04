@@ -4,7 +4,7 @@ import { after, before, test } from "node:test";
 import React, { act, type ReactNode } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import type { OrchestratorSettingsView } from "@wollipog/protocol";
+import type { OrchestratorSettingsView, VideoReviewSettingsStatus } from "@wollipog/protocol";
 import { createApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
@@ -81,6 +81,7 @@ function settings(drifted = false): OrchestratorSettingsView {
           merged_branch_deletion: "human",
           follow_up_issue_publication: "human",
           ui_evidence_approval: "human",
+          review_round_extension: "human",
         },
       },
       execution: { strictProjectIsolation: false, integrationIsolation: false },
@@ -120,10 +121,13 @@ function json(body: unknown, status = 200): Response {
 function server(initial: OrchestratorSettingsView) {
   let current = initial;
   const writes: Array<{ defaults: Defaults }> = [];
-  const state = { reject: null as string | null, current: () => current, set: (next: OrchestratorSettingsView) => { current = next; } };
+  const state = { reject: null as string | null, current: () => current, set: (next: OrchestratorSettingsView) => { current = next; },
+    // Video review status: an older server without the route by default, so the group stays hidden.
+    video: { status: 404, body: { error: "Not Found" } as unknown } };
   const transport: ApiTransport = {
     instanceId: "test", publicOrigin: "http://localhost", close() {},
     async request(path, init) {
+      if (path === "/api/video-evidence/review-status") return json(state.video.body, state.video.status);
       assert.equal(path, "/api/orchestrator-settings");
       if (init?.method === "PUT") {
         const body = JSON.parse(String(init.body)) as { defaults: Defaults };
@@ -210,8 +214,9 @@ test("the panel header saves only the future preference and clears its control w
     assert.equal(view.container.querySelectorAll('[role="radiogroup"][aria-label="Orchestrator Control"]').length, 1);
     assert.equal(head.querySelector("h2")?.textContent, "Orchestrator");
     await act(async () => controlMode(head, "Full Control").click());
-    assert.match(view.container.textContent ?? "", /Activation Unavailable/);
-    assert.equal(button(view.container, "Authorize Full Control")?.disabled, true);
+    assert.doesNotMatch(view.container.textContent ?? "", /Activation Unavailable/);
+    assert.equal(button(view.container, "Authorize Full Control"), undefined, "a default never authorizes a campaign");
+    assert.match(view.container.textContent ?? "", /Each campaign still needs your authorization/);
     await act(async () => button(view.container, "Save Defaults")!.click());
     await settle();
     assert.equal(writes.length, 1);
@@ -259,8 +264,7 @@ test("Full Control defaults preview blocks saving and never mutates authenticate
     await act(async () => fireDomEvent.change(limit, { target: { value: "8" } }));
     const save = button(container, "Save Defaults")!;
     await act(async () => controlMode(container, "Full Control").click());
-    assert.match(container.textContent ?? "", /Activation Unavailable/);
-    assert.match(container.textContent ?? "", /Defaults apply only to new campaigns/);
+    assert.match(container.textContent ?? "", /This version can't save Full Control as a default/);
     assert.equal(save.getAttribute("aria-disabled"), "true");
     await act(async () => save.click());
     assert.equal(writes.length, 0);
@@ -279,12 +283,41 @@ test("a supported Full Control default saves only the preference and preserves o
   const view = await mount(panel(transport));
   try {
     await act(async () => controlMode(view.container, "Full Control").click());
-    assert.match(view.container.textContent ?? "", /Save Defaults records a preferred mode; it grants no campaign authority/);
+    assert.match(view.container.textContent ?? "", /Proposed whenever you start a Full Control campaign/);
     await act(async () => button(view.container, "Save Defaults")!.click());
     await settle();
     assert.equal(writes.length, 1);
     assert.deepEqual(writes[0]!.defaults, { ...initial.defaults, controlMode: "full_control" });
     assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally { await view.cleanup(); }
+});
+
+test("the Full Control campaign budget saves as a default only when both limits are valid, and clears as a pair", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    await act(async () => controlMode(container, "Full Control").click());
+    const cost = container.querySelector<HTMLInputElement>("#orchestrator-campaign-cost")!;
+    const tools = container.querySelector<HTMLInputElement>("#orchestrator-campaign-tools")!;
+    await act(async () => fireDomEvent.change(cost, { target: { value: "40" } }));
+    const save = button(container, "Save Defaults")!;
+    assert.equal(save.getAttribute("aria-disabled"), "true", "a cost without a tool-call limit cannot save");
+    assert.match(container.textContent ?? "", /Enter both a cost limit and a whole number of tool calls/);
+    await act(async () => fireDomEvent.change(tools, { target: { value: "400" } }));
+    assert.equal(save.getAttribute("aria-disabled"), null);
+    await act(async () => save.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.deepEqual(writes[0]!.defaults.campaignBudget, { costUsd: 40, toolCalls: 400 });
+    assert.equal(writes[0]!.defaults.controlMode, "full_control");
+    await act(async () => fireDomEvent.change(cost, { target: { value: "" } }));
+    await act(async () => fireDomEvent.change(tools, { target: { value: "" } }));
+    await act(async () => button(container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 2);
+    assert.equal(writes[1]!.defaults.campaignBudget, null, "clearing both fields removes the saved budget");
   } finally { await view.cleanup(); }
 });
 
@@ -305,7 +338,10 @@ test("the editor has control preparation and three settings groups, and a change
       ["About Isolation", "About UI Evidence Delegation"]);
     assert.ok(disclosures.every((node) => !(node as HTMLDetailsElement).open), "every disclosure starts closed");
     assert.match(disclosures[1]!.textContent ?? "", /provider may retain images in provider-local transcripts or media logs/);
-    assert.match(disclosures[1]!.textContent ?? "", /Video evidence otherwise requires human review/);
+    assert.match(disclosures[1]!.textContent ?? "", /Video evidence otherwise requires human review, including video attached as a Session artifact, unless a Full Control campaign's certified media-only reviewer is available\./,
+      "account settings name no single campaign, so the video sentence names the certified exception");
+    assert.match(disclosures[1]!.textContent ?? "", /Video routes to a human unless a Full Control campaign's certified media-only reviewer is available; an operator may also enable one short-frame validation campaign\./);
+    assert.doesNotMatch(disclosures[1]!.textContent ?? "", /Video normally routes to a human/);
     assert.match(container.querySelector(".orchestrator-human-only")?.textContent ?? "",
       /^Secrets, sign-in, permission grants, governance changes, budgets and guardrails always stay with you\.$/);
     assert.ok(container.querySelector(".orchestrator-human-only > svg"), "with its lock icon");
@@ -320,7 +356,7 @@ test("the editor has control preparation and three settings groups, and a change
     await settle();
     assert.equal(writes.length, 1);
     assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
-    assert.equal(Object.keys(writes[0]!.defaults.delegation.decisions).length, 5);
+    assert.equal(Object.keys(writes[0]!.defaults.delegation.decisions).length, 6);
     assert.equal(writes[0]!.defaults.execution.strictProjectIsolation, false);
     assertNoDomNode(container.querySelector(".save-bar"), "a saved draft is clean again");
   } finally {
@@ -500,7 +536,9 @@ test("a server without the settings route asks for a newer Wollipog; another fai
   let attempts = 0;
   const transport: ApiTransport = {
     instanceId: "test", publicOrigin: "http://localhost", close() {},
-    async request() {
+    async request(path) {
+      // Only the settings load counts; the Video Evidence Review group reads its own route.
+      if (path !== "/api/orchestrator-settings") return json({ error: "Not Found" }, 404);
       attempts += 1;
       return answer ?? json(settings());
     },
@@ -668,6 +706,181 @@ test("runner discovery refreshes capabilities without discarding unsaved default
   } finally {
     await view.cleanup();
   }
+});
+
+test("runner discovery keeps a typed campaign budget, complete or not, and saves what was typed", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control" };
+  const { transport, state, writes } = server(initial);
+  const view = await mount(panel(transport, { revision: 1 }));
+  try {
+    const cost = () => view.container.querySelector<HTMLInputElement>("#orchestrator-campaign-cost")!;
+    const tools = () => view.container.querySelector<HTMLInputElement>("#orchestrator-campaign-tools")!;
+    await act(async () => { fireDomEvent.change(cost(), { target: { value: "40" } }); });
+    assert.ok(view.container.querySelector(".save-bar"), "a half-typed budget is an unsaved change");
+    state.set({ ...state.current(), capabilities: { ...state.current().capabilities, installations: 2 } });
+    await act(async () => view.root.render(panel(transport, { revision: 2 })));
+    await settle();
+    assert.equal(cost().value, "40", "a discovery refresh keeps the incomplete budget");
+    await act(async () => { fireDomEvent.change(tools(), { target: { value: "400" } }); });
+    await act(async () => view.root.render(panel(transport, { revision: 3 })));
+    await settle();
+    assert.deepEqual([cost().value, tools().value], ["40", "400"]);
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.deepEqual(writes.at(-1)!.defaults.campaignBudget, { costUsd: 40, toolCalls: 400 });
+    assert.deepEqual([cost().value, tools().value], ["40", "400"]);
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally {
+    await view.cleanup();
+  }
+});
+
+/** The limit-entry lifecycle (L1-L8 in the review brief) for the saved defaults: each limit is a
+ * text entry whose typed text is its only state, replaced only where the draft is. */
+function limitFields(container: Element) {
+  return {
+    cost: container.querySelector<HTMLInputElement>("#orchestrator-campaign-cost"),
+    tools: container.querySelector<HTMLInputElement>("#orchestrator-campaign-tools"),
+    children: container.querySelector<HTMLInputElement>("#orchestrator-max-children")!,
+  };
+}
+const BUDGET_ERROR = /Enter both a cost limit and a whole number of tool calls, or clear both\./;
+
+test("L1: every default limit mounts as a text entry showing the saved value, or empty, without an error", async () => {
+  for (const campaignBudget of [{ costUsd: 30, toolCalls: 300 }, undefined]) {
+    const initial = { ...settings(), controlModeSupported: true };
+    initial.defaults = { ...initial.defaults, controlMode: "full_control", ...(campaignBudget ? { campaignBudget } : {}) };
+    const view = await mount(panel(server(initial).transport));
+    try {
+      const fields = limitFields(view.container);
+      assert.deepEqual([fields.cost!.type, fields.tools!.type, fields.children.type], ["text", "text", "number"]);
+      assert.deepEqual([fields.cost!.value, fields.tools!.value, fields.children.value], campaignBudget ? ["30", "300", "4"] : ["", "", "4"]);
+      assert.doesNotMatch(view.container.textContent ?? "", BUDGET_ERROR);
+      assertNoDomNode(view.container.querySelector(".save-bar"));
+    } finally { await view.cleanup(); }
+  }
+});
+
+test("L1: a tiny saved cost shows as a plain decimal, so the saved budget stays valid and other defaults still save", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control", campaignBudget: { costUsd: 0.0000001, toolCalls: 100 } };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    assert.equal(limitFields(view.container).cost!.value, "0.0000001");
+    assert.doesNotMatch(view.container.textContent ?? "", BUDGET_ERROR);
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+    await act(async () => fireDomEvent.change(limitFields(view.container).children, { target: { value: "8" } }));
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.deepEqual(writes[0]!.defaults.campaignBudget, { costUsd: 0.0000001, toolCalls: 100 });
+    assert.equal(limitFields(view.container).cost!.value, "0.0000001", "the adopted response shows the same plain decimal");
+    assertNoDomNode(view.container.querySelector(".save-bar"));
+  } finally { await view.cleanup(); }
+});
+
+test("L2: an entry survives its field unmounting, Discard after unmounting restores a clean editor, and unrelated defaults still save", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    await act(async () => controlMode(container, "Full Control").click());
+    await act(async () => fireDomEvent.change(limitFields(container).cost!, { target: { value: "e" } }));
+    assert.match(container.textContent ?? "", BUDGET_ERROR);
+    await act(async () => controlMode(container, "Custom").click());
+    assertNoDomNode(limitFields(container).cost);
+    assert.equal(button(container, "Save Defaults")!.getAttribute("aria-disabled"), "true", "the hidden entry still blocks saving");
+    await act(async () => controlMode(container, "Full Control").click());
+    assert.equal(limitFields(container).cost!.value, "e", "remounting shows what was typed, with its error");
+    assert.match(container.textContent ?? "", BUDGET_ERROR);
+    await act(async () => controlMode(container, "Custom").click());
+    await act(async () => button(container, "Discard")!.click());
+    assertNoDomNode(container.querySelector(".save-bar"));
+    await act(async () => controlMode(container, "Full Control").click());
+    assert.equal(limitFields(container).cost!.value, "");
+    assert.doesNotMatch(container.textContent ?? "", BUDGET_ERROR, "a remounted empty field has no stale error");
+    await act(async () => controlMode(container, "Custom").click());
+    await act(async () => fireDomEvent.change(limitFields(container).children, { target: { value: "8" } }));
+    await act(async () => button(container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.behavior.maximumConcurrentChildren, 8);
+    assert.equal(Object.hasOwn(writes[0]!.defaults, "campaignBudget"), false, "the discarded entry is not saved");
+  } finally { await view.cleanup(); }
+});
+
+test("L3: outside changes keep a typed entry and its error, and a clean editor takes the server's new values", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control" };
+  const { transport, state } = server(initial);
+  const view = await mount(panel(transport, { revision: 1 }));
+  try {
+    state.set({ ...state.current(), defaults: { ...state.current().defaults, campaignBudget: { costUsd: 50, toolCalls: 500 } } });
+    await act(async () => view.root.render(panel(transport, { revision: 2 })));
+    await settle();
+    assert.deepEqual([limitFields(view.container).cost!.value, limitFields(view.container).tools!.value], ["50", "500"]);
+    await act(async () => fireDomEvent.change(limitFields(view.container).cost!, { target: { value: "5e" } }));
+    state.set({ ...state.current(), defaults: { ...state.current().defaults, campaignBudget: { costUsd: 60, toolCalls: 600 } } });
+    await act(async () => view.root.render(panel(transport, { revision: 3 })));
+    await settle();
+    assert.equal(limitFields(view.container).cost!.value, "5e");
+    assert.match(view.container.textContent ?? "", BUDGET_ERROR);
+  } finally { await view.cleanup(); }
+});
+
+test("L4-L8: typing invalid, valid and invalid again, clearing, blur, Discard and Save all follow the typed text", async () => {
+  const initial = { ...settings(), controlModeSupported: true };
+  initial.defaults = { ...initial.defaults, controlMode: "full_control", campaignBudget: { costUsd: 30, toolCalls: 300 } };
+  const { transport, writes } = server(initial);
+  const view = await mount(panel(transport));
+  try {
+    const { container } = view;
+    const fields = () => limitFields(container);
+    const type = (input: HTMLInputElement, value: string) => act(async () => fireDomEvent.change(input, { target: { value } }));
+    const save = () => button(container, "Save Defaults")!;
+    // L4 for each field: forms `Number` accepts (`1e1`, `0x10`) are budget errors like unreadable
+    // text; the child limit's native number field reports unreadable text as "", which is invalid.
+    for (const [key, bad, good] of [["cost", "1e1", "40"], ["tools", "0x10", "400"], ["children", "", "6"]] as const) {
+      await type(fields()[key]!, bad);
+      assert.equal(save().getAttribute("aria-disabled"), "true", `${key}=${bad} cannot save`);
+      await type(fields()[key]!, good);
+      assert.equal(save().getAttribute("aria-disabled"), null, `${key}=${good} can save`);
+      await type(fields()[key]!, `${good}e`);
+      assert.equal(save().getAttribute("aria-disabled"), "true");
+      await type(fields()[key]!, good);
+    }
+    // L6 blur changes nothing.
+    await type(fields().cost!, "7e");
+    await act(async () => { fields().cost!.focus(); fields().cost!.blur(); });
+    assert.equal(fields().cost!.value, "7e");
+    assert.equal(save().getAttribute("aria-disabled"), "true");
+    // L7 reset to the saved defaults restores every entry.
+    await act(async () => button(container, "Discard")!.click());
+    assert.deepEqual([fields().cost!.value, fields().tools!.value, fields().children.value], ["30", "300", "4"]);
+    assertNoDomNode(container.querySelector(".save-bar"));
+    // L5 clearing: the budget pair clears as a pair; an empty child limit is an error, never 0.
+    await type(fields().children, "");
+    assert.equal(save().getAttribute("aria-disabled"), "true");
+    await type(fields().children, "4");
+    await type(fields().cost!, "");
+    assert.equal(save().getAttribute("aria-disabled"), "true", "half a budget cannot save");
+    await type(fields().tools!, "");
+    // L8 submit saves exactly what is shown.
+    await act(async () => save().click());
+    await settle();
+    assert.equal(writes.length, 1);
+    assert.equal(writes[0]!.defaults.campaignBudget, null);
+    await type(fields().cost!, "12.5");
+    await type(fields().tools!, "125");
+    await type(fields().children, "9");
+    await act(async () => save().click());
+    await settle();
+    assert.deepEqual(writes[1]!.defaults.campaignBudget, { costUsd: 12.5, toolCalls: 125 });
+    assert.equal(writes[1]!.defaults.behavior.maximumConcurrentChildren, 9);
+    assert.deepEqual([fields().cost!.value, fields().tools!.value, fields().children.value], ["12.5", "125", "9"]);
+  } finally { await view.cleanup(); }
 });
 
 test("isolation is Off | On, and Strict Project Isolation On includes Integration Isolation", async () => {
@@ -947,6 +1160,143 @@ test("closing the window with a dirty draft asks the browser to confirm", async 
     assert.equal(unload(), true);
     await act(async () => button(view.container.querySelector(".save-bar")!, "Discard")!.click());
     assert.equal(unload(), false);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+const DAY = 24 * 60 * 60 * 1000;
+function videoStatus(overrides: Partial<VideoReviewSettingsStatus> = {}): VideoReviewSettingsStatus {
+  return { readiness: { available: false, code: "live_validation", reason: "server sentence" },
+    reviewer: { driver: "claude-code", model: "claude-opus-5-5", effort: "high" }, mediaTypes: ["video/mp4", "video/webm"],
+    machines: [
+      { runnerId: "r1", machineName: "Studio", agentId: "claude", gap: null,
+        proof: { state: "certified", proofId: "p1", validatedAt: Date.UTC(2026, 9, 1), expiresAt: Date.UTC(2026, 9, 1) + 30 * DAY } },
+      { runnerId: "r2", machineName: "Laptop", agentId: "claude", gap: null, proof: { state: "expired", proofId: "p2", expiresAt: Date.UTC(2026, 8, 1) } },
+      { runnerId: "r3", machineName: "Build Box", agentId: "claude", gap: null, proof: { state: "revoked", proofId: "p3" } },
+      { runnerId: "r4", machineName: "Spare", agentId: "claude", gap: null, proof: { state: "missing" } },
+      { runnerId: "r5", machineName: "Codex Host", agentId: null, proof: null,
+        gap: { code: "no_claude_code_agent", reason: "This machine has no native Claude Code agent, the only harness that can host the media-only reviewer." } },
+    ], ...overrides };
+}
+const videoGroup = (container: Element) => [...container.querySelectorAll("section.settings-group")]
+  .find((section) => section.querySelector(".settings-group-title")?.textContent === "Video Evidence Review");
+
+test("Video Evidence Review shows each machine's live proof state and why review is unavailable", async () => {
+  const { transport, state } = server(settings());
+  state.video = { status: 200, body: videoStatus() };
+  const view = await mount(panel(transport));
+  try {
+    const group = videoGroup(view.container);
+    assert.ok(group, "the group renders once the status loads");
+    assert.match(group.textContent ?? "", /No current live proof certifies a media-only reviewer, so video evidence stays with you\./u);
+    assert.doesNotMatch(group.textContent ?? "", /server sentence|control plane/u, "readiness is dashboard copy, not the server's sentence");
+    const rows = [...group.querySelectorAll(".setting-row")].map((row) => ({
+      title: row.querySelector(".setting-row-title")?.textContent, badge: row.querySelector(".status")?.textContent?.trim(),
+      description: row.querySelector(".setting-row-desc")?.textContent }));
+    assert.deepEqual(rows.map((row) => [row.title, row.badge]), [["Studio", "Certified"], ["Laptop", "Expired"],
+      ["Build Box", "Revoked"], ["Spare", "Not Certified"], ["Codex Host", "Unavailable"]]);
+    assert.match(rows[0]!.description ?? "", /^Certified on .+ until .+\.$/u);
+    assert.match(rows[1]!.description ?? "", /^The live proof expired on .+\. Record a new certification to delegate video review\.$/u);
+    assert.equal(rows[2]!.description, "The live proof was revoked. Record a new certification to delegate video review.");
+    assert.equal(rows[3]!.description, "No live proof certifies this reviewer's current attestation yet.");
+    assert.equal(rows[4]!.description, "This machine has no native Claude Code agent, the only harness that can host the media-only reviewer.");
+    const about = group.querySelector("details summary")?.textContent;
+    assert.equal(about, "About Video Evidence Review");
+    const body = group.querySelector("details .disclosure-body")?.textContent?.replace(/\s+/gu, " ") ?? "";
+    assert.match(body, /separate Claude Code reviewer on claude-opus-5-5 at high effort/u);
+    assert.match(body, /expires after 30 days/u);
+    const runbook = group.querySelector<HTMLAnchorElement>("details .disclosure-body a");
+    assert.equal(runbook?.textContent, "certification runbook");
+    assert.equal(runbook?.getAttribute("href"), "https://github.com/picoduck/wollipog/blob/main/docs/video-review-certification-runbook.md");
+    assert.match(body, /a different harness or model keeps video with you/u);
+    assert.match(body, /Only MP4 and WebM recordings attached as private Session artifacts can be delegated\./u);
+  } finally {
+    await view.cleanup();
+  }
+});
+
+test("a status with a narrower or malformed shape hides Video Evidence Review and leaves Settings usable", async () => {
+  const valid = videoStatus();
+  const malformed: Array<[string, unknown]> = [
+    ["no reviewer", { ...valid, reviewer: undefined }],
+    ["no reviewer model", { ...valid, reviewer: { driver: "claude-code", effort: "high" } }],
+    ["no media types", { ...valid, mediaTypes: undefined }],
+    ["an unknown media type", { ...valid, mediaTypes: ["video/quicktime"] }],
+    ["a null machine", { ...valid, machines: [null] }],
+    ["a machine without a name", { ...valid, machines: [{ ...valid.machines[0]!, machineName: undefined }] }],
+    ["an invalid certified date", { ...valid, machines: [{ ...valid.machines[0]!,
+      proof: { state: "certified", proofId: "p1", validatedAt: Number.NaN, expiresAt: 1 } }] }],
+    ["an out-of-range expiry", { ...valid, machines: [{ ...valid.machines[1]!, proof: { state: "expired", proofId: "p2", expiresAt: 9e15 } }] }],
+    ["an unknown proof state", { ...valid, machines: [{ ...valid.machines[0]!, proof: { state: "pending" } }] }],
+    ["a gap with a proof", { ...valid, machines: [{ ...valid.machines[4]!, proof: { state: "missing" } }] }],
+    ["no readiness reason", { ...valid, readiness: { available: false, code: "live_validation" } }],
+  ];
+  for (const [label, body] of malformed) {
+    const { transport, state } = server(settings());
+    state.video = { status: 200, body };
+    const view = await mount(panel(transport));
+    try {
+      assert.equal(videoGroup(view.container), undefined, `${label} hides the group`);
+      assert.ok(view.container.querySelector("#orchestrator-max-children"), `${label} leaves the rest of Settings usable`);
+    } finally { await view.cleanup(); }
+  }
+});
+
+test("Video Evidence Review states availability, admin-only access and an older server plainly", async () => {
+  const { transport, state } = server(settings());
+  state.video = { status: 200, body: videoStatus({ readiness: { available: true } }) };
+  let view = await mount(panel(transport));
+  try {
+    assert.match(videoGroup(view.container)?.textContent ?? "", /The Orchestrator can delegate video evidence to a certified media-only reviewer\./u);
+  } finally { await view.cleanup(); }
+  state.video = { status: 403, body: { error: "admins only" } };
+  view = await mount(panel(transport));
+  try {
+    const group = videoGroup(view.container);
+    assert.match(group?.textContent ?? "", /Only an owner or admin of the personal organization can see video review certification\./u);
+    assertNoDomNode(group?.querySelector(".setting-row") ?? null, "no machine rows without access");
+  } finally { await view.cleanup(); }
+  state.video = { status: 404, body: { error: "Not Found" } };
+  view = await mount(panel(transport));
+  try {
+    assert.equal(videoGroup(view.container), undefined, "an older server shows no group");
+  } finally { await view.cleanup(); }
+});
+
+
+test("a saved retired exec Child Harness remains visible as unavailable while defaults can be edited", async () => {
+  const current = settings();
+  const retired = { agentId: "retired-codex", driver: "codex" as const, context: { kind: "native" as const } };
+  current.defaults.behavior.childHarness = retired;
+  current.capabilities.harnesses!.push({
+    ...retired, name: "Codex Non-Interactive", models: [], effortLevels: [],
+    supportedPairs: [], installations: 0,
+  });
+  current.capabilities.compatibleInstallations = 0;
+  current.capabilities.status = "unavailable";
+  const { transport, writes } = server(current);
+  const view = await mount(panel(transport));
+  try {
+    const trigger = view.container.querySelector<HTMLButtonElement>('[aria-label^="Child Harness:"]');
+    assert.ok(trigger);
+    assert.match(trigger.getAttribute("aria-label") ?? "", /Codex Non-Interactive.*Unavailable/);
+    await act(async () => trigger.click());
+    const option = [...view.container.querySelectorAll<HTMLElement>('[role="option"]')]
+      .find((candidate) => candidate.textContent?.includes("Codex Non-Interactive"));
+    assert.ok(option, "the saved retired harness stays listed");
+    assert.match(option.textContent ?? "", /Unavailable/);
+    assert.match(option.textContent ?? "", /No current installation advertises this saved Agent Harness/);
+    await act(async () => trigger.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key: "Escape", bubbles: true }) as never));
+    await act(async () => pill(view.container, "Completion", "Stop and Archive").click());
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    assert.equal(writes.length, 0, "the unavailable saved harness cannot be saved again");
+    assert.equal(fieldError(trigger)?.textContent, "Choose another Child Harness, or Automatic.");
+    await choose(view.container, "Child Harness", "Automatic");
+    await act(async () => button(view.container, "Save Defaults")!.click());
+    await settle();
+    assert.equal(writes[0]?.defaults.behavior.childHarness, null);
+    assert.equal(writes[0]?.defaults.behavior.completion, "stop_and_archive");
   } finally {
     await view.cleanup();
   }

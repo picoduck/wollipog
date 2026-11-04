@@ -1,5 +1,6 @@
 import { expect, test, type Locator, type Page } from "@playwright/test";
 import { dialogMotionSettled } from "./dialog-motion.js";
+import { viewPath } from "../src/navigation.js";
 
 // One dialog anatomy with a phone sheet (docs/design-system.md §7, #1800), measured in a browser.
 
@@ -112,16 +113,20 @@ test.describe("desktop", () => {
     await openProjectMenu(page);
     await page.getByRole("menuitem", { name: /Manage Project/ }).click();
     await page.getByRole("button", { name: /Alpha/ }).first().click();
-    await page.getByRole("button", { name: "Delete Project" }).click();
+    await page.locator(".project-detail-title-row").getByRole("button", { name: "Project Actions" }).click();
+    await page.getByRole("menuitem", { name: "Delete Project…" }).click();
     const dialog = page.getByRole("dialog", { name: "Delete Project" });
     await dialogMotionSettled(page);
     expect((await anatomy(dialog)).width).toBe(400);
-    await expect(dialog.getByLabel("Type Alpha to Confirm")).toBeFocused();
+    const field = dialog.getByLabel("Type the Project Name to Confirm");
+    await expect(field).toBeFocused();
+    await expect(field).toHaveAccessibleDescription("Enter Alpha exactly.");
+    await expect(dialog.locator(".field-helper code")).toHaveText("Alpha");
     const confirm = dialog.getByRole("button", { name: "Delete Project" });
     await expect(confirm).toBeDisabled();
-    await dialog.getByLabel("Type Alpha to Confirm").fill("Alph");
+    await field.fill("Alph");
     await expect(confirm).toBeDisabled();
-    await dialog.getByLabel("Type Alpha to Confirm").fill("Alpha");
+    await field.fill("Alpha");
     await expect(confirm).toBeEnabled();
     await expect(dialog.getByRole("button", { name: "Cancel" })).toHaveClass("btn");
   });
@@ -171,15 +176,36 @@ test.describe("phone", () => {
 
   test("Delete Team takes over the Manage Team sheet and Back returns with its values", async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
-    await page.getByRole("region", { name: "Teams" }).locator(".access-row").first().getByRole("button", { name: "Manage" }).click();
-    const manage = page.getByRole("dialog", { name: "Manage Support" });
+    await page.getByRole("region", { name: "Teams" }).locator(".access-row-open").first().click();
+    const manage = page.getByRole("dialog", { name: "Manage Team" });
     await expect(manage).toBeVisible();
     const member = manage.getByRole("checkbox").first();
     const checked = await member.isChecked();
     await member.setChecked(!checked);
 
-    // On a phone the destructive tertiary is a full-width row at the end of the body.
-    const deleteTeam = manage.locator(".modal-body > .modal-tertiary").getByRole("button", { name: "Delete Team" });
+    // On a phone the destructive tertiary is a full-width row at the end of the body, and the
+    // footer holds two equal 48px buttons (#3000).
+    const deleteTeam = manage.locator(".modal-body > .modal-tertiary").getByRole("button", { name: "Delete Team…" });
+    await dialogMotionSettled(page);
+    const layout = await manage.evaluate((panel) => {
+      const body = panel.querySelector(".modal-body")!;
+      const tertiary = body.querySelector(".modal-tertiary button")!;
+      const bodyStyle = getComputedStyle(body);
+      const inner = body.getBoundingClientRect().width - parseFloat(bodyStyle.paddingLeft) - parseFloat(bodyStyle.paddingRight);
+      return {
+        tertiaryLast: body.lastElementChild?.classList.contains("modal-tertiary") ?? false,
+        tertiaryFullWidth: Math.abs(tertiary.getBoundingClientRect().width - inner) < 1,
+        footer: [...panel.querySelectorAll(".modal-foot .btn")].map((button) => {
+          const box = button.getBoundingClientRect();
+          return [Math.round(box.width), Math.round(box.height)];
+        }),
+      };
+    });
+    expect(layout.tertiaryLast).toBe(true);
+    expect(layout.tertiaryFullWidth).toBe(true);
+    expect(layout.footer).toHaveLength(2);
+    expect(layout.footer[0]).toEqual(layout.footer[1]);
+    expect(layout.footer[0]![1]).toBe(48);
     await deleteTeam.click();
 
     const confirmation = page.getByRole("dialog", { name: "Delete Team" });
@@ -187,7 +213,7 @@ test.describe("phone", () => {
     await expect(page.locator(".modal")).toHaveCount(1);
     await expect(page.locator(".modal-backdrop")).toHaveCount(1);
     await expect(manage).toBeHidden();
-    const back = confirmation.getByRole("button", { name: "Back to Manage Support" });
+    const back = confirmation.getByRole("button", { name: "Back to Manage Team" });
     await expect(back).toBeVisible();
     await expect(confirmation.locator(".modal-foot .btn.danger")).toHaveText("Delete Team");
 
@@ -195,6 +221,44 @@ test.describe("phone", () => {
     await expect(confirmation).toHaveCount(0);
     await expect(manage).toBeVisible();
     await expect(manage.getByRole("checkbox").first()).toBeChecked({ checked: !checked });
+  });
+
+  test("a project's confirmations replace the ⋯ sheet they came from, with two equal 48px buttons and Back (#2964)", async ({ page }) => {
+    const url = `/command-inbox-projects-e2e.html?fullShell=1&path=${encodeURIComponent(viewPath({ name: "projects", id: "alpha" }))}`;
+    await page.goto(url);
+    await page.evaluate(() => localStorage.clear());
+    await page.goto(url);
+    const bar = page.locator(".detail-bar");
+    await expect(bar.getByRole("heading", { name: "Alpha" })).toBeVisible();
+    const location = page.locator(".project-location").first();
+    const cases: Array<[trigger: Locator, menu: string, item: RegExp, title: RegExp]> = [
+      [bar.getByRole("button", { name: "Project Actions" }), "Project Actions", /^Delete Project…/, /^Delete Project$/],
+      [bar.getByRole("button", { name: "Project Actions" }), "Project Actions", /^Archive/, /^Archive (and Stop )?\d+ Sessions?$/],
+      [location.getByRole("button", { name: / Actions$/ }), "", /^Remove Location…/, /^Remove Location$/],
+    ];
+    for (const [trigger, menuName, item, title] of cases) {
+      await trigger.click();
+      const menu = menuName ? page.getByRole("menu", { name: menuName }) : page.getByRole("menu");
+      await menu.getByRole("menuitem", { name: item }).click();
+      const dialog = page.getByRole("dialog", { name: title });
+      await expect(dialog).toBeVisible();
+      await expect(page.getByRole("menu")).toHaveCount(0);
+      await expect(page.locator(".modal")).toHaveCount(1);
+      await dialogMotionSettled(page);
+      expect(await anatomy(dialog)).toMatchObject({ backdropParentIsBody: true, width: 390, bottomGap: 0, header: 48 });
+      const buttons = await dialog.locator(".modal-foot .btn").evaluateAll((elements) =>
+        elements.map((element) => [Math.round(element.getBoundingClientRect().width), element.getBoundingClientRect().height]));
+      expect(buttons).toHaveLength(2);
+      expect(buttons[0]![0]).toBe(buttons[1]![0]);
+      expect(buttons.map(([, height]) => height)).toEqual([48, 48]);
+      await dialog.getByRole("button", { name: "Back to More Actions" }).click();
+      await expect(dialog).toHaveCount(0);
+      const reopened = page.getByRole("menu");
+      await expect(reopened).toBeVisible();
+      await expect(reopened.getByRole("menuitem", { name: item })).toBeFocused();
+      await page.keyboard.press("Escape");
+      await expect(reopened).toHaveCount(0);
+    }
   });
 
   test("the composer's model-settings sheet shows the same 36px grabber", async ({ page }) => {
@@ -216,8 +280,8 @@ test.describe("desktop stacking", () => {
 
   test("Delete Team stacks over Manage Team under one dim", async ({ page }) => {
     await page.goto("/people-devices-e2e.html");
-    await page.getByRole("region", { name: "Teams" }).locator(".access-row").first().getByRole("button", { name: "Manage" }).click();
-    const manage = page.getByRole("dialog", { name: "Manage Support" });
+    await page.getByRole("region", { name: "Teams" }).locator(".access-row-open").first().click();
+    const manage = page.getByRole("dialog", { name: "Manage Team" });
     await manage.locator(".modal-foot .modal-tertiary").getByRole("button", { name: "Delete Team" }).click();
     const confirmation = page.getByRole("dialog", { name: "Delete Team" });
     await expect(confirmation).toBeVisible();

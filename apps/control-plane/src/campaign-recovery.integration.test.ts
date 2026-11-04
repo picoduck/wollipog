@@ -1,12 +1,14 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
-  type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata } from "@wollipog/protocol";
-import { ControlPlaneDb } from "./db.js";
+  type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
+  type SessionSnapshot } from "@wollipog/protocol";
+import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
+import { STALLED_RECOVERY_WAKE_MAX_MS, stalledRecoveryWakeDelayMs } from "./campaign-recovery-store.js";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -78,9 +80,12 @@ function nativeRecoveryFixture() {
   const request = { requestId: "native_original", workItemId, pullRequest: { repository: "picoduck/wollipog", number: 3068 },
     baseSha: "a".repeat(40), headSha: "b".repeat(40), costUsd: 5, toolCalls: 20, brief: "Private CODE fixture brief" };
   const reserve = (requestId: string, extra: Partial<typeof request> = {}) => {
-    const result = h.svc.requestCampaignReviewJob("root", { ...request, requestId, ...extra });
-    assert.ok(result.ok, result.error ?? "native fixture reservation refused");
-    return h.db.campaignReviewJobs.command(result.data!.jobId)!;
+    const item = h.db.campaignWorkLedger.detail("root", workItemId, Date.now(), () => true)!;
+    const control = h.db.getSession("root")!.orchestratorPolicy!.control!;
+    assert.equal(control.mode, "full_control");
+    if (control.mode !== "full_control") throw Error("Historical fixture boundary missing");
+    return h.db.campaignReviewJobs.reserve("root", "r", "child", control.boundary.revision,
+      profile, { ...request, requestId, ...extra }, { workItemAttemptId: item.currentAttempt!.id, issue: item.issue! });
   };
   return { ...h, reserve };
 }
@@ -325,7 +330,7 @@ test("Full Control cannot deliver a legacy queued continuation without its autho
   } finally { h.db.close(); }
 });
 
-test("human exceptions retain exact resource, owner and smallest input without duplicate requests or content leakage", () => {
+test("a parked sign-in is never a human exception under Full Control: the Orchestrator may only decline it, as content-safe blocked work", () => {
   const h = fixture();
   try {
     const secret = "https://private.example/token?bearer=secret";
@@ -334,24 +339,274 @@ test("human exceptions retain exact resource, owner and smallest input without d
     h.db.updateSessionStatus("child", "input_required", 3);
     h.recovery.maintain(100);
     const before = h.db.campaignProjection("root")!.recovery!;
-    assert.equal(before.waitingHuman, 1); assert.equal(before.unattendedReady, false);
+    assert.equal(before.waitingHuman, 0, "nobody is asked to sign in (#2940)");
     const record = before.records[0]!;
     assert.equal(record.resource.occurrenceId, recoveryCoordinate(secret));
-    assert.equal(record.reason, "missing_access");
-    assert.equal(record.requiredInput, "restore_existing_access");
-    assert.equal(record.effectiveOwner, "human");
+    assert.equal(record.effectiveOwner, "orchestrator");
     assert.equal(JSON.stringify(before).includes("private.example"), false);
-    assert.equal(h.db.getSession("child")!.pendingApproval!.campaignRecovery?.id, record.id);
-    const requests = h.svc.descendantRequests("root", () => true, "human").data!.requests;
-    assert.equal(requests.length, 1); assert.equal(requests[0]!.request.campaignRecovery!.id, record.id);
-    h.recovery.maintain(200); h.recovery.maintain(300);
-    assert.deepEqual(h.db.campaignProjection("root")!.recovery, before);
-    assert.equal(h.sent.length, 0);
+    assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.filter((r) => r.responseOwner === "human").length, 0);
+    const owned = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.sessionId === "child")!;
+    assert.equal(owned.authorityEvaluation!.disposition, "decline");
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", secret, { action: "approve", optionId: "any" }, () => true).ok, false);
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", secret, { action: "dismiss" }, () => true).ok);
+    assert.deepEqual(h.sent.filter((m) => (m as { type: string }).type === "resolve_permission").map((m) => (m as { optionId: string | null }).optionId), [null]);
     h.db.setPendingApproval("child", null);
     h.db.updateSessionStatus("child", "idle", 400);
     h.recovery.maintain(400);
-    assert.equal(h.db.campaignProjection("root")!.recovery!.waitingHuman, 0);
+    const after = h.db.campaignProjection("root")!.recovery!;
+    assert.equal(after.waitingHuman, 0);
+    const blocked = after.records.filter((candidate) => candidate.reason === "request_declined");
+    assert.deepEqual(blocked.map((candidate) => [candidate.state, candidate.action, candidate.requiredInput]), [["blocked", "continue_without_request", "none"]]);
+    assert.equal(after.unattendedReady, false, "blocked work is visible, never silently ready");
+    h.recovery.maintain(500); h.recovery.maintain(600);
+    assert.deepEqual(h.db.campaignProjection("root")!.recovery, after, "repeated sweeps never duplicate or re-dispatch it");
+    assert.equal(JSON.stringify(after).includes("private.example"), false);
   } finally { h.db.close(); }
+});
+
+test("a delivered decline is recorded once per session and class, and revocation cancels the blocked work", () => {
+  const h = fixture();
+  try {
+    h.db.updateSessionStatus("child", "running", 3);
+    for (const occurrenceId of ["first", "first", "second"]) {
+      h.svc.onSessionEvent("child", { kind: "question_request", requestId: occurrenceId, occurrenceId, requestSource: "provider_question",
+        questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] });
+    }
+    const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
+    assert.deepEqual(h.db.campaignRecovery.declines("root", revision).map((decline) => [decline.sessionId, decline.requestClass, decline.count]),
+      [["child", "secrets_and_sign_in", 2]], "two distinct occurrences, one record; a redelivery counts once");
+    const records = () => h.db.campaignProjection("root")!.recovery?.records.filter((record) => record.reason === "request_declined") ?? [];
+    assert.equal(records().length, 1);
+    assert.equal(records()[0]!.state, "blocked");
+    const principal = { ...h.identity, kind: "human" as const, actorId: h.identity.userId };
+    assert.ok(h.svc.setCampaignControl("root", { mode: "custom" }, revision, principal).ok);
+    h.recovery.maintain(1000);
+    assert.equal(records().length, 0, "revocation restores Custom: no Full Control blocked work remains active");
+  } finally { h.db.close(); }
+});
+
+/** A child's runner snapshot, as the runner reports it, carrying or clearing a hold. */
+function childSnapshot(extra: Partial<SessionSnapshot>): SessionSnapshot {
+  return { id: "child", workspaceId: "w", agentId: "agent", status: "input_required", title: "child", driver: "codex-app-server",
+    config: { model: "gpt-6.1-sol" }, costUsd: 0, tokensIn: 0, tokensOut: 0, useWorktree: true,
+    worktreePath: "/repos/test/.agent-worktrees/child", preview: null, pendingApproval: null, seq: 0, historyEpoch: 0,
+    createdAt: 1, updatedAt: 3, ...extra };
+}
+
+test("a request a reconnecting runner restores gets the same standing decline as a live one", () => {
+  const h = fixture();
+  try {
+    // The runner was away when the request was parked, so nothing could deliver a response.
+    h.hub.sendToRunner = () => false;
+    const pending: PendingApproval = { requestId: "restored", occurrenceId: "restored", kind: "question", title: "Credential",
+      options: [], requestSource: "provider_question",
+      questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] };
+    h.svc.onSessionEvent("child", { kind: "question_request", requestId: pending.requestId, occurrenceId: pending.occurrenceId,
+      requestSource: "provider_question", questions: pending.questions! });
+    assert.ok(h.db.getSession("child")!.pendingApproval, "undeliverable while the runner is away");
+    assert.equal(h.sent.length, 0);
+    // The runner reconnects and reports the same pending request in its snapshot.
+    h.hub.sendToRunner = (_id, message) => { h.sent.push(message); return true; };
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: pending, updatedAt: 6 }));
+    const dismissed = h.sent.filter((message) => (message as { type: string }).type === "answer_question") as Array<{ requestId: string; action: string }>;
+    assert.deepEqual(dismissed.map((message) => [message.requestId, message.action]), [["restored", "dismiss"]]);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 1);
+  } finally { h.db.close(); }
+});
+
+const credentialQuestion: PendingApproval = { requestId: "secret-q", occurrenceId: "secret-q", kind: "question", title: "Credential",
+  options: [], requestSource: "provider_question",
+  questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] };
+const sentOf = (sent: unknown[], type: string) => sent.filter((message) => (message as { type: string }).type === type) as
+  Array<{ sessionId: string; requestId: string; action?: string; optionId?: string | null }>;
+
+test("a card restored only by runner registration gets its standing decline, once (#2940 CR-2.2)", () => {
+  const h = fixture();
+  try {
+    h.svc.hydrateRunnerSessions("r", [
+      childSnapshot({ id: "root", title: "root", status: "running" }),
+      childSnapshot({ pendingApproval: credentialQuestion }),
+      childSnapshot({ id: "unaffected", title: "unaffected", status: "running" }),
+    ]);
+    assert.deepEqual(sentOf(h.sent, "answer_question").map((message) => [message.sessionId, message.requestId, message.action]),
+      [["child", "secret-q", "dismiss"]], "one dismissal with no later runtime update");
+    assert.equal(h.db.getSession("child")!.pendingApproval, null, "no pending card remains");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)", () => {
+  // A credential decline, a root question dismissal, and a sign-in dismissal whose runner resolution
+  // is still pending: each restored card is answered exactly once across repeated snapshots.
+  const rootQuestion: PendingApproval = { requestId: "root-q", occurrenceId: "root-q", kind: "question", title: "Placement",
+    options: [], requestSource: "provider_question",
+    questions: [{ id: "placement", question: "Which placement?", options: [{ label: "Inline (Recommended)" }, { label: "Footer" }] }] };
+  const signIn: PendingApproval = { requestId: "provider-auth:1", occurrenceId: "auth-occurrence", kind: "authentication", title: "Authentication Required",
+    options: [{ optionId: "auth:revalidate", name: "Retry", kind: "allow_once" }, { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" }] };
+  for (const [sessionId, pending, type] of [["child", credentialQuestion, "answer_question"], ["root", rootQuestion, "answer_question"],
+    ["child", signIn, "resolve_permission"]] as const) {
+    const h = fixture();
+    try {
+      for (let index = 0; index < 3; index += 1) {
+        h.svc.applySessionRuntimeUpdate("r", childSnapshot({ id: sessionId, title: sessionId, pendingApproval: pending, updatedAt: 10 + index }));
+      }
+      const answered = sentOf(h.sent, type).filter((message) => message.requestId === pending.requestId);
+      assert.equal(answered.length, 1, `${pending.requestId}: answered exactly once`);
+      if (sessionId === "root") assert.equal(answered[0]!.action, "dismiss", "the root's own question is dismissed, never answered for it (#2940)");
+      if (pending.kind === "authentication") assert.equal(answered[0]!.optionId, "auth:dismiss");
+    } finally { h.db.close(); }
+  }
+});
+
+test("a sign-in card rebuilt after a runner restart with a fresh occurrence is not dismissed again (CR-3.4)", () => {
+  const h = fixture();
+  try {
+    const card = (occurrenceId: string): PendingApproval => ({ requestId: "provider-auth:recovery-1", occurrenceId, kind: "authentication",
+      title: "Authentication Required", options: [{ optionId: "auth:revalidate", name: "Retry", kind: "allow_once" },
+        { optionId: "auth:dismiss", name: "Dismiss Recovery", kind: "reject_once" }] });
+    // The standing dismissal is sent; the runner restarts before completing it.
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: card("occurrence-before-restart"), updatedAt: 10 }));
+    h.svc.failRunnerSessions("r");
+    // Startup rebuilds the same recovery card, which mints a fresh occurrence id.
+    h.svc.hydrateRunnerSessions("r", [
+      childSnapshot({ id: "root", title: "root", status: "running", updatedAt: 20 }),
+      childSnapshot({ pendingApproval: card("occurrence-after-restart"), updatedAt: 20 }),
+      childSnapshot({ id: "unaffected", title: "unaffected", status: "running", updatedAt: 20 }),
+    ]);
+    const dismissals = sentOf(h.sent, "resolve_permission").filter((message) => message.requestId === "provider-auth:recovery-1");
+    assert.deepEqual(dismissals.map((message) => message.optionId), ["auth:dismiss"], "exactly one dismissal across the restart");
+  } finally { h.db.close(); }
+});
+
+test("a standing response the runner socket refused is retried by the next snapshot, still only once", () => {
+  const h = fixture();
+  try {
+    h.hub.sendToRunner = () => false;
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: credentialQuestion, updatedAt: 10 }));
+    assert.equal(sentOf(h.sent, "answer_question").length, 0);
+    h.hub.sendToRunner = (_id, message) => { h.sent.push(message); return true; };
+    for (let index = 0; index < 2; index += 1) h.svc.applySessionRuntimeUpdate("r", childSnapshot({ pendingApproval: credentialQuestion, updatedAt: 11 + index }));
+    assert.equal(sentOf(h.sent, "answer_question").length, 1, "a refused send released its claim; the delivered one is fenced");
+  } finally { h.db.close(); }
+});
+
+test("a held child is recovered through the real recovery wake, and clearing the hold resolves it (#2938 AC2)", () => {
+  const h = fixture();
+  try {
+    const detail = "PRIVATE-HOLD-DETAIL the selected worktree could not be verified";
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ worktreeRecovery: { recoveryId: "worktree-recovery:child",
+      detectedAt: 2, selectedPath: "/repos/test/.agent-worktrees/child", expectedBranch: "agent/child", detail } }));
+    assert.ok(h.db.getSession("child")!.holds?.length, "the runner-reported hold is current");
+    h.db.updateSessionStatus("root", "idle", 4);
+    const now = Date.now();
+    h.recovery.maintain(now);
+    const held = h.db.campaignRecovery.projection("root").records.find(record => record.action === "recover_hold")!;
+    assert.deepEqual([held.resource.kind, held.resource.sessionId, held.effectiveOwner, held.reason, held.requiredInput],
+      ["hold", "child", "orchestrator", "transient_failure", "none"]);
+    assert.equal(held.resource.occurrenceId, recoveryCoordinate(h.db.getSession("child")!.holds![0]!.holdId),
+      "the hold is identified by digest, never by its runner text");
+    h.recovery.maintain(now + 1_000); // Transient holds retain their bounded backoff before the wake.
+    const woken = h.db.campaignRecovery.projection("root").records.find(record => record.id === held.id)!;
+    assert.deepEqual([woken.state, woken.attempts], ["dispatched", 1]);
+    h.svc.retryDuePrompts(now + 32_000);
+    const continuation = h.db.latestCampaignContinuation("root")!;
+    assert.ok(continuation, "the wake reaches the parent's single continuation lane");
+    const text = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson).text as string;
+    assert.match(text, /Action needed: yes/u);
+    assert.match(text, /"action":"recover_hold"/u);
+    assert.ok(text.includes(held.id));
+    assert.equal(text.includes("PRIVATE-HOLD-DETAIL") || text.includes(".agent-worktrees"), false,
+      "the wake names the hold's record, not the runner's detail or paths");
+    h.svc.retryDuePrompts(now + 33_000);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, continuation.continuationId, "no duplicate turn");
+    // The runner reports the hold cleared: the recovery is resolved, not left as automatic work.
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ status: "idle", worktreeRecovery: null, updatedAt: 5 }));
+    assert.equal(h.db.getSession("child")!.holds?.length ?? 0, 0);
+    h.recovery.maintain(now + 34_000);
+    assert.equal(h.db.campaignRecovery.activeRecords("root").some(record => record.id === held.id), false);
+    assert.equal((JSON.parse((h.db.raw().prepare("SELECT record_json FROM campaign_recovery WHERE id=?").get(held.id) as
+      { record_json: string }).record_json) as { state: string }).state, "resolved");
+  } finally { h.db.close(); }
+});
+
+test("a provider account switch hold waits for the Human and never wakes the parent (#2938 AC2)", () => {
+  const h = fixture();
+  try {
+    h.svc.applySessionRuntimeUpdate("r", childSnapshot({ status: "queued", queueHold: { kind: "provider_account_switch",
+      holdId: "account-switch:child", since: 2, target: "Fixture Account", queuedPrompts: 1, unfinishedBackgroundJobs: 1 } }));
+    assert.ok(h.db.getSession("child")!.holds?.some(hold => hold.kind === "provider_account_switch"));
+    h.db.updateSessionStatus("root", "idle", 4);
+    const now = Date.now();
+    for (const at of [now, now + 1_000, now + 31_000]) h.recovery.maintain(at);
+    const record = h.db.campaignRecovery.projection("root").records.find(item => item.action === "recover_hold")!;
+    assert.deepEqual([record.effectiveOwner, record.reason, record.state, record.requiredInput, record.attempts],
+      ["human", "missing_access", "waiting_human", "restore_existing_access", 0]);
+    assert.equal(JSON.stringify(record).includes("Fixture Account"), false);
+    assert.equal(h.db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE occurrence_id=?").get(record.id)!.n, 0,
+      "a human-owned hold reserves no parent wake");
+  } finally { h.db.close(); }
+});
+
+test("a child whose command sandbox cannot start is blocked work for the person, not a retry (#3843)", () => {
+  for (const [launchFailure, expected] of [
+    ["codex_sandbox_unavailable", ["human", "unsupported_capability", "use_supported_capability"]],
+    // An untyped failure, or a code this control plane does not know, stays the Orchestrator's retry.
+    [undefined, ["orchestrator", "transient_failure", "none"]],
+    ["future_code", ["orchestrator", "transient_failure", "none"]],
+  ] as const) {
+    const h = fixture();
+    try {
+      h.svc.onSessionStatus("child", "failed", "Codex's command sandbox cannot start here", undefined, "r",
+        undefined, undefined, undefined, launchFailure);
+      assert.equal(h.db.sessionLaunchFailure("child"), launchFailure === "codex_sandbox_unavailable" ? launchFailure : null);
+      h.db.updateSessionStatus("root", "idle", 4);
+      h.recovery.maintain(Date.now());
+      const record = h.db.campaignRecovery.projection("root").records.find(item => item.action === "replace_worker")!;
+      assert.deepEqual([record.resource.sessionId, record.effectiveOwner, record.reason, record.requiredInput],
+        ["child", ...expected], String(launchFailure));
+      if (launchFailure === "codex_sandbox_unavailable") {
+        assert.equal(record.state, "waiting_human");
+        assert.equal(JSON.stringify(record).includes("sandbox cannot start"), false, "the record carries no runner text");
+        // A relaunch clears the typed reason with the failure it explained.
+        h.db.updateSessionStatus("child", "starting", 6);
+        assert.equal(h.db.sessionLaunchFailure("child"), null);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+test("a typed launch failure survives reconnect hydration in either order (#3843 CR-1.2)", () => {
+  const typedRecord = (h: ReturnType<typeof fixture>) => {
+    h.db.updateSessionStatus("root", "idle", 4);
+    h.recovery.maintain(Date.now());
+    const record = h.db.campaignRecovery.projection("root").records.find(item => item.action === "replace_worker")!;
+    return [record.effectiveOwner, record.reason, record.state];
+  };
+  const waitingForHuman = ["human", "unsupported_capability", "waiting_human"];
+  // Registration hydrates the failure first, from a snapshot without the reason (an older runner,
+  // or one restarted before it could send it); the buffered status then arrives.
+  const buffered = fixture();
+  try {
+    buffered.svc.hydrateRunnerSessions("r", [childSnapshot({ status: "failed", updatedAt: 5 })]);
+    assert.equal(buffered.db.getSession("child")!.status, "failed");
+    assert.equal(buffered.db.sessionLaunchFailure("child"), null);
+    buffered.svc.onSessionStatus("child", "failed", "Codex's command sandbox cannot start here", undefined, "r",
+      undefined, undefined, undefined, "codex_sandbox_unavailable");
+    assert.equal(buffered.db.sessionLaunchFailure("child"), "codex_sandbox_unavailable");
+    assert.deepEqual(typedRecord(buffered), waitingForHuman);
+  } finally { buffered.db.close(); }
+  // The runner kept the reason with its failed state, so registration alone carries it.
+  const hydrated = fixture();
+  try {
+    hydrated.svc.hydrateRunnerSessions("r", [childSnapshot({ status: "failed", launchFailure: "codex_sandbox_unavailable", updatedAt: 5 })]);
+    assert.equal(hydrated.db.sessionLaunchFailure("child"), "codex_sandbox_unavailable");
+    assert.deepEqual(typedRecord(hydrated), waitingForHuman);
+    // A later snapshot without the field (an older runner) leaves it; a relaunch clears it.
+    hydrated.svc.applySessionRuntimeUpdate("r", childSnapshot({ status: "failed", updatedAt: 6 }));
+    assert.equal(hydrated.db.sessionLaunchFailure("child"), "codex_sandbox_unavailable");
+    hydrated.svc.hydrateRunnerSessions("r", [childSnapshot({ status: "running", updatedAt: 7 })]);
+    assert.equal(hydrated.db.sessionLaunchFailure("child"), null);
+  } finally { hydrated.db.close(); }
 });
 
 test("an idle Full Control parent continues unrelated work while a child waits for a human", () => {
@@ -822,6 +1077,50 @@ for (const completion of ["retain", "stop_and_archive"] as const) {
   });
 }
 
+/** Record the root's consumed closure of #2938 as the runner reported it. */
+function recordEpicClosure(h: ReturnType<typeof mergedWorkVerificationFixture>, occurrence: string,
+  change: { authority?: "human" | "orchestrator"; outcome?: "closed" | "uncertain" | "already_closed"; members?: boolean; admitted?: boolean } = {}) {
+  const snapshot = { category: "issue_closure", repository: "picoduck/wollipog", issue: 2938, title: "Epic",
+    url: "https://github.com/picoduck/wollipog/issues/2938", forgeDigest: "a".repeat(64), reason: "completed", explanation: "Members closed.",
+    evidence: ["Every member closed as completed."], openPullRequests: [], activeChildren: [],
+    ...(change.members === false ? {} : { epicMembers: { readable: true, members: [{ number: 2938_1, state: "completed" }] } }),
+    ...(change.admitted === false ? {} : { issueAdmission: { boundaryRevision: 1, evidenceDigest: "e".repeat(64) } }) };
+  h.db.raw().prepare(`INSERT INTO workflow_decisions (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
+    resource_snapshot, resource_digest, policy_revision, authority, status, created_at, issue_closure_result)
+    VALUES (?, ?, 'root', 'root', 'issue_closure', 'issue_closure:picoduck/wollipog#2938', ?, ?, 1, ?, 'consumed', ?, ?)`)
+    .run(occurrence, occurrence, JSON.stringify(snapshot), "f".repeat(64), change.authority ?? "orchestrator", h.now,
+      JSON.stringify({ outcome: change.outcome ?? "closed", completedAt: h.now }));
+}
+
+test("an epic placeholder item is finished by its closure proven from members, and nothing else is (#4060)", () => {
+  const h = mergedWorkVerificationFixture("delivered");
+  try {
+    const placeholder = h.svc.recordCampaignPlan("root", { planComplete: true,
+      items: [{ key: "epic:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+    assert.ok(placeholder.ok, placeholder.error ?? "plan refused");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "a never-dispatched item is unfinished by default");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    // Only an Orchestrator-owned, member-proven completed closure the runner confirmed closed counts.
+    for (const [occurrence, change] of [["human", { authority: "human" }], ["uncertain", { outcome: "uncertain" }],
+      ["already", { outcome: "already_closed" }], ["items", { members: false }], ["unadmitted", { admitted: false }]] as const) {
+      recordEpicClosure(h, `closure-${occurrence}`, change);
+      assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", occurrence);
+    }
+    recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "complete");
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete", "no scope_removed marking is needed");
+  } finally { h.db.close(); }
+});
+
+test("an epic closure proven from members does not finish the epic's own dispatched work (#4060)", () => {
+  const h = mergedWorkVerificationFixture("incomplete");
+  try {
+    recordEpicClosure(h, "closure-proven");
+    assert.equal(h.db.campaignRecoveryCompletion("root", h.now).state, "recovery_held", "an item with an attempt keeps its own proof");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+  } finally { h.db.close(); }
+});
+
 test("incomplete original work survives replacement and a new head until current-attempt delivery", () => {
   const h = mergedWorkVerificationFixture("incomplete");
   try {
@@ -1006,6 +1305,138 @@ test("all four scoped repair reservations deliver; a fifth head cannot reset the
   } finally { h.db.close(); }
 });
 
+/** Delivers the latest staged parent continuation and reports its turn finished, as the runner does. */
+function completeLatestContinuation(h: ReturnType<typeof completedPrFixture>, at: number) {
+  h.svc.retryDuePrompts(at);
+  const continuation = h.db.latestCampaignContinuation("root")!;
+  assert.ok(continuation);
+  const text = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson).text as string;
+  assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update",
+    commandId: continuation.commandId, sessionId: "root", state: "completed", revision: 1 }));
+  const settled = h.db.latestCampaignContinuation("root")!;
+  assert.equal(settled.state, "completed");
+  h.db.updateSessionStatus("root", "idle", at);
+  return { ...continuation, text, settledAt: settled.updatedAt };
+}
+const recoveryEvents = (h: ReturnType<typeof completedPrFixture>) =>
+  (h.db.raw().prepare("SELECT event_id FROM orchestrator_campaign_events WHERE campaign_session_id='root' ORDER BY seq").all() as
+    Array<{ event_id: string }>).map(row => row.event_id);
+
+test("an unanswered dispatched wake is woken again with backoff, then exhausts instead of staying automatic (#2938 AC8)", () => {
+  const h = completedPrFixture();
+  try {
+    h.recovery.maintain(h.now);
+    const original = h.db.campaignRecovery.projection("root").records[0]!;
+    assert.deepEqual([original.state, original.attempts], ["dispatched", 1]);
+    const first = completeLatestContinuation(h, h.now + 31_000);
+    let settledAt = first.settledAt;
+    const delivered = new Set([first.commandId]);
+    for (let attempts = 1; attempts <= 3; attempts++) {
+      const delay = stalledRecoveryWakeDelayMs(attempts);
+      // Within its delay a finished wake is still owed an answer: no new wake, no new event.
+      const events = recoveryEvents(h).length;
+      h.recovery.maintain(settledAt + delay - 1);
+      h.recovery.maintain(settledAt + delay - 1);
+      assert.deepEqual([h.db.campaignRecovery.projection("root").records[0]!.state, recoveryEvents(h).length],
+        ["dispatched", events], `attempt ${attempts} waits for its delay`);
+      // After it, the same record and occurrence is woken once more under a fresh event identity.
+      h.recovery.maintain(settledAt + delay);
+      h.recovery.maintain(settledAt + delay);
+      const record = h.db.campaignRecovery.projection("root").records[0]!;
+      assert.deepEqual([record.id, record.resource, record.state, record.attempts],
+        [original.id, original.resource, "dispatched", attempts + 1]);
+      assert.deepEqual(recoveryEvents(h).slice(-1), [`${original.id}:${attempts + 1}`], "exactly one new wake event, single-flight");
+      const continuation = completeLatestContinuation(h, settledAt + delay + 31_000);
+      settledAt = continuation.settledAt;
+      assert.equal(delivered.has(continuation.commandId), false, "each re-wake reaches its own parent turn");
+      delivered.add(continuation.commandId);
+      assert.match(continuation.text, /Action needed: yes/u);
+      assert.ok(continuation.text.includes(original.id), "the re-wake names the same recovery record");
+    }
+    // The fourth wake also went unanswered: the ceiling is spent, so the record is blocked as an
+    // exhausted exception and unattended readiness is withdrawn rather than counted as automatic.
+    const before = h.db.latestCampaignContinuation("root")!.continuationId;
+    h.recovery.maintain(settledAt + stalledRecoveryWakeDelayMs(4));
+    h.svc.retryDuePrompts(settledAt + stalledRecoveryWakeDelayMs(4) + 31_000);
+    const exhausted = h.db.campaignRecovery.projection("root");
+    assert.deepEqual([exhausted.records[0]!.reason, exhausted.records[0]!.state, exhausted.records[0]!.attempts,
+      exhausted.records[0]!.requiredInput], ["attempts_exhausted", "blocked", 4, "none"]);
+    assert.deepEqual([exhausted.unattendedReady, exhausted.automatic, exhausted.blocked], [false, 0, 1]);
+    assert.equal(h.db.latestCampaignContinuation("root")!.continuationId, before, "an exhausted record is never woken again");
+    assert.equal(h.db.campaignProjection("root")!.status, "blocked");
+    assert.equal(JSON.stringify(exhausted).includes("Component fixture"), false, "the exception carries no transcript content");
+  } finally { h.db.close(); }
+});
+
+test("a wake is not re-sent while the parent is busy, a descendant works, or its turn's outcome is unknown", () => {
+  for (const hold of ["root_running", "descendant_running", "root_background", "descendant_background", "missing_result"] as const) {
+    const h = completedPrFixture();
+    try {
+      h.recovery.maintain(h.now);
+      const original = h.db.campaignRecovery.projection("root").records[0]!;
+      h.svc.retryDuePrompts(h.now + 31_000);
+      const continuation = h.db.latestCampaignContinuation("root")!;
+      assert.ok(h.svc.onDurablePromptReceipt("r", { type: "durable_session_command_update", commandId: continuation.commandId,
+        sessionId: "root", state: hold === "missing_result" ? "uncertain" : "completed", revision: 1 }));
+      h.db.updateSessionStatus("root", hold === "root_running" ? "running" : "idle", h.now + 31_000);
+      if (hold === "descendant_running" || hold === "descendant_background") {
+        h.db.setSessionArchived("child", false, h.now + 31_000);
+        h.db.updateSessionStatus("child", hold === "descendant_running" ? "running" : "idle", h.now + 31_000);
+      }
+      // At rest in the foreground while detached work still returns, as the runner's snapshot records it.
+      if (hold === "root_background") h.db.raw().prepare("UPDATE sessions SET background_work_state='running' WHERE id='root'").run();
+      if (hold === "descendant_background") {
+        h.db.raw().prepare("UPDATE sessions SET background_work_state='continuation_pending' WHERE id='child'").run();
+      }
+      const events = recoveryEvents(h).length;
+      for (const at of [h.now + 31_000 + stalledRecoveryWakeDelayMs(1), h.now + 31_000 + STALLED_RECOVERY_WAKE_MAX_MS * 4]) {
+        h.recovery.maintain(at);
+      }
+      const record = h.db.campaignRecovery.projection("root").records.find(r => r.id === original.id)!;
+      assert.deepEqual([record.state, record.attempts, recoveryEvents(h).length], ["dispatched", 1, events], hold);
+    } finally { h.db.close(); }
+  }
+});
+
+test("restarting a Full Control root cancels its outstanding recovery, so the old wake cannot continue (#2938 AC9)", () => {
+  const h = completedPrFixture();
+  try {
+    h.recovery.maintain(h.now);
+    const original = h.db.campaignRecovery.projection("root").records[0]!;
+    assert.deepEqual([original.state, original.attempts], ["dispatched", 1]);
+    // A current host advertises the independent Orchestrator role the restart relaunches with.
+    h.metadata.agents[0]!.capabilities = { models: [{ id: "gpt-6.1-sol", displayName: "Fixture", default: true }],
+      effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default"],
+      orchestratorAdditive: true };
+    h.db.registerRunner(h.metadata, h.now, PROTOCOL_VERSION);
+    const restarted = h.svc.restart("root");
+    assert.ok(restarted.ok, restarted.error ?? "restart refused");
+    const stored = JSON.parse((h.db.raw().prepare("SELECT record_json FROM campaign_recovery WHERE id=?")
+      .get(original.id) as { record_json: string }).record_json);
+    assert.deepEqual([stored.state, stored.dispatchFenced, stored.attempts], ["cancelled", true, 1],
+      "the restart cancels the reservation rather than rebinding it to the new run");
+    // The restarted root comes back idle and the same failing check is observed again: the old
+    // reservation stays fenced until a fresh occurrence exists, and its ceiling is not reset.
+    h.db.updateSessionStatus("root", "idle", h.now + 1_000);
+    const events = recoveryEvents(h);
+    for (const at of [h.now + 1_000, h.now + 31_000, h.now + 31_000 + STALLED_RECOVERY_WAKE_MAX_MS]) {
+      h.recovery.maintain(at);
+      h.svc.retryDuePrompts(at);
+    }
+    const after = h.db.campaignRecovery.projection("root");
+    assert.deepEqual([after.records[0]!.id, after.records[0]!.state, after.records[0]!.reason, after.records[0]!.attempts],
+      [original.id, "blocked", "authority_changed", 1]);
+    assert.equal(after.unattendedReady, false);
+    assert.deepEqual(recoveryEvents(h), events, "no new wake is reserved for the fenced record");
+    const continuation = h.db.latestCampaignContinuation("root");
+    if (continuation) {
+      const text = JSON.parse(h.db.getSessionPromptCommand(continuation.commandId)!.payloadJson).text as string;
+      assert.match(text, /Action needed: no/u, "the pre-restart wake is delivered only as settled information");
+      assert.match(text, /"pending":false/u);
+    }
+  } finally { h.db.close(); }
+});
+
 for (const fence of ["stale", "out_of_scope", "wrong_subject", "hard_denial", "exhausted", "unsupported", "budget", "stop", "archive", "pause", "revoke"] as const) {
   test(`verified children cannot admit original PR recovery through the ${fence} fence`, () => {
     const h = completedPrFixture();
@@ -1075,4 +1506,178 @@ test("fresh check/review failures route to repair; stale facts cannot resolve th
     h.recovery.maintain(700_001);
     assert.equal(h.db.campaignProjection("root")!.recovery!.records.length, 0);
   } finally { h.db.close(); }
+});
+
+test("a failed GitLab pipeline routes to repair and a passed one resolves it (#3600)", () => {
+  const h = fixture();
+  try {
+    const mr = { repository: "gitlab.example.com/platform/agents/wollipog", number: 7 };
+    const planned = h.db.campaignWorkLedger.recordPlan("root", "root", { items: [{ key: "original:3600" }], planComplete: true }, 10);
+    assert.ok(planned.ok);
+    assert.ok(h.db.campaignWorkLedger.updateItem("root", "root", { workItemId: planned.data.items[0]!.workItemId,
+      stage: { stage: "awaiting_checks", pullRequests: [mr] } }, 20).ok);
+    const observation = { forge: "gitlab" as const, state: "open" as const, draft: false, headSha: "a".repeat(40), baseRef: "main",
+      approvals: { approved: false, approvedBy: 0, left: 1 }, pipeline: { id: 901, status: "failed" as const },
+      mergeTrain: null, mergeCommitSha: null };
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: mr, observation }], 100);
+    h.recovery.maintain(100);
+    assert.deepEqual(h.db.campaignProjection("root")!.recovery!.records.map(record => [record.action, record.reason]),
+      [["repair_checks", "failed_checks"]], "GitLab has no requested-changes decision, so only the pipeline asks for repair");
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: mr,
+      observation: { ...observation, pipeline: { id: 902, status: "success" as const } } }], 200);
+    h.recovery.maintain(200);
+    assert.equal(h.db.campaignProjection("root")!.recovery!.records.length, 0);
+  } finally { h.db.close(); }
+});
+
+// #3362: a stopped worker's reason comes from the server-written stop provenance, never from agent
+// text, and every stop classification stays a hard block that recovery never replaces or restarts.
+function assignChild(h: ReturnType<typeof fixture>, childSessionId = "child") {
+  const planned = h.svc.recordCampaignPlan("root", { planComplete: true,
+    items: [{ key: "original:2938", issue: { repository: "picoduck/wollipog", number: 2938 } }] });
+  assert.ok(planned.ok, planned.error ?? "plan refused");
+  const workItemId = planned.data!.items[0]!.workItemId;
+  const assigned = h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId });
+  assert.ok(assigned.ok, assigned.error ?? "assignment refused");
+  return workItemId;
+}
+const workerRecord = (h: ReturnType<typeof fixture>) =>
+  h.db.campaignRecovery.projection("root").records.find(item => item.action === "replace_worker");
+// Worker-replacement wakes only, from any record state: a child's own request still wakes the root.
+const wakes = (h: ReturnType<typeof fixture>) => Number((h.db.raw().prepare(`SELECT COUNT(*) AS n FROM orchestrator_campaign_events event
+  JOIN campaign_recovery record ON record.id=event.occurrence_id WHERE json_extract(record.record_json,'$.action')='replace_worker'`)
+  .get() as { n: number }).n);
+
+test("an intentional Stop of an assigned worker is recorded as an intentional stop, never a denial, and stays blocked (#3362)", () => {
+  const h = fixture();
+  try {
+    const workItemId = assignChild(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    assert.ok(h.svc.stop("child").ok);
+    assert.ok(h.db.getSession("child")!.stopOperation, "the Stop is a durable, server-recorded intent");
+    h.recovery.maintain(100);
+    assert.equal(workerRecord(h), undefined, "a Stop still settling is not yet recovery work");
+    h.svc.onSessionStatus("child", "stopped", undefined, undefined, "r");
+    assert.equal(h.db.getSession("child")!.stopOperation, undefined);
+    assert.equal(h.db.sessionStopProvenance("child")!.cause, "requested");
+    for (const now of [200, 10_000, 100_000, 10_000_000]) h.recovery.maintain(now);
+    const record = workerRecord(h)!;
+    assert.deepEqual([record.reason, record.state, record.effectiveOwner, record.requiredInput, record.attempts, record.resource.workItemId],
+      ["intentional_stop", "blocked", "orchestrator", "none", 0, workItemId]);
+    assert.match(record.explanation, /stopped on purpose by a recorded Stop or archive request; nothing was denied/);
+    assert.match(record.explanation, /will not replace or restart it automatically/);
+    assert.equal(wakes(h), 0, "an intentional stop never wakes the Orchestrator to replace the worker");
+    assert.equal(h.db.getSession("child")!.status, "stopped", "nothing restarted the stopped worker");
+    assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 1);
+  } finally { h.db.close(); }
+});
+
+test("stop provenance, denial and failure each keep their own reason and restriction (#3362)", () => {
+  const cases: Array<[string, (h: ReturnType<typeof fixture>) => void, string]> = [
+    ["guardrail decline", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "guardrail" }), "hard_denial"],
+    ["runner-reported stop", h => h.db.updateSessionStatus("child", "stopped", 5, RUNNER_REPORTED_STOP), "unverified_stop"],
+    ["runner disconnect", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "runner_disconnect" }), "unverified_stop"],
+    ["launch never sent", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "not_launched", confirmation: "not_launched" }), "unverified_stop"],
+    ["unrecorded stop", h => h.db.updateSessionStatus("child", "stopped", 5, { cause: "unrecorded" }), "unverified_stop"],
+    ["failed worker", h => h.db.updateSessionStatus("child", "failed", 5), "transient_failure"],
+  ];
+  for (const [label, end, reason] of cases) {
+    for (const assignment of ["active", "unledgered"] as const) {
+      const h = fixture();
+      try {
+        const workItemId = assignment === "active" ? assignChild(h) : undefined;
+        h.db.updateSessionStatus("root", "idle", 4);
+        end(h);
+        for (const now of [100, 100_000]) h.recovery.maintain(now);
+        const record = workerRecord(h)!;
+        assert.deepEqual([record.reason, record.resource.workItemId], [reason, workItemId], `${label} (${assignment})`);
+        if (reason === "transient_failure") {
+          assert.ok(record.attempts > 0, "an ordinary failure keeps bounded automatic replacement");
+          assert.ok(wakes(h) > 0, "the replacement wake is observable, so the blocked cases' zero is meaningful");
+        } else {
+          assert.equal(record.state, "blocked", label);
+          assert.equal(record.attempts, 0, label);
+          assert.equal(wakes(h), 0, `${label} is never automatically replaced`);
+        }
+        if (reason === "unverified_stop") assert.match(record.explanation, /cause is unverified/);
+        if (reason !== "hard_denial") assert.doesNotMatch(record.explanation, /was denied\./, label);
+      } finally { h.db.close(); }
+    }
+  }
+});
+
+test("an ended assignment's stop is history, not recovery work (#3362)", () => {
+  const h = fixture();
+  try {
+    const workItemId = assignChild(h);
+    h.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    const reassigned = h.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "unaffected" });
+    assert.ok(reassigned.ok, reassigned.error ?? "reassignment refused");
+    assert.equal(h.db.campaignWorkLedger.currentAssignment("child"), null);
+    h.recovery.maintain(100);
+    assert.equal(h.db.campaignRecovery.projection("root").records.some(item => item.resource.sessionId === "child"), false);
+  } finally { h.db.close(); }
+});
+
+test("a stored hard denial is never relabeled, and a stop label only escalates across workers (#3362)", () => {
+  const h = fixture();
+  try {
+    const workItemId = assignChild(h);
+    const revision = h.db.getSession("root")!.parentControlPolicy?.revision ?? 0;
+    h.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    const epoch = h.db.getSession("child")!.eventEpoch ?? 0;
+    // A record an earlier version wrote for this very stop keeps its denial: nothing softens it.
+    h.db.campaignRecovery.synchronize("root", revision, true, [{ action: "replace_worker", owner: "orchestrator",
+      reason: "hard_denial", resource: { kind: "worker", sessionId: "child", occurrenceId: `epoch:${epoch}`, workItemId },
+      signal: `child:${epoch}:stopped` }], 50);
+    for (const now of [100, 200]) h.recovery.maintain(now);
+    assert.deepEqual([workerRecord(h)!.reason, workerRecord(h)!.state], ["hard_denial", "blocked"]);
+  } finally { h.db.close(); }
+  // An intentional stop, then a replacement worker's guardrail denial before the next scan: the denial shows.
+  const escalated = fixture();
+  try {
+    const workItemId = assignChild(escalated);
+    escalated.db.updateSessionStatus("child", "stopped", 5, { cause: "requested" });
+    escalated.recovery.maintain(100);
+    assert.equal(workerRecord(escalated)!.reason, "intentional_stop");
+    assert.ok(escalated.svc.assignCampaignWorkItem("root", { workItemId, childSessionId: "unaffected" }).ok);
+    escalated.db.updateSessionStatus("unaffected", "stopped", 6, { cause: "guardrail" });
+    for (const now of [200, 300]) escalated.recovery.maintain(now);
+    assert.deepEqual([workerRecord(escalated)!.resource.sessionId, workerRecord(escalated)!.reason, workerRecord(escalated)!.state],
+      ["unaffected", "hard_denial", "blocked"]);
+  } finally { escalated.db.close(); }
+});
+
+test("pause, archive, revocation and denial still prevent replacing a stopped worker (#3362)", () => {
+  for (const fence of ["pause", "archive_child", "archive_root", "revoke", "deny"] as const) {
+    const h = fixture();
+    try {
+      assignChild(h);
+      h.db.updateSessionStatus("root", "idle", 3);
+      if (fence === "deny") {
+        const decision = h.svc.createWorkflowDecision("child", { requestId: "stop-deny", resourceKey: "choice",
+          resourceSnapshot: { category: "implementation_question", question: "Which fixture should we implement?",
+            options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+        assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
+          { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
+      }
+      assert.ok(h.svc.stop("child").ok);
+      h.svc.onSessionStatus("child", "stopped", undefined, undefined, "r");
+      h.db.updateSessionStatus("root", "idle", 4);
+      if (fence === "pause") h.db.updateSessionStatus("root", "input_required", 5);
+      if (fence === "archive_child") h.db.setSessionArchived("child", true, 5);
+      if (fence === "archive_root") h.db.setSessionArchived("root", true, 5);
+      if (fence === "revoke") h.db.updateSessionCampaignControl("root", { mode: "custom" }, 2, 5);
+      for (const now of [100, 100_000, 10_000_000]) h.recovery.maintain(now);
+      const projection = h.db.campaignRecovery.projection("root");
+      assert.equal(projection.automatic, 0, fence);
+      assert.equal(wakes(h), 0, fence);
+      assert.equal(h.db.getSession("child")!.status, "stopped", `${fence}: the worker was not restarted`);
+      if (fence === "pause") assert.equal(workerRecord(h)!.reason, "intentional_stop");
+      if (fence === "deny") {
+        assert.deepEqual(projection.records.map(item => item.reason).sort(), ["hard_denial", "intentional_stop"],
+          "the typed denial stays a denial beside the intentional stop");
+      }
+    } finally { h.db.close(); }
+  }
 });

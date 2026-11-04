@@ -94,7 +94,7 @@ class WalkthroughStack {
     if (!ready) throw new Error(`control plane did not become healthy\n${this.output}`);
     // Startup settlement stops every session it finds live. Put them back as they were.
     restoreCampaignStatuses(this.databasePath, this.seeded);
-    const db = ControlPlaneDb.open(this.databasePath);
+    const db = ControlPlaneDb.attach(this.databasePath);
     try {
       for (const id of [this.walkthrough.walkthroughWorkerId, this.walkthrough.sharedRootId, "shared-review-child"]) {
         db.updateSessionStatus(id, "idle", Date.now());

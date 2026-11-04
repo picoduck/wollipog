@@ -263,7 +263,7 @@ test("a plugin inheritance that fails partway marks the launch preparation unpro
   } finally { h.gate.resolve(); h.cleanup(); }
 });
 
-test("the actual Codex guard phase marks the launch preparation unprovable before its hook inventory runs", async () => {
+test("the actual Codex guard phase forwards hook inventory proofs and retains partial plugin writes", async () => {
   const index = readFileSync(new URL("./index.ts", import.meta.url), "utf8");
   const start = index.indexOf("    if (CODEX_GUARD_DRIVERS.has(meta.driver)) {");
   const end = index.indexOf("    const commandPreparation =", start);
@@ -278,16 +278,22 @@ test("the actual Codex guard phase marks the launch preparation unprovable befor
     log: () => {},
     memoryGuardSocket: async () => undefined,
     sessions: { managedWorktreeGuardProtections: () => [] },
-    provisionCodexGuard: async () => { order.push("hook inventory"); return { args: ["guarded"], guardActive: true }; },
+    provisionCodexGuard: async (_spec: unknown, config: { onProcess(proof: Promise<boolean>): void }) => {
+      order.push("hook inventory");
+      config.onProcess(Promise.resolve(true));
+      return { args: ["guarded"], guardActive: true };
+    },
     isOrchestratorLaunch: () => false,
     claudeHookHost: undefined,
   }) as (meta: Partial<SessionMeta>, cancellation?: LaunchPreparationCancellation) => Promise<string[] | undefined>;
   const base = { sessionId: "s1", repoPath: "/repo", worktreePath: null, args: [] };
   const codex = recordingProviderHome();
-  const providerHome = { ...codex.providerHome, markUnprovable: () => { order.push("unprovable"); } };
+  const proofs: Promise<boolean>[] = [];
+  const providerHome = { ...codex.providerHome, onProcess: (proof: Promise<boolean>) => proofs.push(proof),
+    markUnprovable: () => { order.push("unprovable"); } };
   assert.deepEqual(await phase({ ...base, driver: "codex-app-server" }, { providerHome }), ["guarded"]);
-  assert.deepEqual(order, ["unprovable", "plugins", "hook inventory"],
-    "the Codex app-server it spawns runs outside any provable boundary (#3340)");
+  assert.deepEqual(order, ["plugins", "hook inventory"]);
+  assert.deepEqual(await Promise.all(proofs), [true], "the preparation receives the actual probe proof");
   order.length = 0;
   assert.equal(await phase({ ...base, driver: "claude-code" }, { providerHome }), undefined);
   assert.deepEqual(order, [], "a launch without the Codex guard stays provable");

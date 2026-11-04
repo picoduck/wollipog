@@ -24,7 +24,7 @@ const read = (path: string) => readFileSync(fileURLToPath(new URL(path, import.m
 const HOST_PICKERS: ReadonlyArray<[string, string]> = [
   ["./components/NewSessionDialog.tsx", "New Session"],
   ["./components/NewRunDialog.tsx", "New Multi-Agent Run"],
-  ["./components/AutomationsView.tsx", "Automations"],
+  ["./components/AutomationEditor.tsx", "Automations"],
 ];
 
 test("host pickers name the Machine, not the Runner that represents it", () => {
@@ -42,7 +42,7 @@ test("host pickers name the Machine, not the Runner that represents it", () => {
 test("New Session migration copy names the target and its App Server capabilities", () => {
   const source = read("./components/NewSessionDialog.tsx");
   assert.match(source, /Codex App Server supports interactive approvals and resumable conversations\./);
-  assert.match(source, /Use \{suggestedAgentOption\.label\}/);
+  assert.match(source, /`Use \$\{suggestedAgentOption\.name\}`/);
   assert.doesNotMatch(source, /Interactive \(Recommended\)|Use Recommended|Codex App Server is recommended/);
 });
 
@@ -61,6 +61,7 @@ test("no user-facing string calls a Machine a box", () => {
   // control plane, which is correct; it must not reach a label, tooltip, or sentence a user reads.
   for (const path of [
     "./components/RunnersView.tsx",
+    "./components/MachineDetail.tsx",
     "./components/AddBoxDialog.tsx",
     "./components/InstancesPanel.tsx",
   ]) {
@@ -82,7 +83,7 @@ test("no user-facing string calls a Machine a box", () => {
  */
 const EXPECTED_PLACEHOLDERS: ReadonlyArray<[string, string]> = [
   ["./components/SessionsSearch.tsx", "Search sessions"],
-  ["./components/ProjectsView.tsx", "Search projects"],
+  ["./components/ProjectList.tsx", "Search projects"],
   ["./components/CommitBar.tsx", "Describe the change"],
 ];
 
@@ -101,7 +102,6 @@ test("known placeholders read as hint text, not labels", () => {
  */
 const EXPECTED_TOOLTIPS: ReadonlyArray<[string, string]> = [
   ["./components/GitDiffViewer.tsx", "Add a finding on this line"],
-  ["./components/RunnersView.tsx", "Reconnect this machine"],
 ];
 
 test("tooltips stay in sentence case", () => {
@@ -112,7 +112,8 @@ test("tooltips stay in sentence case", () => {
 });
 
 test("signed-trigger instructions publish only the Wollipog wire generation", () => {
-  const source = read("./components/AutomationsView.tsx");
+  // How to Call shows the request on each automation's page (#2972).
+  const source = read("./automation-triggers.ts");
   assert.match(source, /application\/vnd\.wollipog\.automation-trigger\+json/);
   for (const header of ["X-Wollipog-Timestamp", "X-Wollipog-Nonce", "X-Wollipog-Signature"]) {
     assert.ok(source.includes(header), `Automations should publish ${header}`);
@@ -133,7 +134,7 @@ test("machine selectors render disambiguated Machine labels", () => {
   for (const path of [
     "./components/NewSessionDialog.tsx",
     "./components/NewRunDialog.tsx",
-    "./components/AutomationsView.tsx",
+    "./components/AutomationEditor.tsx",
     // Both of these rendered a bare runnerDisplay().name. The Board filter silently hides the
     // sessions you wanted; the Location dialog creates the (Machine, Workspace) pair against the
     // wrong host, which is the costlier of the two.
@@ -176,10 +177,14 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./session-preset-defaults.ts", "Update Wollipog to configure Integration Isolation."],
   ["./components/ProjectLocationDialog.tsx",
     "This version of Wollipog does not support creating a Location from a new folder. Update or restart Wollipog so it matches this dashboard, then try again."],
-  ["./components/ProjectLocationDialog.tsx", "<strong>Wollipog Update Required</strong>"],
+  // Add Location's New Folder notice (#2966).
+  ["./components/ProjectLocationDialog.tsx", "title=\"Adding New Folders Needs an Update\""],
   ["./components/ProjectLocationDialog.tsx",
-    "This version of Wollipog cannot register a new folder as a Location. Update or restart Wollipog so it matches this dashboard. Existing Locations can still be added below."],
-  ["./components/ProjectMemorySharing.tsx", "Memory policy is unavailable. Update Wollipog to configure it."],
+    "This version of Wollipog can't register a new folder as a location. Update or restart Wollipog so it matches this dashboard. You can still add an existing location."],
+  // A project's Memory Sharing on an older server (#2963).
+  ["./components/ProjectMemorySharing.tsx", "title=\"Memory Sharing Needs an Update\""],
+  ["./components/ProjectMemorySharing.tsx", "Update Wollipog to choose how accounts share memory."],
+  ["./components/ProjectMemorySharing.tsx", "\"Update Wollipog on this machine to use it\""],
   // Settings › Behavior › Agent Defaults (#3024).
   ["./components/AgentDefaultsPanel.tsx",
     "This version of Wollipog doesn't support agent defaults. Update or restart Wollipog so it matches this dashboard, then try again."],
@@ -187,7 +192,7 @@ const UPDATE_REQUIRED_COPY: ReadonlyArray<[string, string]> = [
   ["./runners.ts",
     "This version of Wollipog does not support updating this Machine setting. Update or restart Wollipog so it matches this dashboard, then try again."],
   ["./components/UsageView.tsx", "Checking whether this version of Wollipog supports weekly aggregation."],
-  ["./components/UsageView.tsx", "Weekly aggregation requires a newer version of Wollipog. Update Wollipog to use Week."],
+  ["./components/UsageView.tsx", "Week grouping needs a newer version of Wollipog."],
   // The transcript column's earlier-activity failure and unpaired-device state (#2579).
   ["./components/SessionDetail.tsx",
     "Earlier activity isn't available from this version of Wollipog. Update Wollipog to load it."],
@@ -232,7 +237,7 @@ const CODEX_USAGE_NOTES: ReadonlyArray<[string, string]> = [
   ["./components/UsageView.tsx",
     "Codex App Server usage recorded before a machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
   ["./components/SessionUsageControl.tsx",
-    "Codex App Server usage recorded before the machine's Wollipog update includes only the final response of each turn, so it is incomplete. Usage recorded since then counts every response."],
+    "Codex App Server usage recorded before the machine's Wollipog update counts only the final response of each turn, so older figures are incomplete."],
 ];
 
 test("Codex App Server usage notes name the Wollipog update, not a runner protocol number", () => {

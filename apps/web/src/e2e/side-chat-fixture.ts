@@ -12,10 +12,13 @@ import type { ApiClient } from "../api.js";
  * - `conversation`: an idle side chat with one question and its answer.
  * - `replying`: the same, with a second question being answered.
  * - `ended`: a stopped side chat with its transcript.
+ * - `ended-empty`: a side chat stopped before anyone wrote in it (#3037).
  */
-export type SideChatFixtureState = "none" | "starting" | "failed" | "conversation" | "replying" | "ended";
+export type SideChatFixtureState = "none" | "starting" | "failed" | "conversation" | "replying" | "ended" | "ended-empty";
 
-export const SIDE_CHAT_STATES: readonly SideChatFixtureState[] = ["none", "starting", "failed", "conversation", "replying", "ended"];
+export const SIDE_CHAT_STATES: readonly SideChatFixtureState[] = [
+  "none", "starting", "failed", "conversation", "replying", "ended", "ended-empty",
+];
 
 const CHILD_ID = "side-chat-child";
 
@@ -59,7 +62,7 @@ export function installSideChatFixture(client: ApiClient, initial: SideChatFixtu
     const parentSessionId = parentSession()?.id ?? "";
     if (state === "conversation") return { parentSessionId, session: child("idle"), createdAt: 1 };
     if (state === "replying") return { parentSessionId, session: child("running", "side-turn-2"), createdAt: 1 };
-    if (state === "ended") return { parentSessionId, session: child("stopped"), createdAt: 1 };
+    if (state === "ended" || state === "ended-empty") return { parentSessionId, session: child("stopped"), createdAt: 1 };
     return created;
   };
   const events = (): SessionEvent[] => state === "replying" ? REPLYING

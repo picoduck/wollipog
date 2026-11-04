@@ -82,7 +82,7 @@ function campaignFixture() {
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const decisions = {
     implementation_question: "human", pr_merge: "human", merged_branch_deletion: "human",
-    follow_up_issue_publication: "human", ui_evidence_approval: "human",
+    follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
   } as const;
   const createRoot = (title: string) => {
     const created = svc.createSession({

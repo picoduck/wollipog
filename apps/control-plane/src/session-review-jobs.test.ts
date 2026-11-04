@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, SESSION_REVIEW_ARTIFACT_LIMIT_BYTES, SESSION_REVIEW_BRIEF_LIMIT_BYTES, SESSION_REVIEW_JOB_ID_PATTERN,
+  PROTOCOL_VERSION, SESSION_REVIEW_ARTIFACT_LIMIT_BYTES,
   type RunnerMetadata, type SessionReviewCapability, type SessionReviewJobCommand, type SessionReviewJobRequest,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
@@ -39,118 +39,33 @@ function harness(options: { protocol?: number; sessionReview?: SessionReviewCapa
   let deliver = true;
   hub.sendToRunner = (_, message) => { if (deliver) sent.push(message as { type: string }); return deliver; };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
-  return { db, svc, sent, setOnline: (value: boolean) => { online = value; }, setDeliver: (value: boolean) => { deliver = value; } };
+  return { db, svc, sent, metadata, setOnline: (value: boolean) => { online = value; }, setDeliver: (value: boolean) => { deliver = value; } };
 }
 
-test("a session requests its own review; the runner receives the durable command (#3306)", () => {
-  const h = harness();
-  try {
-    const result = h.svc.requestSessionReviewJob("s1", request({ scope: "full", fullReason: "rebased onto main" }));
-    assert.ok(result.ok && result.data, result.error ?? "request refused");
-    assert.equal(result.status, 201);
-    assert.match(result.data.jobId, SESSION_REVIEW_JOB_ID_PATTERN);
-    assert.deepEqual({ sessionId: result.data.sessionId, state: result.data.state, terminal: result.data.terminal, scope: result.data.scope },
-      { sessionId: "s1", state: "requested", terminal: false, scope: "full" });
-    const command = h.sent.at(-1) as unknown as SessionReviewJobCommand;
-    assert.equal(command.type, "session_review_job");
-    assert.equal(command.jobId, result.data.jobId);
-    assert.equal(command.sessionId, "s1", "the job is always bound to the requesting session");
-    assert.deepEqual(command.request, request({ scope: "full", fullReason: "rebased onto main" }));
-    assert.ok(command.nonce);
+/** Seed an already-dispatched pre-retirement record; this never calls admission or sends a job. */
+function seedHistoricalBridge(h: ReturnType<typeof harness>) {
+  const command = h.db.sessionReviewJobs.create("s1", "r", request(), Date.now());
+  return { ok: true, data: h.db.sessionReviewJobs.view(command.jobId)! };
+}
 
-    const again = h.svc.requestSessionReviewJob("s1", request());
-    assert.equal(again.ok, false);
-    assert.equal(again.status, 409);
-    assert.match(again.error!, /already running/u);
-    assert.ok(h.svc.requestSessionReviewJob("s2", request()).ok, "another session's job is independent");
-  } finally { h.db.close(); }
-});
-
-test("malformed review requests are refused before anything is recorded or sent", () => {
-  const h = harness();
-  try {
-    const bad: unknown[] = [
-      null,
-      { ...request(), extra: true },
-      request({ pullRequest: { repository: "not-a-repo", number: 1 } }),
-      request({ pullRequest: { repository: "../etc", number: 1 } }),
-      request({ pullRequest: { repository: "picoduck/wollipog", number: 0 } }),
-      request({ pullRequest: { repository: "picoduck/wollipog", number: 1.5 } }),
-      request({ headSha: "abc" }),
-      request({ headSha: "A".repeat(40) }),
-      request({ brief: "" }),
-      request({ brief: "x".repeat(SESSION_REVIEW_BRIEF_LIMIT_BYTES + 1) }),
-      request({ scope: "everything" as "full" }),
-      request({ fullReason: "why" }),
-      request({ scope: "delta", fullReason: "why" }),
-      request({ scope: "full", fullReason: "x".repeat(501) }),
-    ];
-    for (const item of bad) {
-      const result = h.svc.requestSessionReviewJob("s1", item as SessionReviewJobRequest);
-      assert.equal(result.ok, false, JSON.stringify(item)?.slice(0, 120));
-      assert.equal(result.status, 400, JSON.stringify(item)?.slice(0, 120));
-    }
-    assert.equal(h.sent.length, 0);
-    assert.equal(h.svc.sessionReviewJobs("s1", {}).data?.jobs.length, 0);
-    const { brief: _brief, ...withoutBrief } = request();
-    assert.ok(h.svc.requestSessionReviewJob("s1", withoutBrief).ok, "a later round may omit the brief; the runner keeps it");
-  } finally { h.db.close(); }
-});
-
-test("an unsupported runner, a missing installation or an unavailable reviewer is refused", () => {
-  const old = harness({ protocol: RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1 });
-  try {
-    const refused = old.svc.requestSessionReviewJob("s1", request());
-    assert.equal(refused.status, 409);
-    assert.equal(refused.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob);
-    assert.equal(old.sent.length, 0);
-  } finally { old.db.close(); }
-  const missing = harness({ sessionReview: null });
-  try {
-    const refused = missing.svc.requestSessionReviewJob("s1", request());
-    assert.equal(refused.status, 409);
-    assert.match(refused.error!, /no trusted cross-model review installation/u);
-  } finally { missing.db.close(); }
-  const noCodex = harness({ sessionReview: { reviewers: ["claude-code"], unavailable: { codex: "codex is not installed" } } });
-  try {
-    const refused = noCodex.svc.requestSessionReviewJob("s1", request());
-    assert.equal(refused.status, 409);
-    assert.match(refused.error!, /Codex reviewer is unavailable.*codex is not installed/u);
-  } finally { noCodex.db.close(); }
-  const codexSession = harness({ driver: "codex", sessionReview: { reviewers: ["codex"] } });
-  try {
-    assert.match(codexSession.svc.requestSessionReviewJob("s1", request()).error!, /Claude Code reviewer is unavailable/u,
-      "a Codex implementer needs the Claude Code reviewer");
-  } finally { codexSession.db.close(); }
-  const pi = harness({ driver: "pi" });
-  try {
-    assert.match(pi.svc.requestSessionReviewJob("s1", request()).error!, /no cross-model reviewer/u);
-  } finally { pi.db.close(); }
-  const offline = harness();
-  try {
-    offline.setOnline(false);
-    assert.match(offline.svc.requestSessionReviewJob("s1", request()).error!, /offline/u);
-  } finally { offline.db.close(); }
-});
-
-test("a session under a campaign allowance is refused and pointed at the campaign review job", () => {
-  const h = harness();
-  try {
-    h.db.campaignBudgets.database.prepare(`INSERT INTO campaign_budget_members(session_id,root_id,cost,tools,active)
-      VALUES ('s1','root',0,0,1)`).run();
-    const refused = h.svc.requestSessionReviewJob("s1", request());
-    assert.equal(refused.status, 409);
-    assert.match(refused.error!, /run_campaign_review_job/u);
-    assert.equal(h.sent.length, 0);
-    assert.ok(h.svc.requestSessionReviewJob("s2", request()).ok, "a session outside the campaign is unaffected");
-  } finally { h.db.close(); }
+test("legacy bridge admission always refuses with migration guidance, without writes or dispatch", () => {
+  for (const protocol of [223, 243, PROTOCOL_VERSION]) {
+    const h = harness({ protocol });
+    try {
+      assert.equal(h.svc.requestSessionReviewJob("s1", request()).status, 410);
+      assert.match(h.svc.requestSessionReviewJob("s1", request()).error!, /retired.*review session/u);
+      assert.equal(h.db.sessionReviewJobs.page("s1", undefined, 10)?.jobs.length, 0);
+      assert.equal(h.sent.length, 0);
+      assert.equal(h.svc.requestSessionReviewJob("s1", request(), () => false).status, 404);
+    } finally { h.db.close(); }
+  }
 });
 
 test("only the owning runner's updates with the job's nonce apply, and a terminal state is final", () => {
   const h = harness();
   try {
-    const job = h.svc.requestSessionReviewJob("s1", request()).data!;
-    const command = h.sent.at(-1) as unknown as SessionReviewJobCommand;
+    const job = seedHistoricalBridge(h).data!;
+    const command = h.db.sessionReviewJobs.command(job.jobId)!;
     const base = { type: "session_review_job_update" as const, jobId: job.jobId, nonce: command.nonce };
     h.svc.onSessionReviewJobUpdate("r", { ...base, nonce: "forged", state: "completed", report: "forged" });
     h.svc.onSessionReviewJobUpdate("other-runner", { ...base, state: "completed", report: "forged" });
@@ -176,15 +91,15 @@ test("only the owning runner's updates with the job's nonce apply, and a termina
     h.svc.onSessionReviewJobUpdate("r", { ...base, state: "failed", reason: "the review was cancelled" });
     h.svc.onSessionReviewJobUpdate("r", { ...base, state: "running" });
     assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data!.state, "completed", "a finished job never changes");
-    assert.ok(h.svc.requestSessionReviewJob("s1", request()).ok, "a finished job no longer blocks the next round");
+    assert.equal(h.svc.requestSessionReviewJob("s1", request()).status, 410, "new reviews use review sessions");
   } finally { h.db.close(); }
 });
 
 test("runner reasons are reduced to the fixed vocabulary", () => {
   const h = harness();
   try {
-    const job = h.svc.requestSessionReviewJob("s1", request()).data!;
-    const command = h.sent.at(-1) as unknown as SessionReviewJobCommand;
+    const job = seedHistoricalBridge(h).data!;
+    const command = h.db.sessionReviewJobs.command(job.jobId)!;
     h.svc.onSessionReviewJobUpdate("r", { type: "session_review_job_update", jobId: job.jobId, nonce: command.nonce,
       state: "not_launched", reason: "failed at /home/user/.secret/path" });
     assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data!.reason, "the review could not be completed; see the runner log");
@@ -194,7 +109,7 @@ test("runner reasons are reduced to the fixed vocabulary", () => {
 test("reads are bound to the job's own session", () => {
   const h = harness();
   try {
-    const job = h.svc.requestSessionReviewJob("s1", request()).data!;
+    const job = seedHistoricalBridge(h).data!;
     assert.equal(h.svc.sessionReviewJob("s2", job.jobId).status, 404);
     assert.equal(h.svc.sessionReviewJobArtifacts("s2", job.jobId).status, 404);
     assert.equal(h.svc.cancelSessionReviewJob("s2", job.jobId).status, 404);
@@ -208,9 +123,9 @@ test("listing pages newest first", () => {
   try {
     const ids: string[] = [];
     for (let i = 0; i < 3; i++) {
-      const job = h.svc.requestSessionReviewJob("s1", request()).data!;
+      const job = seedHistoricalBridge(h).data!;
       ids.push(job.jobId);
-      const command = h.sent.at(-1) as unknown as SessionReviewJobCommand;
+      const command = h.db.sessionReviewJobs.command(job.jobId)!;
       h.svc.onSessionReviewJobUpdate("r", { type: "session_review_job_update", jobId: job.jobId, nonce: command.nonce, state: "failed" });
     }
     const first = h.svc.sessionReviewJobs("s1", { limit: 2 }).data!;
@@ -222,47 +137,58 @@ test("listing pages newest first", () => {
   } finally { h.db.close(); }
 });
 
-test("cancelling sends the job first when the runner may never have received it", () => {
+
+test("cancellation never dispatches a requested legacy bridge job", () => {
   const h = harness();
   try {
-    const job = h.svc.requestSessionReviewJob("s1", request()).data!;
-    h.sent.length = 0;
-    const cancelled = h.svc.cancelSessionReviewJob("s1", job.jobId);
-    assert.equal(cancelled.status, 202);
-    assert.equal(cancelled.data!.cancelRequested, true);
-    assert.deepEqual(h.sent.map((message) => message.type), ["session_review_job", "cancel_session_review_job"]);
-    assert.ok(h.sent.every((message) => message.jobId === job.jobId));
+    const job = seedHistoricalBridge(h).data;
+    assert.equal(h.svc.cancelSessionReviewJob("s1", job.jobId).status, 202);
+    assert.deepEqual(h.sent.map(message => message.type), ["cancel_session_review_job"]);
+    assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.terminal, false, "await the owning runner's terminal receipt");
   } finally { h.db.close(); }
 });
 
-test("reconnect re-dispatches unfinished jobs, with their pending cancellation", () => {
-  const h = harness();
+test("a prior runner's silent cancel retains the record until an upgraded runner supplies its receipt", () => {
+  const h = harness({ protocol: 243 });
   try {
-    h.setDeliver(false);
-    const job = h.svc.requestSessionReviewJob("s1", request());
-    assert.ok(job.ok, "an undelivered request stays durable for reconnect");
-    h.svc.cancelSessionReviewJob("s1", job.data!.jobId);
-    h.setDeliver(true);
+    const job = seedHistoricalBridge(h).data;
+    const command = h.db.sessionReviewJobs.command(job.jobId)!;
     h.svc.recoverSessionReviewJobs("r");
-    assert.deepEqual(h.sent.map((message) => message.type), ["session_review_job", "cancel_session_review_job"]);
-    const command = h.sent[0] as unknown as SessionReviewJobCommand;
+    // The prior runner sends nothing for a finished or never-delivered job. Keep the row and
+    // cancellation intent, rather than redispatching a controller or discarding a lost report.
+    assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.state, "requested");
+    assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.cancelRequested, true);
+    h.db.registerRunner(h.metadata, 10, PROTOCOL_VERSION);
+    h.svc.recoverSessionReviewJobs("r");
+    assert.deepEqual(h.sent.map(message => message.type), ["cancel_session_review_job", "cancel_session_review_job"]);
     h.svc.onSessionReviewJobUpdate("r", { type: "session_review_job_update", jobId: command.jobId, nonce: command.nonce,
-      state: "not_launched", reason: "the review was cancelled" });
-    h.sent.length = 0;
-    h.svc.recoverSessionReviewJobs("r");
-    assert.equal(h.sent.length, 0, "a finished job is never sent again");
+      state: "completed", report: "historical report" });
+    assert.equal(h.svc.sessionReviewJobArtifacts("s1", job.jobId).data?.report, "historical report");
+    assert.equal(h.db.sessionReviewJobs.unfinished("r").length, 0);
   } finally { h.db.close(); }
 });
 
-test("a runner that lost support cannot report, so its unfinished jobs finish on reconnect", () => {
-  const h = harness();
-  try {
-    const job = h.svc.requestSessionReviewJob("s1", request()).data!;
-    h.db.registerRunner({ runnerId: "r", hostname: "test", os: "linux", version: "old", workspaces: [], agents: [] }, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1);
-    h.sent.length = 0;
-    h.svc.recoverSessionReviewJobs("r");
-    assert.equal(h.sent.length, 0);
-    const view = h.svc.sessionReviewJob("s1", job.jobId).data!;
-    assert.deepEqual({ state: view.state, terminal: view.terminal }, { state: "not_launched", terminal: true });
-  } finally { h.db.close(); }
+test("reconnect cancels retired bridge work once and never redispatches it, including a downgraded runner", () => {
+  for (const protocol of [222, PROTOCOL_VERSION]) {
+    const h = harness({ protocol });
+    try {
+      const job = seedHistoricalBridge(h).data;
+      h.svc.recoverSessionReviewJobs("r");
+      assert.deepEqual(h.sent.map(message => message.type), protocol < 223 ? [] : ["cancel_session_review_job"]);
+      assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.state, protocol < 223 ? "failed" : "requested");
+      assert.match(h.svc.sessionReviewJob("s1", job.jobId).data?.reason ?? "", /retired/u);
+      if (protocol >= 223) {
+        assert.equal(h.svc.sessionReviewJob("s1", job.jobId).data?.cancelRequested, true);
+        h.sent.length = 0;
+        h.svc.recoverSessionReviewJobs("r");
+        assert.deepEqual(h.sent.map(message => message.type), ["cancel_session_review_job"], "lost cancellation is retried without dispatch");
+        const command = h.db.sessionReviewJobs.command(job.jobId)!;
+        h.svc.onSessionReviewJobUpdate("r", { type: "session_review_job_update", jobId: job.jobId,
+          nonce: command.nonce, state: "failed", reason: "the review was cancelled" });
+      }
+      h.sent.length = 0;
+      h.svc.recoverSessionReviewJobs("r");
+      assert.equal(h.sent.length, 0);
+    } finally { h.db.close(); }
+  }
 });

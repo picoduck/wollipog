@@ -140,9 +140,9 @@ test("Pi is selectable only when the runner proves source-preserving session ado
     await act(async () => {
       root.render(<AgentSessionDiscoveryDialog runner={{ ...runner, protocolVersion: 155 }} onClose={() => {}} />);
     });
-    const radio = container.querySelector('input[value="pi"]') as HTMLInputElement;
-    assert.equal(radio.disabled, true);
-    assert.match(container.textContent ?? "", /needs a newer runner for Pi session discovery\. Update and restart the runner\./);
+    const radio = container.querySelector('input[data-agent-id="pi"]') as HTMLInputElement;
+    assert.equal(radio.getAttribute("aria-disabled"), "true");
+    assert.match(container.textContent ?? "", /Update this machine's runner to find this agent's sessions\./);
   } finally {
     await act(async () => { root.unmount(); });
     mountPoint.remove();
@@ -161,15 +161,19 @@ test("an old runner explains why Codex App Server discovery requires an update",
       root.render(<AgentSessionDiscoveryDialog runner={{ ...runner, protocolVersion: 62 }} onClose={() => {}} />);
     });
 
-    const appServerRadio = container.querySelector('input[value="codex-app"]') as HTMLInputElement;
-    assert.equal(appServerRadio.disabled, true);
+    const appServerRadio = container.querySelector('input[data-agent-id="codex-app"]') as HTMLInputElement;
+    assert.equal(appServerRadio.getAttribute("aria-disabled"), "true");
+    assert.equal(appServerRadio.checked, false, "an agent that cannot be scanned is never preselected");
     const copy = container.textContent ?? "";
-    assert.match(copy, /Runner Update Required/);
-    assert.match(copy, /This machine needs a newer runner for Codex app server session discovery\. Update and restart the runner\./);
+    // The reason is the row's visible second line, not a badge or a tooltip (#2994).
+    const reason = Array.from(container.querySelectorAll(".choice-row-reason"))
+      .find((element) => element.textContent === "Update this machine's runner to find this agent's sessions.");
+    assert.ok(reason, "the disabled agent shows its reason as visible text");
+    assert.doesNotMatch(copy, /Runner Update Required/);
     assert.doesNotMatch(copy, /Codex(?: —)? Interactive session discovery/);
     assert.doesNotMatch(copy, /protocol|v6[23]/);
     // Discovery's exec row restarts existing sessions only; it is not an adoption fallback.
-    assertNoDomNode(container.querySelector('input[value="codex-exec"]'));
+    assertNoDomNode(container.querySelector('input[data-agent-id="codex-exec"]'));
   } finally {
     await act(async () => { root.unmount(); });
     mountPoint.remove();
@@ -211,8 +215,8 @@ test("agent selection keeps ACP session sources when the same provider has a nat
       );
     });
 
-    assert.ok(container.querySelector('input[value="claude"]'), "native Claude discovery remains available");
-    assert.ok(container.querySelector('input[value="claude-acp"]'), "ACP Claude sessions remain discoverable");
+    assert.ok(container.querySelector('input[data-agent-id="claude"]'), "native Claude discovery remains available");
+    assert.ok(container.querySelector('input[data-agent-id="claude-acp"]'), "ACP Claude sessions remain discoverable");
   } finally {
     await act(async () => { root.unmount(); });
     mountPoint.remove();
@@ -262,15 +266,16 @@ test("agent session discovery waits for a selection and scopes the result list",
     });
 
     assert.equal(calls.length, 0, "opening the dialog must not scan before the user selects an agent");
-    assert.match(container.textContent ?? "", /Select an Agent/);
+    assert.ok(container.querySelector('[role="radiogroup"][aria-label="Agent"]'));
     assert.match(container.textContent ?? "", /Codex App Server/);
     assert.doesNotMatch(container.textContent ?? "", /Non-Interactive|codex exec/);
 
     const findButton = Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent?.includes("Find Sessions")) as HTMLButtonElement;
     assert.equal(findButton.disabled, true);
+    assert.equal(container.querySelector(".modal-foot .agent-session-find-reason")?.textContent, "Choose an agent to scan.");
 
-    const claudeRadio = container.querySelector('input[value="claude"]') as HTMLInputElement;
+    const claudeRadio = container.querySelector('input[data-agent-id="claude"]') as HTMLInputElement;
     await act(async () => { claudeRadio.click(); });
     assert.equal(findButton.disabled, false);
 
@@ -288,7 +293,8 @@ test("agent session discovery waits for a selection and scopes the result list",
     assert.deepEqual(calls, [["runner-1", "claude"]]);
     assert.match(container.textContent ?? "", /Matching Claude Session/);
     assert.doesNotMatch(container.textContent ?? "", /Unrelated Gemini Session/);
-    assert.match(container.textContent ?? "", /Choose Another Agent/);
+    assert.match(container.textContent ?? "", /Change Agent/);
+    assert.doesNotMatch(container.textContent ?? "", /Selected Agent/);
 
     const rescanButton = Array.from(container.querySelectorAll("button"))
       .find((button) => button.textContent?.includes("Rescan")) as HTMLButtonElement;
@@ -305,7 +311,7 @@ test("agent session discovery waits for a selection and scopes the result list",
     );
 
     const chooseAnother = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent?.includes("Choose Another Agent")) as HTMLButtonElement;
+      .find((button) => button.textContent?.includes("Change Agent")) as HTMLButtonElement;
     await act(async () => { chooseAnother.click(); });
     assert.equal(
       (domWindow.document.activeElement as unknown as HTMLElement).getAttribute("aria-label"),
@@ -350,15 +356,15 @@ test("a stale scan cannot overwrite the most recently selected agent", async () 
       .find((button) => button.textContent?.includes("Find Sessions")) as HTMLButtonElement;
 
     await act(async () => {
-      (container.querySelector('input[value="claude"]') as HTMLInputElement).click();
+      (container.querySelector('input[data-agent-id="claude"]') as HTMLInputElement).click();
     });
     await act(async () => { findButton().click(); });
 
     const chooseAnother = Array.from(container.querySelectorAll("button"))
-      .find((button) => button.textContent?.includes("Choose Another Agent")) as HTMLButtonElement;
+      .find((button) => button.textContent?.includes("Change Agent")) as HTMLButtonElement;
     await act(async () => { chooseAnother.click(); });
     await act(async () => {
-      (container.querySelector('input[value="gemini"]') as HTMLInputElement).click();
+      (container.querySelector('input[data-agent-id="gemini"]') as HTMLInputElement).click();
     });
     await act(async () => { findButton().click(); });
 
@@ -374,10 +380,252 @@ test("a stale scan cannot overwrite the most recently selected agent", async () 
     });
     assert.match(container.textContent ?? "", /Unrelated Gemini Session/);
     assert.doesNotMatch(container.textContent ?? "", /Matching Claude Session/);
-    assert.match(container.textContent ?? "", /Selected AgentGemini/);
+    assert.equal(container.querySelector(".agent-session-results-agent")?.textContent, "Gemini");
   } finally {
     await act(async () => { root.unmount(); });
     api.listExternalSessions = priorList;
     mountPoint.remove();
+  }
+});
+
+async function renderDialog(element: React.ReactElement) {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const mountPoint = happyContainer as unknown as HTMLDivElement;
+  // Dialogs are portalled to <body>, so the test queries the body.
+  const container = domWindow.document.body as unknown as HTMLDivElement;
+  const root = createRoot(mountPoint);
+  await act(async () => { root.render(element); });
+  return {
+    container,
+    button: (name: string) => Array.from(container.querySelectorAll("button"))
+      .find((button) => button.textContent?.trim() === name) as HTMLButtonElement | undefined,
+    async unmount() {
+      await act(async () => { root.unmount(); });
+      mountPoint.remove();
+    },
+  };
+}
+
+const claudeOnly: RunnerView = { ...runner, agents: runner.agents.filter((agent) => agent.id === "claude") };
+
+test("the only agent that can be scanned is selected on open, so Find Sessions is ready (#2994)", async () => {
+  // App Server cannot be scanned by a v62 runner, so Claude Code is the only one that can.
+  const view = await renderDialog(
+    <AgentSessionDiscoveryDialog
+      runner={{ ...runner, protocolVersion: 62, agents: runner.agents.filter((agent) => ["claude", "codex-app"].includes(agent.id)) }}
+      onClose={() => {}}
+    />,
+  );
+  try {
+    assert.equal((view.container.querySelector('input[data-agent-id="claude"]') as HTMLInputElement).checked, true);
+    assert.equal((view.container.querySelector('input[data-agent-id="codex-app"]') as HTMLInputElement).checked, false);
+    assert.equal(view.button("Find Sessions")?.disabled, false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("each agent's meta line names its integration only when its name does not (#2994)", async () => {
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={runner} onClose={() => {}} />);
+  try {
+    const meta = (id: string) => {
+      const row = view.container.querySelector(`input[data-agent-id="${id}"]`)!.closest(".choice-row")!;
+      return row.querySelector(".choice-row-desc")?.textContent;
+    };
+    assert.equal(meta("claude"), "Native");
+    assert.equal(meta("codex-app"), "Native");
+    assert.equal(meta("pi"), "Native");
+    assert.equal(meta("gemini"), "ACP · Native");
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("initialAgentId selects that agent among several (#2994)", async () => {
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={runner} initialAgentId="gemini" onClose={() => {}} />);
+  try {
+    assert.equal((view.container.querySelector('input[data-agent-id="gemini"]') as HTMLInputElement).checked, true);
+    assert.equal(view.button("Find Sessions")?.disabled, false);
+  } finally {
+    await view.unmount();
+  }
+});
+
+test("scanning shows skeleton rows, then each result has one action that says what it does (#2994)", async () => {
+  const priorList = api.listExternalSessions;
+  let resolve!: (value: { sessions: ExternalSessionDescriptor[] }) => void;
+  api.listExternalSessions = () => new Promise((done) => { resolve = done; });
+  const view = await renderDialog(
+    <AgentSessionDiscoveryDialog runner={{ ...claudeOnly, displayName: "Studio Mac" }} onClose={() => {}} />,
+  );
+  try {
+    await act(async () => { view.button("Find Sessions")!.click(); });
+    assert.equal(view.container.querySelectorAll(".agent-session-result-skeleton").length, 3);
+    assert.match(view.container.textContent ?? "", /Scanning Claude Code sessions on Studio Mac…/);
+
+    await act(async () => {
+      resolve({
+        sessions: [
+          matchingSession,
+          { ...matchingSession, agentSessionId: "untitled", title: "", resumable: true },
+          { ...matchingSession, agentSessionId: "read-only", title: "History Only", resumable: false },
+        ],
+      });
+    });
+    const rows = Array.from(view.container.querySelectorAll(".agent-session-results > li"));
+    assert.equal(rows.length, 3);
+    assert.deepEqual(rows.map((row) => row.querySelector("button")?.textContent?.trim()), [
+      "Continue Here",
+      "Continue Here",
+      "Import as Read-Only",
+    ]);
+    assert.equal(rows[1]!.querySelector(".row-title")?.textContent, "Untitled Session");
+    assert.match(rows[2]!.textContent ?? "", /No Claude Code agent on this machine can continue it, so it opens as read-only history\./);
+    assert.match(rows[0]!.textContent ?? "", /4 Messages/);
+    assert.equal(rows[0]!.querySelector(".agent-session-path")?.getAttribute("title"), "/repos/project");
+    assert.ok(view.button("Done"), "the results step closes with Done");
+  } finally {
+    await view.unmount();
+    api.listExternalSessions = priorList;
+  }
+});
+
+test("no sessions offers Rescan, which scans again (#2994)", async () => {
+  const priorList = api.listExternalSessions;
+  let calls = 0;
+  api.listExternalSessions = async () => {
+    calls += 1;
+    return { sessions: [] };
+  };
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+  try {
+    await act(async () => { view.button("Find Sessions")!.click(); });
+    assert.match(view.container.textContent ?? "", /No Sessions Found/);
+    assert.match(view.container.textContent ?? "", /Claude Code has no sessions on this machine that Wollipog isn't already showing\./);
+    const rescans = Array.from(view.container.querySelectorAll("button")).filter((button) => button.textContent?.trim() === "Rescan");
+    assert.equal(rescans.length, 1, "one Rescan, in the state");
+    await act(async () => { rescans[0]!.click(); });
+    assert.equal(calls, 2);
+  } finally {
+    await view.unmount();
+    api.listExternalSessions = priorList;
+  }
+});
+
+test("a failed scan is a danger notice with Try Again and the raw error behind Show Details (#2994)", async () => {
+  const priorList = api.listExternalSessions;
+  let calls = 0;
+  api.listExternalSessions = async () => {
+    calls += 1;
+    throw new Error("ENOENT: sessions index");
+  };
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+  try {
+    await act(async () => { view.button("Find Sessions")!.click(); });
+    const notice = view.container.querySelector(".notice.t-danger");
+    assert.ok(notice);
+    assert.match(notice!.textContent ?? "", /Couldn't Load Sessions/);
+    assert.doesNotMatch(notice!.textContent ?? "", /ENOENT/, "the raw error stays behind Show Details");
+    await act(async () => { view.button("Show Details")!.click(); });
+    assert.match(notice!.textContent ?? "", /ENOENT: sessions index/);
+    await act(async () => { view.button("Try Again")!.click(); });
+    assert.equal(calls, 2);
+  } finally {
+    await view.unmount();
+    api.listExternalSessions = priorList;
+  }
+});
+
+const RESULTS_STEP = "Agent Session Discovery Results";
+const focusedLabel = () => (domWindow.document.activeElement as unknown as HTMLElement).getAttribute("aria-label");
+
+for (const outcome of ["empty", "error"] as const) {
+  test(`a header Rescan that ends ${outcome === "empty" ? "with no sessions" : "in an error"} keeps focus in the dialog (CR-1.1)`, async () => {
+    const priorList = api.listExternalSessions;
+    let calls = 0;
+    api.listExternalSessions = async () => {
+      calls += 1;
+      if (calls === 1) return { sessions: [matchingSession] };
+      if (outcome === "error") throw new Error("scan failed");
+      return { sessions: [] };
+    };
+    const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+    try {
+      await act(async () => { view.button("Find Sessions")!.click(); });
+      const rescan = view.button("Rescan")!;
+      rescan.focus();
+      await act(async () => {
+        rescan.click();
+        await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+      });
+      assert.equal(calls, 2);
+      assert.equal(rescan.isConnected, false, "the header Rescan is gone once nothing is listed");
+      assert.equal(focusedLabel(), RESULTS_STEP);
+    } finally {
+      await view.unmount();
+      api.listExternalSessions = priorList;
+    }
+  });
+}
+
+for (const outcome of ["empty", "error", "adopt"] as const) {
+  test(`focus the user moved while ${outcome === "adopt" ? "an import" : "a rescan"} ran stays where they put it (CR-2.1, ${outcome})`, async () => {
+    const priorList = api.listExternalSessions;
+    const priorAdopt = api.adoptSession;
+    let calls = 0;
+    let settle!: () => void;
+    const pending = new Promise<void>((resolve) => { settle = resolve; });
+    api.listExternalSessions = async () => {
+      calls += 1;
+      if (calls === 1) return { sessions: [matchingSession] };
+      await pending;
+      if (outcome === "error") throw new Error("scan failed");
+      return { sessions: [] };
+    };
+    api.adoptSession = (async () => { await pending; return {}; }) as unknown as typeof api.adoptSession;
+    const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+    try {
+      await act(async () => { view.button("Find Sessions")!.click(); });
+      const origin = view.button(outcome === "adopt" ? "Continue Here" : "Rescan")!;
+      origin.focus();
+      await act(async () => { origin.click(); });
+      const done = view.button("Done")!;
+      done.focus();
+      await act(async () => {
+        settle();
+        await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+      });
+      assert.equal(origin.isConnected, false);
+      // assert.ok, not assert.equal: a failing equal on two happy-dom nodes exhausts memory diffing them.
+      assert.ok((domWindow.document.activeElement as unknown) === done, `the control the user moved to keeps focus (now ${focusedLabel() ?? (domWindow.document.activeElement as unknown as HTMLElement)?.tagName})`);
+    } finally {
+      await view.unmount();
+      api.listExternalSessions = priorList;
+      api.adoptSession = priorAdopt;
+    }
+  });
+}
+
+test("continuing the last listed session keeps focus in the dialog (CR-1.1)", async () => {
+  const priorList = api.listExternalSessions;
+  const priorAdopt = api.adoptSession;
+  api.listExternalSessions = async () => ({ sessions: [matchingSession] });
+  api.adoptSession = (async () => ({})) as unknown as typeof api.adoptSession;
+  const view = await renderDialog(<AgentSessionDiscoveryDialog runner={claudeOnly} onClose={() => {}} />);
+  try {
+    await act(async () => { view.button("Find Sessions")!.click(); });
+    const continueHere = view.button("Continue Here")!;
+    continueHere.focus();
+    await act(async () => {
+      continueHere.click();
+      await new Promise((resolve) => domWindow.setTimeout(resolve, 0));
+    });
+    assert.match(view.container.textContent ?? "", /No Sessions Found/);
+    assert.equal(focusedLabel(), RESULTS_STEP);
+  } finally {
+    await view.unmount();
+    api.listExternalSessions = priorList;
+    api.adoptSession = priorAdopt;
   }
 });

@@ -43,6 +43,11 @@ test("reminder activity recognizes only authoritative agent response completion"
   assert.equal(reminderWakeReasonForEvent({ kind: "turn_interrupted" }), null);
 });
 
+test("a non-fatal driver problem is not a failure wake reason (#3806)", () => {
+  assert.equal(reminderWakeReasonForEvent({ kind: "error", message: "turn/start failed" }), "failure");
+  assert.equal(reminderWakeReasonForEvent({ kind: "error", message: "question not shown", nonFatal: true }), null);
+});
+
 function gitReq(requestId: string): GitActionRequestMessage {
   return { type: "git_action", requestId, sessionId: "s", worktreePath: "/w", action: { kind: "status" } };
 }
@@ -901,6 +906,40 @@ test("closeUiClientsForDevice force-closes only the revoked device's sockets", (
   sends.length = 0; // ignore the snapshot; count only post-revoke broadcasts
   hub2.runnerRemoved("r"); // triggers a broadcast
   assert.equal(sends.length, 0, "revoked client no longer receives broadcasts");
+});
+
+test("a directory change refreshes its organization in place; a member's own access change closes only theirs (#2606)", () => {
+  const hub = new Hub(snapshotDb);
+  const closed: string[] = [];
+  const refreshed: string[] = [];
+  const add = (label: string, organizationId: string, userId: string) => {
+    const principal = {
+      kind: "human" as const, actorId: userId, userId, userName: label, organizationId, organizationName: organizationId,
+      role: "operator" as const, deviceId: `dev_${label}`, localBootstrap: false,
+    };
+    hub.addUiClient({
+      send: (data: string) => {
+        if ((JSON.parse(data) as { type: string }).type === "identity_directory_changed") refreshed.push(label);
+      },
+    }, { deviceId: principal.deviceId, principal, close: () => closed.push(label) });
+  };
+  add("ada-phone", "org_a", "usr_ada");
+  add("ada-laptop", "org_a", "usr_ada");
+  add("ada-other-org", "org_b", "usr_ada");
+  add("lin", "org_a", "usr_lin");
+  add("outsider", "org_b", "usr_out");
+  hub.addUiClient({ send: () => {} }); // a client with no principal belongs to no organization
+
+  hub.identityDirectoryChanged("org_a");
+  assert.deepEqual(refreshed, ["ada-phone", "ada-laptop", "lin"], "only the changed organization refreshes");
+  assert.deepEqual(closed, [], "a refresh closes nothing");
+
+  // Status belongs to the user, so every socket of theirs closes, in any organization.
+  refreshed.length = 0;
+  hub.closeUserUiClients("usr_ada");
+  hub.identityDirectoryChanged("org_a");
+  assert.deepEqual(closed, ["ada-phone", "ada-laptop", "ada-other-org"]);
+  assert.deepEqual(refreshed, ["lin"], "closed sockets are dropped from the fan-out");
 });
 
 test("pod context entries fan out as one attributed websocket delta", () => {

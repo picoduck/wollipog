@@ -1,8 +1,8 @@
-import { sessionAttentionStatus, type SessionView } from "@wollipog/protocol";
+import type { SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { sessionArchiveSearchDetail } from "./archive-browser.js";
 import type { GlobalViewName } from "./navigation.js";
-import { statusMeta, type StatusMeta } from "./status-meta.js";
+import { sessionStatusSummary, statusMeta, type StatusMeta } from "./status-meta.js";
 import type { View } from "./store.js";
 
 /**
@@ -21,6 +21,8 @@ interface PaletteRow {
   detail?: string;
   /** A transcript snippet with ⟪⟫ match marks: the third line of a session, the second of a hit. */
   snippet?: string;
+  /** The last-activity time trailing line 1, as on the Sessions list's rows (§5.2): Recent only. */
+  at?: number;
   /** The keycap text, when the row has a binding. */
   keys?: string;
 }
@@ -68,10 +70,27 @@ export function transcriptQueryTooShort(query: string): boolean {
   return length > 0 && length < TRANSCRIPT_QUERY_MIN;
 }
 
-/** What a session row's dot says: a pending request outranks the lifecycle, as on every surface. */
+/**
+ * What a session row's dot and second line say: a pending request outranks the lifecycle, as on every
+ * surface. The request is named as the Sessions list names it, by its kind ("Approval Required"), so
+ * three pending approvals read Approval Required rather than a generic Needs Your Input.
+ */
 export function paletteSessionStatus(session: SessionView): StatusMeta {
-  const attention = session.pendingApproval ? sessionAttentionStatus(session) : null;
-  return attention ? statusMeta("attention", attention.kind) : statusMeta("session", session.status);
+  const attention = session.pendingApproval
+    ? sessionStatusSummary(session).conditions.find((condition) => condition.kind === "attention")
+    : undefined;
+  return attention ? attention.meta : statusMeta("session", session.status);
+}
+
+/** A session's second line. It names the status its dot shows, so a pending request reads as the
+ * Sessions list says it ("Approval Required"), not as the lifecycle under it ("Awaiting Input"). */
+function sessionDetail(session: SessionView): string {
+  return sessionArchiveSearchDetail(session, paletteSessionStatus(session).label);
+}
+
+/** When the session last did something, as the Sessions list's row time reads it. */
+export function paletteSessionTime(session: SessionView): number | undefined {
+  return session.attention?.meaningfulAt ?? (session.lastEventAt || session.updatedAt || session.createdAt || undefined);
 }
 
 function sessionEntry(session: SessionView, key: string): PaletteEntry & { kind: "session" } {
@@ -79,7 +98,7 @@ function sessionEntry(session: SessionView, key: string): PaletteEntry & { kind:
     kind: "session",
     key,
     label: session.title || session.id,
-    detail: sessionArchiveSearchDetail(session),
+    detail: sessionDetail(session),
     status: paletteSessionStatus(session),
     view: { name: "session", id: session.id },
   };
@@ -174,7 +193,9 @@ export function paletteSections(input: PaletteModelInput): PaletteSection[] {
   if (terms.length === 0) {
     const recent = input.recent.flatMap((id) => {
       const session = input.sessions.get(id);
-      return session ? [sessionEntry(session, `recent:${id}`)] : [];
+      if (!session) return [];
+      const at = paletteSessionTime(session);
+      return [{ ...sessionEntry(session, `recent:${id}`), ...(at === undefined ? {} : { at }) }];
     });
     return [
       section("recent", recent),
@@ -201,7 +222,7 @@ export function paletteSections(input: PaletteModelInput): PaletteSection[] {
       kind: "transcript",
       key: `transcript:${hit.sessionId}`,
       label: hit.title || session?.title || hit.sessionId,
-      detail: session ? sessionArchiveSearchDetail(session) : "Session State Unavailable",
+      detail: session ? sessionDetail(session) : "Session State Unavailable",
       snippet,
       view: { name: "session", id: hit.sessionId },
     });

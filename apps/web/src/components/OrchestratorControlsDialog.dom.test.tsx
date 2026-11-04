@@ -3,7 +3,11 @@ import test, { afterEach, mock } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
+import { DEFAULT_ORCHESTRATOR_DEFAULTS, PROTOCOL_VERSION } from "@wollipog/protocol";
 import type {
+  CampaignLaunchPreflight,
+  OrchestratorCampaignBehaviorView,
+  UpdateOrchestratorCampaignBehaviorRequest,
   OrchestratorCampaignProjection,
   OrchestratorCampaignPolicy,
   ParentControlDecisionPolicy,
@@ -22,7 +26,10 @@ import {
   ORCHESTRATOR_CONTROLS_CONFLICT,
   ORCHESTRATOR_CONTROLS_RELOAD_TIMEOUT_MS,
   OrchestratorControlsDialog,
+  WORKFLOW_DECISION_LABELS,
+  childSessionRequestsNote,
   orchestratorControlsSummary,
+  workflowDecisionsNote,
   workflowDecisionsSummary,
 } from "./OrchestratorControlsDialog.js";
 
@@ -48,6 +55,9 @@ for (const [name, value] of Object.entries({
   Event: domWindow.Event,
   MouseEvent: domWindow.MouseEvent,
   KeyboardEvent: domWindow.KeyboardEvent,
+  // Campaign Behavior's edit form uses the shared Select, which positions its menu on a frame.
+  requestAnimationFrame: domWindow.requestAnimationFrame.bind(domWindow),
+  cancelAnimationFrame: domWindow.cancelAnimationFrame.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
 })) Object.defineProperty(globalThis, name, { configurable: true, writable: true, value });
@@ -58,6 +68,7 @@ const HUMAN_ONLY: ParentControlDecisionPolicy = {
   merged_branch_deletion: "human",
   follow_up_issue_publication: "human",
   ui_evidence_approval: "human",
+  review_round_extension: "human",
 };
 
 const POLICY: OrchestratorCampaignPolicy = {
@@ -88,6 +99,7 @@ const POLICY: OrchestratorCampaignPolicy = {
         merged_branch_deletion: "legacy_session",
         follow_up_issue_publication: "legacy_session",
         ui_evidence_approval: "legacy_session",
+        review_round_extension: "legacy_session",
       },
     },
   },
@@ -138,7 +150,7 @@ async function open(
   session: SessionView,
   client: Partial<ApiClient>,
   refusal: string | null = null,
-  { strict = false }: { strict?: boolean } = {},
+  { strict = false, modelLabel }: { strict?: boolean; modelLabel?: (modelId: string) => string } = {},
 ): Promise<Harness> {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
@@ -154,6 +166,7 @@ async function open(
         <OrchestratorControlsDialog
           session={current}
           refusal={refusal}
+          modelLabel={modelLabel}
           onClose={() => { closed += 1; }}
           // The store's part: the session the dialog is given follows what it reports.
           onSessionChanged={(next) => { changed.push(next); render(next); }}
@@ -198,8 +211,10 @@ test("explicit Full Control revocation uses the current revision and preserves c
   const writes: unknown[] = [];
   const fresh = { ...initial, orchestratorPolicy: { ...initial.orchestratorPolicy!, control: { mode: "custom" as const } },
     parentControlPolicy: { ...initial.parentControlPolicy!, revision: 4 } };
+  const preflights: unknown[] = [];
   const harness = await open(initial, {
     revokeCampaignControl: async (...args) => { writes.push(args); return fresh; },
+    fullControlEnablePreflight: async (...args) => { preflights.push(args); return { preflight: enablePreflight(false), expectedRevision: 4 }; },
   });
   await act(async () => [...harness.dialog().querySelectorAll<HTMLButtonElement>("button")]
     .find((node) => node.textContent?.trim() === "Revoke Full Control")!.click());
@@ -208,6 +223,12 @@ test("explicit Full Control revocation uses the current revision and preserves c
   assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.behavior, initial.orchestratorPolicy!.behavior);
   assert.deepEqual(harness.changed[0]!.orchestratorPolicy!.execution, initial.orchestratorPolicy!.execution);
   assert.match(harness.dialog().textContent ?? "", /Effective Mode: Custom/);
+  // The choice follows the revoked root: Custom, with no enable action or check offered back.
+  await act(async () => { await new Promise((resolve) => setTimeout(resolve, 50)); });
+  assert.equal(harness.dialog().querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.checked, true);
+  assertNoDomNode(harness.dialog().querySelector('section[aria-label="Enable Full Control"]'));
+  assert.deepEqual(footerButtons(harness.dialog()), ["Done"]);
+  assert.deepEqual(preflights, []);
 });
 
 test("a conflicting Full Control revocation reloads without replay and descendants cannot revoke", async () => {
@@ -234,28 +255,106 @@ test("a descendant displays the current root mode after revoke and does not trea
   const harness = await open({ ...initial, parentSessionId: "root",
     orchestratorCampaign: { ...CAMPAIGN, control: { mode: "custom" }, policyRevision: 4 } }, {});
   assert.match(harness.dialog().textContent ?? "", /Effective Mode: Custom/);
-  assert.equal(harness.dialog().querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.checked, true);
+  assertNoDomNode(harness.dialog().querySelector('[data-control-mode]'), "a descendant cannot enable Full Control");
   assert.equal([...harness.dialog().querySelectorAll<HTMLButtonElement>("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"), false);
   await harness.unmount();
   const legacy = await open({ ...initial, id: "legacy-nested", parentSessionId: "root", orchestratorCampaign: undefined }, {});
   assert.match(legacy.dialog().textContent ?? "", /Effective Mode: Current Root State Not Reported/);
 });
 
-test("active Full Control preview exposes revision and human gates without changing campaign state", async () => {
-  const writes: unknown[] = [];
+/** A server preflight in the shape the enable route returns. Not ready means a genuine impossibility. */
+function enablePreflight(ready: boolean): CampaignLaunchPreflight {
+  const verified = (id: CampaignLaunchPreflight["capabilities"][number]["id"], capability: string) => ({ id, capability, state: "verified" as const, mandatory: true, reason: `${capability} is verified.` });
+  const blocker = "The runner could not verify this campaign's repository; check that the runner is online and the origin is github.com.";
+  return { ready, digest: (ready ? "b" : "a").repeat(64), inspectionCancellation: "supported",
+    summary: { repository: ready ? "owner/repo" : null, issueNumbers: [12], objective: "Deliver #12",
+      root: { agentId: "claude", driver: "claude-code", model: "claude-opus-5-5", effort: null, isolation: { mode: "provider", network: "inherit" },
+        strictProjectIsolation: false, integrationIsolation: false, completion: "retain" },
+      budget: { costUsd: null, toolCalls: null, concurrency: 4, acceptedFollowUps: 0, source: "unset", reviewIncluded: false },
+      review: { controlled: false, statement: "The regular cross-model review workflow, because controlled review is unavailable." },
+      followUps: { policy: "recommend_only", relatedFollowUps: false, maxIssues: 1, closureReasons: ["completed"] },
+      evidence: { statement: "The Orchestrator reviews screenshots.",
+        destination: { kind: "private_session_artifacts", configurationId: "session_artifacts:org", disclosureRevision: 1 }, provider: null, envelope: false },
+      humanRequired: [],
+      blockers: ready ? [] : [{ capability: "Repository and Issue Scope", reason: blocker }] },
+    capabilities: [ready ? verified("repository_scope", "Repository and Issue Scope")
+      : { id: "repository_scope", capability: "Repository and Issue Scope", state: "unsupported", mandatory: true, reason: blocker },
+      verified("authority_contract", "Full Control Authority")],
+    advanced: { proposal: null, plan: {} as never, humanRequiredRequests: [] } };
+}
+
+const footerButtons = (dialog: HTMLElement) => [...dialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")].map((button) => button.textContent);
+
+/** Enabling adds nothing to fill in or review (#2940): no summary, limits, readiness or Advanced. */
+function assertNoEnableForm(dialog: HTMLElement): void {
+  const text = dialog.textContent ?? "";
+  for (const copy of [/Ready to Enable/, /Can't Enable Yet/, /Campaign Limits/, /Advanced/, /No Limit/, /Checking Full Control Readiness/]) {
+    assert.doesNotMatch(text, copy);
+  }
+  assertNoDomNode(dialog.querySelector('section[aria-label="Enable Full Control"]'));
+  assertNoDomNode(dialog.querySelector("fieldset"));
+}
+
+test("choosing Full Control on a live campaign shows no form, and Enable Full Control is the one action", async () => {
+  const preflights: unknown[] = [];
+  const enables: unknown[] = [];
   const harness = await open(orchestrator(), {
-    setParentControl: async (...args) => { writes.push(args); return orchestrator(); },
-    setParentControlPolicy: async (...args) => { writes.push(args); return orchestrator(); },
+    fullControlEnablePreflight: async (id, body) => { preflights.push([id, body]); return { preflight: enablePreflight(true), expectedRevision: 2 }; },
+    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
   });
   const dialog = harness.dialog();
-  const full = dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]');
-  assert.ok(full);
-  await act(async () => full.click());
+  assert.deepEqual(footerButtons(dialog), ["Done"]);
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  assert.match(dialog.textContent ?? "", /The Orchestrator runs this campaign end to end\./);
+  assertNoEnableForm(dialog);
+  assert.deepEqual(preflights, [], "nothing is checked or shown before the action");
+  assert.deepEqual(footerButtons(dialog), ["Done", "Enable Full Control"]);
+  const enable = dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!;
+  assert.equal(enable.disabled, false);
+  await act(async () => enable.click());
+  await act(async () => { await Promise.resolve(); });
+  assert.deepEqual(preflights, [["orch", {}]]);
+  assert.deepEqual(enables, [["orch", { expectedRevision: 2, preflightDigest: "b".repeat(64) }]]);
+  assert.equal(harness.changed.at(-1)!.orchestratorPolicy!.control!.mode, "full_control");
+  assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
+  assert.deepEqual(footerButtons(dialog), ["Done"], "an enabled campaign has nothing left to enable");
+  assert.ok([...dialog.querySelectorAll("button")].some((button) => button.textContent?.trim() === "Revoke Full Control"));
+});
+
+test("a genuine impossibility on a live campaign is one inline error, and nothing changes", async () => {
+  const enables: unknown[] = [];
+  const harness = await open(orchestrator(), {
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(false), expectedRevision: 2 }),
+    enableFullControl: async (...args) => { enables.push(args); return fullCampaign(); },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await act(async () => dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!.click());
+  await act(async () => { await Promise.resolve(); });
+  assert.deepEqual(enables, []);
+  assert.deepEqual(harness.changed, []);
+  const alerts = [...dialog.querySelectorAll<HTMLElement>('[role="alert"]')];
+  assert.equal(alerts.length, 1);
+  assert.match(alerts[0]!.textContent ?? "", /Couldn't Enable Full Control/);
+  assert.match(alerts[0]!.textContent ?? "", /could not verify this campaign's repository; check that the runner is online/);
+  assertNoEnableForm(dialog);
   assert.match(dialog.textContent ?? "", /Effective Mode: Custom/);
-  assert.match(dialog.textContent ?? "", /revokes incompatible unused approvals/);
-  assert.match(dialog.textContent ?? "", /Issue expansion and closure retain their human gate/);
-  assert.equal([...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Authorize Full Control")?.disabled, true);
-  assert.deepEqual(writes, []);
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+  assert.deepEqual(footerButtons(dialog), ["Done"], "Custom has no enable action");
+  assert.equal(dialog.querySelectorAll('[role="alert"]').length, 0, "and no stale error");
+});
+
+test("a refused enable from the server reads as its own reason", async () => {
+  const harness = await open(orchestrator(), {
+    fullControlEnablePreflight: async () => ({ preflight: enablePreflight(true), expectedRevision: 2 }),
+    enableFullControl: async () => { throw new ApiError("Full Control cannot be enabled: Campaign usage contains unpriced records.", 409); },
+  });
+  const dialog = harness.dialog();
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  await act(async () => dialog.querySelector<HTMLButtonElement>(".modal-foot .btn.primary")!.click());
+  await act(async () => { await Promise.resolve(); });
+  const alert = dialog.querySelector<HTMLElement>('[role="alert"]')!;
+  assert.match(alert.textContent ?? "", /Couldn't Enable Full ControlCampaign usage contains unpriced records\./);
   assert.deepEqual(harness.changed, []);
 });
 
@@ -275,21 +374,133 @@ function sectionTitles(dialog: HTMLElement): string[] {
   return [...dialog.querySelectorAll(".section-title")].map((node) => node.textContent ?? "");
 }
 
+/** A Full Control root as the server projects it: only PR merge is inside the boundary, so the
+ * effective owners differ from the saved Custom choices (which delegate two other gates). */
+function fullControlProjection(): SessionView {
+  const base = fullCampaign();
+  return { ...base, parentControl: "questions_and_approvals",
+    orchestratorCampaign: { ...CAMPAIGN, control: base.orchestratorPolicy!.control, policyRevision: 3,
+      decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" } } } as SessionView;
+}
+
+/** The Custom-only surfaces: none of them has an effect under a Full Control boundary (#2940).
+ * Campaign Behavior does: it governs every child Full Control creates, so it stays while Full
+ * Control is in effect (#3580), though not while Full Control is only being chosen. */
+const CUSTOM_ONLY_SECTIONS = ["Child Session Requests", "Workflow Decisions", "Human Required", "Evidence the Orchestrator Can't Inspect"];
+function assertOnlyFullControl(dialog: HTMLElement, { inEffect }: { inEffect: boolean }): void {
+  assert.deepEqual(sectionTitles(dialog), inEffect ? ["Orchestrator Control", "Campaign Behavior"] : ["Orchestrator Control"]);
+  for (const title of CUSTOM_ONLY_SECTIONS) assert.equal(sectionTitles(dialog).includes(title), false, `${title} is hidden`);
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"][aria-label="Review Round Extensions"]'));
+  assertNoDomNode(dialog.querySelector(".orchestrator-gate-helper"), "no evidence or retention disclosure");
+  assert.match(dialog.textContent ?? "", /The Orchestrator runs this campaign end to end\./);
+}
+
+test("under Full Control the dialog shows only the mode, its line and Revoke, and the Custom sections return after Revoke", async () => {
+  const initial = fullControlProjection();
+  const revoked = { ...initial, orchestratorPolicy: { ...initial.orchestratorPolicy!, control: { mode: "custom" as const } },
+    orchestratorCampaign: { ...initial.orchestratorCampaign!, control: { mode: "custom" as const }, policyRevision: 4 },
+    parentControlPolicy: { ...initial.parentControlPolicy!, revision: 4 } } as SessionView;
+  const harness = await open(initial, { revokeCampaignControl: async () => revoked });
+  const dialog = harness.dialog();
+  assert.match(dialog.textContent ?? "", /Effective Mode: Full Control/);
+  assertOnlyFullControl(dialog, { inEffect: true });
+  assert.deepEqual(footerButtons(dialog), ["Done"]);
+  await act(async () => [...dialog.querySelectorAll<HTMLButtonElement>("button")]
+    .find((node) => node.textContent?.trim() === "Revoke Full Control")!.click());
+  assert.match(dialog.textContent ?? "", /Effective Mode: Custom/);
+  for (const title of ["Child Session Requests", "Workflow Decisions", "Campaign Behavior"]) {
+    assert.ok(sectionTitles(dialog).includes(title), `${title} returns under Custom`);
+  }
+  assert.ok(dialog.querySelector('[role="radiogroup"][aria-label="PR Merge Approval"]'));
+});
+
+test("choosing Full Control on a Custom campaign hides the Custom sections until Custom is chosen again", async () => {
+  const harness = await open(orchestrator(), {});
+  const dialog = harness.dialog();
+  assert.ok(sectionTitles(dialog).includes("Workflow Decisions"));
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="full_control"]')!.click());
+  assertOnlyFullControl(dialog, { inEffect: false });
+  assert.match(dialog.textContent ?? "", /Effective Mode: Custom/, "nothing changes until Enable Full Control");
+  assert.deepEqual(footerButtons(dialog), ["Done", "Enable Full Control"]);
+  await act(async () => dialog.querySelector<HTMLInputElement>('[data-control-mode="custom"]')!.click());
+  for (const title of ["Child Session Requests", "Workflow Decisions", "Campaign Behavior"]) assert.ok(sectionTitles(dialog).includes(title));
+  assert.ok(dialog.querySelector('[role="radiogroup"][aria-label="Review Round Extensions"]'));
+  assert.deepEqual(footerButtons(dialog), ["Done"]);
+});
+
+/** A descendant whose root's control the server does not report: its copied policy delegates two
+ * gates, while the server's effective owners keep every gate but PR Merge Approval with a person. */
+function unknownRootDescendant(campaign: OrchestratorCampaignProjection | null = { ...CAMPAIGN, decisionOwners: { ...HUMAN_ONLY, pr_merge: "orchestrator" } }): SessionView {
+  return { ...fullCampaign(), id: "nested", parentSessionId: "root", parentControl: "questions_and_approvals", orchestratorCampaign: campaign ?? undefined } as SessionView;
+}
+
+test("a descendant whose root control is unknown shows the effective owners read-only and offers nothing editable", async () => {
+  const writes: unknown[] = [];
+  const harness = await open(unknownRootDescendant(), {
+    setParentControl: async (...args) => { writes.push(args); return unknownRootDescendant(); },
+    setParentControlPolicy: async (...args) => { writes.push(args); return unknownRootDescendant(); },
+  });
+  const dialog = harness.dialog();
+  const text = dialog.textContent ?? "";
+  assert.match(text, /Effective Mode: Current Root State Not Reported/);
+  assertNoDomNode(dialog.querySelector('[role="radiogroup"]'), "no Child Session Requests rows and no gate is editable");
+  assertNoDomNode(dialog.querySelector("input"), "nothing in the dialog takes input");
+  assert.deepEqual(sectionTitles(dialog), ["Orchestrator Control", "Child Session Requests", "Workflow Decisions", "Campaign Behavior"]);
+  assert.match(text, /The root campaign's control isn't reported\. Who answers these isn't known here, so they can't be changed until it is\./);
+  assert.match(text, /These are the owners Wollipog applies, and they can't be changed here until it is\./);
+  const fact = (term: string) => [...dialog.querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
+  assert.equal(fact("PR Merge Approval"), "Orchestrator", "the server's effective owner, not the copied Human choice");
+  assert.equal(fact("Implementation Questions"), "HumanSet by the root campaign.", "a copied Orchestrator choice is not shown as current");
+  assert.equal(fact("UI Evidence Approval"), "HumanNo image reader.", "the evidence fallback keeps the server's reason");
+  assert.deepEqual(writes, []);
+  await harness.unmount();
+
+  // No projection at all: nothing is reported, so nothing is guessed either.
+  const bare = await open(unknownRootDescendant(null), {});
+  const bareFact = (term: string) => [...bare.dialog().querySelectorAll("dt")].find((node) => node.textContent === term)?.nextElementSibling?.textContent;
+  for (const label of Object.values(WORKFLOW_DECISION_LABELS)) assert.equal(bareFact(label), "Not Reported", label);
+  assertNoDomNode(bare.dialog().querySelector('[role="radiogroup"]'));
+});
+
+test("a descendant with a reported Custom root keeps its editable gates", async () => {
+  const harness = await open({ ...unknownRootDescendant(), orchestratorCampaign: { ...CAMPAIGN, control: { mode: "custom" }, policyRevision: 3 } } as SessionView, {});
+  assert.ok(harness.dialog().querySelector('[role="radiogroup"][aria-label="Child Session Requests"]'));
+  gate(harness.dialog(), "PR Merge Approval");
+});
+
 test("the summaries count the gates that stay with a person", () => {
-  assert.equal(workflowDecisionsSummary(HUMAN_ONLY), "5 of 5 decisions stay with a person.");
+  assert.equal(workflowDecisionsSummary(HUMAN_ONLY), "6 of 6 decisions stay with a person.");
   assert.equal(
     workflowDecisionsSummary({ ...HUMAN_ONLY, pr_merge: "orchestrator", implementation_question: "orchestrator" }),
-    "3 of 5 decisions stay with a person.",
+    "4 of 6 decisions stay with a person.",
   );
   assert.equal(
     workflowDecisionsSummary({
       implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "orchestrator",
-      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human",
+      follow_up_issue_publication: "orchestrator", ui_evidence_approval: "human", review_round_extension: "orchestrator",
     }),
-    "1 of 5 decisions stays with a person.",
+    "1 of 6 decisions stays with a person.",
   );
   assert.equal(orchestratorControlsSummary({ parentControl: "questions", parentControlPolicy: undefined }),
     "Child session requests: Questions.", "a control plane without typed gates summarizes the one choice it has");
+  // Under Full Control the summaries describe the effective owners, never the inactive Custom choices.
+  const full = fullControlProjection();
+  assert.equal(orchestratorControlsSummary(full), "Full Control: 5 of 6 decisions stay with a person.");
+  assert.equal(childSessionRequestsNote(full), "Full Control");
+  assert.equal(orchestratorControlsSummary({ ...full, orchestratorCampaign: undefined }), "Full Control.");
+  // Under Custom the summaries count the effective owners too: the saved choices delegate two gates,
+  // but the server reports one of them routed to a person.
+  const custom = orchestrator({ orchestratorCampaign: { ...CAMPAIGN, decisionOwners: { ...HUMAN_ONLY, implementation_question: "orchestrator" } } });
+  assert.equal(workflowDecisionsNote(custom), "5 of 6 decisions stay with a person.");
+  assert.equal(workflowDecisionsNote({ ...custom, orchestratorCampaign: undefined }), "4 of 6 decisions stay with a person.",
+    "without a projection the saved choices are all there is");
+  // An unknown root: the effective owners when reported, and never the descendant's copied choices.
+  assert.equal(workflowDecisionsNote(unknownRootDescendant()), "5 of 6 decisions stay with a person.");
+  assert.equal(childSessionRequestsNote(unknownRootDescendant()), "Not Reported");
+  assert.equal(workflowDecisionsNote(unknownRootDescendant(null)), "The root campaign's control isn't reported.");
+  assert.equal(orchestratorControlsSummary({ ...unknownRootDescendant(null), parentControlPolicy: undefined }),
+    "Child session requests: Not Reported.");
 });
 
 test("the dialog has three titled sections, the campaign's facts and a close-only footer", async () => {
@@ -366,7 +577,7 @@ test("choosing a Child Session Requests row calls setParentControl once and show
   await flush();
   assert.deepEqual(calls, [["orch", "questions"]]);
   assert.equal(harness.changed.at(-1)?.parentControl, "questions", "the reply updates the session");
-  const head = dialog.querySelector(".section-head");
+  const head = [...dialog.querySelectorAll(".section-head")].find((node) => /Child Session Requests/.test(node.textContent ?? ""));
   assert.match(head?.textContent ?? "", /Saved/, "the section shows the Saved check");
   assert.equal(dialog.querySelector('[role="status"].sr-only')?.textContent, "Child Session Requests saved");
 });
@@ -851,4 +1062,262 @@ test("a legacy campaign payload derives Integration Isolation from the preset be
   await harness.rerender(orchestrator({ permissionMode: "acceptEdits", orchestratorPolicy: legacy(true) }));
   assert.match(isolation(harness.dialog()).value, /^Enabled/);
   assert.match(isolation(harness.dialog()).disclosure, /Removes configured MCP servers/);
+});
+
+/** #3580: a running campaign's Child Harness, Model, Effort, Follow-Ups and Completion, edited from
+ * an Edit action on Campaign Behavior, with New Session's choices and validation. */
+const CLAUDE_HARNESS = { agentId: "claude", driver: "claude-code" as const, context: { kind: "native" as const } };
+const CODEX_HARNESS = { agentId: "codex", driver: "codex-app-server" as const, context: { kind: "native" as const } };
+
+function behaviorView(overrides: Partial<OrchestratorCampaignBehaviorView> = {}): OrchestratorCampaignBehaviorView {
+  return {
+    revision: 2,
+    behavior: { childHarness: CLAUDE_HARNESS, childModel: "claude-opus-5", childEffort: "high", followUps: "recommend_only", completion: "retain" },
+    sources: { childHarness: "user_default", childModel: "session_override", childEffort: "user_default", followUps: "system_default", completion: "system_default" },
+    capabilities: {
+      harnesses: [
+        { ...CLAUDE_HARNESS, name: "Claude Code", models: [{ id: "claude-opus-5", displayName: "Claude Opus 5", efforts: ["medium", "high"] }],
+          effortLevels: ["medium", "high"], supportedPairs: [{ modelId: "claude-opus-5", effortLevels: ["medium", "high"] }], installations: 1, machines: 1 },
+        { ...CODEX_HARNESS, name: "Codex", models: [{ id: "gpt-5.5", displayName: "GPT-5.5", efforts: ["low", "high"] }],
+          effortLevels: ["low", "high"], supportedPairs: [{ modelId: "gpt-5.5", effortLevels: ["low", "high"] }], installations: 1, machines: 1 },
+      ],
+      models: [], effortLevels: [], supportedPairs: [], installations: 2, compatibleInstallations: 1, status: "available",
+    },
+    runnerProtocolVersion: PROTOCOL_VERSION,
+    ...overrides,
+  };
+}
+
+function editButton(dialog: HTMLElement): HTMLButtonElement | undefined {
+  return [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.getAttribute("aria-label") === "Edit Campaign Behavior");
+}
+
+function behaviorForm(dialog: HTMLElement): HTMLFormElement {
+  const form = dialog.querySelector<HTMLFormElement>('form[aria-label="Edit Campaign Behavior"]');
+  assert.ok(form, "the edit form is open");
+  return form;
+}
+
+function formButton(form: HTMLElement, label: string): HTMLButtonElement {
+  const button = [...form.querySelectorAll<HTMLButtonElement>("button")].find((node) => node.textContent?.trim() === label);
+  assert.ok(button, `${label} is offered`);
+  return button;
+}
+
+async function chooseOption(scope: HTMLElement, select: string, option: RegExp) {
+  const trigger = scope.querySelector<HTMLButtonElement>(`[aria-label^="${select}:"]`);
+  assert.ok(trigger, `${select} is a Select`);
+  await act(async () => trigger.click());
+  // The menu is portalled to the document, outside the form.
+  const match = [...scope.ownerDocument.querySelectorAll<HTMLButtonElement>('[role="option"]')]
+    .find((node) => option.test(node.textContent ?? ""));
+  assert.ok(match, `${select} offers ${String(option)}`);
+  await act(async () => match.click());
+}
+
+function behaviorFact(dialog: HTMLElement, label: string): string {
+  const term = [...dialog.querySelectorAll("dl.facts dt")].find((node) => node.textContent === label);
+  assert.ok(term, `${label} is a fact`);
+  return term.nextElementSibling?.textContent ?? "";
+}
+
+test("Campaign Behavior's Edit action saves the child harness, model, effort, follow-ups and completion against the loaded revision", async () => {
+  const reads: string[] = [];
+  const writes: Array<[string, UpdateOrchestratorCampaignBehaviorRequest]> = [];
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async (id: string) => { reads.push(id); return behaviorView(); },
+    setCampaignBehavior: async (id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => {
+      writes.push([id, request]);
+      return orchestrator({ orchestratorPolicy: { ...POLICY, behaviorRevision: 3,
+        behavior: { ...POLICY.behavior, ...request.behavior },
+        sources: { ...POLICY.sources, behavior: { ...POLICY.sources.behavior, childHarness: "active_campaign", childModel: "active_campaign",
+          childEffort: "active_campaign", followUps: "active_campaign", completion: "active_campaign" } } } });
+    },
+  });
+  const dialog = harness.dialog();
+  const edit = editButton(dialog);
+  assert.ok(edit, "Campaign Behavior has an Edit action");
+  assert.equal(edit.textContent, "Edit");
+  assert.ok(edit.closest(".section-head")?.textContent?.includes("Campaign Behavior"), "in the section's own head");
+  await act(async () => edit.click());
+  await flush();
+  assert.deepEqual(reads, ["orch"]);
+  const form = behaviorForm(dialog);
+  assert.equal(editButton(dialog), undefined, "the action gives way to the form");
+  assert.match(form.textContent ?? "", /Changes apply to children created from now on\. Children already running keep their harness, model and effort\./);
+  assert.equal(formButton(form, "Save Changes").disabled, true, "nothing to save yet");
+
+  // A new Child Harness starts its model and effort over at Automatic, as New Session's does.
+  await chooseOption(form, "Child Harness", /^Codex/);
+  assert.match(form.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+  await chooseOption(form, "Child Model", /^GPT-5\.5/);
+  await chooseOption(form, "Child Effort", /^High/);
+  await chooseOption(form, "Follow-Ups", /^Execute Approved/);
+  await act(async () => option(form.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Completion"]')!, "Stop and Archive").click());
+  assert.equal(formButton(form, "Save Changes").disabled, false);
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+
+  assert.deepEqual(writes, [["orch", { expectedRevision: 2, behavior: { childHarness: CODEX_HARNESS, childModel: "gpt-5.5",
+    childEffort: "high", followUps: "execute_approved", completion: "stop_and_archive" } }]]);
+  assert.equal(harness.changed.at(-1)?.orchestratorPolicy?.behaviorRevision, 3, "the reply updates the session");
+  assertNoDomNode(dialog.querySelector('form[aria-label="Edit Campaign Behavior"]'), "the form closes");
+  assert.match(behaviorFact(dialog, "Child Harness"), /Codex.*Changed After Launch/);
+  assert.match(behaviorFact(dialog, "Child Model"), /gpt-5\.5.*Changed After Launch/);
+  assert.match(behaviorFact(dialog, "Follow-Ups"), /Execute Approved.*Changed After Launch/);
+  assert.match(behaviorFact(dialog, "Completion"), /Stop and Archive.*Changed After Launch/);
+  assert.match(behaviorFact(dialog, "Maximum Concurrent Children"), /User Default/, "an unchanged value keeps its source");
+  const head = [...dialog.querySelectorAll(".section-head")].find((node) => /Campaign Behavior/.test(node.textContent ?? ""));
+  assert.match(head?.textContent ?? "", /Saved/);
+  assert.equal(dialog.querySelector('[role="status"].sr-only')?.textContent, "Campaign Behavior saved");
+  assert.ok(editButton(dialog), "Edit returns");
+});
+
+test("a stale Campaign Behavior save shows the current values instead of replaying the change", async () => {
+  let reads = 0;
+  const current = behaviorView({ revision: 3, behavior: { ...behaviorView().behavior, followUps: "execute_approved" } });
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async () => (reads += 1) === 1 ? behaviorView() : current,
+    setCampaignBehavior: async () => { throw new ApiError("Campaign behavior changed; refresh and try again.", 409); },
+  });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  await act(async () => option(form.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Completion"]')!, "Stop and Archive").click());
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+  assert.equal(reads, 2, "the conflict reloads the campaign's values");
+  assert.match(form.querySelector('[role="alert"]')?.textContent ?? "", /Campaign Behavior changed elsewhere, so your change wasn't saved\. The current values are shown\./);
+  assert.match(form.querySelector('[aria-label^="Follow-Ups:"]')?.getAttribute("aria-label") ?? "", /Execute Approved/);
+  assert.equal(option(form.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Completion"]')!, "Retain").getAttribute("aria-checked"), "true");
+  assert.equal(formButton(form, "Save Changes").disabled, true, "nothing of the person's is left to save");
+  assert.equal(harness.changed.length, 0);
+});
+
+test("a Campaign Behavior refusal that is not a conflict keeps the person's choices and says why", async () => {
+  const reason = "No connected machine supports this Child Harness, Child Model and Child Effort combination.";
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async () => behaviorView(),
+    setCampaignBehavior: async () => { throw new ApiError(reason, 409); },
+  });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  await chooseOption(form, "Child Effort", /^Medium/);
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+  assert.equal(form.querySelector('[role="alert"]')?.textContent?.includes(reason), true);
+  assert.match(form.querySelector('[aria-label^="Child Effort:"]')?.getAttribute("aria-label") ?? "", /Medium/);
+  await act(async () => formButton(form, "Cancel").click());
+  assertNoDomNode(harness.dialog().querySelector('form[aria-label="Edit Campaign Behavior"]'));
+  assert.match(behaviorFact(harness.dialog(), "Child Effort"), /^High/, "Cancel leaves the stored value");
+});
+
+test("under Full Control Campaign Behavior stays editable and says the boundary is unchanged; descendants and refused viewers can't edit", async () => {
+  const full = await open(fullControlProjection(), { campaignBehavior: async () => behaviorView() });
+  assert.ok(editButton(full.dialog()), "Full Control campaigns can change their children's harness");
+  await act(async () => editButton(full.dialog())!.click());
+  await flush();
+  assert.match(behaviorForm(full.dialog()).textContent ?? "",
+    /Full Control stays as you authorized it: these changes don't alter Follow-Ups Without Approval or Maximum Issues\. Past that limit, each follow-up waits for your approval\. Change the limit in Campaign Status\./);
+  await full.unmount();
+
+  const nested = await open(orchestrator({ parentSessionId: "root", orchestratorCampaign: { ...CAMPAIGN, control: { mode: "custom" } },
+    orchestratorPolicy: { ...POLICY, sources: { ...POLICY.sources, behavior: { ...POLICY.sources.behavior, childHarness: "active_campaign" } } } }), {});
+  assert.equal(editButton(nested.dialog()), undefined);
+  assert.match(nested.dialog().textContent ?? "", /This nested Orchestrator uses its root campaign's behavior\. Change it on the root Orchestrator\./);
+  assert.match(behaviorFact(nested.dialog(), "Child Harness"), /Set by the Root Campaign/);
+  await nested.unmount();
+
+  const refused = await open(orchestrator(), {}, "Only the session's owner can change its configuration.");
+  assert.equal(editButton(refused.dialog()), undefined);
+});
+
+test("the Child Model fact reads as the Child Model selector names it, and its id only when nothing names it (#3580)", async () => {
+  const named = await open(orchestrator(), {}, null, { modelLabel: (id) => id === "claude-opus-5" ? "Claude Opus 5" : id });
+  assert.match(behaviorFact(named.dialog(), "Child Model"), /^Claude Opus 5Session Override$/);
+  await named.unmount();
+  const unnamed = await open(orchestrator(), {});
+  assert.match(behaviorFact(unnamed.dialog(), "Child Model"), /^claude-opus-5Session Override$/);
+});
+
+/** No machine offers the campaign's fixed children now: the stored harness is listed but unavailable,
+ * as the server lists a saved harness no installation advertises. */
+function offlineBehaviorView(): OrchestratorCampaignBehaviorView {
+  return behaviorView({ capabilities: {
+    harnesses: [{ ...CLAUDE_HARNESS, name: "Claude Code", models: [], effortLevels: [], supportedPairs: [], installations: 0, machines: 0 }],
+    models: [], effortLevels: [], supportedPairs: [], installations: 0, compatibleInstallations: 0, status: "unavailable",
+    reason: "No connected machine supports this Child Harness, Child Model and Child Effort combination.",
+  } });
+}
+
+test("with the fixed children's machines offline, Follow-Ups and Completion still save with the unchanged child values (CR-1.3)", async () => {
+  const writes: UpdateOrchestratorCampaignBehaviorRequest[] = [];
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async () => offlineBehaviorView(),
+    setCampaignBehavior: async (_id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => { writes.push(request); return orchestrator(); },
+  });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  assert.equal(formButton(form, "Save Changes").disabled, true, "nothing changed yet");
+  assertNoDomNode(form.querySelector(".field-error"), "an unchanged combination is not reported as a problem");
+  await chooseOption(form, "Follow-Ups", /^Execute Approved/);
+  await act(async () => option(form.querySelector<HTMLElement>('[role="radiogroup"][aria-label="Completion"]')!, "Stop and Archive").click());
+  assert.equal(formButton(form, "Save Changes").disabled, false);
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+  assert.deepEqual(writes, [{ expectedRevision: 2, behavior: { ...behaviorView().behavior, followUps: "execute_approved", completion: "stop_and_archive" } }]);
+});
+
+test("with no installations at all, every child value can still be set to Automatic and saved (CR-1.3)", async () => {
+  const writes: UpdateOrchestratorCampaignBehaviorRequest[] = [];
+  const harness = await open(orchestrator(), {
+    campaignBehavior: async () => offlineBehaviorView(),
+    setCampaignBehavior: async (_id: string, request: UpdateOrchestratorCampaignBehaviorRequest) => { writes.push(request); return orchestrator(); },
+  });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  // A new Child Harness starts its model and effort over at Automatic.
+  await chooseOption(form, "Child Harness", /^Automatic/);
+  assert.match(form.querySelector('[aria-label^="Child Model:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+  assert.match(form.querySelector('[aria-label^="Child Effort:"]')?.getAttribute("aria-label") ?? "", /Automatic/);
+  assertNoDomNode(form.querySelector(".field-error"));
+  assert.equal(formButton(form, "Save Changes").disabled, false);
+  await act(async () => formButton(form, "Save Changes").click());
+  await flush();
+  assert.deepEqual(writes, [{ expectedRevision: 2, behavior: { ...behaviorView().behavior, childHarness: null, childModel: null, childEffort: null } }]);
+});
+
+test("an exact-row campaign offers only its kept row's models while the change keeps that harness (CR-2.1, CR-3.1)", async () => {
+  const full = behaviorView().capabilities;
+  const codexAll = full.harnesses!.find((harness) => harness.driver === "codex-app-server")!;
+  const view = behaviorView({
+    behavior: { childHarness: { agentId: "codex-local", driver: "codex-app-server", context: { kind: "native" } }, childModel: "gpt-5.5",
+      childEffort: "high", followUps: "recommend_only", completion: "retain" },
+    // Two Codex rows: together they offer two models; the row this campaign keeps offers one.
+    capabilities: { ...full, harnesses: full.harnesses!.map((harness) => harness === codexAll ? { ...codexAll,
+      models: [...codexAll.models, { id: "gpt-5.4", displayName: "GPT-5.4", efforts: ["low", "high"] }],
+      supportedPairs: [...codexAll.supportedPairs, { modelId: "gpt-5.4", effortLevels: ["low", "high"] }] } : harness) },
+    retainedRow: codexAll,
+  });
+  const harness = await open(orchestrator(), { campaignBehavior: async () => view });
+  await act(async () => editButton(harness.dialog())!.click());
+  await flush();
+  const form = behaviorForm(harness.dialog());
+  const modelOptions = async () => {
+    const trigger = form.querySelector<HTMLButtonElement>('[aria-label^="Child Model:"]')!;
+    await act(async () => trigger.click());
+    const labels = [...form.ownerDocument.querySelectorAll('[role="option"]')].map((node) => node.textContent ?? "");
+    await act(async () => trigger.click());
+    return labels;
+  };
+  assert.equal((await modelOptions()).some((label) => label.startsWith("GPT-5.4")), false, "the kept row does not offer GPT-5.4");
+  assert.ok((await modelOptions()).some((label) => label.startsWith("GPT-5.5")));
+  // Another harness has its full catalog, and coming back to Codex keeps the row again.
+  await chooseOption(form, "Child Harness", /^Claude Code/);
+  assert.ok((await modelOptions()).some((label) => label.startsWith("Claude Opus 5")));
+  await chooseOption(form, "Child Harness", /^Codex/);
+  assert.equal((await modelOptions()).some((label) => label.startsWith("GPT-5.4")), false);
 });

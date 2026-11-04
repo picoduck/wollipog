@@ -3,7 +3,8 @@ import { plainTextPreview, prioritizedPendingRequests, sessionAttentionStatus } 
 import { statusMeta, statusValues, type StatusMeta } from "./status-meta.js";
 import type { SubagentDescriptor } from "./subagents.js";
 import { splitStepTitle } from "./work-steps.js";
-import { backgroundJobLabel } from "./background-job-stop.js";
+import { backgroundJobKind, backgroundJobLabel, backgroundJobShortId } from "./background-job-stop.js";
+import { formatDuration } from "./format.js";
 import { inputTokenBasis, type InputTokenBasis } from "./session-cost.js";
 
 /**
@@ -39,6 +40,9 @@ export interface WorkerMemberMetadata {
 export interface WorkerRow {
   id: string;
   name: string;
+  /** A background job's name in its two parts, so its row sets the id in mono `--text-faint` as
+   * Background Work's rows do (§4.10). Titles and sentences read `name` whole. */
+  nameParts?: { kind: string; id: string };
   group: WorkerGroup;
   state: WorkerState;
   /** What the worker needs from the user, while `state` is `attention`. */
@@ -281,6 +285,7 @@ export function workerRoster(
   for (const job of session.backgroundJobs ?? []) rows.push({
     id: `background:${job.id}`,
     name: backgroundJobLabel(job),
+    nameParts: { kind: backgroundJobKind(job), id: backgroundJobShortId(job) },
     group: BACKGROUND_GROUP,
     state: backgroundWorkerState(job, session, online(session.runnerId)),
     activity: `${LAUNCH_NOUNS[job.launchType] ?? LAUNCH_NOUNS.unknown} the agent started in the background`,
@@ -339,6 +344,20 @@ export function memberName(member: Pick<SessionView, "title" | "agentName">, run
 export function isCurrentWorker(row: Pick<WorkerRow, "state">): boolean {
   return row.state === "running" || row.state === "queued" || row.state === "awaiting_prompt" ||
     row.state === "attention" || row.state === "unverified";
+}
+
+const HOUR_MS = 3_600_000;
+const DAY_MS = 24 * HOUR_MS;
+
+/**
+ * A roster row's trailing elapsed time (#2857): "3h 20m", "5m 12s" under a day, then days and hours
+ * past it, as Campaign Status's `measuredDuration()` reads ("2d 3h", "16d"), never "384h 14m".
+ */
+export function workerElapsed(durationMs: number): string {
+  if (!Number.isFinite(durationMs) || durationMs < DAY_MS) return formatDuration(durationMs);
+  const hours = Math.floor(durationMs / HOUR_MS);
+  const days = Math.floor(hours / 24);
+  return hours % 24 ? `${days}d ${hours % 24}h` : `${days}d`;
 }
 
 /** Whether a worker is verifiably working or waiting: its elapsed time counts to now, and the session

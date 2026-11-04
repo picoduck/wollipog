@@ -44,7 +44,23 @@ Runner policy is explicit:
 Concurrency can wait, record a skip, or run parallel actions. Parallel prompt-existing-session is
 rejected because two turns cannot safely share one provider session, and a prompt occurrence remains
 unclaimed until its target session is idle. Accepted actions reconcile to
-success or failure from their durable session or workflow status.
+success or failure from their durable session or workflow status. A validated runner governance
+report instead records `ceiling_paused`, with `governancePause` naming its session, trip ID,
+`cost_budget` or `max_tool_calls`, configured threshold and observed value. This is a receipt of
+interrupted work, not a claim that no output exists; the session's approval card remains available
+to continue or stop it. Run History and Run Details show a warning and the configured ceiling.
+Workflow pauses retain failure cleanup semantics: pending sibling commands are terminalized,
+active sibling turns receive cancellation, and the workflow instance finishes before the execution
+releases its concurrency slot. Matching requires a started command or workflow attempt and the exact
+runner trip's authenticated audit record at or after that start and the execution claim. Retained
+cards from earlier work cannot classify an undelivered occurrence, and later turns' reports cannot
+classify a completed command. Terminal executions cannot gain
+provider-retry replacement commands from trailing receipts.
+Only runner evidence establishes this distinction: pre-v129 runners and generic provider
+cancellations retain their existing settlement, and already terminal receipts are never rewritten.
+The additive `governance_pause_json` column preserves the original SQLite status constraint;
+pause rows use its legacy `failed` terminal slot and project as `ceiling_paused` on authenticated
+reads and in the status audit event. No table rebuild or historical-row backfill is needed.
 
 ### Delivery guarantee
 
@@ -92,9 +108,19 @@ fixed, content-free status text. Authenticated execution history retains diagnos
 inspection in the Automations view. Push endpoints and credentials stay in the device subscription
 tables, never in a schedule.
 
+An existing `failed` subscription also receives a governance pause, using the content-free
+“Automation Paused” card at normal urgency and explaining that partial or complete output may be
+available. Ordinary provider failures retain the high-urgency “Automation Failed” card. The
+`execution_status_changed` audit event records the distinct pause status, source session, trip ID,
+ceiling, threshold and observed value, so operators can distinguish a crash from a governance stop
+and identify the exact bound without reading provider content.
+
 Authenticated routes are:
 
-- `GET /api/automations`
+- `GET /api/automations`: each automation also carries an optional `latestExecution`, its newest
+  execution's `status` and `at` (completion, else start, else creation), with no error text. It is
+  absent for an automation that has never run and from control planes that predate it; the
+  Automations list then shows no Last Run Failed badge, and the automation's page still does.
 - `POST /api/automations`
 - `GET /api/automations/:id`
 - `PUT /api/automations/:id`

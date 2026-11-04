@@ -14,6 +14,7 @@ import {
 } from "./subscription-usage.js";
 import type { AgentProcess, SpawnAgentOptions } from "./spawn.js";
 import { agentForProviderAccount } from "./provider-accounts.js";
+import { usageWindowRejection } from "./automatic-provider-account-switch.js";
 
 const base = { sourceId: "a".repeat(32), runnerId: "runner-1", agentId: "agent-1" };
 
@@ -941,7 +942,7 @@ test("a status-only Claude event is explained without claiming a reset time was 
   assert.match(snapshot?.detail ?? "", /reported allowance windows for this source without utilization/);
 });
 
-test("a delayed event cannot walk utilization backwards inside one window", () => {
+test("a single delayed event cannot walk utilization backwards inside one window", () => {
   let now = OBSERVED_AT;
   const manager = new SubscriptionUsageManager({
     runnerId: "runner-1",
@@ -960,22 +961,122 @@ test("a delayed event cannot walk utilization backwards inside one window", () =
         unifiedWindows: { five_hour: { utilization, resetsAt: FIVE_HOUR_RESET } },
       }),
     });
+  const fiveHourUsed = () =>
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent;
   observe(0.9);
   now = OBSERVED_AT + 1_000;
   // Concurrent sessions share one source; this one observed the account earlier but reported
-  // later. Same window, so its lower usage is stale rather than a genuine decrease.
+  // later. Same window, and nothing yet confirms its lower usage, so the window holds.
   observe(0.4);
-  assert.equal(
-    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
-    90,
-    "usage only accumulates within a window, so the lower late reading is older data",
-  );
+  assert.equal(fiveHourUsed(), 90, "one lower reading inside a window is held, not applied");
   now = OBSERVED_AT + 2_000;
   observe(0.95);
+  assert.equal(fiveHourUsed(), 95, "a genuine increase in the same window still applies");
+  now = OBSERVED_AT + 3_000;
+  observe(0.4);
+  now = OBSERVED_AT + 4_000;
+  observe(0.96);
+  now = OBSERVED_AT + 5_000;
+  observe(0.4);
   assert.equal(
-    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "five_hour")?.usedPercent,
-    95,
-    "a genuine increase in the same window still applies",
+    fiveHourUsed(),
+    96,
+    "a higher reading discards the held one, so lower readings must arrive consecutively to apply",
+  );
+});
+
+test("a quota reset inside one window applies once a second event confirms it", () => {
+  let now = OBSERVED_AT;
+  const published: SubscriptionUsageSnapshot[] = [];
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: (snapshot) => published.push(snapshot),
+    now: () => now,
+  });
+  // The shape Claude Code reported before and after a user applied a quota reset (#3482): the
+  // weekly window keeps its reset time while its utilization drops.
+  const observe = (status: string, rateLimitType: string, weekly: number) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, {
+      provider: "claude",
+      kind: "sparse",
+      payload: rateLimitEvent({
+        status,
+        rateLimitType,
+        resetsAt: rateLimitType === "seven_day" ? WEEK_RESET : FIVE_HOUR_RESET,
+        unifiedWindows: {
+          five_hour: { utilization: 0.25, resetsAt: FIVE_HOUR_RESET },
+          seven_day: { utilization: weekly, resetsAt: WEEK_RESET },
+        },
+      }),
+    });
+  const weekly = () => manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "seven_day");
+  observe("rejected", "seven_day", 1);
+  assert.equal(weekly()?.status, "exhausted");
+  assert.deepEqual(usageWindowRejection(manager.inventory()[0], now), { resetsAt: WEEK_RESET * 1000 });
+
+  now = OBSERVED_AT + 60_000;
+  observe("allowed", "five_hour", 0.29);
+  assert.equal(weekly()?.usedPercent, 100, "the first lower reading alone is indistinguishable from a late event");
+
+  // Within the event dedupe interval: the identical repeat is the confirmation, not noise.
+  now = OBSERVED_AT + 61_000;
+  observe("allowed", "five_hour", 0.29);
+  assert.deepEqual(weekly(), {
+    id: "seven_day",
+    label: "Weekly — All Models",
+    usedPercent: 29,
+    remainingPercent: 71,
+    resetsAt: WEEK_RESET * 1000,
+    status: "available",
+  });
+  assert.equal(usageWindowRejection(manager.inventory()[0], now), null,
+    "the account is eligible for switching again");
+  assert.equal(published.at(-1)?.buckets.find((bucket) => bucket.id === "seven_day")?.usedPercent, 29);
+
+  now = OBSERVED_AT + 62_000;
+  observe("allowed", "five_hour", 0.3);
+  assert.equal(weekly()?.usedPercent, 30, "usage accumulates again from the reset level");
+});
+
+test("only the repeat of an event holding a decrease skips the event dedupe", () => {
+  let now = OBSERVED_AT;
+  let publishes = 0;
+  const manager = new SubscriptionUsageManager({
+    runnerId: "runner-1",
+    agents: () => [claudeAgent()],
+    resolveEnv: () => ({}),
+    publish: () => { publishes += 1; },
+    now: () => now,
+  });
+  const observe = (unifiedWindows: Record<string, unknown>) =>
+    manager.observe("claude", "claude-code", { kind: "native" }, {
+      provider: "claude",
+      kind: "sparse",
+      payload: rateLimitEvent({ status: "allowed", rateLimitType: "five_hour", unifiedWindows }),
+    });
+  observe({
+    five_hour: { utilization: 0.2, resetsAt: FIVE_HOUR_RESET },
+    seven_day: { utilization: 0.9, resetsAt: WEEK_RESET },
+  });
+  now += 1_000;
+  observe({
+    five_hour: { utilization: 0.2, resetsAt: FIVE_HOUR_RESET },
+    seven_day: { utilization: 0.5, resetsAt: WEEK_RESET },
+  });
+  // The weekly reading stays held while events that never mention that window keep arriving.
+  const fiveHourOnly = { five_hour: { utilization: 0.3, resetsAt: FIVE_HOUR_RESET } };
+  now += 1_000;
+  observe(fiveHourOnly);
+  const afterFirst = publishes;
+  now += 1_000;
+  observe(fiveHourOnly);
+  assert.equal(publishes, afterFirst, "an identical event that held nothing is still deduplicated");
+  assert.equal(
+    manager.inventory()[0]?.buckets.find((bucket) => bucket.id === "seven_day")?.usedPercent,
+    90,
+    "an event that does not report the held window neither confirms nor discards it",
   );
 });
 

@@ -149,12 +149,13 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
     ["service", ["service install", "service status", "service restart", "service logs", "service upgrade", "service uninstall"]],
     ["admin", ["admin pairing-url", "admin status", "admin doctor", "admin device create", "admin runner-credential"]],
     ["session", ["session list", "session capabilities", "session create", "session wait", "session guardrails", "--effort"]],
-    ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard"]],
+    ["worktree", ["worktree create", "worktree attach", "worktree select", "worktree discard", "worktree delete-refs", "packed-refs.lock"]],
     ["issue-closure", ["request --proposal", "execute <occurrence-id>", "protocol v194+", "uncertain"]],
     ["campaign", ["plan --input", "update-item <work-item-id>", "assign <work-item-id>", "adjudicate <recommendation-id>", "work-items", "protocol v196+", "grant no authority"]],
     ["decision", ["decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision", "--snapshot"]],
     ["init", ["wollipog init", ".wollipog.json", "does not run", "never overwritten"]],
-    ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane"]],
+    ["pr", ["pr wait", "--repo", "--head", "--timeout", "--interval", "--any-failure", "pending, never passing", "124 timeout", "needs no control plane",
+      "pr closures", "--intended", "--file", "does not close #N", "Refs #N", "intendedClosures"]],
   ];
   for (const [topic, expected] of topics) {
     const result = await captureCli(["help", topic]);
@@ -172,7 +173,7 @@ test("CLI topic help is complete, successful, and side-effect free", async () =>
 test("pr wait runs locally through gh with outcome exit codes and never contacts the control plane", async () => {
   const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
   const json = (value: unknown): GhOutcome => ({ stdout: JSON.stringify(value), stderr: "", code: null, timedOut: false });
-  const fakeGh = (conclusion: string | null, extra: Record<string, unknown> = {}) => {
+  const fakeGh = (conclusion: string | null, extra: Record<string, unknown> = {}, admitted = false) => {
     const calls: string[][] = [];
     const gh: GhRunner = async (args) => {
       calls.push(args);
@@ -181,9 +182,12 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
         return json({ data: { repository: { defaultBranchRef: { name: "main" }, pullRequest: {
           url: "https://github.com/picoduck/wollipog/pull/7", state: "OPEN", isDraft: false, headRefOid: head, baseRefName: "main",
           mergeStateStatus: "BLOCKED", mergeCommit: null, mergeQueueEntry: null,
+          createdAt: "2026-10-11T10:00:00Z", timelineItems: { nodes: [{ createdAt: "2026-10-12T09:00:00Z" }] },
           commits: { nodes: [{ commit: { oid: head, statusCheckRollup: { contexts: { pageInfo: { hasNextPage: false }, nodes: [
-            { __typename: "CheckRun", name: "CI", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion, startedAt: "t" },
-            ...(conclusion === "SKIPPED" ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
+            { __typename: "CheckRun", name: "CI", status: conclusion ? "COMPLETED" : "IN_PROGRESS", conclusion, startedAt: "t",
+              ...(admitted ? { databaseId: 200 } : {}),
+            },
+            ...(conclusion === "SKIPPED" && !admitted ? [{ __typename: "CheckRun", name: "Browser", status: "QUEUED", conclusion: null }] : []),
           ] } } } }] },
           ...extra,
         } } } });
@@ -191,6 +195,17 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
       if (args.some((arg) => arg.includes("/rules/branches/"))) {
         return json([{ type: "required_status_checks", parameters: { required_status_checks: [{ context: "CI" }] } }]);
       }
+      if (args.some((arg) => arg.includes("/check-runs/"))) return json({
+        id: 200, head_sha: head, name: "CI", status: "completed", conclusion: "skipped", check_suite: { id: 100 },
+      });
+      if (args.some((arg) => arg.includes("/attempts/"))) return json({ total_count: 1, jobs: [{
+        name: "CI", check_run_url: "https://api.github.com/repos/picoduck/wollipog/check-runs/200",
+        run_attempt: 1, status: "completed", conclusion: "skipped",
+      }] });
+      if (args.some((arg) => arg.includes("/actions/runs?"))) return json({ total_count: 1, workflow_runs: [{
+        id: 20, workflow_id: 30, check_suite_id: 100, head_sha: head, event: "pull_request", run_attempt: 1,
+        created_at: "2026-10-12T10:00:00Z", status: "completed",
+      }] });
       return json({});
     };
     return { gh, calls };
@@ -223,6 +238,12 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
   assert.equal(skipped.code, 124, "an old skipped draft check cannot certify newly admitted CI");
   assert.equal(JSON.parse(skipped.stdout).outcome, "timeout");
   assert.deepEqual(JSON.parse(skipped.stdout).checks.required, [{ name: "CI", state: "pending", reported: true }]);
+
+  const legitimateSkip = await run(["pr", "wait", "picoduck/wollipog#7", "--head", head, "--timeout", "1000", "--json"],
+    fakeGh("SKIPPED", {}, true).gh);
+  assert.equal(legitimateSkip.code, 0, "a current admitted skip satisfies the check wait behind an independent gate");
+  assert.equal(JSON.parse(legitimateSkip.stdout).outcome, "checks_passed");
+  assert.equal(JSON.parse(legitimateSkip.stdout).merged, false);
 
   const merged = await run(["pr", "wait", "https://github.com/picoduck/wollipog/pull/7", "--json"],
     fakeGh(null, { state: "MERGED", mergeCommit: { oid: head } }).gh);
@@ -292,6 +313,71 @@ test("pr wait runs locally through gh with outcome exit codes and never contacts
     assert.equal(help.code, 0, argv.join(" "));
     assert.match(help.stdout, /^Usage: wollipog pr wait/u);
   }
+});
+
+test("pr closures reports what merging a pull request or a draft would close, against --intended (#3713)", async () => {
+  const head = "44579c6c25235598f1a28f8ccb0449cb8dbbc810";
+  const calls: string[][] = [];
+  const gh: GhRunner = async (args) => {
+    calls.push(args);
+    if (args[0] === "repo") return { stdout: "picoduck/wollipog\n", stderr: "", code: null, timedOut: false };
+    return { stdout: JSON.stringify({ data: { repository: { nameWithOwner: "picoduck/wollipog", pullRequest: {
+      number: 7, state: "OPEN", headRefOid: head, body: "Refs #3635. This PR does not close #3635.",
+      closingIssuesReferences: { nodes: [{ number: 3713, repository: { nameWithOwner: "picoduck/wollipog" } }], pageInfo: { hasNextPage: false } },
+    } } } }), stderr: "", code: null, timedOut: false };
+  };
+  const run = async (args: string[], runner: GhRunner = gh) => {
+    let stdout = "";
+    let stderr = "";
+    const code = await runPullRequestCli(args, true, { stdout: (text) => { stdout += text; }, stderr: (text) => { stderr += text; } }, runner);
+    return { code, stdout, stderr };
+  };
+
+  const flagged = await run(["pr", "closures", "picoduck/wollipog#7", "--intended", "https://github.com/picoduck/wollipog/issues/3713", "--json"]);
+  assert.equal(flagged.code, 3, "an undeclared closure fails the check");
+  assert.deepEqual(JSON.parse(flagged.stdout), {
+    repository: "picoduck/wollipog", pullRequest: 7, state: "OPEN", headSha: head,
+    closures: [
+      { issue: "picoduck/wollipog#3635", sources: ["description"], excerpt: "Refs #3635. This PR does not close #3635." },
+      { issue: "picoduck/wollipog#3713", sources: ["linked"] },
+    ],
+    undeclared: ["picoduck/wollipog#3635"], unmade: [],
+  });
+  assert.equal(calls.some((args) => args[0] === "repo"), false, "an owner/name reference needs no repository lookup");
+
+  const matched = await run(["pr", "closures", "7", "--intended", "#3635", "--intended=#3713", "--json"]);
+  assert.equal(matched.code, 0);
+  assert.deepEqual(JSON.parse(matched.stdout).undeclared, []);
+  assert.deepEqual(calls.at(-2), ["repo", "view", "--json", "nameWithOwner", "--jq", ".nameWithOwner"], "a bare number uses this checkout");
+
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cli-closures-"));
+  try {
+    const draft = join(root, "body.md");
+    writeFileSync(draft, "Slice one. Refs #12.\n\n`closes #13` is how GitHub closes an issue.\n\nIt must not auto-close #14.\n");
+    const fromFile = await run(["pr", "closures", "--file", draft, "--repo", "picoduck/wollipog", "--intended", "#15", "--json"]);
+    assert.equal(fromFile.code, 3);
+    assert.deepEqual(JSON.parse(fromFile.stdout), { repository: "picoduck/wollipog",
+      closures: [{ issue: "picoduck/wollipog#14", sources: ["description"], excerpt: "It must not auto-close #14." }],
+      undeclared: ["picoduck/wollipog#14"], unmade: ["picoduck/wollipog#15"] });
+    writeFileSync(draft, "Refs #12 and #14.\n");
+    assert.equal((await run(["pr", "closures", "--file", draft, "--json"])).code, 0, "a clean draft passes; the repository comes from gh");
+    assert.equal((await run(["pr", "closures", "--file", join(root, "missing.md"), "--repo", "a/b", "--json"])).code, 1);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+
+  const unreadable: GhRunner = async () => ({ stdout: "", stderr: "HTTP 401: Bad credentials", code: 1, timedOut: false });
+  const denied = await run(["pr", "closures", "picoduck/wollipog#7", "--json"], unreadable);
+  assert.equal(denied.code, 1);
+  assert.equal(JSON.parse(denied.stdout).error, "gh in this session's context is not signed in to github.com.");
+  for (const args of [["pr", "closures"], ["pr", "closures", "7", "8"], ["pr", "closures", "--file"],
+    ["pr", "closures", "7", "--intended"], ["pr", "closures", "7", "--repo", "a/b", "--intended", "nope"],
+    ["pr", "closures", "gitlab.example.com/group/project!7"], ["pr", "closures", "--file", "body.md", "7", "--repo", "a/b"]]) {
+    assert.equal((await run([...args, "--json"])).code, 2, args.join(" "));
+  }
+  const help = await captureCli(["pr", "closures", "--help"]);
+  assert.equal(help.code, 0);
+  assert.match(help.stdout, /wollipog pr closures --file <description\.md>/u);
 });
 
 test("local init succeeds without control-plane credentials and emits stable content-safe JSON", async () => {
@@ -669,6 +755,23 @@ test("CLI JSON create and prompt commands reuse the manager routes and reject in
   assert.match(JSON.parse(incompatible).error, /incompatible/);
 });
 
+test("CLI explains a refused session credential without device pairing instructions", async () => {
+  for (const detail of ["unauthorized — open the startup pairing URL or pair this device", "session agent credential refused: runner reconnecting; retry after the runner reconnects"]) {
+    let output = "";
+    const code = await runWollipogCli(
+      ["node", "cli.js", "--wollipog-cli", "session", "list", "--json"],
+      { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "session-token", WOLLIPOG_SESSION_ID: "s_self" },
+      { stdout: (text) => { output += text; }, stderr: () => {} },
+      async () => ({ ok: false, status: 401, text: async () => JSON.stringify({ error: detail }) }),
+    );
+    assert.equal(code, 1);
+    assert.match(JSON.parse(output).error, /session agent credential refused:/);
+    assert.match(JSON.parse(output).error, /Orchestrator|retry/);
+    assert.doesNotMatch(JSON.parse(output).error, /pair/i);
+    if (detail.startsWith("session agent")) assert.ok(JSON.parse(output).error.includes(detail));
+  }
+});
+
 test("CLI rejects explicit effort against pre-v138 control planes without creating a session", async () => {
   const requests: string[] = [];
   const fetch: McpFetch = async (url) => {
@@ -845,6 +948,7 @@ test("CLI emits JSON for get, events, prompt, wait, and stop core commands", asy
     { argv: ["session", "wait", "s_child", "--for", "completed", "--timeout", "50"], method: "GET", path: "/api/sessions/s_child" },
     { argv: ["session", "stop", "s_child"], method: "POST", path: "/api/sessions/s_child/stop" },
     { argv: ["session", "stop-job", "s_child", "monitor-1"], method: "POST", path: "/api/sessions/s_child/background-jobs/monitor-1/stop" },
+    { argv: ["session", "release-hold", "s_child", "worktree-rebind:5000"], method: "POST", path: "/api/sessions/s_child/queue-hold/release" },
     { argv: ["session", "steering", "s_child"], method: "GET", path: "/api/sessions/s_child/steering" },
     { argv: ["session", "steering-get", "s_child", "sub /1"], method: "GET", path: "/api/sessions/s_child/steering/sub%20%2F1" },
     { argv: ["session", "resolve-steering", "s_child", "sub /1", "queue_again"], method: "POST", path: "/api/sessions/s_child/steering/sub%20%2F1/resolve" },
@@ -905,6 +1009,10 @@ test("CLI session wait exits 124 on a timeout result and 1 on an unknown state",
   assert.equal(timedOut.body.outcome, "timeout");
   assert.deepEqual(timedOut.body.waitingFor, ["completed"]);
   assert.equal(timedOut.body.session.status, "running");
+  assert.equal(timedOut.body.session.runnerId, undefined, "a timeout prints the compact status by default");
+  const full = await run("--for", "completed", "--timeout", "1", "--interval", "50", "--full");
+  assert.equal(full.code, 124);
+  assert.equal(full.body.session.runnerId, "r1", "--full prints the full metadata");
 
   const readsBefore = sessionReads.length;
   const refused = await run("--for", "needs_input");
@@ -1086,6 +1194,48 @@ test("CLI artifact attach uploads a file by path and prints only its metadata", 
   }
 });
 
+test("CLI worktree delete-refs acts only on the injected session and checks the control plane first (#3316)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let protocolVersion: number = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    const body = url.endsWith("/api/compatibility") ? { protocolVersion }
+      : { refDeletion: { worktreePath: "/repo/wt", deleted: ["CHERRY_PICK_HEAD"], absent: ["AUTO_MERGE"] } };
+    return { ok: true, status: 200, text: async () => JSON.stringify(body) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  let stdout = "";
+  const io = { stdout: (text: string) => { stdout += text; }, stderr: () => {} };
+  const pick = "a".repeat(40);
+  const tree = "b".repeat(40);
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "worktree", "delete-refs",
+    "--ref", `CHERRY_PICK_HEAD=${pick}`, `--ref=AUTO_MERGE=${tree}`, "--json"], env, io, fetch), 0);
+  const request = calls.find((call) => call.url === "http://cp/api/sessions/self/worktrees/delete-refs");
+  assert.ok(request, "the session's own route is used");
+  assert.deepEqual(JSON.parse(request.body!), { refs: [{ ref: "CHERRY_PICK_HEAD", oldOid: pick }, { ref: "AUTO_MERGE", oldOid: tree }] });
+  assert.deepEqual(JSON.parse(stdout), { worktreePath: "/repo/wt", deleted: ["CHERRY_PICK_HEAD"], absent: ["AUTO_MERGE"] });
+
+  for (const argv of [
+    ["worktree", "delete-refs", "--json"],
+    ["worktree", "delete-refs", "--ref", "CHERRY_PICK_HEAD", "--json"],
+    ["worktree", "delete-refs", "--ref", `=${pick}`, "--json"],
+    ["worktree", "delete-refs", "--session", "other", "--ref", `CHERRY_PICK_HEAD=${pick}`, "--json"],
+  ]) {
+    calls.length = 0;
+    stdout = "";
+    assert.notEqual(await runWollipogCli(["node", "cli.js", "--wollipog-cli", ...argv], env, io, fetch), 0, argv.join(" "));
+    assert.equal(calls.length, 0, `${argv.join(" ")} issues no request`);
+  }
+
+  calls.length = 0;
+  stdout = "";
+  protocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion - 1;
+  assert.equal(await runWollipogCli(["node", "cli.js", "--wollipog-cli", "worktree", "delete-refs",
+    "--ref", `CHERRY_PICK_HEAD=${pick}`, "--json"], env, io, fetch), 1);
+  assert.match(JSON.parse(stdout).error, new RegExp(`requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.sessionWorktreeRefDeletion}`, "u"));
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane receives no request");
+});
+
 test("CLI artifact help is discoverable and malformed artifact commands issue no request", async () => {
   const rootHelpText = await captureCli(["help"]);
   assert.match(rootHelpText.stdout, /^\s+artifact\s+Attach an image file/mu, "agent instructions detect the command from root help");
@@ -1250,12 +1400,14 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
 
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
   const rootHelpText = await captureCli(["help"]);
-  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, and reconcile typed workflow decisions/mu);
+  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, execute, reconcile, and withdraw typed workflow decisions/mu);
   const topic = await captureCli(["help", "workflow-decisions"]);
   assert.equal(topic.code, 0);
   for (const text of [
     "decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision",
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
+    "decision withdraw", "withdraw_workflow_decision", "protocol v269",
+    "decision ask-owner", "decision hand-to-owner", "request_owner_decision", "hand_workflow_decision_to_owner", "protocol v281",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
@@ -1275,6 +1427,18 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "list", "--limit", "1.5"],
     ["decision", "list", "--cursor"],
     ["decision", "list", "unexpected"],
+    ["decision", "withdraw", "--reason", "Not needed"],
+    ["decision", "withdraw", "workflow_1"],
+    ["decision", "withdraw", "workflow_1", "--reason", " "],
+    ["decision", "withdraw", "workflow_1", "--reason", "Not needed", "--session"],
+    ["decision", "ask-owner", "--resource-key", "k", "--question", "Q?", "--options", "[]"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "not-json"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "{}"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "[]", "--session", "child"],
+    ["decision", "hand-to-owner", "--reason", "Kept"],
+    ["decision", "hand-to-owner", "workflow_1"],
+    ["decision", "hand-to-owner", "workflow_1", "--reason", "Kept", "--session"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));
@@ -1330,6 +1494,29 @@ test("CLI reconciliation requires protocol v153 before calling the endpoint", as
   assert.deepEqual(calls, ["http://cp/api/compatibility"]);
 });
 
+test("CLI withdrawal forwards the exact reason and target, and refuses a pre-v269 control plane (#3917)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { occurrenceId: "workflow_1", status: "revoked" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "parent" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "withdraw", ...args, "--json"],
+    env, { stdout: () => {}, stderr: () => {} }, fetch);
+  assert.equal(await invoke(["workflow_1", "--reason", "Superseded by #2."]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/parent/workflow-decisions/workflow_1/withdraw");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { reason: "Superseded by #2." });
+  assert.equal(await invoke(["workflow_1", "--reason", "Not needed.", "--session", "child"]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { reason: "Not needed.", sessionId: "child" },
+    "an Orchestrator names its child in the body; the path stays its own session");
+  calls.length = 0;
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal - 1;
+  assert.equal(await invoke(["workflow_1", "--reason", "Not needed."]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")), "an older control plane is never sent the withdrawal");
+});
+
 test("CLI issue closure preserves the exact proposal and refuses other sessions or old control planes", async () => {
   const proposal = { requestId: "close-123", issue: 123, reason: "completed", explanation: "Delivered.",
     evidence: ["Verified merged PR."], comment: "Exact\nclosing comment." };
@@ -1355,6 +1542,34 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   version = 193;
   assert.equal(await invoke(["issue-closure", "request", "--proposal", JSON.stringify(proposal), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+});
+
+test("CLI automation proposals preserve configuration and expose read/execute without approval commands", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = PROTOCOL_VERSION;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { authority: "human", status: "pending" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args, "--json"], env,
+    { stdout() {}, stderr() {} }, fetch);
+  const proposal = { requestId: "daily-1", resourceKey: "daily", spec: { name: "Daily", prompt: "Exact\ntext" } };
+  assert.equal(await invoke(["automation", "request", "--proposal", JSON.stringify(proposal)]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), proposal);
+  assert.equal(await invoke(["automation", "get", "workflow_1"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/self/automation-proposals/workflow_1");
+  assert.equal(await invoke(["automation", "execute", "workflow_1", "--digest", "a".repeat(64)]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { resourceDigest: "a".repeat(64) });
+  calls.length = 0;
+  assert.equal(await invoke(["automation", "get", "workflow_1", "--session", "other"]), 2);
+  assert.equal(calls.length, 0);
+  assert.equal(await invoke(["automation", "approve", "workflow_1"]), 2);
+  version = 231;
+  assert.equal(await invoke(["automation", "request", "--proposal", JSON.stringify(proposal)]), 1);
+  assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
+  assert.match(resolveHelp(["help", "automation"])!.text, /human approval/);
 });
 
 test("CLI exact-result handoff forwards the descendant revision and refuses its own session", async () => {
@@ -1408,16 +1623,6 @@ test("CLI campaign ledger commands map to their tools and refuse other sessions 
     "http://cp/api/sessions/parent/orchestrator-campaign/work-items?limit=5&state=all&includeRecommendations=true");
   assert.equal(await invoke(["campaign", "work-items", "--item", "cwi_1", "--json"]), 0);
   assert.equal(last().url, "http://cp/api/sessions/parent/orchestrator-campaign/work-items/cwi_1");
-  const review={requestId:"review1",workItemId:"cwi_1",pullRequest:{repository:"picoduck/wollipog",number:3065},baseSha:"a".repeat(40),headSha:"b".repeat(40),costUsd:5,toolCalls:20,brief:"Review the pinned snapshot."};
-  assert.equal(await invoke(["campaign","review","--input",JSON.stringify(review),"--json"]),0);
-  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs");
-  assert.deepEqual(JSON.parse(last().body!),review);
-  assert.equal(await invoke(["campaign","review-job","review_id","--json"]),0);
-  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs/review_id");
-  assert.equal(await invoke(["campaign","review-jobs","--limit","10","--cursor","review_id","--item","cwi_1","--json"]),0);
-  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs?limit=10&afterJobId=review_id&workItemId=cwi_1");
-  assert.equal(await invoke(["campaign","review-report","review_id","--json"]),0);
-  assert.equal(last().url,"http://cp/api/sessions/parent/orchestrator-campaign/review-jobs/review_id/report");
   calls.length = 0;
   assert.equal(await invoke(["campaign", "assign", "cwi_1", "child", "--session", "other", "--json"]), 2);
   assert.equal(await invoke(["campaign", "plan", "--json"]), 2, "plan requires --input");
@@ -1425,54 +1630,69 @@ test("CLI campaign ledger commands map to their tools and refuse other sessions 
   version = 195;
   assert.equal(await invoke(["campaign", "plan", "--input", JSON.stringify(plan), "--json"]), 1);
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
-  calls.length=0;version=216;
-  assert.equal(await invoke(["campaign","review","--input",JSON.stringify(review),"--json"]),1);
-  assert.ok(calls.every((call)=>call.url.endsWith("/api/compatibility")));
+
 });
 
-test("review commands map to the session's own cross-model review tools (#3306)", async () => {
+test("review session commands map to the session's own review session tools (#3368)", async () => {
   const calls: Array<{ url: string; method?: string; body?: string }> = [];
   let version = PROTOCOL_VERSION;
   const fetch: McpFetch = async (url, init) => {
     calls.push({ url, method: init?.method, body: init?.body });
     return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
-      ? { protocolVersion: version } : { jobId: "srj_abcdefgh", terminal: false }) };
+      ? { protocolVersion: version } : { reviewSessionId: "s_review", terminal: false }) };
   };
   const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
   const io = { stdout: () => {}, stderr: () => {} };
   const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args], env, io, fetch);
   const last = () => calls.filter((call) => !call.url.endsWith("/api/compatibility")).at(-1)!;
-  const root = mkdtempSync(join(tmpdir(), "wollipog-review-brief-"));
+  const root = mkdtempSync(join(tmpdir(), "wollipog-review-session-brief-"));
   try {
     const brief = join(root, "brief.md");
-    writeFileSync(brief, "# Intent\nFix #3306.\n");
+    writeFileSync(brief, "# Intent\nReview #3368.\n");
     const head = "c".repeat(40);
-    assert.equal(await invoke(["review", "run", "--repo", "picoduck/wollipog", "--pr", "3307", "--head", head, "--brief-file", brief, "--json"]), 0);
+    assert.equal(await invoke(["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "3368", "--head", head, "--brief-file", brief, "--json"]), 0);
     assert.equal(last().method, "POST");
-    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews");
-    assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3307 }, headSha: head, brief: "# Intent\nFix #3306.\n" });
-    assert.equal(await invoke(["review", "run", "--repo", "picoduck/wollipog", "--pr", "3307", "--head", head, "--scope", "full", "--full-reason", "rebased", "--json"]), 0);
-    assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3307 }, headSha: head, scope: "full", fullReason: "rebased" });
-    assert.equal(await invoke(["review", "get", "srj_abcdefgh", "--json"]), 0);
-    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews/srj_abcdefgh");
-    assert.equal(await invoke(["review", "list", "--limit", "5", "--cursor", "srj_abcdefgh", "--json"]), 0);
-    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews?limit=5&afterJobId=srj_abcdefgh");
-    assert.equal(await invoke(["review", "cancel", "srj_abcdefgh", "--json"]), 0);
-    assert.equal(last().url, "http://cp/api/sessions/self/cross-model-reviews/srj_abcdefgh/cancel");
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions");
+    assert.deepEqual(JSON.parse(last().body!), { pullRequest: { repository: "picoduck/wollipog", number: 3368 }, headSha: head, brief: "# Intent\nReview #3368.\n" });
+    assert.equal(await invoke(["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "3368", "--head", head, "--brief-file", brief,
+      "--full-reason", "Rebased onto main", "--json"]), 0);
+    assert.equal(JSON.parse(last().body!).fullReason, "Rebased onto main");
+    assert.equal(await invoke(["review", "session", "get", "s_review", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions/s_review");
+    assert.equal(await invoke(["review", "session", "list", "--limit", "5", "--cursor", "s_review", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions?limit=5&afterReviewSessionId=s_review");
+    assert.equal(await invoke(["review", "session", "cancel", "s_review", "--json"]), 0);
+    assert.equal(last().url, "http://cp/api/sessions/self/review-sessions/s_review/cancel");
 
     calls.length = 0;
     for (const args of [
-      ["review", "run", "--repo", "picoduck/wollipog", "--head", head],
-      ["review", "run", "--repo", "picoduck/wollipog", "--pr", "0", "--head", head],
-      ["review", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--full-reason", "why"],
-      ["review", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", join(root, "missing.md")],
-      ["review", "get", "srj_abcdefgh", "--session", "other"],
-      ["review", "get"],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "0", "--head", head, "--brief-file", brief],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", join(root, "missing.md")],
+      ["review", "session", "run", "--repo", "picoduck/wollipog", "--pr", "1", "--head", head, "--brief-file", brief, "--full-reason", "--json"],
+      ["review", "session", "get", "s_review", "--session", "other"],
+      ["review", "session", "get"],
     ]) assert.equal(await invoke([...args, "--json"]), 2, args.join(" "));
     assert.equal(calls.length, 0);
-    version = RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob - 1;
-    assert.equal(await invoke(["review", "list", "--json"]), 1);
+    version = RUNNER_CAPABILITY_MIN_PROTOCOL.reviewSession - 1;
+    assert.equal(await invoke(["review", "session", "list", "--json"]), 1);
     assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
-    assert.equal(resolveHelp(["help", "review"])?.ok, true);
   } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("retired review CLI spellings refuse with review-session guidance without contacting a control plane", async () => {
+  for (const args of [["review", "run"], ["review", "get", "old"], ["review", "list"], ["review", "cancel", "old"],
+    ["campaign", "review"], ["campaign", "review-job", "old"], ["campaign", "review-jobs"], ["campaign", "review-report", "old"]]) {
+    let output = ""; let calls = 0;
+    const result = await runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args, "--json"], {},
+      { stdout: text => { output += text; }, stderr: text => { output += text; } },
+      async () => { calls++; throw Error("must not contact a retired endpoint"); });
+    assert.equal(result, 2, args.join(" "));
+    assert.match(output, /retired.*review session/u);
+    assert.equal(calls, 0);
+  }
+  const help = resolveHelp(["help", "review"])!.text;
+  assert.match(help, /review session run/u);
+  assert.doesNotMatch(help, /review run|review get|review list|review cancel|cross_model_review/u);
+  assert.doesNotMatch(resolveHelp(["help", "campaign"])!.text, /review-job|review-report|campaign review/u);
 });

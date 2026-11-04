@@ -7,7 +7,10 @@ for (const theme of ["dark", "light"]) {
       await page.goto(`/campaign-status-e2e.html?scenario=campaign&budget=1&theme=${theme}`);
       const summary = page.locator(".campaign-status-summary");
       await expect(summary).toContainText("Campaign Allowance");
-      await expect(summary).toContainText("$100.00, 2000 tool calls, 4 concurrent workers, 3 accepted follow-ups");
+      // The follow-up limit is an approval threshold, not an allowance ceiling (#2940): it has its own section.
+      await expect(summary).toContainText("$100.00, 2000 tool calls, 4 concurrent workers");
+      await expect(summary.locator("dt", { hasText: "Campaign Allowance" }).locator("+ dd")).not.toContainText("follow-ups");
+      await expect(page.getByRole("region", { name: "Follow-Ups", exact: true })).toContainText("1 of 3 follow-ups without approval");
       await expect(summary).toContainText("Recorded Campaign Spend$12.00, 100 tool calls");
       await expect(summary).toContainText("Outstanding Allocations$50.00, 900 tool calls");
       await expect(summary).toContainText("Unallocated Allowance$38.00, 1000 tool calls");

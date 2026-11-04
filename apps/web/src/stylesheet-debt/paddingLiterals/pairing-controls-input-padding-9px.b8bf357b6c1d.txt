@@ -1,1 +1,0 @@
-|.pairing-controls input|padding|9px

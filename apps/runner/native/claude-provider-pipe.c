@@ -322,6 +322,10 @@ static void reap_retired_workers(struct supervisor *state) {
     if (reaped == 0) state->retired[keep++] = pid;
   }
   state->retired_count = keep;
+  /* As a subreaper we also adopt background tasks when their workers finish.
+   * Reap those tasks throughout the namespace lifetime. An active worker's
+   * result travels in pipe frames, so its wait status is not needed here. */
+  while (waitpid(-1, NULL, WNOHANG) > 0) { }
 }
 
 static int send_control(struct supervisor *state, unsigned char kind, uint32_t generation,
@@ -482,7 +486,12 @@ invalid:
 
 static int handle_control(struct supervisor *state, unsigned char kind, uint32_t generation,
                           const unsigned char *payload, uint32_t length) {
-  if (kind == TERMINATE_MESSAGE && generation == 0 && length == 0) return 1;
+  if (kind == TERMINATE_MESSAGE && generation == 0 && length == 0) {
+    /* The outer bwrap monitor can return the application's status before its
+     * PID-namespace init has finished reaping. End and reap adopted descendants
+     * ourselves before success permits the host to release provider references. */
+    return kill_worker_children() == 0 ? 1 : -1;
+  }
   if (kind == START_MESSAGE) {
     if (generation <= state->generation || state->active)
       return control_error(state, generation, "invalid or concurrent provider start") < 0 ? -1 : 0;
@@ -650,7 +659,7 @@ static int supervisor_main(const char *token_hex) {
   state.worker_input = state.worker_output = -1;
   /* The namespace peer has our uid. Deny /proc/1/fd and ptrace access to
    * the host control descriptors before accepting any provider launch. */
-  if (prctl(PR_SET_DUMPABLE, 0) < 0 ||
+  if (prctl(PR_SET_DUMPABLE, 0) < 0 || prctl(PR_SET_CHILD_SUBREAPER, 1) < 0 ||
       hex_token(token_hex, state.token) < 0 || set_nonblocking(STDIN_FILENO) < 0) return 125;
   signal(SIGPIPE, SIG_IGN);
   if (send_control(&state, READY_MESSAGE, 0, NULL, 0) < 0) return 125;

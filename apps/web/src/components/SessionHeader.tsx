@@ -30,7 +30,7 @@ import { DEVELOPMENT_BUILD } from "../config.js";
 import { outstandingSessionResult } from "../session-follow-up.js";
 import { shortcutAriaKeys, shortcutDisplay } from "../shortcuts.js";
 import { pendingQueuedPromptCount, type ConversationForkAvailability } from "../session-actions.js";
-import { backgroundWorkAccessibleName } from "./common.js";
+import { backgroundWorkCondition } from "../status-meta.js";
 import {
   useAccessibleMenu,
   useDismissiblePopover,
@@ -50,6 +50,7 @@ import { unarchiveSession } from "../session-unarchive.js";
 import { writeClipboardText } from "../clipboard.js";
 import { sessionStatusSummary } from "../status-meta.js";
 import { SessionStatusButton } from "./SessionStatusButton.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { useBackgroundDeliveryStep } from "./useBackgroundDeliveryStep.js";
 import { historicalBackgroundResultRecovery } from "../background-delivery-status.js";
 
@@ -594,11 +595,18 @@ export function SessionHeader({
               void run(async () => {
                 if (historicalResultRecovery && !await confirm({
                   title: "Restart Session",
-                  message: "This starts a new conversation and ends every background job; " +
+                  message: "This restarts the agent process and ends every background job; " +
                     (runnerSupportsProtocol(runnerProtocolVersion, "restartKeepsQueuedWork")
-                      ? "finished results are reported to the new conversation."
+                      ? "finished results are reported after the restart."
                       : "held results are discarded.") +
-                    " The original job commands are not rerun; review the conversation before continuing.",
+                    (runnerSupportsProtocol(runnerProtocolVersion, "sessionRestartResume") &&
+                      session.agentCapabilities?.restartResumesConversation === true
+                      ? " The established conversation will resume"
+                      : runnerSupportsProtocol(runnerProtocolVersion, "sessionRestartResume") &&
+                        session.agentCapabilities?.restartResumesConversation === false
+                        ? " This starts a new conversation"
+                        : " The runner has not confirmed conversation continuity") +
+                    "; original job commands are not rerun, so review the conversation before continuing.",
                   confirmLabel: "Restart Session",
                   tone: "danger",
                 })) return;
@@ -720,6 +728,7 @@ export function SessionHeader({
             tabIndex={titleId ? -1 : undefined}
             title={displayTitle}
           >
+            <SessionTypeIcon session={session} />
             {displayTitle}
           </h1>
         </>
@@ -755,7 +764,7 @@ export function SessionHeader({
       {/* Background work changes are announced politely wherever the badge shows (#784). The region
           stays mounted, so its first state is announced too, and it is text, not a second badge. */}
       <span className="sr-only" data-live="background-work" role="status" aria-live="polite">
-        {visibleBackgroundWorkState ? backgroundWorkAccessibleName(visibleBackgroundWorkState) : ""}
+        {visibleBackgroundWorkState ? `Background Work: ${visibleBackgroundWorkState === "orphaned" ? "Lost" : backgroundWorkCondition(session, runnerOnline)?.meta.label}` : ""}
       </span>
       <div className="detail-actions">
         <div className="overflow-menu">

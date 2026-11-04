@@ -5,8 +5,8 @@ import { githubApi } from "./merge-group-cleanup.mjs";
 // Pull-request CI runs share a concurrency lane only with runs of the same head commit, so two
 // runs GitHub starts for one head never cancel each other and leave a cancelled required check
 // on it (#3283). Runs of an older head are cancelled here instead, once a run of the pull
-// request's current ready head is in progress. Failing to cancel only costs runner time: the
-// required check is read on the current head, which this never touches.
+// request's current ready head is requested (or a rerun starts). Failing to cancel only costs
+// runner time: the required check is read on the current head, which this never touches.
 
 const SHA = /^[a-f0-9]{40}$/;
 const REPOSITORY = /^[A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+$/;
@@ -19,7 +19,8 @@ export const MAX_PAGES = 5;
 export function targetFromEvent(event, repository) {
   const run = event?.workflow_run;
   if (!REPOSITORY.test(repository ?? "") ||
-      event?.action !== "in_progress" || run?.event !== "pull_request" ||
+      !(event?.action === "requested" || (event?.action === "in_progress" && run?.run_attempt > 1)) ||
+      !Number.isSafeInteger(run?.run_attempt) || run.run_attempt <= 0 || run?.event !== "pull_request" ||
       run?.repository?.full_name !== repository || run?.path !== CI_PATH ||
       !REPOSITORY.test(run?.head_repository?.full_name ?? "") ||
       !Number.isSafeInteger(run?.id) || run.id <= 0 ||

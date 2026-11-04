@@ -55,7 +55,7 @@ async function measureChrome(page: Page) {
       return { height: outer.height, escape, overlapping, stacked };
     };
     const rail = document.querySelector(".app-rail")!;
-    const pane = document.querySelector(".project-manager-list");
+    const pane = document.querySelector('.master-detail-list[aria-label="Projects"]');
     return {
       pageScroll: document.documentElement.scrollWidth - document.documentElement.clientWidth,
       mainScroll: (() => {
@@ -76,7 +76,7 @@ async function measureChrome(page: Page) {
         scroll: pane.scrollWidth - pane.clientWidth,
         // The visibility filter keeps the search field's inset on both sides.
         filterInset: (() => {
-          const search = box(pane.querySelector(".project-manager-search")!);
+          const search = box(pane.querySelector(".input-affix")!);
           const filter = box(pane.querySelector(".seg")!);
           return [filter.left - search.left, search.right - filter.right];
         })(),
@@ -132,142 +132,69 @@ for (const width of [761, 834, 940, 1099]) {
 }
 
 /**
- * The Archived Sessions table, measured with the longest State badge in its first row: nothing
- * scrolls sideways or is cut off, the Session column keeps `minSession` for a title, and Project,
- * Location and Agent show either as columns or, `folded`, in the meta line under the title.
+ * Fixed archive rows never scroll sideways, and their native title links keep readable width.
  */
-async function checkArchivedTable(page: Page, where: string, { folded, minSession }: { folded: boolean; minSession: number }) {
-  await expect(page.locator(".archive-table tbody tr").first()).toBeVisible();
-  // The fixture has no stop in progress, so give the first row the longest State badge a session
-  // can show beside Archived and its lifecycle (§11.1: a badge keeps its own width).
-  await page.locator(".archive-state-badges").first().evaluate((badges) => {
-    const longest = badges.querySelector(".status")!.cloneNode() as HTMLElement;
-    longest.className = "status sm t-warning";
-    longest.textContent = "Stop Waiting for Runner";
-    badges.append(longest);
-  });
-  const archive = await page.evaluate(() => {
-    const box = (element: Element) => element.getBoundingClientRect();
-    const wrap = document.querySelector(".archive-table-wrap")!;
-    const edge = box(wrap);
-    return {
-      scroll: wrap.scrollWidth - wrap.clientWidth,
-      sessionColumn: box(document.querySelector(".archive-table thead th")!).width,
-      rows: [...wrap.querySelectorAll("tbody tr")].map((row) => {
-        const hidden = [".col-project", ".col-location", ".col-agent"].map((selector) => row.querySelector(selector)!);
-        const meta = row.querySelector(".archive-session-meta")!;
-        const cell = box(row.querySelector(".archive-session-cell")!);
-        // Everything the row shows, cut off by its cell or by the wrapper.
-        const clipped = [...row.querySelectorAll(".archive-session-meta > span, .archive-session-cell > a, .status, .actions-cell button, time")]
-          .filter((element) => element.getClientRects().length > 0)
-          .filter((element) => {
-            const own = box(element);
-            const td = box(element.closest("td")!);
-            return own.left < Math.max(td.left, edge.left) - 0.5 || own.right > Math.min(td.right, edge.right) + 0.5;
-          })
-          .map((element) => element.textContent);
-        return {
-          columnsShown: hidden.map((element) => element.getClientRects().length > 0),
-          values: hidden.map((element) => element.textContent),
-          meta: meta.getClientRects().length > 0 ? (meta as HTMLElement).innerText : null,
-          metaInside: box(meta).right <= cell.right + 0.5,
-          clipped,
-        };
-      }),
-    };
-  });
-  expect(archive.scroll, `${where}: the Archived Sessions table scrolls sideways`).toBeLessThanOrEqual(0);
-  expect(archive.sessionColumn, `${where}: the Session column keeps room for a title`).toBeGreaterThanOrEqual(minSession);
-  expect(archive.rows.length).toBeGreaterThan(0);
-  for (const row of archive.rows) {
-    if (folded) {
-      expect(row.columnsShown, `${where}: Project, Location and Agent fold into the Session cell`).toEqual([false, false, false]);
-      for (const value of row.values) expect(row.meta, `${where}: the Session cell shows ${value}`).toContain(value);
-      expect(row.metaInside, `${where}: the meta line stays inside its cell`).toBe(true);
-    } else {
-      expect(row.columnsShown, `${where}: Project, Location and Agent keep their columns`).toEqual([true, true, true]);
-      expect(row.meta, `${where}: no meta line repeats the columns`).toBeNull();
-    }
-    expect(row.clipped, `${where}: row content cut off`).toEqual([]);
+async function checkArchivedTable(page: Page, where: string, { minSession }: { folded: boolean; minSession: number }) {
+  await expect(page.locator(".archive-item").first()).toBeVisible();
+  await page.evaluate(() => document.fonts.ready);
+  const rows = await page.locator(".archive-item").evaluateAll((items) => items.map((row) => ({
+    height: row.getBoundingClientRect().height,
+    title: row.querySelector("a")!.getBoundingClientRect().width,
+    overflow: row.scrollWidth - row.clientWidth,
+  })));
+  for (const row of rows) {
+    expect(row.height, where).toBe(56);
+    expect(row.title, where).toBeGreaterThanOrEqual(minSession);
+    expect(row.overflow, where).toBeLessThanOrEqual(0);
   }
+  await expect(page.locator(".archive-table")).toHaveCount(0);
 }
 
 /**
- * Page content the tier's audit found overflowing (#2106): the Archived Sessions table, the Usage
- * API card's controls and the Pod Orchestration Controls fields.
+ * Page content the tier's audit found overflowing (#2106): the Archived Sessions table and the Usage
+ * API card's controls.
  */
 async function checkPageContent(page: Page, where: string) {
   await open(page, "path=%2Farchived", "Archived Sessions");
-  await checkArchivedTable(page, where, { folded: true, minSession: 145 });
+  await checkArchivedTable(page, where, { folded: true, minSession: 200 });
 
   await open(page, "path=%2Fusage", "Usage and Cost");
+  // API Usage's one toolbar (#3010): Metric, Range, Group By and About These Numbers on one row. A
+  // main column no wider than a phone (the 761px window less its rail) would clip those labels, so
+  // there Range and Group By are one button and About is its icon (#4029).
   const usage = await page.evaluate(() => {
     const box = (element: Element) => element.getBoundingClientRect();
-    const card = document.querySelector(".usage-api-controls")!;
-    const description = card.querySelector(".usage-api-controls-heading p")!;
-    const controls = [...card.querySelectorAll(".usage-desktop-controls > .seg")];
-    const style = getComputedStyle(description);
-    const context = document.createElement("canvas").getContext("2d")!;
-    context.font = `${style.fontWeight} ${style.fontSize} ${style.fontFamily}`;
-    const text = description.textContent!;
+    const toolbar = document.querySelector(".usage-toolbar")!;
+    const column = box(document.querySelector(".main")!).width;
+    const controls = [...toolbar.children].filter((child) => !child.classList.contains("sr-only"));
     const overlaps = (a: DOMRect, b: DOMRect) =>
       Math.min(a.right, b.right) - Math.max(a.left, b.left) > 0.5 && Math.min(a.bottom, b.bottom) - Math.max(a.top, b.top) > 0.5;
     return {
-      count: controls.length,
+      column,
+      names: controls.map((control) => control.getAttribute("aria-label") ?? control.textContent),
       rows: new Set(controls.map((control) => Math.round(box(control).top))).size,
-      overlapping: controls.flatMap((a, i) => [description, ...controls.slice(i + 1)]
-        .filter((b) => overlaps(box(a), box(b))).map((b) => `${a.getAttribute("aria-label")} / ${b.textContent}`)),
-      escape: Math.max(...controls.map((control) => box(control).right)) - box(card).right,
-      charactersPerLine: box(description).width / (context.measureText(text).width / text.length),
+      overlapping: controls.flatMap((a, i) => controls.slice(i + 1)
+        .filter((b) => overlaps(box(a), box(b))).map((b) => `${a.textContent} / ${b.textContent}`)),
+      escape: Math.max(...controls.map((control) => box(control).right)) - box(toolbar).right,
+      // A button squeezed below its label: Range's label ends in an ellipsis inside its span, and
+      // About's spills out of the button. Boxes that merely touch would not show either (#4029).
+      clipped: controls.filter((control) => control.tagName === "BUTTON")
+        .filter((button) => [button, ...button.querySelectorAll(":scope > span")]
+          .some((element) => element.scrollWidth > element.clientWidth))
+        .map((button) => button.getAttribute("aria-label") ?? button.textContent),
     };
   });
-  expect(usage.count).toBe(3);
-  expect(usage.rows, `${where}: the Usage controls stay on one row`).toBe(1);
+  expect(usage.names, `${where}: a ${usage.column}px main column`).toEqual(usage.column <= 760
+    ? ["Metric", "Range and Group By: 30 Days, Daily", "About These Numbers"]
+    : ["Metric", "Range: Last 30 Days", "Group By", "About These Numbers"]);
+  expect(usage.rows, `${where}: the Usage toolbar stays on one row`).toBe(1);
   expect(usage.overlapping, `${where}: the Usage controls overlap`).toEqual([]);
-  expectGeometry(usage.escape, `${where}: the Usage controls stay inside their card`).toBeLessThanOrEqual(0.51);
-  expect(usage.charactersPerLine, `${where}: the Usage description keeps a readable measure`).toBeGreaterThanOrEqual(30);
-
-  await open(page, "view=pod", "Active Collaboration Pod");
-  const pod = await page.evaluate(() => {
-    const box = (element: Element) => element.getBoundingClientRect();
-    const card = document.querySelector(".pod-orchestration")!;
-    const style = getComputedStyle(card);
-    const inner = { left: box(card).left + parseFloat(style.paddingLeft), right: box(card).right - parseFloat(style.paddingRight) };
-    return [...card.querySelectorAll(".pod-orchestration-grid > .field")].map((field) => {
-      const label = field.querySelector("span")!;
-      const control = field.querySelector("select, input") as HTMLSelectElement | HTMLInputElement;
-      // A select is as wide as its longest option when nothing constrains it.
-      const natural = control.cloneNode(true) as HTMLElement;
-      natural.style.cssText = "position: absolute; width: auto; min-width: 0";
-      field.append(natural);
-      const needed = control instanceof HTMLSelectElement ? box(natural).width : 0;
-      natural.remove();
-      return {
-        name: label.textContent,
-        outside: Math.max(inner.left - box(field).left, box(field).right - inner.right),
-        // The label's text on one line, and no wider than its field.
-        labelClipped: (() => {
-          const range = document.createRange();
-          range.selectNodeContents(label);
-          const lines = new Set([...range.getClientRects()].map((rect) => Math.round(rect.top))).size;
-          return lines !== 1 || range.getBoundingClientRect().right > box(field).right + 0.5;
-        })(),
-        valueClipped: box(control).width < needed - 0.5,
-      };
-    });
-  });
-  expect(pod.map((field) => field.name)).toEqual(["Arbitration", "Default Context Tokens", "Summary Tokens", "Turn Cap", "Repeated-Output Cap"]);
-  for (const field of pod) {
-    expectGeometry(field.outside, `${where}: ${field.name} reaches past the Orchestration Controls card`).toBeLessThanOrEqual(0.51);
-  }
-  for (const field of pod) {
-    expect(field.labelClipped, `${where}: ${field.name} keeps its label on one line`).toBe(false);
-    expect(field.valueClipped, `${where}: ${field.name} shows its longest option`).toBe(false);
-  }
+  expect(usage.clipped, `${where}: a Usage button clips its label`).toEqual([]);
+  expectGeometry(usage.escape, `${where}: the Usage controls stay inside the page`).toBeLessThanOrEqual(0.51);
 }
 
 for (const width of [761, 834, 940, 1099]) {
-  test(`at ${width}px, the Archived Sessions table, the Usage controls and the Pod Orchestration fields fit`, async ({ page }) => {
+  test(`at ${width}px, the Archived Sessions table and the Usage controls fit`, async ({ page }) => {
     await page.setViewportSize({ width, height: 860 });
     await checkPageContent(page, `at ${width}px`);
   });
@@ -276,7 +203,7 @@ for (const width of [761, 834, 940, 1099]) {
 test.describe("page content on an 834×1112 coarse-pointer tablet", () => {
   test.use({ viewport: { width: 834, height: 1112 }, hasTouch: true, isMobile: true });
 
-  test("the same three surfaces fit with touch-sized controls", async ({ page }) => {
+  test("the same two surfaces fit with touch-sized controls", async ({ page }) => {
     await checkPageContent(page, "at 834px on touch");
   });
 });
@@ -290,19 +217,15 @@ async function expandRail(page: Page) {
 test("a phone keeps the Archived Sessions table's own rows, with the project on line 2", async ({ page }) => {
   await page.setViewportSize({ width: 760, height: 860 });
   await open(page, "path=%2Farchived", "Archived Sessions");
-  const row = page.locator(".archive-table tbody tr").first();
-  await expect(row.locator(".archive-session-meta")).toBeHidden();
-  // The phone rows show the project as line-2 meta and leave Location and Agent to the detail (§14).
-  await expect(row.locator(".col-project")).toBeVisible();
+  const row = page.locator(".archive-item").first();
+  await expect(row.locator(".archive-item-meta")).toBeVisible();
+  await expect(row.locator(".archive-project")).toBeVisible();
+  await expect(row.locator("time")).toBeHidden();
 });
 
-/**
- * Above the tier the table folds the same way until the main column fits its full layout with 200px
- * for the Session column (§14, #2114): a 1220px column, which the labelled rail's extra width pushes
- * from a 1284px window to 1428px.
- */
-test.describe("the Archived Sessions table from 1100px", () => {
+test.describe("Archived Sessions rows across compact and desktop widths", () => {
   const cases = [
+    ...[761, 834, 940, 1099].flatMap((width) => [false, true].map((labelled) => ({ width, labelled, folded: false }))),
     { width: 1100, labelled: false, folded: true },
     { width: 1280, labelled: false, folded: true },
     { width: 1439, labelled: false, folded: false },
@@ -319,6 +242,17 @@ test.describe("the Archived Sessions table from 1100px", () => {
     });
   }
 
+  test("a wider timestamp font still leaves the title 200px at the labelled-rail floor", async ({ page }) => {
+    await page.setViewportSize({ width: 761, height: 860 });
+    await open(page, "path=%2Farchived", "Archived Sessions");
+    await expandRail(page);
+    // CI's DejaVu Sans timestamp is wider than this workstation's Noto Sans fallback.
+    await page.locator(".archive-item > time").evaluateAll((times) => times.forEach((time) => {
+      (time as HTMLElement).style.fontFamily = '"DejaVu Sans", sans-serif';
+    }));
+    await checkArchivedTable(page, "wide timestamp font at 761px with labelled rail", { folded: false, minSession: 200 });
+  });
+
   test("the full layout returns exactly where it fits", async ({ page }) => {
     await open(page, "path=%2Farchived", "Archived Sessions");
     for (const [width, folded] of [[1283, true], [1284, false]] as const) {
@@ -331,7 +265,7 @@ test.describe("the Archived Sessions table from 1100px", () => {
 });
 
 test.describe("either side of the tier", () => {
-  test("the Projects list pane is 310px once the main column is 1100px, its filter inset like the search field", async ({ page }) => {
+  test("the Projects list pane is 320px once the main column is 1100px, its filter inset like the search field", async ({ page }) => {
     // The pane answers to the main column (`@container app`, #2105), so the tier ends where the
     // column, not the window, reaches 1100px: the window is 1100px plus the rail.
     await page.setViewportSize({ width: 1440, height: 860 });
@@ -341,7 +275,7 @@ test.describe("either side of the tier", () => {
     await expect.poll(() => page.locator(".main").evaluate((main) => main.getBoundingClientRect().width))
       .toBeGreaterThanOrEqual(1100);
     const chrome = await measureChrome(page);
-    expect(chrome.pane!.width).toBe(310);
+    expect(chrome.pane!.width).toBe(320);
     expect(chrome.pane!.filterInset).toEqual([0, 0]);
   });
 

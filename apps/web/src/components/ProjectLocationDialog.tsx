@@ -1,13 +1,17 @@
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useId, useMemo, useRef, useState } from "react";
 import { StatusBadge } from "./StatusBadge.js";
 import {
   runnerSupportsProtocol,
   type BoxView,
+  type IdentityAdministrationView,
+  type ProjectLocationView,
   type ProjectView,
   type ResourceOwner,
+  type ResourceScope,
   type RunnerView,
 } from "@wollipog/protocol";
 import { ApiError } from "../api.js";
+import { useApi } from "../api-context.js";
 import {
   accessScopeChoices,
   accessScopeLabel,
@@ -28,15 +32,41 @@ import {
   AccessScopeField,
   useAccessScopeIdentity,
 } from "./AccessScopeControls.js";
+import { FieldError } from "./FieldError.js";
 import { Modal } from "./common.js";
-import { ChevronRightIcon } from "./Icons.js";
-import { Checkbox } from "./ui/ChoiceControls.js";
+import { SearchIcon } from "./Icons.js";
+import { Notice } from "./Notice.js";
+import { BusyButton } from "./ui/BusyButton.js";
+import { Checkbox, ChoiceRows, SegmentedControl, Select } from "./ui/ChoiceControls.js";
 
-interface NewProjectLocation {
-  runnerId: string;
-  name: string;
-  path: string;
-  owner?: ResourceOwner;
+type AddLocationMode = "existing" | "new";
+
+/** What Add Location is adding: an existing location's workspace, or a folder on a machine. */
+type LocationTarget =
+  | { kind: "existing"; runnerId: string; workspaceId: string }
+  | { kind: "new"; runnerId: string; path: string };
+
+/** "/repos/acme/" and "/repos/acme" are one folder; a root keeps its only separator. */
+const withoutTrailingSeparators = (path: string) => path.replace(/[\\/]+$/u, "") || path;
+
+/**
+ * The project's location for `target` once it is added: the same workspace, or the same machine
+ * and folder. A `runner_removed` row is a detached tombstone, kept for Relink, that an add would
+ * reattach, so it never proves an add; an attached location counts in any other state, offline or
+ * missing included.
+ */
+export function projectLocationFor(project: ProjectView, target: LocationTarget): ProjectLocationView | undefined {
+  return project.locations.find((location) => location.availability !== "runner_removed" &&
+    location.runnerId === target.runnerId && (target.kind === "existing"
+    ? location.workspaceId === target.workspaceId
+    : withoutTrailingSeparators(location.path) === withoutTrailingSeparators(target.path)));
+}
+
+/** A New Folder refusal because the folder is already a location, perhaps by this request's lost
+ * first try. Older servers send only the message. */
+function alreadyRegistered(cause: unknown): boolean {
+  return cause instanceof ApiError && cause.status === 409 &&
+    (cause.code === "LOCATION_ALREADY_REGISTERED" || /already registered/iu.test(cause.message));
 }
 
 export function projectLocationCreationError(cause: unknown): string {
@@ -48,11 +78,84 @@ export function projectLocationCreationError(cause: unknown): string {
     : "The Location could not be added.";
 }
 
-function locationNameFromPath(path: string): string {
+/** Words a Title Case name keeps lowercase unless they come first or last (AGENTS.md, UI Copy). */
+const MINOR_WORDS = new Set(["a", "an", "and", "as", "at", "but", "by", "for", "in", "nor", "of", "on", "or", "the", "to", "with"]);
+
+/**
+ * A Location Name from the folder it points at, in Title Case like every other location name:
+ * "acme-storefront" → "Acme Storefront". Dashes, underscores and spaces separate words; a word keeps
+ * the rest of its letters as written, so "iOS-app" reads "IOS App" rather than losing its casing.
+ */
+export function locationNameFromFolder(path: string): string {
   const trimmed = path.replace(/[\\/]+$/u, "");
-  return trimmed.split(/[\\/]/u).pop() || trimmed || "Root";
+  const folder = trimmed.split(/[\\/]/u).pop() || trimmed;
+  const words = folder.split(/[-_\s]+/u).filter(Boolean);
+  if (words.length === 0) return folder || "Root";
+  return words.map((word, index) => {
+    const lower = word.toLocaleLowerCase();
+    if (index > 0 && index < words.length - 1 && MINOR_WORDS.has(lower)) return lower;
+    return word.charAt(0).toLocaleUpperCase() + word.slice(1);
+  }).join(" ");
 }
 
+/** "Is Shared Only With Builders", "Is Private to You": how a narrower location's access reads in
+ * the mismatch notice's title. */
+function narrowerAccessTitle(name: string, scope: ResourceScope, identity: IdentityAdministrationView): string {
+  if (scope.owner.kind === "team") {
+    const teamId = scope.owner.teamId;
+    return `${name} Is Shared Only With ${identity.teams.find((team) => team.teamId === teamId)?.name ?? "One Team"}`;
+  }
+  if (scope.owner.kind === "user") {
+    const label = accessScopeLabel(scope, identity);
+    return `${name} Is ${label === "Private to Me" ? "Private to You" : label}`;
+  }
+  return `${name} Is Shared More Narrowly`;
+}
+
+/** Who a project's access reaches, for the mismatch notice's one sentence. */
+function projectAudience(project: ProjectView, identity: IdentityAdministrationView): string {
+  const owner = project.scope?.owner;
+  if (!owner || owner.kind === "organization") return "everyone in your organization";
+  if (owner.kind === "team") {
+    const teamId = owner.teamId;
+    return `everyone on ${identity.teams.find((team) => team.teamId === teamId)?.name ?? "its team"}`;
+  }
+  return owner.userId === identity.context.userId ? "you" : "its owner";
+}
+
+/** A machine New Folder can list, and whether it can browse its folders now. */
+interface MachineChoice {
+  runner: RunnerView;
+  display: ReturnType<typeof runnerDisplay>;
+  browsable: boolean;
+}
+
+type ScopeCorrection = {
+  resource: { kind: "project"; projectId: string; name: string } |
+    { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
+  scope: ResourceScope;
+  owner: ResourceOwner;
+};
+
+/**
+ * Add Location (#2966, docs/design-system.md §7, §8.4, §10.2, §13.2): add a location that already
+ * exists, or register a new folder, chosen with one switch and committed by the footer's one Add
+ * Location. Existing locations are one surface of radio rows; the chosen row's offline or access
+ * warning sits under the list. A mismatch keeps Add Location off, because the server would refuse
+ * it, and offers the Change Access dialog that fixes it, stacked over this one.
+ *
+ * `onboarding` is the hand-off from New Project: a success notice leads, Cancel reads Skip for Now,
+ * and, where the server can generate one (`setupFileSupported`), the Create a Starter Setup File
+ * checkbox is the last field and applies to whichever location is added.
+ *
+ * The dialog sends the request itself, so it can tell a refusal from an unknown outcome (#3468). A
+ * refusal (a 4xx) added nothing. A timeout, a lost connection, a 5xx or an unreadable reply may
+ * follow the add, so the dialog reads the project again: when it lists this location (the same
+ * workspace, or the same machine and folder) the location was added, and `onAdded` runs as after a
+ * reply. Otherwise the notice says the outcome couldn't be confirmed, since the request may still
+ * land. Trying again is safe because the server adds a location once. A New Folder retry refused as
+ * already registered was added only if this project lists that folder; elsewhere, it is a refusal.
+ */
 export function ProjectLocationDialog({
   project,
   projects,
@@ -61,10 +164,10 @@ export function ProjectLocationDialog({
   canCreateLocation,
   accessScopeManagementSupported,
   onClose,
-  onAdd,
-  onCreate,
+  onAdded,
   onManageConnections,
   onboarding = false,
+  setupFileSupported = false,
   returnFocusRef,
 }: {
   project: ProjectView;
@@ -74,52 +177,112 @@ export function ProjectLocationDialog({
   canCreateLocation: boolean;
   accessScopeManagementSupported: boolean;
   onClose: () => void;
-  onAdd: (candidate: ProjectLocationCandidate, generateSetup: boolean) => Promise<void>;
-  onCreate: (location: NewProjectLocation, generateSetup: boolean) => Promise<void>;
+  /** The location was added: the project as the server now has it, and the added location (absent
+   * only if a reply left it out). Runs before the dialog closes, and reports its own failures, since
+   * the location is added whatever happens next. */
+  onAdded: (project: ProjectView, location: ProjectLocationView | undefined, generateSetup: boolean) => void | Promise<void>;
   onManageConnections: () => void;
+  /** Opened right after New Project created `project`. */
   onboarding?: boolean;
+  /** The server can create a starter setup file, so onboarding offers it. */
+  setupFileSupported?: boolean;
   /** The control that opened this dialog, for focus to return to (a button inside New Session). */
   returnFocusRef?: { current: HTMLElement | null };
 }) {
+  const api = useApi();
+  const ids = useId();
   const [query, setQuery] = useState("");
-  const [busyKey, setBusyKey] = useState<string | null>(null);
-  const [error, setError] = useState<string | null>(null);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<{ title: string; sentence: string; detail: string | null } | null>(null);
+  // Targets with a request that went unanswered: a later refusal doesn't prove that one added nothing.
+  const unanswered = useRef(new Set<string>());
+  const [chosenKey, setChosenKey] = useState<string | null>(null);
   const [runnerId, setRunnerId] = useState("");
   const [locationName, setLocationName] = useState("");
   const [nameEdited, setNameEdited] = useState(false);
+  const [nameError, setNameError] = useState<string | null>(null);
   const [folderSelection, setFolderSelection] = useState<{ runnerId: string; path: string } | null>(null);
-  const [createExpanded, setCreateExpanded] = useState(false);
-  const [browsing, setBrowsing] = useState(false);
   const [scopeKey, setScopeKey] = useState("");
   const [generateSetup, setGenerateSetup] = useState(false);
-  const [scopeCorrection, setScopeCorrection] = useState<{
-    resource: { kind: "project"; projectId: string; name: string } |
-      { kind: "workspace"; runnerId: string; workspaceId: string; name: string };
-    owner: ResourceOwner;
-  } | null>(null);
+  const [scopeCorrection, setScopeCorrection] = useState<ScopeCorrection | null>(null);
+  const [submittedMachine, setSubmittedMachine] = useState<MachineChoice | null>(null);
+  const nameRef = useRef<HTMLInputElement>(null);
   const { identity, error: identityError } = useAccessScopeIdentity(accessScopeManagementSupported);
   const close = () => {
-    if (!busyKey) onClose();
+    if (!busy) onClose();
   };
   const boxByRunner = useMemo(() => new Map([...boxes.values()].map((box) => [box.runnerId, box])), [boxes]);
-  const browseMachines = useMemo(() => [...runners.values()]
-    .filter((runner) => runner.status === "online" &&
-      runnerSupportsProtocol(runner.protocolVersion, "directoryListing"))
-    .map((runner) => ({
+  const machineName = (id: string) => runnerDisplay(runners.get(id), boxByRunner.get(id), id).name;
+
+  const candidates = useMemo(() => buildProjectLocationCandidates(projects, runners.values()), [projects, runners]);
+  const addable = candidates.some((candidate) => !projectLocationMembershipState(candidate, project.id).alreadyAdded);
+  // Existing Location when there is one to add; otherwise New Folder (§10.2). Chosen once, on open,
+  // so a location that comes and goes never switches the dialog under the person.
+  const [mode, setMode] = useState<AddLocationMode>(() => addable ? "existing" : "new");
+  const filtered = useMemo(() => {
+    const normalized = query.trim().toLocaleLowerCase();
+    return candidates.filter((candidate) => {
+      if (!normalized) return true;
+      const machine = runnerDisplay(
+        runners.get(candidate.runnerId),
+        boxByRunner.get(candidate.runnerId),
+        candidate.runnerId,
+      ).name;
+      return `${candidate.name} ${candidate.path} ${machine} ${candidate.runnerId}`
+        .toLocaleLowerCase()
+        .includes(normalized);
+    });
+  }, [boxByRunner, candidates, query, runners]);
+  const projectById = useMemo(() => new Map(projects.map((item) => [item.id, item])), [projects]);
+
+  // The access check for one candidate: `null` while it can't be judged yet.
+  const scopeCheckPending = accessScopeManagementSupported && !identity && !identityError;
+  const scopeUnavailable = (candidate: ProjectLocationCandidate) => accessScopeManagementSupported && Boolean(identity) &&
+    (!project.scope || !candidate.scope);
+  const scopeCompatible = (candidate: ProjectLocationCandidate) =>
+    !accessScopeManagementSupported || !identity || !project.scope || !candidate.scope
+      ? null
+      : scopeAudienceContainedForIdentity(identity, project.scope, candidate.scope);
+  const rowState = (candidate: ProjectLocationCandidate) => {
+    const { alreadyAdded, relinkRequired } = projectLocationMembershipState(candidate, project.id);
+    return {
+      alreadyAdded,
+      relinkRequired,
+      unavailable: alreadyAdded || scopeUnavailable(candidate),
+    };
+  };
+  // A row the search hides is not chosen: Add Location never commits a row the person can't see.
+  const chosen = mode === "existing" ? filtered.find((candidate) => candidate.key === chosenKey) ?? null : null;
+  const chosenState = chosen ? rowState(chosen) : null;
+  const chosenMismatch = chosen && scopeCompatible(chosen) === false ? chosen : null;
+
+  // New Folder: every machine, with the ones that can't browse listed but unavailable (§8.4).
+  const machines = useMemo(() => [...runners.values()]
+    .map((runner): MachineChoice => ({
       runner,
       display: runnerDisplay(runner, boxByRunner.get(runner.runnerId), runner.runnerId),
+      browsable: runner.status === "online" && runnerSupportsProtocol(runner.protocolVersion, "directoryListing"),
     }))
     .sort((left, right) =>
+      Number(right.browsable) - Number(left.browsable) ||
       left.display.name.localeCompare(right.display.name) ||
       left.runner.runnerId.localeCompare(right.runner.runnerId)), [boxByRunner, runners]);
   // A Location is one exact (Machine, Workspace) pair, so an ambiguous Machine option here creates
   // the pair against the wrong host and filesystem.
   const machineLabels = useMemo(
-    () => machineOptionLabels(browseMachines.map(({ runner }) => runner),
+    () => machineOptionLabels(machines.map(({ runner }) => runner),
       (runnerId) => boxByRunner.get(runnerId)),
-    [boxByRunner, browseMachines],
+    [boxByRunner, machines],
   );
-  const selectedMachine = browseMachines.find(({ runner }) => runner.runnerId === runnerId) ?? browseMachines[0] ?? null;
+  const anyOnline = machines.some(({ runner }) => runner.status === "online");
+  const liveMachine = machines.find(({ runner, browsable }) => browsable && runner.runnerId === runnerId) ??
+    machines.find(({ browsable }) => browsable) ?? null;
+  // While a new folder is being added, the machine it was submitted for holds. Live availability
+  // can't unmount or re-key the folder browser under the request, so the folder shown, the folder
+  // selected and the folder submitted stay one; the live machine returns when the request settles,
+  // and a browser that remounts then reports its own folder again.
+  const holding = submittedMachine !== null;
+  const selectedMachine = submittedMachine ?? liveMachine;
   const selectedRunnerId = selectedMachine?.runner.runnerId ?? "";
   const selectedFolder = folderSelection?.runnerId === selectedRunnerId ? folderSelection.path : null;
   const creationScopeChoices = useMemo(() => identity ? accessScopeChoices(identity)
@@ -137,346 +300,409 @@ export function ProjectLocationDialog({
         ? preferred : creationScopeChoices[0]!.key);
     }
   }, [accessScopeManagementSupported, creationScopeChoices, project.scope, scopeKey]);
-  const candidates = useMemo(() => buildProjectLocationCandidates(projects, runners.values()), [projects, runners]);
-  const filtered = useMemo(() => {
-    const normalized = query.trim().toLocaleLowerCase();
-    return candidates.filter((candidate) => {
-      if (!normalized) return true;
-      const machine = runnerDisplay(
-        runners.get(candidate.runnerId),
-        boxByRunner.get(candidate.runnerId),
-        candidate.runnerId,
-      ).name;
-      return `${candidate.name} ${candidate.path} ${machine} ${candidate.runnerId}`
-        .toLocaleLowerCase()
-        .includes(normalized);
-    });
-  }, [boxByRunner, candidates, query, runners]);
-  const projectById = useMemo(() => new Map(projects.map((item) => [item.id, item])), [projects]);
+  const creationScope = creationScopeChoices.find((choice) => choice.key === scopeKey);
+  const creating = mode === "new" && (canCreateLocation || holding) && selectedMachine !== null;
 
   const changeMachine = (nextRunnerId: string) => {
     setRunnerId(nextRunnerId);
     setFolderSelection(null);
-    setLocationName("");
-    setNameEdited(false);
-    setBrowsing(false);
+    if (!nameEdited) setLocationName("");
     setError(null);
   };
 
-  const pickFolder = (path: string) => {
-    setFolderSelection({ runnerId: selectedRunnerId, path });
-    if (!nameEdited) setLocationName(locationNameFromPath(path));
-    setBrowsing(false);
+  // The browser's current folder is the selection; the name follows it until the person edits it.
+  const folderChanged = (path: string | null) => {
+    setFolderSelection(path === null ? null : { runnerId: selectedRunnerId, path });
+    if (!nameEdited) setLocationName(path === null ? "" : locationNameFromFolder(path));
+  };
+
+  const switchMode = (next: AddLocationMode) => {
+    if (busy) return;
+    setMode(next);
     setError(null);
   };
 
-  const toggleCreate = () => {
-    if (busyKey) return;
-    setCreateExpanded((current) => !current);
-    setBrowsing(false);
-    setError(null);
+  /** Why Add Location is off, for the footer's left slot (§7.3); null while it can commit. */
+  const blockedReason = (() => {
+    if (mode === "existing") {
+      if (!chosen || chosenState?.unavailable) return "Choose a location or a folder.";
+      if (identityError && accessScopeManagementSupported) return "Access levels couldn't be loaded.";
+      if (scopeCheckPending) return "Checking access levels…";
+      if (chosenMismatch) return "Match the access levels to continue.";
+      return null;
+    }
+    if (!creating || !selectedFolder) return "Choose a location or a folder.";
+    if (accessScopeManagementSupported) {
+      if (identityError) return "Access levels couldn't be loaded.";
+      if (!identity) return "Checking access levels…";
+      if (!creationScope) return "No access level fits this project and machine.";
+    }
+    return null;
+  })();
+
+  /** Send the request, and settle it as added, refused or unconfirmed (#3468). */
+  const settle = async (target: LocationTarget, send: () => Promise<{ project: ProjectView }>) => {
+    const setup = onboarding && setupFileSupported && generateSetup;
+    const key = target.kind === "existing"
+      ? `existing\u0000${target.runnerId}\u0000${target.workspaceId}`
+      : `new\u0000${target.runnerId}\u0000${withoutTrailingSeparators(target.path)}`;
+    let added: ProjectView;
+    try {
+      added = (await send()).project;
+    } catch (cause) {
+      const raw = cause instanceof Error ? cause.message.trim() : String(cause).trim();
+      const refused = cause instanceof ApiError && cause.status < 500;
+      const registered = target.kind === "new" && alreadyRegistered(cause);
+      const retried = unanswered.current.has(key);
+      // Whether the project lists the location now; null when it couldn't be read.
+      let listed: { project: ProjectView; location: ProjectLocationView | undefined } | null = null;
+      if (!refused || registered || retried) {
+        try {
+          const { project: current } = await api.project(project.id);
+          listed = { project: current, location: projectLocationFor(current, target) };
+        } catch {
+          listed = null;
+        }
+      }
+      if (listed?.location) {
+        unanswered.current.delete(key);
+        await onAdded(listed.project, listed.location, setup);
+        onClose();
+        return;
+      }
+      const subject = target.kind === "new" ? "this folder" : "this location";
+      if (!refused || (registered && listed === null)) {
+        unanswered.current.add(key);
+        setError({
+          title: "Couldn't Confirm the Location",
+          sentence: `Wollipog couldn't confirm whether ${subject} was added. Adding it again is safe: it won't be added twice.`,
+          detail: raw || null,
+        });
+        return;
+      }
+      // A bare legacy 404 becomes the update sentence; anything else keeps the server's words
+      // behind Show Details (§8.5). The server registers a folder and adds its location together,
+      // so a folder registered while this project doesn't list it is registered elsewhere.
+      const legacy = target.kind === "new" && cause instanceof ApiError && cause.status === 404 &&
+        raw.toLocaleLowerCase() === "not found";
+      setError(legacy
+        ? { title: "Couldn't Add the Location", sentence: projectLocationCreationError(cause), detail: null }
+        : retried && !registered
+          ? {
+            title: "Couldn't Add the Location",
+            sentence: `Wollipog refused to add ${subject} this time, and ${project.name} doesn't list it yet. An earlier try may still add it.`,
+            detail: raw || null,
+          }
+          : { title: "Couldn't Add the Location", sentence: `Wollipog refused to add ${subject}. Nothing was added.`, detail: raw || null });
+      return;
+    }
+    unanswered.current.delete(key);
+    await onAdded(added, projectLocationFor(added, target), setup);
+    onClose();
   };
 
-  const create = async () => {
-    const name = locationName.trim();
-    const selectedScope = creationScopeChoices.find((choice) => choice.key === scopeKey);
-    if (busyKey || !selectedRunnerId || !selectedFolder || !name ||
-        (accessScopeManagementSupported && !selectedScope)) return;
-    setBusyKey("create");
+  const commit = async () => {
+    if (busy || blockedReason) return;
+    if (mode === "new") {
+      const name = locationName.trim();
+      if (!name) {
+        setNameError("Enter a name for this location.");
+        nameRef.current?.focus();
+        return;
+      }
+      if (!selectedFolder || !selectedMachine) return;
+      setSubmittedMachine(selectedMachine);
+      setBusy(true);
+      setError(null);
+      try {
+        await settle({ kind: "new", runnerId: selectedRunnerId, path: selectedFolder }, () => api.createProjectLocation(project.id, {
+          runnerId: selectedRunnerId,
+          name,
+          path: selectedFolder,
+          ...(creationScope ? { owner: creationScope.owner } : {}),
+        }));
+      } finally {
+        setBusy(false);
+        setSubmittedMachine(null);
+      }
+      return;
+    }
+    if (!chosen) return;
+    setBusy(true);
     setError(null);
     try {
-      await onCreate({
-        runnerId: selectedRunnerId,
-        name,
-        path: selectedFolder,
-        ...(selectedScope ? { owner: selectedScope.owner } : {}),
-      }, generateSetup);
-      onClose();
-    } catch (cause) {
-      setError(projectLocationCreationError(cause));
+      await settle({ kind: "existing", runnerId: chosen.runnerId, workspaceId: chosen.workspaceId }, () =>
+        api.addProjectLocation(project.id, { runnerId: chosen.runnerId, workspaceId: chosen.workspaceId }));
     } finally {
-      setBusyKey(null);
+      setBusy(false);
     }
   };
 
-  const choose = async (candidate: ProjectLocationCandidate) => {
-    const targetLink = candidate.links.find((link) => link.projectId === project.id);
-    const relinkingHere = targetLink?.availability === "runner_removed";
-    if (busyKey || (targetLink && !relinkingHere)) return;
-    setError(null);
-    setBusyKey(candidate.key);
-    try {
-      await onAdd(candidate, generateSetup);
-      onClose();
-    } catch (cause) {
-      setError((cause as Error).message);
-    } finally {
-      setBusyKey(null);
-    }
-  };
+  const reasonId = `${ids}-reason`;
+  const nameHelperId = `${ids}-name-helper`;
+  const nameErrorId = `${ids}-name-error`;
 
-  return (
-    <Modal title={`Add Location to ${project.name}`} onClose={close} size="lg" returnFocusRef={returnFocusRef}>
-      <div className="project-location-picker">
-        <p className="muted">Add an existing Location to this Project. Its other Project memberships and sessions will not change. If the folder is not registered yet, create a new Location from a connected machine.</p>
-        {onboarding && (
-          <Checkbox className="project-location-generate-option" checked={generateSetup} disabled={busyKey !== null}
-            label="Generate Starter Config" onChange={setGenerateSetup}
-            helper="After adding the Location, create .wollipog.json for review. No tools run, and nothing is staged or committed." />
-        )}
-        <div className="project-location-create-section">
-          <button
-            type="button"
-            className="disclosure-trigger"
-            aria-expanded={createExpanded}
-            aria-controls="create-project-location-panel"
-            disabled={busyKey !== null || !canCreateLocation}
-            onClick={toggleCreate}
-          >
-            <ChevronRightIcon className="disclosure-chevron" />
-            <span className="project-location-create-heading">
-              <strong id="create-project-location-heading">Create New Location</strong>
-              <span className="muted">Register a folder on a connected machine.</span>
-            </span>
-          </button>
-          {!canCreateLocation && (
-            <div className="project-location-compatibility" role="status">
-              <strong>Wollipog Update Required</strong>
-              <span>
-                This version of Wollipog cannot register a new folder as a Location. Update or restart
-                Wollipog so it matches this dashboard. Existing Locations can still be added below.
-              </span>
-            </div>
-          )}
-          {createExpanded && (
-          <section
-            id="create-project-location-panel"
-            className="project-location-create"
-            aria-labelledby="create-project-location-heading"
-          >
-          {browseMachines.length > 0 ? (
-            <>
-              <div className="project-location-create-fields">
-                <label className="field">
-                  <span>Machine</span>
-                  <select
-                    value={selectedRunnerId}
-                    disabled={busyKey !== null}
-                    onChange={(event) => changeMachine(event.target.value)}
-                  >
-                    {browseMachines.map(({ runner, display }) => (
-                      <option key={runner.runnerId} value={runner.runnerId}>
-                        {machineLabels.get(runner.runnerId) ?? display.name}
-                        {" · "}{display.kind === "ssh" ? "SSH" : "Native Runner"}
-                      </option>
-                    ))}
-                  </select>
-                </label>
-                <label className="field">
-                  <span>Location Name</span>
-                  <input
-                    value={locationName}
-                    disabled={busyKey !== null}
-                    placeholder="Filled from the selected folder"
-                    onChange={(event) => {
-                      setLocationName(event.target.value);
-                      setNameEdited(true);
-                    }}
-                  />
-                </label>
-              </div>
-              <div className="field">
-                <span>Folder</span>
-                <div className="project-location-folder">
-                  <code title={selectedFolder ?? undefined}>
-                    {selectedFolder ?? "No Folder Selected"}
-                  </code>
-                  <button
-                    type="button"
-                    className="btn ghost sm"
-                    disabled={busyKey !== null}
-                    onClick={() => setBrowsing((current) => !current)}
-                  >
-                    {browsing ? "Close Browser" : selectedFolder ? "Choose Another Folder…" : "Browse for a Folder…"}
-                  </button>
-                </div>
-              </div>
-              {accessScopeManagementSupported && creationScopeChoices.length > 0 && (
-                <AccessScopeField
-                  choices={creationScopeChoices}
-                  value={scopeKey}
-                  onChange={setScopeKey}
-                  disabled={busyKey !== null}
-                  label="Location Access"
-                />
-              )}
-              {accessScopeManagementSupported && !identity && !identityError && (
-                <span className="muted">Loading permitted access scopes…</span>
-              )}
-              {accessScopeManagementSupported && identity && creationScopeChoices.length === 0 && (
-                <div className="project-location-error" role="alert">
-                  <strong>No Compatible Access Scope</strong>
-                  <span>
-                    No access scope you can assign is compatible with both this Project and Machine.
-                    Change the Project or Machine access first.
-                  </span>
-                </div>
-              )}
-              {browsing && selectedMachine && (
-                <DirectoryPicker
-                  runnerId={selectedMachine.runner.runnerId}
-                  protocolVersion={selectedMachine.runner.protocolVersion}
-                  onPick={pickFolder}
-                  onCancel={() => setBrowsing(false)}
-                />
-              )}
-              <div className="project-location-create-actions">
-                <button
-                  type="button"
-                  className="btn primary"
-                  disabled={busyKey !== null || !selectedFolder || !locationName.trim() ||
-                    (accessScopeManagementSupported && !creationScopeChoices.some((choice) => choice.key === scopeKey))}
-                  onClick={() => void create()}
-                >
-                  {busyKey === "create" ? "Adding…" : "Add Location"}
-                </button>
-              </div>
-            </>
-          ) : (
-            <div className="project-location-machine-empty">
-              <span>No compatible machines are online. Connect or update a machine to browse its filesystem.</span>
-              <button type="button" className="btn" onClick={onManageConnections}>Manage Connections</button>
-            </div>
-          )}
-          </section>
-          )}
-        </div>
-        {error && (
-          <div className="project-location-error" role="alert">
-            <strong>Location Could Not Be Added</strong>
-            <span>{error}</span>
-          </div>
-        )}
-        {identityError && (
-          <div className="project-location-error" role="alert">
-            <strong>Access Scopes Could Not Be Loaded</strong>
-            <span>{identityError}</span>
-          </div>
-        )}
-        <div className="project-location-existing-heading">
-          <strong>Existing Locations</strong>
-          <span className="muted">A Location can be used by more than one Project.</span>
-        </div>
-        <label className="field">
-          <span>Search Locations</span>
-          <input
-            autoFocus
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            placeholder="Machine, folder, or path"
-          />
-        </label>
-        <div className="project-location-candidates" role="list">
-          {filtered.map((candidate) => {
-            const runner = runners.get(candidate.runnerId);
-            const display = runnerDisplay(runner, boxByRunner.get(candidate.runnerId), candidate.runnerId);
-            const { alreadyAdded, relinkRequired } = projectLocationMembershipState(candidate, project.id);
+  const existing = (
+    <>
+      <label className="input-affix" title="Searches location names, machines and paths.">
+        <span className="input-affix-text" aria-hidden="true"><SearchIcon size={14} /></span>
+        <input
+          type="search"
+          autoFocus
+          aria-label="Search Locations"
+          disabled={busy}
+          placeholder="Search locations"
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+        />
+      </label>
+      {filtered.length > 0 ? (
+        <ChoiceRows
+          className="surface add-location-list"
+          label="Locations"
+          value={chosen?.key ?? null}
+          onChange={(key) => { if (!busy) { setChosenKey(key); setError(null); } }}
+          options={filtered.map((candidate) => {
+            const { alreadyAdded, relinkRequired, unavailable } = rowState(candidate);
             const usedBy = candidate.links
               .filter((link) => link.projectId !== project.id)
               .map((link) => projectById.get(link.projectId)?.name)
               .filter((name): name is string => Boolean(name));
-            const scopeCompatible = !accessScopeManagementSupported || !identity || !project.scope || !candidate.scope
-              ? null
-              : scopeAudienceContainedForIdentity(identity, project.scope, candidate.scope);
-            const scopeCheckPending = accessScopeManagementSupported && !identity && !identityError;
-            const scopeCheckFailed = accessScopeManagementSupported && !identity && Boolean(identityError);
-            const scopeCheckUnavailable = accessScopeManagementSupported && Boolean(identity) &&
-              (!project.scope || !candidate.scope);
-            const canNarrowProject = Boolean(identity && project.scope && candidate.scope &&
-              project.canManage !== false && canChangeAccessScope(identity, project.scope, candidate.scope.owner));
-            const canBroadenLocation = Boolean(identity && project.scope && candidate.scope &&
-              candidate.canManage !== false && canChangeAccessScope(identity, candidate.scope, project.scope.owner));
-            return (
-              <article className="project-location-candidate" role="listitem" key={candidate.key}>
-                <div className="project-location-main">
-                  <div className="project-location-heading">
-                    <strong>{candidate.name}</strong>
-                    <StatusBadge meta={projectAvailabilityMeta(candidate.availability)} />
-                  </div>
-                  <code title={candidate.path}>{candidate.path}</code>
-                  <span className="muted">{display.name} · {display.kind === "ssh" ? "SSH" : "Native Runner"}</span>
-                  {candidate.scope && (
-                    <span className="muted">Location Access: {accessScopeLabel(candidate.scope, identity)}</span>
-                  )}
-                  {usedBy.length > 0 && <span className="muted">Also Used by: {usedBy.join(", ")}</span>}
-                  {scopeCompatible === false && (
-                    <div className="project-location-reason">
-                      This Location is narrower than the Project, so adding it would expose a private workspace.
-                      {(canNarrowProject || canBroadenLocation) && (
-                        <span className="project-location-corrections">
-                          {canNarrowProject && candidate.scope && (
-                            <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
-                              resource: { kind: "project", projectId: project.id, name: project.name },
-                              owner: candidate.scope!.owner,
-                            })}>Narrow Project Access</button>
-                          )}
-                          {canBroadenLocation && project.scope && (
-                            <button type="button" className="btn ghost sm" onClick={() => setScopeCorrection({
-                              resource: {
-                                kind: "workspace",
-                                runnerId: candidate.runnerId,
-                                workspaceId: candidate.workspaceId,
-                                name: candidate.name,
-                              },
-                              owner: project.scope!.owner,
-                            })}>Broaden Location Access</button>
-                          )}
-                        </span>
-                      )}
-                    </div>
-                  )}
-                  {scopeCheckPending && <span className="muted">Checking access compatibility…</span>}
-                  {scopeCheckUnavailable && (
-                    <div className="project-location-reason">
-                      Access scope details are unavailable, so this Location cannot be added safely.
-                    </div>
-                  )}
-                </div>
-                <button
-                  type="button"
-                  className="btn sm"
-                  disabled={alreadyAdded || busyKey !== null || scopeCompatible === false ||
-                    scopeCheckPending || scopeCheckFailed || scopeCheckUnavailable}
-                  onClick={() => void choose(candidate)}
-                >
-                  {busyKey === candidate.key
-                    ? "Saving…"
-                    : alreadyAdded
-                      ? "Already Added"
-                      : relinkRequired
-                        ? "Relink Location"
-                        : "Add to Project"}
-                </button>
-              </article>
-            );
+            const machine = machineName(candidate.runnerId);
+            return {
+              value: candidate.key,
+              title: candidate.name,
+              status: <StatusBadge meta={projectAvailabilityMeta(candidate.availability)} />,
+              description: (
+                <span className="add-location-line">
+                  <span className="add-location-machine">{machine}</span>
+                  <span className="add-location-path" title={candidate.path}><bdi>{candidate.path}</bdi></span>
+                </span>
+              ),
+              meta: alreadyAdded ? "Already Added"
+                : relinkRequired ? "Relink"
+                  : usedBy.length > 0
+                    ? <span title={`Used by ${usedBy.join(", ")}`}>Used by {usedBy[0]}{usedBy.length > 1 ? ` +${usedBy.length - 1}` : ""}</span>
+                    : undefined,
+              // Every row holds still while a commit is pending; only an unavailable one says why.
+              disabled: unavailable || busy,
+              disabledReason: alreadyAdded ? `It's already one of ${project.name}'s locations.`
+                : unavailable ? "Its access can't be checked, so it can't be added." : undefined,
+            };
           })}
-          {filtered.length === 0 && (
-            <div className="project-manager-empty">
-              <strong>{candidates.length === 0 ? "No Locations Found" : "No Matching Locations"}</strong>
-              <span>{candidates.length === 0
-                ? "Create a new Location above or connect another machine."
-                : "Try a different machine, folder, or path."}</span>
-            </div>
-          )}
+        />
+      ) : (
+        <div className="surface">
+          <div className="row add-location-empty" role="status">
+            <SearchIcon size={16} />
+            <span>
+              {candidates.length === 0
+                ? "There are no locations to add yet. Add a new folder instead."
+                : "No locations match. Try a machine name, a folder or a path, or add a new folder."}
+            </span>
+          </div>
         </div>
+      )}
+      {chosen?.availability === "runner_offline" && (
+        <Notice tone="warning" compact>
+          {machineName(chosen.runnerId)} is offline. You can add this location, but sessions can't start there until it reconnects.
+        </Notice>
+      )}
+      {chosenMismatch && identity && project.scope && chosenMismatch.scope && (() => {
+        const candidateScope = chosenMismatch.scope;
+        const projectScope = project.scope;
+        const canNarrowProject = project.canManage !== false &&
+          canChangeAccessScope(identity, projectScope, candidateScope.owner);
+        const canBroadenLocation = chosenMismatch.canManage !== false &&
+          canChangeAccessScope(identity, candidateScope, projectScope.owner);
+        return (
+          <Notice
+            tone="warning"
+            title={narrowerAccessTitle(chosenMismatch.name, candidateScope, identity)}
+            actions={(canNarrowProject || canBroadenLocation) && (
+              <>
+                {canNarrowProject && (
+                  <button type="button" className="btn sm" aria-haspopup="dialog" onClick={() => setScopeCorrection({
+                    resource: { kind: "project", projectId: project.id, name: project.name },
+                    scope: projectScope,
+                    owner: candidateScope.owner,
+                  })}>Narrow Project Access…</button>
+                )}
+                {canBroadenLocation && (
+                  <button type="button" className="btn sm" aria-haspopup="dialog" onClick={() => setScopeCorrection({
+                    resource: {
+                      kind: "workspace",
+                      runnerId: chosenMismatch.runnerId,
+                      workspaceId: chosenMismatch.workspaceId,
+                      name: chosenMismatch.name,
+                    },
+                    scope: candidateScope,
+                    owner: projectScope.owner,
+                  })}>Broaden Location Access…</button>
+                )}
+              </>
+            )}
+          >
+            {project.name} is shared with {projectAudience(project, identity)}, and a project's locations must be shared at least as widely.
+          </Notice>
+        );
+      })()}
+    </>
+  );
+
+  const newFolder = !canCreateLocation && !holding ? (
+    <Notice tone="warning" title="Adding New Folders Needs an Update">
+      This version of Wollipog can't register a new folder as a location. Update or restart Wollipog so it matches this dashboard. You can still add an existing location.
+    </Notice>
+  ) : !anyOnline && !holding ? (
+    <Notice
+      tone="neutral"
+      title="No Machines Online"
+      actions={<button type="button" className="btn sm" onClick={onManageConnections}>Open Connections</button>}
+    >
+      Start a machine to browse its folders.
+    </Notice>
+  ) : (
+    <>
+      <div className="field">
+        <span>Machine</span>
+        <Select
+          label="Machine"
+          value={selectedRunnerId || null}
+          disabled={busy}
+          onChange={changeMachine}
+          options={machines.map(({ runner, display, browsable }) => ({
+            value: runner.runnerId,
+            label: machineLabels.get(runner.runnerId) ?? display.name,
+            disabled: !browsable,
+            ...(!browsable ? {
+              disabledReason: runner.status !== "online"
+                ? "Offline. Start it to browse its folders."
+                : "Update Wollipog on this machine to browse its folders.",
+            } : {}),
+          }))}
+        />
       </div>
+      {selectedMachine && (
+        <div className="field">
+          <span>Folder</span>
+          <DirectoryPicker
+            runnerId={selectedMachine.runner.runnerId}
+            machineName={selectedMachine.display.name}
+            protocolVersion={selectedMachine.runner.protocolVersion}
+            hideActions
+            disabled={busy}
+            onLocationChange={folderChanged}
+            onPick={folderChanged}
+            onCancel={close}
+          />
+        </div>
+      )}
+      <label className="field">
+        <span>Location Name</span>
+        <input
+          ref={nameRef}
+          value={locationName}
+          disabled={busy}
+          aria-invalid={nameError ? true : undefined}
+          aria-describedby={nameError ? nameErrorId : nameHelperId}
+          onChange={(event) => {
+            setLocationName(event.target.value);
+            setNameEdited(true);
+            if (event.target.value.trim()) setNameError(null);
+          }}
+        />
+        {nameError
+          ? <FieldError id={nameErrorId}>{nameError}</FieldError>
+          : <p className="field-helper" id={nameHelperId}>{nameEdited ? "Shown wherever this location is listed." : "Filled in from the folder name."}</p>}
+      </label>
+      {accessScopeManagementSupported && creationScopeChoices.length > 0 && (
+        <AccessScopeField
+          choices={creationScopeChoices}
+          value={scopeKey}
+          onChange={setScopeKey}
+          disabled={busy}
+          label="Location Access"
+          helper="A location must be shared at least as widely as its project."
+        />
+      )}
+      {accessScopeManagementSupported && identity && creationScopeChoices.length === 0 && (
+        <Notice tone="warning" title="No Access Level Fits">
+          None of the access levels you can assign fits both this project and this machine. Change the project's or the machine's access first.
+        </Notice>
+      )}
+    </>
+  );
+
+  return (
+    <Modal
+      title={`Add Location to ${project.name}`}
+      onClose={close}
+      size="md"
+      returnFocusRef={returnFocusRef}
+      footer={(
+        <>
+          {blockedReason && <span className="add-location-reason" id={reasonId}>{blockedReason}</span>}
+          <button type="button" className="btn" disabled={busy} onClick={onClose}>
+            {onboarding ? "Skip for Now" : "Cancel"}
+          </button>
+          <BusyButton
+            className="btn primary"
+            busy={busy}
+            progress="Adding the location…"
+            disabled={blockedReason !== null}
+            aria-describedby={blockedReason ? reasonId : undefined}
+            onClick={() => void commit()}
+          >
+            Add Location
+          </BusyButton>
+        </>
+      )}
+    >
+      {onboarding && (
+        <Notice tone="success" compact>
+          {project.name} was created. Add the folder where its sessions run.
+        </Notice>
+      )}
+      <SegmentedControl
+        className="block"
+        label="Add From"
+        value={mode}
+        onChange={switchMode}
+        options={[
+          { value: "existing", label: "Existing Location", disabled: busy },
+          { value: "new", label: "New Folder", disabled: busy },
+        ]}
+      />
+      {mode === "existing" ? existing : newFolder}
+      {identityError && (
+        <Notice tone="danger" role="alert" title="Couldn't Load Access Levels" details={identityError}>
+          Wollipog needs them to check that a location fits this project. Close this and try again.
+        </Notice>
+      )}
+      {onboarding && setupFileSupported && (
+        <Checkbox
+          checked={generateSetup}
+          disabled={busy}
+          label="Create a Starter Setup File"
+          helper="Adds a setup file for review after the location is added. Nothing runs, and nothing is committed."
+          onChange={setGenerateSetup}
+        />
+      )}
+      {error && (
+        <Notice tone="danger" role="alert" title={error.title} details={error.detail ?? undefined}>
+          {error.sentence}
+        </Notice>
+      )}
       {scopeCorrection && identity && (
         <AccessScopeChangeDialog
           resource={scopeCorrection.resource}
-          owner={scopeCorrection.owner}
+          scope={scopeCorrection.scope}
+          initialOwner={scopeCorrection.owner}
           identity={identity}
           onClose={() => setScopeCorrection(null)}
-          onUpdated={onClose}
+          // The snapshot carries the new access; Add Location stays open and turns on once it matches.
+          onUpdated={() => {}}
         />
       )}
     </Modal>

@@ -15,7 +15,9 @@ import { claudeStableAliasCatalogModel } from "./claude-model-aliases.js";
 /** Whether an Orchestrator assigned UI Evidence Approval can actually exercise it. Human is always
  * a safe owner, so every unknown, unsupported, or unverifiable input resolves to the human. */
 export type UiEvidenceReviewEvaluation =
-  | { effectiveOwner: "orchestrator" }
+  /** `limitation`: Full Control (#2940) gave the Orchestrator evidence it cannot fully inspect.
+   * It approves only with a receipt for every item, so it can ask for screenshots or deny. */
+  | { effectiveOwner: "orchestrator"; limitation?: { code: UiEvidenceReviewUnavailableCode; reason: string } }
   | { effectiveOwner: "human"; fallback?: { code: UiEvidenceReviewUnavailableCode; reason: string } };
 
 export type UiEvidenceItem = Extract<

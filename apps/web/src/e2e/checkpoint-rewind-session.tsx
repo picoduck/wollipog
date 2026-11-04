@@ -28,6 +28,7 @@ import { SessionDetail } from "../components/SessionDetail.js";
  * (`navigated`, `rewound`, `forked`, `prompted`).
  */
 const params = new URLSearchParams(window.location.search);
+const retryMode = params.get("retry");
 const driver = params.get("driver") === "claude-code" ? "claude-code" as const : "codex-app-server" as const;
 const quarantine = params.get("quarantine");
 const forkMode = params.get("fork");
@@ -81,7 +82,7 @@ const runner = {
   workspaces: [],
   connectedAt: 1,
   lastSeen: 1,
-  protocolVersion: PROTOCOL_VERSION,
+  protocolVersion: retryMode === "legacy" ? 260 : PROTOCOL_VERSION,
 } as RunnerView;
 
 const session: SessionView = {
@@ -92,9 +93,10 @@ const session: SessionView = {
   projectId: null,
   agentId: driver,
   agentName: driver === "claude-code" ? "Claude Code" : "Codex",
-  agentCapabilities: capabilities,
+  agentCapabilities: { ...capabilities, ...(retryMode && retryMode !== "legacy"
+    ? { restartResumesConversation: retryMode === "resume" } : {}) },
   title: "Tidy the Session Notice Slot",
-  status: "idle",
+  status: retryMode ? "failed" : "idle",
   column: "review",
   runId: null,
   useWorktree: true,
@@ -120,7 +122,10 @@ const session: SessionView = {
     : {}),
 } as SessionView;
 
-const payloads: SessionEvent["payload"][] = [
+const payloads: SessionEvent["payload"][] = retryMode ? [
+  { kind: "user_message", text: "Continue the existing task after reloading the MCP configuration.", images: [] },
+  { kind: "error", message: "prompt failed: Rate limit reached" },
+] : [
   { kind: "user_message", text: "Add a Retry Turn button to the failed turn notice.", images: [] },
   { kind: "checkpoint", turn: 1 },
   { kind: "agent_message", text: "Added **Retry Turn** to the Turn Failed notice, with a test for its focus.", final: true },
@@ -180,12 +185,22 @@ const navigation: ViewNavigation = {
 
 const client = {
   ...api,
+  restart: async () => {
+    document.body.dataset.retryCalls = JSON.stringify(["restart"]);
+    return { ...session, status: "starting" as const };
+  },
   session: () => new Promise<never>(() => {}),
   getSessionEventPage: () => new Promise<never>(() => {}),
   getSessionEventTailPage: (_id: string, _before: number | undefined, eventEpoch: number) =>
     Promise.resolve({ events, eventEpoch, nextBefore: 0, hasMoreOlder: false, cacheComplete: true }),
   prompt: async (_id: string, text: string) => {
     document.body.dataset.prompted = text;
+    if (retryMode) {
+      document.body.dataset.retryCalls = JSON.stringify([
+        ...JSON.parse(document.body.dataset.retryCalls ?? "[]") as string[], "prompt",
+      ]);
+      return { ...session, status: "queued" as const };
+    }
     return undefined as never;
   },
   rewind: async (_id: string, turn: number) => {

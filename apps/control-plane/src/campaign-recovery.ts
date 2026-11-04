@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol,
+import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
-import type { ControlPlaneDb } from "./db.js";
+import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
 import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 
 /** Hash untrusted provider coordinates rather than allowing an identifier to become a credential,
@@ -10,15 +10,23 @@ import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 export function recoveryCoordinate(value: string): string {
   return `sha256:${createHash("sha256").update(value).digest("hex")}`;
 }
-function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
+/** Why a pending request needs its owner: the four irrecoverable classes of #2938 stay distinct. */
+export function requestReason(evaluation: CampaignAuthorityEvaluation): CampaignRecoveryReason {
   if (evaluation.owner === "orchestrator") return "authorized_action";
   switch (evaluation.reason) {
-    case "outside_boundary": return "boundary_enlargement";
+    case "outside_boundary": case "outside_issue_scope": case "review_extension_cap_reached": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
-    case "provider_delivery_unavailable": return "unsupported_capability";
+    case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
     case "protected_request": case "human_required_rule": case "custom_owner": return "human_required_rule";
     default: return "missing_human_information";
   }
+}
+
+/** Why a stopped worker is blocked (#3362), from the server-written stop provenance only, never
+ * from agent text. A recorded Stop or archive request is an intentional stop; a declined guardrail
+ * is a genuine denial; any other or missing provenance is unverified. All three stay blocked. */
+export function stoppedWorkerReason(stop: SessionStopProvenance | null): CampaignRecoveryReason {
+  return stop?.cause === "requested" ? "intentional_stop" : stop?.cause === "guardrail" ? "hard_denial" : "unverified_stop";
 }
 
 /** Server adapters translate authoritative requests, holds, receipt state and forge facts into
@@ -74,16 +82,24 @@ export class CampaignRecoveryService {
           repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined },
         this.db.getRunner(session.runnerId)?.protocolVersion,
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),
-        root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion);
+        root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion, undefined,
+        decision?.resourceSnapshot.category === "review_round_extension" ? this.db.reviewExtensionCap(session.id, decision.resourceSnapshot) : undefined);
         const owner = decision?.authority === "human" ? "human" : evaluated.owner;
-        const reason = request.kind === "authentication"
+        // The condition recorded when the server could not admit a publication, not a boundary
+        // enlargement (#4065). A live re-evaluation never carries it, so it is read from the decision.
+        const admissionFailure = owner === "human" && decision?.category === "follow_up_issue_publication"
+          ? decision.authorityEvaluation?.admissionFailure : undefined;
+        // Under Full Control the server declines sign-in itself; it never waits for the Human.
+        const reason = request.kind === "authentication" && owner === "human"
           ? "missing_access" : request.kind === "question" && owner === "human" && !request.humanRequired &&
             evaluated.reason === "unverified_intent" ? "missing_human_information"
           : decision?.humanFallback ? "unsupported_capability"
+          : admissionFailure ? "publication_not_admitted"
           : requestReason({ ...evaluated, owner });
         observations.push({ action: decision?.category === "ui_evidence_approval" ? "review_evidence" : "answer_request",
           resource: { kind: "request", sessionId: session.id, occurrenceId: recoveryCoordinate(request.occurrenceId) },
-          reason, owner, signal: `${revision}:${owner}:${reason}` });
+          reason, owner, signal: `${revision}:${owner}:${reason}${admissionFailure ? `:${admissionFailure}` : ""}`,
+          ...(admissionFailure ? { admissionFailure } : {}) });
       }
       for (const hold of session.holds ?? []) {
         observations.push({ action: "recover_hold", resource: { kind: "hold", sessionId: session.id,
@@ -94,12 +110,18 @@ export class CampaignRecoveryService {
       if (session.id !== root.id && !this.db.campaignChildReportVerified(root.id, session.id) &&
           (session.status === "failed" || session.status === "stopped")) {
         const assignment = this.db.campaignWorkLedger.currentAssignment(session.id);
+        // A provider whose command sandbox cannot start on its host (#3843) fails the same way in
+        // every replacement there. Fixing the host, or the Child Harness, is the person's to do.
+        const hostBlocked = session.status === "failed" &&
+          this.db.sessionLaunchFailure(session.id) === "codex_sandbox_unavailable";
         // Ended attempts are historical, and must not race the replacement's current failure.
         if (assignment || !ledgerWorkers.has(session.id)) observations.push({ action: "replace_worker",
           resource: { kind: "worker", sessionId: session.id, occurrenceId: `epoch:${session.eventEpoch ?? 0}`,
             ...(assignment ? { workItemId: assignment.workItemId } : {}) },
-          reason: session.status === "stopped" ? "hard_denial" : "transient_failure",
-          owner: "orchestrator", signal: `${session.id}:${session.eventEpoch ?? 0}:${session.status}` });
+          reason: session.status === "stopped" ? stoppedWorkerReason(this.db.sessionStopProvenance(session.id))
+            : hostBlocked ? "unsupported_capability" : "transient_failure",
+          owner: hostBlocked ? "human" : "orchestrator",
+          signal: `${session.id}:${session.eventEpoch ?? 0}:${session.status}${hostBlocked ? ":codex_sandbox_unavailable" : ""}` });
       }
     }
     for (const decision of this.db.campaignRecoverySettledDecisions(root.id)) {
@@ -114,6 +136,32 @@ export class CampaignRecoveryService {
         resource: { kind: "request", sessionId: decision.sessionId, occurrenceId: recoveryCoordinate(decision.occurrenceId) },
         reason: decision.status === "denied" ? "hard_denial" : "uncertain_outcome",
         owner: decision.status === "denied" ? "orchestrator" : "human", signal: decision.status });
+    }
+    // Full Control declines (#2940) are informational blocked work. One record per session and
+    // class: it is never dispatched or offered for override, and a verified report settles it.
+    for (const decline of this.db.campaignRecovery.declines(root.id, revision)) {
+      if (decline.sessionId !== root.id && this.db.campaignRecoveryVerifiedReport(root.id, decline.sessionId)) {
+        this.db.campaignRecovery.retireDeclines(root.id, decline.sessionId);
+        continue;
+      }
+      // An unresolved-effect decline is a plain decline: the child was told how to retry, and
+      // nothing it could not supply is blocked. Its row only keeps that message to once per child.
+      if (!FULL_CONTROL_DECLINED_CLASSES.has(decline.requestClass as FullControlRequestClass)) continue;
+      observations.push({ action: "continue_without_request",
+        resource: { kind: "request", sessionId: decline.sessionId, occurrenceId: decline.occurrenceId },
+        reason: "request_declined", owner: "orchestrator", signal: `declined:${decline.requestClass}` });
+    }
+    // A member's correctable publication refusal (#4065) created no request, so it reaches the root
+    // as an Orchestrator-owned recovery record and its wake, like any child request needing it.
+    // The member's next request for that recommendation, or its verified report, settles it.
+    for (const refusal of this.db.campaignRecovery.publicationRefusals(root.id, revision)) {
+      if (this.db.campaignRecoveryVerifiedReport(root.id, refusal.sessionId)) {
+        this.db.campaignRecovery.retirePublicationRefusals(root.id, refusal.sessionId);
+        continue;
+      }
+      observations.push({ action: "reformulate_request",
+        resource: { kind: "request", sessionId: refusal.sessionId, occurrenceId: refusal.occurrenceId },
+        reason: "correctable_refusal", owner: "orchestrator", signal: `refused:${refusal.failure}`, admissionFailure: refusal.failure });
     }
     for (const job of this.db.campaignReviewJobs.recoveryJobs(root.id)) {
       const unknown = job.usageSettlement === "unavailable" || job.usageSettlement === "pending" && previous.some(item =>
@@ -166,6 +214,14 @@ export class CampaignRecoveryService {
         if (value.state !== "open") continue;
         const resource = { kind: "pull_request" as const, sessionId: root.id, repository: ref.repository,
           pullRequest: ref.number, occurrenceId: value.headSha };
+        if (value.forge === "gitlab") {
+          // GitLab has no "changes requested" decision; a failed pipeline is the repair signal (#3600).
+          if (value.pipeline?.status === "failed") {
+            observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
+              signal: `${value.headSha}:pipeline:${value.pipeline.id}:failed` });
+          }
+          continue;
+        }
         if (value.checks.state === "failing" || value.requiredChecks.state === "failing") {
           observations.push({ action: "repair_checks", resource, reason: "failed_checks", owner: "orchestrator",
             signal: `${value.headSha}:checks:${value.checks.state}:${value.requiredChecks.state}` });
@@ -177,7 +233,16 @@ export class CampaignRecoveryService {
         }
       }
     }
-    const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now);
+    // A dispatched wake is unanswered only while nothing could still be answering it: the root is
+    // idle with nothing pending, and neither it nor any live descendant has unfinished work in the
+    // foreground, a pending Stop or background work still returning (as the web's sessionWorking).
+    const working = (session: SessionView) => ["queued", "starting", "running"].includes(session.status) ||
+      session.stopOperation?.status === "stop_pending" ||
+      session.backgroundWorkState === "running" || session.backgroundWorkState === "continuation_pending";
+    const quiet = root.status === "idle" && !root.pendingApproval && !working(root) &&
+      sessions.slice(1).every(session => session.archived || !working(session));
+    const changed = this.db.campaignRecovery.synchronize(root.id, revision, current, observations, now,
+      quiet ? record => this.db.campaignRecoveryWakeSettledAt(root.id, `${record.id}:${record.attempts}`) : undefined);
     const admission = this.db.campaignContinuationAdmission(root.id);
     const admissionKey = `${revision}:${admission.state}`;
     if (this.admissionStates.get(root.id) !== admissionKey) {

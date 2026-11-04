@@ -1,1 +1,0 @@
-|.compare-head|padding|13px

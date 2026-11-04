@@ -74,16 +74,6 @@ export function requestPanelPositionLabel(position: number, count: number): stri
 /** Where the list was scrolled for each session, so returning from a detail keeps the place (§6.2). */
 const listScrollPositions = new Map<string, number>();
 
-export function descendantRequestCounts(requests: readonly Pick<DescendantRequestView, "responseOwner">[]) {
-  let human = 0;
-  let orchestrator = 0;
-  for (const request of requests) {
-    if (request.responseOwner === "human") human += 1;
-    else orchestrator += 1;
-  }
-  return { human, orchestrator };
-}
-
 function itemKey(sessionId: string, occurrenceId: string): string {
   return JSON.stringify([sessionId, occurrenceId]);
 }
@@ -97,9 +87,13 @@ export function requestTypeLabel(request: PendingApproval): string {
     if (category === "pr_merge") return "PR Merge";
     if (category === "merged_branch_deletion") return "Branch Deletion";
     if (category === "issue_closure") return "Issue Closure";
+    if (category === "automation_creation") return "Create Automation";
     if (category === "campaign_issue_scope") return "Campaign Issue Scope";
+    if (category === "campaign_follow_up_admission") return "Follow-Up Approval";
     if (category === "follow_up_issue_publication") return "Issue Publication";
     if (category === "implementation_question") return "Implementation Decision";
+    if (category === "owner_decision") return "Owner Decision";
+    if (category === "review_round_extension") return "Review Round Extension";
     return "Workflow Decision";
   }
   return "Approval";

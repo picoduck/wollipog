@@ -870,6 +870,79 @@ test("with the real Claude driver, a model stop in a later turn starts no contin
   }
 });
 
+test("an unrequested shell kill settles its durable row and releases a queued worktree handoff (#3204)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-shell-kill-handoff-"));
+  let manager: SessionManager | undefined;
+  const children: any[] = [];
+  try {
+    const repo = initRepo(root);
+    const dataDir = join(root, "data");
+    const store = new SessionStore(join(dataDir, "sessions"));
+    const submitted: Array<{ cwd: string; text: string }> = [];
+    const sent: RunnerToControlPlane[] = [];
+    const factory = (_kind: unknown, options: DriverOptions, callbacks: DriverCallbacks) =>
+      new ClaudeCodeDriver(options, callbacks, {
+        spawn: () => {
+          const child = new EventEmitter() as any;
+          Object.assign(child, { pid: 123, stdin: new PassThrough(), stdout: new PassThrough(), stderr: new PassThrough(), kill: () => true });
+          children.push(child);
+          child.stdin.on("finish", () => setImmediate(() => child.emit("close", 0)));
+          let buffered = "";
+          child.stdin.on("data", (chunk: Buffer) => {
+            buffered += chunk.toString();
+            let newline: number;
+            while ((newline = buffered.indexOf("\n")) >= 0) {
+              const line = buffered.slice(0, newline);
+              buffered = buffered.slice(newline + 1);
+              if (!line.trim()) continue;
+              const value = JSON.parse(line);
+              if (value.type !== "user") continue;
+              const text = JSON.stringify(value.message.content);
+              submitted.push({ cwd: options.cwd, text });
+              setImmediate(() => {
+                const frame = (value: unknown) => child.stdout.write(JSON.stringify(value) + "\n");
+                if (submitted.length === 1) {
+                  frame({ type: "assistant", message: { content: [{ type: "tool_use", id: "toolu_wait", name: "Bash",
+                    input: { command: "sleep 100", run_in_background: true } }] } });
+                  frame({ type: "system", subtype: "task_started", task_id: "wait", tool_use_id: "toolu_wait" });
+                }
+                frame({ type: "stream_event", event: { type: "content_block_delta", delta: { type: "text_delta", text: "Finished checking." } } });
+                frame({ type: "result", subtype: "success" });
+              });
+            }
+          });
+          return child;
+        }, kill() {},
+      } as any);
+    manager = new SessionManager(message => sent.push(message), () => {}, store, "runner", undefined, factory as never, dataDir, 1);
+    const spec = claudeSpec("s_shell_kill_handoff", repo);
+    await manager.start(spec);
+    manager.prompt(spec.sessionId, "launch watch");
+    await waitFor(() => store.readMeta(spec.sessionId)?.status === "idle" &&
+      store.readMeta(spec.sessionId)?.backgroundWorkState === "running", "the shell job did not start");
+    assert.deepEqual(store.readMeta(spec.sessionId)?.backgroundJobs?.map(job => job.id), ["wait"],
+      "the provider identity replaces its provisional row without an unfinished duplicate");
+    const requested = await manager.requestWorktree(spec.sessionId, { baseRef: "HEAD", branch: "fix/shell-kill" });
+    manager.prompt(spec.sessionId, "queued work");
+    await waitFor(() => publishedHolds(sent).some(hold => hold?.kind === "worktree_rebind"), "the queued handoff was not held");
+    const frame = (value: unknown) => children[0].stdout.write(JSON.stringify(value) + "\n");
+    frame({ type: "system", subtype: "task_updated", task_id: "wait", patch: { status: "killed" } });
+    frame({ type: "system", subtype: "task_notification", task_id: "wait", status: "stopped" });
+    await waitFor(() => submitted.some(prompt => prompt.cwd === requested.worktree.path && prompt.text.includes("queued work")) &&
+      store.readMeta(spec.sessionId)?.status === "idle", "the terminal job did not release the queued handoff");
+    const meta = store.readMeta(spec.sessionId)!;
+    assert.equal(meta.backgroundWorkState, undefined, "the idle session no longer claims external work is running");
+    assert.equal(publishedHolds(sent).at(-1), null);
+    assert.ok(meta.backgroundJobs?.every(job => job.terminalStatus === "killed"));
+    assert.ok(meta.backgroundJobs?.every(job => job.assistantResultPersistedAt !== undefined));
+    assert.equal(submitted.filter(prompt => prompt.text.includes(CONTINUATION_PREFIX)).length, 1);
+  } finally {
+    manager?.shutdownAll();
+    for (const child of children) child.emit("close", 0);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("a stop the provider confirms late keeps the actor who asked, and no other stop takes it over (#1849)", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-job-stop-late-"));
   let manager: SessionManager | undefined;

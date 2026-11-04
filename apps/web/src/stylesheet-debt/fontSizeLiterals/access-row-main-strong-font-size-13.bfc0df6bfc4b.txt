@@ -1,1 +1,0 @@
-|.access-row-main strong|font-size|13

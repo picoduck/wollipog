@@ -23,7 +23,7 @@ import { randomUUID } from "node:crypto";
 import { claudeFailureCategory, type ProviderFailureCategory } from "./provider-failure.js";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
-import { BACKGROUND_HANDOFF_WAIT_MAX_MS, type AgentQuestion, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
+import { BACKGROUND_HANDOFF_WAIT_MAX_MS, fullControlAutomaticResponseText, type AgentQuestion, type FullControlAutomaticResponse, type PlanEntry, type PromptImage, type SessionConfig } from "@wollipog/protocol";
 import { approvalScopeContext } from "../approval-scope.js";
 import { campaignOperationEvidence } from "../campaign-operation-evidence.js";
 import { BoundedNdjsonBuffer } from "../bounded-ndjson.js";
@@ -554,7 +554,7 @@ export class ClaudeCodeDriver implements Driver {
   private readonly deps: ClaudeDriverDeps;
   /** Every process this instance starts. Its owner is the descendant owner of the provider spawns
    * and keys the Claude namespace those spawns share. */
-  private readonly processes = new ProviderProcessLedger();
+  private readonly processes: ProviderProcessLedger;
   /** Graceful EOF retirements started by dispose(); a terminating proof must not preempt them. */
   private disposeBarrier: Promise<unknown> | null = null;
   private readonly persistentRequested: boolean;
@@ -680,6 +680,8 @@ export class ClaudeCodeDriver implements Driver {
   /** Also from the last `preparedBaseArgs()`: what the spawn's environment carries for the runner's
    * own hooks (the relayed manager hook's key, #1472). Never part of the persisted launch env. */
   private preparedHookEnv: Record<string, string> = {};
+  /** Latest provisioning result, also used to observe the completed turn's hook circuit. */
+  private preparedHookArgs: string[];
   /** The permission mode the RUNNING child emulates on the worktree veto's behalf, or null when it
    * was launched unmediated. Bound at spawn for the same reason as
    * `launchedRoutineControlChannelMode`: the worktree inventory now changes mid-turn by design
@@ -699,9 +701,12 @@ export class ClaudeCodeDriver implements Driver {
     private readonly cb: DriverCallbacks,
     deps: Partial<ClaudeDriverDeps> = {},
   ) {
-    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint, opts.claudeLiveUsage);
+    this.processes = new ProviderProcessLedger({ cgroup: opts.reviewWriterCgroup });
+    this.usageAccounting = new ClaudeUsageAccounting(claudeRestoresUsage(opts.agentVersion), opts.claudeUsageCheckpoint,
+      opts.claudeLiveUsage, opts.claudeRepublicationInterrupted === true);
     this.cwd = opts.cwd;
     this.config = opts.config;
+    this.preparedHookArgs = [...opts.args];
     // Phase 2 resume: reuse the persisted claude session id (→ `--resume` from the first turn);
     // otherwise mint a fresh id (→ `--session-id` on turn 1, `--resume` after).
     this.sessionId = opts.resumeId ?? randomUUID();
@@ -724,8 +729,14 @@ export class ClaudeCodeDriver implements Driver {
     this.persistentIdleMs = persistent.idleMs;
     this.pendingMaxMs = persistent.pendingMaxMs;
     this.handoffWaitMaxMs = persistent.handoffWaitMaxMs;
+    // A task the session already ended stays ended in this process too (#3752). Claude can still
+    // deliver the dead task's queued `stopped` notification after a relaunch, which would otherwise
+    // record it as pending again and hold the next handoff on a job the session lists as killed.
+    for (const id of opts.endedBackgroundTaskIds ?? []) {
+      if (id) this.endedBackgroundTaskIds.add(id);
+    }
     for (const id of opts.initialBackgroundTaskIds ?? []) {
-      if (id) {
+      if (id && !this.endedBackgroundTaskIds.has(id)) {
         this.pendingBackgroundTasks.set(id, { id, startedAt: this.deps.now(), launchType: "unknown" });
         this.unverifiedBackgroundTaskIds.add(id);
       }
@@ -876,7 +887,15 @@ export class ClaudeCodeDriver implements Driver {
       this.usageAccounting.checkpoint = { sessionId: this.sessionId, totalCostUsd: 0, models: {}, accountingScope: "conversation" };
       this.cb.onClaudeUsageCheckpoint?.(this.usageAccounting.checkpoint);
     }
-    this.emitUsageEvents(this.usageAccounting.beginProcess());
+    this.usageAccounting.beginProcess(this.firstTurn);
+  }
+
+  /** The running process's own version decides how its totals are accounted: the recorded one can
+   * be missing or stale after a runner restart (#4069). Usage before any report confirms it too. */
+  private confirmUsageProcess(version?: unknown): void {
+    const { events, baseline } = this.usageAccounting.confirmProcess(this.sessionId, typeof version === "string" ? version : undefined);
+    this.emitUsageEvents(events);
+    if (baseline) this.cb.onClaudeUsageCheckpoint?.(baseline);
   }
 
   private emitUsageEvents(events: ReturnType<ClaudeUsageAccounting["result"]>): void {
@@ -892,6 +911,7 @@ export class ClaudeCodeDriver implements Driver {
     // The control plane may have changed since `message_start`; only a v216+ peer shows, rather
     // than accrues, a provisional record.
     if (!request || this.cb.supportsLiveClaudeUsage?.() !== true) return;
+    this.confirmUsageProcess();
     const u = request.usage;
     const n = (value: unknown) => typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
     const details = u.output_tokens_details && typeof u.output_tokens_details === "object"
@@ -914,8 +934,8 @@ export class ClaudeCodeDriver implements Driver {
     const checkpoint = this.usageAccounting.checkpoint !== before ? this.usageAccounting.checkpoint : null;
     events.forEach((event, index) => this.cb.onEvent({ ...event,
       ...(index === events.length - 1 && typeof result.duration_ms === "number" ? { durationMs: result.duration_ms } : {}),
-      ...(index === events.length - 1 && checkpoint && !event.accountingIncomplete
-        ? { claudeUsageCheckpoint: checkpoint } : {}),
+      // An incomplete record moves the baseline only when it closes an unproven total.
+      ...(index === events.length - 1 && checkpoint ? { claudeUsageCheckpoint: checkpoint } : {}),
     }));
     if (checkpoint) this.cb.onClaudeUsageCheckpoint?.(checkpoint);
   }
@@ -949,7 +969,8 @@ export class ClaudeCodeDriver implements Driver {
     // /context is a local zero-cost command. It makes Claude persist the fork immediately so the
     // target app session can safely store a real resumable id without running a hidden model turn.
     const args = [
-      ...this.preparedBaseArgs(),
+      // This local, tool-less probe must not refresh a future model turn's hook configuration.
+      ...this.preparedBaseArgs(false),
       "-p",
       "--resume",
       this.sessionId,
@@ -971,7 +992,7 @@ export class ClaudeCodeDriver implements Driver {
       this.processes.assertOpen();
       // No descendantOwner: the probe's boundary is terminated when it closes, so the ledger proves
       // it on its own.
-      child = this.processes.record(this.deps.spawn({
+      child = this.processes.launch(this.deps.spawn, {
         command: this.opts.command,
         args,
         cwd,
@@ -991,7 +1012,7 @@ export class ClaudeCodeDriver implements Driver {
         containerAgentLaunch: true,
         cloudAgentLaunch: true,
         descendantMarker: options?.descendantMarker ?? this.opts.descendantMarker,
-      }));
+      });
     } catch (err) {
       throw new Error(`Claude fork failed to spawn: ${(err as Error).message}`);
     }
@@ -1094,7 +1115,23 @@ export class ClaudeCodeDriver implements Driver {
     });
   }
 
+  /** Review sessions: `structured_output` from the last successful root result (`--json-schema`). */
+  private lastStructuredOutput: string | null = null;
+
+  reviewOutput(): string | null {
+    return this.lastStructuredOutput;
+  }
+
+  /** Review sessions: permission denials recorded by the last root result. */
+  private lastPermissionDenials = 0;
+
+  reviewDiagnostics(): { permissionDenials: number } {
+    return { permissionDenials: this.lastPermissionDenials };
+  }
+
   prompt(text: string, images?: PromptImage[], slashCommand?: string): Promise<StopReason> {
+    this.lastStructuredOutput = null;
+    this.lastPermissionDenials = 0;
     // A disposed driver must never spawn a fresh agent process (a caller racing stop()/restart
     // against an awaited pre-turn step would otherwise launch an invisible rogue turn).
     if (this.disposed) return Promise.resolve("cancelled");
@@ -1242,6 +1279,12 @@ export class ClaudeCodeDriver implements Driver {
       }
     }
     if (this.disposed || cancelGeneration !== this.oneShotCancelGeneration) return "cancelled";
+    let preparedArgs: string[];
+    try {
+      preparedArgs = this.preparedBaseArgs();
+    } catch (error) {
+      return this.refuseHookLaunch(error);
+    }
     this.beginUsageProcess();
     return new Promise<StopReason>((resolve) => {
       this.cancelled = false;
@@ -1251,7 +1294,7 @@ export class ClaudeCodeDriver implements Driver {
       const imgs = images ?? [];
 
       const args = [
-        ...this.preparedBaseArgs(),
+        ...preparedArgs,
         "-p",
         "--output-format",
         "stream-json",
@@ -1297,7 +1340,7 @@ export class ClaudeCodeDriver implements Driver {
       let child: AgentProcess;
       try {
         this.processes.assertOpen();
-        child = this.processes.record(this.deps.spawn({
+        child = this.processes.launch(this.deps.spawn, {
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -1320,7 +1363,7 @@ export class ClaudeCodeDriver implements Driver {
           claudeNamespaceProvider: true,
           claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
-        }));
+        });
       } catch (err) {
         this.cb.onEvent({ kind: "error", message: (err as Error).message });
         return resolve("refusal");
@@ -1335,7 +1378,7 @@ export class ClaudeCodeDriver implements Driver {
         if (settled) return;
         settled = true;
         if (this.activeOneShotTurnId === turnId) this.activeOneShotTurnId = null;
-        if (r !== "cancelled") this.preparedBaseArgs();
+        if (r !== "cancelled") this.preparedBaseArgs(false);
         // A clean terminal result is fallback establishment evidence for abbreviated streams
         // that omit system/init. Refused/cancelled turns rely on init alone.
         if (r !== "refusal" && r !== "cancelled") this.markSessionEstablished();
@@ -1533,7 +1576,15 @@ export class ClaudeCodeDriver implements Driver {
     const cfg = this.config;
     // The prepared argv establishes whether the managed-worktree guard is active for this spawn,
     // so it must be resolved BEFORE the permission mode that depends on it.
-    const preparedArgs = this.preparedBaseArgs();
+    let preparedArgs: string[];
+    try {
+      // Background work owns the existing child until it becomes quiescent. Do not rewrite its
+      // shared hook settings or publish a future launch's capabilities while replacement is deferred.
+      preparedArgs = this.preparedBaseArgs(!(this.child && this.pendingBackgroundTasks.size > 0));
+    } catch (error) {
+      this.settlePersistentTurn(turn, this.refuseHookLaunch(error));
+      return;
+    }
     const configuredPermissionMode = this.effectivePermissionMode();
     const mediatesManagedPermissions = this.mediatesManagedPermissions(this.managedProtections());
     this.reportManagedPermissionMediation(configuredPermissionMode, mediatesManagedPermissions);
@@ -1594,7 +1645,7 @@ export class ClaudeCodeDriver implements Driver {
       let child: AgentProcess;
       try {
         this.processes.assertOpen();
-        child = this.processes.record(this.deps.spawn({
+        child = this.processes.launch(this.deps.spawn, {
           command: this.opts.command,
           args,
           cwd: this.cwd,
@@ -1617,7 +1668,7 @@ export class ClaudeCodeDriver implements Driver {
           claudeNamespaceProvider: true,
           claudeNamespaceSessionId: this.sessionId,
           descendantMarker: this.opts.descendantMarker,
-        }));
+        });
       } catch (err) {
         this.openPersistentCircuit(`persistent claude spawn failed: ${(err as Error).message}`, turn);
         return;
@@ -1769,7 +1820,7 @@ export class ClaudeCodeDriver implements Driver {
       "Claude provider turn closed before steering acknowledgement",
     );
     this.pendingApprovals.clear();
-    if (reason !== "cancelled") this.preparedBaseArgs();
+    if (reason !== "cancelled") this.preparedBaseArgs(false);
     if (reason !== "refusal" && reason !== "cancelled") this.markSessionEstablished();
     if (reason !== "refusal" && reason !== "cancelled") this.settleUnverifiedBackgroundTasks();
     if (turn.origin === "runner") {
@@ -1873,7 +1924,9 @@ export class ClaudeCodeDriver implements Driver {
         if (status === "killed" && this.stoppingBackgroundTasks.has(taskId)) this.completeStoppedTask(taskId);
         else if (status === "killed" && this.stopWasRequested(taskId)) this.completeProviderStop(taskId, toolUseId);
         else if (status === "killed" && this.pendingBackgroundTasks.get(taskId)?.launchType === "monitor") {
-          this.completeMonitorTask(taskId, toolUseId);
+          this.completeEndedTask(taskId, toolUseId);
+        } else if (status === "killed" && this.canSettleUnrequestedShellStop(taskId)) {
+          this.completeEndedTask(taskId, toolUseId);
         }
       } else if (msg.subtype === "task_notification" && taskId) {
         const status = typeof msg.status === "string" ? msg.status.toLowerCase() : "";
@@ -1883,7 +1936,10 @@ export class ClaudeCodeDriver implements Driver {
           this.completeProviderStop(taskId, toolUseId);
         } else if ((status === "stopped" || status === "killed" || status === "completed" || status === "failed") &&
             this.pendingBackgroundTasks.get(taskId)?.launchType === "monitor") {
-          this.completeMonitorTask(taskId, toolUseId, status === "failed" ? "failed" : status === "completed" ? "completed" : "killed");
+          this.completeEndedTask(taskId, toolUseId, status === "failed" ? "failed" : status === "completed" ? "completed" : "killed");
+        } else if ((status === "killed" || (status === "stopped" && this.pendingBackgroundTasks.get(taskId)?.launchType === "shell")) &&
+            this.canSettleUnrequestedShellStop(taskId)) {
+          this.completeEndedTask(taskId, toolUseId);
         } else if (status === "completed" || status === "failed" || status === "killed") {
           this.completePendingTask(taskId, toolUseId, status);
         } else {
@@ -1933,7 +1989,7 @@ export class ClaudeCodeDriver implements Driver {
         if (stopTarget && block.is_error === true &&
             this.pendingBackgroundTasks.get(stopTarget)?.launchType === "monitor" &&
             block.content === `<tool_use_error>No task found with ID: ${stopTarget}</tool_use_error>`) {
-          this.completeMonitorTask(stopTarget);
+          this.completeEndedTask(stopTarget);
         }
         this.modelTaskStops.delete(block.tool_use_id);
         // Monitor's observed launch result has taskId but no async_launched status. Its prose
@@ -2119,25 +2175,38 @@ export class ClaudeCodeDriver implements Driver {
     return this.activePersistentTurn?.id ?? this.activeOneShotTurnId ?? undefined;
   }
 
-  /** Expiry and an exact missing-task response prove a monitor ended. Remember both identities
-   * before publishing its terminal record, so trailing notifications/results cannot revive it. */
-  private completeMonitorTask(id: string, toolUseId?: string, status: "completed" | "failed" | "killed" = "killed"): void {
+  /** An open persistent transport distinguishes a provider's shell timeout from the identical
+   * reports it emits when stdin closes. The latter still belong to orphan recovery (#3204). */
+  private canSettleUnrequestedShellStop(id: string): boolean {
+    const task = this.pendingBackgroundTasks.get(id);
+    return (task?.launchType === "shell" || task?.launchType === "unknown") &&
+      this.persistentTransport && !this.intentionalPersistentStop && this.child != null &&
+      !this.child.stdin.writableEnded && !this.child.stdin.destroyed;
+  }
+
+  /** Remember both identities before publishing an authoritative terminal report, so trailing
+   * notifications, launch results and markerless output files cannot revive the job. */
+  private completeEndedTask(
+    id: string,
+    toolUseId?: string,
+    status: "completed" | "failed" | "killed" = "killed",
+    provenance: Partial<Pick<DriverBackgroundTerminalJob, "continuationRequired">> = {},
+  ): void {
     const task = this.pendingBackgroundTasks.get(id);
     const alias = toolUseId ?? task?.toolUseId;
     this.endedBackgroundTaskIds.add(id);
     if (alias) this.endedBackgroundTaskIds.add(`tool:${alias}`);
-    this.completePendingTask(id, alias, status);
+    this.completePendingTask(id, alias, status, provenance);
   }
 
   /** A restart seed gets one recovery turn. If that live process did not re-observe the id, the
    * seed is handled rather than being carried into an automatic replay loop forever. */
   private settleUnverifiedBackgroundTasks(): void {
-    let changed = false;
-    for (const id of this.unverifiedBackgroundTaskIds) {
-      if (this.pendingBackgroundTasks.delete(id)) changed = true;
+    for (const id of [...this.unverifiedBackgroundTaskIds]) {
+      // Recovery already handled this seed and did not re-observe it. Publish its settlement as
+      // well as removing the driver entry, otherwise its durable row holds handoffs forever.
+      this.completeEndedTask(id, undefined, "killed", { continuationRequired: false });
     }
-    this.unverifiedBackgroundTaskIds.clear();
-    if (changed) this.pendingWorkChanged();
   }
 
   private pendingWorkChanged(terminalJobs: DriverBackgroundTerminalJob[] = []): void {
@@ -2214,16 +2283,29 @@ export class ClaudeCodeDriver implements Driver {
       if (task) {
         terminalJobs.push({
           ...driverBackgroundJob(task),
-          status: "completed",
+          status: inspection.terminalTaskStatuses?.get(id) ?? "completed",
           terminalAt: this.deps.now(),
           continuationRequired,
         });
         this.pendingBackgroundTasks.delete(id);
         this.unverifiedBackgroundTaskIds.delete(id);
+        // Agent/workflow ids can be resumed after completion. Only non-resumable jobs need
+        // protection from the trailing stopped report or markerless shell output file.
+        if (task.launchType !== "agent" && task.launchType !== "workflow") {
+          this.endedBackgroundTaskIds.add(id);
+          if (task.toolUseId) this.endedBackgroundTaskIds.add(`tool:${task.toolUseId}`);
+        }
         changed = true;
       }
     }
     if (changed) this.pendingWorkChanged(terminalJobs);
+    for (const job of terminalJobs) {
+      const stop = this.stoppingBackgroundTasks.get(job.id);
+      if (stop && !stop.ended) {
+        stop.ended = { stopped: false, job };
+        stop.wake?.();
+      }
+    }
   }
 
   private providerProjectsRoot(): string | undefined {
@@ -2252,18 +2334,28 @@ export class ClaudeCodeDriver implements Driver {
     ), continuationRequired);
   }
 
-  private async reconcilePendingTaskFilesInContext(continuationRequired = false): Promise<void> {
-    this.applyBackgroundInspection(await this.deps.inspectBackgroundWork(
+  private async reconcilePendingTaskFilesInContext(continuationRequired = false, onlyTaskId?: string): Promise<void> {
+    const child = this.child;
+    const task = onlyTaskId ? this.pendingBackgroundTasks.get(onlyTaskId) : undefined;
+    const inspection = await this.deps.inspectBackgroundWork(
       this.opts.context,
       this.cwd,
       this.sessionId,
-      this.pendingBackgroundTasks.keys(),
+      onlyTaskId ? [onlyTaskId] : this.pendingBackgroundTasks.keys(),
       { env: {
         ...this.opts.env,
         ...(claudeNamespaceTempRoot(this.processes.owner)
           ? { TMPDIR: claudeNamespaceTempRoot(this.processes.owner) } : {}),
       }, projectsRoot: this.providerProjectsRoot() },
-    ), continuationRequired);
+    );
+    if (onlyTaskId) {
+      // A live report or transport replacement during the receipt read supersedes it. Do not
+      // rediscover unrelated artifacts as a side effect of stopping this one task.
+      if (this.disposed || this.child !== child || this.pendingBackgroundTasks.get(onlyTaskId) !== task) return;
+      this.applyBackgroundInspection({ ...inspection, incompleteArtifacts: [],
+        terminalTaskIds: new Set([...inspection.terminalTaskIds].filter(id => id === onlyTaskId)),
+      }, continuationRequired);
+    } else this.applyBackgroundInspection(inspection, continuationRequired);
   }
 
   private finishIdleEvictionAfterReconcile(): void {
@@ -2420,6 +2512,12 @@ export class ClaudeCodeDriver implements Driver {
       if (stop.ended) return { status: stop.ended.stopped ? "stopped" : "finished", job: stop.ended.job };
       if (this.child !== child) return { status: "refused", reason: "no_live_process" };
       if (response && !succeeded) return { status: "refused", reason: "provider_rejected" };
+      // A forgotten task may have a durable terminal receipt but no live stop report. Success
+      // alone still proves nothing; reconcile the exact provider ledger before returning 409.
+      await this.reconcilePendingTaskFilesInContext(true, jobId);
+      const reconciled = this.stoppingBackgroundTasks.get(jobId)?.ended;
+      if (reconciled) return { status: reconciled.stopped ? "stopped" : "finished", job: reconciled.job };
+      if (this.child !== child) return { status: "refused", reason: "no_live_process" };
       this.rememberUnconfirmedStop(jobId);
       return { status: "refused", reason: "unconfirmed" };
     } finally {
@@ -2645,10 +2743,25 @@ export class ClaudeCodeDriver implements Driver {
     return env;
   }
 
+  private refuseHookLaunch(error: unknown): StopReason {
+    this.settledRunnerTurnErrorText = this.turnErrorText = (error as Error).message;
+    this.settledRunnerTurnFailureCategory = this.turnFailureCategory = null;
+    this.cb.onEvent({ kind: "error", message: this.turnErrorText });
+    return "refusal";
+  }
+
   /** Heal the exact managed settings path before every process and remove it after the session's
    * transport circuit opens. The persisted base args remain intact for restart diagnostics. */
-  private preparedBaseArgs(): string[] {
-    const prepared = prepareClaudeHookArgs(this.opts.args);
+  private preparedBaseArgs(forSpawn = true): string[] {
+    const launch = forSpawn ? this.opts.prepareClaudeHooks?.(this.config) : undefined;
+    // Callers without a provisioning callback may still update their shared base argv.
+    // Callback-backed launches instead retain the most recent refresh for observation.
+    const baseArgs = launch?.args ?? (this.opts.prepareClaudeHooks ? this.preparedHookArgs : this.opts.args);
+    const prepared = prepareClaudeHookArgs(baseArgs);
+    if (launch?.managerRequired && !prepared.managerActive && !prepared.circuitOpen) {
+      throw new Error("Claude launch refused: the required manager policy hook is unavailable. Use Default or Auto, or restore manager hook support before retrying.");
+    }
+    this.preparedHookArgs = [...baseArgs];
     this.preparedHookEnv = prepared.env ?? {};
     this.managedWorktreeGuardActive = prepared.guardActive;
     this.managerHooksActive = prepared.managerActive;
@@ -2727,8 +2840,9 @@ export class ClaudeCodeDriver implements Driver {
   /** Answer a pending interactive approval by writing a control_response on the CLI's
    * stdin (the stdio permission-prompt-tool protocol). Returns true iff a live ask was
    * answered — false means nothing was waiting (unknown id / process gone) and the caller
-   * must surface that instead of pretending the decision landed. */
-  resolvePermission(requestId: string, optionId: string | null): boolean {
+   * must surface that instead of pretending the decision landed. A Full Control policy decline
+   * says that Wollipog declined it and no person saw it, never "the user" (#4063). */
+  resolvePermission(requestId: string, optionId: string | null, automaticResponse?: FullControlAutomaticResponse): boolean {
     const input = this.pendingApprovals.get(requestId);
     if (input === undefined) return false;
     this.pendingApprovals.delete(requestId);
@@ -2736,7 +2850,7 @@ export class ClaudeCodeDriver implements Driver {
     const allow = optionId === "allow";
     const response = allow
       ? { behavior: "allow", updatedInput: input }
-      : { behavior: "deny", message: "The user declined this tool call." };
+      : { behavior: "deny", message: automaticResponse ? fullControlAutomaticResponseText("tool", automaticResponse) : "The user declined this tool call." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
     if (!this.child) return false;
     try {
@@ -2750,14 +2864,15 @@ export class ClaudeCodeDriver implements Driver {
   /** Answer a pending AskUserQuestion: allow with `updatedInput = {questions, answers}` (the
    * T3-proven wire shape — answers keyed by question TEXT; multiSelect ⇒ label array). An
    * explicit dismiss, or a legacy empty answer map, denies the ask so the agent does not hang. */
-  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss"): boolean {
+  answerQuestion(requestId: string, answers: Record<string, string | string[]>, action?: "submit" | "dismiss",
+    automaticResponse?: FullControlAutomaticResponse): boolean {
     const original = this.pendingApprovals.get(requestId);
     if (original === undefined) return false;
     this.pendingApprovals.delete(requestId);
     this.pendingAttentionOwners.delete(requestId);
     const response = action === "submit" || (action == null && Object.keys(answers).length > 0)
       ? { behavior: "allow", updatedInput: { ...(original as Json), answers } }
-      : { behavior: "deny", message: "The user dismissed the question." };
+      : { behavior: "deny", message: automaticResponse ? fullControlAutomaticResponseText("question", automaticResponse) : "The user dismissed the question." };
     const msg = { type: "control_response", response: { subtype: "success", request_id: requestId, response } };
     if (!this.child) return false;
     try {
@@ -2877,6 +2992,7 @@ export class ClaudeCodeDriver implements Driver {
           this.cb.onModelResolved?.(msg.model);
         }
         if (msg.subtype === "init" && !parentId) {
+          this.confirmUsageProcess(msg.claude_code_version);
           // Null when this Claude Code release sends no list, so a remembered one is dropped.
           this.cb.onClaudeInitCatalog?.(parseClaudeInitCatalog(msg as Record<string, unknown>));
         }
@@ -3155,9 +3271,9 @@ export class ClaudeCodeDriver implements Driver {
             // The trust surface: the card shows WHAT it authorizes, not just the tool name.
             context: {
               ...(req.tool_name === "Bash" && typeof req.input?.command === "string" && req.input.command.length <= 2000
-                ? { operation: campaignOperationEvidence("Bash", { kind: "command", input: req.input.command }) }
+                ? { operation: campaignOperationEvidence("Bash", { kind: "command", input: req.input.command }, this.cwd) }
                 : ["Read", "Edit", "Write"].includes(req.tool_name ?? "") && typeof req.input?.file_path === "string" && req.input.file_path.length <= 1024
-                  ? { operation: campaignOperationEvidence(req.tool_name, { kind: "file", path: req.input.file_path }) } : {}),
+                  ? { operation: campaignOperationEvidence(req.tool_name, { kind: "file", path: req.input.file_path }, this.cwd) } : {}),
               toolName: req.tool_name ? truncate(String(req.tool_name), 256) : undefined,
               input: renderApprovalInput(req.tool_name, req.input),
               ...approvalScopeContext(req.input),
@@ -3352,6 +3468,7 @@ export class ClaudeCodeDriver implements Driver {
             ...(typeof usage.cache_creation_input_tokens === "number" ? { cacheCreationInputTokens: usage.cache_creation_input_tokens } : {}),
             ...(typeof msg.duration_ms === "number" ? { durationMs: msg.duration_ms } : {}), ...pp });
         } else {
+          this.confirmUsageProcess();
           this.emitUsageResult(msg);
         }
         // Token usage on a top-level result is proof the provider actually answered over the API,
@@ -3380,6 +3497,12 @@ export class ClaudeCodeDriver implements Driver {
           } catch {
             /* ignore */
           }
+        }
+        if (!parentId && this.opts.review) {
+          // A denial is a tool the preset refused: the attempt broke the reviewer's tool policy,
+          // whether or not the turn then ended in an error.
+          const denials = (msg as { permission_denials?: unknown }).permission_denials;
+          this.lastPermissionDenials = Array.isArray(denials) ? denials.length : denials === undefined ? 0 : 1;
         }
         if (msg.is_error || msg.subtype === "error_during_execution") {
           if (!parentId) {
@@ -3411,6 +3534,9 @@ export class ClaudeCodeDriver implements Driver {
         if (msg.subtype === "error_max_turns") {
           if (!parentId) this.streamedAgentResponse = false;
           return "max_turn_requests";
+        }
+        if (!parentId && this.opts.review) {
+          this.lastStructuredOutput = msg.structured_output === undefined ? null : JSON.stringify(msg.structured_output);
         }
         if (!parentId && this.streamedAgentResponse) {
           this.streamedAgentResponse = false;

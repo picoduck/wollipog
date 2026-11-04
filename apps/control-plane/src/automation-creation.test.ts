@@ -1,0 +1,710 @@
+import assert from "node:assert/strict";
+import { test } from "node:test";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import Fastify from "fastify";
+import { PROTOCOL_VERSION, type AutomationSpec, type RunnerMetadata } from "@wollipog/protocol";
+import { ControlPlaneDb } from "./db.js";
+import type { Hub } from "./hub.js";
+import type { AgentPrincipal, AuthPrincipal } from "./identity.js";
+import { SessionsService } from "./sessions.js";
+import { AutomationCreationService } from "./automation-creation.js";
+import { AutomationsService } from "./automations.js";
+import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
+import { isAgentControlApiRouteAllowed } from "./auth.js";
+import { BUILD_REVIEW_WORKFLOW } from "./workflow-graphs.js";
+
+const metadata: RunnerMetadata = { runnerId: "runner", hostname: "test", os: "linux", version: "test",
+  workspaces: [{ id: "repo", name: "Example", path: "/example" }], agents: [{ id: "agent", name: "Agent",
+    command: "agent", args: [], env: {}, available: true, driver: "acp", context: { kind: "native" },
+    capabilities: { models: [{ id: "model", default: true, efforts: ["high"] }], effortLevels: ["high"],
+      permissionModes: ["default"], slashCommands: [], supportsImages: false, supportsApprovals: true } }] };
+const spec = (): AutomationSpec => ({ name: "Weekly Health", cron: "0 8 * * 2", timezone: "UTC", enabled: true,
+  action: { kind: "create_session", request: { runnerId: "runner", workspaceId: "repo", agentId: "agent", useWorktree: true, prompt: "Read CI outcomes; report without changes." } },
+  misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
+  limits: { maxCostUsd: 5, maxToolCalls: 50 }, notifications: { pushEvents: ["failed"] } });
+
+function harness(file = ":memory:", seed = true) {
+  const db = ControlPlaneDb.open(file);
+  const hub = { isRunnerOnline: () => false, sessionChangedById() {}, sessionEvent() {}, sessionChanged() {} } as unknown as Hub;
+  if (seed) {
+    db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+    db.createSession({ id: "self", runnerId: "runner", workspaceId: "repo", agentId: "agent", title: "Requester",
+      driver: "acp", useWorktree: false, config: {}, now: Date.now() });
+    db.updateSessionStatus("self", "running", Date.now());
+  }
+  const notifications: unknown[] = [];
+  const warnings: string[] = [];
+  const sessions = new SessionsService(db, hub, { info() {}, warn(message) { warnings.push(message); }, error() {} },
+    (previous, current) => {
+      assert.equal(db.raw().isTransaction, false, "Notifications must run after the database commit");
+      notifications.push({ previous, current });
+    });
+  const service = new AutomationCreationService(db, sessions, hub);
+  const scope = db.sessionScope("self")!;
+  const principal: AgentPrincipal = { kind: "agent", actorId: "self", credentialSessionId: "self", organizationId: scope.organizationId, delegatedScope: scope };
+  const owner = db.localIdentityContext().userId;
+  const request = (requestId = "request", resourceKey = "weekly", input = spec()) => service.request("self", { requestId, resourceKey, spec: input }, principal);
+  const resolve = (occurrence: string, outcome: "approve" | "deny" = "approve") => sessions.resolveWorkflowDecision("self", "self", occurrence,
+    { outcome }, "human", { kind: "human", id: owner }, () => true);
+  return { db, hub, sessions, service, principal, owner, request, resolve, notifications, warnings };
+}
+
+test("Normal sessions require human approval, preview inherited defaults and create exactly once", () => {
+  const h = harness();
+  try {
+    const proposal = h.request();
+    assert.equal(proposal.status, 201, proposal.error ?? "Proposal should be admitted");
+    const decision = proposal.data!;
+    assert.equal(decision.authority, "human");
+    assert.equal(decision.controllingSessionId, "self");
+    assert.equal(decision.status, "pending");
+    assert.equal(h.db.getSession("self")!.status, "input_required");
+    assert.equal(decision.resourceSnapshot.category, "automation_creation");
+    if (decision.resourceSnapshot.category !== "automation_creation") assert.fail();
+    assert.equal(decision.resourceSnapshot.spec.action.request.config, undefined);
+    assert.deepEqual(decision.resourceSnapshot.effectiveTargets[0]!.config, { model: "model", effort: "high", permissionMode: "default" });
+    assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, false);
+    assert.equal(h.db.listAutomations().length, 0);
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    assert.equal(h.service.execute("self", decision.occurrenceId, "0".repeat(64), h.principal).ok, false);
+    const created = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(created.status, 201, created.error ?? "Approved creation should succeed");
+    assert.equal(created.data!.status, "consumed");
+    const receipt = created.data!.automationCreationResult!;
+    assert.match(receipt.navigationPath, /^\/automations\/~[A-Za-z0-9_-]+$/);
+    const saved = h.db.getAutomation(receipt.automationId)!;
+    assert.equal(saved.name, "Weekly Health");
+    assert.equal(saved.createdBy.id, h.owner);
+    assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!.automationCreationResult!.automationId, receipt.automationId);
+    assert.equal(h.request().data!.occurrenceId, decision.occurrenceId);
+    assert.equal(h.db.listAutomations().length, 1);
+    assert.equal(h.db.listAutomationEvents(receipt.automationId)[0]!.actor.id, h.owner);
+  } finally { h.db.close(); }
+});
+
+test("Orchestrator and descendant agents cannot approve automation creation through another decision path", async () => {
+  const h = harness();
+  try {
+    h.db.raw().prepare("UPDATE sessions SET session_role='orchestrator' WHERE id='self'").run();
+    const decision = h.request().data!;
+    const agentAnswer = h.sessions.resolveWorkflowDecision("self", "self", decision.occurrenceId, { outcome: "approve" }, "orchestrator", { kind: "agent", id: "self" }, () => true);
+    assert.equal(agentAnswer.ok, false);
+    assert.equal(h.sessions.resolveWorkflowDecision("other", "self", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: h.owner }, () => true).ok, false);
+    assert.equal(h.sessions.resolveWorkflowDecision("self", "self", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "agent", id: "self" }, () => true).ok, false);
+    assert.equal(h.sessions.resolveWorkflowDecision("self", "self", decision.occurrenceId, { outcome: "approve" }, "human", { kind: "human", id: "different-user" }, () => true).ok, false);
+    assert.equal(h.sessions.createWorkflowDecision("self", { requestId: "forged", resourceKey: "forged", resourceSnapshot: decision.resourceSnapshot }).status, 403);
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    assert.equal((await h.sessions.consumeWorkflowDecision("self", decision.occurrenceId, { resourceSnapshot: decision.resourceSnapshot })).status, 403);
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+for (const [driver, permissionModes] of [
+  ["codex-app-server", ["read-only", "on-request", "auto-review", "danger-full-access"]],
+  ["pi", []],
+  ["acp", []],
+] as const) {
+  test(`${driver} automations inherit an unnamed provider permission default`, () => {
+    const h = harness();
+    try {
+      h.db.registerRunner({ ...metadata, agents: [{ ...metadata.agents[0]!, driver,
+        capabilities: { ...metadata.agents[0]!.capabilities!, permissionModes: [...permissionModes] } }] }, Date.now(), PROTOCOL_VERSION);
+      const normal = new AutomationsService(h.db, h.hub, h.sessions, { info() {}, warn() {} });
+      assert.equal(normal.create(spec(), { kind: "human", id: h.owner }).ok, true);
+      const proposed = h.request();
+      assert.equal(proposed.ok, true, proposed.error ?? "Provider defaults must remain available");
+      const decision = proposed.data!;
+      if (decision.resourceSnapshot.category !== "automation_creation") assert.fail();
+      assert.equal(decision.resourceSnapshot.effectiveTargets[0]!.config.permissionMode, undefined);
+      assert.equal(h.resolve(decision.occurrenceId).ok, true);
+      const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+      assert.equal(executed.ok, true, executed.error ?? "Approved provider-default creation should succeed");
+      assert.equal(executed.data!.automationCreationResult!.spec.action.request.config, undefined);
+      const unsupported = spec(); unsupported.action.request.config = { permissionMode: "unsupported" };
+      assert.equal(h.request("unsupported", "unsupported", unsupported).ok, false,
+        "Explicit modes must still pass capability admission");
+    } finally { h.db.close(); }
+  });
+}
+
+test("expired pending proposals are retired and cleared without a human denial", () => {
+  const h = harness();
+  try {
+    const proposed = h.service.request("self", { requestId: "expired", resourceKey: "expired", spec: spec() }, h.principal, Date.now() - 25 * 60 * 60_000);
+    assert.equal(proposed.ok, true);
+    assert.equal(h.resolve(proposed.data!.occurrenceId).status, 409);
+    assert.equal(h.service.get("self", proposed.data!.occurrenceId, h.principal).data!.status, "revoked");
+    assert.equal(h.db.getSession("self")!.pendingApproval, null);
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+for (const deadline of ["approval", "proposal"] as const) {
+  test(`unexecuted approval is retired at its ${deadline} deadline without losing history`, (t) => {
+    const start = Date.now();
+    let now = start;
+    t.mock.method(Date, "now", () => now);
+    const h = harness();
+    try {
+      const decision = h.request().data!;
+      if (deadline === "proposal") now += 24 * 60 * 60_000 - 10 * 60_000;
+      assert.equal(h.resolve(decision.occurrenceId).ok, true);
+      const approved = h.db.workflowDecisionByOccurrence(decision.occurrenceId)!;
+      const end = deadline === "approval" ? now + 30 * 60_000 : start + 24 * 60 * 60_000;
+      now = end - 1;
+      assert.equal(h.service.get("self", decision.occurrenceId, h.principal).data!.status, "approved");
+      now = end;
+      assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, false);
+      const expired = h.service.get("self", decision.occurrenceId, h.principal).data!;
+      assert.equal(expired.status, "revoked");
+      assert.equal(expired.resolvedAt, approved.resolvedAt);
+      assert.deepEqual(expired.resourceSnapshot, approved.resourceSnapshot);
+      assert.equal(h.db.automationCreationApprover(decision.occurrenceId), h.owner);
+      assert.equal(h.db.unconsumedWorkflowDecisionsForSession("self").length, 0);
+      assert.equal(h.db.unconsumedWorkflowDecisionsForController("self").length, 0);
+      assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+      assert.equal(h.db.listAutomations().length, 0);
+      const audit = h.db.listGovernanceAudit("self").filter((entry) => entry.requestId === decision.occurrenceId);
+      assert.equal(audit.filter((entry) => entry.outcome === "allowed").length, 1);
+      assert.equal(audit.filter((entry) => entry.outcome === "revoked").length, 1);
+      assert.equal(h.request().data!.status, "revoked", "An identical retry must not renew an expired grant");
+    } finally { h.db.close(); }
+  });
+}
+
+test("restart maintenance retires offline approvals and unsent approval resumes", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const root = mkdtempSync(join(tmpdir(), "automation-expiry-"));
+  let h = harness(join(root, "state.db"));
+  try {
+    const held = h.request("held", "held").data!;
+    const staged = h.request("staged", "staged").data!;
+    assert.equal(h.resolve(held.occurrenceId).ok, true);
+    assert.equal(h.resolve(staged.occurrenceId).ok, true);
+    h.db.stageWorkflowDecisionResume({ occurrenceId: staged.occurrenceId, from: "held", command: {
+      commandId: "stale-resume", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: now + 86_400_000, now,
+    } });
+    h.db.close();
+    now += 30 * 60_000;
+    h = harness(join(root, "state.db"), false);
+    h.sessions.retryDuePrompts(now);
+    for (const decision of [held, staged]) {
+      assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+      assert.equal((h.db.raw().prepare("SELECT resume_state AS state FROM workflow_decisions WHERE occurrence_id=?")
+        .get(decision.occurrenceId) as { state: string }).state, "abandoned");
+      assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, false);
+    }
+    assert.equal(h.db.getSessionPromptCommand("stale-resume")!.state, "failed");
+    assert.equal(h.db.dueSessionPromptCommands(now).length, 0);
+    assert.equal(h.db.listAutomations().length, 0);
+    h.sessions.retryDuePrompts(now + 1);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 2);
+  } finally { h.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("expiration preserves consumed creation receipts after both deadlines", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const created = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!;
+    now += 25 * 60 * 60_000;
+    h.sessions.retryDuePrompts(now);
+    assert.deepEqual(h.service.get("self", decision.occurrenceId, h.principal).data, created);
+    assert.deepEqual(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data, created);
+    assert.equal(h.db.listAutomations().length, 1);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("expiration fences an already-sent approval resume and late receipts cannot re-hold it", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    h.db.stageWorkflowDecisionResume({ occurrenceId: decision.occurrenceId, from: "held", command: {
+      commandId: "sent-resume", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: now + 86_400_000, now,
+    } });
+    h.db.markSessionPromptCommandSent("sent-resume", "sent-request", now, now + 1);
+    now += 30 * 60_000;
+    h.sessions.retryDuePrompts(now);
+    const command = h.db.getSessionPromptCommand("sent-resume")!;
+    assert.equal(command.state, "uncertain", "Already-attempted delivery must not be reported as recalled");
+    assert.equal(command.nextAttemptAt, null);
+    assert.equal(h.db.dueSessionPromptCommands(now).length, 0);
+    assert.equal(h.db.workflowDecisionResumeForCommand("sent-resume"), null);
+    h.sessions.onDurablePromptReceipt("runner", { type: "durable_session_command_result", requestId: "sent-request",
+      commandId: "sent-resume", sessionId: "self", state: "failed", revision: command.revision + 1,
+      error: "Recovery required", code: "WORKTREE_RECOVERY_REQUIRED", duplicate: false });
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("agent HTTP inspection and the UI decision reader agree on expired status", async (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness(); const app = Fastify();
+  registerAutomationCreationRoutes(app, { service: h.service, requestPrincipal: () => h.principal });
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    now += 30 * 60_000;
+    const response = await app.inject({ method: "GET", url: `/api/sessions/self/automation-proposals/${decision.occurrenceId}` });
+    assert.equal(response.statusCode, 200);
+    assert.equal(response.json().status, "revoked");
+    assert.deepEqual(response.json(), h.sessions.workflowDecision("self", decision.occurrenceId).data);
+    assert.deepEqual(h.sessions.workflowDecisions("self", undefined, 10).data!.decisions, []);
+    assert.equal(h.db.getSession("self")!.pendingApproval, null);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
+  } finally { await app.close(); h.db.close(); }
+});
+
+for (const status of ["pending", "approved"] as const) test(`interrupted ${status} expiration rolls back the decision, card, resume and audit for recovery`, (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    h.db.updateSessionStatus("self", "idle", now);
+    const decision = h.request().data!;
+    if (status === "approved") assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const before = h.db.getSession("self")!;
+    now += status === "pending" ? 24 * 60 * 60_000 : 30 * 60_000;
+    const auditCount = h.db.listGovernanceAudit("self").length;
+    h.notifications.length = 0;
+    h.db.raw().exec("CREATE TRIGGER fail_expiration BEFORE INSERT ON governance_audit WHEN NEW.outcome='revoked' BEGIN SELECT RAISE(ABORT, 'test expiration interruption'); END");
+    assert.equal(h.sessions.expireAutomationCreationDecisions(now), 0);
+    assert.match(h.warnings.at(-1)!, /test expiration interruption/);
+    assert.equal(h.notifications.length, 0, "A rolled-back expiration must not notify the human");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, status);
+    assert.deepEqual(h.db.getSession("self")!.pendingApproval, before.pendingApproval);
+    assert.equal(h.db.getSession("self")!.status, before.status);
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, status === "approved" ? 1 : 0);
+    assert.equal(h.db.listGovernanceAudit("self").length, auditCount);
+    h.db.raw().exec("DROP TRIGGER fail_expiration");
+    assert.equal(h.sessions.expireAutomationCreationDecisions(now), 1);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+    assert.equal(h.db.getSession("self")!.pendingApproval, null);
+    assert.equal(h.db.getSession("self")!.status, "idle");
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
+  } finally { h.db.close(); }
+});
+
+for (const context of ["workflow attempt", "pod orchestration", "pod step"] as const) {
+  test(`expiration restores idle safely for a session in a ${context}`, (t) => {
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    const h = harness();
+    try {
+      h.db.updateSessionStatus("self", "idle", now);
+      if (context === "workflow attempt") {
+        h.db.createRun({ id: "run", title: "Workflow", prompt: "Inspect", runnerId: "runner", workspaceId: "repo", now });
+        const definition = h.db.createWorkflowDefinition({ workflowId: "expiry-workflow", ...BUILD_REVIEW_WORKFLOW,
+          source: "custom", createdBy: { kind: "human", id: h.owner }, createdAt: now });
+        h.db.createWorkflowInstance({ instanceId: "instance", definition, runId: "run", createdBy: { kind: "human", id: h.owner }, now });
+        h.db.createWorkflowAttempt({ attemptId: "attempt", instanceId: "instance", nodeId: "build", attempt: 1,
+          status: "running", dispatchKey: "instance:build:1", sessionId: "self", startedAt: now, deadlineAt: now + 48 * 60 * 60_000 });
+      } else {
+        h.db.createPod({ id: "pod", title: "Pod", objective: "Inspect", sessionIds: ["self"], now });
+        const pod = h.db.getPod("pod")!;
+        h.db.updatePodOrchestrationPolicy("pod", { ...pod.orchestration!.policy, maxTurns: 1 }, now);
+        if (context === "pod step") h.db.appendEvent("self", { kind: "agent_message", text: "Finished inspection", final: true }, now);
+        h.db.startPodOrchestration("pod", "pod-run", now);
+        h.db.beginPodOrchestrationStep({ stepId: "step", podId: "pod", runId: "pod-run", targetSessionId: "self",
+          selectedEntryIds: [], estimatedTokens: 0, now });
+        h.db.markPodOrchestrationStepRunning("step", "pod", "self", 0, now);
+        h.hub.podChanged = () => {};
+        h.hub.podContextEntry = () => {};
+      }
+      const decision = h.request().data!;
+      now += 24 * 60 * 60_000;
+      const failingNotifier = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} },
+        () => { throw new Error("test persistent notification failure"); });
+      assert.doesNotThrow(() => failingNotifier.retryDuePrompts(now));
+      assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+      assert.equal(h.db.getSession("self")!.status, "idle");
+      assert.deepEqual(h.warnings, []);
+      if (context === "workflow attempt") assert.equal(h.db.getWorkflowAttempt("attempt")!.status, "awaiting_output");
+      else assert.notEqual(h.db.getPod("pod")!.orchestration!.state.status, "running");
+      const snapshot = () => ({
+        audit: h.db.listGovernanceAudit("self"),
+        workflow: context === "workflow attempt" ? h.db.listWorkflowEvents("instance") : [],
+        pod: context === "workflow attempt" ? [] : h.db.listPodContextEntries("pod"),
+      });
+      const settled = snapshot();
+      assert.equal(h.db.automationExpirationEffects().length, 1);
+      for (let retry = 0; retry < 3; retry++) failingNotifier.retryDuePrompts(now);
+      assert.deepEqual(snapshot(), settled, "Notification retries must not repeat workflow, pod or audit effects");
+      h.sessions.expireAutomationCreationDecisions(now);
+      assert.equal(h.db.automationExpirationEffects().length, 0);
+    } finally { h.db.close(); }
+  });
+}
+
+for (const deadline of ["approval", "proposal"] as const) test(`future outbox scheduling does not expire an automation ${deadline} early`, (t) => {
+  const start = Date.now();
+  let now = start;
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    if (deadline === "proposal") now += 24 * 60 * 60_000 - 10 * 60_000;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const end = deadline === "approval" ? now + 30 * 60_000 : start + 24 * 60 * 60_000;
+    h.db.stageWorkflowDecisionResume({ occurrenceId: decision.occurrenceId, from: "held", command: {
+      commandId: "future-due", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: end + 86_400_000, now,
+    } });
+    now = end - 500;
+    h.sessions.retryDuePrompts(now + 1000, "runner");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.deepEqual(h.db.dueSessionPromptCommands(now + 1000).map((row) => row.commandId), ["future-due"]);
+    now = end;
+    h.sessions.retryDuePrompts(now + 1000, "runner");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    const audit = h.db.listGovernanceAudit("self").find((entry) => entry.outcome === "revoked")!;
+    assert.equal(audit.timestamp, now);
+  } finally { h.db.close(); }
+});
+
+for (const scenario of ["deny", "expired", "revoked", "capability", "workspace", "owner", "stopped", "membership-removed", "suspended", "viewer", "operator"] as const) {
+  test(`creation refuses ${scenario} without leaving an automation`, () => {
+    const h = harness();
+    try {
+      const decision = h.request().data!;
+      assert.equal(h.resolve(decision.occurrenceId, scenario === "deny" ? "deny" : "approve").ok, true);
+      if (scenario === "revoked") h.db.raw().prepare("UPDATE workflow_decisions SET status='revoked' WHERE occurrence_id=?").run(decision.occurrenceId);
+      if (scenario === "capability") h.db.registerRunner({ ...metadata, agents: [{ ...metadata.agents[0]!, capabilities: { ...metadata.agents[0]!.capabilities!, models: [{ id: "different", efforts: ["high"] }] } }] }, Date.now(), PROTOCOL_VERSION);
+      if (scenario === "workspace") h.db.registerRunner({ ...metadata, workspaces: [{ ...metadata.workspaces[0]!, path: "/changed" }] }, Date.now(), PROTOCOL_VERSION);
+      if (scenario === "owner") h.db.raw().prepare("UPDATE session_ownership SET owner_id='different' WHERE session_id='self'").run();
+      if (scenario === "stopped") h.db.raw().prepare("UPDATE sessions SET status='stopped' WHERE id='self'").run();
+      if (scenario === "membership-removed") h.db.raw().prepare("DELETE FROM identity_memberships WHERE user_id=?").run(h.owner);
+      if (scenario === "suspended") h.db.raw().prepare("UPDATE identity_users SET status='suspended' WHERE user_id=?").run(h.owner);
+      if (scenario === "viewer") h.db.raw().prepare("UPDATE identity_memberships SET role='viewer' WHERE user_id=?").run(h.owner);
+      if (scenario === "operator") h.db.raw().prepare("UPDATE identity_memberships SET role='operator' WHERE user_id=?").run(h.owner);
+      const result = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal,
+        scenario === "expired" ? Date.now() + 31 * 60_000 : Date.now());
+      assert.equal(result.ok, false, scenario);
+      assert.equal(h.db.listAutomations().length, 0);
+    } finally { h.db.close(); }
+  });
+}
+
+test("automation approval preserves the existing global-resource role and organization boundary", () => {
+  for (const role of ["owner", "admin", "operator", "viewer"] as const) {
+    const h = harness();
+    try {
+      const decision = h.request().data!;
+      h.db.raw().prepare("UPDATE identity_memberships SET role=? WHERE user_id=?").run(role, h.owner);
+      const allowed = role === "owner" || role === "admin";
+      assert.equal(h.resolve(decision.occurrenceId).ok, allowed, role);
+      const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+      assert.equal(executed.ok, allowed, role);
+      assert.equal(h.db.listAutomations().length, allowed ? 1 : 0);
+    } finally { h.db.close(); }
+  }
+});
+
+test("post-commit lifecycle recovery survives restart without replaying expiration or approval", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const root = mkdtempSync(join(tmpdir(), "automation-effects-"));
+  let h = harness(join(root, "state.db"));
+  try {
+    h.db.updateSessionStatus("self", "idle", now);
+    const decision = h.request().data!;
+    now += 24 * 60 * 60_000;
+    const failingNotify = new SessionsService(h.db, h.hub, { info() {}, warn() {}, error() {} }, () => { throw new Error("test post-commit failure"); });
+    assert.equal(failingNotify.expireAutomationCreationDecisions(now), 1);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+    assert.equal(h.db.getSession("self")!.pendingApproval, null);
+    assert.equal(h.db.automationExpirationEffects().length, 1);
+    h.db.close();
+    h = harness(join(root, "state.db"), false);
+    assert.equal(h.sessions.expireAutomationCreationDecisions(now), 0);
+    assert.equal(h.db.automationExpirationEffects().length, 0);
+    assert.equal(h.notifications.length, 1);
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
+    assert.equal(h.db.listAutomations().length, 0);
+    assert.equal(h.db.heldWorkflowDecisionResumes("self").length, 0);
+  } finally { h.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a partial pod publication failure does not duplicate context or settlement on recovery", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    h.db.updateSessionStatus("self", "idle", now);
+    h.db.appendEvent("self", { kind: "agent_message", text: "Finished inspection", final: true }, now);
+    h.db.createPod({ id: "pod", title: "Pod", objective: "Inspect", sessionIds: ["self"], now });
+    h.db.updatePodOrchestrationPolicy("pod", { ...h.db.getPod("pod")!.orchestration!.policy, maxTurns: 1 }, now);
+    h.db.startPodOrchestration("pod", "pod-run", now);
+    h.db.beginPodOrchestrationStep({ stepId: "step", podId: "pod", runId: "pod-run", targetSessionId: "self",
+      selectedEntryIds: [], estimatedTokens: 0, now });
+    h.db.markPodOrchestrationStepRunning("step", "pod", "self", 0, now);
+    h.hub.podChanged = () => {};
+    let publications = 0;
+    h.hub.podContextEntry = () => { publications++; throw new Error("test context publication failure"); };
+    h.request();
+    now += 24 * 60 * 60_000;
+    h.sessions.expireAutomationCreationDecisions(now);
+    assert.equal(h.db.automationExpirationEffects().length, 1);
+    assert.equal(h.db.listPodContextEntries("pod").length, 1);
+    h.sessions.retryDuePrompts(now);
+    assert.equal(h.db.automationExpirationEffects().length, 0);
+    assert.equal(h.db.listPodContextEntries("pod").length, 1);
+    assert.equal(publications, 1, "An already-recorded source range must not be appended or published again");
+    assert.notEqual(h.db.getPod("pod")!.orchestration!.state.status, "running");
+    assert.equal(h.db.listGovernanceAudit("self").filter((entry) => entry.outcome === "revoked").length, 1);
+  } finally { h.db.close(); }
+});
+
+test("one failed expiration neither blocks other grants nor admits an expired resume", (t) => {
+  let now = Date.now();
+  t.mock.method(Date, "now", () => now);
+  const h = harness();
+  try {
+    const blocked = h.request("blocked", "blocked").data!;
+    const healthy = h.request("healthy", "healthy").data!;
+    assert.equal(h.resolve(blocked.occurrenceId).ok, true);
+    assert.equal(h.resolve(healthy.occurrenceId).ok, true);
+    h.db.stageWorkflowDecisionResume({ occurrenceId: blocked.occurrenceId, from: "held", command: {
+      commandId: "failed-expiration-resume", sessionId: "self", runnerId: "runner", payloadJson: "{}", payloadSha256: "0".repeat(64), expiresAt: now + 86_400_000, now,
+    } });
+    // Parameters are not accepted in trigger definitions. Occurrence IDs are server-generated.
+    h.db.raw().exec(`CREATE TRIGGER fail_one_expiration BEFORE INSERT ON governance_audit
+      WHEN NEW.outcome='revoked' AND NEW.request_id='${blocked.occurrenceId}' BEGIN SELECT RAISE(ABORT, 'test one expiration failure'); END`);
+    now += 30 * 60_000;
+    assert.equal(h.sessions.expireAutomationCreationDecisions(now), 1);
+    assert.equal(h.db.workflowDecisionByOccurrence(blocked.occurrenceId)!.status, "approved");
+    assert.equal(h.db.workflowDecisionByOccurrence(healthy.occurrenceId)!.status, "revoked");
+    assert.equal(h.db.dueSessionPromptCommands(now).length, 0);
+    h.db.stageSessionPromptCommand({ commandId: "unrelated", sessionId: "self", runnerId: "runner", payloadJson: "{}",
+      payloadSha256: "0".repeat(64), expiresAt: now + 86_400_000, now });
+    assert.deepEqual(h.db.dueSessionPromptCommands(now).map((row) => row.commandId), ["unrelated"]);
+    h.db.raw().exec("DROP TRIGGER fail_one_expiration");
+    assert.equal(h.sessions.expireAutomationCreationDecisions(now), 1);
+  } finally { h.db.close(); }
+});
+
+test("automation approval stays within the personal control-plane organization", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    h.db.raw().prepare("INSERT INTO identity_organizations VALUES ('other-org','Other',1,1)").run();
+    h.db.raw().prepare("INSERT INTO identity_memberships VALUES ('other-org',?,'owner',1,1)").run(h.owner);
+    h.db.raw().prepare("UPDATE session_ownership SET organization_id='other-org',owner_kind='user',owner_id=? WHERE session_id='self'").run(h.owner);
+    assert.equal(h.db.isSessionOwner({ userId: h.owner, organizationId: "other-org" }, "self"), true);
+    assert.equal(h.db.automationCreationHuman(h.owner, "other-org"), null);
+    assert.equal(h.resolve(decision.occurrenceId).status, 403);
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("changed proposals need a fresh human decision and supersede prior unconsumed approval", () => {
+  const h = harness();
+  try {
+    const first = h.request().data!;
+    assert.equal(h.resolve(first.occurrenceId).ok, true);
+    const changed = spec(); changed.cron = "0 9 * * 2";
+    assert.equal(h.request("request", "weekly", changed).status, 409);
+    const next = h.request("request-2", "weekly", changed).data!;
+    assert.equal(next.status, "pending");
+    assert.equal(h.db.workflowDecisionByOccurrence(first.occurrenceId)!.status, "superseded");
+    assert.equal(h.service.execute("self", first.occurrenceId, first.resourceDigest, h.principal).ok, false);
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); }
+});
+
+test("unchanged runner registration preserves an approved automation target", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    h.db.registerRunner(metadata, Date.now() + 5, PROTOCOL_VERSION);
+    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true, executed.error ?? "An unchanged registration is not target drift");
+  } finally { h.db.close(); }
+});
+
+test("calendar-impossible schedules fail as a validation result before creating a decision", () => {
+  const h = harness();
+  try {
+    const input = spec(); input.cron = "0 0 30 2 *";
+    const result = h.request("impossible", "impossible", input);
+    assert.equal(result.ok, false);
+    assert.equal(result.status, 400);
+    assert.equal(h.db.pendingWorkflowDecisionsForSession("self").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("workflow roles resolve disjoint defaults independently without storing shared overrides", () => {
+  const h = harness();
+  try {
+    h.db.registerRunner({ ...metadata, agents: [...metadata.agents, { ...metadata.agents[0]!, id: "second-agent",
+      capabilities: { ...metadata.agents[0]!.capabilities!, models: [{ id: "second-model", default: true, efforts: ["high"] }] } }] }, Date.now(), PROTOCOL_VERSION);
+    h.db.createWorkflowDefinition({ workflowId: "mixed-workflow", name: "Mixed Defaults", maxTransitions: 3,
+      nodes: ["agent", "second-agent"].map((agentId, index) => ({ nodeId: `inspect-${index}`, kind: "agent" as const,
+        role: `inspector-${index}`, agentId, inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 })),
+      edges: [], source: "custom", createdBy: { kind: "system", id: "test" }, createdAt: Date.now() });
+    const input = spec(); input.action = { kind: "workflow_run", request: { runnerId: "runner", workspaceId: "repo", workflowId: "mixed-workflow", task: "Inspect" } };
+    const result = h.request("mixed-workflow", "mixed-workflow", input);
+    assert.equal(result.ok, true, result.error ?? "Disjoint defaults should not be chained");
+    const snapshot = result.data!.resourceSnapshot;
+    if (snapshot.category !== "automation_creation") assert.fail();
+    assert.equal(snapshot.spec.action.request.config, undefined);
+    assert.deepEqual(snapshot.effectiveTargets.map((target) => target.config.model), ["model", "second-model"]);
+    assert.equal(h.resolve(result.data!.occurrenceId).ok, true);
+    assert.equal(h.service.execute("self", result.data!.occurrenceId, result.data!.resourceDigest, h.principal).ok, true);
+  } finally { h.db.close(); }
+});
+
+test("prompt automation defaults stay inherited after the target owner changes session settings", () => {
+  const h = harness();
+  try {
+    h.db.createSession({ id: "target", runnerId: "runner", workspaceId: "repo", agentId: "agent", title: "Target", driver: "acp",
+      useWorktree: false, config: { model: "model", effort: "high", permissionMode: "default" }, now: Date.now() });
+    h.db.updateSessionStatus("target", "idle", Date.now());
+    const input = spec(); input.action = { kind: "prompt_session", sessionId: "target", request: { text: "Inspect" } };
+    const decision = h.request("inherit", "inherit", input).data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true);
+    h.db.raw().prepare("UPDATE sessions SET permission_mode='read-only' WHERE id='target'").run();
+    const saved = h.db.getAutomation(executed.data!.automationCreationResult!.automationId)!;
+    assert.equal(saved.action.request.config, undefined, "Future normal prompts must not reapply the previous permission mode");
+  } finally { h.db.close(); }
+});
+
+test("an interrupted post-commit acknowledgement reconciles the same durable receipt", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const create = h.db.createAutomation.bind(h.db);
+    h.db.createAutomation = (input) => { create(input); throw new Error("Interrupted acknowledgement after commit"); };
+    const recovered = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(recovered.ok, true);
+    assert.equal(h.db.listAutomations().length, 1);
+    assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!.automationCreationResult!.automationId,
+      recovered.data!.automationCreationResult!.automationId);
+  } finally { h.db.close(); }
+});
+
+test("paused, alternate-machine and prompt-session configurations preserve normal automation semantics", () => {
+  const h = harness();
+  try {
+    const alternate = structuredClone(metadata); alternate.runnerId = "alternate";
+    h.db.registerRunner(alternate, Date.now(), PROTOCOL_VERSION);
+    const input = spec(); input.enabled = false;
+    if (input.action.kind !== "create_session") assert.fail();
+    input.action.request.projectId = null;
+    input.action.request.projectLocationId = null;
+    input.runnerPolicy = { kind: "alternate", targets: [{ runnerId: "alternate", workspaceId: "repo", agentId: "agent", projectId: null, projectLocationId: null }], expireAfterMinutes: 60 };
+    const proposed = h.request("alternate", "alternate", input);
+    assert.equal(proposed.ok, true, proposed.error ?? "Alternate placement must validate");
+    const decision = proposed.data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true, executed.error ?? "Alternate placement must remain stable");
+    const saved = h.db.getAutomation(executed.data!.automationCreationResult!.automationId)!;
+    assert.equal(saved.enabled, false);
+    assert.equal(saved.nextFireAt, undefined);
+    h.db.createSession({ id: "target", runnerId: "runner", workspaceId: "repo", agentId: "agent", title: "Target",
+      driver: "acp", useWorktree: false, config: { model: "model", effort: "high", permissionMode: "default" }, now: Date.now() });
+    h.db.updateSessionStatus("target", "idle", Date.now());
+    const prompt = spec(); prompt.action = { kind: "prompt_session", sessionId: "target", request: { text: "Inspect current CI" } };
+    const promptDecision = h.request("prompt", "prompt", prompt).data!;
+    assert.equal(h.resolve(promptDecision.occurrenceId).ok, true);
+    assert.equal(h.service.execute("self", promptDecision.occurrenceId, promptDecision.resourceDigest, h.principal).ok, true);
+  } finally { h.db.close(); }
+});
+
+test("workflow proposals pin the reviewed definition version and validate all agent roles", () => {
+  const h = harness();
+  try {
+    h.db.createWorkflowDefinition({ workflowId: "workflow", name: "Health", maxTransitions: 2,
+      nodes: [{ nodeId: "inspect", kind: "agent", role: "inspector", agentId: "agent", inputs: [], outputs: [],
+        retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 60_000 }], edges: [], source: "custom",
+      createdBy: { kind: "system", id: "test" }, createdAt: Date.now() });
+    const input = spec(); input.action = { kind: "workflow_run", request: { runnerId: "runner", workspaceId: "repo", workflowId: "workflow", task: "Inspect CI" } };
+    const proposed = h.request("workflow", "workflow", input);
+    assert.equal(proposed.ok, true, proposed.error ?? "Workflow should be admitted");
+    const decision = proposed.data!;
+    assert.equal(decision.resourceSnapshot.category, "automation_creation");
+    if (decision.resourceSnapshot.category !== "automation_creation" || decision.resourceSnapshot.spec.action.kind !== "workflow_run") assert.fail();
+    assert.equal(decision.resourceSnapshot.spec.action.request.workflowVersion, 1);
+    assert.equal(decision.resourceSnapshot.spec.action.request.useWorktree, true);
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const executed = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true, executed.error ?? "Pinned workflow should be stable");
+  } finally { h.db.close(); }
+});
+
+test("invalid explicit configuration cannot be replaced silently with a default model", () => {
+  const h = harness();
+  try {
+    const input = spec(); input.action.request.config = { model: "unsupported", permissionMode: "default" };
+    assert.equal(h.request("bad-model", "weekly", input).ok, false);
+    assert.equal(h.db.listAutomations().length, 0);
+    assert.equal(h.db.pendingWorkflowDecisionsForSession("self").length, 0);
+  } finally { h.db.close(); }
+});
+
+test("consumed receipts survive restart and cannot create again after deletion", () => {
+  const root = mkdtempSync(join(tmpdir(), "automation-creation-"));
+  let h = harness(join(root, "state.db"));
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    const result = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!.automationCreationResult!;
+    h.db.close();
+    h = harness(join(root, "state.db"), false);
+    assert.deepEqual(h.service.get("self", decision.occurrenceId, h.principal).data!.automationCreationResult, result);
+    h.db.deleteAutomation(result.automationId, { kind: "human", id: h.owner }, Date.now());
+    assert.deepEqual(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).data!.automationCreationResult, result);
+    assert.equal(h.db.listAutomations().length, 0);
+  } finally { h.db.close(); rmSync(root, { recursive: true, force: true }); }
+});
+
+test("creation transaction rolls back consumption and receipt if insertion fails", () => {
+  const h = harness();
+  try {
+    const decision = h.request().data!;
+    assert.equal(h.resolve(decision.occurrenceId).ok, true);
+    h.db.raw().exec("CREATE TRIGGER fail_automation BEFORE INSERT ON automations BEGIN SELECT RAISE(ABORT, 'test insertion failure'); END");
+    assert.throws(() => h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal), /test insertion failure/);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.automationCreationResult, undefined);
+    assert.equal(h.db.listAutomations().length, 0);
+    h.db.raw().exec("DROP TRIGGER fail_automation");
+    assert.equal(h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal).ok, true);
+  } finally { h.db.close(); }
+});
+
+test("route and credential boundaries reject impersonation and configuration overrides", async () => {
+  const h = harness(); const app = Fastify();
+  let principal: AuthPrincipal = h.principal;
+  registerAutomationCreationRoutes(app, { service: h.service, requestPrincipal: () => principal });
+  try {
+    for (const role of ["normal", "orchestrator"]) {
+      assert.equal(isAgentControlApiRouteAllowed("POST", "/api/sessions/:id/automation-proposals", role), true);
+      assert.equal(isAgentControlApiRouteAllowed("POST", "/api/automations", role), false);
+      assert.equal(isAgentControlApiRouteAllowed("PUT", "/api/automations/:id", role), false);
+    }
+    const decision = h.request().data!;
+    assert.equal((await app.inject({ method: "POST", url: `/api/sessions/other/automation-proposals/${decision.occurrenceId}/execute`, payload: { resourceDigest: decision.resourceDigest } })).statusCode, 403);
+    assert.equal((await app.inject({ method: "POST", url: `/api/sessions/self/automation-proposals/${decision.occurrenceId}/execute`, payload: { resourceDigest: decision.resourceDigest, spec: spec() } })).statusCode, 400);
+    principal = { ...h.principal, credentialSessionId: "descendant", actorId: "descendant" };
+    assert.equal((await app.inject({ method: "GET", url: `/api/sessions/self/automation-proposals/${decision.occurrenceId}` })).statusCode, 403);
+  } finally { await app.close(); h.db.close(); }
+});

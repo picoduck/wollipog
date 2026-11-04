@@ -6,14 +6,14 @@ import type {
 import type { PushMessage } from "./web-push.js";
 
 type AutomationPushSource = Pick<AutomationSchedule, "automationId" | "name">;
-type AutomationPushExecution = Pick<AutomationExecution, "error">;
+type AutomationPushExecution = Pick<AutomationExecution, "error" | "governancePause">;
 
 /** Build the encrypted notification card without copying execution details into terminal alerts.
  * The execution argument remains part of the notifier contract so the regression test can prove
  * that failure and expiry messages ignore it. Authenticated execution history keeps the details. */
 export function automationPushMessage(
   automation: AutomationPushSource,
-  _execution: AutomationPushExecution,
+  execution: AutomationPushExecution,
   event: AutomationNotificationEvent,
 ): PushMessage {
   const common = {
@@ -23,6 +23,12 @@ export function automationPushMessage(
 
   switch (event) {
     case "failed":
+      if (execution.governancePause) return {
+        ...common,
+        title: "Automation Paused",
+        body: "A governance ceiling paused the run. Partial or complete output may be available in Automations.",
+        urgency: "normal",
+      };
       return {
         ...common,
         title: "Automation Failed",

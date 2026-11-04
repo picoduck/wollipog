@@ -11,7 +11,7 @@ const original = new URL("../src/provider-home-lease.test.ts", import.meta.url);
 // Explicitly named to Node; excluded from the regular test glob if interrupted.
 const mutated = new URL(`../src/provider-home-lease.readiness-${randomUUID()}.mutation.ts`, import.meta.url);
 const source = readFileSync(original, "utf8");
-const gate = /^    assert\.ok\(await waitUntil\(\(\) => states\.every\(\(state\) => state\.ready\), options\.readinessMs \?\? 10_000, true\), "contender readiness timed out"\);$/gm;
+const gate = /^    if \(!await waitUntil\(\(\) => states\.every\(\(state\) => state\.ready\), readinessMs, true\)\) \{\r?\n      recordOverruns\(\);\r?\n      assert\.fail\("contender readiness timed out"\);\r?\n    \}$/gm;
 assert.equal([...source.matchAll(gate)].length, 1, "locate exactly one parent readiness wait");
 let output = "";
 writeFileSync(mutated, source.replace(gate, "    // Readiness wait removed by the mutation verifier."), { flag: "wx" });

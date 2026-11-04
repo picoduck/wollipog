@@ -20,6 +20,8 @@ export interface WorkflowVideoEvidenceAccess extends Omit<VideoEvidenceGateAcces
    * still require its exact admitted Session. Completed proof is historical, never fresh access.
    * This probe authorizes no media read, dispatch, spend or gate resolution. */
   available(controller: SessionView, child: SessionView, snapshot: WorkflowDecisionResourceSnapshot): boolean;
+  /** The same readiness for the campaign as a whole, with the first reason it is missing. */
+  campaignReadiness?(controller: SessionView): { available: true } | { available: false; reason: string };
 }
 
 /** Composes the existing gate with exact actual-worker proof. Persisted references and direct
@@ -48,6 +50,12 @@ export class WorkflowVideoEvidenceApprovals {
   }
   available(controller: SessionView, child: SessionView, snapshot: WorkflowDecisionResourceSnapshot): boolean {
     try { return this.access.available(controller, child, snapshot); } catch { return false; }
+  }
+  campaignReadiness(controller: SessionView): { available: true } | { available: false; reason: string } {
+    try {
+      return this.access.campaignReadiness?.(controller) ??
+        { available: false, reason: "Wollipog's video review service is not attached yet." };
+    } catch { return { available: false, reason: "Wollipog's video review service could not be checked." }; }
   }
   private approval(decision: WorkflowDecisionView): Approval {
     const row = this.database.raw().prepare("SELECT record,sha256 FROM workflow_video_approvals WHERE occurrence_id=?")

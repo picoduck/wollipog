@@ -15,7 +15,7 @@ import {
   type UiSnapshotMessage,
 } from "@wollipog/protocol";
 import type { ViewNavigation } from "../navigation.js";
-import { StoreProvider } from "../store.js";
+import { StoreProvider, useStoreSelector } from "../store.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
@@ -576,6 +576,16 @@ test("the Sessions header's New Session uses the active tab's preset, and ⋯ ex
   const items = () => [...menu.querySelectorAll<HTMLButtonElement>('[role="menuitem"]')];
   assert.deepEqual(items().map((item) => item.querySelector(".menu-text")?.textContent), ["New Project…", "Keyboard Shortcuts"]);
   assert.equal(items()[0]!.disabled, false);
+  // #2965: New Project… opens the dialog of that name, with Create Project and a one-line description.
+  await act(async () => { items()[0]!.click(); });
+  const newProjectDialog = domWindow.document.querySelector('[role="dialog"]') as unknown as HTMLElement;
+  assert.equal(newProjectDialog.querySelector(".modal-title")?.textContent, "New Project");
+  assert.equal(newProjectDialog.querySelector(".modal-desc")?.textContent, "Groups sessions by repository. You'll add its folders next.");
+  const newProjectFooter = [...newProjectDialog.querySelectorAll<HTMLButtonElement>(".modal-foot button")];
+  assert.deepEqual(newProjectFooter.map((button) => button.textContent?.trim()), ["Cancel", "Create Project"]);
+  await act(async () => { newProjectFooter[0]!.click(); });
+  assertNoDomNode(domWindow.document.querySelector('[role="dialog"]'), "Cancel closes New Project");
+  menu = await openMenu();
   await act(async () => { items()[1]!.click(); });
   assert.equal(shortcutsOpened, 1);
   // The opener reads an argument as the element to return focus to, so ⋯ must not hand it its choice.
@@ -1913,6 +1923,65 @@ for (const outcome of [
   });
 }
 
+for (const outcome of [
+  { refused: false, message: "Session ID copied.", tone: "t-success", detail: "B" },
+  { refused: true, message: "Couldn't copy the session ID.", tone: "t-danger", detail: undefined },
+]) {
+  test(`Copy Session ID from a row's menu ${outcome.refused ? "reports a refused write" : "copies the row's ID and shows it"} (#3897)`, async () => {
+    mobileViewport = false;
+    setWindowFocused(true);
+    setVisibility("visible");
+    const { container, root } = mountTestRoot();
+    const socket = new FakeSocket();
+    const connection: UiConnectionRuntime = {
+      instanceId: "inbox-copy-session-id",
+      runtimeKey: "inbox-copy-session-id:1",
+      createSocket: () => socket,
+      close() {},
+    };
+    const written: string[] = [];
+    const clipboard = Object.getOwnPropertyDescriptor(domWindow.navigator, "clipboard");
+    Object.defineProperty(domWindow.navigator, "clipboard", {
+      configurable: true,
+      value: { writeText: async (text: string) => { if (outcome.refused) throw new Error("denied"); written.push(text); } },
+    });
+    // happy-dom has no execCommand, so a refused write's hidden-field fallback fails too.
+    try {
+      await act(async () => {
+        root.render(
+          <ApiProvider client={api}>
+            <StoreProvider connection={connection} navigation={navigation}>
+              <FeedbackProvider>
+                <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+              </FeedbackProvider>
+            </StoreProvider>
+          </ApiProvider>,
+        );
+      });
+      await act(async () => { socket.push(snapshot([session("A", 30), session("B", 20)])); });
+      const rowB = [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")]
+        .find((row) => row.textContent?.includes("Session B"))!;
+      await act(async () => {
+        rowB.dispatchEvent(new domWindow.MouseEvent("contextmenu", { bubbles: true, cancelable: true, clientX: 50, clientY: 60 }) as never);
+      });
+      await act(async () => { menuItem("Copy Session ID").click(); });
+      await act(async () => { await Promise.resolve(); });
+      assert.deepEqual(written, outcome.refused ? [] : ["B"], "the exact ID of the row the menu belongs to");
+      assertNoDomNode(domWindow.document.querySelector('[role="menu"]'), "the menu closed");
+
+      const toasts = [...container.querySelectorAll<HTMLElement>(".toast")];
+      assert.equal(toasts.length, 1);
+      const toast = toasts[0]!;
+      assert.equal(toast.querySelector(".toast-message")?.textContent, outcome.message);
+      assert.ok(toast.classList.contains(outcome.tone), `${outcome.tone}, not ${toast.className}`);
+      assert.equal(toast.querySelector(".toast-detail.mono")?.textContent, outcome.detail);
+    } finally {
+      if (clipboard) Object.defineProperty(domWindow.navigator, "clipboard", clipboard);
+      else delete (domWindow.navigator as { clipboard?: unknown }).clipboard;
+    }
+  });
+}
+
 test("a Viewer's Inbox archive and decision shortcuts and row menu send nothing (#1857)", async () => {
   mobileViewport = false;
   setWindowFocused(true);
@@ -2616,6 +2685,83 @@ test("InboxView keeps a hidden selection on its nearest visible ancestor and Shi
   assert.equal(previewTitle(), "Session Lone");
 });
 
+test("InboxView nests a child's review one step deeper, between its siblings, and walks rows in display order (#4077)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-depth-test",
+    runtimeKey: "inbox-thread-depth-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Orchestrator", 40, { status: "running", role: "orchestrator" }),
+      session("A", 30, { status: "running", parentSessionId: "Orchestrator" }),
+      session("Review", 25, { status: "running", parentSessionId: "A", kind: "review" }),
+      session("B", 20, { status: "running", parentSessionId: "Orchestrator" }),
+      session("Lone", 5),
+    ]));
+  });
+  const shells = () => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")];
+  const shape = () => shells().map((shell) => [
+    shell.querySelector(".inbox-row-title")?.textContent,
+    ["thread-child", "thread-depth-2", "thread-last", "thread-outer"].filter((name) => shell.classList.contains(name)).join(" "),
+  ]);
+  assert.deepEqual(shape(), [
+    ["Session Orchestrator", ""],
+    ["Session A", "thread-child"],
+    ["Session Review", "thread-child thread-depth-2 thread-last thread-outer"],
+    ["Session B", "thread-child thread-last"],
+    ["Session Lone", ""],
+  ]);
+  const familyText = (title: string) => shells().find((shell) =>
+    shell.querySelector(".inbox-row-title")?.textContent === title)?.querySelector(".inbox-thread-family-text")?.textContent;
+  assert.equal(familyText("Session A"), "1 Review");
+  assert.equal(familyText("Session Orchestrator"), "2 Children");
+
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  const visited = [selectedTitle()];
+  for (let step = 0; step < 4; step += 1) { await press("j"); visited.push(selectedTitle()); }
+  assert.deepEqual(visited, rowTitles(container), "j visits every row in display order");
+  await press("k"); await press("k");
+  assert.equal(selectedTitle(), "Session Review");
+  await press("ArrowLeft");
+  assert.equal(selectedTitle(), "Session A", "Left on the review selects its own parent");
+
+  // Collapsing A hides only its review; collapsing the Orchestrator hides A, B, and the review.
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Orchestrator", "Session A", "Session B", "Session Lone"]);
+  assert.equal(familyText("Session A"), "1 Review", "the rollup survives collapse");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Orchestrator", "Session A", "Session Review", "Session B", "Session Lone"]);
+  await press("k");
+  assert.equal(selectedTitle(), "Session Orchestrator");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Orchestrator", "Session Lone"]);
+  await press("t");
+  assert.equal(rowTitles(container).length, 5);
+  await act(async () => root.unmount());
+});
+
 test("an expanded child inside a collapsed thread is the session marked seen, not its projected parent (#896)", async () => {
   mobileViewport = false;
   setVisibility("visible");
@@ -3076,7 +3222,8 @@ test("a desktop row's ⋯ selects the row without moving any, so the menu, previ
     assert.equal(domWindow.document.querySelector('[role="menu"]')?.getAttribute("aria-label"),
       "Session Actions for Session B");
     assert.deepEqual(menuLabels(), [
-      "Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Archive and Stop…",
+      "Reply", "Rename Session…", "Pin Session", "Mark Unread", "Fork Conversation…", "Snooze…", "Copy Session ID",
+      "Archive and Stop…",
     ]);
     // The menu reads the preview's own Fork availability: disabled, with its reason as a second line.
     const fork = menuItem("Fork Conversation…");
@@ -3211,14 +3358,21 @@ test("U and the menu's Mark Unread and Mark Read toggle a session's unread dot (
   }
 });
 
-/** The phone Sessions app bar (#2211), mounted with two Projects: Alpha with two sessions waiting on
- * the user and one stalled, and Beta with one idle session and one snoozed. */
+function InboxSelectionProbe({ report }: { report: (split: string | null) => void }) {
+  report(useStoreSelector((state) => state.inbox.splitKey));
+  return null;
+}
+
+/** Sessions with Alpha (two blocked, one stalled) and Beta (one idle, one snoozed). */
 async function mountPhoneBar(name: string, options: {
+  desktop?: boolean;
+  initialRoute?: string;
+  reportSplit?: (split: string | null) => void;
   pushed?: Array<{ name: string; split?: string | null }>;
   presets?: unknown[];
   client?: ApiClient;
 } = {}) {
-  mobileViewport = true;
+  mobileViewport = !options.desktop;
   const { container, root } = mountTestRoot();
   const socket = new FakeSocket();
   const connection: UiConnectionRuntime = {
@@ -3238,19 +3392,20 @@ async function mountPhoneBar(name: string, options: {
   });
   const now = Date.now();
   /** Renders with the group the URL names, as Back and Forward do. */
-  const render = (routeSplit?: string | null) => act(async () => {
+  const render = (routeSplit?: string | null, expandedSessionId: string | null = null) => act(async () => {
     root.render(
       <ApiProvider client={options.client ?? api}>
         <StoreProvider connection={connection} navigation={spyNavigation}>
           <FeedbackProvider>
-            <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
+            {options.reportSplit && <InboxSelectionProbe report={options.reportSplit} />}
+            <InboxView expandedSessionId={expandedSessionId} rightPanel={rightPanel} onOpenTerminal={() => undefined} routeSplit={routeSplit}
               onNewSession={(preset) => options.presets?.push(preset)} onOpenShortcuts={() => undefined} />
           </FeedbackProvider>
         </StoreProvider>
       </ApiProvider>,
     );
   });
-  await render();
+  await render(options.initialRoute);
   await act(async () => {
     socket.push({
       type: "snapshot",
@@ -3632,3 +3787,43 @@ test("virtualizer corrections do not hold idle priority changes (#3301, CR-2.1)"
   await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
   assert.deepEqual(rowTitles(container), ["Session B", "Session A"], "layout movement is not reader intent");
 });
+
+for (const desktop of [false, true]) {
+  for (const change of ["archive", "snooze", "reassign", "archive-all"] as const) {
+    test(`expanded session ${change} retains its project on ${desktop ? "desktop" : "phone"} (#3971)`, async () => {
+      let split: string | null = null;
+      const h = await mountPhoneBar(`project-retention-${desktop}-${change}`, {
+        desktop, reportSplit: (value) => { split = value; },
+      });
+      const projectKey = "project:alpha";
+      await h.render(projectKey);
+      assert.equal(split, projectKey);
+      await h.render(undefined, "alpha-blocked-1");
+      assert.equal(split, projectKey, "expanding keeps the originating project");
+      await act(async () => {
+        if (change === "snooze") {
+          h.socket.push({ type: "session_reminder_upsert", userId: "user", reminder: reminder("alpha-blocked-1") });
+        } else {
+          const ids = change === "archive-all"
+            ? ["alpha-blocked-1", "alpha-blocked-2", "alpha-stalled"] : ["alpha-blocked-1"];
+          for (const id of ids) h.socket.push({ type: "session_upsert", session: session(id, Date.now(), {
+            projectId: change === "reassign" ? "beta" : "alpha", archived: change !== "reassign",
+          }) });
+        }
+      });
+      assert.equal(split, projectKey, "a live update never broadens the remembered list");
+      await h.render();
+      assert.equal(split, projectKey, "closing retains the project even when it is empty");
+    });
+  }
+}
+
+for (const desktop of [false, true]) {
+  test(`a cold project URL waits for the snapshot on ${desktop ? "desktop" : "phone"} (#3971)`, async () => {
+    let split: string | null = null;
+    await mountPhoneBar(`cold-project-${desktop}`, {
+      desktop, initialRoute: "project:beta", reportSplit: (value) => { split = value; },
+    });
+    assert.equal(split, "project:beta");
+  });
+}

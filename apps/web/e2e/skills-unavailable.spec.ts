@@ -50,15 +50,20 @@ test("a phone-width container session keeps the notice inside the pane", async (
   await page.screenshot({ path: "test-results/skills-unavailable/session-container-phone.png" });
 });
 
-test("the New Session dialog says skills are unavailable only for a container target", async ({ page }) => {
+test("the New Session dialog shows the skills notice only for a container target (#2954)", async ({ page }) => {
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto("/new-session-choices-e2e.html?containerTargets=1");
   await expect(page.getByRole("heading", { name: "New Session" })).toBeVisible();
-  await expect(page.getByText(UNAVAILABLE)).toHaveCount(0);
+  const notice = page.getByRole("status", { name: "Skills Unavailable" });
+  await expect(notice).toHaveCount(0);
+  await page.getByRole("button", { name: "Options", exact: true }).click();
   await page.screenshot({ path: "test-results/skills-unavailable/new-session-host.png", fullPage: true });
 
-  await page.getByRole("button", { name: /Execution Target/u }).click();
+  await page.getByRole("button", { name: /^Run On:/u }).click();
   await page.getByRole("option", { name: /Offline Container/u }).click();
-  await expect(page.getByText(UNAVAILABLE).first()).toBeVisible();
+  // The session view's notice, with the assigned skill names; the old muted line is gone.
+  await expect(notice).toBeVisible();
+  await expect(notice).toContainText("release-notes and review-pr");
+  await expect(page.getByText(UNAVAILABLE)).toHaveCount(0);
   await page.screenshot({ path: "test-results/skills-unavailable/new-session-container.png", fullPage: true });
 });

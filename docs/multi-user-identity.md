@@ -1,9 +1,10 @@
 # Multi-user identity and resource ownership
 
 The control plane now has a local-first collaboration boundary. A fresh or upgraded personal
-deployment bootstraps one `Personal organization` and one `Local owner`; existing paired-device
+deployment bootstraps one `Personal organization` and one owner named `Owner`; existing paired-device
 tokens, runners, workspaces, and sessions are migrated into that organization without replacing
-credentials or changing resource ids. This is an additive foundation, not an external identity
+credentials or changing resource ids. The owner's default name is the same fixed word on every
+install, never the computer's account or host name, because every member sees it (#3001). This is an additive foundation, not an external identity
 provider. Expiring transcript capabilities, authenticated artifact exports, runner-specific
 credential rotation, and runner-local secret references build on this identity boundary; account
 federation remains outside the current local-first deployment model.
@@ -36,6 +37,13 @@ preserve the source session owner. A stale or unknown snapshot workspace falls b
 scope and never widens access; a runner fork response must preserve the source driver and agent
 identity. Non-admin members cannot submit an arbitrary host path. An agent session credential receives only
 its live persisted session scope, and its route allowlist remains an additional ceiling.
+The one exception is runner-family access (runners, their workspaces and agent installations) for a
+credential whose session is user-owned, such as a Full Control root and its children: it acts for
+that user, so it may list, inspect and launch on the runners that user can use as an active,
+non-viewer member (organization-owned, the user's own, and the user's teams'). It never inherits an
+owner/admin role, and sessions, Projects, artifacts and decisions keep the exact session-scope rule.
+Like that user, it launches only into registered workspaces the user can access, and it names an
+arbitrary host path only when the user is an active organization owner or admin.
 Workflow-engine orchestrators are explicitly organization-owned even when their worker sessions use
 a user/team-owned project: workflow definitions, runs, artifacts, and policies are still
 organization resources, while each worker keeps the selected project scope.
@@ -85,15 +93,22 @@ automation, workflow, and reconciliation audits.
 
 ## Administration
 
-The Machines view includes **People & Devices**. Owners/admins can create members, assign roles,
-suspend/reactivate access, create teams, update team membership, and pair a device directly to an
-active member. The last active owner cannot be demoted or suspended. Owners alone can grant or alter
+The Connections page includes **People and Devices**. Owners/admins can create members, assign
+roles, suspend/reactivate access, create teams, update team membership, and pair a device directly
+to an active member. An owner or admin renames themselves from their own row (**Your Name**), which
+sends only `displayName`; nobody changes their own access level there. The last active owner cannot be demoted or suspended. Owners alone can grant or alter
 owner access. A team that still owns a runner, workspace, or session cannot be deleted until those
 resources are reassigned.
 
 The REST surface is:
 
-- `GET /api/identity` — current context plus organization directory and teams;
+- `GET /api/identity` — current context plus organization directory and teams. The context carries
+  `defaultName: true` only for the bootstrap owner while their name is still the default `Owner`.
+  It is set when the default is written: on a new install, or by the one-time startup rename of an
+  owner still named exactly `Local owner` (when the marker column is added). It is cleared the first
+  time that member's name is saved through `PATCH /api/identity/users/:userId`: by themselves, even
+  unchanged, or by another owner giving them a different name. People shows the **Set Your Name**
+  notice to that member alone while it is set;
 - `POST/PATCH /api/identity/users...` — member lifecycle;
 - `POST/PUT/DELETE /api/identity/teams...` — team lifecycle and membership;
 - `GET /api/identity/mutation-audit` — bounded recent mutation attribution;

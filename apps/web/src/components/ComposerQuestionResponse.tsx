@@ -38,6 +38,7 @@ import { ChevronsDownIcon, ChevronsUpIcon, CloseIcon, QuestionIcon } from "./Ico
 import { Notice } from "./Notice.js";
 import { StructuredQuestionText } from "./StructuredQuestionText.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { secretValueRef } from "./ui/secret-input.js";
 import {
   QUESTION_CARD_COPY,
   QuestionChoiceRows,
@@ -531,27 +532,53 @@ export function ComposerQuestionResponse({
             {submissionError === QUESTION_CARD_COPY.alreadySending ? submissionError : QUESTION_CARD_COPY.notSent}
           </Notice>
         )}
-        <input
-          ref={inputRef}
-          className="composer-answer-input"
-          data-session-request-focus=""
-          type={question.secret ? "password" : "text"}
-          inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
-          autoComplete="off"
-          maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
-          value={rawValue}
-          aria-labelledby={titleId}
-          aria-describedby={helpShown ? helpId : validationError ? errorId : undefined}
-          aria-invalid={validationError ? true : undefined}
-          aria-disabled={responseUnavailable || undefined}
-          disabled={busy}
-          readOnly={responseUnavailable}
-          placeholder={answerPlaceholder(question, currentDraft)}
-          onChange={(event) => {
-            const raw = event.currentTarget.value;
-            updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
-          }}
-        />
+        {question.secret ? (
+          // A secret is uncontrolled, so it never reaches the value attribute (#3814); the page-only
+          // draft reaches the field through its ref. The keys keep React from reusing one input for both.
+          <input
+            key="secret"
+            ref={secretValueRef(rawValue, inputRef)}
+            className="composer-answer-input"
+            data-session-request-focus=""
+            type="password"
+            autoComplete="off"
+            maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+            aria-labelledby={titleId}
+            aria-describedby={helpShown ? helpId : validationError ? errorId : undefined}
+            aria-invalid={validationError ? true : undefined}
+            aria-disabled={responseUnavailable || undefined}
+            disabled={busy}
+            readOnly={responseUnavailable}
+            placeholder={answerPlaceholder(question, currentDraft)}
+            onChange={(event) => {
+              const raw = event.currentTarget.value;
+              updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
+            }}
+          />
+        ) : (
+          <input
+            key="plain"
+            ref={inputRef}
+            className="composer-answer-input"
+            data-session-request-focus=""
+            type="text"
+            inputMode={question.inputFormat === "integer" ? "numeric" : question.inputFormat === "number" ? "decimal" : undefined}
+            autoComplete="off"
+            maxLength={question.maxLength ?? DEFAULT_QUESTION_FREE_TEXT_MAX_LENGTH}
+            value={rawValue}
+            aria-labelledby={titleId}
+            aria-describedby={helpShown ? helpId : validationError ? errorId : undefined}
+            aria-invalid={validationError ? true : undefined}
+            aria-disabled={responseUnavailable || undefined}
+            disabled={busy}
+            readOnly={responseUnavailable}
+            placeholder={answerPlaceholder(question, currentDraft)}
+            onChange={(event) => {
+              const raw = event.currentTarget.value;
+              updateDraft({ kind: currentDraft?.kind === "other" ? "other" : "entry", value: raw });
+            }}
+          />
+        )}
         {validationError !== null && <FieldError id={errorId}>{validationError}</FieldError>}
         {helpShown && <p className="answer-help" id={helpId}>{help}</p>}
         {usage && usageOwnRow && <div className="composer-answer-usage own-row">{usage}</div>}

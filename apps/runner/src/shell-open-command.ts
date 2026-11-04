@@ -1,4 +1,4 @@
-import type { AgentContext, ShellOpenMessage, ShellOpenResultMessage } from "@wollipog/protocol";
+import type { AgentContext, ProviderHomeLaunchRefusalView, ShellOpenMessage, ShellOpenResultMessage } from "@wollipog/protocol";
 import type { SessionMeta } from "./session-store.js";
 import type { AgentTuiProviderHome, ShellProcessLaunch } from "./shell-manager.js";
 
@@ -38,6 +38,9 @@ export interface ShellOpenCommandDependencies {
   ): { pty: boolean };
   send(result: ShellOpenResultMessage): void;
   errorText(error: unknown): string;
+  /** The typed refusal of an Agent TUI open its provider-HOME lease refused (#3338), mapped as a
+   * refused session launch is, or undefined for any other failure or a peer too old to read it. */
+  providerHomeRefusal?(error: unknown, meta: SessionMeta): ProviderHomeLaunchRefusalView | undefined;
 }
 
 /** Coordinate a shell open without letting an initial Agent TUI outrun its session start.
@@ -48,11 +51,12 @@ export async function handleShellOpenCommand(
   message: ShellOpenMessage,
   dependencies: ShellOpenCommandDependencies,
 ): Promise<void> {
-  const fail = (error: string) => dependencies.send({
+  const fail = (error: string, providerHomeRefusal?: ProviderHomeLaunchRefusalView) => dependencies.send({
     type: "shell_open_result",
     requestId: message.requestId,
     ok: false,
     error,
+    ...(providerHomeRefusal ? { providerHomeRefusal } : {}),
   });
 
   const registered = message.kind === "agent_tui";
@@ -151,7 +155,10 @@ export async function handleShellOpenCommand(
       unopenedProviderHome = undefined;
       // Settled before the failure is reported, so a caller that saw the refusal sees the release.
       await unopened?.settle(null).catch(() => {});
-      fail(dependencies.errorText(error));
+      // A busy, foreign-owned or not-granted account offers the same recovery as the session (#3338).
+      fail(dependencies.errorText(error), message.kind === "agent_tui"
+        ? dependencies.providerHomeRefusal?.(error, target.meta)
+        : undefined);
     }
   } finally {
     if (registered) dependencies.unregisterPending(message.shellId);

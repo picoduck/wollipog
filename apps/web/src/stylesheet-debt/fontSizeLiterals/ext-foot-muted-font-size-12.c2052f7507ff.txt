@@ -1,1 +1,0 @@
-|.ext-foot .muted|font-size|12

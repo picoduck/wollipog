@@ -45,7 +45,14 @@ import {
   AGENT_CONTROL_RELAY_KEY_ENV,
 } from "./agent-control-relay.js";
 import { AGENT_CONTROL_RELAY_FIFO_ENV, agentControlFifoRelayBase } from "./agent-control-fifo-relay.js";
-import { CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION, SESSION_CODEX_MCP_MARKER } from "./orchestrator-preset.js";
+import { CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS } from "./claude-wollipog-mcp.js";
+import { PULL_REQUEST_WAIT_MAX_TIMEOUT_MS, PULL_REQUEST_WAIT_READ_GRACE_MS } from "./pull-request-wait.js";
+import {
+  CLAUDE_AGENT_ACP_ORCHESTRATOR_VERSION,
+  CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING,
+  CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC,
+  SESSION_CODEX_MCP_MARKER,
+} from "./orchestrator-preset.js";
 import { claudeHookSettingsPath, provisionClaudeHooks, resetClaudeGuardState } from "./hook-settings.js";
 import { PI_ORCHESTRATOR_PRESET_TOOLS_ENV, PI_SECURITY_REQUEST_NONCE_ENV } from "./pi-agent-control-extension.js";
 import { WSL_AGENT_CONTROL_PRIVATE_DIR } from "./wsl-agent-control.js";
@@ -91,13 +98,20 @@ test("injected POSIX CLI launcher carries Node and single-executable re-entry ar
         executionIsolationMode: "bwrap",
       }, () => {}, { ...host, configDir: root, platform: "linux" });
       assert.equal(launch.env.WOLLIPOG_CLI, agentControlCliPath(root, launch.sessionId));
-      assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "[]");
+      assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "");
       assert.equal(statSync(launch.env.WOLLIPOG_CLI!).mode & 0o777, 0o700);
       const result = spawnSync(launch.env.WOLLIPOG_CLI!, ["session", "list", "with spaces", "quote'"],
         { encoding: "utf8", cwd: tmpdir() });
       assert.equal(result.status, 0, result.stderr);
       assert.notEqual(result.stdout, "", `${name}: ${result.stderr}`);
       assert.deepEqual(JSON.parse(result.stdout), ["--wollipog-cli", "session", "list", "with spaces", "quote'"]);
+      // Appending the variable unquoted, as a shell user would, must add no argument (#3527).
+      const appended = spawnSync("/bin/sh", ["-c", '"$WOLLIPOG_CLI" $WOLLIPOG_CLI_ARGS session list --json'], {
+        encoding: "utf8", cwd: tmpdir(),
+        env: { ...process.env, WOLLIPOG_CLI: launch.env.WOLLIPOG_CLI!, WOLLIPOG_CLI_ARGS: launch.env.WOLLIPOG_CLI_ARGS! },
+      });
+      assert.equal(appended.status, 0, appended.stderr);
+      assert.deepEqual(JSON.parse(appended.stdout), ["--wollipog-cli", "session", "list", "--json"]);
       removeAgentControlFiles(launch.sessionId, root);
       assert.equal(existsSync(launch.env.WOLLIPOG_CLI!), false);
     }
@@ -117,6 +131,60 @@ test("native Windows retains a safe argument-array CLI fallback", () => {
     assert.equal(launch.env.WOLLIPOG_CLI, "C:\\wollipog-runner.exe");
     assert.deepEqual(JSON.parse(launch.env.WOLLIPOG_CLI_ARGS!), ["--wollipog-cli"]);
     assert.equal(existsSync(agentControlCliPath(root, launch.sessionId)), false);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a delegated image reviewer launches with only its two review tools, or not at all (#4074)", () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-image-reviewer-control-"));
+  try {
+    const host: AgentControlHost = {
+      isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root, platform: "linux",
+    };
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const };
+    const launch = spec("claude-code");
+    launch.agentId = "claude";
+    launch.command = "claude";
+    // User flags that would widen the reviewer are replaced, never kept beside the preset.
+    launch.args = ["--allowedTools", "Bash", "--dangerously-skip-permissions", "--mcp-config", "/home/user/extra.json"];
+    launch.uiEvidenceReviewer = { reviewId: "uiimgreview_1" };
+    provisionAgentControl(launch, control, () => {}, host);
+    const args = [...launch.args];
+    assert.equal(launch.env.WOLLIPOG_PERMISSION_PRESET, "ui_evidence_reviewer");
+    const value = (flag: string) => launch.args[launch.args.indexOf(flag) + 1];
+    assert.equal(value("--tools"), "", "no built-in tools");
+    assert.equal(value("--allowedTools"), "mcp__wollipog__review_evidence_image,mcp__wollipog__submit_evidence_verdict");
+    assert.equal(value("--permission-mode"), "dontAsk");
+    assert.equal(value("--setting-sources"), "");
+    assert.ok(launch.args.includes("--strict-mcp-config"));
+    assert.ok(launch.args.includes("--disable-slash-commands"));
+    assert.equal(launch.args.includes("--dangerously-skip-permissions"), false);
+    assert.equal(launch.args.includes("Bash"), false);
+    assert.deepEqual(launch.args.flatMap((arg, index) => arg === "--mcp-config" ? [launch.args[index + 1]] : []),
+      [agentControlMcpConfigPath(root, launch.sessionId)], "only the runner's own management server");
+    const mcp = JSON.parse(readFileSync(agentControlMcpConfigPath(root, launch.sessionId), "utf8"));
+    assert.equal(mcp.mcpServers.wollipog.env.WOLLIPOG_PERMISSION_PRESET, "ui_evidence_reviewer",
+      "the management server serves the reviewer role");
+    provisionAgentControl(launch, control, () => {}, host);
+    assert.deepEqual(launch.args, args, "resume is idempotent");
+
+    for (const [label, refused, options] of [
+      ["Codex", Object.assign(spec("codex"), { uiEvidenceReviewer: { reviewId: "r" } }), control],
+      ["an Orchestrator", Object.assign(spec("claude-code"), { uiEvidenceReviewer: { reviewId: "r" }, role: "orchestrator",
+        config: { permissionMode: "orchestrator" } }), control],
+      ["an older control plane", Object.assign(spec("claude-code"), { uiEvidenceReviewer: { reviewId: "r" } }),
+        { ...control, controlPlaneProtocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.delegatedImageEvidenceReview - 1 }],
+      ["a WSL context", Object.assign(spec("claude-code"), { uiEvidenceReviewer: { reviewId: "r" },
+        context: { kind: "wsl", distro: "Ubuntu" } }), control],
+    ] as const) {
+      const refusedSpec = refused as SessionLaunchSpec;
+      refusedSpec.sessionId = `s_refused_${label.replace(/\W+/gu, "_")}`;
+      assert.throws(() => provisionAgentControl(refusedSpec, options, () => {}, host),
+        /delegated image reviewer launches only/u, label);
+      assert.equal(existsSync(agentControlTokenPath(root, refusedSpec.sessionId)), false, `${label}: no credential before refusal`);
+    }
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -491,7 +559,7 @@ test("verified Direct WSL rotates credentials and provisions only the target-loc
     assert.equal(first.tokenFile, agentControlTokenPath(root, launch.sessionId));
     assert.equal(JSON.stringify(launch).includes(first.token), false, "credential stays out of launch metadata");
     assert.equal(launch.env.WOLLIPOG_CLI, `${WSL_AGENT_CONTROL_PRIVATE_DIR}/cli`);
-    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "[]");
+    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, "");
     assert.ok(launch.args.some((arg) => arg.includes('"WOLLIPOG_AGENT_CONTROL_SOCKET" = "/tmp/wollipog-agent-control/control.sock"')),
       "Codex MCP receives the private socket explicitly instead of relying on ambient inheritance");
     assert.ok(launch.args.includes("--strict-config"));
@@ -558,7 +626,7 @@ test("native sessions receive a purpose-bound token file and CLI environment wit
     assert.equal(launch.env.WOLLIPOG_SESSION_ID, launch.sessionId);
     assert.equal(launch.env.WOLLIPOG_CLI, process.platform === "win32"
       ? "/opt/wollipog-runner" : agentControlCliPath(root, launch.sessionId));
-    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, process.platform === "win32" ? '["--wollipog-cli"]' : "[]");
+    assert.equal(launch.env.WOLLIPOG_CLI_ARGS, process.platform === "win32" ? '["--wollipog-cli"]' : "");
     assert.equal(JSON.stringify(launch).includes(token), false, "plaintext token never enters launch metadata");
     assert.equal(registrations.length, 1);
     assert.equal(registrations[0]![0], launch.sessionId);
@@ -882,6 +950,10 @@ test("Claude receives the general MCP config without changing the agent identity
     const config = JSON.parse(readFileSync(configPath, "utf8"));
     assert.equal(config.mcpServers.wollipog.command, "/opt/wollipog-runner");
     assert.deepEqual(config.mcpServers.wollipog.args, ["--agent-control-mcp"]);
+    // Claude Code's 30-minute idle abort must not cut a pending wait short (#4072); the limit lives
+    // only in this entry, and this file names no other server.
+    assert.deepEqual(Object.keys(config.mcpServers), ["wollipog"]);
+    assert.equal(config.mcpServers.wollipog.timeout, CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS);
     assert.equal(JSON.stringify(config).includes(readFileSync(agentControlTokenPath(root, launch.sessionId), "utf8")), false);
     assert.equal(launch.agentId, "codex", "provisioning never changes or advertises the agent identity");
 
@@ -895,6 +967,16 @@ test("Claude receives the general MCP config without changing the agent identity
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("the Claude wollipog entry's limit outlasts the longest pull request wait, as Codex's does (#4072)", () => {
+  // Claude Code takes the larger of this and its 30-minute idle limit, and this also replaces the
+  // server's total per-call limit, so it must cover a three-hour wait plus one in-flight read and
+  // still be a bound.
+  assert.ok(CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS >= PULL_REQUEST_WAIT_MAX_TIMEOUT_MS + PULL_REQUEST_WAIT_READ_GRACE_MS);
+  assert.ok(CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS < PULL_REQUEST_WAIT_MAX_TIMEOUT_MS + 30 * 60_000);
+  assert.equal(CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS, CODEX_WOLLIPOG_MCP_TOOL_TIMEOUT_SEC * 1000,
+    "both harnesses state one per-call limit");
 });
 
 test("retained Claude sessions shed runner-owned control state on downgrade and re-provision deterministically", () => {
@@ -1262,13 +1344,20 @@ test("an additive Codex Orchestrator refuses a launch that already claims the re
 });
 
 /** A stand-in for `codex mcp list --json` that loads a runner `wollipog` entry from the launch
- * arguments the way codex-cli 0.162.1 does, unless told this installation refuses it. */
-function fakeCodexMcpInventory(configured: object[], options: { loadsEntry?: boolean; fails?: boolean } = {}) {
+ * arguments the way codex-cli 0.162.1 does, unless told this installation refuses it. A Codex
+ * without `features.code_mode.direct_only_tool_namespaces` refuses its whole configuration when the
+ * setting is present (`refusesDirectTools`), as codex-cli 0.165.0 does for any unknown field there. */
+function fakeCodexMcpInventory(configured: object[],
+  options: { loadsEntry?: boolean; fails?: boolean; refusesDirectTools?: boolean } = {}) {
   const reads: Array<{ args: string[]; cwd: string; env: Record<string, string> }> = [];
   const read: NonNullable<AgentControlHost["readCodexMcpInventory"]> = async (launch, cwd) => {
     reads.push({ args: [...launch.args], cwd, env: { ...launch.env } });
     if (options.fails) throw new Error("codex mcp list failed");
-    const entry = launch.args.find((arg) => arg.startsWith("mcp_servers.wollipog="));
+    if (options.refusesDirectTools && launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING)) {
+      throw new Error("Codex MCP probe exited with code 1");
+    }
+    const entry = launch.args.find((arg) => arg.startsWith("mcp_servers.wollipog=") ||
+      (arg.startsWith("mcp_servers={") && arg.includes('"wollipog"')));
     const command = entry && /"command" = ("[^"]*")/u.exec(entry)?.[1];
     const timeout = entry && /"tool_timeout_sec" = (\d+)/u.exec(entry)?.[1];
     return JSON.stringify([
@@ -1295,14 +1384,19 @@ test("a Codex session without the Orchestrator role gains the wollipog MCP serve
         const launch = Object.assign(spec(driver), { worktreePath: "/repo/.worktrees/s" });
         launch.sessionId = `s_${mode}_${driver.replace(/-/gu, "_")}`;
         launch.args = [...userArgs];
+        launch.env.CODEX_HOME = join(root, "codex-home");
         launch.config = { permissionMode: "on-request" };
         const logs: string[] = [];
-        await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+        const proofs: Promise<boolean>[] = [];
+        await provisionAgentControl(launch, { ...control, onProcess: proof => proofs.push(proof) }, (line) => logs.push(line), host);
+        assert.deepEqual(await Promise.all(proofs), [false, false], "both injected inventory reads retain HOME ownership");
 
         const added = launch.args.slice(userArgs.length);
         assert.deepEqual(launch.args.slice(0, userArgs.length), userArgs, "the user's arguments are untouched");
-        assert.equal(added.length, 2, `${driver}/${mode} adds one setting`);
+        assert.equal(added.length, 4, `${driver}/${mode} adds the entry and the direct-tools setting`);
         assert.equal(added[0], "-c");
+        assert.deepEqual(added.slice(2), ["-c", CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING],
+          "the tools stay out of code mode, named directly after the entry (#4023)");
         assert.match(added[1]!, /^mcp_servers\.wollipog=\{ "command" = "\/opt\/runner", "args" = \["--agent-control-mcp"\]/u);
         assert.ok(added[1]!.includes('"tool_timeout_sec" = 10860'));
         assert.ok(added[1]!.includes(SESSION_CODEX_MCP_MARKER));
@@ -1345,6 +1439,7 @@ test("a Codex session without the Orchestrator role gains the wollipog MCP serve
       const launch = spec("codex-app-server");
       launch.sessionId = "s_refused";
       launch.args = [...args];
+      launch.env.CODEX_HOME = join(root, "codex-home");
       const logs: string[] = [];
       await provisionAgentControl(launch, fileMode, (line) => logs.push(line), host);
       assert.deepEqual(launch.args, args, `${name}: the launch is unchanged`);
@@ -1353,26 +1448,173 @@ test("a Codex session without the Orchestrator role gains the wollipog MCP serve
       assert.match(logs.at(-1)!, reason, name);
     }
 
+    // A Codex without the direct-tools setting refuses its configuration with it. The entry alone
+    // is read again and launches exactly as it did before #4023.
+    {
+      const inventory = fakeCodexMcpInventory([mine], { refusesDirectTools: true });
+      const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+        platform: "linux", readCodexMcpInventory: inventory.read };
+      const launch = Object.assign(spec("codex-app-server"), { worktreePath: "/repo" });
+      launch.sessionId = "s_older_codex";
+      launch.args = [...userArgs];
+      launch.env.CODEX_HOME = join(root, "codex-home");
+      const logs: string[] = [];
+      await provisionAgentControl(launch, fileMode, (line) => logs.push(line), host);
+      assert.equal(launch.args.length, userArgs.length + 2, "the entry alone");
+      assert.match(launch.args.at(-1)!, /^mcp_servers\.wollipog=/u);
+      assert.equal(launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), false);
+      assert.equal(inventory.reads.length, 3);
+      assert.ok(inventory.reads[1]!.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), "the setting is tried first");
+      assert.deepEqual(inventory.reads[2]!.args, launch.args, "then exactly the launch without it");
+      assert.match(logs.at(-1)!, /CLI and MCP provisioned \(this Codex installation did not load the setting/u);
+      const once = [...launch.args];
+      await provisionAgentControl(launch, fileMode, () => {}, host);
+      assert.deepEqual(launch.args, once, "resume is idempotent");
+    }
+
+    // The setting would replace a user's own `direct_only_tool_namespaces`, so a launch whose
+    // configuration already names one keeps the user's list and gains the entry alone.
+    const userListHome = join(root, "user-list-home");
+    mkdirSync(userListHome, { recursive: true });
+    writeFileSync(join(userListHome, "config.toml"), '[features.code_mode]\ndirect_only_tool_namespaces = ["mcp__mine"]\n');
+    // A project Codex reads through `-C`/`--cd` counts too, though the launch directory has none.
+    const otherProject = join(root, "other-project");
+    mkdirSync(join(otherProject, ".codex"), { recursive: true });
+    writeFileSync(join(otherProject, ".codex", "config.toml"), '[features.code_mode]\ndirect_only_tool_namespaces = ["mcp__mine"]\n');
+    const userLists: Array<[string, string, string[]]> = [
+      ["the Codex home's config.toml", userListHome, userArgs],
+      ["a launch argument", join(root, "codex-home"),
+        [...userArgs, "-c", 'features.code_mode.direct_only_tool_namespaces=["mcp__mine"]']],
+      ["-C <dir>", join(root, "codex-home"), [...userArgs, "-C", otherProject]],
+      ["-C<dir>", join(root, "codex-home"), [...userArgs, `-C${otherProject}`]],
+      ["--cd <dir>", join(root, "codex-home"), [...userArgs, "--cd", otherProject]],
+      ["--cd=<dir>", join(root, "codex-home"), [...userArgs, `--cd=${otherProject}`]],
+    ];
+    for (const [name, home, args] of userLists) {
+      const inventory = fakeCodexMcpInventory([mine]);
+      const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+        platform: "linux", readCodexMcpInventory: inventory.read };
+      const launch = Object.assign(spec("codex-app-server"), { worktreePath: "/repo" });
+      launch.sessionId = "s_user_list";
+      launch.args = [...args];
+      launch.env.CODEX_HOME = home;
+      const logs: string[] = [];
+      await provisionAgentControl(launch, fileMode, (line) => logs.push(line), host);
+      assert.deepEqual(launch.args.slice(0, args.length), args, `${name}: the user's arguments are untouched`);
+      assert.equal(launch.args.length, args.length + 2, `${name}: the entry alone`);
+      assert.equal(launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), false, name);
+      assert.equal(inventory.reads.some((read) => read.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING)), false,
+        `${name}: the setting is never tried`);
+      assert.match(logs.at(-1)!, /already sets direct_only_tool_namespaces, which is kept; add "mcp__wollipog"/u, name);
+    }
+
     // A stale session entry never survives into a launch that does not re-derive it: neither an
     // Orchestrator (after a role conversion) nor a launch whose control plane lacks Agent Control.
     const stale = Object.assign(spec("codex"), { worktreePath: "/repo" });
+    stale.env.CODEX_HOME = join(root, "codex-home");
     stale.sessionId = "s_stale";
     const inventory = fakeCodexMcpInventory([]);
     const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
       platform: "linux", readCodexMcpInventory: inventory.read };
     await provisionAgentControl(stale, fileMode, () => {}, host);
     const staleArgs = [...stale.args];
-    assert.equal(staleArgs.length, 2);
+    assert.equal(staleArgs.length, 4);
     stale.config = { permissionMode: "on-request" };
     stale.orchestrator = { strictProjectIsolation: false };
     await provisionAgentControl(stale, relayMode, () => {}, host);
     assert.equal(stale.args.some((arg) => arg.includes(SESSION_CODEX_MCP_MARKER)), false);
     assert.equal(stale.args.filter((arg) => arg.startsWith("mcp_servers.wollipog=")).length, 1,
       "only the Orchestrator's own entry remains");
+    assert.equal(stale.args.filter((arg) => arg === CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING).length, 1,
+      "the session's setting left with its entry; the Orchestrator's own follows its entry");
     assert.equal(stale.env[SESSION_CODEX_MCP_MARKER], undefined);
     const downgraded = Object.assign(spec("codex"), { args: [...staleArgs] });
     await provisionAgentControl(downgraded, { ...fileMode, controlPlaneProtocolVersion: null }, () => {}, host);
     assert.deepEqual(downgraded.args, [], "an entry pointing at a removed credential is dropped");
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
+test("a Codex Orchestrator keeps its wollipog tools out of code mode only when Codex loads the setting (#4023)", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-orchestrator-direct-tools-"));
+  try {
+    const control = { controlPlaneUrl: "ws://127.0.0.1:4317/runner", controlPlaneProtocolVersion: PROTOCOL_VERSION,
+      executionIsolationMode: "bwrap" as const };
+    const userArgs = ["-c", "model_reasoning_effort=high"];
+    const shapes = [
+      ["preset", { permissionMode: "orchestrator" }, 'mcp_servers={ "wollipog" = '],
+      ["additive", { permissionMode: "on-request" }, "mcp_servers.wollipog="],
+    ] as const;
+    for (const [shape, config, entryPrefix] of shapes) {
+      for (const refuses of [false, true]) {
+        const inventory = fakeCodexMcpInventory([], { refusesDirectTools: refuses });
+        const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+          platform: "linux", readCodexMcpInventory: inventory.read };
+        const launch = Object.assign(spec("codex-app-server"), { worktreePath: "/repo/.worktrees/o" });
+        launch.sessionId = `s_${shape}_${refuses ? "refused" : "loaded"}`;
+        launch.args = [...userArgs];
+        launch.env.CODEX_HOME = join(root, "codex-home");
+        launch.config = config;
+        // Without Strict Project Isolation the preset launches from the worktree, as checked here.
+        launch.orchestrator = { strictProjectIsolation: false };
+        const logs: string[] = [];
+        await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+        const name = `${shape}${refuses ? " on a Codex that refuses the setting" : ""}`;
+        const entry = launch.args.findIndex((arg) => arg.startsWith(entryPrefix));
+        assert.ok(entry > 0, `${name}: the Orchestrator's entry is present`);
+        assert.equal(inventory.reads.length, 1, `${name}: one read`);
+        assert.equal(inventory.reads[0]!.cwd, "/repo/.worktrees/o");
+        if (refuses) {
+          assert.equal(launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), false, `${name}: launch unchanged`);
+          assert.match(logs.at(-1)!, /did not load the setting that keeps the wollipog tools out of code mode/u, name);
+        } else {
+          assert.deepEqual(launch.args.slice(entry + 1, entry + 3), ["-c", CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING],
+            `${name}: the setting follows the entry`);
+          assert.deepEqual(inventory.reads[0]!.args, launch.args, `${name}: Codex loaded exactly the launch`);
+        }
+        const once = [...launch.args];
+        await provisionAgentControl(launch, control, () => {}, host);
+        assert.deepEqual(launch.args, once, `${name}: resume is idempotent`);
+      }
+    }
+
+    // A strict preset Orchestrator launches from a scratch directory chosen later, whose Codex
+    // configuration cannot be checked here: it goes without the setting, and nothing is probed.
+    {
+      const inventory = fakeCodexMcpInventory([]);
+      const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+        platform: "linux", readCodexMcpInventory: inventory.read };
+      const launch = Object.assign(spec("codex-app-server"), { worktreePath: "/repo/.worktrees/o" });
+      launch.sessionId = "s_strict_preset";
+      launch.config = { permissionMode: "orchestrator" };
+      launch.orchestrator = { strictProjectIsolation: true };
+      launch.env.CODEX_HOME = join(root, "codex-home");
+      const logs: string[] = [];
+      await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+      assert.ok(launch.args.some((arg) => arg.startsWith('mcp_servers={ "wollipog" = ')));
+      assert.equal(launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), false);
+      assert.equal(inventory.reads.length, 0);
+      assert.match(logs.at(-1)!, /launch directory is not known yet/u);
+    }
+
+    // A project's own `.codex/config.toml` above the launch directory names a list: it is kept.
+    const project = join(root, "project");
+    mkdirSync(join(project, ".codex"), { recursive: true });
+    mkdirSync(join(project, "sub"), { recursive: true });
+    writeFileSync(join(project, ".codex", "config.toml"),
+      '[profiles.fast.features.code_mode]\ndirect_only_tool_namespaces = ["mcp__mine"]\n');
+    const inventory = fakeCodexMcpInventory([]);
+    const host: AgentControlHost = { isSea: true, execPath: "/opt/runner", execArgv: [], configDir: root,
+      platform: "linux", readCodexMcpInventory: inventory.read };
+    const launch = Object.assign(spec("codex-app-server"), { worktreePath: join(project, "sub") });
+    launch.sessionId = "s_project_list";
+    launch.config = { permissionMode: "on-request" };
+    launch.orchestrator = { strictProjectIsolation: false };
+    launch.env.CODEX_HOME = join(root, "codex-home");
+    const logs: string[] = [];
+    await provisionAgentControl(launch, control, (line) => logs.push(line), host);
+    assert.equal(launch.args.includes(CODEX_DIRECT_WOLLIPOG_TOOLS_SETTING), false);
+    assert.equal(inventory.reads.length, 0, "nothing to probe");
+    assert.match(logs.at(-1)!, /already sets direct_only_tool_namespaces, which is kept/u);
   } finally { rmSync(root, { recursive: true, force: true }); }
 });
 

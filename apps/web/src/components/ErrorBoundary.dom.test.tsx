@@ -6,7 +6,15 @@ import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
 import { ErrorBoundary, errorDetailsText } from "./ErrorBoundary.js";
-import { viewSubjectName } from "../navigation.js";
+import {
+  destination,
+  GLOBAL_VIEW_ITEMS,
+  SETTINGS_DESCRIPTION,
+  viewDescription,
+  viewHasHeaderTabs,
+  viewPageWidth,
+  viewSubjectName,
+} from "../navigation.js";
 import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window();
@@ -88,10 +96,18 @@ const click = async (target: HTMLElement) => {
 
 test("a crashed view names the destination in user words and keeps the exception behind Show Details", async () => {
   const view = await mount(
-    <ErrorBoundary name="Automations" pageTitle="Automations"><TimelineRow /></ErrorBoundary>,
+    <ErrorBoundary name="Automations" pageTitle="Automations" pageDescription={viewDescription({ name: "automations" })}>
+      <TimelineRow />
+    </ErrorBoundary>,
   );
   try {
     const notice = view.container.querySelector('[role="alert"]')!;
+    const header = view.container.querySelector(".page > header.page-header")!;
+    assert.equal(header.querySelector("h1#page-title")?.textContent, "Automations");
+    assert.equal(header.querySelector(".page-heading > p.page-desc")?.textContent,
+      "Run a prompt on a schedule, from a webhook, or from a chat message.",
+      "the destination's description stays under the title, so the header keeps its height");
+    assert.ok(header.compareDocumentPosition(notice as never) & 4, "the notice sits below the header");
     assert.ok(notice.classList.contains("t-danger"), "a render failure is a danger notice");
     assert.equal(notice.querySelector(".notice-title")?.textContent, "Automations Couldn't Be Shown");
     assert.equal(notice.querySelector(".notice-body")?.textContent, "Part of this page failed to display. Nothing was changed.");
@@ -105,6 +121,10 @@ test("a crashed view names the destination in user words and keeps the exception
       ["Reload Page", "Copy Error Details", "Show Details"]);
     assert.equal(buttonNamed(notice, "Try Again"), undefined, "re-rendering the same data crashes the same way");
     assert.ok(buttonNamed(notice, "Reload Page")!.classList.contains("primary"), "Reload Page is the next step");
+    const reloadIcon = buttonNamed(notice, "Reload Page")!.querySelector("svg");
+    assert.ok(reloadIcon?.classList.contains("lucide-refresh-cw"), "Reload Page carries the refresh icon (§3.1)");
+    assert.equal(reloadIcon?.getAttribute("width"), "14");
+    assert.equal(view.container.querySelector(".page")?.className, "page", "a list page keeps the default container");
 
     await click(buttonNamed(notice, "Show Details")!);
     const well = notice.querySelector(".notice-details-body .code-well pre");
@@ -211,9 +231,123 @@ test("a route's error title reads as its destination, and a detail route as This
   assert.equal(viewSubjectName({ name: "pod", id: "p1" }), "This Pod");
 });
 
+test("a crashed route keeps its own container width, so the header's hairline does not move", async () => {
+  for (const [width, className] of [["wide", "page wide"], ["full", "page full"], ["fill", "page full fill"]] as const) {
+    const view = await mount(
+      <ErrorBoundary name="Usage and Cost" pageTitle="Usage and Cost" pageWidth={width}><TimelineRow /></ErrorBoundary>,
+    );
+    try {
+      assert.equal(view.container.querySelector(".page")?.className, className);
+      assert.ok(view.container.querySelector(".page > .notice.view-error"), "the notice is the header's sibling");
+    } finally {
+      await view.unmount();
+    }
+  }
+  assert.equal(viewPageWidth({ name: "usage" }), "wide");
+  for (const name of ["projects", "skills", "settings"] as const) {
+    assert.equal(viewPageWidth({ name }), "full", `${name} is a full-width page`);
+  }
+  // Their content fills the column edge to edge; only the header takes the gutter.
+  assert.equal(viewPageWidth({ name: "inbox" }), "fill");
+  assert.equal(viewPageWidth({ name: "board" }), "fill");
+  assert.equal(viewPageWidth({ name: "runners" }), "fill", "Connections opens on Machines, a master-detail");
+  assert.equal(viewPageWidth({ name: "runners", section: "machines", machineId: "m1" }), "fill");
+  assert.equal(viewPageWidth({ name: "runners", section: "people" }), null);
+  for (const name of ["archived", "automations", "runs", "pods"] as const) {
+    assert.equal(viewPageWidth({ name }), null, `${name} is a list page`);
+  }
+});
+
+test("a crashed route's description is the one its working header draws", () => {
+  for (const item of GLOBAL_VIEW_ITEMS) {
+    assert.equal(viewDescription({ name: item.id }), item.description, `${item.name} reads the registry`);
+  }
+  assert.equal(viewDescription({ name: "runs" }), "Give one task to several agents and compare what each one does.");
+  assert.equal(viewDescription({ name: "board" }), destination("inbox").description, "board mode is Sessions");
+  // Sessions and Connections spend that line on their header controls and tabs.
+  assert.equal(viewDescription({ name: "inbox" }), undefined);
+  assert.equal(viewDescription({ name: "runners", section: "people" }), undefined);
+  assert.equal(viewDescription({ name: "automations", tab: "outbound" }), destination("automations").description);
+  assert.equal(viewDescription({ name: "automations", editor: { kind: "new" } }), undefined, "the editor draws a detail bar");
+  assert.equal(viewDescription({ name: "settings", section: "about" }), SETTINGS_DESCRIPTION,
+    "Settings is not in the registry, but its header has a description");
+  for (const view of [
+    { name: "session", id: "s1" },
+    { name: "run", id: "r1" },
+    { name: "pod", id: "p1" },
+    { name: "automation", id: "a1" },
+  ] as const) {
+    assert.equal(viewDescription(view), undefined, `${view.name} keeps its own header`);
+  }
+});
+
+test("a crashed tabbed destination keeps an empty tab row, hidden and out of reach", async () => {
+  const view = await mount(
+    <ErrorBoundary name="Automations" pageTitle="Automations" pageDescription={viewDescription({ name: "automations" })} pageTabs>
+      <TimelineRow />
+    </ErrorBoundary>,
+  );
+  try {
+    const header = view.container.querySelector(".page > header.page-header")!;
+    const heading = header.querySelector(".page-header-row > .page-heading")!;
+    assert.equal(heading.querySelector("h1#page-title")?.textContent, "Automations", "the focus target is unchanged");
+    assert.equal(heading.querySelector("h1#page-title")?.getAttribute("tabindex"), "-1");
+    assert.ok(heading.querySelector("p.page-desc"), "the description stays");
+    const row = header.querySelector(":scope > .page-tabs");
+    assert.ok(row, "the header's last row is its tab slot, so it keeps the working header's height");
+    assert.equal(header.lastElementChild, row);
+    assert.equal(row!.textContent, "", "no tab labels are guessed at");
+    assert.equal(row!.querySelectorAll("button, a, [tabindex], [role]").length, 0, "nothing to reach or announce");
+    assert.ok([...row!.children].every((child) => child.getAttribute("aria-hidden") === "true"));
+    const notice = view.container.querySelector('[role="alert"]')!;
+    assert.equal(notice.querySelector(".notice-title")?.textContent, "Automations Couldn't Be Shown");
+    assert.ok(header.compareDocumentPosition(notice as never) & 4, "the notice still sits below the header");
+  } finally {
+    await view.unmount();
+  }
+  const untabbed = await mount(<ErrorBoundary name="Projects" pageTitle="Projects"><TimelineRow /></ErrorBoundary>);
+  try {
+    assertNoDomNode(untabbed.container.querySelector(".page-tabs"), "a header without tabs gets no row");
+  } finally {
+    await untabbed.unmount();
+  }
+});
+
+test("a crashed route reserves a tab row exactly where its working header draws one", () => {
+  const wide = { phone: false, compact: false };
+  const compact = { phone: false, compact: true };
+  const phone = { phone: true, compact: false };
+  for (const layout of [wide, compact, phone]) {
+    assert.equal(viewHasHeaderTabs({ name: "automations" }, layout), true);
+    assert.equal(viewHasHeaderTabs({ name: "automations", tab: "outbound" }, layout), true);
+    assert.equal(viewHasHeaderTabs({ name: "automations", editor: { kind: "new" } }, layout), false, "the editor has no tabs");
+    assert.equal(viewHasHeaderTabs({ name: "usage", tab: "subscriptions" }, layout), true);
+    assert.equal(viewHasHeaderTabs({ name: "runners", section: "people" }, layout), true);
+    for (const name of ["projects", "runs", "pods", "skills", "archived"] as const) {
+      assert.equal(viewHasHeaderTabs({ name }, layout), false, `${name} has no tabs`);
+    }
+  }
+  for (const name of ["inbox", "board"] as const) {
+    assert.equal(viewHasHeaderTabs({ name }, wide), true, "the Sessions group tabs");
+    assert.equal(viewHasHeaderTabs({ name }, compact), true);
+    assert.equal(viewHasHeaderTabs({ name }, phone), false, "a phone's Sessions draws its own bar");
+  }
+  assert.equal(viewHasHeaderTabs({ name: "runners", section: "machines", machineId: "m1" }, wide), true);
+  assert.equal(viewHasHeaderTabs({ name: "runners", section: "machines", machineId: "m1" }, phone), false,
+    "an open machine takes a phone's whole header");
+  assert.equal(viewHasHeaderTabs({ name: "settings" }, wide), false);
+  assert.equal(viewHasHeaderTabs({ name: "settings", section: "about" }, compact), true, "section tabs show only when compact");
+  assert.equal(viewHasHeaderTabs({ name: "settings" }, phone), false);
+});
+
 test("the shell passes the destination's name, and both app boundaries take the window", () => {
   const app = readFileSync(fileURLToPath(new URL("../App.tsx", import.meta.url)), "utf8");
   assert.equal(app.match(/<ErrorBoundary scope="app">/g)?.length, 2, "the browser and the desktop roots");
   assert.match(app, /<ErrorBoundary\s+name=\{viewSubjectName\(view\)\}\s+resetKey=\{viewPath\(view\)\}/);
+  assert.match(app, /pageWidth=\{viewPageWidth\(view\)\}/, "with the route's container width");
+  assert.match(app, /<ErrorBoundary\s+name=\{viewSubjectName\(view\)\}[^>]*\bpageDescription=\{viewDescription\(view\)\}/,
+    "and the route's description");
+  assert.match(app, /pageTabs=\{viewHasHeaderTabs\(view, \{ phone: isMobile, compact: isCompact \}\)\}/,
+    "and whether its header ends in tabs at this width");
   assert.doesNotMatch(app, /<ErrorBoundary[^>]*\blabel=/, "a developer label never reaches the page");
 });

@@ -74,8 +74,11 @@ test("at 1440px the stack is anchored bottom right, clear of the app bar, three 
   }
 
   await more.click();
+  // While the list is open only the newest stays above it (#2954), so the list holds the rest.
+  await expect(visible).toHaveCount(1);
+  await expect(visible.first()).toContainText("Notice 5");
   const older = page.getByRole("list", { name: "Older Notifications" });
-  await expect(older.locator(".toast")).toHaveCount(2);
+  await expect(older.locator(".toast")).toHaveCount(4);
   await expect(older.getByRole("button", { name: "Restore Sessions" })).toBeVisible();
 });
 

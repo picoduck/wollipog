@@ -100,6 +100,26 @@ test("sizes are classes on the surface, and the panel carries the caller's class
   }
 });
 
+test("an initial focus target inside the dialog takes the opening focus instead of the first field (#2990)", async () => {
+  matchingMedia = new Set(["(pointer: fine)"]);
+  function Opened({ at }: { at: boolean }) {
+    const section = React.useRef<HTMLHeadingElement>(null);
+    return (
+      <Modal title="Settings" onClose={() => undefined} {...(at ? { initialFocusRef: section } : {})}>
+        <input aria-label="Machine Name" />
+        <h3 ref={section} tabIndex={-1}>Installations</h3>
+      </Modal>
+    );
+  }
+  const atSection = await mount(<Opened at />);
+  assert.equal(document.activeElement?.textContent, "Installations");
+  await atSection.unmount();
+  // Without one, the first field keeps the opening focus.
+  const plain = await mount(<Opened at={false} />);
+  assert.equal(document.activeElement?.getAttribute("aria-label"), "Machine Name");
+  await plain.unmount();
+});
+
 test("a child stacks on its parent on desktop, and closing it returns focus inside the parent", async () => {
   matchingMedia = new Set();
   function Parent() {
@@ -277,6 +297,21 @@ test("the scrim of a phone sheet closes only the panel on top", async () => {
   });
   assert.equal(answer, false);
   assert.equal(parentClosed, false);
+  await view.unmount();
+  matchingMedia = new Set();
+});
+
+test("a full-height sheet that turns into a fitted one shows its grabber at the top, before the panel", async () => {
+  // Install Manually opens full height and falls back to its fitted height when setup details fail
+  // to load (#2992). The grabber mounts then, after the panel already placed in the surface.
+  matchingMedia = new Set([PHONE]);
+  const sheet = (phoneSheet: "fit" | "full") => <Modal title="Install Manually" phoneSheet={phoneSheet} onClose={() => {}}>Body</Modal>;
+  const view = await mount(sheet("full"));
+  assertNoDomNode(document.querySelector(".sheet-grabber"));
+  await act(async () => { view.root.render(sheet("fit")); await tick(); });
+  const surface = document.querySelector(".modal")!;
+  assert.ok(surface.firstElementChild?.classList.contains("sheet-grabber"), "the grabber is the surface's first child");
+  assert.ok(surface.lastElementChild?.classList.contains("modal-panel-host"), "the panel follows it");
   await view.unmount();
   matchingMedia = new Set();
 });
@@ -461,6 +496,22 @@ test("a focused tertiary action keeps focus when the breakpoint moves it between
   await act(async () => { domWindow.dispatchEvent(new domWindow.Event("resize")); await tick(); });
   assert.ok(remove.closest(".modal-foot"));
   assert.equal(document.activeElement, remove);
+  await view.unmount();
+});
+
+test("on a phone the tertiary stays at the body's end when the body's content changes under it (#2993)", async () => {
+  matchingMedia = new Set([PHONE]);
+  const tertiary = <button type="button" className="btn ghost">Install Manually Instead</button>;
+  const sheet = (loaded: boolean) => (
+    <Modal title="Set Up This Machine" onClose={() => undefined} tertiary={tertiary}>
+      {loaded ? <p>Loaded</p> : <span>Loading</span>}
+    </Modal>
+  );
+  const view = await mount(sheet(false));
+  await act(async () => { view.root.render(sheet(true)); await tick(); });
+  const body = document.querySelector(".modal-body")!;
+  assert.equal(body.lastElementChild?.className, "modal-tertiary", "the loaded content comes before the tertiary");
+  assert.equal(body.querySelector("p")?.textContent, "Loaded");
   await view.unmount();
 });
 

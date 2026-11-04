@@ -17,10 +17,12 @@ export const PanelNoticeRegionContext = createContext<{ element: HTMLElement; fo
  * entries that apply to what it shows; they take ranks from `PANEL_NOTICE_RANK`, and the lowest rank
  * shows first whatever its severity (#2861). Outside the side panel it renders in place.
  */
-export function PanelNoticeSlot({ sessionId, entries }: {
+export function PanelNoticeSlot({ sessionId, entries, claimRemovedFocus }: {
   /** Whose info dismissals these are; kept apart from the session slot's. */
   sessionId: string;
   entries: readonly SessionNoticeEntry[];
+  /** `SessionNoticeSlot`'s: where focus goes when an entry's own action removed the focused control. */
+  claimRemovedFocus?: () => boolean;
 }) {
   const region = useContext(PanelNoticeRegionContext);
   const slot = (
@@ -31,6 +33,7 @@ export function PanelNoticeSlot({ sessionId, entries }: {
       className="panel-notice-slot"
       order="rank"
       onFocusLost={region?.focusHead}
+      claimRemovedFocus={claimRemovedFocus}
     />
   );
   return region ? createPortal(slot, region.element) : slot;

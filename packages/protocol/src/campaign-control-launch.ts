@@ -14,6 +14,10 @@ export function campaignSessionArtifactDestinationId(organizationId: string): st
   return `session_artifacts:${organizationId}`;
 }
 
+/** The boundary objective while a Full Control campaign waits for its owner's first message (#2940).
+ * That message replaces it before the Orchestrator's first turn. */
+export const FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE = "The task its owner sends as this campaign's first message.";
+
 /** Plain Human intent. The authenticated server constructs all authority provenance. */
 export interface CampaignLaunchProposal {
   repository: string;
@@ -45,7 +49,8 @@ export interface FullControlLaunchRequest {
   workspaceId: string;
   projectId?: string | null;
   projectLocationId?: string | null;
-  /** Task description. At least one of `task` and `issueNumbers` is required. */
+  /** Task description. With neither `task` nor `issueNumbers`, the campaign starts idle with a
+   * task-only boundary, and its owner's first message sets the objective and issue scope. */
   task?: string;
   issueNumbers?: number[];
   overrides?: FullControlLaunchOverrides;
@@ -82,8 +87,20 @@ export interface CampaignLaunchInspectionMessage {
   type: "campaign_launch_inspect";
   requestId: string;
   workspaceId: string;
+  /** Resolved by authorized session preparation, never browser or agent input. */
+  workspacePath?: string;
   issueNumbers: number[];
 }
+
+export const CAMPAIGN_LAUNCH_INSPECTION_ERRORS = {
+  invalid_request: "The workspace inspection request is invalid.",
+  unknown_location: "The project location is unknown; select an available location.",
+  missing_path: "The project location path is missing or unavailable on the runner.",
+  not_repository: "The project location is not a git repository with a valid HEAD.",
+  unsupported_origin: "The project repository origin is unsupported; Full Control requires a github.com or GitLab repository.",
+  issue_read_failed: "The selected issues could not be read and verified in the project repository.",
+} as const;
+export type CampaignLaunchInspectionFailure = keyof typeof CAMPAIGN_LAUNCH_INSPECTION_ERRORS;
 
 /** Version 2 runners stop an inspection whose caller expired or went away (#3360). The runner
  * aborts only the inspection registered under this exact request id. */
@@ -101,6 +118,7 @@ export interface CampaignLaunchInspectionResult {
   issueNumbers?: number[];
   digest?: string;
   error?: string;
+  failure?: CampaignLaunchInspectionFailure;
   /** Set when the inspection stopped because its request was cancelled. Never admits a launch. */
   cancelled?: true;
 }
@@ -109,12 +127,16 @@ export type CampaignLaunchCapabilityId =
   | "repository_scope" | "authority_contract" | "accounting_budget" | "native_review"
   | "execution_isolation" | "image_evidence" | "video_evidence" | "external_evidence";
 
-/** `unsupported` blocks launch. `human_required` is an allowed, disclosed exception that routes
- * that class of decision to the Human for this campaign. */
+/** `unsupported` blocks launch, and only a mandatory capability can be unsupported. `human_required`
+ * is an allowed, disclosed exception that routes that class of decision to the Human for this
+ * campaign. `informational` states an infrastructure gap the campaign works around with the best
+ * available path, such as the regular cross-model review workflow; it never blocks launch.
+ * `orchestrator_decides` discloses a class the Orchestrator owns without being able to inspect it:
+ * it asks for inspectable evidence or denies, and never hands it to the Human (#2940). */
 export interface CampaignLaunchCapability {
   id: CampaignLaunchCapabilityId;
   capability: string;
-  state: "verified" | "unsupported" | "human_required";
+  state: "verified" | "unsupported" | "human_required" | "informational" | "orchestrator_decides";
   reason: string;
   mandatory: boolean;
 }
@@ -126,8 +148,13 @@ export interface CampaignLaunchSummary {
   root: { agentId: string; driver: string; model: string | null; effort: string | null;
     isolation: { mode: string; network: string } | null; strictProjectIsolation: boolean; integrationIsolation: boolean;
     completion: OrchestratorCampaignPolicy["behavior"]["completion"] };
+  /** A null amount has no ceiling. `unset`: neither amount has one, so the campaign runs with no
+   * limit while usage is still metered, priced and shown. */
   budget: { costUsd: number | null; toolCalls: number | null; concurrency: number; acceptedFollowUps: number;
     source: "override" | "saved_defaults" | "unset"; reviewIncluded: boolean };
+  /** Which cross-model review the campaign uses: the controlled reviewer charged to the campaign,
+   * or, when that is unavailable, the regular cross-model review workflow. */
+  review: { controlled: boolean; statement: string };
   followUps: { policy: OrchestratorCampaignPolicy["behavior"]["followUps"]; relatedFollowUps: boolean;
     maxIssues: number; closureReasons: Array<"completed" | "not_planned"> };
   evidence: {
@@ -142,11 +169,14 @@ export interface CampaignLaunchSummary {
     envelope: boolean;
   };
   humanRequired: Array<{ exception: string; reason: string }>;
+  /** What happens to the requests the campaign can never supply, instead of asking the Human. */
+  declinedNote?: string;
   blockers: Array<{ capability: string; reason: string }>;
 }
 
 export interface CampaignLaunchPreflight {
-  /** Every mandatory capability is verified. Only then does the admission route launch. */
+  /** Every mandatory capability (repository scope, the authority contract and any explicit budget
+   * ceiling) is verified. Only then does the admission route launch. */
   ready: boolean;
   digest: string;
   summary: CampaignLaunchSummary;

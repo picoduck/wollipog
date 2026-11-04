@@ -418,9 +418,14 @@ test("cooperative registration yields and cancellation never settles absent sess
   } finally { db.close(); }
 });
 
-test("Stop, deletion, and new-session intents arriving between batches remain authoritative", async () => {
+for (const retainedStatus of ["stopped", "idle"] as const) {
+test(`Stop, deletion, and new-session intents between ${retainedStatus} batches remain authoritative`, async () => {
   const { db, svc, snapshots } = fixture(100);
   try {
+    if (retainedStatus === "idle") for (const [index, snap] of snapshots.entries()) {
+      db.updateSessionStatus(snap.id, "idle", 3);
+      snapshots[index] = { ...snap, status: "idle" };
+    }
     db.updateSessionStatus("child-80", "running", 3);
     snapshots[80] = { ...snapshots[80]!, status: "running" };
     db.setPendingApproval("child-82", { requestId: "answered", title: "Answer", options: [] });
@@ -453,6 +458,7 @@ test("Stop, deletion, and new-session intents arriving between batches remain au
     assert.ok(db.isTombstoned("new-delete"), "new deletion is not confirmed by an older inventory");
   } finally { db.close(); }
 });
+}
 
 test("post-negotiation runtime replay coalesces campaign attention without deferring unrelated HTTP work", async () => {
   const { db, svc, snapshots } = fixture();
@@ -740,5 +746,393 @@ test("registration refreshes the deferred before-view after a publication yield"
     assert.equal(intervened, true);
     assert.equal(db.raw().prepare("SELECT COUNT(*) AS n FROM orchestrator_campaign_events WHERE kind='human_blockers_cleared'")
       .get()?.n, 1);
+  } finally { db.close(); }
+});
+
+/** Records each write transaction boundary the connection runs, in order, alongside `log`. */
+function recordTransactions(db: ControlPlaneDb, log: string[], fail?: (sql: string) => boolean) {
+  const raw = db.raw();
+  const exec = raw.exec.bind(raw);
+  raw.exec = (sql: string) => {
+    if (/^(BEGIN|COMMIT|ROLLBACK)/.test(sql)) log.push(sql);
+    if (fail?.(sql)) throw new Error("Synthetic commit failure");
+    return exec(sql);
+  };
+  return () => { raw.exec = exec; };
+}
+
+const inTransaction = (db: ControlPlaneDb) =>
+  (db.raw() as ReturnType<ControlPlaneDb["raw"]> & { isTransaction: boolean }).isTransaction;
+
+for (const status of ["idle", "running"] as const) {
+  test(`registration groups 70 quiet ${status} snapshots into three FULL snapshot commits`, () => {
+    const { db, svc, snapshots } = fixture(70);
+    try {
+      for (const snap of snapshots) db.updateSessionStatus(snap.id, status, 3);
+      const active = snapshots.map((snap) => ({ ...snap, status, preview: "Registered" }));
+      const groups: number[] = [];
+      const commitLevels: unknown[] = [];
+      const exec = db.raw().exec.bind(db.raw());
+      let grouping = false;
+      db.raw().exec = (sql) => {
+        if (grouping && sql === "COMMIT") commitLevels.push(db.raw().prepare("PRAGMA synchronous").get()?.synchronous);
+        return exec(sql);
+      };
+      const update = db.updateSessionsFromSnapshots.bind(db);
+      db.updateSessionsFromSnapshots = (...args) => {
+        groups.push(args[0].length); grouping = true;
+        try { return update(...args); } finally { grouping = false; }
+      };
+      let singles = 0;
+      const single = db.updateSessionFromSnapshot.bind(db);
+      db.updateSessionFromSnapshot = (...args) => { singles++; return single(...args); };
+      svc.hydrateRunnerSessions("runner", active);
+      assert.deepEqual(groups.filter(Boolean), [32, 32, 6]);
+      assert.equal(singles, 0);
+      assert.deepEqual(commitLevels, [2, 2, 2], "each snapshot group retains synchronous=FULL");
+      for (const snap of active) assert.equal(db.getSession(snap.id)?.preview, "Registered");
+    } finally { db.close(); }
+  });
+}
+
+function activeFixture(children = 3) {
+  const f = fixture(children);
+  for (const snap of f.snapshots) f.db.updateSessionStatus(snap.id, "idle", 3);
+  return { ...f, snapshots: f.snapshots.map((snap) => ({ ...snap, status: "idle" as const, preview: "Registered" })) };
+}
+
+test("active registration publishes only after its group commits", () => {
+  const { db, svc, hub, snapshots } = activeFixture();
+  try {
+    const log: string[] = [];
+    recordTransactions(db, log);
+    hub.sessionChangedById = (id) => {
+      assert.equal(inTransaction(db), false);
+      if (id.startsWith("child-")) log.push(`changed:${id}`);
+    };
+    svc.hydrateRunnerSessions("runner", snapshots);
+    const first = log.indexOf("changed:child-0");
+    assert.ok(first > 0);
+    assert.equal(log[first - 1], "COMMIT");
+    assert.deepEqual(log.slice(first, first + 3), ["changed:child-0", "changed:child-1", "changed:child-2"]);
+  } finally { db.close(); }
+});
+
+test("a policy decision created after grouped registration keeps FULL durability and its delivery path", () => {
+  const { db, svc, snapshots } = activeFixture(1);
+  try {
+    db.updateSessionCostBudget("child-0", 1, 4);
+    const committed: unknown[] = [];
+    const exec = db.raw().exec.bind(db.raw());
+    db.raw().exec = (sql) => {
+      if (sql === "COMMIT") committed.push(db.raw().prepare("PRAGMA synchronous").get()?.synchronous);
+      return exec(sql);
+    };
+    const delivered: string[] = [];
+    const standing = (svc as unknown as { applyStandingCampaignResponses: (id: string) => void }).applyStandingCampaignResponses.bind(svc);
+    (svc as unknown as { applyStandingCampaignResponses: (id: string) => void }).applyStandingCampaignResponses = (id) => {
+      if (db.getSession(id)?.pendingApproval) delivered.push(id);
+      standing(id);
+    };
+    svc.hydrateRunnerSessions("runner", [{ ...snapshots[0]!, costUsd: 2 }]);
+    assert.equal(db.getSession("child-0")?.status, "input_required");
+    assert.ok(db.getSession("child-0")?.pendingApproval);
+    assert.deepEqual(delivered, ["child-0"]);
+    assert.ok(committed.length > 0);
+    assert.ok(committed.every((level) => level === 2));
+    assert.equal(db.raw().prepare("PRAGMA synchronous").get()?.synchronous, 2);
+  } finally { db.close(); }
+});
+
+for (const failure of ["write", "commit"] as const) {
+  test(`active registration ${failure} failure rolls back then retries per-session without duplicate publications`, () => {
+    const { db, svc, hub, snapshots, logs } = activeFixture();
+    try {
+      const changes: string[] = [];
+      hub.sessionChangedById = (id) => { if (id.startsWith("child-")) changes.push(id); };
+      let grouping = false;
+      let failed = false;
+      const update = db.updateSessionsFromSnapshots.bind(db);
+      db.updateSessionsFromSnapshots = (...args) => {
+        grouping = args[0].length > 0;
+        try { return update(...args); } finally { grouping = false; }
+      };
+      const exec = db.raw().exec.bind(db.raw());
+      db.raw().exec = (sql) => {
+        if (failure === "commit" && grouping && !failed && sql === "COMMIT") {
+          failed = true; throw new Error("Synthetic commit failure");
+        }
+        return exec(sql);
+      };
+      const rawPrepare = db.raw().prepare.bind(db.raw());
+      db.raw().prepare = (sql) => {
+        const stmt = rawPrepare(sql);
+        if (failure === "write" && sql.includes("UPDATE sessions SET status=?, title=?")) {
+          const run = stmt.run.bind(stmt);
+          stmt.run = (...args) => {
+            if (grouping && !failed && args.at(-1) === "child-1") {
+              failed = true; throw new Error("Synthetic write failure");
+            }
+            return Reflect.apply(run, stmt, args);
+          };
+        }
+        return stmt;
+      };
+      let singles = 0;
+      const single = db.updateSessionFromSnapshot.bind(db);
+      db.updateSessionFromSnapshot = (...args) => {
+        if (singles++ === 0) {
+          assert.deepEqual(changes, []);
+          for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, null);
+        }
+        return single(...args);
+      };
+      svc.hydrateRunnerSessions("runner", snapshots);
+      assert.equal(failed, true);
+      assert.equal(singles, 3);
+      assert.deepEqual(changes, snapshots.map((snap) => snap.id));
+      for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, "Registered");
+      assert.match(logs.join("\n"), /runner_reconciliation_batch_fallback/);
+      const diagnostic = JSON.parse(logs.find((line) => line.includes("runner_reconciliation_batch_fallback"))!);
+      assert.deepEqual(Object.keys(diagnostic).sort(), ["entryPoint", "event", "reconciliationId", "runnerId", "snapshotCount"]);
+      assert.equal(diagnostic.snapshotCount, 3);
+      assert.match(diagnostic.reconciliationId, /^[0-9a-f-]{36}$/);
+      assert.doesNotMatch(JSON.stringify(diagnostic), /Synthetic|child-|Registered/);
+    } finally { db.close(); }
+  });
+}
+
+test("active registration does not retry a group after post-commit maintenance fails", () => {
+  const { db, svc, snapshots } = activeFixture();
+  try {
+    // The batch transaction commits before this normally no-op maintenance hook.
+    const original = (db as unknown as { maybeMaintainUsageAggregation: () => void }).maybeMaintainUsageAggregation;
+    (db as unknown as { maybeMaintainUsageAggregation: () => void }).maybeMaintainUsageAggregation = () => {
+      throw new Error("Synthetic maintenance failure");
+    };
+    let singles = 0;
+    const single = db.updateSessionFromSnapshot.bind(db);
+    db.updateSessionFromSnapshot = (...args) => { singles++; return single(...args); };
+    assert.throws(() => svc.hydrateRunnerSessions("runner", snapshots), /maintenance failure/);
+    assert.equal(singles, 0);
+    for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, "Registered");
+    (db as unknown as { maybeMaintainUsageAggregation: () => void }).maybeMaintainUsageAggregation = original;
+  } finally { db.close(); }
+});
+
+test("an exceptional active snapshot settles before the next registration group", () => {
+  const { db, svc, snapshots } = activeFixture();
+  try {
+    snapshots[1] = { ...snapshots[1]!, pendingApproval: question("pending") };
+    const order: string[] = [];
+    const update = db.updateSessionsFromSnapshots.bind(db);
+    db.updateSessionsFromSnapshots = (...args) => {
+      if (args[0].length) order.push(`group:${args[0].map((snap) => snap.id).join(",")}`);
+      return update(...args);
+    };
+    const single = db.updateSessionFromSnapshot.bind(db);
+    db.updateSessionFromSnapshot = (...args) => { order.push(`single:${args[0]}`); return single(...args); };
+    svc.hydrateRunnerSessions("runner", snapshots);
+    assert.deepEqual(order, ["group:child-0", "single:child-1", "group:child-2"]);
+    assert.equal(db.getSession("child-1")?.pendingApproval?.requestId, "pending");
+  } finally { db.close(); }
+});
+
+test("duplicate active registration snapshots stay ordered on the per-session path", () => {
+  const { db, svc, snapshots } = activeFixture(1);
+  try {
+    const groups: string[] = [];
+    const update = db.updateSessionsFromSnapshots.bind(db);
+    db.updateSessionsFromSnapshots = (...args) => { groups.push(...args[0].map((snap) => snap.id)); return update(...args); };
+    svc.hydrateRunnerSessions("runner", [snapshots[0]!, { ...snapshots[0]!, preview: "Newest" }]);
+    assert.deepEqual(groups, []);
+    assert.equal(db.getSession("child-0")?.preview, "Newest");
+  } finally { db.close(); }
+});
+
+test("active registration group admission excludes every pending service obligation", () => {
+  const { db, svc, snapshots } = activeFixture(1);
+  const admission = svc as unknown as { batchableActiveRegistrationSnapshot: (runner: string, snap: SessionSnapshot) => boolean };
+  try {
+    assert.equal(admission.batchableActiveRegistrationSnapshot("runner", snapshots[0]!), true);
+    // Each independent obligation must deny admission even when every other guard is clear.
+    // The normal service path remains responsible for settling/delivering the actual obligation.
+    const cases: Array<[string, unknown]> = [
+      ["isTombstoned", true], ["hasSessionStopIntent", true], ["hasActiveSessionPromptCommands", true],
+      ["unconsumedWorkflowDecisionsForSession", [{}]], ["heldWorkflowDecisionResumes", [{}]],
+      ["hasOpenRestartNotices", true], ["hasOpenReviewContinuations", true],
+      ["listOpenPolicyHookApprovals", [{}]], ["policyResumeStatus", "idle"],
+    ];
+    const methods = db as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const [method, result] of cases) {
+      const original = methods[method]!;
+      methods[method] = () => result;
+      try { assert.equal(admission.batchableActiveRegistrationSnapshot("runner", snapshots[0]!), false, method); }
+      finally { methods[method] = original; }
+    }
+    assert.equal(admission.batchableActiveRegistrationSnapshot("other-runner", snapshots[0]!), false);
+    assert.equal(admission.batchableActiveRegistrationSnapshot("runner", { ...snapshots[0]!, status: "input_required" }), false);
+    assert.equal(admission.batchableActiveRegistrationSnapshot("runner", { ...snapshots[0]!, pendingApproval: question("new") }), false);
+    const getSession = db.getSession.bind(db);
+    const existing = getSession("child-0")!;
+    for (const field of ["kind", "orchestratorCampaign", "worktreeRecovery"] as const) {
+      db.getSession = (id) => id === "child-0"
+        ? { ...existing, [field]: field === "kind" ? "review" : {} } as unknown as typeof existing
+        : getSession(id);
+      assert.equal(admission.batchableActiveRegistrationSnapshot("runner", snapshots[0]!), false, field);
+    }
+    db.getSession = getSession;
+    const service = svc as unknown as Record<string, (...args: unknown[]) => unknown>;
+    for (const method of ["pendingMediaLifecycle", "archivedSessionRequiresStop"]) {
+      const original = service[method]!;
+      service[method] = () => true;
+      try { assert.equal(admission.batchableActiveRegistrationSnapshot("runner", snapshots[0]!), false, method); }
+      finally { service[method] = original; }
+    }
+    const prepare = db.raw().prepare.bind(db.raw());
+    for (const query of ["MAX(revision)", "usage_cost_reconciliation_repairs"]) {
+      db.raw().prepare = (sql) => {
+        const stmt = prepare(sql);
+        if (sql.includes(query)) stmt.get = (() => ({ n: 1, digest: "synthetic" })) as typeof stmt.get;
+        return stmt;
+      };
+      assert.equal(admission.batchableActiveRegistrationSnapshot("runner", snapshots[0]!), false, query);
+    }
+    db.raw().prepare = prepare;
+    db.setPendingApproval("child-0", question("existing"));
+    assert.equal(admission.batchableActiveRegistrationSnapshot("runner", snapshots[0]!), false);
+  } finally { db.close(); }
+});
+
+test("a burst of live runtime snapshots commits once per bounded run, not once per snapshot (#2601)", () => {
+  const { db, svc, snapshots } = fixture(70);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    let perSnapshotCommits = 0;
+    const update = db.updateSessionFromSnapshot.bind(db);
+    db.updateSessionFromSnapshot = (...args) => { perSnapshotCommits++; return update(...args); };
+    const transactions: string[] = [];
+    recordTransactions(db, transactions);
+    svc.applySessionRuntimeUpdates("runner", snapshots.map((snap) => ({ ...snap, preview: "Negotiated" })),
+      svc.beginRunnerAttentionBatch("runner"));
+    assert.equal(perSnapshotCommits, 0);
+    assert.deepEqual(transactions, ["BEGIN IMMEDIATE", "COMMIT", "BEGIN IMMEDIATE", "COMMIT", "BEGIN IMMEDIATE", "COMMIT"],
+      "70 snapshots commit as runs of 32, 32 and 6");
+    for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, "Negotiated");
+  } finally { db.close(); }
+});
+
+test("runtime runs keep per-session order, and the newest snapshot wins", () => {
+  const { db, svc, snapshots } = fixture(4);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    const order: string[] = [];
+    const runs = db.updateSessionsFromRuntimeSnapshots.bind(db);
+    db.updateSessionsFromRuntimeSnapshots = (updates, now) => {
+      order.push(`run:${updates.map(({ snapshot }) => `${snapshot.id}=${snapshot.preview}`).join(",")}`);
+      return runs(updates, now);
+    };
+    const update = db.updateSessionFromSnapshot.bind(db);
+    db.updateSessionFromSnapshot = (id, snap, now) => { order.push(`single:${id}=${snap.preview}`); return update(id, snap, now); };
+    // A terminal snapshot for a session the control plane still thinks is live must revoke what the
+    // end owes, so it takes the exact single-snapshot path, in its place in the sequence.
+    db.updateSessionStatus("child-2", "running", 3);
+    const reconciled: string[] = [];
+    const newest = { ...snapshots[0]!, preview: "Newest", updatedAt: 5 };
+    svc.applySessionRuntimeUpdates("runner", [
+      { ...snapshots[0]!, preview: "Older" }, { ...snapshots[1]!, preview: "Older" }, newest,
+      { ...snapshots[2]!, preview: "Ended" }, { ...snapshots[3]!, preview: "After" },
+    ], svc.beginRunnerAttentionBatch("runner"), (snap) => reconciled.push(`${snap.id}=${snap.preview}`));
+    assert.deepEqual(order, [
+      "run:child-0=Older,child-1=Older", // a second snapshot for child-0 starts a new run
+      "run:child-0=Newest",
+      "single:child-2=Ended",
+      "run:child-3=After",
+    ]);
+    assert.deepEqual(reconciled, ["child-2=Ended"],
+      "only the single-snapshot path reconciles role conversions; none is unapplied in a run");
+    assert.equal(db.getSession("child-0")?.preview, "Newest");
+    assert.equal(db.isRepeatedRuntimeSnapshot("child-0", newest), true, "the stored fingerprint is the newest snapshot's");
+    assert.equal(db.getSession("child-2")?.status, "stopped");
+  } finally { db.close(); }
+});
+
+test("a runtime run publishes nothing until its commit has succeeded", () => {
+  const { db, hub, svc, snapshots } = fixture(3);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    const log: string[] = [];
+    recordTransactions(db, log);
+    const changed = hub.sessionChangedById.bind(hub);
+    hub.sessionChangedById = (sessionId, refreshProject) => {
+      assert.equal(inTransaction(db), false, "a broadcast inside the transaction could announce a rolled-back row");
+      log.push(`changed:${sessionId}=${db.getSession(sessionId)?.preview}`);
+      return changed(sessionId, refreshProject);
+    };
+    const send = hub.sendToRunner.bind(hub);
+    hub.sendToRunner = (...args) => { assert.equal(inTransaction(db), false); return send(...args); };
+    svc.applySessionRuntimeUpdates("runner", snapshots.map((snap) => ({ ...snap, preview: "Committed" })),
+      svc.beginRunnerAttentionBatch("runner"));
+    assert.deepEqual(log.filter((entry) => !entry.startsWith("changed:campaign-")), [
+      "BEGIN IMMEDIATE", "COMMIT",
+      "changed:child-0=Committed", "changed:child-1=Committed", "changed:child-2=Committed",
+    ]);
+  } finally { db.close(); }
+});
+
+for (const failure of ["commit", "write"] as const) {
+  test(`a failed runtime run ${failure} rolls back the whole run and publishes nothing`, async () => {
+    const { db, hub, svc, snapshots } = fixture(3);
+    try {
+      svc.hydrateRunnerSessions("runner", snapshots);
+      const changed: string[] = [];
+      const broadcast = hub.sessionChangedById.bind(hub);
+      hub.sessionChangedById = (sessionId, refreshProject) => { changed.push(sessionId); return broadcast(sessionId, refreshProject); };
+      const transactions: string[] = [];
+      const restoreExec = recordTransactions(db, transactions, (sql) => failure === "commit" && sql === "COMMIT");
+      const clear = db.clearPolicyResumeStatus.bind(db);
+      if (failure === "write") db.clearPolicyResumeStatus = (sessionId) => {
+        if (sessionId === "child-2") throw new Error("Synthetic write failure");
+        return clear(sessionId);
+      };
+      const batch = svc.beginRunnerAttentionBatch("runner");
+      assert.throws(() => svc.applySessionRuntimeUpdates("runner",
+        snapshots.map((snap) => ({ ...snap, preview: "Rolled back" })), batch), /Synthetic (commit|write) failure/);
+      assert.deepEqual(transactions, ["BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"].filter((sql) => failure === "commit" || sql !== "COMMIT"));
+      assert.equal(inTransaction(db), false);
+      assert.deepEqual(changed, [], "nothing about a failed run is broadcast");
+      for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, null, "no snapshot of the run was applied");
+      restoreExec();
+      db.clearPolicyResumeStatus = clear;
+      svc.applySessionRuntimeUpdates("runner", snapshots.map((snap) => ({ ...snap, preview: "Replayed" })), batch);
+      for (const snap of snapshots) assert.equal(db.getSession(snap.id)?.preview, "Replayed");
+      await svc.flushRunnerAttention("runner", () => true);
+    } finally { db.close(); }
+  });
+}
+
+test("a later snapshot's role conversion is reconciled only after the earlier run has committed", () => {
+  const { db, svc, snapshots } = fixture(2);
+  try {
+    svc.hydrateRunnerSessions("runner", snapshots);
+    db.beginSessionRoleConversion({ type: "prepare_session_role", sessionId: "child-1", conversionId: "conversion-1" } as
+      Parameters<ControlPlaneDb["beginSessionRoleConversion"]>[0], undefined, 3);
+    const log: string[] = [];
+    let failCommit = true;
+    recordTransactions(db, log, (sql) => failCommit && sql === "COMMIT");
+    const reconcile = (snap: SessionSnapshot) => {
+      assert.equal(inTransaction(db), false);
+      log.push(`reconcile:${snap.id}`);
+    };
+    const burst = snapshots.map((snap) => ({ ...snap, preview: "Converted" }));
+    assert.throws(() => svc.applySessionRuntimeUpdates("runner", burst, svc.beginRunnerAttentionBatch("runner"), reconcile),
+      /Synthetic commit failure/);
+    assert.deepEqual(log, ["BEGIN IMMEDIATE", "COMMIT", "ROLLBACK"],
+      "the converting session's reconciliation, which can commit and publish, never ran ahead of the failed run");
+    log.length = 0;
+    failCommit = false;
+    svc.applySessionRuntimeUpdates("runner", burst, svc.beginRunnerAttentionBatch("runner"), reconcile);
+    assert.deepEqual(log.slice(0, 3), ["BEGIN IMMEDIATE", "COMMIT", "reconcile:child-1"]);
+    assert.equal(db.getSession("child-1")?.preview, "Converted");
   } finally { db.close(); }
 });

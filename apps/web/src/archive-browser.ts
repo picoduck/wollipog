@@ -1,4 +1,4 @@
-import type { SessionStatus, SessionView } from "@wollipog/protocol";
+import type { ArchiveSessionMetadata, SessionStatus, SessionView } from "@wollipog/protocol";
 import { sessionAgentLabel } from "./components/agent-options.js";
 import { statusMeta } from "./status-meta.js";
 
@@ -11,12 +11,6 @@ export interface ArchiveBrowserFilters {
   agent: string | null;
   archive: ArchiveStateFilter;
   lifecycle: SessionStatus | "all";
-}
-
-export interface ArchiveSessionMetadata {
-  project: string;
-  location: string;
-  agent: string;
 }
 
 /** The provider lifecycles a session can be filtered by, in the order the filter lists them. */
@@ -39,12 +33,14 @@ export function lifecycleSearchLabels(status: SessionStatus): string[] {
 export function sessionArchiveSearchDetail(
   session: Pick<SessionView, "archived" | "status" | "projectName" | "workspaceName" | "agentName" | "driver" | "agentId" | "capacityWait"
     | "historyPruned">,
+  /** The status the row names: its lifecycle, unless the row's dot shows another (the palette's). */
+  statusLabel = canonicalLifecycleLabel(session.status),
 ): string {
   return [
     session.archived ? "Archived" : null,
     // Only its kept prompts and final response still match a search (#2777).
     session.historyPruned ? "History Pruned" : null,
-    canonicalLifecycleLabel(session.status),
+    statusLabel,
     session.status === "queued" ? session.capacityWait?.description : null,
     session.projectName ?? session.workspaceName,
     sessionAgentLabel(session.agentName, session.driver, session.agentId),

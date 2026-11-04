@@ -35,31 +35,9 @@ export const LABEL_SWAP = new RegExp(
 
 /** The inventory, exact: production file → label-swapping sites it still has. */
 const BASELINE: Readonly<Record<string, number>> = {
-  "components/AccessScopeControls.tsx": 1,
-  "components/AddBoxDialog.tsx": 1,
-  "components/AgentSessionDiscoveryDialog.tsx": 3,
-  "components/AutomationsView.tsx": 2,
   "components/Board.tsx": 1,
-  "components/CreateProjectDialog.tsx": 1,
-  "components/InstancesPanel.tsx": 1,
-  "components/NewRunDialog.tsx": 1,
-  "components/NewSessionDialog.tsx": 1,
   "components/OfflineBanner.tsx": 1,
-  "components/OnboardRunnerDialog.tsx": 3,
-  "components/OutboundEventSubscriptions.tsx": 1,
-  // Moved with the pairing banner from App.tsx (#2303), which kept its behaviour as it was.
-  "components/PairingBanner.tsx": 2,
   "components/PendingPromptBubbles.tsx": 3,
-  "components/PeopleDevicesPanel.tsx": 4,
-  "components/PodsView.tsx": 9,
-  "components/ProjectChildDefaults.tsx": 1,
-  "components/ProjectLocationDialog.tsx": 2,
-  "components/ProjectsView.tsx": 5,
-  "components/ProviderAccountsSection.tsx": 2,
-  "components/ProviderLoginCard.tsx": 1,
-  "components/RunnersView.tsx": 11,
-  "components/RunsView.tsx": 1,
-  "components/UsageView.tsx": 4,
 };
 
 function sourceFiles(dir: string, out: string[] = []): string[] {

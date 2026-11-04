@@ -4,9 +4,12 @@ import {
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   PROTOCOL_VERSION,
   buildConversationHandoff,
+  inPlaceHandoffTurns,
   removePendingRequest,
+  type AccessScopeChangePreview,
   type AgentCapabilities,
   type AgentSlashCommand,
+  type OrchestratorCampaignStatus,
   type CreateSessionRequest,
   type CreateWorkspaceReferenceRequest,
   type ControlPlaneToUi,
@@ -18,9 +21,12 @@ import {
   type InvokeSessionCommandRequest,
   type PodView,
   type PromptImageInput,
+  type ProjectLocationView,
   type ProjectView,
   type ProviderAccountDefinition,
   type ProviderLoginView,
+  type ResourceOwner,
+  type ResourceScope,
   type RunView,
   type RunnerView,
   type SessionConfig,
@@ -38,6 +44,7 @@ import {
   type SteerResultReason,
   type SteeringAttemptView,
   type UiSnapshotMessage,
+  type WorktreeSetupConfigStatus,
   type UiToControlPlane,
   type WorkspaceReference,
 } from "@wollipog/protocol";
@@ -48,6 +55,7 @@ import {
   saveDurableQueuedEditRecovery,
   type QueuedPromptEditRecovery,
 } from "../queued-edit-recovery.js";
+import { scopeAudienceContainedForIdentity } from "../access-scopes.js";
 import { api, ApiError, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { FeedbackProvider, useFeedback, type ToastOptions } from "../components/FeedbackProvider.js";
@@ -57,6 +65,7 @@ import { NewSessionDialog, type NewSessionPreset } from "../components/NewSessio
 import { PodDetail } from "../components/PodsView.js";
 import { ProjectsView } from "../components/ProjectsView.js";
 import { RunDetail } from "../components/RunsView.js";
+import type { WorkflowInstanceDetail } from "@wollipog/protocol";
 import { SessionDetail } from "../components/SessionDetail.js";
 import { ShellDock } from "../components/ShellDock.js";
 import { SessionTerminalsProvider } from "../session-terminals.js";
@@ -71,6 +80,8 @@ import { viewFromPath, viewPath, type ViewNavigation } from "../navigation.js";
 import { StoreProvider, useStoreSelector } from "../store.js";
 import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-transport.js";
 import { useNewSessionShortcut } from "../useNewSessionShortcut.js";
+import { DEVICE_TOKEN_CHANGED_EVENT, deviceToken } from "../device-token.js";
+import { adoptManagedDesktopPairing } from "../desktop-local-pairing.js";
 import "../styles.css";
 import { staticPinnedSummary } from "../components/pinned-summary-state.js";
 import { DIFF_SECTIONS_STATUS_FILES, diffSectionsDiff } from "./diff-sections-fixture.js";
@@ -167,6 +178,10 @@ const ACP_LOGOUT = FIXTURE_QUERY.get("acpLogout") === "1";
 /** `?machineName=<name>` names the fixture runner; `?remoteMachine=1` reaches it over SSH (#2277). */
 const MACHINE_NAME = FIXTURE_QUERY.get("machineName");
 const REMOTE_MACHINE = FIXTURE_QUERY.get("remoteMachine") === "1";
+/** `?createError=kept` fails New Session's request after the session was kept (#2952). */
+const CREATE_ERROR = FIXTURE_QUERY.get("createError");
+/** `?offlineMachine=1` adds an offline second machine, Build Server 02, for its locations (#2952). */
+const OFFLINE_MACHINE = FIXTURE_QUERY.get("offlineMachine") === "1";
 const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
 /**
  * A routed session that is not in the snapshot is looked up by id (#2202). `?lookup=pending` never
@@ -175,8 +190,18 @@ const HISTORY_PAGE_DELAY_MS = Number(FIXTURE_QUERY.get("historyDelay") ?? 25);
  */
 const SESSION_LOOKUP_MODE = FIXTURE_QUERY.get("lookup");
 let sessionLookupFailed = false;
-/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner. */
+/** `?pairingRequired=1` closes every socket as unpaired (1008), so the shell shows its pairing banner,
+ * until Pair This Device stores `PAIRING_ACCEPTED_CODE`, which the fixture accepts (#3005). */
 const PAIRING_REQUIRED = FIXTURE_QUERY.get("pairingRequired") === "1";
+const PAIRING_ACCEPTED_CODE = "e2eAcceptedPairingCode0123456789";
+/** `?managedPairingFailure=1` is the desktop app that couldn't read its saved pairing: its banner offers
+ * Retry Pairing, which here finds another Wollipog on the port, as a browser build's adoption does. */
+if (FIXTURE_QUERY.get("managedPairingFailure") === "1") {
+  void adoptManagedDesktopPairing({
+    isTauri: () => true,
+    invoke: async () => { throw new Error("The saved pairing file could not be read."); },
+  }).catch(() => {});
+}
 /** `?unarchiveRestart=1` advertises the control plane's one preflighted Unarchive and Restart. */
 const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
 /** `?archiveStop=failed` or `?archiveStop=pending`: every archive reports its sessions' stops as
@@ -184,7 +209,16 @@ const UNARCHIVE_RESTART = FIXTURE_QUERY.get("unarchiveRestart") === "1";
 const ARCHIVE_STOP_STATUS = FIXTURE_QUERY.get("archiveStop") === "failed" ? "stop_failed" as const
   : FIXTURE_QUERY.get("archiveStop") === "pending" ? "stop_pending" as const
     : undefined;
-const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}`;
+/**
+ * The Projects page's frame (#2957). `?projects=nine` is nine projects, one hidden; `many` is forty,
+ * whose Alpha has enough locations that its detail is taller than any viewport; `empty` has none;
+ * `unsupported` is a control plane without projects; `loading` never delivers the snapshot. The
+ * nine and the forty spread their locations over an online and an offline machine. For the Projects
+ * Overview (#2958), `attention` is the nine with a second Docs Site, `healthy` only the six that can
+ * start sessions, and `two` the first two of those.
+ */
+const SHELL_PROJECTS_MODE = FIXTURE_QUERY.get("projects");
+const STORAGE_KEY = `wollipog.e2e.project-inbox-model${SCENARIO ? `.${SCENARIO}` : ""}${SHELL_PROJECTS_MODE ? `.projects-${SHELL_PROJECTS_MODE}` : ""}`;
 /** The `switch-account` scenario's machine (#2149): `default`, `removed` (the session's account was
  * removed from the machine), `none` (no other account), `auth` (blocked on authentication) or
  * `reasons` (the endpoint lists an exhausted and an unknown-usage account with its reasons, #2276). */
@@ -321,6 +355,30 @@ function initialModel(): FixtureModel {
     initial.projects[0]!.unarchivedSessionCount = 4;
     initial.projects[0]!.totalSessionCount = 4;
   }
+  if (SCENARIO === "campaign-complete") {
+    // Three at-rest Orchestrator roots with the same unacknowledged result (#2940), shaped as the
+    // list snapshot sends them: summaries carry no campaign projection, only a Full Control root's
+    // server-derived `fullControlCampaignStatus`. Only the verified-complete one is informational.
+    const base = Date.now() - 3000;
+    const make = (id: string, title: string, at: number, fullControlCampaignStatus?: OrchestratorCampaignStatus) => ({
+      ...session(id, title, "alpha", "alpha-workspace"), projection: "summary" as const, status: "idle" as const,
+      role: "orchestrator" as const, createdAt: base, updatedAt: base + at, lastEventAt: base + at,
+      attention: { version: 1 as const, meaningfulAt: base + at, humanActions: [],
+        result: { revision: `${id}-result`, at: base + at, owner: "human" as const },
+        acknowledgedRevision: null } as NonNullable<SessionView["attention"]>,
+      ...(fullControlCampaignStatus ? { fullControlCampaignStatus } : {}),
+    });
+    // An active campaign's at-rest root continues automatically, so its intermediate result is
+    // informational too (#2938); a blocked campaign keeps Ready for Review.
+    initial.sessions = [
+      make("session-complete", "Full Control Campaign Delivered", 300, "verified_complete"),
+      make("session-active", "Full Control Campaign Continuing", 250, "active"),
+      make("session-custom", "Custom Campaign Delivered", 200),
+      make("session-blocked", "Full Control Campaign Blocked", 100, "blocked"),
+    ];
+    initial.projects[0]!.unarchivedSessionCount = 4;
+    initial.projects[0]!.totalSessionCount = 4;
+  }
   if (SCENARIO === "inbox-live-scroll") {
     initial.sessions = Array.from({ length: 36 }, (_, index) => {
       const value = session(
@@ -415,7 +473,11 @@ function initialModel(): FixtureModel {
           source: "created",
         }],
       }],
-      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {}],
+      ["session-no-worktree", "A Session With No Worktree Whose Title Was Derived From a Long Opening Prompt and Therefore Runs Well Past the Width of Any Viewport the Inbox Is Ever Rendered At, Including the Widest Desktop Layout", {
+        // #4076: an Orchestrator's type mark leads the longest title. (A review lists only under its
+        // requester, so this flat scenario cannot carry one.)
+        role: "orchestrator",
+      }],
       ["session-plain", "Plain", {}],
       // #782: line three is unconditional, so the scenario has to carry every combination of branch
       // state and background work — that product is exactly what used to make cards two, three, or
@@ -617,10 +679,13 @@ function initialModel(): FixtureModel {
   }
   if (SCENARIO === "conversation-handoff") {
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
-      status: "idle", activeTurnId: null, useWorktree: true, worktreePath: "/repos/alpha/checkpoint",
+      status: FIXTURE_QUERY.has("busyTurn") ? "running" : FIXTURE_QUERY.has("interrupted") ? "stopped" : "idle",
+      activeTurnId: FIXTURE_QUERY.has("busyTurn") ? "turn-running" : null,
+      useWorktree: !FIXTURE_QUERY.has("inPlace"),
+      worktreePath: FIXTURE_QUERY.has("inPlace") ? null : "/repos/alpha/checkpoint",
       // A deliberate non-default tier that the destination model below does not advertise, so the
       // dialog must say so rather than substitute a default.
-      serviceTier: "flex",
+      serviceTier: FIXTURE_QUERY.has("inPlace") ? "priority" : "flex",
     });
   }
   if (SCENARIO === "edit-in-fork") {
@@ -776,7 +841,184 @@ function initialModel(): FixtureModel {
       workspaceName: null,
     });
   }
+  if (SHELL_PROJECTS_MODE === "empty") {
+    initial.projects = [];
+    for (const value of initial.sessions) Object.assign(value, { projectId: null, projectLocationId: null });
+  }
+  if (SHELL_PROJECTS_MODE === "nine" || SHELL_PROJECTS_MODE === "many") initial.projects = shellProjects(SHELL_PROJECTS_MODE === "nine" ? 9 : 40);
+  if (SHELL_PROJECTS_MODE === "attention") {
+    const docs = shellProjects(9).find((candidate) => candidate.id === "docs-site")!;
+    initial.projects = [...shellProjects(9), project("docs-site-2", "Docs Site", {
+      locations: [{
+        ...shellProjects(9)[1]!.locations[0]!, id: "location-docs-site-2", projectId: "docs-site-2",
+        workspaceId: SHELL_SECOND_DOCS_WORKSPACE.id, name: SHELL_SECOND_DOCS_WORKSPACE.name, path: SHELL_SECOND_DOCS_WORKSPACE.path,
+      }],
+      unarchivedSessionCount: 2, totalSessionCount: 2, createdAt: docs.createdAt + 1,
+    })];
+  }
+  if (SHELL_PROJECTS_MODE === "healthy" || SHELL_PROJECTS_MODE === "two") {
+    const healthy = shellProjects(9).filter((candidate) => candidate.locations.some((value) => value.availability === "available"));
+    initial.projects = SHELL_PROJECTS_MODE === "two" ? healthy.slice(0, 2) : healthy;
+  }
+  if (SHELL_PROJECTS_MODE === "access") initial.projects = accessProjects();
+  if (SHELL_PROJECTS_MODE === "locations") initial.projects = locationProjects();
   return initial;
+}
+
+/**
+ * `?projects=locations` (#2961): Alpha's location rows in each state. Its default has a long name
+ * and is on the offline machine; the build machine's folders have a setup file that is ready,
+ * missing, invalid or still being checked; Legacy is on a machine too old to say. Edge Proxy has no
+ * locations.
+ */
+function locationProjects(): ProjectView[] {
+  const at = (id: string, name: string, path: string, options: Partial<ProjectLocationView> = {}): ProjectLocationView => ({
+    id: `location-${id}`, projectId: "alpha", runnerId: "runner-1", workspaceId: `${id}-workspace`, name, path,
+    source: "managed", availability: "available", isDefault: false, createdAt: 1, updatedAt: 1, totalSessionCount: 0, ...options,
+  });
+  return [
+    project("alpha", "Alpha", {
+      locations: [
+        at("billing", "Customer Billing Reconciliation Workspace", "/srv/checkouts/customer-billing-reconciliation", {
+          runnerId: "runner-2", availability: "runner_offline", isDefault: true, totalSessionCount: 12,
+        }),
+        at("alpha", "alpha", "/repos/alpha", { totalSessionCount: 3 }),
+        at("alpha-docs", "alpha-docs", "/home/builder/src/github.com/picoduck/alpha/docs-site", { totalSessionCount: 1 }),
+        at("alpha-api", "alpha-api", "/repos/alpha-api"),
+        at("alpha-tools", "alpha-tools", "/repos/alpha-tools"),
+        at("legacy", "legacy", "/repos/legacy", { runnerId: "runner-3" }),
+      ],
+      unarchivedSessionCount: 16, totalSessionCount: 16,
+    }),
+    project("edge-proxy", "Edge Proxy"),
+  ];
+}
+
+/** The `locations` fixture's setup files by location; a missing one is still being checked. */
+const LOCATION_SETUP: Record<string, WorktreeSetupConfigStatus> = {
+  "location-alpha": { status: "valid", hash: "a".repeat(64) },
+  "location-alpha-docs": { status: "absent" },
+  "location-alpha-api": {
+    status: "invalid",
+    error: "setup.commands[0] must be a string\n  at .wollipog.json:4:7\n  > 4 |     \"commands\": [{ \"run\": \"pnpm install\" }]",
+  },
+};
+
+/** The `attention` fixture's second Docs Site's folder, on the online machine. */
+const SHELL_SECOND_DOCS_WORKSPACE = { id: "docs-site-2-workspace", name: "docs-site-2", path: "/repos/docs-site-2" };
+
+const SHELL_PROJECT_NAMES = ["Alpha", "Billing Service", "Checkout Web", "Docs Site", "Edge Proxy", "Field App", "Growth Experiments", "Secret", "Infra"];
+
+/** `?projects=nine|many`: Alpha first, with many locations; Secret hidden; every fourth on the offline machine only. */
+function shellProjects(count: number): ProjectView[] {
+  const at = (projectId: string, index: number, offline: boolean): ProjectLocationView => ({
+    id: index === 0 ? `location-${projectId}` : `location-${projectId}-${index}`,
+    projectId,
+    runnerId: offline ? "runner-2" : "runner-1",
+    workspaceId: index === 0 ? `${projectId}-workspace` : `${projectId}-workspace-${index}`,
+    name: index === 0 ? projectId : `${projectId}-${index}`,
+    path: index === 0 ? `/repos/${projectId}` : `/repos/${projectId}-${index}`,
+    source: "managed",
+    availability: offline ? "runner_offline" : "available",
+    isDefault: index === 0,
+    createdAt: 1,
+    updatedAt: 1,
+  });
+  return Array.from({ length: count }, (_, index) => {
+    const name = SHELL_PROJECT_NAMES[index] ?? `Team Project ${String(index + 1).padStart(2, "0")}`;
+    const id = index === 0 ? "alpha" : name === "Secret" ? "secret" : name.toLowerCase().replace(/\s+/g, "-");
+    const offline = index % 4 === 3;
+    const locations = index === 0 ? Array.from({ length: 8 }, (_, location) => at(id, location, location % 3 === 2))
+      : index % 5 === 4 ? [] : [at(id, 0, offline)];
+    const sessions = index === 0 ? 1 : (index * 7) % 12;
+    // A few are running, so the Projects Overview's counts have something to say (#2958).
+    const running = index === 1 ? 2 : index === 2 ? 1 : 0;
+    return project(id, name, {
+      hidden: name === "Secret", locations, unarchivedSessionCount: sessions, totalSessionCount: sessions, activeSessionCount: running,
+    });
+  });
+}
+
+/**
+ * `?projects=access` (#2960): a control plane that manages access. Alpha and Beta are shared with
+ * Builders (three people). Alpha Checkout is Organization-Wide; Beta's Laptop Checkout is private to
+ * the signed-in owner, so making Beta Organization-Wide is refused until that location is widened.
+ * Gamma is Organization-Wide. Ghosts is a team with no members.
+ * `&accessPreview=hold` leaves every preview pending, for the checking state.
+ */
+const ACCESS_ORG = "fixture-organization";
+const ACCESS_USER = "fixture-user";
+const ACCESS_TEAMS: TeamView[] = [
+  { teamId: "team-builders", organizationId: ACCESS_ORG, name: "Builders", memberUserIds: [ACCESS_USER, "user-ana", "user-kofi"], createdAt: 1 },
+  { teamId: "team-ghosts", organizationId: ACCESS_ORG, name: "Ghosts", memberUserIds: [], createdAt: 1 },
+];
+const ACCESS_PREVIEW_HOLD = FIXTURE_QUERY.get("accessPreview") === "hold";
+const accessScope = (owner: ResourceOwner): ResourceScope => ({ organizationId: ACCESS_ORG, owner });
+const BUILDERS_SCOPE = accessScope({ kind: "team", teamId: "team-builders" });
+const organizationAccess = accessScope({ kind: "organization", organizationId: ACCESS_ORG });
+
+function accessProjects(): ProjectView[] {
+  const location = (projectId: string, name: string, scope: ResourceScope): ProjectLocationView => ({
+    id: `location-${projectId}`, projectId, runnerId: "runner-1", workspaceId: `${projectId}-workspace`, name,
+    path: `/repos/${projectId}`, source: "managed", availability: "available", isDefault: true, createdAt: 1, updatedAt: 1,
+    scope, canManage: true,
+  });
+  return [
+    project("alpha", "Alpha", {
+      scope: BUILDERS_SCOPE, canManage: true,
+      locations: [location("alpha", "Alpha Checkout", organizationAccess)],
+      activeSessionCount: 2, unarchivedSessionCount: 5, totalSessionCount: 5,
+    }),
+    project("beta", "Beta", {
+      scope: BUILDERS_SCOPE, canManage: true,
+      locations: [location("beta", "Laptop Checkout", accessScope({ kind: "user", userId: ACCESS_USER }))],
+      activeSessionCount: 1, unarchivedSessionCount: 3, totalSessionCount: 3,
+    }),
+    project("gamma", "Gamma", {
+      scope: organizationAccess, canManage: true, locations: [location("gamma", "Gamma Checkout", organizationAccess)],
+      activeSessionCount: 1, unarchivedSessionCount: 4, totalSessionCount: 4,
+    }),
+  ];
+}
+
+/** The server's preview (control-plane db.ts), from the fixture's scopes and the project's counts. */
+async function accessPreview(
+  resource: "project" | "workspace",
+  id: { projectId?: string; runnerId?: string; workspaceId?: string },
+  owner: ResourceOwner,
+): Promise<AccessScopeChangePreview> {
+  if (ACCESS_PREVIEW_HOLD) return new Promise(() => undefined);
+  const identity = await client.getIdentity();
+  const target = accessScope(owner);
+  const owning = resource === "project"
+    ? model.projects.filter((candidate) => candidate.id === id.projectId)
+    : model.projects.filter((candidate) => candidate.locations.some((entry) => entry.workspaceId === id.workspaceId));
+  const location = owning[0]?.locations.find((entry) => entry.workspaceId === id.workspaceId);
+  const currentScope = resource === "project" ? owning[0]?.scope : location?.scope;
+  if (!owning[0] || !currentScope) throw new Error("access scope not found");
+  const contained = (narrower: ResourceScope, wider: ResourceScope) =>
+    scopeAudienceContainedForIdentity(identity, narrower, wider);
+  const reason = resource === "project"
+    ? owning[0].locations.some((entry) => entry.scope && !contained(target, entry.scope))
+      ? "The requested Project access would expose a narrower Location. Change that Location first or choose a narrower Project scope."
+      : undefined
+    : owning.some((candidate) => candidate.scope && !contained(candidate.scope, target))
+      ? "The requested Location access is narrower than an attached Project. Narrow those Projects first or choose a broader Location scope."
+      : undefined;
+  const sessions = resource === "project" ? owning[0] : { activeSessionCount: 0, totalSessionCount: 0 };
+  return {
+    resource,
+    resourceId: (resource === "project" ? id.projectId : id.workspaceId)!,
+    ...(id.runnerId ? { runnerId: id.runnerId } : {}),
+    currentScope,
+    targetScope: target,
+    affectedProjects: owning.map((candidate) => ({ projectId: candidate.id, name: candidate.name })),
+    activeSessionCount: sessions.activeSessionCount,
+    totalSessionCount: sessions.totalSessionCount,
+    sessionsToNarrow: contained(currentScope, target) ? 0 : sessions.totalSessionCount,
+    compatible: reason === undefined,
+    ...(reason ? { reason } : { confirmationToken: `token-${resource}-${owner.kind}` }),
+  };
 }
 
 function loadModel(): FixtureModel {
@@ -843,9 +1085,13 @@ for (const value of model.sessions) {
   });
 }
 if (SESSION_TOOLS) {
-  // Nine uncommitted changes, none staged, and no operation in progress.
+  // Nine uncommitted changes, none staged, and no operation in progress; with `committed=1`, all of
+  // the work committed instead: a clean worktree three commits ahead of main (#3035).
   const alpha = gitFixtures.get("session-alpha")!;
-  Object.assign(alpha.status, {
+  Object.assign(alpha.status, FIXTURE_QUERY.get("committed") === "1" ? {
+    files: [], hasChanges: false, ahead: 3, stagedCount: 0, modifiedCount: 0, untrackedCount: 0, conflictedCount: 0,
+    operation: null, addedLines: 0, deletedLines: 0,
+  } : {
     files: Array.from({ length: 9 }, (_, index) => ({ status: "M", path: `src/session-tools/file-${index + 1}.ts` })),
     hasChanges: true, stagedCount: 0, modifiedCount: 9, untrackedCount: 0, conflictedCount: 0, operation: null,
   });
@@ -969,6 +1215,29 @@ if (SCENARIO === "conversation-handoff") {
     { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: { kind: "agent_message", text: "The checkpoint preserves the accessible layout.", final: true } },
     { id: 4, sessionId: "session-alpha", seq: 4, ts: 4, payload: { kind: "conversation_checkpoint", turn: 1 } },
   ]);
+  if (FIXTURE_QUERY.has("inPlace") && !FIXTURE_QUERY.has("removedWorktree")) {
+    const history: SessionEvent[] = [
+      { id: 1, sessionId: "session-alpha", seq: 1, ts: 1, payload: { kind: "user_message", text: "Keep the interface accessible on mobile.", final: true } },
+      { id: 2, sessionId: "session-alpha", seq: 2, ts: 2, payload: { kind: "agent_message", text: "The current files preserve the accessible layout.", final: true } },
+      { id: 3, sessionId: "session-alpha", seq: 3, ts: 3, payload: FIXTURE_QUERY.has("interrupted")
+        ? { kind: "turn_interrupted" } : FIXTURE_QUERY.has("guardrail")
+          ? { kind: "stderr", text: "Runner governance paused this turn at the cost threshold." }
+          : { kind: "agent_response_completed" } },
+    ];
+    if (FIXTURE_QUERY.has("unfinishedTurn") || FIXTURE_QUERY.has("busyTurn")) {
+      if (FIXTURE_QUERY.has("unfinishedTurn")) history.pop();
+      const next = history.length + 1;
+      history.push(
+        { id: next, sessionId: "session-alpha", seq: next, ts: next, payload: { kind: "user_message", text: "A later task", final: true } },
+        { id: next + 1, sessionId: "session-alpha", seq: next + 1, ts: next + 1, payload: { kind: "agent_message", text: "A later response", final: true } },
+      );
+      if (FIXTURE_QUERY.has("unfinishedTurn")) history.push(
+        { id: 5, sessionId: "session-alpha", seq: 5, ts: 5, payload: { kind: "agent_response_completed" } },
+      );
+    }
+    sessionEvents.set("session-alpha", FIXTURE_QUERY.has("partialHistory")
+      ? history.map((event) => ({ ...event, id: event.id + 10, seq: event.seq + 10 })) : history);
+  }
 }
 if (SCENARIO === "edit-in-fork") {
   // Two completed turns, so the second message has a checkpoint to edit from and the first has none.
@@ -1229,12 +1498,67 @@ if (SCENARIO === "conversation-handoff") runner.agents.push({
     supportsImages: true, supportsApprovals: true, slashCommands: [] },
 });
 
+/**
+ * `?pod=members` (#2980): the pod has a lead, a worker and a reviewer on one machine and folder, and
+ * Recent Merges holding a conflict and a merge. `&podTurns=running` runs automatic turns at turn 3 of
+ * 12 with the worker up; `&podTurns=stopped` stopped them at the turn limit. Off by default, so the
+ * other cases see the empty pod they always have.
+ */
+const POD_FIXTURE = FIXTURE_QUERY.get("pod") === "members";
+const POD_TURNS = FIXTURE_QUERY.get("podTurns");
+
+function podMemberSession(id: string, title: string, agentName: string, driver: SessionView["driver"]): SessionView {
+  return {
+    ...session(id, title, "alpha", "alpha-workspace"),
+    agentId: agentName.toLowerCase().replaceAll(" ", "-"),
+    agentName,
+    driver,
+    useWorktree: true,
+    worktreePath: `/worktrees/${id}`,
+  };
+}
+
+const podMemberSessions: SessionView[] = POD_FIXTURE ? [
+  podMemberSession("pod-lead", "Lead: plan the call-site migration", "Claude Code", "claude-code"),
+  podMemberSession("pod-worker", "Worker: migrate call sites", "Codex", "codex-app-server"),
+  podMemberSession("pod-reviewer", "Reviewer: check the migrated sites", "Claude Code", "claude-code"),
+] : [];
+
+const podNow = Date.now();
 const activePod: PodView = {
   id: "pod-active",
   title: "Active Collaboration Pod",
-  objective: "Manual collaboration pod",
+  objective: "Migrate the API client's call sites to the shared retry helper.",
   status: "active",
-  members: [],
+  members: podMemberSessions.map((member, index) => ({
+    sessionId: member.id,
+    joinedAt: 1,
+    role: (["lead", "worker", "reviewer"] as const)[index]!,
+    contextTokenBudget: null,
+    lastContextSeq: 0,
+  })),
+  ...(POD_FIXTURE ? {
+    orchestration: {
+      policy: { mode: POD_TURNS ? "round_robin" : "manual", contextTokenBudget: 8_192, summaryTokenBudget: 512, maxTurns: 12, maxRepeatedOutputs: 2 },
+      state: POD_TURNS === "running"
+        ? { status: "running", runId: "pod-run-1", turnsUsed: 3, currentSessionId: "pod-worker", startedAt: podNow - 300_000, updatedAt: podNow - 20_000 }
+        : POD_TURNS === "stopped"
+          ? { status: "stopped", runId: "pod-run-1", turnsUsed: 12, stopReason: "max_turns", updatedAt: podNow - 60_000 }
+          : { status: "idle", turnsUsed: 0, updatedAt: 1 },
+    },
+    reconciliations: [
+      {
+        reconciliationId: "merge-2", podId: "pod-active", sourceSessionId: "pod-worker", targetSessionId: "pod-lead", actorId: "local",
+        status: "conflicted", sourceHead: "4f9c2a7e1b3d5c6a", targetHead: "9b81d0c4e2f7a3b5", mergeBase: "1a2b3c4d5e6f7a8b",
+        conflictPaths: ["src/api/client.ts", "src/api/retry.ts"], createdAt: podNow - 180_000, completedAt: podNow - 175_000,
+      },
+      {
+        reconciliationId: "merge-1", podId: "pod-active", sourceSessionId: "pod-reviewer", targetSessionId: "pod-lead", actorId: "local",
+        status: "applied", sourceHead: "c0ffee1234567890", targetHead: "deadbeef12345678", mergeBase: "1a2b3c4d5e6f7a8b",
+        resultHead: "5eed5eed5eed5eed", createdAt: podNow - 3_600_000, completedAt: podNow - 3_590_000,
+      },
+    ],
+  } : {}),
   createdAt: 1,
   updatedAt: 1,
 };
@@ -1292,7 +1616,7 @@ const RUN_ARTIFACT_SOURCES: ReadonlyArray<{
   { id: "run-art-log", kind: "test_log", name: "e2e shard 3 of 5.log", mimeType: "text/plain", ageMinutes: 14,
     author: { kind: "agent", id: "session-alpha" },
     body: async () => runArtifactText.encode(Array.from({ length: 60 }, (_, index) => `12:04:${String(index).padStart(2, "0")} ✔ checkout.spec.ts › case ${index + 1} (${(index % 9) + 3}ms)`).join("\n")) },
-  { id: "run-art-html", kind: "html_preview", name: "Order summary preview", mimeType: "text/html", ageMinutes: 20,
+  { id: "run-art-html", kind: "html_preview", name: "Order summary preview for the redesigned checkout flow", mimeType: "text/html", ageMinutes: 20,
     author: { kind: "agent", id: "session-alpha" },
     body: async () => runArtifactText.encode("<!doctype html><style>body{font:14px system-ui;margin:24px}h1{font-size:20px}</style><h1>Order Summary</h1><p>3 items · $42.00</p>") },
   { id: "run-art-verdict", kind: "verdict", name: "Gate verdict", mimeType: "application/json", ageMinutes: 31,
@@ -1331,6 +1655,19 @@ function rowColumnsReminder(): SessionReminderView {
   };
 }
 
+function prunedWorkflowFixture(): WorkflowInstanceDetail {
+  return {
+    instanceId: "workflow-pruned", workflowId: "workflow", workflowVersion: 1, runId: activeRun.id,
+    status: "succeeded", transitionCount: 3, createdBy: { kind: "system" }, createdAt: 1, updatedAt: 2, completedAt: 2,
+    eventHistoryPruned: { prunedAt: Date.UTC(2026, 9, 16), eventCount: 1_284, retentionDays: 90 },
+    nodeStates: [{ nodeId: "build", status: "succeeded", attemptCount: 1, outcome: "success", completedAt: 2 }],
+    definition: { workflowId: "workflow", version: 1, source: "custom", name: "Build and Review", maxTransitions: 20,
+      edges: [], createdBy: { kind: "system" }, createdAt: 1, nodes: [{ nodeId: "build", kind: "agent", role: "Builder",
+        agentId: "codex", inputs: [], outputs: [], retry: { maxAttempts: 1, backoffMs: 0 }, timeoutMs: 1_000 }] },
+    attempts: [], events: [],
+  };
+}
+
 function snapshot(): UiSnapshotMessage {
   return {
     type: "snapshot",
@@ -1338,24 +1675,28 @@ function snapshot(): UiSnapshotMessage {
       sessionSubscriptions: TARGETED_READER_STREAMS,
       boundedDelivery: TARGETED_READER_STREAMS,
       paginatedSessionHistory: TARGETED_READER_STREAMS,
-      projects: !LEGACY_WORKSPACES,
+      projects: !LEGACY_WORKSPACES && SHELL_PROJECTS_MODE !== "unsupported",
       createProjectLocations: !LEGACY_WORKSPACES,
       nativeTuiLaunch: true,
       stopBeforeArchive: true,
       ...(UNARCHIVE_RESTART ? { unarchiveAndRestart: true } : {}),
       ...(SESSION_REMINDERS ? { sessionReminders: true } : {}),
       ...(orchestratorRoleSupported ? { orchestratorRole: true } : {}),
-      ...(LIST_NOTICES.has("setup") ? { worktreeSetupConfig: true } : {}),
+      ...(LIST_NOTICES.has("setup") || SHELL_PROJECTS_MODE === "locations" ? { worktreeSetupConfig: true } : {}),
+      ...(SHELL_PROJECTS_MODE === "access" ? { accessScopeManagement: true } : {}),
     },
     runners: SHELL_SKILLS_MODE === "detail" ? [runner, secondSkillRunner]
       : SHELL_SKILLS_MODE === "notices" ? [noticeStudio, noticeLaptop]
-      : shellOfflineRunner ? [runner, shellOfflineRunner] : [runner],
+      : shellOfflineRunner ? [runner, shellOfflineRunner, ...(shellOldRunner ? [shellOldRunner] : [])]
+        : OFFLINE_MACHINE ? [runner, { ...structuredClone(runner), runnerId: "runner-3", hostname: "build-02",
+          displayName: "Build Server 02", status: "offline" as const, providerLogins: undefined }]
+          : [runner],
     boxes: REMOTE_MACHINE ? [{
       boxId: "box-fixture", sshTarget: "pat@build.example.com", runnerId: runner.runnerId, status: "online",
       lastError: null, createdAt: 1,
     }] : [],
-    ...(LEGACY_WORKSPACES ? {} : { projects: structuredClone(model.projects) }),
-    sessions: structuredClone(model.sessions.filter((candidate) => !candidate.archived)),
+    ...(LEGACY_WORKSPACES || SHELL_PROJECTS_MODE === "unsupported" ? {} : { projects: structuredClone(model.projects) }),
+    sessions: structuredClone([...model.sessions.filter((candidate) => !candidate.archived), ...podMemberSessions]),
     ...(ROW_COLUMNS ? { reminders: [rowColumnsReminder()] } : {}),
     runs: [structuredClone(activeRun)],
     pods: [structuredClone(activePod)],
@@ -1387,7 +1728,7 @@ class FixtureSocket implements UiSocket {
         }));
         this.push({ type: "session_snapshot_page", sessions: sessions.slice(0, 1), complete: false });
         this.push({ type: "session_snapshot_page", sessions: sessions.slice(1), complete: true });
-      } else this.push(initial);
+      } else if (SHELL_PROJECTS_MODE !== "loading") this.push(initial);
     }, 0);
   }
   send(data: string): void {
@@ -1430,7 +1771,7 @@ const connection: UiConnectionRuntime = {
   runtimeKey: "project-inbox-e2e:1",
   createSocket() {
     if (offlineBannerLost) return offlineBannerSocket = new NeverOpenSocket();
-    if (PAIRING_REQUIRED) {
+    if (PAIRING_REQUIRED && deviceToken() !== PAIRING_ACCEPTED_CODE) {
       const unpaired = new NeverOpenSocket();
       window.setTimeout(() => unpaired.onclose?.({ code: 1008 }), 0);
       return unpaired;
@@ -1447,6 +1788,11 @@ const connection: UiConnectionRuntime = {
       }, 50);
     }
     return opened;
+  },
+  // A stored pairing reopens the socket in-process, as the browser runtime's does.
+  onCredentialChange(listener) {
+    window.addEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
+    return () => window.removeEventListener(DEVICE_TOKEN_CHANGED_EVENT, listener);
   },
   close() {},
 };
@@ -1736,11 +2082,30 @@ const shellOverviewMachine = () => {
   };
 };
 /** The overview's offline second machine. */
-const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar"
+const SHELL_PROJECTS_MACHINES = ["nine", "many", "attention", "healthy", "two", "locations"].includes(SHELL_PROJECTS_MODE ?? "");
+/** The `locations` fixture's machine whose runner predates setup-file checks. */
+const shellOldRunner: RunnerView | null = SHELL_PROJECTS_MODE === "locations"
+  ? { ...structuredClone(runner), runnerId: "runner-3", hostname: "old-laptop", displayName: "Old Laptop", protocolVersion: 140,
+    providerLogins: undefined, workspaces: [{ id: "legacy-workspace", name: "legacy", path: "/repos/legacy" }] }
+  : null;
+const shellOfflineRunner: RunnerView | null = SHELL_OVERVIEW || SCENARIO === "preview-bar" || SHELL_PROJECTS_MACHINES
   ? { ...structuredClone(runner), runnerId: "runner-2", hostname: "studio-workstation", displayName: "Studio Workstation", status: "offline",
     providerLogins: undefined }
   : null;
-if (SHELL_OVERVIEW) runner.displayName = "Build Machine";
+if (SHELL_OVERVIEW || SHELL_PROJECTS_MACHINES) runner.displayName = "Build Machine";
+// The Projects fixtures' folders are on their machines, so a project there can start sessions.
+if (SHELL_PROJECTS_MACHINES) {
+  for (const location of shellProjects(40).flatMap((candidate) => candidate.locations)) {
+    if (location.runnerId !== runner.runnerId || runner.workspaces.some((workspace) => workspace.id === location.workspaceId)) continue;
+    runner.workspaces.push({ id: location.workspaceId, name: location.name, path: location.path });
+  }
+  runner.workspaces.push(SHELL_SECOND_DOCS_WORKSPACE);
+  if (SHELL_PROJECTS_MODE === "locations") {
+    for (const location of locationProjects()[0]!.locations.filter((value) => value.runnerId === runner.runnerId)) {
+      runner.workspaces.push({ id: location.workspaceId, name: location.name, path: location.path });
+    }
+  }
+}
 const shellSkills = SHELL_SKILLS_MODE === "empty" ? [] : SHELL_SKILLS_MODE === "list" ? SHELL_LIST_SKILLS : SHELL_OVERVIEW ? SHELL_OVERVIEW_SKILLS : Array.from(
   { length: SHELL_SKILLS_MODE === "many" ? 40 : SHELL_SKILL_NAMES.length },
   (_, index) => ({
@@ -2242,6 +2607,7 @@ const client = {
     return { summary: structuredClone(fixture.summary) };
   },
   workflowInstances: async () => [],
+  workflowDefinitions: async () => [],
   projectLocationWorktreeSetup: async (_projectId: string, locationId: string) => ({
     locationId,
     status: { status: "valid" as const, hash: "a".repeat(64) },
@@ -2284,6 +2650,14 @@ const client = {
   } : {}),
   createSession: async (request: CreateSessionRequest) => {
     lastCreateSessionRequest = structuredClone(request);
+    if (CREATE_ERROR === "kept") {
+      throw new ApiError(
+        "Session session-kept was retained because the Native TUI launch outcome is unknown.",
+        504,
+        "NATIVE_TUI_LAUNCH_AMBIGUOUS",
+        { sessionId: "session-kept" },
+      );
+    }
     const created = session(
       `session-created-${model.sessions.length + 1}`,
       "Created Session",
@@ -2323,6 +2697,12 @@ const client = {
     const value = model.sessions.find((candidate) => candidate.id === id);
     // The control plane answers a missing or hidden session with a fail-closed 404.
     if (!value) throw new ApiError("Session not found", 404);
+    if (SCENARIO === "campaign-complete" && value.projection === "summary") {
+      // The detail endpoint returns the full row with the root's own stored control, not a summary.
+      const { projection: _summary, ...detail } = structuredClone(value);
+      return { session: { ...detail, orchestratorPolicy: { control: { mode: value.fullControlCampaignStatus ? "full_control" : "custom" } },
+      } as unknown as SessionView };
+    }
     return { session: structuredClone(value) };
   },
   unarchiveAndRestart: async (id: string) => {
@@ -2364,6 +2744,44 @@ const client = {
     value.updatedAt += 1;
     pushSession(value);
     return { sessionId: id, jobId, outcome: "stopped" as const, terminalStatus: "killed" as const };
+  },
+  // #3752: Proceed Now ends every unfinished job as killed, then the handoff and the queued prompts run.
+  releaseQueueHold: async (id: string, holdId: string) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new ApiError("Session not found", 404);
+    if (value.queueHold?.holdId !== holdId) {
+      throw new ApiError("This session is no longer held by that handoff, so nothing was ended.", 409);
+    }
+    const now = Date.now();
+    const jobIds: string[] = [];
+    for (const job of value.backgroundJobs ?? []) {
+      if (job.terminalStatus) continue;
+      Object.assign(job, {
+        terminalStatus: "killed", terminalObservedAt: now, continuationRequired: false, lastObservedAt: now,
+        endedBy: { actor: { kind: "user" }, reason: "stop_request", endedAt: now },
+      });
+      jobIds.push(job.id);
+    }
+    delete value.queueHold;
+    value.holds = value.holds?.filter((hold) => hold.holdId !== holdId);
+    value.status = "running";
+    value.updatedAt += 1;
+    pushSession(value);
+    return { sessionId: id, holdId, outcome: "released" as const, jobIds };
+  },
+  acknowledgeBackgroundBlockedResults: async (id, targets) => {
+    const value = model.sessions.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("session not found");
+    for (const delivery of value.backgroundDeliveries ?? []) {
+      if (delivery.watchdogState === "continuation_blocked" && targets.some((target) =>
+        target.parentTurnId === delivery.parentTurnId && target.revision === delivery.blockedResultRevision)) {
+        delivery.blockedResultAcknowledgedAt = Date.now();
+        delete delivery.watchdogState;
+      }
+    }
+    value.updatedAt += 1;
+    pushSession(value);
+    return structuredClone(value);
   },
   acknowledgeBackgroundMissingResult: async (id: string, continuationId: string) => {
     const value = model.sessions.find((candidate) => candidate.id === id);
@@ -2417,10 +2835,18 @@ const client = {
   },
   handoff: async (id: string, turn: number, agentId: string, config: SessionConfig) => {
     handoffRequests.push({ id, turn, agentId, config: structuredClone(config) });
+    if (FIXTURE_QUERY.has("legacyHandoff")) throw new ApiError("Update the runner to support handoffs from in-place sessions.", 409);
+    if (FIXTURE_QUERY.has("unsupportedRepository")) throw new ApiError("Handoff needs a Git repository with at least one readable commit.", 409);
+    if (FIXTURE_QUERY.has("savedHistoryIncomplete")) throw new ApiError("This session's saved history is incomplete, so it can't be handed off.", 409);
     const source = model.sessions.find((candidate) => candidate.id === id)!;
     const agent = runner.agents.find((candidate) => candidate.id === agentId)!;
-    const handoffDraft = buildConversationHandoff(sessionEvents.get(id) ?? [], 3, agent, config);
-    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config, status: "idle" as const };
+    const history = sessionEvents.get(id) ?? [];
+    const point = source.worktreePath ? undefined
+      : inPlaceHandoffTurns(history, { status: source.status, throughSeq: history.at(-1)?.seq ?? 0 }).turns.find((point) => point.turn === turn);
+    if (!source.worktreePath && !point?.eventSeq) throw new Error(point?.reason ?? "This turn didn't finish, so it can't be handed off yet.");
+    const handoffDraft = buildConversationHandoff(history, point?.eventSeq ?? 3, agent, config, { inPlace: !source.worktreePath });
+    const child = { ...source, id: "handoff-child", agentId, driver: agent.driver!, title: "Checkpoint Handoff", ...config,
+      useWorktree: true, worktreePath: "/repos/alpha/handoff-child", status: "idle" as const };
     model.sessions.push(child);
     sessionEvents.set(child.id, [{ id: 1, sessionId: child.id, seq: 1, ts: 4, payload: { kind: "conversation_forked", sourceSessionId: id, turn,
       handoff: { sourceAgent: source.agentId!, destinationAgent: agentId, disclosure: handoffDraft.disclosure } } }]);
@@ -2745,7 +3171,8 @@ const client = {
       await waitSyntheticHistoryRead("forward", after);
       return page;
     }
-    const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after);
+    const available = (sessionEvents.get(sessionId) ?? []).filter((event) => event.seq > after &&
+      !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail") && event.seq === 3));
     // R1.2 deliberately exposes several incomplete renders. A restored logical row can be absent
     // from the first cache page but reappear later in this same authoritative recovery chain.
     if (READER_RECOVERY_SCENARIO && after > 0) {
@@ -2758,7 +3185,7 @@ const client = {
       eventEpoch: model.sessions.find((candidate) => candidate.id === sessionId)?.eventEpoch ?? 0,
       nextAfter: events.at(-1)?.seq ?? after,
       hasMoreCached,
-      cacheComplete: !hasMoreCached,
+      cacheComplete: !hasMoreCached && !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
   getSessionEventTailPage: async (sessionId: string, before?: number) => {
@@ -2776,7 +3203,8 @@ const client = {
       return page;
     }
     const all = sessionEvents.get(sessionId) ?? [];
-    const available = before === undefined ? all : all.filter((event) => event.seq < before);
+    const available = (before === undefined ? all : all.filter((event) => event.seq < before))
+      .filter((event) => !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail") && event.seq === 3));
     // A bounded opening window over a much longer log: tall enough to scroll and pause inside,
     // with older turns still only reachable by paging below it.
     const windowed = READER_RECOVERY_SCENARIO
@@ -2793,7 +3221,7 @@ const client = {
       ...(windowed[0] ? { nextBefore: windowed[0].seq } : {}),
       hasMoreOlder: windowed.length < available.length,
       ...(SCENARIO === "preview-opening-fill" ? { turnAligned: true } : {}),
-      cacheComplete: true,
+      cacheComplete: !(SCENARIO === "conversation-handoff" && FIXTURE_QUERY.has("partialTail")),
     };
   },
   podContext: async () => ({ entries: [] }),
@@ -2921,6 +3349,38 @@ const client = {
     window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
     return { project: structuredClone(value) };
   },
+  project: async (id: string) => {
+    const value = model.projects.find((candidate) => candidate.id === id);
+    if (!value) throw new Error("project not found");
+    return { project: structuredClone(value) };
+  },
+  previewProjectAccessScope: async (projectId: string, owner: ResourceOwner) =>
+    ({ preview: await accessPreview("project", { projectId }, owner) }),
+  previewWorkspaceAccessScope: async (runnerId: string, workspaceId: string, owner: ResourceOwner) =>
+    ({ preview: await accessPreview("workspace", { runnerId, workspaceId }, owner) }),
+  updateProjectAccessScope: async (projectId: string, owner: ResourceOwner, confirmationToken: string) => {
+    const preview = await accessPreview("project", { projectId }, owner);
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope confirmation is stale");
+    const value = model.projects.find((candidate) => candidate.id === projectId)!;
+    Object.assign(value, { scope: preview.targetScope, updatedAt: value.updatedAt + 1 });
+    saveModel();
+    window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
+    return { project: structuredClone(value), preview };
+  },
+  updateWorkspaceAccessScope: async (runnerId: string, workspaceId: string, owner: ResourceOwner, confirmationToken: string) => {
+    const preview = await accessPreview("workspace", { runnerId, workspaceId }, owner);
+    if (preview.confirmationToken !== confirmationToken) throw new Error("access scope confirmation is stale");
+    for (const value of model.projects) {
+      const location = value.locations.find((entry) => entry.workspaceId === workspaceId);
+      if (!location) continue;
+      location.scope = preview.targetScope;
+      value.updatedAt += 1;
+      window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(value) }), 0);
+    }
+    saveModel();
+    // The page reads the project again rather than the workspace, so the workspace is a stand-in.
+    return { workspace: { id: workspaceId } as never, preview };
+  },
   addProjectLocation: async (projectId: string, body: { runnerId: string; workspaceId: string }) => {
     const owningProject = model.projects.find((candidate) => candidate.id === projectId);
     const workspace = runner.workspaces.find((candidate) => candidate.id === body.workspaceId);
@@ -2949,36 +3409,6 @@ const client = {
     saveModel();
     window.setTimeout(() => socket?.push({ type: "project_upsert", project: structuredClone(owningProject) }), 0);
     return { project: structuredClone(owningProject) };
-  },
-  moveProjectLocation: async (targetProjectId: string, body: { locationId: string }) => {
-    const target = model.projects.find((candidate) => candidate.id === targetProjectId);
-    const source = model.projects.find((candidate) => candidate.locations.some((location) => location.id === body.locationId));
-    const location = source?.locations.find((candidate) => candidate.id === body.locationId);
-    if (!target || !source || !location) throw new Error("project location not found");
-    source.locations = source.locations.filter((candidate) => candidate.id !== location.id);
-    if (location.isDefault && source.locations[0]) source.locations[0].isDefault = true;
-    location.projectId = target.id;
-    location.isDefault = target.locations.length === 0;
-    target.locations.push(location);
-    for (const value of model.sessions.filter((candidate) => candidate.projectLocationId === location.id)) {
-      value.projectId = target.id;
-      value.updatedAt += 1;
-    }
-    for (const value of [source, target]) {
-      value.activeSessionCount = model.sessions.filter((candidate) => candidate.projectId === value.id && !candidate.archived && ["queued", "starting", "running", "input_required"].includes(candidate.status)).length;
-      value.unarchivedSessionCount = model.sessions.filter((candidate) => candidate.projectId === value.id && !candidate.archived).length;
-      value.totalSessionCount = model.sessions.filter((candidate) => candidate.projectId === value.id).length;
-      value.updatedAt += 1;
-    }
-    saveModel();
-    window.setTimeout(() => {
-      socket?.push({ type: "project_upsert", project: structuredClone(source) });
-      socket?.push({ type: "project_upsert", project: structuredClone(target) });
-      for (const value of model.sessions.filter((candidate) => candidate.projectLocationId === location.id)) {
-        socket?.push({ type: "session_upsert", session: structuredClone(value) });
-      }
-    }, 0);
-    return { project: structuredClone(target) };
   },
   removeProjectLocation: async (projectId: string, locationId: string) => {
     const owningProject = model.projects.find((candidate) => candidate.id === projectId);
@@ -3080,6 +3510,22 @@ const client = {
       : [];
     return { path: at, parent, entries };
   },
+  ...(SHELL_PROJECTS_MODE === "locations" ? {
+    projectLocationWorktreeSetup: (_projectId: string, locationId: string) => {
+      const status = LOCATION_SETUP[locationId];
+      return status ? Promise.resolve({ locationId, status: structuredClone(status) }) : new Promise<never>(() => {});
+    },
+    generateProjectLocationWorktreeSetup: async (_projectId: string, locationId: string) => {
+      LOCATION_SETUP[locationId] = { status: "valid", hash: "b".repeat(64) };
+      return { locationId, status: structuredClone(LOCATION_SETUP[locationId]!), path: ".wollipog.json" as const, detected: ["pnpm"] };
+    },
+    dismissWorktreeSetupNotice: async () => undefined,
+  } : {}),
+  // Keep this scenario's complete read responses together, independent of the default run mocks.
+  ...(FIXTURE_QUERY.get("workflowPruned") === "1" ? {
+    workflowInstances: async () => [prunedWorkflowFixture()],
+    workflowInstance: async () => prunedWorkflowFixture(),
+  } : {}),
 } as ApiClient;
 
 if (SCENARIO === "inbox-triage") {
@@ -3096,7 +3542,7 @@ if (sideChatFixture) {
 }
 
 let workspaceMoveCount = 0;
-let identityTeams: TeamView[] = [];
+let identityTeams: TeamView[] = SHELL_PROJECTS_MODE === "access" ? structuredClone(ACCESS_TEAMS) : [];
 
 let nextProjectUpdateError: string | null = null;
 
@@ -3742,7 +4188,7 @@ function FixtureSurface() {
   if (view.name === "projects") {
     return (
       <>
-        <ProjectsView selectedProjectId={view.id} onNewSession={openNewSession} />
+        <ProjectsView selectedProjectId={view.id} pane={view.pane} onNewSession={openNewSession} />
         {newSession && (
           <NewSessionDialog
             preset={newSession.preset}

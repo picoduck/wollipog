@@ -68,6 +68,8 @@ updates:
       # ACP_SDK_VERSION and ships it on the wire as `schemaAuthority`; acp-contract.test.ts and
       # acp-session-context.test.ts both assert the value, including that it matches the manifest.
       # A bump is a deliberate protocol-attestation change, not a dependency refresh.
+      # Its `zod` peer is declared in the runner's devDependencies, so zod updates and security
+      # fixes still arrive while the SDK stays pinned; an auto-installed peer was unreachable.
       - dependency-name: "@agentclientprotocol/sdk"
       # TypeScript 7 removes the stable compiler API used by two guardrail tests. ADR 0005 and
       # #349 record the plan to separate the build compiler from a pinned test-time parser before

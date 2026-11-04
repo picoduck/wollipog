@@ -12,7 +12,7 @@ const human: AuthPrincipal = {
   organizationId: "org", organizationName: "Synthetic Org", role: "owner", deviceId: null, localBootstrap: false,
 };
 const target: EvidenceReviewerTarget = {
-  agentId: "synthetic", driver: "codex-app-server", modelId: "synthetic-model", providerId: "synthetic-provider",
+  agentId: "synthetic", driver: "codex-app-server", modelId: "synthetic-model", effort: "high", providerId: "synthetic-provider",
   runnerId: "isolated", runnerProtocolVersion: 221, capabilitiesSha256: digest("audited capability"),
   auditedAllFrameDelivery: true, reviewerNamespaceSha256: digest("narrowed namespace"), mediaOnlyNamespaceVerified: true,
 };
@@ -76,4 +76,28 @@ test("human-inspected metadata is bound to exact model/capability and expires or
   assert.equal(registry.current(target, proof.expiresAt), null);
   assert.equal(registry.revoke(human, proof.proofId), true);
   assert.equal(registry.current(target, 1_000), null);
+});
+test("only owners and admins list proofs; readiness counts only unrevoked proofs inside their window", (t) => {
+  const db = new DatabaseSync(":memory:"); t.after(() => db.close());
+  const registry = new VideoLiveValidationRegistry(db);
+  const operator = { ...human, role: "operator" } as AuthPrincipal;
+  const agent: AuthPrincipal = { kind: "agent", actorId: "agent", credentialSessionId: "agent", organizationId: "org",
+    delegatedScope: { organizationId: "org", owner: { kind: "user", userId: "human" } } };
+  assert.deepEqual(registry.list(human, 1_000), []);
+  assert.equal(registry.list(operator, 1_000), null);
+  assert.equal(registry.list(agent, 1_000), null);
+  assert.equal(registry.recordInspectedRuns(operator, target, runs(), 1_000), null);
+  assert.equal(registry.recordInspectedRuns(human, target, null as unknown as InspectedVideoValidationRun[], 1_000), null);
+  const proof = registry.recordInspectedRuns(human, target, runs(), 1_000)!;
+  assert.deepEqual(registry.unexpired(1_000).map((item) => item.proofId), [proof.proofId]);
+  assert.deepEqual(registry.unexpired(999), [], "a proof is not current before it was validated");
+  assert.deepEqual(registry.unexpired(proof.expiresAt), []);
+  assert.deepEqual(registry.list(human, proof.expiresAt), [{ proofId: proof.proofId, driver: target.driver, modelId: target.modelId,
+    providerId: target.providerId, capabilitiesSha256: target.capabilitiesSha256, validatedAt: 1_000, expiresAt: proof.expiresAt,
+    verifiedByUserId: "human", revoked: false, expired: true }]);
+  assert.equal(registry.revoke(operator, proof.proofId), false);
+  assert.equal(registry.revoke(human, proof.proofId), true);
+  assert.equal(registry.revoke(human, proof.proofId), false, "a revoked proof cannot be revoked twice");
+  assert.deepEqual(registry.unexpired(1_000), []);
+  assert.equal(registry.list(human, 1_000)![0]!.revoked, true);
 });

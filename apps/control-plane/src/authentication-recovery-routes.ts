@@ -154,11 +154,11 @@ export function registerAuthenticationRecoveryRoutes(
     if (typeof body.providerAccountId !== "string" || !PROVIDER_ACCOUNT_ID.test(body.providerAccountId)) {
       return reply.code(400).send({ error: "providerAccountId is invalid" });
     }
-    if (typeof body.expectedProviderAccountId !== "string" ||
-        !PROVIDER_ACCOUNT_ID.test(body.expectedProviderAccountId)) {
+    if (body.expectedProviderAccountId !== null &&
+        (typeof body.expectedProviderAccountId !== "string" || !PROVIDER_ACCOUNT_ID.test(body.expectedProviderAccountId))) {
       return reply.code(400).send({ error: "expectedProviderAccountId is invalid" });
     }
-    if (session.providerAccountId !== body.expectedProviderAccountId) {
+    if ((session.providerAccountId ?? null) !== body.expectedProviderAccountId) {
       return reply.code(409).send({
         error: "The session's configured account changed while this card was open. Review the updated card.",
         code: "account_changed",

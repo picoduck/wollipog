@@ -1,14 +1,108 @@
 import assert from "node:assert/strict";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
-import { chmodSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { chmodSync, copyFileSync, existsSync, linkSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, realpathSync, renameSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
+import { fileURLToPath } from "node:url";
 import { LeaseHelperArtifact, leaseHelperParent } from "./provider-home-lease-staging.js";
 
 const registryModule = new URL("./provider-home-lease.ts", import.meta.url).href;
 const ioModule = new URL("./provider-home-lease-io.ts", import.meta.url).href;
 const boundedModule = new URL("../../../packages/test-support/src/bounded-child-process.ts", import.meta.url).href;
+
+test("trusted helper capture compares complete bounded bytes before establishing cleanup proof", (t) => {
+  const parent = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-embedded-proof-")));
+  t.after(() => rmSync(parent, { recursive: true, force: true }));
+  const trusted = Buffer.alloc(128 * 1024, 0x61);
+  const expected = createHash("sha256").update(trusted).digest("hex");
+  for (const change of ["valid", "tail", "partial", "empty", "oversized", "hardlink", ...(process.platform === "win32" ? [] : ["symlink"])]) {
+    const artifact = new LeaseHelperArtifact(parent, "lease-io");
+    const bytes = Buffer.from(trusted);
+    if (change === "tail") bytes[bytes.length - 1] = bytes[bytes.length - 1]! ^ 1;
+    if (change === "symlink") {
+      const target = join(parent, "foreign-target"); writeFileSync(target, trusted);
+      symlinkSync(target, artifact.path);
+    } else {
+      writeFileSync(artifact.path, change === "partial" ? bytes.subarray(0, bytes.length / 2)
+        : change === "empty" ? Buffer.alloc(0) : change === "oversized" ? Buffer.alloc(16 * 1024 * 1024 + 1) : bytes);
+    }
+    if (change === "hardlink") linkSync(artifact.path, join(parent, "foreign-link"));
+    if (change === "valid") {
+      assert.equal(artifact.capture(expected).sha256, expected);
+      assert.deepEqual(artifact.verify(), trusted);
+      artifact.cleanup(); assert.equal(existsSync(artifact.root), false);
+    } else {
+      assert.throws(() => artifact.capture(expected), /embedded asset|unsafe fixed helper/);
+      assert.throws(() => artifact.verify(), /unproven helper artifact/);
+      const before = readFileSync(artifact.path); artifact.cleanup();
+      assert.deepEqual(readFileSync(artifact.path), before, change + ": unproven evidence retained");
+    }
+  }
+});
+
+test("source and actual POSIX SEA extraction refuse write faults before proof, execution or HOME publication", {
+  skip: process.platform !== "linux" && process.platform !== "darwin", timeout: 180_000,
+}, (t) => {
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-extraction-sea-")));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const require = createRequire(import.meta.url);
+  const entry = fileURLToPath(new URL("./fixtures/provider-home-lease-extraction.cjs", import.meta.url));
+  const bundle = join(root, "fixture-bundle.cjs"), binary = join(root, "fixture-sea");
+  const helper = join(root, "native-helper"), blob = join(root, "fixture.blob"), config = join(root, "sea.json");
+  const run = (command: string, args: string[]) => {
+    const result = spawnSync(command, args, { encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024 });
+    assert.equal(result.status, 0, command + ": " + String(result.error ?? "") + "\n" + result.stderr + "\n" + result.stdout);
+  };
+  const compiler = process.platform === "darwin" ? "/usr/bin/clang" : "/usr/bin/cc";
+  run(compiler, ["-Os", "-std=c11", "-Wall", "-Wextra", "-Werror", ...(process.platform === "linux" ? ["-static"] : []),
+    fileURLToPath(new URL("../native/provider-home-lease-io.c", import.meta.url)), "-o", helper]);
+  const builder = join(root, "build.cjs");
+  writeFileSync(builder, "require(" + JSON.stringify(require.resolve("esbuild")) + ").buildSync("
+    + JSON.stringify({ entryPoints: [entry], outfile: bundle, bundle: true, platform: "node", format: "cjs",
+      target: "node24", define: { "import.meta.url": "undefined" } }) + ");");
+  run(process.execPath, [builder]);
+  writeFileSync(config, JSON.stringify({ main: bundle, output: blob, disableExperimentalSEAWarning: true,
+    assets: { "wollipog/provider-home-lease-io": helper } }));
+  run(process.execPath, ["--experimental-sea-config", config]);
+  copyFileSync(process.execPath, binary); chmodSync(binary, 0o700);
+  if (process.platform === "darwin") {
+    const unsigned = spawnSync("/usr/bin/codesign", ["--remove-signature", binary], { encoding: "utf8", timeout: 30_000 });
+    assert.ok(unsigned.status === 0 || unsigned.stderr.includes("not signed at all"), unsigned.stderr);
+  }
+  const injector = join(root, "inject.cjs");
+  writeFileSync(injector, "require(" + JSON.stringify(require.resolve("postject")) + ").inject("
+    + JSON.stringify(binary) + ",'NODE_SEA_BLOB',require('node:fs').readFileSync(" + JSON.stringify(blob) + "),"
+    + JSON.stringify({ sentinelFuse: "NODE_SEA_FUSE_fce680ab2cc467b6e072b8b5df1996b2",
+      ...(process.platform === "darwin" ? { machoSegmentName: "NODE_SEA" } : {}) })
+    + ").catch(e=>{console.error(e);process.exitCode=1;});");
+  run(process.execPath, [injector]);
+  if (process.platform === "darwin") run("/usr/bin/codesign", ["--sign", "-", binary]);
+  for (const sea of [false, true]) {
+    for (const mode of sea ? ["success", "corrupt", "partial", "partial-throw", "substitute", "fallback"] : ["success", "compiler-partial"]) {
+      const caseRoot = join(root, (sea ? "sea-" : "source-") + mode);
+      const home = join(caseRoot, "home"), temporary = join(caseRoot, "tmp"), data = join(caseRoot, "data");
+      for (const path of [home, temporary, data]) mkdirSync(path, { recursive: true, mode: 0o700 });
+      writeFileSync(join(home, "credential-sentinel"), "synthetic unchanged");
+      const result = spawnSync(sea ? binary : process.execPath,
+        [...(sea ? [] : ["--require", require.resolve("tsx/cjs"), entry]), mode, caseRoot], {
+          env: { HOME: home, TMPDIR: temporary, TMP: temporary, TEMP: temporary, PATH: "/usr/bin:/bin" },
+          encoding: "utf8", timeout: 30_000, maxBuffer: 64 * 1024,
+        });
+      assert.equal(result.status, 0, (sea ? "SEA " : "source ") + mode + ": " + String(result.error ?? "")
+        + "\n" + result.stderr + "\n" + result.stdout);
+      const receipt = JSON.parse(result.stdout.trim());
+      assert.equal(receipt.sea, sea); assert.equal(receipt.mode, mode);
+      if (mode === "success") {
+        assert.deepEqual(readdirSync(temporary).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
+        assert.deepEqual(readdirSync(data).filter(name => name.startsWith("wollipog-provider-home-lease-io-")), []);
+      }
+      t.diagnostic(result.stdout.trim());
+    }
+  }
+});
 
 test("default-equivalent profile temp and runner data can bootstrap without changing foreign lease evidence", { timeout: 180_000 }, (t) => {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-profile-bootstrap-")));

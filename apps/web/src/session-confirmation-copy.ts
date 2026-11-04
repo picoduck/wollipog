@@ -31,8 +31,10 @@ export function stopSessionMessage(title: string | null | undefined, queuedCount
  * Stop Session in Archived Sessions: the same first sentence, then where the session stays. An
  * archived session shows no composer, so Stop Turn is not offered.
  */
-export function stopArchivedSessionMessage(title: string | null | undefined, queuedCount: number): string {
-  return `${stopsNowSentence(title, queuedCount)} It stays in Archived Sessions with its transcript.`;
+export function stopArchivedSessionMessage(title: string | null | undefined, queuedCount: number, archived = true): string {
+  return archived
+    ? `${stopsNowSentence(title, queuedCount)} It stays in Archived Sessions with its transcript.`
+    : `${stopsNowSentence(title, queuedCount)} It stays in Sessions with its transcript, and you can send it a new prompt later.`;
 }
 
 /** Delete Session. */

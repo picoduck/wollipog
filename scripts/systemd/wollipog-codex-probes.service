@@ -1,0 +1,19 @@
+[Unit]
+Description=Measure Codex CLI Assumptions in an Isolated Fixture
+
+[Service]
+Type=oneshot
+# Operator-owned dedicated checkout; NEVER point this at the hosting stack's checkout.
+WorkingDirectory=%h/wollipog-codex-probes
+# Pin these executable paths with an operator-owned drop-in when using nvm/standalone installs.
+ExecStart=/usr/bin/env node --import tsx scripts/codex-assumptions.mjs --report-dir %h/.local/state/wollipog-codex-probes
+Environment=PATH=/usr/local/bin:/usr/bin:/bin
+# Optional operator acknowledgement, configured only after inspecting the first report.
+EnvironmentFile=-%h/.config/wollipog-codex-probes.env
+UMask=0077
+TimeoutStartSec=160min
+KillMode=control-group
+TimeoutStopSec=15s
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=wollipog-codex-probes

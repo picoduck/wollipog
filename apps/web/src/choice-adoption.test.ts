@@ -89,13 +89,6 @@ type Pattern = keyof typeof PATTERNS;
  * one in `SessionPanelToggles.tsx` fails here instead of hiding behind a whole-file exemption.
  */
 const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
-  ["components/AddBoxDialog.tsx", "native-select", 1],
-  ["components/AgentSessionDiscoveryDialog.tsx", "agent-pick", 1],
-  ["components/AutomationsView.tsx", "native-select", 12],
-  ["components/NewRunDialog.tsx", "native-select", 6],
-  ["components/PeopleDevicesPanel.tsx", "native-select", 4],
-  ["components/PodsView.tsx", "native-select", 8],
-  ["components/ProjectLocationDialog.tsx", "native-select", 1],
   // A fenced block's Wrap Lines button (#2152): one on/off toggle per block, not one of N options.
   ["components/Markdown.tsx", "aria-pressed", 1],
   ["components/SessionDetail.tsx", "aria-pressed", 2],
@@ -126,7 +119,6 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
      It is gone: Appearance's three settings are SegmentedRow and SelectRow now, and both own their
      semantics inside the primitives file. The entry came off with the control, which is the
      ratchet working rather than an exemption being granted. */
-  ["components/AgentSessionDiscoveryDialog.tsx", "raw-radiogroup", 1],
   /* ReviewPanel's findings selector and GitDiffViewer's line selectors became `Checkbox` with
      #2044, which took both files' last raw-choice entries off. The question card's options became
      ChoiceRows with #2196, which took SessionApproval's raw radios and `.question-option` off. */
@@ -169,13 +161,16 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
   ["components/ReviewToolbar.tsx", "raw-radiogroup", 4],
   ["components/EditorSelect.tsx", "raw-radiogroup", 1],
   ["components/InstanceSelector.tsx", "raw-radiogroup", 1],
-  ["components/PodsView.tsx", "raw-radiogroup", 1],
   /* Down from 6 on 2026-08-12: the Move to Project dialog adopted ChoiceCards (now ChoiceRows),
      retiring the durable Project chip's bespoke menuitemradio popover. Down from 4 with #2163,
      which moved the workspace form out of the menu. Two of the three are the Move to Workspace
      menu's §9.1 radio-like MenuItem rows (No Workspace and one per workspace) with the trailing
      check: a menu that files the session, not a form choice. */
   ["components/SessionDetail.tsx", "raw-radiogroup", 3],
+  // Usage and Cost's Range menu and the phone's Range and Group By sheet (#3010) are §9.1 radio-like
+  // menus: one MenuItem row per range or grouping with the trailing check, applied at once to the
+  // view. Metric and desktop Group By stay SegmentedControls.
+  ["components/UsageView.tsx", "raw-radiogroup", 2],
 ];
 
 /**
@@ -186,8 +181,7 @@ const BASELINE: ReadonlyArray<readonly [string, Pattern, number]> = [
  * accepted a file that rendered one primitive while keeping seven bespoke controls.
  */
 const FULLY_MIGRATED = [
-  "components/UsageView.tsx",
-  "components/ProjectsView.tsx",
+  "components/ProjectList.tsx",
   "components/NewSessionDialog.tsx",
 ];
 
@@ -306,7 +300,7 @@ test("a fully migrated screen renders a primitive", () => {
   // half — and it looks for a RENDERED element: matching the bare name passed against a screen
   // whose primitive had been renamed and therefore rendered nothing.
   for (const name of FULLY_MIGRATED) {
-    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceRows|ChoiceList|Select|SearchableCombobox)[\s/>]/,
+    assert.match(read(join(SRC, name)), /<(SegmentedControl|ChoiceRows|ChoiceList|Select|SearchableCombobox)[\s/><]/,
       `${name} is listed as fully migrated but renders no choice primitive`);
   }
 });
@@ -314,8 +308,11 @@ test("a fully migrated screen renders a primitive", () => {
 test("New Session completed the shared-choice migration", () => {
   const source = read(join(SRC, "components/NewSessionDialog.tsx"));
   assert.match(source, /<SearchableCombobox/, "Project and Agent use the searchable primitive");
-  assert.match(source, /<ChoiceRows/, "described and multiple choices use shared choice rows");
-  assert.match(source, /<SegmentedControl/, "short fixed modes use the segmented primitive");
+  // Options (#2954): Role, Harness and Working Copy are segmented setting rows, Run On a Select
+  // row, and Extra Folders checkbox rows, each delegating to the shared primitive.
+  assert.match(source, /<SegmentedRow/, "short fixed choices use the segmented setting row");
+  assert.match(source, /<SelectRow/, "a longer list uses the Select setting row");
+  assert.match(source, /<Checkbox/, "multiple choices use the shared checkbox");
   assert.equal(BASELINE.some(([file]) => file === "components/NewSessionDialog.tsx"), false,
     "no bespoke New Session picker remains in the ratchet inventory");
 });

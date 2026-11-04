@@ -1,1 +1,0 @@
-|.workflow-node|padding|10px

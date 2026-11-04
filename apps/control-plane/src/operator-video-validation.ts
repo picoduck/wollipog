@@ -14,7 +14,12 @@ export const OPERATOR_VIDEO_VALIDATION_PROFILES = Object.freeze({
   maximum: { frames: 900, width: 1280, height: 720, durationUs: 30_000_000 },
 });
 export type OperatorVideoValidationProfile = keyof typeof OPERATOR_VIDEO_VALIDATION_PROFILES;
-export interface OperatorVideoValidationSubject extends PreparedMediaSubject { profile: OperatorVideoValidationProfile }
+/** The Human's own commitment to the private blind oracle is part of what they mint, pinned before
+ * any dispatch; the server cannot read or certify the oracle itself. */
+export interface OperatorVideoValidationSubject extends PreparedMediaSubject {
+  profile: OperatorVideoValidationProfile;
+  privateOracleCommitmentSha256: string;
+}
 /** Returned ONLY by the installed server adapter after resolving the stored original Human gate,
  * actual source/full native derivation, private config/disclosure and narrowed installed profile.
  * current() must also check current user/org/session/daily/host/native/media concurrency and
@@ -75,13 +80,15 @@ function validScope(scope: OperatorVideoValidationScope): boolean {
       scope.providerExecutableSha256, scope.nativeToolProfileSha256, scope.namespaceLaunchSha256, scope.authoritySha256].every(digest) &&
     Number.isSafeInteger(s.sizeBytes) && s.sizeBytes > 0 && s.sizeBytes <= 32 * 1024 * 1024 &&
     s.frames === expected.frames && s.width === expected.width && s.height === expected.height && s.durationUs === expected.durationUs &&
+    subject.privateOracleCommitmentSha256 === s.privateOracleCommitmentSha256 &&
     r.agentId === t.agentId && r.runnerId === t.runnerId && r.role !== "orchestrator" &&
     r.launchSurface !== "native_tui" && !r.images?.length && !r.workspacePath && r.config?.model === t.modelId &&
     positive(r.config?.costBudgetUsd) && Number.isSafeInteger(r.config?.maxToolCalls) && Number(r.config?.maxToolCalls) > 0;
 }
 
 /** Human-only, finite, one-shot CODE ingress for a separately reviewed isolated operator action.
- * Not registered in hosting, no API route, no production-proof exemption, no model call/upload.
+ * Reached only through hosting's owner/admin validation routes and the trusted scope port
+ * (`DelegatedVideoReviews.validationScope`); no production-proof exemption, no model call/upload.
  * The permit is a narrowing of existing grants/allowance; it cannot mint those grants itself.
  * An original occurrence/evidence/profile cannot acquire another permit after revocation/replay.
  * Materialization claim and permanent Session purpose must commit in the same SQLite transaction.

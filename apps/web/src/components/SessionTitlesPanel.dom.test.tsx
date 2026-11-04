@@ -605,6 +605,63 @@ test("a save that fails after switching instances never touches the new instance
   }
 });
 
+test("a typed API key never reaches the DOM, before or after a failed save (#3814)", async () => {
+  const { transport, calls } = recordingTransport(() => baseView(), (call) =>
+    call.method === "PUT" ? json({ error: "the selected Machine rejected the configuration" }, 409) : undefined);
+  const view = await renderPanel(transport);
+  try {
+    await selectOption(view.container, "Title Source", "Custom Endpoint");
+    const panel = dialog()!;
+    const url = input(panel, "Endpoint URL");
+    await type(url, "http://models.internal/v1");
+    await type(input(panel, "Model"), "title-model");
+    await leave(url);
+    assert.equal(url.getAttribute("aria-invalid"), null, "without a key, an http endpoint is allowed");
+    const key = input(panel, "API Key (Optional)");
+    await type(key, "endpoint-key-secret");
+    assert.doesNotMatch(body().innerHTML, /endpoint-key-secret/, "a typed key is not mirrored into a value attribute");
+    await leave(url);
+    assert.equal(byId(url.getAttribute("aria-describedby")!)?.textContent, "Use an https:// URL to send an API key.",
+      "a typed key still decides how the endpoint is checked");
+    await type(key, "");
+    assert.equal(url.getAttribute("aria-invalid"), null, "and removing it clears that error");
+
+    await type(url, "https://models.example/v1/chat/completions");
+    await type(key, "endpoint-key-secret");
+    await act(async () => fireDomEvent.submit(panel.querySelector("form")!));
+    await settle();
+    assert.equal(calls.at(-1)?.body?.apiKey, "endpoint-key-secret", "Save sends the typed key");
+    assert.match(panel.querySelector('[role="alert"]')?.textContent ?? "", /Couldn't save the endpoint\./);
+    assert.equal(key.value, "", "the key is not kept past the request that carried it");
+    assert.doesNotMatch(body().innerHTML, /endpoint-key-secret/, "nor is it in the DOM after the failure");
+  } finally {
+    await cleanup(view);
+  }
+});
+
+test("a replacement API key never reaches the DOM, before or after a failed replace (#3814)", async () => {
+  const { transport } = recordingTransport(() => savedEndpoint(true), (call) =>
+    call.path === "/api/session-naming/custom-model/api-key" ? json({ error: "the machine is offline" }, 409) : undefined);
+  const view = await renderPanel(transport);
+  try {
+    await act(async () => buttonNamed(view.container, "Edit…").click());
+    await act(async () => buttonNamed(dialog()!, "Replace…").click());
+    const replace = dialog()!;
+    const key = input(replace, "New API Key");
+    await type(key, "replacement-key-secret");
+    assert.doesNotMatch(body().innerHTML, /replacement-key-secret/);
+    await act(async () => fireDomEvent.submit(replace.querySelector("form")!));
+    await settle();
+    assert.match(replace.textContent ?? "", /The API key wasn't replaced\./);
+    assert.equal(key.value, "");
+    assert.doesNotMatch(body().innerHTML, /replacement-key-secret/, "nor after the failure");
+    await act(async () => fireDomEvent.submit(replace.querySelector("form")!));
+    assert.match(replace.textContent ?? "", /Enter the new API key\./, "a cleared field asks for the key again");
+  } finally {
+    await cleanup(view);
+  }
+});
+
 test("with a saved key, an http URL off this machine is refused before anything is sent", async () => {
   const { transport, calls } = recordingTransport(() => savedEndpoint(true));
   const view = await renderPanel(transport);

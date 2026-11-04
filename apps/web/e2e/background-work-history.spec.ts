@@ -52,7 +52,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     } else {
       await expect(notice).toContainText("no recorded return step");
       await expect(notice).toContainText("will not resubmit them automatically");
-      await expect(panel.locator(".background-work-turn-head")).not.toContainText("Returning Result");
+      await expect(panel.locator(".background-work-turn-head")).not.toContainText("Follow-Up Pending");
     }
     await expect(notice).toContainText("Open More Actions and choose Restart Session");
     await expect(notice).toContainText("Restart ends every job and reports held results; it does not rerun their original commands.");
@@ -64,7 +64,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     }
     await hold(3_000);
     await notice.getByRole("button", { name: "Show Details" }).click();
-    await expect(notice.locator(".facts")).toContainText("Restarting the session ends every job and reports this result to the new conversation.");
+    await expect(notice.locator(".facts")).toContainText("Restarting the session ends every job and reports this result after the restart.");
     await hold(3_000);
     await panel.getByRole("button", { name: /^(Close Panel|Back to Session)$/ }).click();
     await hold(1_500);
@@ -76,7 +76,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     await restart.click();
     const confirmation = page.getByRole("dialog", { name: "Restart Session", exact: true });
     await expect(confirmation).toContainText("ends every background job");
-    await expect(confirmation).toContainText("The original job commands are not rerun");
+    await expect(confirmation).toContainText("original job commands are not rerun");
     await expect(confirmation.getByRole("button", { name: "Cancel", exact: true })).toBeFocused();
     await hold(4_000);
     if (process.env.ISSUE_3280_EVIDENCE_DIR) {

@@ -36,8 +36,9 @@ attempt, shard, source head, fixed output paths, byte sizes and SHA-256 digests.
 To validate on CI, dispatch `ci.yml` on the reviewed issue branch with
 `synthetic_failure_artifacts=true`. Only that manual event selects the isolated
 mocked fixture; normal PR, main and merge-group events retain the full suite.
-One shard deliberately fails, exercises retries and publishes sanitized captures;
-the browser job and required aggregate must fail. This is separate from final
+Each of the five shard projects deliberately fails, exercises retries and publishes
+its own bounded sanitized captures. All five browser jobs and the required aggregate
+must fail. This is separate from final
 merge verification. Sanitizer and upload wiring must receive cross-model review
 before that first upload is enabled. This does not authorize real hosting-session
 captures or change manual Session Artifact Uploads preferences.
@@ -56,6 +57,10 @@ Regression coverage uses synthetic secret/prompt/transcript/cookie/auth/personal
 private-URL/error sentinels in trace fields, DOM, resources, context and metadata.
 
 ## Verified CI Receipt
+
+This historical receipt predates the duration-based shard projects in #3628.
+Its single failing shard and single artifact describe that recorded run; current
+synthetic dispatches select the probe on all five projects as described above.
 
 The first bounded validation used reviewed source head
 `7f8514d922a3d1c4a3d0fd19190f83ad25341696` in

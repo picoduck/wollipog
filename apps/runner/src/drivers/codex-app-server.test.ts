@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { mkdirSync, mkdtempSync, realpathSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { PassThrough } from "node:stream";
 import { fileURLToPath } from "node:url";
 import { test, type TestContext } from "node:test";
@@ -28,6 +28,7 @@ import {
 import type { DriverCallbacks, DriverOptions } from "./driver.js";
 import type { StagedPromptImages } from "./prompt-images.js";
 import { JsonRpcPeer } from "../jsonrpc.js";
+import { codexReviewWorkingDirectory } from "../review-sessions.js";
 import type { AgentProcess } from "../spawn.js";
 
 function fakeAgentProcess(): AgentProcess {
@@ -1365,6 +1366,36 @@ test("newSession starts a fresh thread and requires the server's actual id", asy
   assert.equal(h.driver.agentSessionId(), "fresh-1");
 });
 
+test("Codex reviews keep discovery and every turn outside the reviewed checkout", async () => {
+  const root = mkdtempSync(join(tmpdir(), "review-skills-driver-"));
+  const checkout = join(root, "checkout");
+  mkdirSync(checkout);
+  const h = makeHarness({ cwd: checkout, review: true });
+  const calls: Array<{ method: string; params: any }> = [];
+  const request = async (method: string, params: any) => {
+    calls.push({ method, params });
+    if (method === "thread/start") return { thread: { id: "review" } };
+    if (method === "turn/start") {
+      setImmediate(() => (h.driver as any).settleTurn("end_turn"));
+      return { turn: { id: "turn" } };
+    }
+    return { data: [] };
+  };
+  (h.driver as any).peer = { request, requestWithDeadline: request };
+  try {
+    const cwd = codexReviewWorkingDirectory(checkout);
+    assert.equal((h.driver as any).cwd, cwd, "spawn uses the neutral cwd");
+    await h.driver.newSession(checkout);
+    const thread = calls.find(call => call.method === "thread/start")!;
+    assert.equal(thread.params.cwd, cwd);
+    assert.ok(thread.params.developerInstructions.includes(JSON.stringify(checkout)));
+    assert.deepEqual(calls.find(call => call.method === "skills/list")!.params, { cwds: [cwd] });
+    assert.equal(await h.driver.prompt("review"), "end_turn");
+    assert.equal(calls.find(call => call.method === "turn/start")!.params.cwd, cwd);
+    assert.equal(calls.some(call => call.method === "plugin/reconcile"), false);
+  } finally { rmSync(root, { recursive: true, force: true }); }
+});
+
 test("newSession validates then resumes the exact persisted thread without replaying history", async () => {
   const h = makeHarness({
     resumeId: "thread-7",
@@ -2350,6 +2381,43 @@ test("an async question exceeding the supported context bound remains a compatib
   h.onItem({ type: "agentMessage", id: "oversized-question", text: "Context is too large.", delivery: "async",
     questions: [{ title: "a".repeat(64 * 1024 + 1), options: ["Approve", "Wait"] }] }, true);
   assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+  assert.ok(h.stderr.some((line) => /async question.*reason=title_length index=0/.test(line)));
+});
+
+// Codex's async question contract sets no upper bound on the question count (#3724); the blocking
+// requestUserInput limit of three must not leak into this path.
+for (const count of [4, 20]) {
+  test(`a Codex async message with ${count} questions surfaces every question in order`, () => {
+    const h = makeHarness();
+    const questions = Array.from({ length: count }, (_, index) => ({
+      title: `Authorize decision ${index + 1}?`, options: ["Approve (Recommended)", "Hold"],
+    }));
+    h.onItem({ type: "agentMessage", id: `many-${count}`, text: "Several decisions.", delivery: "async", questions }, true);
+    assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "question_request"]);
+    const request = h.events[1];
+    if (request?.kind !== "question_request") assert.fail("expected an answerable async question card");
+    assert.deepEqual(request.questions.map(question => [question.id, question.question]),
+      questions.map((question, index) => [String(index), question.title]));
+    assert.equal(h.stderr.length, 0);
+  });
+}
+
+test("a Codex async message above the defensive question cap stays a compatibility failure that names the count", () => {
+  const h = makeHarness();
+  const questions = Array.from({ length: 21 }, (_, index) => ({ title: `Decision ${index + 1}?`, options: ["Yes"] }));
+  h.onItem({ type: "agentMessage", id: "too-many", text: "Too many decisions.", delivery: "async", questions }, true);
+  assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+  assert.ok(h.stderr.some((line) => /async question.*reason=question_count count=21/.test(line)));
+});
+
+test("a subagent's async question stays a compatibility failure that names its origin", () => {
+  const h = makeHarness();
+  (h.driver as any).threadId = "root";
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  (h.driver as any).onItem({ type: "agentMessage", id: "child-ask", text: "Child decision.", delivery: "async",
+    questions: [{ title: "Proceed?", options: ["Yes"] }] }, true, "child");
+  assert.deepEqual(h.events.map(event => event.kind), ["agent_message", "error"]);
+  assert.ok(h.stderr.some((line) => /async question.*reason=subagent/.test(line)));
 });
 
 test("a later Codex turn may reuse an async message item id", async () => {
@@ -2374,6 +2442,58 @@ test("unsupported async question payload reports compatibility failure without a
     questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] }, true);
   assert.deepEqual(h.events.map((event) => event.kind), ["agent_message", "error"]);
   assert.match((h.events[1] as { message: string }).message, /cannot safely answer/);
+  assert.equal((h.events[1] as { nonFatal?: true }).nonFatal, true, "a rejected question is not a failed turn (#3806)");
+  assert.ok(h.stderr.some((line) => /async question.*reason=option_shape index=0/.test(line)));
+});
+
+const REJECTED_ASK = { type: "agentMessage", id: "rejected-ask", text: "Please decide.", delivery: "async",
+  questions: [{ title: "Where?", options: [{ label: "Invalid shape" }] }] };
+
+test("a rejected async question in an open root turn steers the agent and reports a non-fatal notice (#3806)", async () => {
+  const h = makeHarness();
+  const calls: Array<{ method: string; params: any }> = [];
+  activateSteer(h.driver, async (method, params) => {
+    calls.push({ method, params });
+    return { turnId: "provider-turn-steer" };
+  });
+  h.onItem(REJECTED_ASK, true);
+  await waitForCondition(() => h.events.some((event) => event.kind === "error"));
+  assert.deepEqual(calls.map((call) => call.method), ["turn/steer"]);
+  assert.equal(calls[0]!.params.expectedTurnId, "provider-turn-steer");
+  assert.equal(calls[0]!.params.clientUserMessageId, "wollipog-async-question-rejected:rejected-ask");
+  assert.match(calls[0]!.params.input[0].text, /could not show your async question.*reason: option_shape index=0.*normal message/);
+  assert.deepEqual(h.events.find((event) => event.kind === "error"), {
+    kind: "error",
+    nonFatal: true,
+    message: "Codex asked a question Wollipog can't show as an answer card. Wollipog asked the agent to repeat it in a normal message.",
+  });
+});
+
+test("a refused steer leaves the user-facing guidance to ask the agent and logs why", async () => {
+  const h = makeHarness();
+  activateSteer(h.driver, async () => { throw new Error("turn already completed"); });
+  h.onItem(REJECTED_ASK, true);
+  await waitForCondition(() => h.events.some((event) => event.kind === "error"));
+  const notice = h.events.find((event) => event.kind === "error") as { message: string; nonFatal?: true };
+  assert.equal(notice.nonFatal, true);
+  assert.match(notice.message, /Ask the agent to repeat the question in a normal message\.$/);
+  assert.ok(h.stderr.some((line) => /could not tell Codex its async question was not shown item=rejected-ask outcome=rejected/.test(line)));
+});
+
+test("a subagent's rejected async question never steers the root turn", async () => {
+  const h = makeHarness();
+  const methods: string[] = [];
+  activateSteer(h.driver, async (method) => {
+    methods.push(method);
+    return { turnId: "provider-turn-steer" };
+  });
+  (h.driver as any).subagentToolByThread.set("child", "spawn");
+  (h.driver as any).onItem({ ...REJECTED_ASK, id: "child-rejected" }, true, "child");
+  await nextTask();
+  assert.deepEqual(methods, []);
+  const notice = h.events.find((event) => event.kind === "error") as { message: string; nonFatal?: true };
+  assert.equal(notice.nonFatal, true);
+  assert.match(notice.message, /Ask the agent to repeat/);
 });
 
 test("structured Codex collaboration items expose recursive live subagent output and lifecycle", () => {
@@ -2700,12 +2820,6 @@ test("resolvePermission writes accept on allow, decline on deny (command approva
   pending.set("req-2", { method: cmd, params: { command: "ls" }, resolve: (d: unknown) => seen.push(d) });
   h.driver.resolvePermission("req-2", "deny");
   assert.deepEqual(seen[1], { decision: "decline" });
-});
-
-test("resolvePermission for an unknown id is a no-op", () => {
-  const h = makeHarness();
-  h.driver.resolvePermission("nope", "allow"); // must not throw
-  assert.ok(true);
 });
 
 test("a newer provider request cancels the previous parked approval and keeps unique fallback ids", async () => {
@@ -3308,6 +3422,38 @@ test("buildCodexTurnParams: orchestrator uses constrained Guardian review withou
   });
 });
 
+test("a review session's Codex launch disables every configured MCP server, with no exemption (#3368)", async () => {
+  // An empty `mcp_servers` table does not remove servers from the user's or the checkout's
+  // configuration: the launch must disable each one the effective inventory lists.
+  const dir = mkdtempSync(join(tmpdir(), "wollipog-review-mcp-"));
+  try {
+    const stub = join(dir, "codex");
+    writeFileSync(stub, `#!/bin/sh\nprintf '%s' '[{"name":"railway","enabled":true},{"name":"declared","enabled":true},{"name":"wollipog","enabled":true}]'\n`, { mode: 0o755 });
+    const launched: string[][] = [];
+    const h = makeHarness({
+      command: stub, cwd: dir, review: true, config: cfg("read-only"),
+      args: ["-c", 'mcp_servers.declared={ "command" = "/x" }'],
+    });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (h.driver as any).spawn = (options: { args: string[] }) => {
+      launched.push(options.args);
+      throw new Error("spawn-reached");
+    };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await assert.rejects(() => (h.driver as any).startAppServer(false), /spawn-reached/u);
+    assert.ok(launched[0]!.includes("mcp_servers.railway.enabled=false"), "a user-configured server is disabled");
+    assert.ok(launched[0]!.includes("mcp_servers.declared.enabled=false"), "a server the launch arguments declare is not exempt");
+    assert.ok(launched[0]!.includes("mcp_servers.wollipog.enabled=false"), "not even a Wollipog server is kept");
+    // With nothing configured at all, the launch still proceeds rather than demanding a Wollipog server.
+    writeFileSync(stub, "#!/bin/sh\nprintf '%s' '[]'\n", { mode: 0o755 });
+    const empty = makeHarness({ command: stub, cwd: dir, review: true, config: cfg("read-only") });
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    (empty.driver as any).spawn = () => { throw new Error("spawn-reached"); };
+    // eslint-disable-next-line @typescript-eslint/no-explicit-any
+    await assert.rejects(() => (empty.driver as any).startAppServer(false), /spawn-reached/u);
+  } finally { rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("an additive Codex Orchestrator turn follows the selected mode and skips the isolation probe", async () => {
   // The additive shape is an ordinary permission mode plus runner-injected launch arguments. The
   // driver has no other signal, so both the turn parameters and the app-server launch must be
@@ -3439,6 +3585,84 @@ test("buildCodexTurnParams: managed linked worktrees grant only shared Git metad
     ).sandboxPolicy,
     { type: "readOnly" },
   );
+});
+
+/** A second linked worktree of the fixture's repository with its own admin directory. */
+function linkedWorktree(repoPath: string, path: string) {
+  const gitAdmin = join(repoPath, ".git", "worktrees", basename(path));
+  mkdirSync(path, { recursive: true });
+  mkdirSync(gitAdmin, { recursive: true });
+  writeFileSync(join(path, ".git"), `gitdir: ${gitAdmin}\n`);
+  return { path, gitAdmin };
+}
+
+test("buildCodexTurnParams: the session's bound worktrees join a protected workspace and nothing else does (#3316)", (t) => {
+  const f = managedGitFixture(t);
+  const owned = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "owned"));
+  const other = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "other"));
+  // An Orchestrator's guard list names every session's worktrees; only the bound set is granted.
+  const protections = [f.worktreePath, owned.path, other.path].map((worktreePath) => ({ worktreePath, repoPath: f.repoPath }));
+  for (const mode of ["auto-review", "on-request", "workspace-write", "danger-full-access"]) {
+    const params = buildCodexTurnParams(cfg(mode), "t", f.worktreePath, [], undefined, protections, null, false, [owned]);
+    assert.deepEqual(params.sandboxPolicy, {
+      type: "workspaceWrite", writableRoots: [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin],
+    }, mode);
+  }
+  const orchestrator = buildCodexTurnParams(cfg("orchestrator"), "t", f.worktreePath, [], undefined, protections, null, false, [owned]);
+  assert.deepEqual(orchestrator.sandboxPolicy.writableRoots, [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin]);
+  assert.deepEqual(
+    buildCodexTurnParams(cfg("read-only"), "t", f.worktreePath, [], undefined, protections, null, false, [owned]).sandboxPolicy,
+    { type: "readOnly" },
+  );
+
+  // The selected worktree itself, a duplicate, and a worktree retired since launch add nothing.
+  const retired = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "retired"));
+  rmSync(retired.path, { recursive: true, force: true });
+  const filtered = buildCodexTurnParams(cfg("auto-review"), "t", f.worktreePath, [], undefined, protections, null, false,
+    [{ path: f.worktreePath, gitAdmin: f.gitRoots[0]! }, owned, owned, retired]);
+  assert.deepEqual(filtered.sandboxPolicy.writableRoots, [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin]);
+
+  // Without a protected selected worktree there is no Git grant to extend.
+  assert.deepEqual(
+    buildCodexTurnParams(cfg("auto-review"), "t", "/w", [], undefined, [], null, false, [owned]).sandboxPolicy,
+    { type: "workspaceWrite" },
+  );
+});
+
+test("prompt grants exactly the worktrees its launch boundary binds (#3316)", async (t) => {
+  const f = managedGitFixture(t);
+  const owned = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "owned"));
+  const other = linkedWorktree(f.repoPath, join(dirname(f.worktreePath), "other"));
+  let turnParams: any = null;
+  const h = makeHarness({
+    cwd: f.worktreePath,
+    config: cfg("workspace-write"),
+    managedWorktreeProtections: () => [f.worktreePath, owned.path, other.path]
+      .map((worktreePath) => ({ worktreePath, repoPath: f.repoPath })),
+    isolation: {
+      backend: "bwrap", command: "/usr/bin/bwrap", args: [], network: "inherit",
+      protectedWorktree: {
+        parent: dirname(f.worktreePath), path: f.worktreePath,
+        gitWritableRoots: [...f.gitRoots, owned.gitAdmin], ownedWorktrees: [owned],
+      },
+    },
+  });
+  (h.driver as any).threadId = "thread-owned";
+  (h.driver as any).peer = {
+    request: async (method: string, params: any) => {
+      if (method === "turn/start") turnParams = params;
+      return { turn: { id: "turn-owned" } };
+    },
+  };
+  const turn = h.driver.prompt("work");
+  await nextTask();
+  assert.deepEqual(turnParams.sandboxPolicy, {
+    type: "workspaceWrite",
+    writableRoots: [f.worktreePath, ...f.gitRoots, owned.path, owned.gitAdmin],
+  });
+  assert.equal(JSON.stringify(turnParams).includes(other.path), false, "another session's worktree is never granted");
+  (h.driver as any).settleTurn("end_turn");
+  assert.equal(await turn, "end_turn");
 });
 
 test("prompt keeps the managed Git grant with Integration Isolation enabled and disabled", async (t) => {
@@ -3673,6 +3897,145 @@ test("historical reconciliation proves one exact completed root command without 
     providerAdmissionItemId: "admission-legacy",
     providerItemId: "command-legacy",
   });
+});
+
+test("same-turn reconciliation trusts only terminal provider items with an exact preceding admission (#3889)", async () => {
+  const h = makeHarness({ resumeId: "thread-same-turn" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/3889 --squash --match-head-commit ${"a".repeat(40)}`;
+  const admission = {
+    id: "admission", type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+    arguments: { occurrenceId: "workflow-same-turn", action: { kind: "pr_merge_enqueue", command } },
+    status: "completed", error: null,
+    result: { content: [{ type: "text", text: JSON.stringify({ decision: {
+      occurrenceId: "workflow-same-turn", status: "approved",
+      actionAdmission: { kind: "pr_merge_enqueue", command },
+    } }) }] },
+  };
+  const item = { id: "command", type: "commandExecution", command, status: "completed", exitCode: 0 };
+  const turn = { id: "turn-same", status: "inProgress", itemsView: "full", items: [admission, item] };
+  const thread = { id: "thread-same-turn", turns: [turn] };
+  Object.assign(h.driver, { threadId: thread.id, peer: { request: async () => ({ thread }) },
+    readRolloutProof: async () => null });
+  const proof = await h.driver.reconcileCompletedCommand("workflow-same-turn", command);
+  assert.equal(proof?.providerItemId, "command");
+  assert.equal(proof?.providerAdmissionItemId, "admission");
+  turn.status = "completed";
+  assert.deepEqual(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), proof,
+    "unchanged next-turn retry returns identical coordinates without executing another command");
+  turn.status = "inProgress";
+  for (const invalidTurnStatus of ["failed", "interrupted", "unknown"]) {
+    turn.status = invalidTurnStatus;
+    assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  }
+  turn.status = "inProgress";
+  turn.itemsView = "summary";
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  turn.itemsView = "full";
+  turn.items = [admission, { ...admission, id: "duplicate-admission" }, item];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  for (const invalid of [
+    { ...item, status: "inProgress", exitCode: null },
+    { ...item, status: "failed" }, { ...item, exitCode: 1 },
+    { ...item, command: command.replace("a".repeat(40), "b".repeat(40)) },
+  ]) {
+    turn.items = [admission, invalid] as typeof turn.items;
+    assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  }
+  turn.items = [admission, item, { ...item, id: "duplicate" }];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  turn.items = [admission, item, { ...item, id: "running-duplicate", status: "inProgress", exitCode: null }] as typeof turn.items;
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null,
+    "a second exact invocation still running makes the proof ambiguous");
+  turn.items = [item, admission];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+  thread.turns = [{ ...turn, items: [admission] }, { ...turn, id: "another-turn", items: [item] }];
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null,
+    "admission in another turn cannot authorize the command");
+  thread.turns = [{ ...turn, items: [admission, item] }];
+  thread.id = "another-session-thread";
+  assert.equal(await h.driver.reconcileCompletedCommand("workflow-same-turn", command), null);
+});
+
+test("a same-head re-enqueue ties the landed command to one admission by provider order (#3991)", async () => {
+  const h = makeHarness({ resumeId: "thread-reenqueue" });
+  const command = `gh pr merge https://github.com/picoduck/wollipog/pull/3991 --squash --match-head-commit ${"a".repeat(40)}`;
+  const admission = (id: string, occurrenceId: string, overrides: Record<string, unknown> = {}) => ({
+    id, type: "mcpToolCall", server: "wollipog", tool: "consume_workflow_decision",
+    arguments: { occurrenceId, action: { kind: "pr_merge_enqueue", command } },
+    status: "completed", error: null,
+    result: { content: [{ type: "text", text: JSON.stringify({ decision: {
+      occurrenceId, status: "approved", actionAdmission: { kind: "pr_merge_enqueue", command },
+    } }) }] },
+    ...overrides,
+  });
+  const enqueue = (id: string) => ({ id, type: "commandExecution", command, status: "completed", exitCode: 0 });
+  const ejectedTurn = { id: "turn-ejected", status: "completed", itemsView: "full",
+    items: [admission("admission-1", "workflow-ejected"), enqueue("command-1")] as Record<string, unknown>[] };
+  const landedTurn = { id: "turn-landed", status: "completed", itemsView: "full",
+    items: [admission("admission-2", "workflow-landed"), enqueue("command-2")] as Record<string, unknown>[] };
+  const thread = { id: "thread-reenqueue", turns: [ejectedTurn, landedTurn] as Record<string, unknown>[] };
+  Object.assign(h.driver, { threadId: thread.id, peer: { request: async () => ({ thread }) },
+    readRolloutProof: async () => null });
+  const reconcile = (occurrenceId: string, fence?: { providerThreadId: string; providerTurnId: string; providerItemId: string }) =>
+    h.driver.reconcileCompletedCommand(occurrenceId, command, fence);
+  const landed = {
+    commandDigest: createHash("sha256").update(command, "utf8").digest("hex"),
+    providerThreadId: "thread-reenqueue",
+    providerTurnId: "turn-landed",
+    providerAdmissionItemId: "admission-2",
+    providerItemId: "command-2",
+  };
+
+  assert.deepEqual(await reconcile("workflow-landed"), landed,
+    "the earlier successful enqueue sits behind its own admission, so it does not make the later one ambiguous");
+  assert.equal(await reconcile("workflow-ejected"), null, "a later successful enqueue followed the ejected admission");
+  assert.deepEqual(await reconcile("workflow-landed",
+    { providerThreadId: "thread-reenqueue", providerTurnId: "turn-landed", providerItemId: "command-2" }), landed);
+  assert.equal(await reconcile("workflow-landed",
+    { providerThreadId: "thread-reenqueue", providerTurnId: "turn-ejected", providerItemId: "command-1" }), null,
+  "a durable receipt naming another command contradicts the ordered proof");
+
+  landedTurn.items = [admission("admission-2", "workflow-landed"),
+    admission("retry-2", "workflow-landed", { status: "failed", error: { message: "already armed" }, result: null }),
+    enqueue("command-2")];
+  assert.deepEqual(await reconcile("workflow-landed"), landed, "a refused retry of the same occurrence arms nothing");
+
+  for (const [label, items] of [
+    ["another occurrence's admission between them",
+      [admission("admission-2", "workflow-landed"), admission("admission-3", "workflow-other"), enqueue("command-2")]],
+    ["an unfinished admission of another occurrence between them",
+      [admission("admission-2", "workflow-landed"), admission("admission-3", "workflow-other", { status: "inProgress", result: null }),
+        enqueue("command-2")]],
+    ["an unreadable consume call between them",
+      [admission("admission-2", "workflow-landed"), admission("admission-3", "workflow-other", { arguments: "unreadable" }),
+        enqueue("command-2")]],
+    ["two successful commands after one admission",
+      [admission("admission-2", "workflow-landed"), enqueue("command-2"), enqueue("command-3")]],
+    ["a second completed admission of the same occurrence",
+      [admission("admission-2", "workflow-landed"), admission("admission-2b", "workflow-landed"), enqueue("command-2")]],
+    ["a missing admission", [enqueue("command-2")]],
+    ["an unfinished duplicate",
+      [admission("admission-2", "workflow-landed"), enqueue("command-2"),
+        { ...enqueue("command-3"), status: "inProgress", exitCode: null }]],
+  ] as const) {
+    landedTurn.items = [...items] as Record<string, unknown>[];
+    assert.equal(await reconcile("workflow-landed"), null, label);
+  }
+
+  landedTurn.items = [admission("admission-2", "workflow-landed"), enqueue("command-2")];
+  thread.turns = [ejectedTurn, landedTurn, { id: "turn-later", status: "completed", itemsView: "full",
+    items: [enqueue("command-later")] }];
+  assert.equal(await reconcile("workflow-landed"), null, "a later successful enqueue without an admission is ambiguous");
+  thread.turns = [ejectedTurn, landedTurn, { id: "turn-interrupted", status: "interrupted", itemsView: "full",
+    items: [enqueue("command-interrupted")] }];
+  assert.equal(await reconcile("workflow-landed"), null,
+    "a later enqueue that exited 0 still counts, although its interrupted turn could prove nothing itself");
+  thread.turns = [{ ...ejectedTurn, status: "interrupted" }, landedTurn];
+  assert.deepEqual(await reconcile("workflow-landed"), landed,
+    "an earlier enqueue behind its own admission stays tied to it, whatever its turn's status");
+  thread.turns = [ejectedTurn, { id: "turn-admitted", status: "completed", itemsView: "full",
+    items: [admission("admission-2", "workflow-landed")] }, { ...landedTurn, items: [enqueue("command-2")] }];
+  assert.equal(await reconcile("workflow-landed"), null, "an admission in another turn still cannot authorize the command");
 });
 
 test("historical reconciliation falls back to the durable rollout after App Server restart", async () => {
@@ -4162,12 +4525,18 @@ test("App Server approval reasons stay display-only and command identity require
 });
 
 test("approvalContext exposes bounded Codex tool/path/network/branch selectors", () => {
-  assert.deepEqual(approvalContext("item/fileChange/requestApproval", {
+  const selected = approvalContext("item/fileChange/requestApproval", {
     changes: [{ path: "/repo/a.ts" }],
     permissions: { network: true },
     branchName: "feature/x",
     reason: "apply patch",
-  }, true), {
+  }, true);
+  // The runner-observed `dev:ino` (of the nearest existing ancestor for a file to be created) is
+  // host-specific; its shape is checked, then the rest of the context compared exactly.
+  const target = selected.operation?.filesystem?.targets[0];
+  assert.match(target?.identity ?? "", /^\d+:\d+(?::missing)?$/u);
+  delete target?.identity;
+  assert.deepEqual(selected, {
     toolName: "fileChange",
     providerPermissionExpansion: true,
     input: "apply patch",

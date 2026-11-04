@@ -20,11 +20,18 @@ export type ShortcutId =
   | "focus-previous-zone"
   | "open-files"
   | "open-review"
+  | "open-browser"
+  | "open-agents"
+  | "open-background-work"
+  | "open-campaign-status"
+  | "open-requests"
+  | "open-decision-history"
   | "open-side-chat"
   | "toggle-terminal"
   | "toggle-side-panel"
   | "submit-run"
   | "relay-pod-note"
+  | "send-run-follow-up"
   | "shortcut-reference"
   | "inbox-next"
   | "inbox-previous"
@@ -73,7 +80,7 @@ export type ShortcutId =
   | "stop-turn"
   | "exit-terminal";
 
-export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Pod detail";
+export type ShortcutScope = "Global" | "Sessions" | "Sessions List" | "Session" | "Session Reading" | "Run dialog" | "Follow Up dialog" | "Pod detail";
 
 export type ShortcutGroup = "Navigation" | "Sessions List" | "Session Reading" | "Session" | "Actions" | "Help";
 
@@ -190,6 +197,54 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
     scope: "Session",
     binding: { key: "g", primary: true, shift: true },
   },
+  // The other side panel tools (#1260), in the tool switcher's order. Nearly every Ctrl/⌘+Shift
+  // letter is a browser's own chord (BROWSER_RESERVED in shortcuts.test.ts), and Ctrl+Shift+U and
+  // Ctrl+Shift+F belong to Linux and Windows input methods. These letters shadow only minor chords a
+  // page may override: Firefox's text direction (X), responsive design mode (M), Linux downloads (Y),
+  // web console (K) and history library (H); Edge's Collections (Y) and duplicate tab (K); and the
+  // Home page on macOS (⌘⇧H). Ctrl/⌘+' is free everywhere.
+  {
+    id: "open-browser",
+    group: "Session",
+    label: "Browser Panel",
+    scope: "Session",
+    binding: { key: "x", primary: true, shift: true },
+  },
+  {
+    id: "open-agents",
+    group: "Session",
+    label: "Agents Panel",
+    scope: "Session",
+    binding: { key: "m", primary: true, shift: true },
+  },
+  {
+    id: "open-background-work",
+    group: "Session",
+    label: "Background Work Panel",
+    scope: "Session",
+    binding: { key: "y", primary: true, shift: true },
+  },
+  {
+    id: "open-campaign-status",
+    group: "Session",
+    label: "Campaign Status Panel",
+    scope: "Session",
+    binding: { key: "k", primary: true, shift: true },
+  },
+  {
+    id: "open-requests",
+    group: "Session",
+    label: "Requests Panel",
+    scope: "Session",
+    binding: { key: "'", primary: true },
+  },
+  {
+    id: "open-decision-history",
+    group: "Session",
+    label: "Decision History Panel",
+    scope: "Session",
+    binding: { key: "h", primary: true, shift: true },
+  },
   // Ctrl/⌘+; as in Claude Code Desktop (#2862). Ctrl/⌘+Alt+S (the Codex app) is AltGr+S on Windows
   // layouts, which types a character there.
   {
@@ -226,8 +281,15 @@ export const SHORTCUTS: readonly ShortcutDefinition[] = [
   {
     id: "relay-pod-note",
     group: "Actions",
-    label: "Add Pod Note",
+    label: "Relay Note",
     scope: "Pod detail",
+    binding: { key: "Enter", primary: true },
+  },
+  {
+    id: "send-run-follow-up",
+    group: "Actions",
+    label: "Send Follow-Up to Agents",
+    scope: "Follow Up dialog",
     binding: { key: "Enter", primary: true },
   },
   {
@@ -707,6 +769,7 @@ const EXPERIMENT_SHORTCUT_IDS: Partial<Record<ShortcutId, ExperimentId>> = {
   "submit-run": "multiAgent",
   "navigate-pods": "pods",
   "relay-pod-note": "pods",
+  "send-run-follow-up": "multiAgent",
 };
 
 /** The rail destination a navigation shortcut advertises, or null for every other binding. */

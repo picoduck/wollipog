@@ -5,6 +5,7 @@ import { delimiter, join } from "node:path";
 import test from "node:test";
 import vm from "node:vm";
 import { spawnSync } from "@wollipog/test-support/bounded-child-process";
+import { browserShards } from "../playwright.shards.ts";
 
 const workflow = readFileSync(new URL("../.github/workflows/ci.yml", import.meta.url), "utf8");
 const evidence = JSON.parse(readFileSync(new URL("./fixtures/browser-ci-timings.json", import.meta.url), "utf8"));
@@ -19,6 +20,13 @@ const diagnosticSteps = [
   "Tell the Author How to Commit the linux Baselines",
 ];
 const reserveSeconds = 180;
+const systemCacheSteps = [
+  "Resolve Playwright Chromium System Packages",
+  "Restore Playwright Chromium System Packages",
+  "Verify Playwright Chromium Launch",
+  "Collect Playwright Chromium System Packages",
+  "Save Playwright Chromium System Packages",
+];
 // The recorded six-minute timeout took 372 seconds. Round its 12-second overrun up to 15
 // for EACH attempt, including a near-bound successful retry. This is a sizing assumption,
 // not a promise about GitHub's timeout enforcement; natural-run observation is still required.
@@ -60,6 +68,13 @@ function measuredRemainder(rows) {
   }));
 }
 
+function assertFullShardCoverage(rows) {
+  for (const { runId, attempt } of evidence.completeRunAttempts) {
+    assert.deepEqual(rows.filter((row) => row.runId === runId && row.attempt === attempt)
+      .map((row) => row.shard).sort(), [1, 2, 3, 4, 5], `${runId}/${attempt}: missing or duplicated shard`);
+  }
+}
+
 function budgetAccounting(source, rows = evidence.samples) {
   const job = browserJob(source);
   const budget = Number(job.match(/^    timeout-minutes: (\d+)$/m)?.[1]) * 60;
@@ -68,14 +83,15 @@ function budgetAccounting(source, rows = evidence.samples) {
   // Cache hit/miss are mutually exclusive; each active path includes its own first AND retry.
   const install = Math.max(...attemptPaths.map((attempts) => attempts.reduce((sum, value) => sum + value, 0)));
   const remainder = Math.ceil(measuredRemainder(rows) / 10) * 10;
-  const enforcement = (Math.max(...attemptPaths.map((attempts) => attempts.length)) + diagnosticSteps.length)
+  const cache = systemCacheSteps.reduce((seconds, name) => seconds + stepSeconds(namedStep(job, name)), 0);
+  const enforcement = (Math.max(...attemptPaths.map((attempts) => attempts.length)) + diagnosticSteps.length + systemCacheSteps.length)
     * enforcementSecondsPerAttempt;
   const diagnostics = diagnosticSteps.reduce((seconds, name) => seconds + stepSeconds(namedStep(job, name)), 0);
-  const required = install + remainder + enforcement + reserveSeconds + diagnostics;
+  const required = install + cache + remainder + enforcement + reserveSeconds + diagnostics;
   assert.ok(budget >= required,
     `browser: ${budget}s must cover ${install}s attempts + ${remainder}s measured remainder + ` +
-    `${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${reserveSeconds}s reserve (needs ${required}s)`);
-  return { budget, install, remainder, enforcement, diagnostics, required };
+    `${cache}s cache/verify + ${enforcement}s timeout enforcement + ${diagnostics}s diagnostics + ${reserveSeconds}s reserve (needs ${required}s)`);
+  return { budget, install, cache, remainder, enforcement, diagnostics, required };
 }
 
 function withBudget(minutes) {
@@ -109,14 +125,15 @@ test("identified browser phases include every full-run shard and reconcile activ
   assert.equal(evidence.units, "seconds");
   const identities = new Set(evidence.samples.map((row) => `${row.runId}/${row.attempt}/${row.shard}`));
   assert.equal(identities.size, evidence.samples.length, "do not count carried-forward successes as fresh retry measurements");
-  for (const { runId, attempt } of evidence.completeRunAttempts) {
-    assert.deepEqual(evidence.samples.filter((row) => row.runId === runId && row.attempt === attempt)
-      .map((row) => row.shard).sort(), [1, 2, 3, 4, 5], `${runId}/${attempt}: missing or duplicated shard`);
+  assertFullShardCoverage(evidence.samples);
+  for (const run of evidence.completeRunAttempts.filter((run) => run.runId >= 40018244256)) {
+    assert.ok(Number.isFinite(Date.parse(run.createdAt)), "redistributed runs retain source creation time");
+    assert.match(run.workloadTreeSha256, /^[a-f0-9]{64}$/, "redistributed runs retain workload provenance");
   }
   const retry = evidence.samples.filter((row) => row.runId === 37478932815 && row.attempt === 2);
   assert.deepEqual(retry.map((row) => row.shard), [4], "only the genuinely rerun job is a new measurement");
-  assert.equal(measuredRemainder(evidence.samples), 1448, "retain the slower historical workload envelope");
-  const current = evidence.samples.filter((row) => row.runId === 37489739075);
+  assert.equal(measuredRemainder(evidence.samples), 2453, "refresh the workload envelope from the identified recent jobs");
+  const current = evidence.samples.filter((row) => row.runId === evidence.baselineRunId);
   assert.equal(current.length, 5, "remeasure all shards after the baseline workload changes");
   assert.ok(current.every((row) => row.headSha === evidence.baselineHead));
   assert.ok(evidence.samples.some((row) => row.shard === 1 && row.productionSeconds > 0));
@@ -124,25 +141,61 @@ test("identified browser phases include every full-run shard and reconcile activ
     "non-shard-1 production skips are intentional");
 });
 
+test("recent sizing evidence covers five natural full runs and rejects incomplete shard samples", () => {
+  assert.equal(evidence.recentSample.runIds.length, 5);
+  assert.equal(new Set(evidence.recentSample.runIds).size, 5);
+  for (const runId of evidence.recentSample.runIds) {
+    const run = evidence.completeRunAttempts.find((run) => run.runId === runId);
+    assert.equal(run.attempt, 1);
+    assert.ok(["push", "merge_group"].includes(run.event));
+    assert.equal(run.workflowConclusion, "success");
+    assert.match(run.workloadTreeSha256, /^[a-f0-9]{64}$/);
+    const rows = evidence.samples.filter((row) => row.runId === runId);
+    assert.ok(rows.every((row) => row.headSha === run.headSha && row.event === run.event && row.conclusion === "success"));
+  }
+  const missing = evidence.samples.filter((row) => !(row.runId === evidence.baselineRunId && row.shard === 5));
+  assert.throws(() => assertFullShardCoverage(missing), /missing or duplicated shard/);
+  assert.throws(() => assertFullShardCoverage([...evidence.samples, evidence.samples[0]]), /missing or duplicated shard/);
+});
+
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 2940, install: 720, remainder: 1450, enforcement: 105, diagnostics: 480, required: 2935 });
+  assert.deepEqual(result, { budget: 4500, install: 720, cache: 480, remainder: 2460, enforcement: 180, diagnostics: 480, required: 4500 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
     "the sizing assumption must cover the observed enforcement overrun");
   for (const row of evidence.samples) {
-    assert.ok(result.budget - result.install - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
+    assert.ok(result.budget - result.install - result.cache - result.enforcement - result.diagnostics - row.nonInstallSeconds >= reserveSeconds,
       `run ${row.runId} shard ${row.shard}: near-bound recovered setup must leave the full remaining workload its reserve`);
   }
 });
 
+test("redistributed sizing retains the measured floor and accounts for the bounded cache phases", () => {
+  const profile = JSON.parse(readFileSync(new URL("./fixtures/browser-shard-profile.json", import.meta.url), "utf8"));
+  for (const { phases } of profile.sources) {
+    assert.ok(Object.values(phases).every((value) => Number.isFinite(value) && value >= 0));
+    assert.equal(phases.activeSeconds, phases.installSeconds + phases.otherSetupSeconds
+      + phases.suiteSeconds + phases.productionSeconds + phases.cleanupSeconds);
+  }
+  const production = profile.sources.reduce((sum, source) => sum + source.phases.productionSeconds, 0);
+  assert.equal(production * 1000, profile.productionDurationMs);
+  const projected = Math.ceil((Math.max(...browserShards().map((group) => group.durationMs)) / 1000
+    + Math.max(...profile.sources.map((source) => source.phases.otherSetupSeconds))
+    + Math.max(...profile.sources.map((source) => source.phases.cleanupSeconds))) / 10) * 10;
+  const result = budgetAccounting(workflow);
+  const conservative = Math.max(projected, result.remainder);
+  assert.ok(result.install + result.cache + conservative + result.enforcement + result.diagnostics + reserveSeconds <= result.budget,
+    "redistribution must fit the finite budget including cache phases, diagnostics and reserve; remeasure workload changes");
+});
+
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 30, 35, 39, 40, 42, 43, 48]) {
+  for (const minutes of [25, 40, 48, 49, 50, 55, 58, 59, 67, 68, 74]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
-  for (const name of paths.flatMap((name) => [name, `Retry ${name}`])) {
-    assert.throws(() => budgetAccounting(withAttemptBound(name, 7)), /must cover/, `${name}: lost reserve`);
+  for (const name of [...paths.flatMap((name) => [name, `Retry ${name}`]), ...systemCacheSteps]) {
+    const minutes = stepSeconds(namedStep(browserJob(workflow), name)) / 60 + 1;
+    assert.throws(() => budgetAccounting(withAttemptBound(name, minutes)), /must cover/, `${name}: lost reserve`);
   }
   const original = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(original.activeSeconds > 25 * 60, "replay the observed recovered install and passing suite against the old limit");

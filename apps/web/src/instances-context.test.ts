@@ -1,6 +1,16 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { activeInstanceConnection, instanceMonogram, instancePublicOrigin } from "./instances-context.js";
+import {
+  activeInstanceConnection,
+  activeInstanceStatusMeta,
+  describeInstanceFailure,
+  instanceAvailabilityMeta,
+  instanceMonogram,
+  instancePublicOrigin,
+  instanceStatus,
+  type InstanceAvailability,
+  type InstanceManager,
+} from "./instances-context.js";
 
 test("public links use the browser dashboard origin for This Machine", () => {
   const manager = {
@@ -52,4 +62,50 @@ test("the tile's connection state follows the banner and is never live while one
   assert.equal(state("connecting", false, true), "reconnecting", "a retry after a loss is still reconnecting");
   assert.equal(state("unauthorized", true), "sign-in-required");
   assert.equal(state("offline", true, true), "sign-in-required", "the pairing banner outranks the offline one");
+});
+
+test("one word per instance state, and none for an instance not tried yet (#3002)", () => {
+  const word = (availability: InstanceAvailability) => {
+    const meta = instanceAvailabilityMeta(availability);
+    return meta && [meta.label, meta.tone, Boolean(meta.pulse), Boolean(meta.hollow)];
+  };
+  assert.deepEqual(word("online"), ["Online", "success", false, false]);
+  assert.deepEqual(word("connecting"), ["Connecting", "info", true, false]);
+  assert.deepEqual(word("offline"), ["Offline", "neutral", false, true]);
+  assert.deepEqual(word("authentication-required"), ["Pairing Required", "warning", false, false]);
+  assert.deepEqual(word("missing-credential"), ["Pairing Required", "warning", false, false]);
+  assert.deepEqual(word("incompatible"), ["Update Required", "warning", false, false]);
+  assert.equal(word("saved"), null);
+});
+
+test("the active instance takes the banner's word, never Online beside it", () => {
+  const remote = { id: "r", serverInstanceId: "s", kind: "remote" as const, label: "Studio", origin: "https://studio.test", createdAt: "" };
+  const manager = (
+    availability?: InstanceAvailability,
+    phase: InstanceManager["phase"] = "ready",
+  ): Pick<InstanceManager, "activeProfile" | "phase" | "statusByProfile"> => ({
+    activeProfile: remote,
+    phase,
+    statusByProfile: availability ? { r: { availability } } : {},
+  });
+  assert.equal(instanceStatus(manager("online"), "reconnecting", "r").availability, "offline");
+  assert.equal(instanceStatus(manager("online"), "sign-in-required", "r").availability, "authentication-required");
+  assert.equal(instanceStatus(manager("online"), "reconnecting", "other").availability, "saved", "another profile keeps its own");
+  assert.equal(instanceStatus(manager(undefined, "opening"), null, "r").availability, "connecting");
+  assert.equal(instanceStatus(manager(undefined, "loading"), null, "r").availability, "connecting");
+  assert.equal(instanceStatus(manager(undefined), null, "r").availability, "saved");
+  assert.equal(activeInstanceStatusMeta("reconnecting", "online")?.label, "Offline");
+  assert.equal(activeInstanceStatusMeta("sign-in-required", "online")?.label, "Pairing Required");
+  assert.equal(activeInstanceStatusMeta(null, "saved"), null);
+});
+
+test("a row's problem is one sentence about the other computer, never the transport error", () => {
+  const sentence = (availability: InstanceAvailability, message?: string) => describeInstanceFailure({ availability, message });
+  assert.equal(sentence("offline", "error sending request for url (https://studio.test/api/health)"), "Didn't answer.");
+  assert.equal(sentence("offline", "tcp connect error: Connection refused (os error 111)"), "Refused the connection.");
+  assert.equal(sentence("authentication-required", "The pairing token was rejected."), "No longer accepts the saved pairing.");
+  assert.equal(sentence("missing-credential"), "This app has no saved pairing for it.");
+  assert.equal(sentence("incompatible", "unsupported API version 3"), "Runs an older Wollipog. Update it on that computer.");
+  assert.equal(sentence("incompatible", "This address now answers as a different Wollipog instance."), "Answers as a different Wollipog instance.");
+  for (const availability of ["online", "connecting", "saved"] as const) assert.equal(sentence(availability), null);
 });

@@ -5,7 +5,7 @@ import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, renameSync, r
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { attachRequestedWorktree, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
+import { attachRequestedWorktree, changeRequestProvider, createRequestedWorktree, createWorktree, discardWorktreeIfSafe, isLegacyWslSessionWorktreePath, fetchRemoteDefaultBase, isGitRepo, CONTAINMENT_FETCH_GIT_CONFIG, CONTAINMENT_FETCH_GIT_ENV, mergedHeadForge, mergedPullRequestContainingHead, mergedWorktreePullRequestForBranch, nativeRepositoryPathIsUnavailable, parseMergedGitLabMergeRequestForHead, parseMergedWorktreePullRequestForHead, parseWorktreePullRequestState, readRepositoryDefaultBranch, reclaimRetainedWorktreeRef, retainedWorktreeRefDiagnostics, removeWorktree, requestedWorktreeBoundary, resolveWorktreeRoot, reuseRegisteredLegacyWslWorktree, sessionWorktreeBranch, setStatfsForTests, WorktreeCleanupJournal, type RetainedWorktreeRefCandidate, type RetainedWorktreeRefRecord, type WorktreeCleanupRecord } from "./worktree.js";
 import { createHash, randomUUID } from "node:crypto";
 import { runContextCommand } from "./context-command.js";
 import { isolateFromAmbientIgnores } from "./git-test-repo.js";
@@ -81,6 +81,12 @@ test("change-request lifecycle parsing requires an exact forge URL and terminal 
     "https://token@gitlab.example.test/team/sub/repo/-/merge_requests/19"), null);
 });
 
+test("a typed merge's forge proof picks glab for a GitLab merge request URL and gh otherwise (#3602)", () => {
+  assert.equal(changeRequestProvider("https://gitlab.example.com/platform/agents/wollipog/-/merge_requests/7"), "gitlab");
+  assert.equal(changeRequestProvider("https://github.com/picoduck/wollipog/pull/7"), "github");
+  assert.equal(changeRequestProvider("not a url"), "github", "anything unrecognized keeps the GitHub read, which then fails closed");
+});
+
 test("merged head discovery requires the exact head whatever the PR branch is named", () => {
   const head = "a".repeat(40);
   const exact = { url: "https://github.com/picoduck/wollipog/pull/983", state: "MERGED", headRefOid: head.toUpperCase(), headRefName: "feat/983-renamed" };
@@ -99,6 +105,163 @@ test("merged head discovery requires the exact head whatever the PR branch is na
   assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([{ ...exact, url: "https://example.test/pull/983" }]), head), null);
   assert.equal(parseMergedWorktreePullRequestForHead("{}", head), null);
   assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([exact]), "a".repeat(39)), null);
+});
+
+test("GitLab merged head discovery requires a merged merge request on the remote's host with the exact head (#3601)", () => {
+  const head = "c".repeat(40);
+  const host = "gitlab.example.test";
+  const exact = { iid: 19, state: "merged", sha: head.toUpperCase(), web_url: `https://${host}/team/sub/repo/-/merge_requests/19` };
+  const proof = { url: exact.web_url, state: "merged", headOid: head, provider: "gitlab", kind: "merge_request" };
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), head, host), proof);
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([{ ...exact, state: "opened" }, exact]), head, host), proof,
+    "an open merge request carrying the same commit is skipped, not fatal");
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), head, "GitLab.Example.Test"), proof);
+  for (const rejected of [
+    { ...exact, state: "closed" },
+    { ...exact, state: "MERGED" },
+    { ...exact, sha: "d".repeat(40) },
+    { ...exact, web_url: `https://elsewhere.test/team/sub/repo/-/merge_requests/19` },
+    { ...exact, web_url: `https://${host}/team/sub/repo/-/issues/19` },
+    { ...exact, web_url: `https://token@${host}/team/sub/repo/-/merge_requests/19` },
+    { ...exact, sha: undefined },
+  ]) {
+    assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([rejected]), head, host), null, JSON.stringify(rejected));
+  }
+  assert.equal(parseMergedGitLabMergeRequestForHead("{}", head, host), null);
+  assert.equal(parseMergedGitLabMergeRequestForHead("not json", head, host), null);
+  assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([exact]), "c".repeat(39), host), null);
+});
+
+test("branch-aware merged head discovery requires a same-repository change request from the branch (#3981)", () => {
+  const head = "a".repeat(40);
+  const branches = ["agent/s_reused", "feat/3981-reused"];
+  const github = { url: "https://github.com/picoduck/wollipog/pull/3974", state: "MERGED", headRefOid: head,
+    headRefName: "agent/s_reused", isCrossRepository: false };
+  const githubProof = { url: github.url, state: "merged", headOid: head, provider: "github", kind: "pull_request" };
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(JSON.stringify([github]), head, branches), githubProof);
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(
+    JSON.stringify([{ ...github, headRefName: "feat/3981-reused" }]), head, branches),
+  { ...githubProof }, "the configured upstream branch name also counts");
+  for (const rejected of [
+    { ...github, headRefName: "fix/other" },
+    { ...github, headRefName: undefined },
+    { ...github, isCrossRepository: true },
+    { ...github, isCrossRepository: undefined },
+  ]) {
+    assert.equal(parseMergedWorktreePullRequestForHead(JSON.stringify([rejected]), head, branches), null,
+      JSON.stringify(rejected));
+  }
+  assert.deepEqual(parseMergedWorktreePullRequestForHead(
+    JSON.stringify([{ ...github, url: "https://github.com/picoduck/wollipog/pull/1", headRefName: "fix/other" }, github]),
+    head, branches), githubProof, "a non-matching entry is skipped, not fatal");
+
+  const host = "gitlab.example.test";
+  const gitlab = { iid: 19, state: "merged", sha: head, web_url: `https://${host}/team/repo/-/merge_requests/19`,
+    source_branch: "agent/s_reused", source_project_id: 7, target_project_id: 7 };
+  assert.deepEqual(parseMergedGitLabMergeRequestForHead(JSON.stringify([gitlab]), head, host, branches),
+    { url: gitlab.web_url, state: "merged", headOid: head, provider: "gitlab", kind: "merge_request" });
+  for (const rejected of [
+    { ...gitlab, source_branch: "fix/other" },
+    { ...gitlab, source_project_id: 8 },
+    { ...gitlab, source_project_id: undefined, target_project_id: undefined },
+  ]) {
+    assert.equal(parseMergedGitLabMergeRequestForHead(JSON.stringify([rejected]), head, host, branches), null,
+      JSON.stringify(rejected));
+  }
+});
+
+test("the production forge choice keeps every GitHub remote the original check admitted (#3601)", async () => {
+  const calls: string[][] = [];
+  const run: typeof runContextCommand = async (_context, _command, args) => {
+    calls.push(args);
+    return { stdout: "https\n", stderr: "" };
+  };
+  const forge = (remote: string) => mergedHeadForge({ kind: "native" }, "/repo", remote, run);
+  for (const github of [
+    "git@github.com:team/repo.git",
+    "https://github.com/team/repo.git",
+    "https://x-access-token:secret@github.com/team/repo.git",
+    "https://token@github.com/team/repo.git",
+    "ssh://git@github.com/team/repo.git",
+  ]) {
+    assert.deepEqual(await forge(github), { provider: "github" }, github);
+  }
+  assert.deepEqual(await forge("git@gitlab.com:team/sub/repo.git"),
+    { provider: "gitlab", host: "gitlab.com", project: "team/sub/repo" });
+  assert.equal(calls.length, 0, "neither github.com nor gitlab.com needs a configuration probe");
+  assert.deepEqual(await forge("https://gitlab.example.test/team/sub/repo.git"),
+    { provider: "gitlab", host: "gitlab.example.test", project: "team/sub/repo" });
+  assert.deepEqual(calls, [["config", "get", "api_protocol", "--host", "gitlab.example.test", "--global"]]);
+  assert.equal(await forge("/srv/git/repo.git"), null, "a local path names no forge");
+});
+
+test("missing-upstream discovery asks GitLab for a GitLab remote, including a configured self-managed host (#3601)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-discovery-"));
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    const branch = "fix/gitlab-squash-merged";
+    execFileSync("git", ["-C", repo, "switch", "-c", branch]);
+    const head = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    let configuredProtocol: string | Error = "https\n";
+    let forgeOutput: string | Error = "[]";
+    const calls: Array<{ command: string; args: string[] }> = [];
+    const runForgeCommand: typeof runContextCommand = async (_context, command, args) => {
+      calls.push({ command, args });
+      if (command === "glab" && args[0] === "config") {
+        if (configuredProtocol instanceof Error) throw configuredProtocol;
+        return { stdout: configuredProtocol, stderr: "" };
+      }
+      if (forgeOutput instanceof Error) throw forgeOutput;
+      return { stdout: forgeOutput, stderr: "" };
+    };
+    const discover = (options: Parameters<typeof mergedWorktreePullRequestForBranch>[2] = {}) =>
+      mergedWorktreePullRequestForBranch(repo, branch, { ...options, runForgeCommand });
+    const merged = (host: string, project: string) => JSON.stringify([
+      { iid: 7, state: "merged", sha: head, web_url: `https://${host}/${project}/-/merge_requests/7` },
+    ]);
+
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "git@gitlab.com:team/sub/repo.git"]);
+    forgeOutput = merged("gitlab.com", "team/sub/repo");
+    assert.deepEqual(await discover(), {
+      url: "https://gitlab.com/team/sub/repo/-/merge_requests/7", state: "merged", headOid: head,
+      provider: "gitlab", kind: "merge_request",
+    }, "a squash-merged GitLab merge request proves the exact local head after its branch is gone");
+    assert.deepEqual(calls.at(-1), {
+      command: "glab",
+      args: ["api", `projects/${encodeURIComponent("team/sub/repo")}/repository/commits/${head}/merge_requests?per_page=100`,
+        "--hostname", "gitlab.com"],
+    }, "gitlab.com needs no configuration probe, and the host is always explicit");
+    assert.equal(calls.some((call) => call.command === "gh"), false);
+
+    calls.length = 0;
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://gitlab.example.test/team/sub/repo.git"]);
+    forgeOutput = merged("gitlab.example.test", "team/sub/repo");
+    assert.equal((await discover())?.provider, "gitlab", "a self-managed host configured for glab is asked");
+    assert.deepEqual(calls[0], {
+      command: "glab", args: ["config", "get", "api_protocol", "--host", "gitlab.example.test", "--global"],
+    });
+    assert.equal(calls[1]?.args.at(-1), "gitlab.example.test");
+
+    forgeOutput = merged("gitlab.com", "team/sub/repo");
+    assert.equal(await discover(), null, "a merge request on another host proves nothing");
+    forgeOutput = JSON.stringify([{ iid: 7, state: "merged", sha: "d".repeat(40),
+      web_url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/7" }]);
+    assert.equal(await discover(), null, "a different merged head proves nothing");
+
+    let forgeUnavailable = 0;
+    forgeOutput = new Error("401 Unauthorized");
+    assert.equal(await discover({ onForgeUnavailable: () => { forgeUnavailable++; } }), null);
+    assert.equal(forgeUnavailable, 1, "an unauthenticated GitLab is unavailable evidence, not a negative");
+
+    let ineligible = 0;
+    calls.length = 0;
+    configuredProtocol = new Error("not configured");
+    assert.equal(await discover({ onIneligible: () => { ineligible++; } }), null);
+    assert.equal(ineligible, 1, "an unconfigured self-managed host has no forge to ask");
+    assert.deepEqual(calls.map((call) => call.args[0]), ["config"], "no API call is made for an unconfigured host");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test("missing-upstream discovery exercises every production Git gate before the forge", { skip: !haveGit() }, async () => {
@@ -625,7 +788,7 @@ test("archive retirement requires delivery beyond a push while preserving dirty 
     assert.equal(existsSync(pushed.path), true);
     writeFileSync(join(pushed.path, "dirty.txt"), "retain\n");
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_archive", { ...pushed, source: "created" },
-      { dataDir, requireDelivered: true }), { removed: false, reason: "dirty" });
+      { dataDir, requireDelivered: true }), { removed: false, reason: "dirty", dirtyPathsReason: 'the worktree has uncommitted changes (1 paths): "dirty.txt"' });
     rmSync(join(pushed.path, "dirty.txt"));
     writeFileSync(join(pushed.path, "later.txt"), "local\n");
     execFileSync("git", ["-C", pushed.path, "add", "later.txt"]);
@@ -859,6 +1022,388 @@ test("a renamed no-upstream push retires only by exact squash-merged head proof 
   }
 });
 
+test("a takeover worktree whose tip is an earlier head of a squash-merged pull request retires by containment (#4068)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-takeover-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo, remote } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    // The configured remote names the forge repository; the local bare repository serves its Git.
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://github.com/picoduck/wollipog.git"]);
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_takeover", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "takeover",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const base = git(repo, "rev-parse", "HEAD");
+
+    // A child takes over the orphaned pull request in a requested worktree under its own branch
+    // name and pushes by URL, so neither name records an upstream.
+    const prBranch = "fix/3506-orphaned";
+    const takeover = (await manager.requestWorktree("s_takeover",
+      { baseRef: "HEAD", branch: "agent/s_takeover" })).worktree;
+    writeFileSync(join(takeover.path, "takeover.txt"), "takeover\n");
+    git(takeover.path, "add", "takeover.txt");
+    git(takeover.path, "commit", "-m", "takeover");
+    const pushedHead = git(takeover.path, "rev-parse", "HEAD");
+    git(takeover.path, "push", remote, `HEAD:refs/heads/${prBranch}`);
+    assert.equal(git(takeover.path, "config", "--get", "--default", "", `branch.${takeover.branch}.remote`), "");
+
+    // The pull request receives more commits outside this worktree, is squash-merged, and its
+    // remote branch is deleted. The repository already holds the final head object locally.
+    const other = join(root, "other");
+    execFileSync("git", ["clone", "--quiet", "--branch", prBranch, remote, other]);
+    git(other, "config", "user.email", "test@example.com");
+    git(other, "config", "user.name", "Test");
+    writeFileSync(join(other, "followup.txt"), "followup\n");
+    git(other, "add", "followup.txt");
+    git(other, "commit", "-m", "followup");
+    const mergedHead = git(other, "rev-parse", "HEAD");
+    git(other, "push", "--quiet", "origin", prBranch);
+    git(repo, "fetch", "--quiet", remote, prBranch);
+    git(other, "checkout", "--quiet", "-b", "main", "origin/main");
+    git(other, "merge", "--squash", prBranch);
+    git(other, "commit", "-m", "Take over the orphaned change (#3506)");
+    git(other, "push", "--quiet", "origin", "main");
+    git(other, "push", "--quiet", "origin", "--delete", prBranch);
+    git(repo, "fetch", "--quiet", remote, "+refs/heads/main:refs/remotes/origin/main");
+    assert.equal(git(repo, "merge-base", "--is-ancestor", pushedHead, mergedHead), "");
+    assert.equal(git(repo, "rev-list", "--count", `origin/main..${pushedHead}`), "1", "squash merge left the tip off main");
+    // Another merged pull request that shares only the base with the takeover.
+    git(other, "checkout", "--quiet", "-b", "unrelated", base);
+    writeFileSync(join(other, "unrelated.txt"), "unrelated\n");
+    git(other, "add", "unrelated.txt");
+    git(other, "commit", "-m", "unrelated");
+    const unrelatedHead = git(other, "rev-parse", "HEAD");
+    git(other, "push", "--quiet", "origin", "HEAD:refs/pull/3600/head");
+
+    const url = (number: number, project = "picoduck/wollipog") => `https://github.com/${project}/pull/${number}`;
+    let listed: Array<{ url: string; state: string; headRefOid: string; headRefName?: string }> = [];
+    const searches: string[][] = [];
+    const forge = async (_context: unknown, _command: string, args: string[]) => {
+      searches.push(args);
+      return { stdout: JSON.stringify(listed), stderr: "" };
+    };
+    const internals = manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+      probeMergedPullRequestContainment: typeof mergedPullRequestContainingHead;
+      active: Map<string, unknown>;
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+    };
+    internals.discoverMergedWorktreePullRequest = (path, branch, options) =>
+      mergedWorktreePullRequestForBranch(path, branch, { ...options, runForgeCommand: forge });
+    internals.probeMergedPullRequestContainment = (path, branch, options) =>
+      mergedPullRequestContainingHead(path, branch, { ...options, runForgeCommand: forge, forgeFetchRepository: remote });
+    const notContained = /worktree retained: the branch has no upstream, and the worktree tip is not the head of, or contained in, a merged pull request$/;
+    const merged3506 = { url: url(3506), state: "MERGED", headRefOid: mergedHead, headRefName: prBranch };
+
+    await assert.rejects(manager.discardWorktree("s_takeover", takeover.path), notContained,
+      "no merged pull request lists the tip");
+    listed = [{ ...merged3506, state: "OPEN" }];
+    await assert.rejects(manager.discardWorktree("s_takeover", takeover.path), notContained,
+      "an open pull request never authorizes deletion");
+    listed = [merged3506];
+    await assert.rejects(manager.discardWorktree("s_takeover", takeover.path),
+      /worktree retained: the branch has no upstream, and the forge could not prove whether a merged pull request contains the worktree tip$/,
+      "a head the forge cannot provide is unavailable proof even when the object is already local");
+    listed = [{ url: url(3600), state: "MERGED", headRefOid: unrelatedHead }];
+    await assert.rejects(manager.discardWorktree("s_takeover", takeover.path), notContained,
+      "a merged pull request that shares only a base proves nothing");
+    assert.equal(existsSync(takeover.path), true);
+
+    // GitHub keeps the pull request's head ref after the branch is deleted.
+    git(other, "push", "--quiet", "origin", `${mergedHead}:refs/pull/3506/head`);
+    listed = [{ ...merged3506, url: url(3506, "someone/fork") }];
+    await assert.rejects(manager.discardWorktree("s_takeover", takeover.path), notContained,
+      "a pull request in another repository proves nothing");
+    const diverged = (await manager.requestWorktree("s_takeover",
+      { baseRef: "HEAD", branch: "agent/s_takeover_diverged" })).worktree;
+    writeFileSync(join(diverged.path, "diverged.txt"), "diverged\n");
+    git(diverged.path, "add", "diverged.txt");
+    git(diverged.path, "commit", "-m", "diverged");
+    const ahead = (await manager.requestWorktree("s_takeover",
+      { baseRef: pushedHead, branch: "agent/s_takeover_ahead" })).worktree;
+    writeFileSync(join(ahead.path, "ahead.txt"), "ahead\n");
+    git(ahead.path, "add", "ahead.txt");
+    git(ahead.path, "commit", "-m", "local only");
+    listed = [merged3506];
+    await assert.rejects(manager.discardWorktree("s_takeover", diverged.path), notContained,
+      "a tip that shares only a base with the pull request is kept");
+    // A replacement that grafts the diverged tip under the merged head is not delivery proof,
+    // neither for discovery nor for safe removal handed that head directly.
+    const divergedTip = git(diverged.path, "rev-parse", "HEAD");
+    git(repo, "replace", "--graft", mergedHead, divergedTip);
+    await assert.rejects(manager.discardWorktree("s_takeover", diverged.path), notContained);
+    assert.deepEqual(await discardWorktreeIfSafe(repo, "s_takeover",
+      { path: diverged.path, branch: diverged.branch, source: "created" },
+      { dataDir, containingMergedHead: mergedHead }), { removed: false, reason: "no_upstream" });
+    git(repo, "replace", "-d", mergedHead);
+    await assert.rejects(manager.discardWorktree("s_takeover", ahead.path), notContained,
+      "a commit outside the merged pull request's history is kept");
+
+    assert.equal((await manager.discardWorktree("s_takeover", takeover.path)).retirement.status, "removed",
+      "explicit discard retires a tip contained in the merged pull request's head");
+    assert.equal(existsSync(takeover.path), false);
+    assert.ok(searches.some((args) => args.includes(pushedHead) && args.includes("github.com/picoduck/wollipog")),
+      "the forge was asked about the exact tip in the remote's own repository");
+    const branchExists = (branch: string) => {
+      try {
+        git(repo, "rev-parse", "--verify", "--quiet", `refs/heads/${branch}`);
+        return true;
+      } catch {
+        return false;
+      }
+    };
+    await waitForCondition(() => !branchExists(takeover.branch),
+      "the local branch was not removed through the retained-ref path");
+
+    const archived = (await manager.requestWorktree("s_takeover",
+      { baseRef: pushedHead, branch: "agent/s_takeover_archive" })).worktree;
+    assert.equal((await manager.discardWorktree("s_takeover", archived.path, { requireDelivered: true }))
+      .retirement.status, "removed", "archive retirement accepts the same delivery proof");
+    await waitForCondition(() => !branchExists(archived.branch), "the archived branch was not removed");
+
+    const deferred = (await manager.requestWorktree("s_takeover",
+      { baseRef: pushedHead, branch: "agent/s_takeover_deferred" })).worktree;
+    const providerOwner = "runner:provider:takeover-deferred";
+    assert.equal(store.acquireWorktreeLease("s_takeover", providerOwner), true);
+    const activeEntry = { sessionId: "s_takeover", context: { kind: "native" },
+      cwd: deferred.path, worktree: deferred, worktreeLeaseOwner: providerOwner,
+      queue: [], client: { dispose: () => {} } };
+    internals.active.set("s_takeover", activeEntry);
+    assert.deepEqual((await manager.discardWorktree("s_takeover", deferred.path)).retirement,
+      { status: "deferred", reason: "provider_active" });
+    assert.equal(internals.deleteActiveSession("s_takeover", activeEntry), true);
+    await waitForCondition(() => !existsSync(deferred.path) && !branchExists(deferred.branch),
+      "deferred replay did not retire the contained tip");
+
+    assert.equal(existsSync(diverged.path), true);
+    assert.equal(existsSync(ahead.path), true);
+    assert.equal(branchExists(diverged.branch) && branchExists(ahead.branch), true);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("merged pull request containment fails closed on every unproven input (#4068)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-containment-"));
+  try {
+    const { repo, remote } = initRepoWithOrigin(root);
+    const forgeUrl = "https://github.com/picoduck/wollipog.git";
+    const git = (cwd: string, ...args: string[]) =>
+      execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
+    git(repo, "checkout", "--quiet", "-b", "feature");
+    writeFileSync(join(repo, "feature.txt"), "feature\n");
+    git(repo, "add", "feature.txt");
+    git(repo, "commit", "-m", "feature");
+    const tip = git(repo, "rev-parse", "HEAD");
+    git(repo, "push", "--quiet", "origin", `${tip}:refs/pull/7/head`);
+    const listed = JSON.stringify([{ url: "https://github.com/picoduck/wollipog/pull/7", state: "MERGED", headRefOid: tip }]);
+    let forgeCalls = 0;
+    const answer = (stdout: string) => async () => {
+      forgeCalls += 1;
+      return { stdout, stderr: "" };
+    };
+
+    const served = { forgeFetchRepository: remote };
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
+      { state: "ineligible" }, "a local path names no forge");
+    assert.equal(forgeCalls, 0);
+    git(repo, "remote", "set-url", "origin", forgeUrl);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
+      { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip });
+    // Without the test endpoint the fetch goes to the rebuilt forge URL. A configuration rewrite of
+    // it to a local path is refused by the transport allowlist, so the proof is unavailable.
+    git(repo, "config", `url.${remote}.insteadOf`, forgeUrl);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { runForgeCommand: answer(listed) }),
+      { state: "unavailable" }, "a rewritten forge endpoint outside the allowed transports proves nothing");
+    git(repo, "config", "--unset", `url.${remote}.insteadOf`);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer("not json") }),
+      { state: "unavailable" }, "a malformed forge answer is not a negative");
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
+      runForgeCommand: async () => { throw Object.assign(new Error("gh missing"), { code: "ENOENT" }); },
+    }), { state: "ineligible" });
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
+      runForgeCommand: async () => { throw new Error("rate limited"); },
+    }), { state: "unavailable" });
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
+      runForgeCommand: async () => { throw new Error("rate limited"); },
+      linkedPullRequest: { url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip },
+    }), { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip },
+    "a forge-verified merged link is checked even when the search is unavailable");
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", {
+      ...served,
+      runForgeCommand: answer(JSON.stringify([{ url: "https://github.com/picoduck/wollipog/pull/8", state: "MERGED", headRefOid: tip }])),
+    }), { state: "unavailable" }, "a pull request head the forge cannot serve proves nothing");
+
+    // Replacement refs and a graft file cannot make a merged head appear to contain a local commit.
+    git(repo, "checkout", "--quiet", "-b", "local-only", "main");
+    writeFileSync(join(repo, "local-only.txt"), "local only\n");
+    git(repo, "add", "local-only.txt");
+    git(repo, "commit", "-m", "local only");
+    const localOnly = git(repo, "rev-parse", "HEAD");
+    git(repo, "replace", "--graft", tip, localOnly);
+    assert.equal(git(repo, "rev-list", "--count", `${tip}..${localOnly}`), "0", "the replacement falsifies plain ancestry");
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "local-only", { ...served, runForgeCommand: answer(listed) }),
+      { state: "not_contained" }, "a replacement ref is not delivery proof");
+    git(repo, "replace", "-d", tip);
+    writeFileSync(join(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"), "info", "grafts"),
+      `${tip} ${localOnly}\n`);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "local-only", { ...served, runForgeCommand: answer(listed) }),
+      { state: "not_contained" }, "a graft is not delivery proof");
+    rmSync(join(git(repo, "rev-parse", "--path-format=absolute", "--git-common-dir"), "info", "grafts"));
+    git(repo, "checkout", "--quiet", "feature");
+
+    // No configured extra header survives the fetch configuration, whichever scope set it.
+    git(repo, "config", "http.extraHeader", "Authorization: canary-any-host");
+    git(repo, "config", "http.https://github.com/.extraHeader", "Authorization: canary-github");
+    let effectiveHeaders = "";
+    try {
+      effectiveHeaders = execFileSync("git", ["-C", repo, ...CONTAINMENT_FETCH_GIT_CONFIG, "config", "--get-urlmatch",
+        "http.extraHeader", forgeUrl], { encoding: "utf8", env: { ...process.env, ...CONTAINMENT_FETCH_GIT_ENV } }).trim();
+    } catch {
+      // No matching value at all is equally anonymous.
+    }
+    assert.equal(effectiveHeaders, "");
+    assert.match(git(repo, "config", "--get-urlmatch", "http.extraHeader", forgeUrl), /canary/);
+    git(repo, "config", "--unset", "http.extraHeader");
+    git(repo, "config", "--unset", "http.https://github.com/.extraHeader");
+
+    // A configured remote name never reaches Git's arguments, whatever it says.
+    git(repo, "config", "branch.feature.remote", "--upload-pack=false");
+    git(repo, "config", "branch.feature.merge", "refs/heads/feature");
+    git(repo, "config", "remote.--upload-pack=false.url", forgeUrl);
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
+      { state: "contained", url: "https://github.com/picoduck/wollipog/pull/7", headOid: tip });
+
+    git(repo, "config", "branch.feature.remote", "origin");
+    git(repo, "update-ref", "refs/remotes/origin/feature", tip);
+    forgeCalls = 0;
+    assert.deepEqual(await mergedPullRequestContainingHead(repo, "feature", { ...served, runForgeCommand: answer(listed) }),
+      { state: "ineligible" }, "a live upstream keeps the upstream rule");
+    assert.equal(forgeCalls, 0);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a retained ref is reclaimed by containment in its recorded merged pull request head (#4068)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-containing-ref-"));
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const git = (...args: string[]) => execFileSync("git", ["-C", repo, ...args], { encoding: "utf8" }).trim();
+    const commitOn = (branch: string, from: string, file: string) => {
+      git("checkout", "--quiet", "-b", branch, from);
+      writeFileSync(join(repo, file), `${file}\n`);
+      git("add", file);
+      git("commit", "-m", file);
+      return git("rev-parse", "HEAD");
+    };
+    const earlier = commitOn("earlier", "main", "earlier.txt");
+    const later = commitOn("later", "earlier", "later.txt");
+    const sibling = commitOn("sibling", "main", "sibling.txt");
+    git("checkout", "--quiet", "main");
+    const record = (branch: string, expectedOid: string, containingMergedHead: string): RetainedWorktreeRefRecord => {
+      const reflog = execFileSync("git", ["-C", repo, "reflog", "show", "--max-count=1", "--date=raw",
+        "--format=%H%x00%gD%x00%gs", `refs/heads/${branch}`], { encoding: "utf8" });
+      const commonDir = git("rev-parse", "--path-format=absolute", "--git-common-dir").replace(/[\\/]+$/u, "");
+      const stat = statSync(join(commonDir, "logs", "refs", "heads", branch));
+      return {
+        sessionId: "s_containing_ref", repoPath: repo, context: { kind: "native" }, branch, expectedOid,
+        identityToken: createHash("sha256").update(reflog).update("\0")
+          .update(`${stat.dev}:${stat.ino}:${stat.birthtimeMs}:${stat.ctimeMs}:${stat.size}`).digest("hex"),
+        reasons: ["deletion_intent"], containingMergedHead, state: "pending",
+        armedAt: 1, createdAt: 1, updatedAt: 1,
+      };
+    };
+    // A replacement that grafts the sibling under the merged head does not count as delivery.
+    git("replace", "--graft", later, sibling);
+    assert.deepEqual(await reclaimRetainedWorktreeRef(record("sibling", sibling, later)),
+      { state: "retained", reason: "delivery_unproved" });
+    git("replace", "-d", later);
+    assert.equal((await reclaimRetainedWorktreeRef(record("earlier", earlier, later))).reason, "deleted");
+    assert.throws(() => git("rev-parse", "--verify", "--quiet", "refs/heads/earlier"));
+    assert.equal(git("rev-parse", "refs/heads/sibling"), sibling);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a squash-merged GitLab merge request whose branch was deleted first still retires its worktree (#3601)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-gitlab-retire-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo, remote } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_gitlab_retire", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "gitlab retire",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const created = await manager.requestWorktree("s_gitlab_retire", { baseRef: "HEAD", branch: "agent/s_gitlab_retire" });
+    const path = created.worktree.path;
+    writeFileSync(join(path, "gitlab.txt"), "gitlab\n");
+    execFileSync("git", ["-C", path, "add", "gitlab.txt"]);
+    execFileSync("git", ["-C", path, "commit", "-m", "gitlab"]);
+    const head = execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    // Pushed with tracking, squash-merged into main, then the source branch was deleted before
+    // anyone retired the worktree: the configured upstream's tracking ref is gone.
+    execFileSync("git", ["-C", path, "push", "-u", "origin", `HEAD:${created.worktree.branch}`]);
+    execFileSync("git", ["-C", repo, "merge", "--squash", created.worktree.branch]);
+    execFileSync("git", ["-C", repo, "commit", "-m", "gitlab (!7)"]);
+    execFileSync("git", ["-C", repo, "push", "origin", "main"]);
+    execFileSync("git", ["-C", path, "push", "origin", "--delete", created.worktree.branch]);
+    // The project lives on a self-managed GitLab; pushes still reach the fixture remote.
+    execFileSync("git", ["-C", repo, "remote", "set-url", "origin", "https://gitlab.example.test/team/sub/repo.git"]);
+    execFileSync("git", ["-C", repo, "remote", "set-url", "--push", "origin", remote]);
+
+    const mergeRequests: unknown[] = [];
+    const asked: string[] = [];
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = (worktreePath, branch, options) =>
+      mergedWorktreePullRequestForBranch(worktreePath, branch, {
+        ...options,
+        runForgeCommand: async (_context, command, args) => {
+          asked.push(`${command} ${args[0]}`);
+          if (args[0] === "config") return { stdout: "https\n", stderr: "" };
+          return { stdout: JSON.stringify(mergeRequests), stderr: "" };
+        },
+      });
+
+    await assert.rejects(manager.discardWorktree("s_gitlab_retire", path), /no upstream|not delivered|unpushed/u,
+      "without a merged merge request for this head the worktree is kept");
+    assert.equal(existsSync(path), true);
+    mergeRequests.push({ iid: 7, state: "merged", sha: head,
+      web_url: "https://gitlab.example.test/team/sub/repo/-/merge_requests/7" });
+    assert.equal((await manager.discardWorktree("s_gitlab_retire", path)).retirement.status, "removed",
+      "the exact merged head proves delivery after the branch was deleted");
+    assert.equal(existsSync(path), false);
+    assert.ok(asked.includes("glab api"), "GitLab, not GitHub, was asked");
+    assert.equal(asked.some((call) => call.startsWith("gh ")), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
 test("archive retirement proves delivery of a -u pushed squash-merged worktree with a live upstream (#3299)", { skip: !haveGit() }, async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-archive-live-upstream-"));
   const dataDir = join(root, "data");
@@ -917,7 +1462,7 @@ test("archive retirement proves delivery of a -u pushed squash-merged worktree w
     // pushed but undelivered successor head without any delivery check.
     writeFileSync(join(created.worktree.path, "followup.txt"), "not yet committed\n");
     await assert.rejects(manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }),
-      /the worktree has uncommitted changes/);
+      /the worktree has uncommitted changes \(1 paths\): "followup.txt"/);
     assert.equal(linkedPullRequest(), undefined, "live-upstream delivery proof is not persisted as a link");
     execFileSync("git", ["-C", created.worktree.path, "add", "followup.txt"]);
     execFileSync("git", ["-C", created.worktree.path, "commit", "-m", "follow-up"]);
@@ -936,6 +1481,179 @@ test("archive retirement proves delivery of a -u pushed squash-merged worktree w
     assert.equal((await manager.discardWorktree("s_archive_live", created.worktree.path, { requireDelivered: true }))
       .retirement.status, "removed", "the exact merged head proves delivery for archive retirement");
     assert.equal(existsSync(created.worktree.path), false);
+  } finally {
+    manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("a branch reused for a second squash-merged PR retires by that PR's exact head (#3981)", { skip: !haveGit() }, async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-reused-branch-"));
+  const dataDir = join(root, "data");
+  let manager: SessionManager | undefined;
+  try {
+    const { repo } = initRepoWithOrigin(root);
+    execFileSync("git", ["-C", repo, "remote", "set-head", "origin", "main"]);
+    const store = new SessionStore(join(dataDir, "sessions"));
+    store.create({
+      sessionId: "s_reused_branch", agentId: "claude", workspaceId: "repo", repoPath: repo,
+      worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+      context: { kind: "native" }, agentSessionId: null, status: "idle", title: "reused branch",
+      config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+      seq: 0, createdAt: 1, updatedAt: 1,
+    });
+    manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+    const url = (number: number) => `https://github.com/picoduck/wollipog/pull/${number}`;
+    const rev = (path: string) => execFileSync("git", ["-C", path, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    // Commit, push the agent branch with tracking, squash-merge it into main, delete the remote
+    // branch: the configured upstream's tracking ref is gone after every pull request.
+    const deliverOnce = (path: string, branch: string, name: string, number: number) => {
+      writeFileSync(join(path, `${name}.txt`), `${name}\n`);
+      execFileSync("git", ["-C", path, "add", `${name}.txt`]);
+      execFileSync("git", ["-C", path, "commit", "-m", name]);
+      execFileSync("git", ["-C", path, "push", "-u", "origin", branch]);
+      execFileSync("git", ["-C", repo, "merge", "--squash", branch]);
+      execFileSync("git", ["-C", repo, "commit", "-m", `${name} (#${number})`]);
+      execFileSync("git", ["-C", repo, "push", "origin", "main"]);
+      execFileSync("git", ["-C", path, "push", "origin", "--delete", branch]);
+      return rev(path);
+    };
+    type ForgePullRequest = {
+      url: string; state: string; headRefOid: string; headRefName: string; isCrossRepository: boolean;
+    };
+    const pullRequests: ForgePullRequest[] = [];
+    const merged = (prUrl: string, head: string, headRefName: string): ForgePullRequest =>
+      ({ url: prUrl, state: "MERGED", headRefOid: head, headRefName, isCrossRepository: false });
+    const deliver = async (name: string, number: number) => {
+      const created = await manager!.requestWorktree("s_reused_branch",
+        { baseRef: "HEAD", branch: `agent/s_reused_${name}` });
+      const { path, branch } = created.worktree;
+      const first = deliverOnce(path, branch, `${name}-1`, number);
+      pullRequests.push(merged(url(number), first, branch));
+      // The session's record links the first pull request with its forge-verified merged head.
+      const meta = store.readMeta("s_reused_branch")!;
+      store.patchMeta("s_reused_branch", {
+        worktrees: meta.worktrees!.map((item) => item.path === path
+          ? { ...item, pullRequest: { url: url(number), state: "merged" as const, headOid: first,
+            provider: "github" as const, kind: "pull_request" as const } }
+          : item),
+      });
+      // The same session resets onto the new main and delivers a follow-on change from the same
+      // branch name; its second pull request is squash-merged and the remote branch deleted again.
+      execFileSync("git", ["-C", path, "fetch", "origin", "main"]);
+      execFileSync("git", ["-C", path, "reset", "--hard", "origin/main"]);
+      const second = deliverOnce(path, branch, `${name}-2`, number + 1);
+      assert.notEqual(second, first);
+      assert.equal(execFileSync("git", ["-C", path, "config", "--get", `branch.${branch}.remote`], { encoding: "utf8" }).trim(),
+        "origin", "the upstream stays configured while its tracking ref is gone");
+      return { path, branch, first, second, secondUrl: url(number + 1) };
+    };
+    const explicit = await deliver("explicit", 3960);
+    const archive = await deliver("archive", 3970);
+    const deferred = await deliver("deferred", 3980);
+    const returned = await deliver("returned", 3985);
+    const kept = await deliver("kept", 3990);
+
+    let forgeUnavailable = false;
+    const searched: string[] = [];
+    (manager as unknown as {
+      discoverMergedWorktreePullRequest: typeof mergedWorktreePullRequestForBranch;
+    }).discoverMergedWorktreePullRequest = (path, branch, options) =>
+      mergedWorktreePullRequestForBranch(path, branch, {
+        ...options,
+        runForgeCommand: async (_context, _command, args) => {
+          searched.push(args[args.indexOf("--search") + 1]!);
+          if (forgeUnavailable) throw Object.assign(new Error("forge unavailable"), { code: "EFORGE" });
+          return { stdout: JSON.stringify(pullRequests), stderr: "" };
+        },
+      });
+    const linked = (path: string) => store.readMeta("s_reused_branch")?.worktrees
+      ?.find((item) => item.path === path)?.pullRequest;
+
+    // Only the first pull request is known as merged: the second head is unproven and kept.
+    await assert.rejects(manager.discardWorktree("s_reused_branch", explicit.path),
+      /the branch has unpushed commits/, "the earlier linked head cannot prove its successor");
+    assert.equal(existsSync(explicit.path), true);
+    assert.ok(searched.includes(explicit.second), "the forge was searched by the exact current tip");
+    // Merged pull requests with this exact head that did not come from this branch in this
+    // repository prove nothing here: another repository, a fork, or another source branch.
+    for (const unrelated of [
+      merged("https://github.com/someone/fork/pull/9", explicit.second, explicit.branch),
+      { ...merged(url(3961), explicit.second, explicit.branch), isCrossRepository: true },
+      merged(url(3962), explicit.second, "fix/someone-else"),
+    ]) {
+      pullRequests.push(unrelated);
+      await assert.rejects(manager.discardWorktree("s_reused_branch", explicit.path),
+        /the branch has unpushed commits/, `explicit discard must keep the tree for ${JSON.stringify(unrelated)}`);
+      await assert.rejects(manager.discardWorktree("s_reused_branch", explicit.path, { requireDelivered: true }),
+        /the branch has unpushed commits/, `archive retirement must keep the tree for ${JSON.stringify(unrelated)}`);
+      assert.equal(existsSync(explicit.path), true);
+      pullRequests.pop();
+    }
+
+    pullRequests.push(merged(explicit.secondUrl, explicit.second, explicit.branch));
+    assert.equal((await manager.discardWorktree("s_reused_branch", explicit.path)).retirement.status, "removed",
+      "explicit discard retires the tip the second merged pull request delivered");
+    assert.equal(existsSync(explicit.path), false);
+
+    // Archive retirement keeps the tree pending through a forge outage, then retires it.
+    forgeUnavailable = true;
+    pullRequests.push(merged(archive.secondUrl, archive.second, archive.branch));
+    await assert.rejects(manager.discardWorktree("s_reused_branch", archive.path, { requireDelivered: true }),
+      /forge state is temporarily unavailable/);
+    assert.equal(existsSync(archive.path), true);
+    forgeUnavailable = false;
+    assert.equal((await manager.discardWorktree("s_reused_branch", archive.path, { requireDelivered: true }))
+      .retirement.status, "removed", "archive retirement accepts the second merged pull request's head");
+    assert.equal(existsSync(archive.path), false);
+
+    // A retirement deferred by an active provider journals the stale linked head; replay re-derives
+    // the proof for the current tip once the provider exits.
+    const internals = manager as unknown as {
+      active: Map<string, unknown>;
+      deleteActiveSession: (sessionId: string, expected: unknown) => boolean;
+      cleanupJournal: { list: () => WorktreeCleanupRecord[]; add: (record: WorktreeCleanupRecord) => void };
+    };
+    const deferWhileActive = async (target: typeof deferred, owner: string) => {
+      // An earlier replay releases the session lease only after its directory is already gone.
+      await waitForCondition(() => store.readWorktreeLease("s_reused_branch") === null,
+        "an earlier cleanup still holds the session's worktree lease");
+      assert.equal(store.acquireWorktreeLease("s_reused_branch", owner), true);
+      const view = store.readMeta("s_reused_branch")!.worktrees!.find((item) => item.path === target.path)!;
+      const entry = { sessionId: "s_reused_branch", context: { kind: "native" },
+        cwd: target.path, worktree: view, worktreeLeaseOwner: owner,
+        queue: [], client: { dispose: () => {} } };
+      internals.active.set("s_reused_branch", entry);
+      assert.deepEqual((await manager!.discardWorktree("s_reused_branch", target.path)).retirement,
+        { status: "deferred", reason: "provider_active" });
+      const record = internals.cleanupJournal.list().find((item) => item.worktreePath === target.path);
+      assert.equal(record?.verifiedMergedHead, target.first, "the deferral journals the linked pull request's head");
+      return { entry, record: record! };
+    };
+    const deferral = await deferWhileActive(deferred, "runner:provider:reused-deferred");
+    pullRequests.push(merged(deferred.secondUrl, deferred.second, deferred.branch));
+    assert.equal(internals.deleteActiveSession("s_reused_branch", deferral.entry), true);
+    await waitForCondition(() => !existsSync(deferred.path),
+      "deferred replay did not retire the tip the second merged pull request delivered");
+
+    // A replay that already proved the later head can be fenced while the provider moves the tip
+    // back to the linked pull request's head. The linked proof must replace the stale later one.
+    pullRequests.push(merged(returned.secondUrl, returned.second, returned.branch));
+    const returning = await deferWhileActive(returned, "runner:provider:reused-returned");
+    returning.record.verifiedMergedHead = returned.second;
+    internals.cleanupJournal.add(returning.record);
+    execFileSync("git", ["-C", returned.path, "reset", "--hard", returned.first]);
+    assert.equal(internals.deleteActiveSession("s_reused_branch", returning.entry), true);
+    await waitForCondition(() => !existsSync(returned.path),
+      "deferred replay did not restore the linked head's proof after the tip returned to it");
+
+    // No merged pull request delivered this tip: every path keeps it.
+    await assert.rejects(manager.discardWorktree("s_reused_branch", kept.path), /the branch has unpushed commits/);
+    await assert.rejects(manager.discardWorktree("s_reused_branch", kept.path, { requireDelivered: true }),
+      /the branch has unpushed commits/);
+    await manager.reconcileWorktreePullRequests();
+    assert.equal(existsSync(kept.path), true, "a tip no merged pull request delivered is kept");
+    assert.equal(linked(kept.path)?.headOid, kept.first, "a successor proof is never persisted as the link");
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });
@@ -969,7 +1687,7 @@ test("safe discard removes only a clean fully-pushed runner-owned worktree", { s
     assert.deepEqual(await discardWorktreeIfSafe(repo, "s_safe", {
       ...dirty,
       source: "created",
-    }, { dataDir }), { removed: false, reason: "dirty" });
+    }, { dataDir }), { removed: false, reason: "dirty", dirtyPathsReason: 'the worktree has uncommitted changes (1 paths): "local.txt"' });
     assert.equal(existsSync(dirty.path), true);
 
     const unpushed = await createRequestedWorktree(repo, "s_safe", {
@@ -3595,9 +4313,11 @@ test("a session attaches a worktree beside its repository and states the isolati
         cwd: string;
         context: { kind: "native" | "wsl" };
         seatbeltWritableRoots?: string[];
+        managedGitBoundary?: true;
+        boundOwnedWorktrees?: string[];
       }>;
       executionIsolation: { mode: string; network: string };
-      attachIsolationNotice(meta: unknown, path: string): Promise<unknown>;
+      worktreeIsolationNotice(meta: unknown, path: string): Promise<unknown>;
       requestedWorktreeIsolation(meta: unknown): Promise<string[]>;
     };
     internals.configuredProjectPaths = [repo];
@@ -3628,7 +4348,7 @@ test("a session attaches a worktree beside its repository and states the isolati
     // A live provider keeps the boundary it launched with, and the response says so rather than
     // letting the agent meet it as a mid-turn write denial.
     internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
-    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+    assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), beside), {
       writableNow: false,
       writableAtNextLaunch: true,
     });
@@ -3638,10 +4358,33 @@ test("a session attaches a worktree beside its repository and states the isolati
     // here — an agent that believed it would meet permission failures instead.
     const wslMeta = { ...store.readMeta("s_ext"), context: { kind: "wsl" } };
     internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "wsl" } });
-    assert.deepEqual(await internals.attachIsolationNotice(wslMeta, beside), {
+    assert.deepEqual(await internals.worktreeIsolationNotice(wslMeta, beside), {
       writableNow: false,
       writableAtNextLaunch: true,
     });
+
+    // A provider launched in a runner-created worktree runs in the managed-worktree bwrap boundary
+    // whatever mode the runner is configured with (#3810). That boundary binds Git admin
+    // directories only for its launch worktree and the owned worktrees bound with it, so a worktree
+    // inside the requested boundary — writable files, unwritable index and HEAD — is not writable,
+    // while the launch worktree and a bound sibling are.
+    const launched = join(boundary, "launched");
+    const sibling = join(boundary, "sibling");
+    const created = join(boundary, "created-since");
+    internals.executionIsolation = { mode: "provider", network: "inherit" };
+    internals.active.set("s_ext", {
+      sessionId: "s_ext", cwd: launched, context: { kind: "native" },
+      managedGitBoundary: true, boundOwnedWorktrees: [sibling],
+    });
+    for (const [path, writableNow] of [[launched, true], [sibling, true], [created, false], [beside, false]] as const) {
+      assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), path),
+        { writableNow, writableAtNextLaunch: true }, path);
+    }
+    // Without that boundary, a runner configured for no platform sandbox writes anywhere.
+    internals.active.set("s_ext", { sessionId: "s_ext", cwd: repo, context: { kind: "native" } });
+    assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), beside),
+      { writableNow: true, writableAtNextLaunch: true });
+    internals.executionIsolation = { mode: "bwrap", network: "deny" };
 
     // Seatbelt grants the native temporary directory outright, so a worktree under it is writable
     // already and reporting otherwise would send the agent into a pointless relaunch.
@@ -3656,13 +4399,13 @@ test("a session attaches a worktree beside its repository and states the isolati
       seatbeltWritableRoots: [repo, dataDir, tmpdir(), join(providerHome, ".claude", "projects")],
     });
     internals.executionIsolation = { mode: "seatbelt", network: "deny" };
-    assert.deepEqual(await internals.attachIsolationNotice(store.readMeta("s_ext"), beside), {
+    assert.deepEqual(await internals.worktreeIsolationNotice(store.readMeta("s_ext"), beside), {
       writableNow: true,
       writableAtNextLaunch: true,
     });
     const providerMeta = { ...store.readMeta("s_ext"), env: { HOME: providerHome } };
     assert.deepEqual(
-      await internals.attachIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),
+      await internals.worktreeIsolationNotice(providerMeta, join(providerHome, ".claude", "projects", "wt")),
       { writableNow: true, writableAtNextLaunch: true },
     );
     internals.executionIsolation = { mode: "bwrap", network: "deny" };
@@ -5583,6 +6326,56 @@ test("a resuming launch claims its captured worktree just as a fresh start does"
   } finally {
     releaseIsolation();
     manager?.shutdownAll();
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("startup schedules each cleanup record once and a later periodic sweep retries pending records", async () => {
+  const root = mkdtempSync(join(tmpdir(), "wollipog-cleanup-startup-once-"));
+  const dataDir = join(root, "data");
+  const store = new SessionStore(join(dataDir, "sessions"));
+  store.create({
+    sessionId: "s_cleanup_live", agentId: "claude", workspaceId: "repo", repoPath: root,
+    worktreePath: null, driver: "claude-code", command: "claude", args: [], env: {},
+    context: { kind: "native" }, agentSessionId: null, status: "idle", title: "cleanup",
+    config: {}, tokensIn: 0, tokensOut: 0, costUsd: 0, preview: null, pendingApproval: null,
+    seq: 0, createdAt: 1, updatedAt: 1,
+  });
+  const journal = new WorktreeCleanupJournal(dataDir);
+  const records: WorktreeCleanupRecord[] = [
+    { sessionId: "s_cleanup_live", removalMode: "safe" },
+    { sessionId: "s_cleanup_gone", removalMode: "safe" },
+    { sessionId: "s_cleanup_force", removalMode: "force", checkpointGenerationDisposable: true },
+  ].map((record) => ({ ...record, repoPath: root, worktreePath: join(root, record.sessionId),
+    context: { kind: "native" } } as WorktreeCleanupRecord));
+  for (const record of records) journal.add(record);
+  const manager = new SessionManager(() => {}, () => {}, store, "runner", undefined, undefined, dataDir);
+  const calls: string[] = [];
+  let release!: () => void;
+  const gate = new Promise<void>((resolve) => { release = resolve; });
+  const internals = manager as unknown as {
+    reapWorktree: (record: WorktreeCleanupRecord) => Promise<void>;
+  };
+  // Leave the durable records pending and hold the startup attempts open so the old duplicate
+  // sweep is observable even when both paths would otherwise finish successfully.
+  internals.reapWorktree = async (record) => { calls.push(record.sessionId); await gate; };
+  const reconcile = manager.reconcileWorktreePullRequests.bind(manager);
+  let startupPass!: Promise<void>;
+  manager.reconcileWorktreePullRequests = (options) => (startupPass = reconcile(options));
+  try {
+    manager.reconcileStore();
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    assert.deepEqual(calls, records.map((record) => record.sessionId),
+      "startup PR reconciliation must not schedule a second attempt, including for a deleted row");
+    release();
+    await startupPass;
+    await manager.reconcileWorktreePullRequests();
+    assert.deepEqual(calls, [...records, ...records.filter((record) => record.removalMode === "safe")]
+      .map((record) => record.sessionId), "later sweeps still retry every pending safe record");
+  } finally {
+    release();
+    await startupPass;
+    manager.shutdownAll();
     rmSync(root, { recursive: true, force: true });
   }
 });
@@ -7845,7 +8638,7 @@ test("a running session discards its own finished worktrees despite the per-sess
     assert.equal(existsSync(unsafe.worktree.path), true);
     assert.deepEqual(sent.filter((message) => message.type === "session_worktree_retirement_refused" &&
       message.path === unsafe.worktree.path).map((message) => message.reason),
-    ["the worktree has uncommitted changes"]);
+    ['the worktree has uncommitted changes (1 paths): "local.txt"']);
   } finally {
     manager?.shutdownAll();
     rmSync(root, { recursive: true, force: true });

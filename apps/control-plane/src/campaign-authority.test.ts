@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -15,6 +15,10 @@ import { SessionsService, canonicalPrMergeEnqueueCommand } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy, parseOrchestratorOverrides } from "./orchestrator-settings.js";
 import type { HumanPrincipal } from "./identity.js";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { runnerCredentialRoots, setCampaignCredentialRoots } from "../../runner/src/campaign-operation-evidence.js";
+
+/** A v230 runner's attestation that resolved targets are inside the fixture worktree `/repos/test`. */
+const CONTAINED = { version: 1 as const, root: "/repos/test", sessionRoot: "/repos/test" };
 
 function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", driver: "claude-code" | "codex-app-server" = "claude-code") {
   const db = ControlPlaneDb.open(":memory:");
@@ -41,6 +45,11 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   hub.sessionChangedById = () => {};
   const sent: unknown[] = [];
   hub.sendToRunner = (_id, message) => { sent.push(message); return true; };
+  // A GitHub merge's closing-reference read (#3713): these pull requests close no issue.
+  const request = hub.requestFromRunner.bind(hub);
+  hub.requestFromRunner = async (runnerId, requestId, message, timeoutMs) => message.type === "github_merge_preflight"
+    ? { type: "github_merge_preflight_result", requestId, sessionId: message.sessionId, ok: true, check: { checkedAt: 1, closures: [] } }
+    : request(runnerId, requestId, message, timeoutMs);
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const enable = (delegatablePolicyIds: string[] = []) => svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2934",
     operations: ["implementation_question", "question", "tool_approval", "policy_ask", "pr_merge", "merged_branch_deletion"],
@@ -54,6 +63,52 @@ function harness(protocol = PROTOCOL_VERSION, workspacePath = "/repos/test", dri
   });
   return { db, svc, principal, sent, enable, ask, generic, snapshot, make };
 }
+
+test("#4062 a Full Control merge is the Orchestrator's only while every issue it closes is in scope, and is never assumed to close nothing", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const root = h.db.getSession("root")!, child = h.db.getSession("child")!;
+    const head = "a".repeat(40);
+    const merge = (extra: Record<string, unknown> = {}) => ({ category: "pr_merge", repository: "picoduck/wollipog", pullRequest: 7, headSha: head,
+      reviewResult: "merge", requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] }, ...extra }) as WorkflowDecisionResourceSnapshot;
+    const evaluate = (controller: typeof root, snapshot: WorkflowDecisionResourceSnapshot, protocol = PROTOCOL_VERSION) => {
+      const { owner, reason, unscopedClosures } = evaluateCampaignAuthority(controller, child, protocol, snapshot, controller.parentControlPolicy, PROTOCOL_VERSION);
+      return { owner, reason, ...(unscopedClosures ? { unscopedClosures } : {}) };
+    };
+    const delegated = { owner: "orchestrator", reason: "authorized_operation" };
+    const unverified = { owner: "human", reason: "unverified_closures" };
+    // A current runner reads what GitHub would close, so the declared closures are exact.
+    assert.deepEqual(evaluate(root, merge()), delegated, "a Refs-only merge closes nothing");
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] })), delegated);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["other/repo#2934", "picoduck/wollipog#2934", "picoduck/wollipog#3903"] })),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["other/repo#2934", "picoduck/wollipog#3903"] });
+    // A runner older than that read (v241) proves nothing, and neither does its declaration: a pull
+    // request declaring an in-scope closure could still close an unscoped issue unread.
+    assert.deepEqual(evaluate(root, merge(), 241), unverified);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#2934"] }), 241), unverified);
+    assert.deepEqual(evaluate(root, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241),
+      { owner: "human", reason: "outside_issue_scope", unscopedClosures: ["picoduck/wollipog#3903"] });
+    // Nothing reads a GitLab merge's closures.
+    const gitlab = "gitlab.example.com/platform/wollipog";
+    const control = structuredClone(root.orchestratorPolicy!.control!);
+    assert.ok(control.mode === "full_control");
+    control.boundary.repository = gitlab;
+    const onGitlab = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control,
+      issueScope: { ...root.orchestratorPolicy!.issueScope!, repository: gitlab } } };
+    assert.equal(campaignBoundaryCurrent(onGitlab), true);
+    assert.deepEqual(evaluate(onGitlab, merge({ repository: gitlab, mergeMethod: "merge_train", squash: false, removeSourceBranch: false })), unverified);
+    // A scope that no longer names a closing issue takes the merge back from the Orchestrator.
+    const narrowed = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, issueNumbers: [],
+      issueScope: { ...root.orchestratorPolicy!.issueScope!, issueNumbers: [] } } };
+    assert.equal(evaluate(narrowed, merge({ intendedClosures: ["picoduck/wollipog#2934"] })).reason, "outside_issue_scope");
+    assert.deepEqual(evaluate(narrowed, merge()), delegated);
+    // Custom campaigns keep their saved owner whatever the merge closes.
+    const custom = { ...root, orchestratorPolicy: { ...root.orchestratorPolicy!, control: undefined },
+      parentControlPolicy: { revision: 1, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY, pr_merge: "orchestrator" as const } } };
+    assert.deepEqual(evaluate(custom, merge({ intendedClosures: ["picoduck/wollipog#3903"] }), 241), { owner: "orchestrator", reason: "custom_owner" });
+  } finally { h.db.close(); }
+});
 
 test("pure media authority requires both participant contract inputs and never invents missing metadata", () => {
   const h = harness(223); try {
@@ -151,8 +206,13 @@ test("provider, parent and list projections share sensitive request ownership", 
     // Explicitly remove provenance: default parameters otherwise select the trusted source.
     const pending = h.db.getSession("child")!.pendingApproval!; delete pending.requestSource;
     h.db.setPendingApproval("child", pending);
+    // Unverified provenance about authentication is declined under Full Control (#2940): owned by
+    // the Orchestrator so the Human is never asked, and only ever declined, never answered.
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "unknown", { action: "answer", answers: { approach: "A" } }, () => true).ok, false);
-    assert.equal(h.db.getSession("child")!.pendingRequestOwners?.human, 1);
+    const owners = h.db.getSession("child")!.pendingRequestOwners!;
+    assert.equal(owners.human, 0);
+    assert.equal(owners.requests!.find((r) => r.occurrenceId === "unknown")!.authorityEvaluation!.disposition, "decline");
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", "unknown", { action: "dismiss" }, () => true).ok);
   } finally { h.db.close(); }
 });
 
@@ -178,7 +238,7 @@ test("Full Control cannot delegate persistent grants or Human Required provider 
   try {
     assert.ok(h.enable().ok);
     h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "tool", occurrenceId: "tool", requestSource: "provider_tool",
-      title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } }, options: [
+      title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } }, options: [
         { optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "always", name: "Always", kind: "allow_always" }] });
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "always" }, () => true).ok, false);
     assert.equal(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "once" }, () => false).ok, false);
@@ -204,14 +264,24 @@ test("Codex permission-profile grants cannot be approved by Custom or Full Contr
       });
       void requests.get("item/permissions/requestApproval")!({ permissions: { network: true } }, `grant-${sessionId}`);
       const session = h.db.getSession(sessionId)!;
-      assert.equal(session.pendingApproval!.options[0]!.name, "Allow for Session");
-      assert.equal(session.pendingApproval!.options[0]!.kind, "allow_always");
-      if (fullControl) assert.equal(session.pendingRequestOwners!.human, 1);
-      else if (sessionId === "child") assert.equal(session.pendingRequestOwners!.orchestrator, 1, "Custom may delegate rejection, never a persistent grant");
-      else assert.equal(session.pendingRequestOwners, undefined, "Custom root requests stay in the direct human request card");
-      assert.equal(h.svc.resolveDescendantRequest("root", sessionId, session.pendingApproval!.occurrenceId!,
-        { action: "approve", optionId: "allow" }, () => true).ok, false);
-      assert.equal(h.sent.length, 0, "session grants never get standing root or delegated child admission");
+      if (fullControl) {
+        // Full Control declines the session-wide access grant itself (#2940) and asks nobody.
+        assert.equal(session.pendingApproval, null);
+        const declines = h.sent.filter((m) => (m as { type: string; sessionId: string }).type === "resolve_permission" &&
+          (m as { sessionId: string }).sessionId === sessionId) as Array<{ optionId: string | null }>;
+        assert.deepEqual(declines.map((m) => m.optionId), ["deny"], "only the one-time reject is ever delivered");
+        assert.ok(h.db.campaignProjection("root")!.recovery!.records.some((record) => record.reason === "request_declined" &&
+          record.resource.sessionId === sessionId), "recorded as blocked work");
+      } else {
+        assert.equal(session.pendingApproval!.options[0]!.name, "Allow for Session");
+        assert.equal(session.pendingApproval!.options[0]!.kind, "allow_always");
+        if (sessionId === "child") assert.equal(session.pendingRequestOwners!.orchestrator, 1, "Custom may delegate rejection, never a persistent grant");
+        else assert.equal(session.pendingRequestOwners, undefined, "Custom root requests stay in the direct human request card");
+        assert.equal(h.svc.resolveDescendantRequest("root", sessionId, session.pendingApproval!.occurrenceId ?? `grant-${sessionId}`,
+          { action: "approve", optionId: "allow" }, () => true).ok, false);
+        assert.equal(h.sent.length, 0, "session grants never get standing root or delegated child admission");
+      }
+      assert.ok(!h.sent.some((m) => (m as { optionId?: string }).optionId === "allow"), "a persistent grant is never delivered");
       driver.dispose();
     }
   } finally { h.db.close(); }
@@ -224,7 +294,7 @@ test("trusted in-bound auth source inspection has the same owner in every server
     assert.ok(h.enable().ok);
     for (const input of ["cat apps/control-plane/src/auth.ts", "cat src/authentication.ts"]) {
       h.svc.onSessionEvent("child", { kind: "permission_request", requestId: input, occurrenceId: input, requestSource: "provider_tool",
-        title: input, context: { toolName: "commandExecution", input, operation: { kind: "command", input, cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: input.split(" ").at(-1)!, resolvedPath: `/repos/test/${input.split(" ").at(-1)!}` }] } } },
+        title: input, context: { toolName: "commandExecution", input, operation: { kind: "command", input, cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: input.split(" ").at(-1)!, resolvedPath: `/repos/test/${input.split(" ").at(-1)!}` }], containment: CONTAINED } } },
         options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
       assert.equal(h.db.getSession("child")!.pendingRequestOwners?.orchestrator, 1);
       assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.orchestrator, 1);
@@ -235,7 +305,7 @@ test("trusted in-bound auth source inspection has the same owner in every server
   } finally { h.db.close(); }
 });
 
-test("root admission cannot settle a foreign effect, missing operation, credential request or persistent grant", () => {
+test("root admission never allows a foreign effect, missing operation, credential request or persistent grant; it declines each once", () => {
   const cases = [
     { toolName: "commandExecution", input: "cat /unrelated/repository/README.md", operation: { kind: "command" as const, input: "cat /unrelated/repository/README.md", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "/unrelated/repository/README.md", resolvedPath: "/unrelated/repository/README.md" }] } } },
     { toolName: "commandExecution", input: "pnpm test" },
@@ -251,16 +321,18 @@ test("root admission cannot settle a foreign effect, missing operation, credenti
     try {
       assert.ok(h.enable().ok);
       h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "root-tool", occurrenceId: "root-tool",
-        title: "Tool Request", requestSource: "provider_tool", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
-      assert.equal(h.sent.filter((message) => (message as { type: string }).type === "resolve_permission").length, 0);
-      assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1);
-      assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+        title: "Tool Request", requestSource: "provider_tool", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" },
+          { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+      const resolved = h.sent.filter((message) => (message as { type: string }).type === "resolve_permission") as Array<{ optionId: string | null }>;
+      assert.deepEqual(resolved.map((m) => m.optionId), ["reject"], "a parked root declines what it cannot verify, once");
+      assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+      assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 0);
       assert.equal(h.svc.resolveDescendantRequest("root", "root", "root-tool", { action: "approve", optionId: "once" }, () => true).ok, false);
     } finally { h.db.close(); }
   }
 });
 
-test("generic Git requests remain reachable human exceptions in all projections without root callbacks", () => {
+test("generic Git requests never reach the Human and are never allowed: root and child decline them once", () => {
   for (const input of ["git status --short", "git diff -- src/implementation.ts",
     "git -c core.fsmonitor=false --no-pager diff --no-ext-diff --no-textconv -- src/implementation.ts"]) {
     const h = harness();
@@ -270,19 +342,16 @@ test("generic Git requests remain reachable human exceptions in all projections 
         kind: "permission_request", requestId: id, occurrenceId: id, requestSource: "provider_tool", title: "Inspect Repository",
         context: { toolName: "commandExecution", input, operation: { kind: "command", input, cwd: "/repos/test",
           filesystem: { cwd: "/repos/test", targets: input.includes("status") ? [] : [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } },
-        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }],
       });
-      assert.equal(h.sent.length, 0, "Full Control never settles generic Git execution");
-      assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
-      assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 2);
-      assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.human, 2);
-      const visible = h.svc.descendantRequests("root", () => true, "human").data!.requests;
-      assert.equal(visible.length, 2);
-      for (const id of ["root", "child"]) {
-        assert.equal(h.db.getSession(id)!.pendingRequestOwners!.human, 1);
-        assert.equal(visible.find((r) => r.sessionId === id)!.authorityEvaluation!.reason, "outside_boundary");
-        assert.equal(h.svc.resolveDescendantRequest("root", id, id, { action: "approve", optionId: "once" }, () => true).ok, false);
-      }
+      // Git can run configured helpers, so its effects never resolve to explicit targets (#2940 CR-1.1).
+      const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ sessionId: string; optionId: string | null }>;
+      assert.deepEqual(resolved.map((m) => [m.sessionId, m.optionId]), [["root", "reject"], ["child", "reject"]], "declined once each, never allowed");
+      assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+      assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 0);
+      assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.human, 0);
+      assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 0,
+        "a plain decline, not credential blocked work");
     } finally { h.db.close(); }
   }
 });
@@ -338,37 +407,155 @@ test("root admission follows physical targets and refuses source symlinks escapi
       assert.equal(context.operation?.filesystem?.targets[0]?.resolvedPath, path === "outside.ts" ? join(directory, path) : join(directory, ".codex/auth.json"), "runner resolves targets; provider claims cannot supply evidence");
       h.svc.onSessionEvent("root", { kind: "permission_request", requestId: path, occurrenceId: path, requestSource: "provider_tool",
         title: "Inspect Source", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
-      assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1);
-      assert.equal(h.sent.length, 0, "escaping source path never settles the parked root callback");
+      const evaluation = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.occurrenceId === path)?.authorityEvaluation
+        ?? h.db.getSession("root")!.pendingRequestOwners?.requests?.find((r) => r.occurrenceId === path)?.authorityEvaluation;
+      const declined = h.sent.filter((m) => (m as { type: string; requestId: string }).type === "resolve_permission" &&
+        (m as { requestId: string }).requestId === path) as Array<{ optionId: string | null }>;
+      assert.deepEqual(declined.map((m) => m.optionId), [null], "an escaping source path is declined, never allowed");
+      assert.ok(!evaluation || evaluation.disposition === "decline");
     }
+    // A symlink into a credential store is declined as secrets, and recorded as blocked work.
+    assert.ok(h.db.campaignProjection("root")!.recovery!.records.some((record) => record.reason === "request_declined" &&
+      record.state === "blocked" && record.resource.sessionId === "root"));
   } finally { h.db.close(); rmSync(directory, { recursive: true, force: true }); }
 });
 
-test("shell patterns cannot hide a source symlink escape in root or child admission", () => {
+test("resolved symlinks into Wollipog's own provider homes and data directory are declined as secrets, not decided", () => {
+  const directory = mkdtempSync(join(tmpdir(), "campaign-runner-roots-"));
+  const dataDir = join(directory, "data"); const profileRoot = join(directory, "home/.agent-manager/profiles");
+  const repo = join(dataDir, "worktrees/repo");
+  for (const dir of [join(dataDir, "agent-control"), join(dataDir, "provider-accounts/acct"), join(profileRoot, "profile-1"), join(repo, "src")]) {
+    mkdirSync(dir, { recursive: true });
+  }
+  // Names deliberately unlike any credential pattern: only the runner's known roots can catch them.
+  const stores = { agentControl: join(dataDir, "agent-control/session.cli"), account: join(dataDir, "provider-accounts/acct/settings.toml"),
+    profile: join(profileRoot, "profile-1/state.bin") };
+  for (const file of Object.values(stores)) writeFileSync(file, "synthetic\n");
+  writeFileSync(join(repo, "src/plain.ts"), "export const plain = true;\n");
+  for (const [name, target] of Object.entries(stores)) symlinkSync(target, join(repo, `src/${name}.ts`));
+  setCampaignCredentialRoots(() => runnerCredentialRoots({ dataDir, worktreeRoot: join(dataDir, "worktrees"), profileRoot,
+    providerAccountDirectories: [join(dataDir, "provider-accounts/acct")], agentEnvs: [], workspacePaths: [repo], userHome: join(directory, "home") }));
+  const h = harness(PROTOCOL_VERSION, repo, "codex-app-server");
+  try {
+    assert.ok(h.enable().ok);
+    for (const name of Object.keys(stores)) {
+      const context = approvalContext("item/commandExecution/requestApproval", { command: `cat src/${name}.ts`, cwd: repo }, false, undefined, repo);
+      assert.equal(context.operation?.filesystem?.targets[0]?.credentialStore, true, `${name}: the runner marks the resolved target`);
+      for (const id of ["root", "child"]) {
+        const evaluation = evaluateCampaignAuthority(h.db.getSession("root")!, { ...h.db.getSession(id)!, repositoryRoot: repo }, PROTOCOL_VERSION,
+          { requestId: name, occurrenceId: name, kind: "permission", title: "Inspect", requestSource: "provider_tool", context,
+            options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
+        assert.deepEqual([evaluation.disposition, evaluation.requestClass], ["decline", "secrets_and_sign_in"], `${name} for ${id}`);
+      }
+    }
+    // A managed worktree inside the data directory still holds ordinary, decidable repository code.
+    const plain = approvalContext("item/commandExecution/requestApproval", { command: "cat src/plain.ts", cwd: repo }, false, undefined, repo);
+    assert.equal(plain.operation?.filesystem?.containment?.root, realpathSync(repo), "the runner attests worktree containment");
+    assert.equal(plain.operation?.filesystem?.targets[0]?.credentialStore, undefined);
+    assert.equal(evaluateCampaignAuthority(h.db.getSession("root")!, { ...h.db.getSession("child")!, repositoryRoot: repo }, PROTOCOL_VERSION,
+      { requestId: "plain", occurrenceId: "plain", kind: "permission", title: "Inspect", requestSource: "provider_tool", context: plain,
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] }).disposition, undefined);
+  } finally {
+    setCampaignCredentialRoots(() => ({ roots: [], except: [] }));
+    h.db.close(); rmSync(directory, { recursive: true, force: true });
+  }
+});
+
+test("the worktree allowlist declines a repository alias to a credential file kept outside its directory (CR-3.2)", () => {
+  const directory = mkdtempSync(join(tmpdir(), "campaign-allowlist-"));
+  const repo = join(directory, "repo"); mkdirSync(join(repo, "src"), { recursive: true });
+  const home = join(directory, "home"); mkdirSync(join(home, ".codex"), { recursive: true });
+  const vault = join(directory, "vault"); mkdirSync(vault);
+  // The credential file is itself a symlink to an external backing file no denylist names.
+  writeFileSync(join(vault, "provider-state.bin"), "{\"synthetic\":true}\n");
+  symlinkSync(join(vault, "provider-state.bin"), join(home, ".codex/auth.json"));
+  symlinkSync(join(vault, "provider-state.bin"), join(repo, "src/alias.ts"));
+  writeFileSync(join(repo, "src/plain.ts"), "export const plain = true;\n");
+  const h = harness(PROTOCOL_VERSION, repo, "codex-app-server");
+  try {
+    assert.ok(h.enable().ok);
+    const context = approvalContext("item/commandExecution/requestApproval", { command: "cat src/alias.ts", cwd: repo }, false, undefined, repo);
+    assert.equal(context.operation?.filesystem?.targets[0]?.resolvedPath, realpathSync(join(vault, "provider-state.bin")));
+    assert.equal(context.operation?.filesystem?.containment, undefined, "the real target leaves the worktree, so nothing is attested");
+    h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "alias", occurrenceId: "alias", requestSource: "provider_tool",
+      title: "Inspect Source", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+    const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ optionId: string | null }>;
+    assert.deepEqual(resolved.map((m) => m.optionId), ["reject"], "declined once, never allowed");
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", "alias", { action: "approve", optionId: "once" }, () => true).ok, false);
+  } finally { h.db.close(); rmSync(directory, { recursive: true, force: true }); }
+});
+
+test("evidence from an older runner is unresolved and declined, even if it claims containment (CR-3.1)", () => {
+  for (const protocol of [229, PROTOCOL_VERSION]) {
+    const h = harness(protocol);
+    try {
+      assert.ok(h.enable().ok);
+      h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "tool", occurrenceId: "tool", requestSource: "provider_tool",
+        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts",
+          cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }],
+            containment: CONTAINED } } },
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+      const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ optionId: string | null }>;
+      if (protocol === 229) {
+        assert.deepEqual(resolved.map((m) => m.optionId), ["reject"], "a v229 runner cannot attest containment: declined, not approvable");
+      } else {
+        assert.equal(resolved.length, 0, "a v230 containment attestation leaves it for the Orchestrator");
+        assert.ok(h.svc.resolveDescendantRequest("root", "child", "tool", { action: "approve", optionId: "once" }, () => true).ok);
+      }
+    } finally { h.db.close(); }
+  }
+});
+
+test("credential roots cover default and configured provider homes, session homes, and a dedicated agent HOME whole", () => {
+  const roots = runnerCredentialRoots({ dataDir: "/d", worktreeRoot: "/d/worktrees", profileRoot: "/u/.agent-manager/profiles",
+    providerAccountDirectories: ["/d/provider-accounts/a"],
+    // The runner's own env, an agent (indirections resolved), and a session launch env.
+    agentEnvs: [{ CODEX_HOME: "/runner/codex" }, { HOME: "/accounts/codex-b" }, { HOME: "/u" }, { CLAUDE_CONFIG_DIR: "/cfg/claude" }],
+    credentialHomes: ["/d/provider-homes/session-1", undefined, "relative/ignored"],
+    workspacePaths: ["/u/src/repo"], userHome: "/u" });
+  assert.deepEqual(roots.roots, ["/d", "/u/.agent-manager/profiles", "/d/provider-accounts/a",
+    // An agent with no configured home uses these, so they are always screened.
+    "/u/.claude", "/u/.claude.json", "/u/.codex", "/u/.pi", "/d/provider-homes/session-1",
+    "/runner/codex", "/accounts/codex-b", "/u/.claude", "/u/.codex", "/u/.pi", "/cfg/claude"]);
+  assert.deepEqual(roots.except, ["/d/worktrees"]);
+});
+
+test("a shell pattern that can reach a credential store through a symlink is declined for root and child, never approvable", async () => {
   const directory = mkdtempSync(join(tmpdir(), "campaign-glob-boundary-"));
   const repo = join(directory, "repo"); mkdirSync(join(repo, "src"), { recursive: true });
+  mkdirSync(join(directory, ".codex"));
   writeFileSync(join(repo, "src/regular.ts"), "benign repository fixture\n");
-  writeFileSync(join(directory, "outside.ts"), "benign outside fixture\n");
-  symlinkSync(join(directory, "outside.ts"), join(repo, "src/link.ts"));
+  writeFileSync(join(directory, ".codex/auth.json"), "{\"synthetic\":true}\n");
+  // The glob matches a symlink into a synthetic credential store the runner cannot see through it.
+  symlinkSync(join(directory, ".codex/auth.json"), join(repo, "src/link.ts"));
   try {
     for (const command of ["cat src/*.ts", "cat src/?ink.ts", `cat ${repo}/src/*.ts`, `cat ${repo}/src/?ink.ts`]) {
       const h = harness(PROTOCOL_VERSION, repo, "codex-app-server");
       try {
         assert.ok(h.enable().ok);
         const context = approvalContext("item/commandExecution/requestApproval", { command, cwd: repo }, false);
+        assert.equal(context.operation?.filesystem, undefined, "the runner cannot resolve a shell pattern");
         for (const id of ["root", "child"]) h.svc.onSessionEvent(id, {
           kind: "permission_request", requestId: id, occurrenceId: id, requestSource: "provider_tool",
           title: "Inspect Source", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }],
         });
-        assert.equal(h.sent.length, 0, "a shell pattern never settles the parked root callback");
-        assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
-        assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 2);
-        assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.human, 2);
-        assert.equal(h.svc.descendantRequests("root", () => true, "human").data!.requests.length, 2);
-        for (const id of ["root", "child"]) {
-          assert.equal(h.db.getSession(id)!.pendingRequestOwners!.human, 1);
-          assert.equal(h.svc.resolveDescendantRequest("root", id, id, { action: "approve", optionId: "once" }, () => true).ok, false);
-        }
+        const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ sessionId: string; optionId: string | null }>;
+        assert.deepEqual(resolved.map((m) => [m.sessionId, m.optionId]), [["root", null], ["child", null]], "declined once each");
+        assert.ok(!resolved.some((m) => m.optionId === "once"), "no allow ever reaches the runner");
+        // Even if a decline had not been delivered, the Orchestrator could never approve it.
+        h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "again", occurrenceId: "again", requestSource: "provider_tool",
+          title: "Inspect Source", context, options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
+        assert.equal(h.svc.resolveDescendantRequest("root", "child", "again", { action: "approve", optionId: "once" }, () => true).ok, false);
+        assert.notEqual(h.db.campaignProjection("root")!.status, "waiting_human");
+        assert.equal(h.db.campaignRequestsForPrincipal(h.principal, "root")!.human, 0);
+        assert.equal(h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined").length, 0,
+          "a plain decline, not credential blocked work");
+        // The child is told once, content-safely, to retry with explicit paths; the root is not woken.
+        await new Promise((resolve) => setImmediate(resolve));
+        const guidance = h.sent.filter((m) => JSON.stringify(m).includes("could not resolve every file it would touch to a real path inside this session's worktree")) as Array<{ sessionId?: string }>;
+        assert.equal(guidance.length, 1);
+        assert.equal(JSON.stringify(guidance[0]).includes("src/"), false, "the guidance never repeats the command or path");
+        assert.ok(!JSON.stringify(guidance[0]).includes("\"root\""), "the parked root is not prompted for its own decline");
       } finally { h.db.close(); }
     }
   } finally { rmSync(directory, { recursive: true, force: true }); }
@@ -378,7 +565,10 @@ test("pending root requests settle on human admission; unavailable delivery beco
   for (const available of [true, false]) {
     const h = harness();
     try {
-      h.generic("root", "already-parked");
+      // A verified one-time effect: the allow path a root's standing authorization still answers.
+      h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "already-parked", occurrenceId: "already-parked", requestSource: "provider_tool",
+        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
+        options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
       assert.ok(h.db.getSession("root")!.pendingApproval);
       if (!available) (h.svc as unknown as { hub: Hub }).hub.sendToRunner = () => false;
       assert.ok(h.enable().ok);
@@ -399,6 +589,24 @@ test("pending root requests settle on human admission; unavailable delivery beco
   }
 });
 
+test("a root's own pending typed decision never blocks its standing allow of a verified effect (#2940)", () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const own = h.ask("root", "own-decision");
+    assert.ok(own.ok, own.error ?? "own decision");
+    assert.equal(own.data!.status, "pending");
+    assert.ok(h.db.getSession("root")!.pendingRequestOwners!.requests!.some((r) => r.occurrenceId === own.data!.occurrenceId), "the root holds its own typed decision");
+    h.svc.onSessionEvent("root", { kind: "permission_request", requestId: "root-tool", occurrenceId: "root-tool", requestSource: "provider_tool",
+      title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
+    const resolved = h.sent.filter((m) => (m as { type: string }).type === "resolve_permission") as Array<{ sessionId: string; requestId: string; optionId: string }>;
+    assert.deepEqual(resolved.map((m) => [m.sessionId, m.requestId, m.optionId]), [["root", "root-tool", "once"]],
+      "the parked root is allowed once instead of waiting on a request only it could answer");
+    assert.equal(h.db.workflowDecisionByOccurrence(own.data!.occurrenceId)!.status, "pending", "its own typed decision is untouched");
+  } finally { h.db.close(); }
+});
+
 test("live Human Required, deny and withdrawn asks have the same effective owner in every projection and resolution", () => {
   for (const change of ["human", "deny", "disabled"] as const) {
     const h = harness();
@@ -408,7 +616,7 @@ test("live Human Required, deny and withdrawn asks have the same effective owner
       h.db.upsertGovernancePolicy(rule, Date.now());
       assert.ok(h.enable(["delegated"]).ok);
       h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "live-rule", occurrenceId: "live-rule", requestSource: "provider_tool",
-        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }] } } },
+        title: "Inspect Repository", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command", input: "cat src/implementation.ts", cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "src/implementation.ts", resolvedPath: "/repos/test/src/implementation.ts" }], containment: CONTAINED } } },
         options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }] });
       assert.equal(h.db.getSession("child")!.pendingRequestOwners!.orchestrator, 1);
       assert.equal(h.db.listSessionsForPrincipal(h.principal).find((s) => s.id === "root")!.campaignRequests!.orchestrator, 1, "seed the cached list before changing policy");
@@ -426,25 +634,139 @@ test("live Human Required, deny and withdrawn asks have the same effective owner
   }
 });
 
-test("ambiguous credential-value choices stay human even on trusted question and implementation routes without secret fields", () => {
+test("ambiguous credential-value choices are declined, never answered, even on trusted question and implementation routes", () => {
   const h = harness();
   try {
     assert.ok(h.enable().ok);
     for (const question of ["Which password should I use?", "Which credentials should we use to implement the feature?"]) {
       h.svc.onSessionEvent("root", { kind: "question_request", requestId: question, occurrenceId: question,
         requestSource: "provider_question", questions: [{ id: "value", question, options: [{ label: "A" }, { label: "B" }] }] });
-      assert.equal(h.db.getSession("root")!.pendingRequestOwners!.human, 1);
-      assert.equal(h.sent.length, 0, "a planning source cannot authorize actual credential-value selection");
+      const delivered = h.sent.filter((m) => (m as { type: string; requestId: string }).type === "answer_question" &&
+        (m as { requestId: string }).requestId === question) as Array<{ action: string; answers: Record<string, unknown> }>;
+      assert.deepEqual(delivered.map((m) => [m.action, Object.keys(m.answers).length]), [["dismiss", 0]],
+        "a planning source cannot authorize actual credential-value selection; the question is dismissed");
       const typed = h.svc.createWorkflowDecision("child", { requestId: question, resourceKey: question,
         resourceSnapshot: { ...h.snapshot, question } });
-      assert.ok(typed.ok);
-      assert.equal(typed.data!.authority, "human");
-      assert.equal(typed.data!.authorityEvaluation!.reason, "protected_request");
+      assert.equal(typed.ok, false);
+      assert.equal(typed.status, 403);
+      assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no decision is created for anyone to answer");
     }
+    const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+    assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state, record.effectiveOwner]).sort(),
+      [["child", "blocked", "orchestrator"], ["root", "blocked", "orchestrator"]], "one deduplicated blocked record per session and class");
+    for (const record of blocked) assert.doesNotMatch(JSON.stringify(record), /password|credentials should/iu, "content-safe");
   } finally { h.db.close(); }
 });
 
-test("a real parked root NDJSON provider resumes after its question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
+test("a typed credential-handling design question is decided by the Orchestrator; one seeking a credential, sign-in or access is declined (#3844)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const design: WorkflowDecisionResourceSnapshot = { category: "implementation_question",
+      question: "Should importing a provider sign-in copy an API key, move an OAuth sign-in, or be unsupported?",
+      options: [{ optionId: "copy", label: "Copy the API key" }, { optionId: "move", label: "Move the OAuth sign-in" },
+        { optionId: "none", label: "Not supported" }], recommendedOptionId: "none" };
+    // The service entry point the request_workflow_decision route calls.
+    const ask = (requestId: string, resourceSnapshot: WorkflowDecisionResourceSnapshot, sessionId = "child") =>
+      h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId, resourceSnapshot }, () => true);
+    // The root decides the same question through its own typed route, as its question notice says.
+    const rootAsked = await ask("root-import-design", design, "root");
+    assert.ok(rootAsked.ok, rootAsked.error ?? "root request failed");
+    assert.equal(rootAsked.data!.authorityEvaluation?.basis, "standing_authorization");
+    assert.equal(rootAsked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.ok(h.svc.resolveDescendantRequest("root", "root", rootAsked.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
+    assert.ok((await h.svc.consumeWorkflowDecision("root", rootAsked.data!.occurrenceId, { resourceSnapshot: design })).ok);
+    const asked = await ask("import-design", design);
+    assert.ok(asked.ok, asked.error ?? "request failed");
+    assert.equal(asked.data!.authority, "orchestrator");
+    assert.equal(asked.data!.authorityEvaluation?.basis, "campaign_delegation");
+    assert.equal(asked.data!.authorityEvaluation?.disposition, undefined, "decided, not declined");
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", asked.data!.occurrenceId,
+      { action: "resolve_workflow_decision", outcome: "approve", selectedOptionId: "none" }, () => true).ok);
+    const consumed = await h.svc.consumeWorkflowDecision("child", asked.data!.occurrenceId, { resourceSnapshot: design });
+    assert.ok(consumed.ok, consumed.error ?? "consume failed");
+    const option = (label: string): WorkflowDecisionResourceSnapshot => ({ ...design, options: [{ optionId: "none", label: "Not supported" }, { optionId: "b", label }] });
+    for (const [requestId, snapshot] of [
+      ["key-value", { ...design, question: "What API key value should the importer use?" }],
+      ["email-value", option("Use dev@example.com for the profile")],
+      ["sign-in", option("Sign in to the provider now")],
+      ["grant", option("Grant the importer access to the provider account")],
+      ["lasting", option("Always allow the importer to read provider sign-ins")],
+      ["send-url", option("Send the API key to https://collector.example for the provider test")],
+      ["upload-token", option("Upload the token to the shared bucket")],
+      ["pr-description", option("Copy the API key into the PR description")],
+      ["public-log", option("Use the token in the public log")],
+      ["backticked-env", { ...design, question: "Should we load `.env` for the import feature?" }],
+      // CR-2.1 to CR-2.3.
+      ["tell-me", option("Tell me the API key")],
+      ["live-key", option("Copy the live API key into the profile")],
+      ["personal-key", option("Copy the personal API key into the profile")],
+      ["bare-host", option("Copy the API key to metrics.example.test")],
+      ["host-port", option("Copy the API key to metrics.example.test:9090")],
+      ["localhost-port", option("Use the API key on localhost:8080")],
+    ] satisfies Array<[string, WorkflowDecisionResourceSnapshot]>) for (const sessionId of ["child", "root"]) {
+      const declined = await ask(`${sessionId}-${requestId}`, snapshot, sessionId);
+      assert.equal(declined.ok, false, `${sessionId} ${requestId}`);
+      assert.equal(declined.status, 403, `${sessionId} ${requestId}`);
+    }
+    assert.equal(h.db.pendingWorkflowDecisionsForController("root").length, 0, "no declined decision is left for anyone to answer");
+    const blocked = h.db.campaignProjection("root")!.recovery!.records.filter((record) => record.reason === "request_declined");
+    assert.deepEqual(blocked.map((record) => [record.resource.sessionId, record.state]).sort(), [["child", "blocked"], ["root", "blocked"]]);
+  } finally { h.db.close(); }
+});
+
+test("questions that only mention credentials or permissions reach their owner; genuine requests are recorded as request_declined (#3913)", async () => {
+  const h = harness();
+  try {
+    assert.ok(h.enable().ok);
+    const declinedRecords = () => h.db.campaignProjection("root")!.recovery?.records.filter((record) => record.reason === "request_declined") ?? [];
+    const ask = (sessionId: string, requestId: string, question: string) => h.svc.createWorkflowDecisionWithVideo(sessionId, { requestId, resourceKey: requestId,
+      resourceSnapshot: { category: "implementation_question", question, options: [{ optionId: "continue", label: "Continue" }, { optionId: "stop", label: "Stop" }] } }, () => true);
+    const provider = (sessionId: string, requestId: string, question: string) => h.svc.onSessionEvent(sessionId, { kind: "question_request", requestId,
+      occurrenceId: requestId, requestSource: "provider_question", questions: [{ id: "choice", question, options: [{ label: "Continue" }, { label: "Stop" }] }] });
+    const dismissed = (requestId: string) => h.sent.some((m) => (m as { type: string; requestId: string; action?: string }).type === "answer_question" &&
+      (m as { requestId: string }).requestId === requestId && (m as { action?: string }).action === "dismiss");
+    const mentionOnly = [
+      "Option B would widen the workflow's read-only, secret-free permissions so it can poll the GitHub Actions API. Which option should the design take?",
+      "Should the design grant its job the actions: read permission so it can poll the GitHub Actions API?",
+      "Option A would need the CI token to read the GitHub Actions API. Which design should we take?",
+      "Option B would need more access to the GitHub Actions API than the default workflow permissions. Which design should we take?",
+      "The child's question was refused because the campaign cannot supply credentials. Should I continue without that design input?",
+    ];
+    for (const [index, question] of mentionOnly.entries()) {
+      provider("child", `child-mention-${index}`, question);
+      const request = h.svc.descendantRequests("root", () => true).data!.requests.find((r) => r.occurrenceId === `child-mention-${index}`);
+      assert.equal(request?.responseOwner, "orchestrator", question);
+      assert.equal(request?.authorityEvaluation?.disposition, undefined, `reaches the Orchestrator: ${question}`);
+      assert.ok(!dismissed(`child-mention-${index}`), question);
+      for (const sessionId of ["child", "root"]) {
+        const typed = await ask(sessionId, `${sessionId}-typed-mention-${index}`, question);
+        assert.ok(typed.ok, `${sessionId} typed: ${typed.error ?? question}`);
+        assert.equal(typed.data!.authorityEvaluation?.disposition, undefined, question);
+      }
+      provider("root", `root-mention-${index}`, question);
+      assert.ok(dismissed(`root-mention-${index}`), `a root's own question is dismissed: ${question}`);
+    }
+    assert.equal(declinedRecords().length, 0, "nothing that only mentions credentials is blocked work");
+    for (const [index, question] of ["Please paste your GitHub token here", "Grant this session wider provider access for the design.",
+      "The campaign cannot supply credentials, so paste one here for the design."].entries()) {
+      provider("child", `child-genuine-${index}`, question);
+      assert.ok(dismissed(`child-genuine-${index}`), `declined, never forwarded: ${question}`);
+      for (const sessionId of ["child", "root"]) {
+        const typed = await ask(sessionId, `${sessionId}-typed-genuine-${index}`, question);
+        assert.equal(typed.ok, false, `${sessionId} typed: ${question}`);
+        assert.equal(typed.status, 403, `${sessionId} typed: ${question}`);
+      }
+      provider("root", `root-genuine-${index}`, question);
+      assert.ok(dismissed(`root-genuine-${index}`), question);
+    }
+    assert.deepEqual(declinedRecords().map((record) => [record.resource.sessionId, record.state, record.effectiveOwner]).sort(),
+      [["child", "blocked", "orchestrator"], ["root", "blocked", "orchestrator"]], "one blocked record per session and class");
+  } finally { h.db.close(); }
+});
+
+test("a real parked root NDJSON provider resumes after its dismissed question and one-time auth-file approval without another agent call", { timeout: 10_000 }, async () => {
   const root = mkdtempSync(join(tmpdir(), "campaign-root-authority-"));
   mkdirSync(join(root, "src")); writeFileSync(join(root, "src/authentication.ts"), "export const implementation = true;\n");
   const h = harness(PROTOCOL_VERSION, root, "codex-app-server");
@@ -473,7 +795,8 @@ test("a real parked root NDJSON provider resumes after its question and one-time
     assert.equal(await driver.prompt("Implement the approved authentication feature."), "end_turn", stderr.join("\n"));
     assert.ok(events.includes("Root continued autonomously."));
     assert.equal(h.db.getSession("root")!.pendingApproval, null);
-    assert.equal(h.sent.filter((m) => (m as { type: string }).type === "answer_question").length, 1);
+    assert.deepEqual(h.sent.filter((m) => (m as { type: string }).type === "answer_question").map((m) => (m as { action: string }).action), ["dismiss"],
+      "the root's own question is dismissed, never answered with its recommended option");
     assert.equal(h.sent.filter((m) => (m as { type: string }).type === "resolve_permission").length, 1);
     assert.ok(h.db.listGovernanceAudit("root").filter((a) => a.stage === "resolution").every((a) => a.actor.kind === "system"));
   } finally { driver.dispose(); h.db.close(); rmSync(root, { recursive: true, force: true }); }

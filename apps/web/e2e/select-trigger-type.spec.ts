@@ -93,38 +93,28 @@ for (const theme of ["dark", "light"] as const) {
         await page.evaluate(() => localStorage.clear());
         await page.goto(url);
         await setTheme(page, theme);
-        await expect(page.locator(".archive-filter").first()).toBeVisible();
-        const search = page.locator(".archive-search input");
-        await expectTriggerType(page, page.locator(".archive-filters"),
-          ["Project", "Location", "Agent", "Archive State", "Lifecycle State"], search);
+        const search = page.getByRole("searchbox", { name: "Search Titles and Transcripts" });
+        if (width === 390) await page.getByRole("button", { name: /^Filters/ }).click();
+        const scope = width === 390 ? page.getByRole("dialog", { name: "Filters", exact: true }) : page.locator(".archive-desktop-facets");
+        await expectTriggerType(page, scope, ["Project", "Location", "Agent", "Status"], search);
         // The search field is on the body line too, so here the two read identically.
         expect(await search.evaluate((input) => getComputedStyle(input).lineHeight)).toBe("20px");
-        // The filters' own labels keep §8.1's --type-label (#2366).
-        expect(await page.locator(".archive-filter > .field-label").first().evaluate((label) => {
-          const style = getComputedStyle(label);
-          return { weight: style.fontWeight, lineHeight: style.lineHeight };
-        })).toEqual({ weight: "500", lineHeight: "16px" });
       });
 
-      test("New Automation's Selects read at its native fields' weight on the body line", async ({ page }) => {
+      test("New Automation's Selects read at its text fields' weight on the body line", async ({ page }) => {
         await page.goto(`/automations-e2e.html?theme=${theme}&capabilities`);
         await page.getByRole("button", { name: "New Automation" }).click();
-        const grid = page.locator(".automation-form-grid");
-        await expectTriggerType(page, grid, ["Model", "Reasoning Effort", "Permission Mode", "Workspace Strategy"],
-          grid.getByRole("combobox", { name: "Action", exact: true }));
-        expect(await weight(grid.getByRole("textbox", { name: "Name", exact: true }))).toBe("400");
+        const form = page.locator(".automation-editor-form");
+        await expectTriggerType(page, form, ["Machine", "Folder", "Agent", "Model", "Reasoning Effort", "Permission Mode",
+          "Workspace Strategy", "If a Run Is Missed", "If the Machine Is Offline", "If the Last Run Is Still Going"],
+        form.getByRole("textbox", { name: "Name", exact: true }));
       });
 
-      test("the Outbound Events Selects, inside their labels, read at the Callback URL's weight on the body line", async ({ page }) => {
-        await page.goto(`/automations-e2e.html?theme=${theme}`);
+      test("New Subscription's Select reads at the Callback URL's weight on the body line", async ({ page }) => {
+        await page.goto(`/automations-e2e.html?theme=${theme}&route=${encodeURIComponent("/automations/outbound")}`);
         await page.getByRole("button", { name: "New Subscription" }).click();
-        const editor = page.locator(".outbound-event-editor");
-        await expectTriggerType(page, editor, ["Scope Type", "Project"], editor.getByRole("textbox", { name: "Callback URL", exact: true }));
-        // The wrapping labels keep §8.1's --type-label (#2366); only the trigger inside stopped taking it.
-        expect(await editor.locator(".automation-form-grid > label").first().evaluate((label) => {
-          const style = getComputedStyle(label);
-          return { weight: style.fontWeight, lineHeight: style.lineHeight };
-        })).toEqual({ weight: "500", lineHeight: "16px" });
+        const dialog = page.getByRole("dialog", { name: "New Subscription" });
+        await expectTriggerType(page, dialog, ["Project"], dialog.getByRole("textbox", { name: "Callback URL", exact: true }));
       });
 
       test("Machine Version's Machine Select reads at a native field's weight on the body line", async ({ page }) => {

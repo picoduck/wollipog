@@ -52,7 +52,9 @@ export function titleCaseLabel(value: string): string {
   const last = wordIndexes.at(-1);
   return words.map((word, index) => {
     if (!/[A-Za-z]/.test(word) || /^[A-Z0-9]+(?:[-/][A-Z0-9]+)*$/.test(word)) return word;
-    return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part) => {
+    return word.replace(/[A-Za-z][A-Za-z'-]*/g, (part, offset: number) => {
+      // An ordinal's suffix ("1st", "22nd") belongs to its number and stays lowercase.
+      if (/\d/.test(word[offset - 1] ?? "")) return part;
       const segments = part.split("-");
       return segments.map((segment, segmentIndex) => {
         if (!segment) return segment;
@@ -169,6 +171,18 @@ export function formatClock(
   return timestampFormatter("clock", locale, timeZone).format(date);
 }
 
+/** A local day in words: "Today", "Yesterday", then the date ("Oct 3, 2026"). */
+export function localDayLabel(at: number, now: number): string {
+  const startOfDay = (time: number) => new Date(time).setHours(0, 0, 0, 0);
+  const today = startOfDay(now);
+  const day = startOfDay(at);
+  if (day === today) return "Today";
+  const yesterday = new Date(today);
+  yesterday.setDate(yesterday.getDate() - 1);
+  if (day === yesterday.getTime()) return "Yesterday";
+  return new Intl.DateTimeFormat(undefined, { dateStyle: "medium" }).format(new Date(at));
+}
+
 /** Session event time means recorded by the runner; adopted history may not retain provider time. */
 export function formatRecordedTimestamp(
   timestamp: number | undefined,
@@ -202,12 +216,19 @@ export function osLabel(os: OS): string {
   return os === "macos" ? "macOS" : os.charAt(0).toUpperCase() + os.slice(1);
 }
 
-/** Compact token count: 1234 -> "1.2k", 1_200_000 -> "1.2M". */
+/**
+ * The one unit style for a token count (#3017), shared by usage figures and context-window sizes:
+ * 1234 -> "1.2K", 72_000 -> "72K", 200_000 -> "200K", 1_000_000 -> "1M", 1_500_000 -> "1.5M".
+ */
 export function formatTokens(n: number): string {
   if (n < 1000) return String(n);
-  // Cross to "M" once the rounded "k" value would reach 1000k (e.g. 999_999 -> "1.0M").
-  if (n < 999_500) return `${(n / 1000).toFixed(n < 10_000 ? 1 : 0)}k`;
-  return `${(n / 1_000_000).toFixed(1)}M`;
+  // Cross to "M" once the rounded "K" value would reach 1000K (e.g. 999_999 -> "1M").
+  if (n < 999_500) return `${withoutZeroTenth((n / 1000).toFixed(n < 10_000 ? 1 : 0))}K`;
+  return `${withoutZeroTenth((n / 1_000_000).toFixed(1))}M`;
+}
+
+function withoutZeroTenth(figure: string): string {
+  return figure.endsWith(".0") ? figure.slice(0, -2) : figure;
 }
 
 /** Convert a provider-resolved Claude id into compact visible model copy. Unknown ids stay exact. */
@@ -349,9 +370,114 @@ export function sshErrorHint(error: string | null | undefined): string | null {
   const networkUnreachable = /\b(network is unreachable|no route to host)\b/.test(e);
   if (!connectBlocked && !networkUnreachable) return null;
   return (
-    "This looks like the connection was blocked before reaching the host — usually a VPN or firewall. " +
-    'If a VPN is active (e.g. NordVPN), add this app to its split-tunneling list set to bypass ' +
-    '("Don\'t use VPN for selected apps"), then restart the app — or pause the VPN. ' +
-    "Split-tunneling rules only take effect for apps started after the rule is added."
+    "The connection was blocked before it reached the host, usually by a VPN or firewall. " +
+    "Pause the VPN or add this app to its split-tunneling list, then restart the app and try again."
   );
+}
+
+/**
+ * One or two sentences for a failed SSH connection or a refused Connect via SSH request, in the
+ * person's words rather than ssh's. The caller keeps the raw text behind Show Details
+ * (docs/design-system.md §8.5, §13.2). `target` is the SSH target as entered: "user@host" or a
+ * `~/.ssh/config` alias.
+ *
+ * Connect via SSH (#2987) shows it above the dialog's footer; a machine's failure notice (#2988)
+ * reuses it for a reconnect that failed.
+ *
+ * `request` says the error is a Wollipog API request's, not ssh's: `status` is the HTTP status the
+ * control plane answered with, or null when the request never reached it (a network failure, a
+ * timeout, the desktop transport's own error). Connect via SSH's request only records the machine,
+ * and no SSH runs before the control plane answers, so a request failure is never an SSH diagnosis.
+ */
+export function describeSshFailure(
+  error: string | null | undefined,
+  target?: string,
+  request?: { status: number | null },
+): string {
+  const raw = (error ?? "").trim();
+  const e = raw.toLowerCase();
+  const host = target?.trim() || "the machine";
+  const unreachable = "Wollipog couldn't be reached. Check the connection, then try again.";
+  // A request past its deadline may still have been applied (RequestTimeoutError), so a retry
+  // could add the machine twice.
+  if (request && /\bdid(?:n't| not) answer within\b/.test(e)) {
+    return "Wollipog didn't answer in time. Check the machine list before trying again.";
+  }
+  // The browser's words for a request that never reached Wollipog: nothing was tried over SSH.
+  if (request?.status === null || /\b(failed to fetch|load failed|networkerror)\b/.test(e)) return unreachable;
+  if (request) {
+    if (request.status === 401 || request.status === 403) {
+      return "Wollipog refused the request. Check that you're signed in and allowed to connect machines.";
+    }
+    // The control plane's own field checks (POST /api/boxes), made before any SSH is attempted.
+    if (e.includes("invalid sshtarget")) return "Use an SSH target such as user@host, with no spaces or leading dash.";
+    if (e.includes("sshport")) return "Use a port from 1 to 65535.";
+    if (e.includes("displayname")) return "Use a machine name of 120 characters or fewer, with no control characters.";
+    return `Wollipog couldn't start connecting to ${host}. Try again.`;
+  }
+  // An authentication rejection ("Permission denied (publickey,password).") or too many keys offered.
+  // A connect-time EACCES reads "port 22: Permission denied" with no parenthesis, and is the hint's.
+  if (/permission denied \(/.test(e) || e.includes("too many authentication failures")) {
+    return "The host refused your SSH key. Load the key with ssh-add, then try again.";
+  }
+  const blocked = sshErrorHint(raw);
+  if (blocked) return blocked;
+  if (e.includes("host key verification failed") || e.includes("remote host identification has changed")) {
+    return `The host key for ${host} doesn't match the one this computer knows. Check the host, then update ~/.ssh/known_hosts.`;
+  }
+  if (e.includes("could not resolve hostname")) return `This computer couldn't find ${host}. Check the SSH target.`;
+  if (e.includes("connection refused")) return `${host} refused the connection. Check that SSH runs there and the port is right.`;
+  return `Wollipog couldn't reach ${host} over SSH.`;
+}
+
+/** The calendar day of `instant` in `timeZone` (the viewer's when omitted), as a UTC midnight. */
+function calendarDay(instant: number, timeZone?: string): number {
+  return Date.parse(new Intl.DateTimeFormat("en-CA", {
+    year: "numeric", month: "2-digit", day: "2-digit", ...(timeZone ? { timeZone } : {}),
+  }).format(new Date(instant)));
+}
+
+/**
+ * A moment in words, without seconds (#2968): "Today, 2:00 AM", "Tomorrow, 2:00 AM",
+ * "Yesterday, 2:00 AM", "Sat, 9:00 AM" later this week, and "Oct 14, 9:00 AM" otherwise, with the
+ * year only when it is not this year's. In the viewer's time zone unless one is given.
+ */
+export function formatCalendarTime(instant: number, now = Date.now(), timeZone?: string, locale?: string): string {
+  if (!Number.isFinite(instant) || !Number.isFinite(now)) return "";
+  const zone = timeZone ? { timeZone } : {};
+  const format = (options: Intl.DateTimeFormatOptions) =>
+    new Intl.DateTimeFormat(locale, { ...options, ...zone }).format(new Date(instant));
+  const time = format({ hour: "numeric", minute: "2-digit" });
+  const days = Math.round((calendarDay(instant, timeZone) - calendarDay(now, timeZone)) / 86_400_000);
+  if (days === 0) return `Today, ${time}`;
+  if (days === 1) return `Tomorrow, ${time}`;
+  if (days === -1) return `Yesterday, ${time}`;
+  if (days > 1 && days < 7) return `${format({ weekday: "short" })}, ${time}`;
+  const year = (value: number) => new Intl.DateTimeFormat("en-CA", { year: "numeric", ...zone }).format(new Date(value));
+  return `${format({ month: "short", day: "numeric", ...(year(instant) !== year(now) ? { year: "numeric" } : {}) })}, ${time}`;
+}
+
+const countOf = (count: number, unit: string) => `${count} ${unit}${count === 1 ? "" : "s"}`;
+
+/**
+ * A moment still to come, as its time and how long until it (#2977): "2:36 AM, in 4 minutes",
+ * "2:36 AM, in less than a minute", "3:40 AM, in 1 hour 4 minutes"; on another day the time is
+ * `formatCalendarTime()`'s ("Tomorrow, 2:36 AM, in 23 hours"). The wait counts the clock's minutes
+ * from now to then, so at 2:31 the words for 2:36 always say 5 minutes, whatever the seconds. Under a
+ * minute away reads "in less than a minute", and a moment already here reads "now". In the viewer's
+ * time zone unless one is given.
+ */
+export function formatFuture(at: number, now = Date.now(), timeZone?: string, locale?: string): string {
+  if (!Number.isFinite(at) || !Number.isFinite(now)) return "";
+  const wait = at - now;
+  if (wait <= 0) return "now";
+  const time = calendarDay(at, timeZone) === calendarDay(now, timeZone)
+    ? formatClock(at, locale, timeZone)
+    : formatCalendarTime(at, now, timeZone, locale);
+  const minutes = Math.floor(at / 60_000) - Math.floor(now / 60_000);
+  const until = wait < 60_000 ? "less than a minute"
+    : minutes < 60 ? countOf(minutes, "minute")
+      : minutes % 60 === 0 || minutes >= 24 * 60 ? countOf(Math.round(minutes / 60), "hour")
+        : `${countOf(Math.floor(minutes / 60), "hour")} ${countOf(minutes % 60, "minute")}`;
+  return `${time}, in ${until}`;
 }

@@ -1,10 +1,22 @@
+import type { CampaignPublicationAdmissionFailure } from "./campaign-issue-publication.js";
+
 /** Content-safe recovery metadata. These records describe work; none is an authorization or
  * a receipt proving an external effect. Resource identities never contain commands, media or URLs. */
 export type CampaignRecoveryAction = "answer_request" | "review_evidence" | "recover_hold" |
-  "replace_worker" | "reformulate_request" | "repair_checks" | "rereview" | "reconcile_outcome" | "continue_campaign";
+  "replace_worker" | "reformulate_request" | "repair_checks" | "rereview" | "reconcile_outcome" | "continue_campaign" |
+  "continue_without_request";
 export type CampaignRecoveryReason = "authorized_action" | "transient_failure" | "failed_checks" | "reviewer_objection" |
   "uncertain_outcome" | "missing_human_information" | "missing_access" | "boundary_enlargement" |
-  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed";
+  "human_required_rule" | "unsupported_capability" | "hard_denial" | "attempts_exhausted" | "authority_changed" |
+  "request_declined" |
+  /** #4065: a person-owned follow-up publication the server could not admit; `admissionFailure` names why. */
+  "publication_not_admitted" |
+  /** #4065: the server refused a member's publication request for a condition it can correct. */
+  "correctable_refusal" |
+  /** #3362: a worker ended by a recorded Stop or archive request, not by a denial. Blocked like one. */
+  "intentional_stop" |
+  /** #3362: a stopped worker whose recorded provenance proves neither a Stop request nor a denial. */
+  "unverified_stop";
 export type CampaignRecoveryState = "ready" | "backoff" | "dispatched" | "waiting_human" |
   "blocked" | "resolved" | "cancelled";
 export interface CampaignRecoveryResource {
@@ -36,6 +48,8 @@ export interface CampaignRecoveryRecord {
   requiredInput: CampaignRecoveryInput;
   /** Fixed server explanation; never an exception's raw message. */
   explanation: string;
+  /** With `publication_not_admitted` or `correctable_refusal`: the recorded admission failure (#4065). */
+  admissionFailure?: CampaignPublicationAdmissionFailure;
   nextAttemptAt?: number;
   createdAt: number;
   updatedAt: number;
@@ -68,4 +82,9 @@ export const CAMPAIGN_RECOVERY_EXPLANATIONS: Record<CampaignRecoveryReason, stri
   hard_denial: "The operation was denied. It remains blocked and recovery will not request repeated overrides.",
   attempts_exhausted: "The recovery ceiling was exhausted. It remains blocked and recovery will not reset the ceiling or request repeated overrides.",
   authority_changed: "The original recovery reservation was cancelled. This live resource remains blocked until a fresh exact occurrence is available; no override is requested.",
+  request_declined: "Full Control declined a request for credentials, sign-in, wider provider access or a lasting permission grant. The campaign cannot supply these, so the work that needed it stays blocked while unrelated work continues. Nobody is asked and the request is never replayed.",
+  publication_not_admitted: "The server could not admit this follow-up publication under the campaign's issue boundary, so a person reviews it. Recovery cannot admit it.",
+  correctable_refusal: "The server refused a member's follow-up publication request for a condition the member can correct, and created nothing. Have it correct the request as the refusal says and request it again.",
+  intentional_stop: "The worker was stopped on purpose by a recorded Stop or archive request; nothing was denied. It remains blocked and recovery will not replace or restart it automatically.",
+  unverified_stop: "The worker stopped without a recorded Stop request, denial or failure that explains why, so the cause is unverified. It remains blocked and recovery will not replace or restart it automatically.",
 };

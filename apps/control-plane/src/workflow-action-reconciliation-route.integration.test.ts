@@ -212,6 +212,7 @@ function seed(database: string, childDriver: ChildDriver = "codex-app-server"): 
         merged_branch_deletion: "human",
         follow_up_issue_publication: "human",
         ui_evidence_approval: "human",
+        review_round_extension: "human",
       } },
       scope,
       now,

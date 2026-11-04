@@ -12,6 +12,8 @@ import { SessionRoleConversions, registerSessionRoleRoutes } from "./session-rol
 import type { HumanPrincipal } from "./identity.js";
 import { SessionsService } from "./sessions.js";
 import { isAgentControlApiRouteAllowed } from "./auth.js";
+import { AutomationCreationService } from "./automation-creation.js";
+import type { AgentPrincipal } from "./identity.js";
 
 const OLDER_RUNNER_REFUSAL = "This machine needs a newer runner for changing session roles. Update and restart the runner.";
 
@@ -49,9 +51,49 @@ function harness(role: SessionRole = "normal", protocol = PROTOCOL_VERSION) {
       receipt: { conversionId: command.conversionId, state: command.type === "prepare_session_role" ? "prepared" : "applied" } };
   };
   const events: string[] = [];
-  const conversions = new SessionRoleConversions(db, hub, (event) => events.push(event));
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  const conversions = new SessionRoleConversions(db, hub, (event) => events.push(event),
+    () => svc.expireAutomationCreationDecisions());
   return { db, hub, conversions, defaults, commands, events, svc, metadata };
+}
+
+for (const role of ["normal", "orchestrator"] as const) {
+  test(`an expired automation approval stops blocking conversion from ${role}`, async (t) => {
+    let now = Date.now();
+    t.mock.method(Date, "now", () => now);
+    const { db, hub, conversions, defaults, metadata, svc } = harness(role);
+    try {
+      db.registerRunner({ ...metadata, agents: [{ ...metadata.agents[0]!, capabilities: {
+        ...metadata.agents[0]!.capabilities!, models: [{ id: "opus", default: true, efforts: ["high"] }], effortLevels: ["high"],
+      } }] }, now, PROTOCOL_VERSION);
+      const scope = db.sessionScope("s")!;
+      const principal: AgentPrincipal = { kind: "agent", actorId: "s", credentialSessionId: "s",
+        organizationId: scope.organizationId, delegatedScope: scope };
+      const automation = new AutomationCreationService(db, svc, hub);
+      const proposal = automation.request("s", { requestId: "expiry", resourceKey: "expiry", spec: {
+        name: "Review", cron: "0 8 * * 2", timezone: "UTC", enabled: false,
+        action: { kind: "create_session", request: { runnerId: "r", workspaceId: "w", agentId: "claude", prompt: "Review only" } },
+        misfirePolicy: { kind: "skip" }, runnerPolicy: { kind: "wait" }, concurrencyPolicy: "wait",
+        limits: { maxCostUsd: 5, maxToolCalls: 50 }, notifications: { pushEvents: [] },
+      } }, principal);
+      assert.equal(proposal.ok, true, proposal.error ?? "Automation proposal should be admitted");
+      const decision = proposal.data!;
+      const owner = db.localIdentityContext().userId;
+      hub.isRunnerOnline = () => false;
+      assert.equal(svc.resolveWorkflowDecision("s", "s", decision.occurrenceId, { outcome: "approve" },
+        "human", { kind: "human", id: owner }, () => true).ok, true);
+      hub.isRunnerOnline = () => true;
+      const target = role === "normal" ? "orchestrator" : "normal";
+      assert.match(conversions.preview("s", target, defaults, () => null).reason!, /unconsumed decisions/);
+      now += 30 * 60_000;
+      assert.equal(conversions.preview("s", target, defaults, () => null).available, true);
+      await conversions.change("s", target, role, defaults, () => null);
+      assert.equal(db.getSession("s")!.role, target);
+      assert.equal(db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "revoked");
+      assert.equal(db.listAutomations().length, 0);
+      assert.equal(db.heldWorkflowDecisionResumes("s").length, 0);
+    } finally { db.close(); }
+  });
 }
 
 for (const role of ["normal", "orchestrator"] as const) test(`role conversion from ${role} preserves identity, transcript, permissions and child links`, async () => {
@@ -274,24 +316,70 @@ test("runtime hydration and an existing attention batch preserve committed role 
   } finally { h.db.close(); }
 });
 
-test("nested promotion preserves its controlling campaign policy and refuses settings that would shadow it", async () => {
+function useLegacyReviewPolicy(h: ReturnType<typeof harness>) {
+  const policy = h.db.getSession("s")!.orchestratorPolicy!;
+  delete policy.reviewPolicySnapshotVersion;
+  for (const key of ["reviewHarness", "reviewModel", "reviewEffort", "reviewRoundBudget"] as const) {
+    delete policy.behavior[key];
+    delete policy.sources.behavior[key];
+  }
+  h.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id='s'").run(JSON.stringify(policy));
+}
+
+for (const legacy of [false, true]) test(`nested promotion preserves its ${legacy ? "legacy" : "current"} controlling policy and refuses shadow settings`, async () => {
   const h = harness("orchestrator");
   try {
+    if (legacy) useLegacyReviewPolicy(h);
     h.db.createSession({ id: "nested", runnerId: "r", workspaceId: "w", agentId: "claude", title: "Nested",
       driver: "claude-code", config: { permissionMode: "auto" }, useWorktree: false, now: 20, parentSessionId: "s" });
     h.db.updateSessionStatus("nested", "idle", 21);
     const policy = h.db.getSession("s")!.orchestratorPolicy!;
     h.defaults.defaults.behavior.maximumConcurrentChildren = 1;
     const preview = h.conversions.preview("nested", "orchestrator", h.defaults, () => null);
-    assert.equal(preview.available, true);
+    assert.equal(preview.available, true, preview.reason ?? "promotion should be available");
     assert.equal(preview.policyInherited, true);
     assert.deepEqual(preview.orchestratorPolicy, policy);
     await assert.rejects(h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null,
       { behavior: { maximumConcurrentChildren: 7 } }), /controlling campaign/);
     assert.equal(h.commands.length, 0);
-    await h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null);
+    const normalRequest = h.hub.requestFromRunner.bind(h.hub);
+    h.hub.requestFromRunner = async () => { throw new Error("prepare never arrived"); };
+    await assert.rejects(h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null), /never arrived/);
+    h.hub.requestFromRunner = normalRequest;
+    // An unchanged selection remains a valid retry of the recorded, unfinished intent.
+    await h.conversions.change("nested", "orchestrator", "normal", h.defaults, () => null,
+      { behavior: { maximumConcurrentChildren: policy.behavior.maximumConcurrentChildren } });
     assert.deepEqual(h.db.getSession("nested")!.orchestratorPolicy, policy);
     assert.equal(h.db.getSession("nested")!.parentSessionId, "s");
+  } finally { h.db.close(); }
+});
+
+for (const legacy of [false, true]) test(`nested Orchestrators preserve ${legacy ? "legacy live" : "current snapshot"} review semantics`, () => {
+  const h = harness("orchestrator");
+  try {
+    if (legacy) useLegacyReviewPolicy(h);
+    h.db.updateSessionStatus("s", "running", Date.now());
+    h.hub.sendToRunner = () => true;
+    const createChild = (parentSessionId: string, title: string, role: SessionRole = "normal") => {
+      const create = () => h.svc.createSession({ runnerId: "r", workspaceId: "w", agentId: "claude", role,
+        title, useWorktree: true, config: { permissionMode: "auto" } },
+      undefined, undefined, false, false, false, { parentSessionId });
+      const result = create();
+      if (!result.ok && result.error?.includes("requires approval")) {
+        const requestId = /request (spawn_[a-f0-9]+)/u.exec(result.error)![1]!;
+        assert.equal(h.db.resolvePolicyHookApproval(parentSessionId, requestId, "allowed", Date.now())?.changed, true);
+        return create();
+      }
+      return result;
+    };
+    const nested = createChild("s", "Nested", "orchestrator");
+    assert.ok(nested.ok && nested.data, nested.error ?? "nested launch should succeed");
+    h.db.updateSessionStatus(nested.data.id, "running", Date.now());
+    const grandchild = createChild(nested.data.id, "Grandchild");
+    assert.ok(grandchild.ok && grandchild.data, grandchild.error ?? "grandchild launch should succeed");
+    assert.equal(grandchild.data.reviewPolicy !== undefined, !legacy, "the outer controlling policy determines capture");
+    assert.equal(nested.data.orchestratorPolicy?.reviewPolicySnapshotVersion, legacy ? undefined : 1);
+    assert.equal(Object.hasOwn(nested.data.orchestratorPolicy!.behavior, "reviewHarness"), !legacy);
   } finally { h.db.close(); }
 });
 

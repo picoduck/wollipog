@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
-import type { SessionEventPayload } from "@wollipog/protocol";
+import { fullControlAutomaticResponseText, type SessionEventPayload } from "@wollipog/protocol";
 import {
   claudeHookCircuitPath,
   claudeHookProtectionsPath,
@@ -125,6 +125,25 @@ test("Claude rate-limit events forward during and between turns without transcri
   assert.deepEqual(h.subscriptionUsage[0], { provider: "claude", kind: "sparse", payload: active });
   assert.deepEqual(h.events, []);
   assert.deepEqual(h.stderr, []);
+});
+
+test("a review session records the root result's permission denials, including on an error result", () => {
+  const h = makeHarness({ review: true });
+  const denied = { permission_denials: [{ tool_name: "Bash", tool_use_id: "toolu_1", tool_input: {} }] };
+  assert.equal(h.feed({ type: "result", subtype: "success", structured_output: { vote: "UPVOTE" }, ...denied }), "end_turn");
+  assert.deepEqual([h.driver.reviewOutput(), h.driver.reviewDiagnostics()], ['{"vote":"UPVOTE"}', { permissionDenials: 1 }]);
+  for (const result of [
+    { type: "result", subtype: "error_during_execution", is_error: true, ...denied },
+    { type: "result", subtype: "error_max_turns", ...denied },
+  ]) {
+    (h.driver as unknown as { lastPermissionDenials: number }).lastPermissionDenials = 0;
+    h.feed(result);
+    assert.deepEqual(h.driver.reviewDiagnostics(), { permissionDenials: 1 }, result.subtype);
+  }
+  // A subagent's result is not the reviewer's.
+  (h.driver as unknown as { lastPermissionDenials: number }).lastPermissionDenials = 0;
+  h.feed({ type: "result", subtype: "success", parent_tool_use_id: "toolu_2", ...denied });
+  assert.deepEqual(h.driver.reviewDiagnostics(), { permissionDenials: 0 });
 });
 
 test("a top-level result with provider tokens reports that the account answered", () => {
@@ -1054,12 +1073,13 @@ test("persistent cumulative process cost is emitted as a per-turn delta while us
   driver.dispose();
 });
 
-test("persistent cost baseline resets when an evicted process resumes", async () => {
+test("an old CLI's persistent cost baseline resets when an evicted process resumes", async () => {
   const children: any[] = [];
   const events: SessionEventPayload[] = [];
   let idleCallback: (() => void) | null = null;
+  // A missing version no longer implies process totals (#4069); this CLI is known to predate 2.1.277.
   const driver = new ClaudeCodeDriver(
-    { ...baseOpts, env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
+    { ...baseOpts, agentVersion: "2.1.276", env: { [CLAUDE_PERSISTENT_FLAG]: "1" }, config: { permissionMode: "acceptEdits" } },
     { ...noopCb, onEvent: (event) => events.push(event) },
     {
       spawn: () => {
@@ -3145,6 +3165,73 @@ test("one-shot fixed-rule mode delivers multiline prompts through stdin, never a
   driver.dispose();
 });
 
+for (const persistent of [false, true]) {
+  test(`missing required manager hook refuses a ${persistent ? "persistent" : "one-shot"} spawn`, async () => {
+    let spawns = 0;
+    const events: SessionEventPayload[] = [];
+    const driver = new ClaudeCodeDriver({
+      ...baseOpts,
+      env: { [CLAUDE_PERSISTENT_FLAG]: persistent ? "1" : "0" },
+      config: { permissionMode: "acceptEdits" },
+      prepareClaudeHooks: () => ({ args: [], managerRequired: true }),
+    }, { ...noopCb, onEvent: (event) => events.push(event) }, {
+      spawn: () => { spawns++; return fakeProcess(); },
+    });
+    try {
+      assert.equal(await driver.prompt("must refuse"), "refusal");
+      assert.equal(spawns, 0);
+      assert.ok(events.some((event) => event.kind === "error" &&
+        event.message.includes("required manager policy hook is unavailable")));
+      assert.match(driver.lastTurnError()!, /required manager policy hook is unavailable/u);
+    } finally {
+      driver.dispose();
+    }
+  });
+}
+
+for (const persistent of [false, true]) {
+  test(`refreshed hook arguments remain observable at ${persistent ? "persistent" : "one-shot"} completion`, async () => {
+    const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-observe-"));
+    const children: any[] = [];
+    const events: SessionEventPayload[] = [];
+    let preparations = 0;
+    const settings = join(root, "sess.settings.json");
+    writeClaudeSettingsSet(settings, {
+      sessionId: "sess", launch: { command: "runner", args: ["--policy-hook"] },
+      cpHttpUrl: "http://127.0.0.1:4317", tokenFile: claudeHookTokenPath(settings),
+    }, null);
+    const driver = new ClaudeCodeDriver({
+      ...baseOpts, args: [],
+      env: { [CLAUDE_PERSISTENT_FLAG]: persistent ? "1" : "0" },
+      config: { permissionMode: "acceptEdits" },
+      prepareClaudeHooks: () => {
+        preparations++;
+        return { args: ["--settings", settings], managerRequired: true };
+      },
+    }, { ...noopCb, onEvent: (event) => events.push(event) }, {
+      spawn: () => { const child = fakeProcess(); children.push(child); return child; },
+      kill: () => {},
+    } as any);
+    try {
+      const turn = driver.prompt("observe refreshed hooks");
+      await nextTask();
+      const openedAt = Date.now();
+      writeHookCircuitState(claudeHookCircuitPath(settings), { consecutiveFailures: 3, open: true, openedAt });
+      children[0].stdout.write(JSON.stringify({ type: "result", subtype: "success" }) + "\n");
+      if (!persistent) children[0].emit("close", 0);
+      assert.equal(await turn, "end_turn");
+      assert.equal(preparations, 1, "completion observes without re-provisioning");
+      assert.deepEqual(events.filter((event) => event.kind === "policy_transport"), [
+        { kind: "policy_transport", state: "open", openedAt },
+      ]);
+    } finally {
+      driver.dispose({ forceImmediate: true });
+      for (const child of children) child.emit("close", 0);
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+}
+
 test("one-shot first/resume turns heal managed hook settings and circuit-open persistent turns restart hook-less", async () => {
   const root = mkdtempSync(join(tmpdir(), "wollipog-claude-hook-driver-"));
   try {
@@ -3433,6 +3520,7 @@ test("Claude fork mints a deterministic target session with a zero-cost local bo
     {
       ...baseOpts,
       resumeId: source,
+      prepareClaudeHooks: () => { throw new Error("model turn must wait for registration"); },
       capabilities: {
         models: [], effortLevels: [], slashCommands: [], supportsImages: true, supportsApprovals: true,
         supportsConversationFork: true, permissionModes: ["acceptEdits"],
@@ -4895,6 +4983,67 @@ test("resolvePermission('deny') writes the deny message and returns true; deny d
   assert.equal(h.driver.resolvePermission("req-1", "deny"), true);
   const frame = JSON.parse(writes[0]!);
   assert.deepEqual(frame.response.response, { behavior: "deny", message: "The user declined this tool call." });
+});
+
+test("a Full Control policy tool decline says Wollipog declined it under Full Control, never the user (#4063)", () => {
+  const h = makeHarness();
+  const writes = askThenChild(h);
+  assert.equal(h.driver.resolvePermission("req-1", "deny", { policy: "full_control", basis: "git_execution_without_bounded_effect_proof" }), true);
+  const response = JSON.parse(writes[0]!).response.response;
+  assert.equal(response.behavior, "deny");
+  assert.equal(response.message, fullControlAutomaticResponseText("tool", { policy: "full_control", basis: "git_execution_without_bounded_effect_proof" }));
+  assert.match(response.message, /Wollipog declined this tool call automatically under the campaign's Full Control policy \(Git Commands Without Bounded Effect Proof\)\. No person saw it/);
+  assert.doesNotMatch(response.message, /\buser\b/i);
+});
+
+test("a Full Control decline never turns an allow into a deny", () => {
+  const h = makeHarness();
+  const writes = askThenChild(h);
+  assert.equal(h.driver.resolvePermission("req-1", "allow", { policy: "full_control" }), true);
+  assert.deepEqual(JSON.parse(writes[0]!).response.response, { behavior: "allow", updatedInput: { command: "ls" } });
+});
+
+function questionThenChild(h: Harness, requestId: string): string[] {
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (s: string) => writes.push(s) } };
+  h.feed({
+    type: "control_request",
+    request_id: requestId,
+    request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [
+      { question: "Proceed?", header: "Proceed", multiSelect: false, options: [{ label: "Yes", description: "" }, { label: "No", description: "" }] },
+    ] } },
+  });
+  return writes;
+}
+
+test("a person's question dismissal still says the user dismissed it", () => {
+  const h = makeHarness();
+  const writes = questionThenChild(h, "q-person");
+  assert.equal(h.driver.answerQuestion("q-person", {}, "dismiss"), true);
+  assert.deepEqual(JSON.parse(writes[0]!).response.response, { behavior: "deny", message: "The user dismissed the question." });
+});
+
+test("every Full Control root question dismissal carries the guidance in its own result, not only the first (#4063)", () => {
+  const h = makeHarness();
+  const first = questionThenChild(h, "q-1");
+  assert.equal(h.driver.answerQuestion("q-1", {}, "dismiss", { policy: "full_control", basis: "root_questions" }), true);
+  const second = questionThenChild(h, "q-2");
+  assert.equal(h.driver.answerQuestion("q-2", {}, "dismiss", { policy: "full_control", basis: "root_questions" }), true);
+  for (const writes of [first, second]) {
+    const response = JSON.parse(writes[0]!).response.response;
+    assert.equal(response.behavior, "deny");
+    assert.match(response.message, /^\[Wollipog Full Control\] Wollipog dismissed this question automatically under the campaign's Full Control policy \(Root Questions\)\. No person saw it, and none of its options was chosen\./);
+    assert.match(response.message, /resolve_descendant_workflow_decision/);
+    assert.doesNotMatch(response.message, /\buser\b/i);
+  }
+});
+
+test("a Full Control dismissal never answers a submitted question", () => {
+  const h = makeHarness();
+  const writes = questionThenChild(h, "q-submit");
+  assert.equal(h.driver.answerQuestion("q-submit", { "Proceed?": "Yes" }, "submit", { policy: "full_control" }), true);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
 test("resolvePermission returns false for an unknown requestId and writes nothing", () => {

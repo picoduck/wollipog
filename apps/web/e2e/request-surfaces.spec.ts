@@ -206,6 +206,19 @@ test.describe("on a coarse pointer", () => {
       expect((await button.boundingBox())!.height).toBe(44);
     }
   });
+
+  test("More Requests sits flush on its rows, so a tap at the first row's top edge opens that row", async ({ page }) => {
+    await page.goto("/request-surfaces-e2e.html?scenario=multiple");
+    await page.getByRole("button", { name: /\+2 More Requests/u }).click();
+    const first = page.locator(".request-dock-row").first();
+    await expect(first).toBeVisible();
+    const hit = await first.evaluate((row) => {
+      const box = row.getBoundingClientRect();
+      const target = document.elementFromPoint(box.left + box.width / 2, box.top + 2);
+      return target !== null && (target === row || row.contains(target));
+    });
+    expect(hit, "2px inside the first waiting row is that row, not the disclosure above it").toBe(true);
+  });
 });
 
 for (const variant of [
@@ -888,8 +901,8 @@ for (const viewport of [
     await expect(entry.locator("dt")).toHaveText(["Hold", "Reason", "Recovery Action", "Held Decision Resumes"]);
     await expect(entry).toContainText(
       "restart the session with restart_session, knowing what that costs: the provider and its background job end, " +
-      "with unfinished work recorded as killed and unrecoverable and a finished result still owed reported to the new " +
-      "conversation; the queued messages are kept and run after the restart; and any approved workflow " +
+      "with unfinished work recorded as killed and unrecoverable and a finished result still owed reported after the " +
+      "restart; the queued messages are kept and run after the restart; and any approved workflow " +
       "decision the session has not yet consumed is revoked, and the " +
       "restarted session is told which ones to request again.");
     await expect(entry).not.toContainText("discarded");
@@ -898,7 +911,7 @@ for (const viewport of [
     await page.goto("/request-surfaces-e2e.html?scenario=held&bounded=1&restart=keeps");
     await expect(entry).toHaveCount(1);
     await expect(entry).toContainText("Prefer waiting to restarting the session: a restart keeps the queued messages but " +
-      "ends every background job and starts a new conversation.");
+      "ends every background job and relaunches the provider.");
     await expect(entry).not.toContainText("discards");
     await assertNoHorizontalOverflow(page, ".campaign-notices");
   });
@@ -939,5 +952,39 @@ for (const viewport of [
       "the hold clears only when someone who can act on this session steps in; ask its owner.");
     await expect(recovery).not.toContainText("restart_session");
     await assertNoHorizontalOverflow(page, ".campaign-notices");
+  });
+}
+
+
+for (const viewport of [{ width: 1440, height: 900 }, { width: 390, height: 844 }]) {
+  test(`a GitHub merge card shows what merging closes at width ${viewport.width} (#3713)`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    for (const [closures, expected] of [
+      ["checked", /Closes on Merge\s*picoduck\/wollipog#2178: “?Closes #2178: the request dock now keeps its card above the keyboard\.”?\s*picoduck\/wollipog#2180 \(linked on GitHub\)/u],
+      ["none", /Closes on Merge\s*None/u],
+      ["declared", /Closes on Merge\s*Not checked: the runner predates this check\. Declared: picoduck\/wollipog#2178, picoduck\/wollipog#2180\./u],
+    ] as const) {
+      await page.goto(`/request-surfaces-e2e.html?scenario=workflow&closures=${closures}`);
+      await expect(card(page)).toContainText("PR Merge Approval Required");
+      await expect(card(page)).toContainText(expected);
+      await assertNoHorizontalOverflow(page, ".request-card");
+      if (process.env.MERGE_CLOSURES_EVIDENCE_DIR) {
+        await card(page).screenshot({ path: `${process.env.MERGE_CLOSURES_EVIDENCE_DIR}/merge-closures-${closures}-${viewport.width}.png` });
+      }
+    }
+  });
+
+  test(`a post-upvote extension shows both bound heads at width ${viewport.width}`, async ({ page }) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/request-surfaces-e2e.html?scenario=review-extension");
+    await expect(card(page)).toContainText("Review Round Extension Approval Required");
+    await expect(card(page)).toContainText("Head Commitcccccccccccc");
+    await expect(card(page)).toContainText("Upvoted Headaaaaaaaaaaaa");
+    await expect(card(page)).toContainText("Rounds Used4");
+    await expect(card(page)).toContainText("Extra Rounds1");
+    await assertNoHorizontalOverflow(page, ".request-card");
+    if (process.env.REVIEW_EXTENSION_EVIDENCE_DIR) {
+      await page.screenshot({ path: `${process.env.REVIEW_EXTENSION_EVIDENCE_DIR}/extension-${viewport.width}.png`, fullPage: true });
+    }
   });
 }

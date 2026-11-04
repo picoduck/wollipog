@@ -1,4 +1,4 @@
-import type { SessionStatus, SessionView } from "@wollipog/protocol";
+import type { ArchiveSessionMetadata, SessionStatus, SessionView } from "@wollipog/protocol";
 
 export const ARCHIVE_SESSION_PAGE_SIZE = 50;
 
@@ -41,12 +41,6 @@ export type ArchiveSessionCandidate = Pick<SessionView,
   projectName: string | null;
   locationName: string | null;
 };
-
-export interface ArchiveSessionMetadata {
-  project: string;
-  location: string;
-  agent: string;
-}
 
 export interface ArchiveSessionCursor {
   version: 1;

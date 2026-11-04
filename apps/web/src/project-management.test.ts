@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import type { ProjectView, RunnerView } from "@wollipog/protocol";
+import type { ProjectLocationView, ProjectView, RunnerView } from "@wollipog/protocol";
 import { workspaceLocationKey } from "./projects.js";
 import {
   buildProjectLocationCandidates,
@@ -8,6 +8,9 @@ import {
   projectAfterRemoval,
   projectAvailabilityLabel,
   projectLocationMembershipState,
+  projectMachineSummary,
+  projectUnavailableStatus,
+  projectVisibilityCounts,
 } from "./project-management.js";
 
 function project(id: string, name: string, hidden = false): ProjectView {
@@ -31,6 +34,46 @@ test("Project management filters retain hidden and zero-session Projects by stab
   assert.deepEqual(filterManagedProjects([hidden, sameName, alpha], "", "all").map((item) => item.id), ["alpha", "alpha-2", "hidden"]);
   assert.deepEqual(filterManagedProjects([alpha, hidden], "", "hidden").map((item) => item.id), ["hidden"]);
   assert.deepEqual(filterManagedProjects([alpha, hidden], "hidden", "all").map((item) => item.id), ["hidden"]);
+});
+
+function located(id: string, name: string, locations: Array<[runnerId: string, availability: ProjectLocationView["availability"], isDefault: boolean]>, hidden = false): ProjectView {
+  return {
+    ...project(id, name, hidden),
+    locations: locations.map(([runnerId, availability, isDefault], index) => ({
+      id: `${id}-${index}`, projectId: id, runnerId, workspaceId: `${id}-workspace-${index}`, name: `${id}-${index}`,
+      path: `/repos/${id}-${index}`, source: "managed", availability, isDefault, createdAt: 1, updatedAt: 1,
+    })),
+  };
+}
+const MACHINES: Record<string, string> = { "runner-1": "Build Machine", "runner-2": "Studio Workstation" };
+const machineName = (location: ProjectLocationView) => MACHINES[location.runnerId] ?? location.runnerId;
+
+test("the Projects list searches names and machines, and its filter counts follow the search (#2957)", () => {
+  const billing = located("billing", "Billing", [["runner-1", "available", true]]);
+  const docs = located("docs", "Docs", [["runner-2", "runner_offline", true]]);
+  const secret = located("secret", "Secret", [["runner-2", "runner_offline", true]], true);
+  const empty = project("empty", "Empty");
+  const all = [billing, docs, secret, empty];
+  assert.deepEqual(filterManagedProjects(all, "studio", "all", machineName).map((item) => item.id), ["docs", "secret"]);
+  assert.deepEqual(filterManagedProjects(all, "studio", "shown", machineName).map((item) => item.id), ["docs"]);
+  // A location's own name and path are not what the field says it searches.
+  assert.deepEqual(filterManagedProjects(all, "/repos", "all", machineName), []);
+  assert.deepEqual(projectVisibilityCounts(all, "", machineName), { all: 4, shown: 3, hidden: 1 });
+  assert.deepEqual(projectVisibilityCounts(all, "studio", machineName), { all: 2, shown: 1, hidden: 1 });
+});
+
+test("a project row names its default location's machine and a status only when nothing is reachable (#2957)", () => {
+  const mixed = located("mixed", "Mixed", [["runner-2", "runner_offline", false], ["runner-1", "available", true]]);
+  assert.equal(projectMachineSummary(mixed, machineName), "Build Machine");
+  assert.equal(projectUnavailableStatus(mixed), null, "one reachable location is enough");
+  const noDefault = located("spread", "Spread", [["runner-1", "available", false], ["runner-2", "available", false], ["runner-1", "available", false]]);
+  assert.equal(projectMachineSummary(noDefault, machineName), "Build Machine, Studio Workstation");
+  assert.equal(projectMachineSummary(project("empty", "Empty"), machineName), null);
+  assert.equal(projectUnavailableStatus(project("empty", "Empty")), null, "no locations is the sub-line's to say");
+  const offline = located("offline", "Offline", [["runner-1", "workspace_missing", false], ["runner-2", "runner_offline", true]]);
+  assert.equal(projectUnavailableStatus(offline), "runner_offline", "the default location's state");
+  const offlineNoDefault = located("away", "Away", [["runner-1", "workspace_missing", false], ["runner-2", "runner_offline", false]]);
+  assert.equal(projectUnavailableStatus(offlineNoDefault), "workspace_missing", "else the first location's");
 });
 
 test("Location candidates use exact runner/workspace identity and preserve stale linked Locations", () => {

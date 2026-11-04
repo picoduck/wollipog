@@ -17,16 +17,17 @@ export const acceptanceMatrix = Object.freeze([
     files: ["apps/control-plane/src/campaign-status-acceptance.integration.test.ts", "apps/control-plane/src/campaign-work-state.test.ts", "apps/control-plane/src/campaign-report-recovery.test.ts", "apps/control-plane/src/session-attention.db.test.ts"] },
   { id: "provider-boundary", criteria: ["managed-provider-restrictions", "unknown-effects", "out-of-bound-repository"],
     files: ["apps/runner/src/orchestrator-provider-permissions.test.ts", "apps/runner/src/orchestrator-additive-campaign.integration.test.ts"] },
-  { id: "budget-and-native-review", criteria: ["finite-fixture-allowance", "child-at-create-rollback", "native-job-replay-accounting", "unknown-usage-reservation"],
-    pending: ["actual-native-provider-dispatch", "actual-media-only-sdk-enforcement", "actual-daily-limit-and-orphan-recovery"],
-    files: ["apps/control-plane/src/campaign-budget.test.ts", "apps/runner/src/campaign-review-jobs.test.ts"] },
+  { id: "budget-and-review-sessions", criteria: ["finite-fixture-allowance", "child-at-create-rollback", "historical-native-receipt-accounting", "review-session-admission", "retirement-mixed-version", "unknown-usage-reservation"],
+    pending: ["actual-managed-review-session-dispatch", "actual-media-only-sdk-enforcement", "actual-daily-limit-and-orphan-recovery"],
+    files: ["apps/control-plane/src/campaign-budget.test.ts", "apps/control-plane/src/review-sessions.test.ts", "apps/runner/src/retired-review-jobs.test.ts"] },
   { id: "provider-rejection-recovery", criteria: ["identical-rejection-hold", "uncertain-failure-not-rejection", "successful-turn-recovery"],
     files: ["apps/runner/src/session-manager-rejection-hold.test.ts"] },
 ]);
 
 export const liveSteps = Object.freeze([
+  "Migrate the historical code-review plan schema to current review-session admission and Session usage evidence before a live run; retired native review profiles cannot be used.",
   "Freeze reviewed integrated main and prerequisite merge commits; verify actual current runtime capabilities.",
-  "Operator establishes disposable services/state and the exact private test repository; never reuse hosting ports or databases.",
+  "Operator establishes disposable services/state and the exact Human-authorized target repository; never reuse hosting ports or databases.",
   "Operator verifies existing account/profile, official prices and stricter limits; authenticate outside the campaign if needed.",
   "Probe the actual media-only reviewer namespace and tools; generate fresh private oracle afterward, outside that namespace.",
   "Complete normal-video candidate/paced/maximum certification under a separately human-authorized metered operator reservation; finish required human inspection/registration before the measured campaign authorization.",
@@ -35,7 +36,7 @@ export const liveSteps = Object.freeze([
   "Resolve epic membership; implement the sanitized test UI interaction; capture screenshot and normal paced video through approved private Session storage.",
   "Deliver exact screenshot plus every normal-video source frame to the admitted reviewer; retain original UI-gate artifact snapshot and separate actual reviewer provenance.",
   "Require criteria-bound defect/verdict and complete ordered delivery proof; compare blind answers against the committed private oracle after the reviewer finishes.",
-  "Repair verified feedback, recapture/re-review changed bytes and current head; run accounted Opus 5.5 high native code review separately from managed media review.",
+  "Repair verified feedback, recapture/re-review changed bytes and current head; run an admitted cross-model review session with the configured harness/model/effort and managed Session usage, separately from media review.",
   "Check required branch CI on the reviewed pushed SHA; consume exact merge admission; observe successful merge-group CI and actual MERGED with commit on default branch.",
   "Record/adjudicate one justified related follow-up, inspect duplicates, sanitize/review exact title/body/labels, publish once and read back exact payload.",
   "Complete that follow-up through review, exact-head and merge-group CI and actual merge; close delivered test issues through enforced authority and read them back.",
@@ -64,8 +65,16 @@ export function inspectLivePlan(plan) {
   const blockers = [];
   const need = (condition, code) => { if (!condition) blockers.push(code); };
   need(plan?.version === 1 && plan?.status === "proposed", "plan_format");
+  // The hosting repository is never an implicit sandbox. It is admissible only as the explicit
+  // Human-authorized target that names it, with the Human's ceiling covering the plan's allowance.
+  const target = plan?.repositoryTarget;
+  const hostingRepository = text(plan?.repository) && plan.repository.toLowerCase() === "picoduck/wollipog";
+  const authorizedTarget = target?.kind === "human_authorized_repository" && target?.authorizedBy === "human" &&
+    text(target?.repository) && text(plan?.repository) && target.repository.toLowerCase() === plan.repository.toLowerCase() &&
+    positive(target?.costCeilingUsd) && positive(plan?.limits?.costUsd) && plan.limits.costUsd <= target.costCeilingUsd &&
+    text(target?.reason);
   need(text(plan?.repository) && /^[\w.-]+\/[\w.-]+$/u.test(plan.repository) &&
-    plan.repository.toLowerCase() !== "picoduck/wollipog", "isolated_repository");
+    (target === undefined ? !hostingRepository : authorizedTarget), "isolated_repository");
   need(text(plan?.objective), "objective");
   need(Array.isArray(plan?.scope?.originalIssues) && plan.scope.originalIssues.length > 0 &&
     plan.scope.originalIssues.every(integer) && new Set(plan.scope.originalIssues).size === plan.scope.originalIssues.length,
@@ -79,19 +88,38 @@ export function inspectLivePlan(plan) {
     integer(plan?.limits?.wallTimeMinutes) && plan?.limits?.followUps === 1 &&
     plan?.limits?.faultAttempts === 6, "finite_aggregate_limits");
   need(plan?.limits?.onExhaustion === "stop_without_override" && plan?.limits?.unknownUsage === "retain_reservation", "no_limit_reset");
-  need(plan?.provider?.root?.driver === "codex-app-server" && plan?.provider?.root?.model === "gpt-6.1-sol" &&
-    plan?.provider?.root?.effort === "high" && text(plan?.provider?.root?.accountProfile), "fixed_root_profile");
+  // The Human fixed this release run's root: native Claude Code, claude-opus-5-5, high effort.
+  need(plan?.provider?.root?.driver === "claude-code" && plan?.provider?.root?.context === "native" &&
+    plan?.provider?.root?.model === "claude-opus-5-5" && plan?.provider?.root?.effort === "high" &&
+    text(plan?.provider?.root?.accountProfile), "fixed_root_profile");
+  // Delegated video admission refuses `mixed_peer` unless the controller, the child and the reviewer
+  // each declare the paced video review contract (reviewerAdmissionPrerequisites in
+  // apps/control-plane/src/evidence-review-worker.ts). Only a native Claude Code agent with a
+  // re-proven media-only reviewer attestation advertises it (withMediaReviewerCapabilities in
+  // apps/runner/src/index.ts), so the root and every implementation child must be one. Children the
+  // plan does not declare could run any harness, so they fail closed too.
+  const pacedPeer = (agent) => agent?.driver === "claude-code" && agent?.context === "native";
+  need(pacedPeer(plan?.provider?.root) && pacedPeer(plan?.provider?.children) &&
+    text(plan?.provider?.children?.accountProfile), "paced_video_peers");
   need(["codex-app-server", "claude-code"].includes(plan?.provider?.media?.driver) && text(plan?.provider?.media?.model) &&
     text(plan?.provider?.media?.provider) && text(plan?.provider?.media?.accountProfile) &&
     digest(plan?.provider?.media?.capabilitiesSha256) && text(plan?.provider?.media?.retentionDisclosure), "exact_media_profile_disclosure");
+  // The installed Claude Code media-only reviewer (#1321 PR B): the pinned CLI, exactly the two
+  // scoped media tools and a dedicated key, attested by the runner. Codex cannot prove a media-only
+  // tool allowlist, so it is refused here exactly as the runner refuses it.
   const nativeBoundary = plan?.provider?.media?.nativeBoundary;
-  need(nativeBoundary?.driver === "codex-app-server" && plan?.provider?.media?.driver === "codex-app-server" &&
-    plan?.provider?.media?.model === "gpt-6.1-sol" && nativeBoundary?.effort === "high" &&
-    text(nativeBoundary?.installedVersion) && digest(nativeBoundary?.executableSha256) &&
-    digest(nativeBoundary?.schemaSha256) && nativeBoundary?.supported === true &&
-    text(nativeBoundary?.enforcedProfileRef) && digest(nativeBoundary?.deniedRoutesProofSha256) &&
+  need(nativeBoundary?.profile === "claude-code-media-only-v1" && nativeBoundary?.driver === "claude-code" &&
+    plan?.provider?.media?.driver === "claude-code" && plan?.provider?.media?.model === "claude-opus-5-5" &&
+    nativeBoundary?.effort === "high" && nativeBoundary?.cliVersion === "2.1.296" &&
+    digest(nativeBoundary?.executableSha256) && digest(nativeBoundary?.namespacePolicySha256) &&
+    JSON.stringify(nativeBoundary?.tools) === JSON.stringify(["review_video_evidence_frame", "submit_video_evidence_verdict"]) &&
+    nativeBoundary?.credential === "dedicated_api_key" && nativeBoundary?.supported === true &&
+    digest(nativeBoundary?.attestationSha256) && nativeBoundary.attestationSha256 === plan?.provider?.media?.capabilitiesSha256 &&
+    digest(nativeBoundary?.deniedRoutesProofSha256) &&
     nativeBoundary?.completeToolAllowlist === true && nativeBoundary?.isolatedContext === true &&
     nativeBoundary?.immutableResumePolicy === true, "native_media_boundary");
+  // Historical v1 shape only. Retired native profiles cannot establish current readiness; a
+  // review-session plan schema and its live proof remain an independent migration requirement.
   need(plan?.provider?.codeReview?.profile === "native_opus_5_5_high_read_only" &&
     text(plan?.provider?.codeReview?.accountProfile) && text(plan?.provider?.codeReview?.cliVersion) &&
     digest(plan?.provider?.codeReview?.controllerSha256) && digest(plan?.provider?.codeReview?.executableSha256), "accounted_native_review_profile");
@@ -115,7 +143,8 @@ export function inspectLivePlan(plan) {
   // A prepared plan cannot activate missing runtime adapters or certify its own approval.
   return { status: "blocked", planComplete: blockers.length === 0, blockers,
     requiredIndependentChecks: ["authenticated_human_envelope", "registered_integrated_adapters", "actual_namespace_enforcement",
-      "actual_media_and_cost_proof", "current_server_capabilities", "isolated_repository_operator_authorization"],
+      "actual_media_and_cost_proof", "current_server_capabilities", "review_session_plan_migration",
+      target === undefined ? "isolated_repository_operator_authorization" : "human_repository_target_authorization"],
     liveExecutionAvailable: false, releaseAcceptanceProven: false };
 }
 

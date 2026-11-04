@@ -17,19 +17,24 @@
  *   - "the model" is a scripted OpenAI Responses-API server this script starts, selected through a
  *     throwaway `CODEX_HOME`. It emits one `exec_command` tool call with the exact arguments the
  *     case wants and then one final message, so each case is one deterministic turn. It also
- *     answers Codex's own `codex-auto-review` Guardian requests with a scripted verdict, which is
- *     how the Guardian-approved path is measured without a Guardian model.
+ *     answers Codex's own Guardian requests (`isGuardianRequest`) with a scripted verdict, which is
+ *     how the Guardian-approved path is measured without a Guardian model. Each case counts those
+ *     requests: a Guardian case passes only when Guardian actually asked, so a Guardian request the
+ *     fixture misread (which Codex treats as a denial) never reads as a measured denial.
  *   - the hook state directory is a throwaway directory holding a random marker, never the
  *     runner's real one.
  */
 
-import { spawn, type ChildProcess } from "node:child_process";
+import { spawn, spawnSync, type ChildProcess } from "node:child_process";
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { isAbsolute, join, relative } from "node:path";
+import { pathToFileURL } from "node:url";
+import { resolve } from "node:path";
 import { codexPermissionProfileOverrides } from "../src/codex-permission-profile.js";
+import { isGuardianRequest, isolatedProbeEnv, unavailableProbeOutput, probeResult, probeExit, GUARD_DOCUMENTATION, ownProbeProcess, type ProbeStatus } from "./codex-probe-support.js";
 
 const CODEX = process.env.CODEX_BIN || "codex";
 const TURN_TIMEOUT_MS = 90_000;
@@ -52,7 +57,7 @@ interface Case {
   expect: "network" | "noNetwork" | "markerRead" | "denied" | "declined";
 }
 
-const CASES: Case[] = [
+export const CASES: Case[] = [
   // The regression itself: the same approved escalation, on each sandbox.
   { name: "legacy · escalation accepted · network", command: "network", escalate: true, sandbox: "legacy", decision: "accept", expect: "network" },
   { name: "profile · escalation accepted · network", command: "network", escalate: true, sandbox: "profile", decision: "accept", expect: "noNetwork" },
@@ -86,6 +91,33 @@ function listen(server: Server): Promise<number> {
   });
 }
 
+/** Only the recorded namespace denial is eligible for an operator acknowledgement. */
+export function sandboxNamespaceUnavailable(result: { error?: unknown; status: number | null; signal?: string | null; stderr: string | null } | null): boolean {
+  return !!result && !result.error && !result.signal && result.status !== null && result.status !== 0 &&
+    /^bwrap: No permissions to create new namespace(?:,|$)/m.test(result.stderr ?? "");
+}
+
+/**
+ * Why the benign sandbox control failed, so a could-not-run report names the cause: the exit
+ * status and the first stderr line, printable ASCII only and bounded. The control runs a fixed
+ * command in a throwaway home, so its stderr carries no credential.
+ */
+export function sandboxFailureDetail(result: { error?: unknown; status: number | null; signal?: string | null; stdout?: string | null; stderr: string | null } | null): string {
+  if (!result) return "no Linux sandbox on this platform";
+  const error = result.error as { code?: string } | undefined;
+  const outcome = error ? `could not start (${error.code ?? "error"})` : result.signal ? `killed by ${result.signal}` :
+    result.status === 0 ? "exited 0 without the ready marker" : `exited ${result.status}`;
+  const lines = (result.stderr ?? "").split("\n").map(l => l.replace(/[^\x20-\x7e]/gu, "").trim()).filter(Boolean);
+  // Prefer the failure itself over a leading warning, such as Codex's PATH-alias notice.
+  const index = lines.findIndex(l => /panicked|error|bwrap:|denied|not permitted|refus/iu.test(l) && !/^WARNING:/u.test(l));
+  const fallback = lines.findLastIndex(l => !/^WARNING:/u.test(l));
+  const at = index >= 0 ? index : fallback >= 0 ? fallback : 0;
+  // A Rust panic prints its location first and its message on the following lines.
+  const picked = lines.slice(at, /panicked at/u.test(lines[at] ?? "") ? at + 3 : at + 1)
+    .filter(l => !/^note: run with `RUST_BACKTRACE/u.test(l)).join(" ");
+  return picked ? `${outcome}: ${picked.length > 400 ? `${picked.slice(0, 400)}...` : picked}` : `${outcome} with no stderr`;
+}
+
 /** Stands in for the network: reachable outside the sandbox, refused inside it. */
 function networkServer(): Server {
   return createServer((_request, response) => {
@@ -94,15 +126,21 @@ function networkServer(): Server {
   });
 }
 
+interface ModelState { tool: Json | null; guardian: "allow" | "deny"; calls: number; guardianRequests: number }
+
+/** What one case produced: the command's output and how many Guardian requests the fixture answered. */
+export interface CaseOutcome { output: string; guardianRequests: number }
+
 /** One scripted model turn, plus scripted Guardian verdicts. */
-function modelServer(state: { tool: Json | null; guardian: "allow" | "deny"; calls: number }): Server {
+function modelServer(state: ModelState): Server {
   return createServer((request, response) => {
     const chunks: Buffer[] = [];
     request.on("data", (chunk: Buffer) => chunks.push(chunk));
     request.on("end", () => {
       let body: Json = {};
       try { body = JSON.parse(Buffer.concat(chunks).toString("utf8")) as Json; } catch { /* keep {} */ }
-      const isGuardian = String(body.model ?? "").startsWith("codex-auto-review");
+      const isGuardian = isGuardianRequest(request.headers, body);
+      if (isGuardian) state.guardianRequests++;
       // The Guardian runs inside the same turn; only the agent's own calls advance the script.
       const step = isGuardian ? -1 : state.calls++;
       const item: Json = isGuardian
@@ -138,17 +176,19 @@ function message(text: string): Json {
 
 interface Fixture { repo: string; codexHome: string; hookDir: string; marker: string; networkPort: number }
 
-function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; guardian: "allow" | "deny"; calls: number }): Promise<string> {
+function runCase(testCase: Case, fixture: Fixture, model: ModelState): Promise<string> {
   const command = testCase.command === "network"
     ? `curl -s --max-time 3 http://127.0.0.1:${fixture.networkPort}/ || echo NETBLOCKED`
     : `cat ${join(fixture.hookDir, "verdict.json")} 2>&1 | head -1`;
   model.tool = {
     cmd: command,
+    shell: "/bin/sh", login: false,
     yield_time_ms: 5000,
     ...(testCase.escalate ? { sandbox_permissions: "require_escalated", justification: "the probe needs it" } : {}),
   };
   model.guardian = testCase.guardian ?? "allow";
   model.calls = 0;
+  model.guardianRequests = 0;
 
   const args = testCase.sandbox === "profile"
     ? ["-c", codexPermissionProfileOverrides(":workspace", fixture.hookDir)[0],
@@ -157,12 +197,12 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
   // Its own process group, like the runner's own probes: the configured command may be a wrapper
   // that starts the real `codex` without `exec`, and killing only the wrapper leaks one app-server
   // per case.
-  const child = spawn(CODEX, [...args, "app-server"], {
+  const child = ownProbeProcess(spawn(CODEX, [...args, "app-server"], {
     cwd: fixture.repo,
-    env: { ...process.env, CODEX_HOME: fixture.codexHome, PROBE_KEY: "x" },
+    env: isolatedProbeEnv(fixture.codexHome),
     stdio: ["pipe", "pipe", "pipe"],
     detached: true,
-  });
+  }));
 
   return new Promise<string>((resolve) => {
     let settled = false;
@@ -244,7 +284,16 @@ function runCase(testCase: Case, fixture: Fixture, model: { tool: Json | null; g
   });
 }
 
-function verdict(testCase: Case, output: string, marker: string): boolean {
+/** A Guardian case was actually reviewed by the scripted Guardian; a client case never reached it. */
+export function guardianRouted(testCase: Case, guardianRequests: number): boolean {
+  return testCase.guardian ? guardianRequests > 0 : guardianRequests === 0;
+}
+
+export function caseMatches(testCase: Case, outcome: CaseOutcome, marker: string): boolean {
+  return guardianRouted(testCase, outcome.guardianRequests) && verdict(testCase, outcome.output, marker);
+}
+
+export function verdict(testCase: Case, output: string, marker: string): boolean {
   switch (testCase.expect) {
     case "network": return output.includes(NETWORK_BODY);
     case "noNetwork": return output.includes("NETBLOCKED") && !output.includes(NETWORK_BODY);
@@ -254,29 +303,72 @@ function verdict(testCase: Case, output: string, marker: string): boolean {
   }
 }
 
+export function hardeningRestorable(outcomes: Map<string, CaseOutcome>, marker: string): boolean {
+  return CASES.every(testCase => {
+    const outcome = outcomes.get(testCase.name);
+    if (outcome === undefined || unavailableProbeOutput(outcome.output) || !guardianRouted(testCase, outcome.guardianRequests)) return false;
+    return testCase.sandbox === "profile" && testCase.escalate && testCase.expect === "noNetwork"
+      ? outcome.output.includes(NETWORK_BODY) : verdict(testCase, outcome.output, marker);
+  });
+}
+
 /* --------------------------------------------------------------------------------------------
  * Driver.
  * ----------------------------------------------------------------------------------------- */
 
+/** The benign sandbox control: Codex's default platform sandbox around a fixed shell command. */
+export const SANDBOX_CONTROL_ARGS = ["sandbox", "--", "/bin/sh", "-c", "printf PROBE_SANDBOX_READY"] as const;
+
+/**
+ * Codex refuses to create its sandbox helper aliases when CODEX_HOME is under the temporary
+ * directory, so the fixture's Codex home lives in this probe's throwaway HOME when that is
+ * outside it. The workspace and hook state stay under the temporary directory as measured.
+ */
+export function fixtureHomeBase(home: string | undefined, temp: string): string | null {
+  if (!home || !isAbsolute(home)) return null;
+  const inside = relative(resolve(temp), resolve(home));
+  return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside)) ? null : home;
+}
+
 async function main(): Promise<number> {
   const root = mkdtempSync(join(tmpdir(), "wollipog-escalation-probe-"));
+  const homeBase = fixtureHomeBase(process.env.HOME, tmpdir());
+  const codexHome = homeBase ? mkdtempSync(join(homeBase, "escalation-codex-home-")) : join(root, "codex-home");
   const fixture: Fixture = {
     repo: join(root, "repo"),
-    codexHome: join(root, "codex-home"),
+    codexHome,
     hookDir: join(root, "hook-state"),
     marker: randomBytes(16).toString("hex"),
     networkPort: 0,
   };
   const net = networkServer();
-  const model = { tool: null as Json | null, guardian: "allow" as "allow" | "deny", calls: 0 };
+  const model: ModelState = { tool: null, guardian: "allow", calls: 0, guardianRequests: 0 };
   const models = modelServer(model);
   let failures = 0;
+  const statuses: ProbeStatus[] = [];
+  const outcomes = new Map<string, CaseOutcome>();
   try {
     mkdirSync(fixture.repo, { recursive: true });
     mkdirSync(fixture.codexHome, { recursive: true });
     mkdirSync(fixture.hookDir, { recursive: true, mode: 0o700 });
     writeFileSync(join(fixture.hookDir, "verdict.json"), fixture.marker, { mode: 0o600 });
-    await gitInit(fixture.repo);
+    await gitInit(fixture.repo, fixture.codexHome);
+
+    // Prove the host can execute Codex's sandbox before spending thirteen turn timeouts.
+    // A denied namespace is an environment failure, never a network/deny measurement.
+    // `codex sandbox [OPTIONS] [COMMAND]...` (0.155.1 and 0.166.0) has no `linux` subcommand:
+    // hosted run 41036582625 showed `sandbox linux` executing a program named `linux`.
+    const sandbox = process.platform === "linux" ? spawnSync(CODEX,
+      SANDBOX_CONTROL_ARGS,
+      { cwd: fixture.repo, env: isolatedProbeEnv(fixture.codexHome), encoding: "utf8", timeout: 15_000 }) : null;
+    if (!sandbox || sandbox.error || sandbox.status !== 0 || !sandbox.stdout.includes("PROBE_SANDBOX_READY")) {
+      const namespaceUnavailable = sandboxNamespaceUnavailable(sandbox);
+      probeResult("permission profile escalation matrix", "could not run",
+        namespaceUnavailable ? "Host denies unprivileged user namespaces; Codex's benign sandbox control could not run; no escalation assumption measured" :
+          `Codex Linux sandbox cannot execute a benign control command on this host (${sandboxFailureDetail(sandbox)}); no escalation assumption measured`, GUARD_DOCUMENTATION,
+        namespaceUnavailable ? "sandbox_namespace_unavailable" : undefined);
+      return 2;
+    }
 
     fixture.networkPort = await listen(net);
     const modelPort = await listen(models);
@@ -288,15 +380,31 @@ async function main(): Promise<number> {
 
     for (const testCase of CASES) {
       const output = await runCase(testCase, fixture, model);
-      const ok = verdict(testCase, output, fixture.marker);
+      const outcome: CaseOutcome = { output, guardianRequests: model.guardianRequests };
+      const ok = caseMatches(testCase, outcome, fixture.marker);
+      outcomes.set(testCase.name, outcome);
+      const status = unavailableProbeOutput(output) ? "could not run" : ok ? "unchanged" : "changed";
+      statuses.push(status);
+      const result = output.includes(NETWORK_BODY) ? "network retained" : output.includes("NETBLOCKED") ? "network blocked" :
+        output.includes(fixture.marker) ? "denied marker readable" : verdict(testCase, output, fixture.marker) ? testCase.expect : "unexpected command result";
+      probeResult(`permission profile: ${testCase.name}`, status,
+        unavailableProbeOutput(output) ? "sandbox or CLI could not execute the fixture command" :
+          `${result}; guardianRequests=${outcome.guardianRequests}`,
+        GUARD_DOCUMENTATION);
       if (!ok) failures++;
       const shown = output.replace(fixture.marker, "<MARKER>").slice(0, 60);
-      process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(44)} ${testCase.expect.padEnd(11)} ${JSON.stringify(shown)}\n`);
+      process.stdout.write(`${ok ? "ok  " : "FAIL"}  ${testCase.name.padEnd(44)} ${testCase.expect.padEnd(11)} ` +
+        `guardian×${outcome.guardianRequests} ${JSON.stringify(shown)}\n`);
+    }
+    if (hardeningRestorable(outcomes, fixture.marker)) {
+      probeResult("provider-mode permission-profile deny withheld by #1336", "changed",
+        "approved escalations retain network and directory denial still holds; withheld hardening is re-enablable through a reviewed code change", GUARD_DOCUMENTATION);
     }
   } finally {
     net.close();
     models.close();
     rmSync(root, { recursive: true, force: true });
+    rmSync(codexHome, { recursive: true, force: true });
   }
   // "no command ran" on every case means the harness never got a turn out of `codex` — a wrong
   // CODEX_BIN, a rejected argument, a config error — not a behaviour change. Say so, rather than
@@ -308,7 +416,7 @@ async function main(): Promise<number> {
         "Codex's sandbox behaviour was measured here.\n"
       : `\n${failures} of ${CASES.length} cases did NOT match. Codex's behaviour has moved; re-read ` +
         "ADR 0012 before changing code.\n");
-  return failures === 0 ? 0 : 1;
+  return probeExit(statuses);
 }
 
 const FIXTURE_TIMEOUT_MS = 30_000;
@@ -321,12 +429,12 @@ const FIXTURE_TIMEOUT_MS = 30_000;
  * would otherwise hang the fixture before any per-case timeout exists — and `main`'s `finally`,
  * which removes the temporary tree, would never run.
  */
-function gitInit(repo: string): Promise<void> {
+function gitInit(repo: string, home: string): Promise<void> {
   const run = (args: string[]): Promise<void> => new Promise((resolve, reject) => {
-    const child: ChildProcess = spawn("git", [
+    const child: ChildProcess = ownProbeProcess(spawn("git", [
       "-c", "core.hooksPath=/dev/null", "-c", "commit.gpgsign=false", "-c", "tag.gpgsign=false",
       "-c", "user.email=probe@example.invalid", "-c", "user.name=probe", ...args,
-    ], { cwd: repo, stdio: "ignore", detached: true });
+    ], { cwd: repo, env: isolatedProbeEnv(home), stdio: "ignore", detached: true }));
     const timer = setTimeout(() => {
       killTree(child);
       reject(new Error(`git ${args[0]} did not finish within ${FIXTURE_TIMEOUT_MS}ms`));
@@ -344,7 +452,7 @@ function gitInit(repo: string): Promise<void> {
     .then(() => run(["commit", "-qm", "init"]));
 }
 
-main().then((code) => { process.exitCode = code; }, (error: unknown) => {
-  process.stderr.write(`${String(error)}\n`);
-  process.exitCode = 1;
+if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) main().then((code) => { process.exitCode = code; }, (error: unknown) => {
+  probeResult("permission profile escalation matrix", "could not run", "fixture or compatible app-server unavailable", GUARD_DOCUMENTATION);
+  process.exitCode = 2;
 });

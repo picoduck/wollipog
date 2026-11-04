@@ -182,8 +182,9 @@ const plural = (count: number, one: string, many = `${one}s`) => `${count} ${cou
 
 /**
  * The one line a run of work collapses to (#2168): "Worked for 26s" once it settles, "Working"
- * while it runs, then its counts 12px apart. A failure is counted in the danger colour with an
- * alert icon; a zero count never renders. The line never wraps: on a narrow screen its meta clips
+ * while it runs, then its counts 12px apart. Commands are the shell commands it ran (#3514): reads,
+ * searches and edits are not commands. A failure is counted in the danger colour with an alert
+ * icon; a zero count never renders. The line never wraps: on a narrow screen its meta clips
  * at the end.
  */
 export function WorkLedgerLine({ ledger, live, open, onToggle }: {
@@ -197,7 +198,7 @@ export function WorkLedgerLine({ ledger, live, open, onToggle }: {
     : 0;
   const title = live ? "Working" : span >= 1_000 ? `Worked for ${formatDuration(span)}` : "Worked";
   const meta: ReactNode[] = [];
-  if (ledger.tools) meta.push(<span key="tools">{plural(ledger.tools, "Command")}</span>);
+  if (ledger.commands) meta.push(<span key="commands">{plural(ledger.commands, "Command")}</span>);
   if (ledger.edits) meta.push(<span key="edits">{plural(ledger.edits, "Edit")}</span>);
   if (!ledger.tools && !ledger.edits && ledger.thoughts) {
     meta.push(<span key="thoughts">{plural(ledger.thoughts, "Reasoning Step")}</span>);

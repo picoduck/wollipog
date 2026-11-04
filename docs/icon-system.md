@@ -39,7 +39,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | Export | Decision | Mapping or Exception | Rationale |
 | --- | --- | --- | --- |
 | `GridIcon` | Lucide | `Grid2X2` | Generic grid navigation. |
-| `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation, and the Sessions No Sessions Yet state (#2220). |
+| `InboxIcon` | Lucide | `Inbox` | Generic inbox navigation, and the Sessions No Sessions Yet state (#2220); an automation row's session target (#2969). |
 | `ProjectsIcon` | Lucide | `FolderKanban` | Project collection navigation. |
 | `BoardIcon` | Lucide | `Columns3` | Generic board columns. |
 | `ListIcon` | Lucide | `List` | Generic list layout. |
@@ -47,12 +47,14 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `AlarmClockIcon` | Lucide | `AlarmClock` | Snooze: a snoozed Sessions row's return time (#2209) and the Sessions preview bar's Snooze button (#2210), and the Sessions No Snoozed Sessions and No Active Sessions states (#2220). |
 | `DismissReminderIcon` | Lucide | `AlarmClockOff` | Dismiss Reminder in the Sessions context menu (#2214). |
 | `ConnectionsIcon` | Lucide | `MonitorCog` | Runner connection management. |
-| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs. |
+| `RunsIcon` | Lucide | `Workflow` | Generic workflow runs, and a workflow run's row in Multi-Agent Runs (#2974); an automation row's workflow target (#2969). |
+| `CompareIcon` | Lucide | `Columns2` | A comparison run's row in Multi-Agent Runs: several agents side by side on one task (#2974). `Columns3` is the Board. |
 | `PodsIcon` | Lucide | `UsersRound` | Collaboration group. |
 | `AutomationsIcon` | Lucide | `Zap` | Automation action. |
 | `ServiceTierIcon` | Lucide | `Gauge` | Fast service-tier setting; distinct from the Automations bolt. |
 | `CostIcon` | Lucide | `DollarSign` | A dollar amount inside a field, such as the Guardrails cost thresholds; the Request Card's Budget kind. |
 | `CountIcon` | Lucide | `Hash` | A whole count inside a field, such as the Guardrails tool-call and live-child limits. |
+| `IdentifierIcon` | Lucide | `FingerprintPattern` | An entity's own identifier, such as the Pinned Summary's Session ID row (#3897). |
 | `SkillsIcon` | Lucide | `WandSparkles` | Reusable agent capability; a skill step in the transcript. |
 | `RecommendedIcon` | Lucide | `Sparkles` | Something Wollipog recommends, such as a built-in skill. |
 | `ArchiveIcon` | Lucide | `Archive` | Archived Sessions destination, outline like every rail glyph. |
@@ -85,7 +87,7 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `SettingsIcon` | Lucide | `Settings` | Generic settings navigation. |
 | `UserPlusIcon` | Lucide | `UserPlus` | Add a collaborator. |
 | `DeviceIcon` | Lucide | `Smartphone` | Paired device. |
-| `TeamIcon` | Lucide | `Users` | Team or access group. |
+| `TeamIcon` | Lucide | `Users` | Team or access group; access shared with a team. |
 | `EditIcon` | Lucide | `Pencil` | Generic edit action. |
 | `CopyIcon` | Lucide | `Copy` | Generic copy action. |
 | `InsertIntoDraftIcon` | Lucide | `TextCursorInput` | Insert into Draft on a Side Chat reply, which puts its text into the session's draft (#2862). |
@@ -103,8 +105,11 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ErrorIcon` | Lucide | `CircleAlert` | The danger tone icon on toasts and notices; the failed count on a work ledger line; a UI evidence tile that Can't Load or Can't Show. |
 | `KeyboardIcon` | Lucide | `Keyboard` | Keyboard shortcuts: the palette action and Settings › Behavior's Show Shortcuts. |
 | `AccountIcon` | Lucide | `CircleUserRound` | The provider account a session runs under. |
+| `KeyIcon` | Lucide | `Key` | Re-Pair… on an instance row and in its More Actions menu: replace this app's saved pairing (#3002). |
+| `ArrowLeftRightIcon` | Lucide | `ArrowLeftRight` | Switch on an instance row: make another saved instance the one this app shows (#3002). |
 | `SignInIcon` | Lucide | `KeyRound` | The Request Card's Sign-In kind: a sign-in the session waits for (#2198). |
-| `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email. |
+| `LockIcon` | Lucide | `Lock` | Locked or restricted state; a masked identifier that is not an email; Private to Me access. |
+| `BuildingIcon` | Lucide | `Building` | Organization-Wide access (#2960). |
 | `SecureContextRequiredIcon` | Lucide | `LockKeyhole` | A page that must be HTTPS or localhost to check evidence: the HTTPS or Localhost Required notice and a UI evidence tile that is Not Shown. |
 | `PlayIcon` | Lucide | `Play` | A recording: the mark over a UI evidence tile's first frame. |
 | `MailIcon` | Lucide | `Mail` | A masked or revealed email address. |
@@ -137,7 +142,6 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `VideoIcon` | Lucide | `Film` | A video artifact's kind tile in the Browser (#2854). |
 | `PaperclipIcon` | Lucide | `Paperclip` | A message that carries images: a row of the composer's queue tray. |
 | `AtSignIcon` | Lucide | `AtSign` | Reference a workspace file: the + menu's Reference a File… row, which opens the @ picker. |
-| `ChainIcon` | Lucide | `GitCommitVertical` | Worktree or context-chain relationship. |
 | `CodeIcon` | Lucide | `Code` | Generic code destination; Markdown's Source in a narrow Files panel (#2913). |
 | `VisualStudioCodeIcon` | Custom Exception | `Official VS Code Stable Mark (2021-06-21)` | Microsoft's canonical multicolor product mark; Lucide excludes vendor logos. |
 | `CursorEditorIcon` | Custom Exception | `Simple Icons 16.29.0: Cursor` | Canonical monochrome product mark; Lucide excludes vendor logos. |
@@ -152,9 +156,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ArrowDownIcon` | Lucide | `ArrowDown` | Generic downward action; Jump to Question on a pending question's transcript marker, down to the request dock. |
 | `StopTurnIcon` | Lucide | `Square` | Filled and optically scaled to preserve its send-arrow balance; also a stopped turn's footer mark. |
 | `TuningIcon` | Lucide | `SlidersHorizontal` | Model or effort tuning, and Settings › Behavior, which holds each agent's default model and effort. |
-| `GitHubIcon` | Custom Exception | `GitHub Mark` | Official brand mark with a 16-unit solid geometry. |
-| `NotesIcon` | Lucide | `NotebookText` | Notes summary. |
 | `ComputerIcon` | Lucide | `Monitor` | Local computer. |
+| `ServerIcon` | Lucide | `Server` | A machine reached over SSH: a project location row's leading icon (#2961). |
 | `BranchIcon` | Lucide | `GitBranch` | Git branch. |
 | `ThreadForkIcon` | Lucide | `GitFork` | Conversation fork. |
 | `CompactedIcon` | Lucide | `FoldVertical` | The provider compacted the conversation into a summary. |
@@ -162,6 +165,8 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `RewindFilesIcon` | Lucide | `FileClock` | Rewind files to a turn's checkpoint. |
 | `HandOffIcon` | Lucide | `ArrowRightLeft` | Hand a conversation off to another provider. |
 | `DialIcon` | Lucide | `CircleGauge` | Model or effort setting. |
+| `CapacityIcon` | Lucide | `Cpu` | Runner Capacity, the session units a machine runs at once: the Machines list's meta (#2985). `Gauge` and `CircleGauge` already mean the Fast service tier and a model or effort setting. |
+| `AllMachinesIcon` | Lucide | `LayoutGrid` | The Machines list's All Machines row, which opens the All Machines overview (#2986). `Grid2X2` is already generic grid navigation. |
 | `PullRequestIcon` | Lucide | `GitPullRequest` | Pull request. |
 | `DiffIcon` | Lucide | `FileDiff` | Changed files in the Review panel; a patch artifact's kind tile in the Browser (#2854). |
 | `TranscriptHitIcon` | Lucide | `FileText` | A transcript search hit in the command palette. |
@@ -170,19 +175,22 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `ChildSessionRequestsIcon` | Lucide | `Network` | Who answers an Orchestrator's child session requests: the Pinned Summary's Child Session Requests row. |
 | `WorkflowDecisionsIcon` | Lucide | `Route` | Where an Orchestrator's workflow gates are decided: the Pinned Summary's Workflow Decisions row; the Request Card's Workflow Decision kind. |
 | `GuardrailsIcon` | Lucide | `Fence` | A session's limits: the + menu's Guardrails… row. `Gauge` already means the Fast service tier. |
-| `OrchestratorControlsIcon` | Lucide | `Waypoints` | An Orchestrator's parent control and workflow gates: the + menu's Orchestrator Controls… row, and Settings › Orchestrator. `Workflow` already means workflow runs. |
+| `OrchestratorIcon` | Lucide | `Waypoints` | An Orchestrator: its parent control and workflow gates (the + menu's Orchestrator Controls… row, and Settings › Orchestrator), and an Orchestrator session's type before its title in the Sessions list, Board, session header and Archived Sessions (#4076). `Workflow` already means workflow runs. |
+| `ReviewSessionIcon` | Lucide | `ScanEye` | A review session's type, before its title wherever `OrchestratorIcon` marks an Orchestrator session (#4076). `Eye` already means show and hide. |
 | `ExternalLinkIcon` | Lucide | `ExternalLink` | A link that opens outside Wollipog. |
-| `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion. |
+| `WrenchIcon` | Lucide | `Wrench` | Project setup suggestion, and a machine's Repair Connection… (#2988). |
 | `HeldIcon` | Lucide | `CirclePause` | Child sessions held from starting their next turn: the Held Children campaign notice. |
 | `ExperimentIcon` | Lucide | `FlaskConical` | An experimental feature, on the page a turned-off experiment's route shows, and Settings › Experimental. |
 | `AppearanceIcon` | Lucide | `Palette` | Settings › Appearance: theme, color scheme, density and navigation. |
 | `NotificationsIcon` | Lucide | `Bell` | Settings › Notifications: alerts when a session needs you. |
 | `StorageIcon` | Lucide | `Database` | Settings › Storage: how long archived sessions keep their history. |
 | `NetworkIcon` | Lucide | `Wifi` | Settings › Network: reaching this machine from other devices. `Network` already means child session requests, and `Globe` a remote host. |
+| `WifiOffIcon` | Lucide | `WifiOff` | A machine Wollipog can't reach: the machine detail's This Machine Is Offline notice (#2988). |
 | `VersionIcon` | Lucide | `Tag` | A numbered version ("v3") in a meta row. |
 | `UpdatedIcon` | Lucide | `Clock` | When something last changed, in a meta row. |
 | `HistoryIcon` | Lucide | `History` | Decision History, in the Session Tools list and the tool switcher (#2844). |
 | `MessageSquareIcon` | Lucide | `MessageSquare` | Side Chat, in the Session Tools list and the tool switcher (#2844). |
+| `FindingIcon` | Lucide | `MessageSquareCode` | A review finding: the inline finding editor's caption naming its line (#2851). |
 | `FilesIcon` | Lucide | `Files` | A count of files, in a meta row. |
 | `SkillSourceIcon` | Lucide | `Package` | Where a skill's content comes from (Git, Machine, Built-In or Library). |
 | `ReadIcon` | Lucide | `BookOpen` | A read step in the transcript. |
@@ -194,7 +202,9 @@ keycap's display key or a multiplication sign in a label, is exempted there by n
 | `TerminalIcon` | Lucide | `Terminal` | A command step in the transcript; distinct from the Command Line destination's framed terminal. |
 | `ThoughtIcon` | Lucide | `Brain` | A thought step in the transcript. |
 | `AgentLogIcon` | Lucide | `ScrollText` | An Agent Log step (a harness's own output) in the transcript. |
-| `BotIcon` | Lucide | `Bot` | An agent step in the transcript; the Agents tool in the Session Tools list and the tool switcher (#2844). |
+| `BotIcon` | Lucide | `Bot` | An agent step in the transcript; the Agents tool in the Session Tools list and the tool switcher (#2844); an automation row's agent target (#2969). |
+| `ScheduleIcon` | Lucide | `Repeat` | An automation's schedule in words, on its Automations list row (#2969). |
+| `NextRunIcon` | Lucide | `CalendarClock` | An automation's next run, or Paused, on its Automations list row (#2969). |
 | `ToolIcon` | Lucide | `Hammer` | A tool step of any other kind; distinct from the project setup wrench; the Request Card's Tool Calls kind. |
 
 The Visual Studio Code mark comes from Microsoft's

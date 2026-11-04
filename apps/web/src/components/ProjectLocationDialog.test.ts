@@ -1,7 +1,18 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { ApiError } from "../api.js";
-import { projectLocationCreationError } from "./ProjectLocationDialog.js";
+import { locationNameFromFolder, projectLocationCreationError } from "./ProjectLocationDialog.js";
+
+test("a new folder's Location Name is its folder name in Title Case (#2966)", () => {
+  assert.equal(locationNameFromFolder("/home/ada/acme-storefront"), "Acme Storefront");
+  assert.equal(locationNameFromFolder("/home/ada/acme-storefront/"), "Acme Storefront");
+  assert.equal(locationNameFromFolder("C:\\src\\billing_service"), "Billing Service");
+  assert.equal(locationNameFromFolder("/repos/state-of-the-art"), "State of the Art");
+  assert.equal(locationNameFromFolder("/repos/the-end-of"), "The End Of", "first and last words are capitalized");
+  assert.equal(locationNameFromFolder("/repos/iOS-app"), "IOS App", "a word keeps the rest of its casing");
+  assert.equal(locationNameFromFolder("/repos/wollipog"), "Wollipog");
+  assert.equal(locationNameFromFolder("/"), "Root");
+});
 
 test("a bare legacy 404 explains the control-plane version mismatch", () => {
   const message = projectLocationCreationError(new ApiError("not found", 404));

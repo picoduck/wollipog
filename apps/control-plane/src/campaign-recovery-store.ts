@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import type { DatabaseSync } from "node:sqlite";
-import { CAMPAIGN_RECOVERY_EXPLANATIONS, CAMPAIGN_RECOVERY_LIMITS,
-  type CampaignRecoveryAction, type CampaignRecoveryInput, type CampaignRecoveryProjection,
+import { CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_RECOVERY_EXPLANATIONS, CAMPAIGN_RECOVERY_LIMITS,
+  type CampaignPublicationAdmissionFailure, type CampaignRecoveryAction, type CampaignRecoveryInput, type CampaignRecoveryProjection,
   type CampaignRecoveryReason, type CampaignRecoveryRecord, type CampaignRecoveryResource } from "@wollipog/protocol";
 
 export const CAMPAIGN_RECOVERY_SCHEMA = `
@@ -23,7 +23,67 @@ CREATE TABLE IF NOT EXISTS campaign_recovery_denial_settlements (
   PRIMARY KEY (campaign_session_id, occurrence_id),
   FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
 );
+CREATE TABLE IF NOT EXISTS campaign_recovery_declines (
+  campaign_session_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  request_class TEXT NOT NULL,
+  first_occurrence TEXT NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  declined_count INTEGER NOT NULL,
+  first_declined_at INTEGER NOT NULL,
+  last_declined_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, subject_session_id, request_class),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS campaign_standing_responses (
+  campaign_session_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  claimed_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, subject_session_id, occurrence),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS campaign_recovery_declined_occurrences (
+  campaign_session_id TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  PRIMARY KEY (campaign_session_id, occurrence),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
+CREATE TABLE IF NOT EXISTS campaign_publication_refusals (
+  campaign_session_id TEXT NOT NULL,
+  subject_session_id TEXT NOT NULL,
+  occurrence TEXT NOT NULL,
+  failure TEXT NOT NULL,
+  policy_revision INTEGER NOT NULL,
+  refused_at INTEGER NOT NULL,
+  PRIMARY KEY (campaign_session_id, subject_session_id, occurrence),
+  FOREIGN KEY (campaign_session_id) REFERENCES sessions(id) ON DELETE CASCADE
+);
 `;
+
+/** A member's correctable publication refusal (#4065), kept until the member requests that
+ * recommendation again or its report is verified. Only the failure code and a hashed
+ * session/recommendation coordinate are stored. */
+export interface CampaignPublicationRefusal {
+  sessionId: string;
+  occurrenceId: string;
+  failure: CampaignPublicationAdmissionFailure;
+  policyRevision: number;
+  refusedAt: number;
+}
+
+/** One Full Control decline, kept as blocked work. Its class and hashed first occurrence are the
+ * only request facts stored: never a title, command, question text, path or answer. */
+export interface CampaignRecoveryDecline {
+  sessionId: string;
+  requestClass: string;
+  /** `recoveryCoordinate` of the first declined occurrence; later ones only raise the count. */
+  occurrenceId: string;
+  policyRevision: number;
+  count: number;
+  firstDeclinedAt: number;
+  lastDeclinedAt: number;
+}
 
 /** Server-verified exact terminal-report accounting, never a quality or media receipt. */
 export interface CampaignRecoveryVerifiedReport {
@@ -43,17 +103,34 @@ export interface CampaignRecoveryObservation {
   signal: string;
   /** Evidence of a completed repair/reconciliation. Absence from a partial scan is not resolution. */
   resolved?: boolean;
+  /** #4065: the publication admission failure this record reports; its signal must include it. */
+  admissionFailure?: CampaignPublicationAdmissionFailure;
 }
 interface Row { id: string; signal: string; record_json: string }
 const inputFor: Partial<Record<CampaignRecoveryReason, CampaignRecoveryInput>> = {
   missing_human_information: "answer_existing_request", missing_access: "restore_existing_access",
   boundary_enlargement: "authorize_exact_boundary_change", human_required_rule: "perform_human_required_action",
   unsupported_capability: "use_supported_capability", uncertain_outcome: "reconcile_original_outcome",
+  publication_not_admitted: "perform_human_required_action",
 };
 const terminal = new Set(["resolved", "cancelled"]);
-const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted"]);
+// A Full Control decline is final for its occurrence: blocked, never dispatched, never asked.
+const hard = new Set<CampaignRecoveryReason>(["hard_denial", "attempts_exhausted", "request_declined",
+  "intentional_stop", "unverified_stop"]);
+// How a stopped worker is classified (#3362), least to most severe. Each is a hard block. A worker
+// record keeps its work item across replacement workers, so its label may only escalate: a later
+// worker's denial is never hidden behind an inherited intentional stop, and nothing relabels a denial.
+const stopSeverity: Partial<Record<CampaignRecoveryReason, number>> = { intentional_stop: 1, unverified_stop: 2, hard_denial: 3 };
 const human = new Set<CampaignRecoveryReason>(["missing_human_information", "missing_access",
-  "boundary_enlargement", "human_required_rule", "unsupported_capability"]);
+  "boundary_enlargement", "human_required_rule", "unsupported_capability", "publication_not_admitted"]);
+
+/** How long a delivered, completed wake may stay unanswered (same signal, quiet campaign) before
+ * the same record is woken again: 2, 4, 8 then 16 minutes, capped at 30. The attempt ceiling
+ * still bounds the total; a stalled record past it is exhausted, never silently automatic. */
+export const STALLED_RECOVERY_WAKE_BASE_MS = 120_000;
+export const STALLED_RECOVERY_WAKE_MAX_MS = 1_800_000;
+export const stalledRecoveryWakeDelayMs = (attempts: number) =>
+  Math.min(STALLED_RECOVERY_WAKE_MAX_MS, STALLED_RECOVERY_WAKE_BASE_MS * 2 ** Math.max(0, attempts - 1));
 
 function identity(campaignId: string, resource: CampaignRecoveryResource, action: CampaignRecoveryAction): string {
   const coordinate = resource.kind === "worker" && resource.workItemId
@@ -76,6 +153,86 @@ export class CampaignRecoveryStore {
     this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_denial_settlements
       (campaign_session_id,occurrence_id,subject_session_id,report_json) VALUES (?,?,?,?)`)
       .run(campaignId, occurrenceId, sessionId, JSON.stringify(report));
+  }
+
+  /** Durable at-most-once fence for a standing response (#2940): claimed before the response is
+   * sent, so a restored card (a repeated snapshot, a reconnect, a restart) never answers the same
+   * occurrence twice. False means it was already claimed and must not be answered again. */
+  claimStandingResponse(campaignId: string, sessionId: string, occurrence: string, now: number): boolean {
+    return this.db.prepare(`INSERT OR IGNORE INTO campaign_standing_responses
+      (campaign_session_id,subject_session_id,occurrence,claimed_at) VALUES (?,?,?,?)`)
+      .run(campaignId, sessionId, occurrence, now).changes > 0;
+  }
+
+  /** Only for a response proven not sent (the runner socket refused it): it may be tried again. */
+  releaseStandingResponse(campaignId: string, sessionId: string, occurrence: string): void {
+    this.db.prepare(`DELETE FROM campaign_standing_responses
+      WHERE campaign_session_id=? AND subject_session_id=? AND occurrence=?`).run(campaignId, sessionId, occurrence);
+  }
+
+  /** Record one declined occurrence. A session's repeated requests of the same class collapse
+   * into its first record (#2938 AC6): the count rises, nothing else is created or re-notified. */
+  recordDecline(campaignId: string, sessionId: string, requestClass: string, occurrenceId: string,
+    policyRevision: number, now: number): { firstForClass: boolean } {
+    // A redelivered occurrence (a reconnect replaying a still-pending request) is the same decline.
+    if (!this.db.prepare(`INSERT OR IGNORE INTO campaign_recovery_declined_occurrences (campaign_session_id,occurrence)
+      VALUES (?,?)`).run(campaignId, `${policyRevision}:${sessionId}:${occurrenceId}`).changes) return { firstForClass: false };
+    const existing = this.db.prepare(`SELECT policy_revision FROM campaign_recovery_declines
+      WHERE campaign_session_id=? AND subject_session_id=? AND request_class=?`).get(campaignId, sessionId, requestClass) as
+      { policy_revision: number } | undefined;
+    this.db.prepare(`INSERT INTO campaign_recovery_declines (campaign_session_id,subject_session_id,request_class,
+      first_occurrence,policy_revision,declined_count,first_declined_at,last_declined_at) VALUES (?,?,?,?,?,1,?,?)
+      ON CONFLICT(campaign_session_id,subject_session_id,request_class) DO UPDATE SET
+        first_occurrence=CASE WHEN policy_revision=excluded.policy_revision THEN first_occurrence ELSE excluded.first_occurrence END,
+        first_declined_at=CASE WHEN policy_revision=excluded.policy_revision THEN first_declined_at ELSE excluded.first_declined_at END,
+        declined_count=CASE WHEN policy_revision=excluded.policy_revision THEN declined_count+1 ELSE 1 END,
+        policy_revision=excluded.policy_revision,last_declined_at=excluded.last_declined_at`)
+      .run(campaignId, sessionId, requestClass, occurrenceId, policyRevision, now, now);
+    return { firstForClass: existing?.policy_revision !== policyRevision };
+  }
+
+  /** Declines still shown as blocked work for the current revision. A revocation or newer
+   * revision fences older ones out, so a re-enabled boundary starts without stale blocks. */
+  declines(campaignId: string, policyRevision: number): CampaignRecoveryDecline[] {
+    return (this.db.prepare(`SELECT subject_session_id,request_class,first_occurrence,policy_revision,declined_count,
+      first_declined_at,last_declined_at FROM campaign_recovery_declines WHERE campaign_session_id=? AND policy_revision=?
+      ORDER BY first_declined_at,subject_session_id,request_class`).all(campaignId, policyRevision) as Array<{
+        subject_session_id: string; request_class: string; first_occurrence: string; policy_revision: number;
+        declined_count: number; first_declined_at: number; last_declined_at: number }>).map(row => ({
+      sessionId: row.subject_session_id, requestClass: row.request_class, occurrenceId: row.first_occurrence,
+      policyRevision: row.policy_revision, count: row.declined_count, firstDeclinedAt: row.first_declined_at,
+      lastDeclinedAt: row.last_declined_at }));
+  }
+
+  /** A verified child report settles that child's declines; the blocked record then resolves. */
+  retireDeclines(campaignId: string, sessionId: string): void {
+    this.db.prepare("DELETE FROM campaign_recovery_declines WHERE campaign_session_id=? AND subject_session_id=?")
+      .run(campaignId, sessionId);
+  }
+
+  /** Record a member's correctable publication refusal (#4065). A later refusal of the same
+   * recommendation replaces the failure; the recovery record keeps its identity and attempts. */
+  recordPublicationRefusal(campaignId: string, sessionId: string, occurrenceId: string,
+    failure: CampaignPublicationAdmissionFailure, policyRevision: number, now: number): void {
+    this.db.prepare(`INSERT INTO campaign_publication_refusals (campaign_session_id,subject_session_id,occurrence,failure,
+      policy_revision,refused_at) VALUES (?,?,?,?,?,?) ON CONFLICT(campaign_session_id,subject_session_id,occurrence) DO UPDATE SET
+        failure=excluded.failure,policy_revision=excluded.policy_revision,refused_at=excluded.refused_at`)
+      .run(campaignId, sessionId, occurrenceId, failure, policyRevision, now);
+  }
+
+  /** Refusals still awaiting the member's corrected request under the current revision. */
+  publicationRefusals(campaignId: string, policyRevision: number): CampaignPublicationRefusal[] {
+    return (this.db.prepare(`SELECT subject_session_id,occurrence,failure,policy_revision,refused_at FROM campaign_publication_refusals
+      WHERE campaign_session_id=? AND policy_revision=? ORDER BY refused_at,subject_session_id,occurrence`).all(campaignId, policyRevision) as Array<{
+        subject_session_id: string; occurrence: string; failure: CampaignPublicationAdmissionFailure; policy_revision: number; refused_at: number }>)
+      .map(row => ({ sessionId: row.subject_session_id, occurrenceId: row.occurrence, failure: row.failure,
+        policyRevision: row.policy_revision, refusedAt: row.refused_at }));
+  }
+
+  /** A new decision for the same recommendation, or a verified report (no `occurrenceId`), settles it. */
+  retirePublicationRefusals(campaignId: string, sessionId: string, occurrenceId?: string): boolean {
+    return this.db.prepare(`DELETE FROM campaign_publication_refusals WHERE campaign_session_id=? AND subject_session_id=?
+      ${occurrenceId === undefined ? "" : "AND occurrence=?"}`).run(campaignId, sessionId, ...(occurrenceId === undefined ? [] : [occurrenceId])).changes > 0;
   }
 
   campaignIds(): string[] {
@@ -126,9 +283,12 @@ export class CampaignRecoveryStore {
   }
 
   /** Complete authoritative scan. Repetition is read-only, including notification/admission ids.
-   * Policy revocation cancels old work rather than rebinding it to fresh authority. */
+   * Policy revocation cancels old work rather than rebinding it to fresh authority.
+   * `settledWakeAt` reports when the turn delivering a dispatched record's current wake completed,
+   * only while the campaign is quiet; a record still unanswered after its delay is woken again. */
   synchronize(campaignId: string, policyRevision: number, authorized: boolean,
-    observations: readonly CampaignRecoveryObservation[], now: number): boolean {
+    observations: readonly CampaignRecoveryObservation[], now: number,
+    settledWakeAt?: (record: CampaignRecoveryRecord) => number | undefined): boolean {
     return this.atomic(() => {
       const previous = new Map(this.rows(campaignId).map((row) => [row.id, row]));
       const observed = new Set<string>();
@@ -146,8 +306,14 @@ export class CampaignRecoveryStore {
         const dispatchFenced = (!authorized || old?.dispatchFenced === true || old?.state === "cancelled" ||
           old !== undefined && old.policyRevision !== policyRevision) && !(authorized && freshOccurrence);
         const currentDispatch = old?.state === "dispatched" && row?.signal === observation.signal && !changedResource;
-        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && !currentDispatch
-          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved
+        // A wake the Orchestrator received and finished without changing anything is no longer in
+        // flight. The same record (same occurrence) is woken again, or exhausted past its ceiling.
+        const settledAt = currentDispatch && authorized && !observation.resolved ? settledWakeAt?.(old!) : undefined;
+        const stalled = settledAt !== undefined && now >= settledAt + stalledRecoveryWakeDelayMs(attempts);
+        const escalatedStop = old?.action === "replace_worker" &&
+          (stopSeverity[observation.reason] ?? 0) > (stopSeverity[old.reason] ?? Infinity);
+        let reason = attempts >= CAMPAIGN_RECOVERY_LIMITS.maxAttempts && !observation.resolved && (!currentDispatch || stalled)
+          ? "attempts_exhausted" : old && hard.has(old.reason) && !terminal.has(old.state) && !observation.resolved && !escalatedStop
             ? old.reason : observation.reason;
         const state = observation.resolved ? "resolved" : !authorized && observation.owner !== "human"
           ? reason === "uncertain_outcome" ? "blocked" : "cancelled" : hard.has(reason) ? "blocked"
@@ -155,7 +321,7 @@ export class CampaignRecoveryStore {
           : dispatchFenced ? "blocked"
           : reason === "transient_failure" ? "backoff" : "ready";
         if (state === "blocked" && dispatchFenced && !hard.has(reason) && reason !== "uncertain_outcome") reason = "authority_changed";
-        if (old && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
+        if (old && !stalled && row!.signal === observation.signal && !changedResource && old.policyRevision === policyRevision &&
             old.effectiveOwner === observation.owner && old.reason === reason && Boolean(old.dispatchFenced) === dispatchFenced &&
             (observation.resolved ? old.state === "resolved" : !terminal.has(old.state) || state === old.state)) continue;
         const next: CampaignRecoveryRecord = {
@@ -163,7 +329,10 @@ export class CampaignRecoveryStore {
           effectiveOwner: observation.owner, policyRevision, ...(dispatchFenced ? { dispatchFenced: true } : {}),
           attempts, maxAttempts: CAMPAIGN_RECOVERY_LIMITS.maxAttempts,
           attemptedRecovery: old?.attemptedRecovery ?? [], requiredInput: inputFor[reason] ?? "none",
-          explanation: CAMPAIGN_RECOVERY_EXPLANATIONS[reason], createdAt: old?.createdAt ?? now, updatedAt: now,
+          explanation: CAMPAIGN_RECOVERY_EXPLANATIONS[reason] + (observation.admissionFailure && reason === observation.reason
+            ? ` ${CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[observation.admissionFailure]}` : ""),
+          ...(observation.admissionFailure ? { admissionFailure: observation.admissionFailure } : {}),
+          createdAt: old?.createdAt ?? now, updatedAt: now,
           ...(state === "backoff" ? { nextAttemptAt: now + Math.min(CAMPAIGN_RECOVERY_LIMITS.maxBackoffMs,
             CAMPAIGN_RECOVERY_LIMITS.baseBackoffMs * 2 ** attempts) } : {}),
         };

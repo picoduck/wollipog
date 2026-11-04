@@ -5,12 +5,18 @@ import type {
   AutomationSchedule,
   AutomationSpec,
   ProjectView,
+  RunnerView,
   SessionConfig,
 } from "@wollipog/protocol";
+import { nextCronFire, parseCron, validateTimeZone } from "@wollipog/protocol/cron-schedule";
+import { agentDisplayName } from "./agent-presentation.js";
+import { resolvedInstallationAgentId } from "./automation-installations.js";
 import {
   automationProjectPlacement,
   validateAutomationAlternatePlacement,
 } from "./automation-project-placement.js";
+import { formatCalendarTime, formatCost, titleCaseLabel } from "./format.js";
+import { timeZoneDisplayName } from "./reminder-schedule.js";
 
 export type ActionKind = AutomationAction["kind"];
 
@@ -372,3 +378,393 @@ export function buildSpec(form: FormState, context: BuildSpecContext): Automatio
     notifications: { pushEvents: form.pushEvents },
   };
 }
+
+/* ========================================================================== */
+/* The automation in words (#2968): its schedule, its action and its policies */
+/* ========================================================================== */
+
+const WEEKDAY_NAMES = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"] as const;
+
+/** "1st", "2nd", "3rd", "11th", "22nd". */
+function ordinal(day: number): string {
+  const tens = day % 100;
+  const suffix = tens >= 11 && tens <= 13 ? "th" : day % 10 === 1 ? "st" : day % 10 === 2 ? "nd" : day % 10 === 3 ? "rd" : "th";
+  return `${day}${suffix}`;
+}
+
+function cronNumber(field: string, min: number, max: number): number | null {
+  if (!/^\d{1,2}$/.test(field)) return null;
+  const value = Number(field);
+  return value >= min && value <= max ? value : null;
+}
+
+/** Whether a month field names a quarter: `*` + `/3`, `1-12/3`, or four months three apart. */
+function quarterly(field: string): boolean {
+  if (field === "*/3" || field === "1-12/3") return true;
+  const months = field.split(",").map((part) => cronNumber(part, 1, 12));
+  if (months.length !== 4 || months.some((month) => month === null)) return false;
+  const sorted = (months as number[]).slice().sort((a, b) => a - b);
+  return sorted.every((month, index) => index === 0 || month - sorted[index - 1]! === 3);
+}
+
+/** A wall-clock time of day as the viewer writes it ("9:00 AM"), independent of any time zone. */
+function wallClock(hour: number, minute: number, locale?: string): string {
+  return new Intl.DateTimeFormat(locale, { hour: "numeric", minute: "2-digit", timeZone: "UTC" })
+    .format(new Date(Date.UTC(2000, 0, 1, hour, minute)));
+}
+
+/**
+ * A cron schedule in words (#2968): every hour, every day, weekdays, weekends, one weekday, a day
+ * of the month, and a day of every third month, in sentence case. Null for anything else.
+ */
+export function scheduleWords(cron: string, locale?: string): string | null {
+  const fields = cron.trim().split(/\s+/);
+  if (fields.length !== 5) return null;
+  const [minuteField, hourField, dayField, monthField, weekdayField] = fields as [string, string, string, string, string];
+  const minute = cronNumber(minuteField, 0, 59);
+  if (minute === null) return null;
+  if (hourField === "*" && dayField === "*" && monthField === "*" && weekdayField === "*") {
+    return minute === 0 ? "Every hour" : `Every hour at :${String(minute).padStart(2, "0")}`;
+  }
+  const hour = cronNumber(hourField, 0, 23);
+  if (hour === null) return null;
+  const at = `at ${wallClock(hour, minute, locale)}`;
+  if (dayField === "*" && monthField === "*") {
+    if (weekdayField === "*") return `Every day ${at}`;
+    if (weekdayField === "1-5") return `Weekdays ${at}`;
+    if (weekdayField === "0,6" || weekdayField === "6,0") return `Weekends ${at}`;
+    const weekday = cronNumber(weekdayField, 0, 7);
+    return weekday === null ? null : `Every ${WEEKDAY_NAMES[weekday % 7]} ${at}`;
+  }
+  const day = cronNumber(dayField, 1, 31);
+  if (day === null || weekdayField !== "*") return null;
+  if (monthField === "*") return `Monthly on the ${ordinal(day)} ${at}`;
+  return quarterly(monthField) ? `Quarterly on the ${ordinal(day)} ${at}` : null;
+}
+
+/**
+ * The first run of `cron` in `timezone` after `now`: the scheduler's own `nextCronFire` (#2971), so
+ * every valid expression gets the run the control plane will make, daylight-saving gaps and
+ * repeats included. Null for an invalid expression or zone, or one that never runs.
+ */
+export function nextScheduleRun(cron: string, timezone: string, now: number): number | null {
+  try {
+    return nextCronFire(cron, timezone, now);
+  } catch {
+    return null;
+  }
+}
+
+export interface ScheduleDescription {
+  /** The schedule in words ("Weekdays at 9:00 AM"), or the cron text itself when unrecognized. */
+  label: string;
+  /** Its next run in words, in the viewer's time zone ("Tomorrow, 9:00 AM"); null when it has none. */
+  nextLabel: string | null;
+}
+
+/**
+ * A cron schedule in words (#2968), `scheduleWords()`'s, with the cron text standing in for an
+ * expression they do not cover. The words are the automation's own wall clock in its own time zone;
+ * the next run is in the viewer's. The list (#2969), the page and the editor (#2971) use the same
+ * words.
+ */
+export function describeSchedule(
+  cron: string,
+  timezone: string,
+  now = Date.now(),
+  options: { viewerTimeZone?: string; locale?: string } = {},
+): ScheduleDescription {
+  const next = nextScheduleRun(cron, timezone, now);
+  return {
+    label: scheduleWords(cron, options.locale) ?? cron.trim(),
+    nextLabel: next === null ? null : formatCalendarTime(next, now, options.viewerTimeZone, options.locale),
+  };
+}
+
+/**
+ * The Schedule field's Examples menu (#2971), in its order. Each item's label is its expression's
+ * preview words in Title Case, so choosing one previews exactly what the item said.
+ */
+const SCHEDULE_EXAMPLE_EXPRESSIONS = ["0 * * * *", "0 9 * * *", "0 9 * * 1-5", "0 9 * * 1", "0 9 1 * *", "0 9 1 */3 *"] as const;
+
+export function scheduleExamples(locale?: string): { cron: string; label: string }[] {
+  return SCHEDULE_EXAMPLE_EXPRESSIONS.map((cron) => ({ cron, label: titleCaseLabel(scheduleWords(cron, locale)!) }));
+}
+
+/** The five fields in order, with the values each takes. */
+const CRON_FIELDS = [
+  { name: "minute", range: "0–59" },
+  { name: "hour", range: "0–23" },
+  { name: "day of month", range: "1–31" },
+  { name: "month", range: "1–12" },
+  { name: "weekday", range: "0–7, where 0 and 7 are Sunday" },
+] as const;
+
+export const SCHEDULE_FIVE_FIELDS_ERROR = "Use five fields: minute, hour, day of month, month, weekday.";
+export const SCHEDULE_NEVER_RUNS_ERROR = "This schedule never runs. Choose a day of month that each chosen month has.";
+
+/**
+ * Why the scheduler would refuse `cron` (§8.5), in one sentence, or null when it accepts it. The
+ * check is the scheduler's `parseCron` (#2971); a refused field is named with the values it takes.
+ * An enabled automation must also run within five years, as the control plane requires on save.
+ */
+export function scheduleError(cron: string, options: { timezone: string; enabled: boolean; now: number }): string | null {
+  try {
+    parseCron(cron);
+  } catch {
+    const fields = cron.trim().split(/\s+/);
+    if (fields.length !== CRON_FIELDS.length || fields[0] === "") return SCHEDULE_FIVE_FIELDS_ERROR;
+    // The first field that is refused on its own, with every other field a wildcard.
+    const refused = CRON_FIELDS.findIndex((_, index) => {
+      try {
+        parseCron(fields.map((field, other) => (other === index ? field : "*")).join(" "));
+        return false;
+      } catch {
+        return true;
+      }
+    });
+    if (refused < 0) return SCHEDULE_FIVE_FIELDS_ERROR;
+    const field = CRON_FIELDS[refused]!;
+    return `Use ${field.range} for the ${field.name}, or a range, list or step of them.`;
+  }
+  if (!options.enabled || !validTimeZone(options.timezone)) return null;
+  return nextScheduleRun(cron, options.timezone, options.now) === null ? SCHEDULE_NEVER_RUNS_ERROR : null;
+}
+
+/**
+ * The zone the scheduler runs `timezone` in: its own trimmed, canonical identity, or null for a zone
+ * it refuses. A stored zone keeps the person's spelling (" America/Chicago " saves), which `Intl`
+ * refuses as written, so anything that formats a time in it uses this instead (CR-1.1).
+ */
+export function schedulerTimeZone(timezone: string): string | null {
+  try {
+    return validateTimeZone(timezone);
+  } catch {
+    return null;
+  }
+}
+
+/** Whether the scheduler accepts `timezone`, by its own check. */
+export function validTimeZone(timezone: string): boolean {
+  return schedulerTimeZone(timezone) !== null;
+}
+
+/**
+ * The line under the Schedule field (#2971): "Weekdays at 9:00 AM · Next Mon, 9:00 AM", its words
+ * and its next run in the automation's zone, which is named when it is not the viewer's. "Custom
+ * schedule" stands in for words a valid expression has none of, and "Paused" for the next run of
+ * an automation that is not enabled. Null while the expression is invalid.
+ */
+export function schedulePreview(cron: string, options: {
+  timezone: string;
+  enabled: boolean;
+  now: number;
+  viewerTimeZone?: string;
+  locale?: string;
+}): string | null {
+  try {
+    parseCron(cron);
+  } catch {
+    return null;
+  }
+  const words = scheduleWords(cron, options.locale) ?? "Custom schedule";
+  if (!options.enabled) return `${words} · Paused`;
+  const timeZone = schedulerTimeZone(options.timezone);
+  const next = timeZone === null ? null : nextScheduleRun(cron, timeZone, options.now);
+  if (timeZone === null || next === null) return words;
+  const zone = options.viewerTimeZone === timeZone ? "" : ` (${timeZoneDisplayName(timeZone, options.now)})`;
+  return `${words} · Next ${formatCalendarTime(next, options.now, timeZone, options.locale)}${zone}`;
+}
+
+/** One Time Zone choice (#2971): "New York (UTC−4)", over its IANA name. */
+export interface TimeZoneChoice {
+  value: string;
+  label: string;
+  description: string;
+  /** The zone's old name, where it was renamed, so a search for either finds it. */
+  keywords?: readonly string[];
+}
+
+/** The zones this browser knows, or none when it cannot list them. */
+function browserTimeZones(): readonly string[] {
+  try {
+    return Intl.supportedValuesOf("timeZone");
+  } catch {
+    return [];
+  }
+}
+
+/** `timeZone`'s offset from UTC at `instant` as "UTC−4", "UTC+5:30" or "UTC"; null for an unknown zone. */
+export function utcOffsetLabel(timeZone: string, instant: number): string | null {
+  let parts: Record<string, number>;
+  try {
+    parts = Object.fromEntries(new Intl.DateTimeFormat("en-US", {
+      timeZone, hourCycle: "h23", year: "numeric", month: "numeric", day: "numeric", hour: "numeric", minute: "numeric",
+    }).formatToParts(new Date(instant)).filter((part) => part.type !== "literal").map((part) => [part.type, Number(part.value)]));
+  } catch {
+    return null;
+  }
+  const wall = Date.UTC(parts.year!, parts.month! - 1, parts.day!, parts.hour!, parts.minute!);
+  const minutes = Math.round((wall - Math.floor(instant / 60_000) * 60_000) / 60_000);
+  if (minutes === 0) return "UTC";
+  const size = Math.abs(minutes);
+  const rest = size % 60;
+  return `UTC${minutes < 0 ? "−" : "+"}${Math.floor(size / 60)}${rest ? `:${String(rest).padStart(2, "0")}` : ""}`;
+}
+
+/** A zone's city, as its IANA name's last part reads ("America/New_York" → "New York"). */
+function zoneCity(timeZone: string): string {
+  return (timeZone.split("/").at(-1) ?? timeZone).replace(/_/g, " ");
+}
+
+/**
+ * The renamed zones ICU still lists under their old name, as Node and Chromium do, each with its
+ * current IANA name ("Asia/Calcutta" → "Asia/Kolkata"): tzdata's backward links whose target is the
+ * same place renamed or respelled, not a neighbouring city that shares its clock.
+ */
+const CURRENT_ZONE_NAMES: ReadonlyMap<string, string> = new Map([
+  ["Africa/Asmera", "Africa/Asmara"],
+  ["America/Buenos_Aires", "America/Argentina/Buenos_Aires"],
+  ["America/Catamarca", "America/Argentina/Catamarca"],
+  ["America/Cordoba", "America/Argentina/Cordoba"],
+  ["America/Godthab", "America/Nuuk"],
+  ["America/Indianapolis", "America/Indiana/Indianapolis"],
+  ["America/Jujuy", "America/Argentina/Jujuy"],
+  ["America/Louisville", "America/Kentucky/Louisville"],
+  ["America/Mendoza", "America/Argentina/Mendoza"],
+  ["Asia/Calcutta", "Asia/Kolkata"],
+  ["Asia/Katmandu", "Asia/Kathmandu"],
+  ["Asia/Rangoon", "Asia/Yangon"],
+  ["Asia/Saigon", "Asia/Ho_Chi_Minh"],
+  ["Atlantic/Faeroe", "Atlantic/Faroe"],
+  ["Europe/Kiev", "Europe/Kyiv"],
+  ["Pacific/Enderbury", "Pacific/Kanton"],
+  ["Pacific/Ponape", "Pacific/Pohnpei"],
+  ["Pacific/Truk", "Pacific/Chuuk"],
+]);
+
+/** Each renamed zone's old name, by its current one. */
+const OLD_ZONE_NAMES: ReadonlyMap<string, string> = new Map([...CURRENT_ZONE_NAMES].map(([old, current]) => [current, old]));
+
+/** A zone's current IANA name: its renamed spelling's, else its own, without surrounding spaces. */
+function currentZoneName(timeZone: string): string {
+  const name = timeZone.trim();
+  return CURRENT_ZONE_NAMES.get(name) ?? name;
+}
+
+/**
+ * The Time Zone field's choices (#2971): every zone the browser lists, labelled by city and current
+ * offset, with the IANA name as the second line, in alphabetical order. UTC and the stored zone are
+ * always among them, so a zone this browser does not list (or an alias) stays chosen, and a browser
+ * with no list still offers the stored zone and UTC. A zone the browser lists by an old name reads
+ * as its current one ("Asia/Calcutta" as Kolkata, Asia/Kolkata) and a search for either finds it.
+ * A stored zone that is a listed one spelled with spaces or by its other name takes that one's
+ * place, so it stays chosen as saved and reads as the zone it is.
+ */
+export function timeZoneChoices(stored: string, now: number, zones: readonly string[] = browserTimeZones()): TimeZoneChoice[] {
+  const values = new Map(zones.map((zone) => [currentZoneName(zone), zone]));
+  if (!values.has("UTC")) values.set("UTC", "UTC");
+  if (stored.trim()) values.set(currentZoneName(stored), stored);
+  return [...values].map(([name, value]): TimeZoneChoice => {
+    const offset = utcOffsetLabel(value.trim(), now);
+    const city = name === "UTC" ? "UTC" : zoneCity(name);
+    const label = offset && name !== "UTC" ? `${city} (${offset})` : city;
+    const old = OLD_ZONE_NAMES.get(name);
+    return old ? { value, label, description: name, keywords: [old] } : { value, label, description: name };
+  }).sort((a, b) => a.label.localeCompare(b.label, "en") || a.value.localeCompare(b.value, "en"));
+}
+
+/** What `actionSentence` names things by. Each lookup answers undefined for what it doesn't know. */
+export interface ActionNames {
+  runners: ReadonlyMap<string, RunnerView>;
+  /** A machine's label, as the editor's Machine field shows it. */
+  machineLabel: (runnerId: string) => string | undefined;
+  sessionTitle: (sessionId: string) => string | undefined;
+  workflowName: (workflowId: string) => string | undefined;
+}
+
+/**
+ * What an automation does, in one sentence with display names and no ids (#2968): "Starts Claude
+ * Code in acme-storefront on Build Server.", "Runs the Build and Review workflow in acme-storefront
+ * on Build Server.", "Prompts “Nightly triage”.". The prompt or task is shown under it.
+ */
+export function actionSentence(action: AutomationAction, names: ActionNames): string {
+  if (action.kind === "prompt_session") {
+    const title = names.sessionTitle(action.sessionId);
+    return title ? `Prompts “${title}”.` : "Prompts a session that isn't loaded.";
+  }
+  const runner = names.runners.get(action.request.runnerId);
+  const folder = runner?.workspaces.find((workspace) => workspace.id === action.request.workspaceId)?.name;
+  const machine = names.machineLabel(action.request.runnerId) ?? "a machine that isn't connected";
+  const where = `in ${folder ?? "a folder that isn't available"} on ${machine}`;
+  if (action.kind === "workflow_run") {
+    const workflow = names.workflowName(action.request.workflowId);
+    return `Runs ${workflow ? `the ${workflow} workflow` : "a workflow that isn't available"} ${where}.`;
+  }
+  // The agent the scheduler starts: a saved installation's agent wherever discovery now lists it
+  // (its id can change or be reused), else the stored agent id (resolveSavedTarget, automations.ts).
+  const saved = action.installationBindings?.agent;
+  if (saved && !resolvedInstallationAgentId(runner, saved)) {
+    return `Starts an agent whose saved installation isn't available ${where}.`;
+  }
+  const agentId = saved ? resolvedInstallationAgentId(runner, saved)! : action.request.agentId;
+  const agent = runner?.agents.find((candidate) => candidate.id === agentId);
+  // A sentence never prints an id: namesakes differ by version or context, else read alike (#2970).
+  return `Starts ${agent ? agentDisplayName(agent, runner!.agents, { identifiers: false }) : "an agent that isn't on this machine"} ${where}.`;
+}
+
+/** The prompt or task an action sends. */
+export function actionText(action: AutomationAction): string {
+  if (action.kind === "prompt_session") return action.request.text;
+  return action.kind === "workflow_run" ? action.request.task : (action.request.prompt ?? "");
+}
+
+function joinWords(words: readonly string[], conjunction: "and" | "or"): string {
+  if (words.length <= 1) return words[0] ?? "";
+  return `${words.slice(0, -1).join(", ")} ${conjunction} ${words[words.length - 1]}`;
+}
+
+function minutes(count: number): string {
+  return `${count.toLocaleString()} ${count === 1 ? "minute" : "minutes"}`;
+}
+
+const NOTIFICATION_WORDS: Record<AutomationNotificationEvent, string> = {
+  started: "starts", succeeded: "succeeds", failed: "fails", expired: "expires",
+};
+
+/**
+ * Each policy's answer in plain words, for the automation page's Rules and Limits (#2968). They
+ * say what the control plane does: an alternate machine is used as soon as the primary is offline,
+ * and its time limit is when the run gives up if none is online.
+ */
+export const policyCopy = {
+  missed(policy: AutomationSpec["misfirePolicy"]): string {
+    if (policy.kind === "skip") return "Skip it";
+    if (policy.kind === "fire_once") return "Run it once";
+    return `Catch up, at most ${policy.maxRuns} ${policy.maxRuns === 1 ? "run" : "runs"}`;
+  },
+  offline(policy: AutomationSpec["runnerPolicy"], machineLabel: (runnerId: string) => string | undefined): string {
+    if (policy.kind === "wait") return "Wait until it's back";
+    if (policy.kind === "expire") return `Give up after ${minutes(policy.afterMinutes)}`;
+    const machines = [...new Set(policy.targets.map((target) => machineLabel(target.runnerId) ?? "a machine that isn't connected"))];
+    const none = policy.targets.length > 1 ? "none is online" : "neither is online";
+    return `Use ${joinWords(machines, "or")} instead; ${policy.expireAfterMinutes === undefined
+      ? `wait if ${none}`
+      : `give up after ${minutes(policy.expireAfterMinutes)} if ${none}`}`;
+  },
+  concurrency(policy: AutomationSpec["concurrencyPolicy"]): string {
+    if (policy === "wait") return "Wait for it to finish";
+    return policy === "skip" ? "Skip this run" : "Run both at once";
+  },
+  cost(limits: AutomationSpec["limits"]): string {
+    return `${formatCost(limits.maxCostUsd) || "$0.00"} per run`;
+  },
+  toolCalls(limits: AutomationSpec["limits"]): string {
+    return `${limits.maxToolCalls.toLocaleString()} ${limits.maxToolCalls === 1 ? "tool call" : "tool calls"} per run`;
+  },
+  notifications(routing: AutomationSpec["notifications"]): string {
+    const words = (Object.keys(NOTIFICATION_WORDS) as AutomationNotificationEvent[])
+      .filter((event) => routing.pushEvents.includes(event)).map((event) => NOTIFICATION_WORDS[event]);
+    return words.length ? `When a run ${joinWords(words, "or")}` : "Off";
+  },
+};

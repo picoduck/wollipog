@@ -52,16 +52,17 @@ integrations, execution target or completion preference.
 
 The normalized provider bridge stamps `requestSource`. Codex `requestUserInput` and Claude
 `AskUserQuestion` are planning-question sources; command approvals are tool sources; external MCP
-elicitation is a separate source that remains human-owned. These values come from the bridge
-method, never from agent-written question input. Missing or contradictory source metadata fails
-closed. A typed implementation decision derives provenance from its validated server route.
+elicitation is a separate source that never counts as verified planning. These values come from the
+bridge method, never from agent-written question input. Missing or contradictory source metadata
+fails closed: it never proves intent or a bounded effect. A typed implementation decision derives
+provenance from its validated server route.
 
 Verified planning about an authentication feature can delegate. Secret/email form fields, requests
 to supply or disclose real credentials, interactive sign-in, identity administration, increased
-access, reviewer escalations and guardrails remain protected. Sensitive tool inputs and ambiguous
-sensitive forms remain human-owned. Text screening is conservative additional evidence; a claim
-that something is implementation work cannot override protected fields or an external form's
-provenance. Provider enforcement remains a separate boundary.
+access, reviewer escalations and guardrails remain protected. Text screening is conservative
+additional evidence; a claim that something is implementation work cannot override protected fields
+or an external form's provenance. Provider enforcement remains a separate boundary. Under Full
+Control "protected" no longer means "asks the Human"; see [Full Control Without Prompts](#full-control-without-prompts).
 
 Tool intent comes from the concrete normalized provider operation, never its display reason.
 Recognized native file inspection/edits and bounded `cat` reads require the campaign workspace binding and a verified directory or absolute bounded
@@ -79,16 +80,15 @@ editable by the agent, and a proved cwd is insufficient to authorize that execut
 provider's existing constraints. They remain unverified tool-effect exceptions. All Git commands
 also remain unverified: repository configuration can run fsmonitor, textconv, clean filters, pagers
 and other helpers, including clean filters when external diff and textconv are disabled. Canonical
-cwd/path evidence and Git command flags cannot prove those effects. Preflight reports
-`git_execution_without_bounded_effect_proof`; Full Control never settles a generic Git permission
-request automatically. Current independently authorized policy and provider enforcement still
-apply; a remaining request is human-owned with `outside_boundary` (or its stronger current
-policy/protection reason). Explicit network
+cwd/path evidence and Git command flags cannot prove those effects, so Full Control never treats a
+generic Git permission request as a bounded effect (class `git_execution_without_bounded_effect_proof`).
+Current independently authorized policy and provider enforcement still apply. Explicit network
 or provider permission-expansion envelopes stay protected even for otherwise recognized code
 operations. Existing independently authorized routine policies retain their own enforcement.
 Codex provides command cwd in its approval envelope. Claude's native control
 channel does not provide a reliable cwd for relative Bash commands; absolute bounded operations
-can qualify, and relative commands without that proof are disclosed preflight exceptions. Existing
+can qualify, and relative commands without that proof are class
+`relative_shell_commands_without_verified_cwd`. Existing
 routine policies and Guardian retain their own enforcement; their existence alone is not effect
 proof for Full Control.
 
@@ -100,23 +100,56 @@ snapshot digest, current revision, supersession, stop/restart revocation and one
 remain enforced.
 
 Synchronous root provider requests cannot wait for the parked root model to answer itself. The
-server resolves eligible one-time repository operations from the standing authorization and
-answers verified root choice forms using the root's recommended choice (or first offered
-assumption). It records a system resolution, rather than an agent-created grant. Root forms with
-no bounded suggested answer, ambiguous recommendations or invalid cardinality are disclosed
-human exceptions. A real NDJSON fixture verifies that both callbacks settle and the provider
+server resolves eligible one-time repository operations from the standing authorization. It
+records a system resolution, rather than an agent-created grant. A root's own questions (class
+`root_questions`) are dismissed at once, whatever options they offer: the root is the campaign's
+only owner, so nobody else can answer them, and applying one of the root's options would record a
+decision no person made. A live root once asked the person to confirm "Approved in Wollipog" for a
+closure it owned itself. After the root's first dismissal in a policy revision, the server queues
+one notice to the root (the `FULL_CONTROL_ROOT_QUESTION_MESSAGE` constant). It says nobody sees the
+root's questions, and that the root decides Orchestrator-owned matters with the typed tools,
+approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
+session ID. Later questions in the same revision are still dismissed but wake the root with no
+further notice, so a root that answers each notice with another question cannot loop; the bound is
+the durable decline ledger's first-for-class record. The dismissal is not blocked work. A root
+whose runner supports owner decisions (v281) receives `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`
+instead, which also names the route for a decision the campaign's owner kept. Since v282 that
+owner-route guidance also rides on every dismissal itself where the provider result can carry text
+(see [Full Control Response Text](#full-control-response-text)); the notice remains as the wake-up
+and for runners and providers that cannot.
+
+Owner decisions (#4064) are that route. `request_owner_decision` creates an `owner_decision`
+workflow decision: a question with explicit options and decision material that the evaluator makes
+human-owned (`owner_kept`) in every mode, under any boundary or grant. Only the campaign's owner
+resolves it, through the same human approval route as other human-owned requests; the root, its
+children and any other person are refused. Its card on the root is non-blocking (`async`): it
+neither sets the root `input_required` nor holds prompts, PR-watch wakes or campaign
+continuations, while Campaign Status counts it as waiting on the owner and lists it under Waiting
+for You (`ownerDecisions`). The owner's choice returns as the decision's resume prompt. The root may
+withdraw its own pending owner decision. `hand_workflow_decision_to_owner` moves one pending,
+unarmed Orchestrator-owned occurrence to the owner, one way: it records `ownerHandoff`, the owner
+alone resolves it, and every later request in the campaign for the same resource (its category
+and key, or the pull request, branch, issue or recommendation it names) is human-owned too, so a
+withdrawal and a new request cannot move it back; an Orchestrator-owned twin requested before the
+handoff is revoked when anyone tries to use it. Both routes need a v281 root runner and control
+plane, exist only for a Full Control root, and refuse a question that asks for a credential value.
+Custom campaigns are unchanged.
+
+The root's own pending typed workflow decisions never park its provider, so they never stop a
+standing response to another request. A real NDJSON fixture verifies that both callbacks settle and the provider
 continues. No stopped-provider recovery is introduced here; that remains #2938.
 Human mode admission also attempts existing eligible parked root occurrences. If delivering a
 standing response fails, the exact request carries `standingAdmissionFailure` and is disclosed as
 `provider_delivery_unavailable`, with human attention, rather than an unreachable self-owned card.
 
-Only `allow_once` options can grant tool access through Full Control. A policy ask additionally
-requires its exact rule ID in the human-authorized `delegatablePolicyIds` list. Unknown, disabled,
-built-in and Human Required rules cannot be admitted to that list. `conditions.humanRequired: true`
-is valid only for ask rules and prevents delegation, including an otherwise matching workflow
-command admission. A hard deny always wins. Current rules are checked again before an agent
-resolves a tool approval. Current Human Required, deny, unknown and withdrawn asks also feed every
-request projection, so ownership cannot lag a policy edit. Persistent options never become eligible.
+Only `allow_once` options can grant tool access through Full Control. Unknown, disabled, built-in
+and Human Required rules cannot be admitted to `delegatablePolicyIds`; an ordinary ask left out of
+that list is still an Orchestrator decision (class `undelegated_policy_asks`), while a listed one
+carries no class. `conditions.humanRequired: true` is valid only for ask rules and prevents
+delegation, including an otherwise matching workflow command admission. A hard deny always wins.
+Current rules are checked again before an agent resolves a tool approval. Current Human Required,
+deny, unknown and withdrawn asks also feed every request projection, so ownership cannot lag a
+policy edit. Persistent options never become eligible.
 
 Supported trusted workflow paths remain separate from generic shell-effect classification. A typed
 PR merge requires its exact resource snapshot, review/CI and current policy gates. Its consumption
@@ -126,7 +159,184 @@ Human Required asks and hard denies cannot be bypassed by an armed grant. No bro
 is created; a changed or replayed command needs a new occurrence.
 
 Codex's separate permissions API returns a session-wide grant. Its normalized operation records
-that lifetime, so an offered `allow_once` label cannot make it eligible for Full Control admission.
+that lifetime, so an offered `allow_once` label cannot make it eligible for Full Control admission;
+Full Control declines it.
+
+## Full Control Without Prompts
+
+Under Full Control the campaign never prompts the person (#2940). Every class preflight once listed
+as Human Required now has a fixed owner, and every change applies only while the root's own current
+Full Control boundary is valid: a stale boundary routes the request as `outside_boundary`, and a
+revocation restores Custom behavior at once. Custom mode is unchanged. Runner guardrails, cost and
+tool-call limits are budget authority, not request classes, and still pause for the Human; so does a
+root standing response the runner could not receive (`provider_delivery_unavailable`).
+
+| Class | Child | Root (parked) |
+| --- | --- | --- |
+| `secrets_and_sign_in`, `provider_access_expansion`, `persistent_permissions` | Declined | Declined |
+| Any tool effect not attested inside the session's own worktree (a target or cwd outside it, an escaping symlink, globs, scripts, interpreters, Git, partial or pre-v230 evidence) | Declined | Declined |
+| `external_elicitation` and other forms | Orchestrator decides once | Declined |
+| `unverified_tool_effects`, `script_execution_without_bounded_effect_proof` with every target inside the worktree | Orchestrator decides once | Declined |
+| `root_questions` (every question the root asks) | Not applicable | Dismissed, with guidance in the result and a notice |
+| `undelegated_policy_asks` (every target inside the worktree) | Orchestrator decides once | Declined |
+| `human_required_rules` (marked Human Required, or built in) | Human | Human |
+
+A declined occurrence has owner `orchestrator`, basis `standing_decline` and `disposition: "decline"`.
+The server answers it itself with its one-time reject, or a dismissal for a question or sign-in
+card; the Orchestrator may decline it too, but no one acting for the campaign can approve or answer
+it. A credential question asked as a typed implementation question creates no decision at all. A
+request offering no one-time allow is never converted into anything else: it is declined.
+
+### Full Control Response Text
+
+A bare dismissal reads as a person's choice, and agents once told the owner "you dismissed my
+question" and saved that as memory (#4063). So when the server's Full Control policy dismisses a
+question or declines a tool call, for a root or a child, the control plane sends
+`automaticResponse: { policy: "full_control", basis? }` with that exact `answer_question` or
+`resolve_permission`. It sends the field only to a runner with capability
+`fullControlResponseAttribution` (v282), only with a dismissal or reject, and never with a person's
+answer or decision, which still read "The user dismissed the question." and "The user declined
+this tool call." The Orchestrator's own choice among a child's options carries no field either. Its
+forced decline of an occurrence the policy already declines does carry it, because the policy
+decided that.
+
+The runner accepts the field only in its exact shape and drops it beside a person's name. The
+Claude Code driver then replaces the person-worded deny text with
+`fullControlAutomaticResponseText`. It says that Wollipog dismissed or declined the request
+automatically under the campaign's Full Control policy, that no person saw it, that no option was
+chosen or nothing was approved, and what to do instead. A root question's text carries the same
+guidance as `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`, including the owner-decision route
+(a v282 runner always has those v281 tools), on every dismissal and not only the first in a
+revision. An
+unresolved-effect decline says to retry with explicit worktree paths.
+
+`basis` names a class only when that is safe: `root_questions`, `external_elicitation`, the
+unverified tool-effect classes, `undelegated_policy_asks` and `unresolved_effects`. The text shows
+the class's label. A credential, sign-in, provider-access or lasting-grant decline carries no
+basis and gets the generic policy sentence, so the result never describes what the request filter
+withheld. No text repeats the request.
+
+An older runner is never sent the field. It keeps today's fixed text, and the server still sends
+the existing notices: the root-question notice and the unresolved-effect notice, each once per
+policy revision. The protocol cannot carry text for Codex App Server: a declined approval is a bare
+`decline` decision, a dismissed question an empty answer set and a declined elicitation a bare
+`decline`. Codex therefore keeps those shapes, which never name a person, and relies on the same
+notices. ACP and other drivers ignore the field likewise. A Full Control decline of a server-minted
+policy hook ask still returns the hook's own reason ("Denied by a manager approval."), which names
+no person.
+
+A design question about credential handling is not a credential question (#3844). A typed
+implementation question's approval selects one offered option id, so it can carry no value back;
+there a question such as whether importing a provider sign-in should copy an API key, move an OAuth
+sign-in or be unsupported is decided like any other, for a child or the root. The same screen
+classifies a root's own question, which is dismissed without applying any answer: a design question
+becomes `root_questions`, whose notice names the typed route, rather than credential blocked work.
+A design form is declined when any of three screens declines it:
+- the ordinary question screen, unchanged;
+- the round-1 design screen of #3844, which declines asking for a credential, an identity, a
+  sign-in or access;
+- a stricter disclosure and destination screen.
+
+The stricter screen declines:
+- disclosing, collecting or transferring any credential, a bare token, key or sign-in included
+  (tell, give, reveal, show, print, display, read out, dictate, send, upload, post, publish,
+  forward, share, export, leak, dump, hand over, ask for, prompt for, sync and others);
+- a qualified credential (my, our, your, their, real, prod, company, team, shared, admin, live,
+  personal, the maintainer's or user's, and others);
+- handling any credential near a destination:
+  - a URL, a `www.` host, any dotted host or IP with or without a port, `localhost` or a name:port,
+    or an email;
+  - a public or shared sink: third-party, external, remote, server, endpoint, webhook, collector,
+    log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord, email,
+    vendor, someone, cloud, ticket, wiki, README, commit, bug report, screenshot, repository, SSH,
+    another device, plain text and others;
+- an email value, and signing in;
+- an option granting access, wider provider access or a lasting permission;
+- a credential-store path named in the form.
+
+The only excusal is an ordinary-screen match whose sole verb is a local "copy" or "use", and only
+when neither of the other two screens matches and no destination is named. A decline that proves
+unnecessary is acceptable; an admission that should have been declined is not.
+
+Quotes and backticks are removed before these checks. For paths, every character that cannot be
+part of a path separates words, so `(.netrc)`, `«.netrc»` or a quoted `.netrc` is still seen. A secret
+or email field always fails closed. A child's provider question can be answered with free text, so
+it keeps the ordinary screen without the excusal.
+
+The worktree allowlist decides whether a tool effect can be approved at all. No denylist can name
+every credential store, and no runner isolation mode hides those stores from a child: bwrap binds
+`/` read-only, Seatbelt allows file reads and provider mode has no sandbox. So the Orchestrator may
+allow a child's tool request once only when the runner produced complete filesystem evidence and
+attests (v230 `filesystem.containment`) that every resolved real target, and the resolved cwd, lies
+inside that session's own canonical worktree root, the root the server knows for it. Anything else
+is a plain standing decline (reason `unresolved_effects`) for root and child: a target outside the
+worktree, a symlink whose real path leaves it, a glob, script, interpreter, Git command, unparsed
+input, partial evidence, or evidence from a runner older than v230 (whose containment claim is
+ignored). Approvability never depends on a missing credential flag. A child is told once per
+revision, content-safely, to retry with explicit file paths inside its worktree, and the campaign
+policy states the same rule for the root. A parked root cannot judge its own request, so it allows
+once only a verified bounded effect inside its worktree, answers with its own suggested choice, and
+declines the rest.
+
+The runner attests a target only when its identity provably stays inside the worktree, and fails
+closed on anything it cannot attest: a `..` segment (never lexically collapsed, because the kernel
+resolves it after the symlinks before it), a symlinked parent or final target whose real path
+leaves the worktree, an existing file with more than one hard link (for reads and every mutation,
+since editing the alias edits the external inode), anything that is not a regular file or, for a
+file to be created, a directory (FIFOs, sockets, devices), `/proc`, `/dev` and `/sys` paths and
+magic links, a target on another device than the worktree root or below a mount point inside it
+(read from `/proc/self/mountinfo`, so a same-device bind mount is caught too), and any Windows
+path (junctions, reparse points and short names are not modelled). Real paths are compared
+exactly, so a case-insensitive alias on macOS can only fail. Each target records its `dev:ino`, and
+the pre-approval recheck re-runs the same resolver, so a swapped inode, a new hard link or a new
+mount cannot reuse the evidence; the window between that recheck and execution remains.
+
+Credential screens remain as defense in depth: a hit is `secrets_and_sign_in` blocked work rather
+than a plain decline. They match the command text and the runner-resolved real paths by name
+(`.codex`, `.claude`, `.claude.json`, `.ssh`, `.aws`, `.azure`, `.env*`, `.config/gh`,
+`.config/gcloud`, `.config/op`, `.kube`, `.pgpass`, `.gnupg`, `.password-store`,
+`.terraform.d/credentials*`, `.git-credentials`, `.netrc`, `.docker`, keychains, keyrings,
+`auth.json`, `.credentials.json`, among others), and the runner marks a target `credentialStore`
+when its real path is inside a directory it knows holds credentials: its data directory except the
+managed worktree root, managed profile homes, configured account homes, the default provider homes,
+each session's provider credential home, and the provider config directories in the runner's, each
+agent's (indirections resolved) and each session's environment.
+
+Each standing response is sent at most once. A durable fence is claimed before the response is
+sent and released only when the send provably did not happen, so a card that a repeated snapshot, a
+reconnect or a restart restores is never answered twice. A sign-in card is fenced by its stable
+recovery request id, because runner startup rebuilds it with a fresh occurrence id; the runner
+completes an accepted Dismiss Recovery itself once an interrupted provider turn settles, rather than
+refusing it. The accepted intent is written durably on the runner before any wait and never
+expires: a runner that stops at any point after accepting it, including during the first wait,
+completes it on restart instead of re-raising the card. That durable dismissal is a v230 runner
+capability (`durableAuthDismissal`). An older runner refuses Dismiss Recovery while the turn settles
+and keeps the card; it still gets exactly one fenced dismissal, never a re-send, and the sign-in
+stays content-safe blocked work (logged as `campaign_auth_dismissal_runner_upgrade_required`) until
+the runner is updated. Nobody is prompted. Requests restored by runner registration, runtime
+snapshots and history hydration get the same standing response as live ones; an Orchestrator's own
+explicit decline is a separate single action.
+
+The credential, access and lasting-grant declines become content-safe blocked work in Campaign
+Status (reason `request_declined`, action `continue_without_request`), so unrelated work continues
+and the person can see it without being asked. The record stores only the class and a hashed first
+occurrence: one record per session and class, a redelivered occurrence counts once, it is never
+dispatched or offered for override, and a verified child report or a revocation settles it.
+
+Evidence follows the same rule. With UI Evidence Approval inside the boundary, the Orchestrator owns
+every UI evidence decision, including video without a certified media reviewer, external links and
+an Orchestrator whose client cannot view images. It is delivered only the child's own inspectable
+screenshots, and approval still needs a receipt for every item, so it asks the child for screenshots
+attached as Session artifacts or denies the claim as unproven. Certified delegated video review
+still applies when available, and operator-enabled frame review derives a short video's frames for
+the boundary's UI Evidence Approval exactly as it does for a Custom saved Orchestrator owner; the
+root's own saved owner plays no part (#1321). Ownership the Orchestrator holds only because Full Control kept a
+decision from the Human can deny, never approve: an approval needs every evidence route (screenshot
+review, operator-enabled frame review, the certified media-only reviewer) directly available to the
+Orchestrator when it resolves, and an approved decision stays consumable only while they still are,
+so frame review switched off or moved to another controller, or a media reviewer whose disclosures
+changed, revokes it. An authorization that leaves UI Evidence Approval out keeps evidence with the
+Human.
 
 Operators can inspect `authorityEvaluation` to answer why a request has its owner. The structured
 `campaign_authority_evaluated` event identifies the occurrence, entry point, operation and reason;

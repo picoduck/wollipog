@@ -1,1 +1,0 @@
-|.access-secondary-badge|text-transform|capitalize
