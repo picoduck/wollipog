@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
+  forgeActionBranchName,
   queueHoldReason,
   validProviderHomeLaunchRefusal,
   validProviderHomeWait,
@@ -119,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 283);
+  assert.equal(PROTOCOL_VERSION, 284);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -357,8 +358,18 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 283", () => {
-  assert.equal(PROTOCOL_VERSION, 283);
+test("PROTOCOL_VERSION is 284", () => {
+  assert.equal(PROTOCOL_VERSION, 284);
+  assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), false);
+  assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
+  // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
+  for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
+    assert.equal(forgeActionBranchName(name), true, name);
+  }
+  for (const name of ["", "-d", "/x", "x/", "a..b", "a//b", ".hidden", "a/.b", "x.lock", "a/b.lock/c", "x.", "a b", "a~1", "a:b",
+    "a^b", "a?b", "a*b", "a[b", "a\\b", "a@{b", "@", "a\u0001b", "x".repeat(256)]) {
+    assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
+  }
   // Full Control response text rides only on a runner that can carry it (#4063), which also has
   // the owner-decision tools its root guidance names.
   assert.equal(runnerSupportsProtocol(281, "fullControlResponseAttribution"), false);

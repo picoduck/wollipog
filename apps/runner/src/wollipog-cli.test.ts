@@ -1400,7 +1400,7 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
 
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
   const rootHelpText = await captureCli(["help"]);
-  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, reconcile, and withdraw typed workflow decisions/mu);
+  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, execute, reconcile, and withdraw typed workflow decisions/mu);
   const topic = await captureCli(["help", "workflow-decisions"]);
   assert.equal(topic.code, 0);
   for (const text of [

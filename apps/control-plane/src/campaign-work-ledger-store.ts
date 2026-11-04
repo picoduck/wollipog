@@ -1564,6 +1564,38 @@ export class CampaignWorkLedgerStore {
     ).all(campaignId) as Array<{ work_item_id: string }>).map((row) => row.work_item_id));
   }
 
+  /** #4067: the committed work item naming each pull request (`owner/repo#N`, lowercased), through
+   * its reported stage or a recorded delivery, with that item's handoff to `human` or `external`
+   * when it has one. A pull request named by several items keeps one with such a handoff, else the
+   * first. */
+  pullRequestWorkItems(campaignId: string): Map<string, { workItemId: string; handoff: CampaignWorkItemHandoff | null }> {
+    const handoffs = new Map((this.stmt(
+      "SELECT * FROM campaign_work_handoffs WHERE campaign_session_id=? AND responsible_actor IN ('human','external')",
+    ).all(campaignId) as unknown as HandoffRow[]).map((row) => [row.work_item_id, handoffView(row)]));
+    const named: Array<{ id: string; refs: CampaignPullRequestRef[] }> = [];
+    for (const item of this.stmt(
+      "SELECT id, stage_pull_requests FROM campaign_work_items WHERE campaign_session_id=? AND commitment='committed' ORDER BY rowid",
+    ).all(campaignId) as Array<{ id: string; stage_pull_requests: string | null }>) {
+      named.push({ id: item.id, refs: item.stage_pull_requests ? JSON.parse(item.stage_pull_requests) as CampaignPullRequestRef[] : [] });
+    }
+    for (const delivery of this.stmt(
+      `SELECT delivery.work_item_id, delivery.pull_requests FROM campaign_work_deliveries delivery
+       JOIN campaign_work_items item ON item.id=delivery.work_item_id AND item.commitment='committed'
+       WHERE delivery.campaign_session_id=? ORDER BY delivery.rowid`,
+    ).all(campaignId) as Array<{ work_item_id: string; pull_requests: string }>) {
+      named.push({ id: delivery.work_item_id, refs: JSON.parse(delivery.pull_requests) as CampaignPullRequestRef[] });
+    }
+    const result = new Map<string, { workItemId: string; handoff: CampaignWorkItemHandoff | null }>();
+    for (const { id, refs } of named) {
+      for (const ref of refs) {
+        const key = `${ref.repository.toLowerCase()}#${ref.number}`;
+        const known = result.get(key);
+        if (!known || (!known.handoff && handoffs.has(id))) result.set(key, { workItemId: id, handoff: handoffs.get(id) ?? null });
+      }
+    }
+    return result;
+  }
+
   /** What campaign completion reads from the ledger (#4070): the handed-off items and how many
    * unfinished committed items an agent still owns. Shares the summary's cache. */
   completionFacts(campaignId: string): Pick<LedgerSummaryPart, "handoffs" | "agentUnfinished"> {

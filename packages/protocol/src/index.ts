@@ -854,7 +854,17 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      older runners keep the fixed person-worded text and the separate notices. A person's
 //      dismissal or decline never carries it.
 // 283: distinguish explicit-account availability from effective-default readiness (#4078).
-export const PROTOCOL_VERSION = 283;
+// 284: Wollipog-performed forge actions (#4067). The requester of an approved
+//      `merged_branch_deletion` (which may now name `pullRequest` and `headSha`) or of an approved,
+//      armed GitHub `pr_merge` calls POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute;
+//      the control plane sends `forge_decision_action` to the child's runner, which deletes the
+//      branch by compare-and-delete or runs the canonical enqueue through the session's own forge
+//      login and answers `forge_decision_action_result`. The decision records `forgeAction`.
+//      GitHub forge observations carry `headBranch` and `crossRepository`, and the campaign
+//      projection lists `mergedBranches`; a pending merged branch keeps a campaign from
+//      `verified_complete`. Older runners never receive the action, and their campaigns keep
+//      today's completion.
+export const PROTOCOL_VERSION = 284;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -871,6 +881,7 @@ export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
 export * from "./workspace-removal.js";
+export * from "./forge-decision-action.js";
 export * from "./review-retirement.js";
 export * from "./video-review-settings.js";
 export * from "./review-contract.js";
@@ -1074,6 +1085,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v279 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
    * Workspaces added in Wollipog are removed by the control plane on any runner. */
   workspaceRemoval: 279,
+  /** v284 Wollipog performs an approved branch deletion or armed enqueue itself (#4067), and GitHub
+   * forge observations report the head branch that merged-branch cleanup tracks. Checked against
+   * the child's runner, and against the control plane by the runner's tools. */
+  forgeDecisionActions: 284,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -3143,6 +3158,17 @@ export interface OrchestratorCampaignProjection {
     status: "pending" | "deferred" | "refused";
     reason: string;
   }>;
+  /** v284 (#4067): the head branches of the campaign's merged pull requests (those its children
+   * merged through approved `pr_merge` decisions) and whether each is deleted, retained with a
+   * reason, or pending on the remote. A pending branch keeps the campaign from `verified_complete`.
+   * Pending first, bounded by CAMPAIGN_MERGED_BRANCHES_LIMIT; the counts are complete. Omitted
+   * when there are none. */
+  mergedBranches?: {
+    total: number;
+    pending: number;
+    retained: number;
+    items: import("./forge-decision-action.js").CampaignMergedBranch[];
+  };
   /** Unverified children held from starting their next turn, with how to clear each (#1650).
    * Bounded; `children.blocked` stays the full count. Omitted when there are none. */
   heldChildren?: Array<{ sessionId: string; holds: SessionHoldView[] }>;
@@ -5407,6 +5433,10 @@ export type WorkflowDecisionResourceSnapshot =
       branch: string;
       merged: true;
       mergeCommitSha: string;
+      /** v284 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
+       * itself only when both are present; omitted, the snapshot and its digest are unchanged. */
+      pullRequest?: number;
+      headSha?: string;
       dependentPullRequests: {
         checkedAt: number;
         open: number[];
@@ -5527,6 +5557,8 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
+  /** v284 (#4067): what Wollipog did when it performed this approved forge action itself. */
+  forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
   /** v242 (#3713): what the child's runner read from GitHub when a GitHub merge was requested.
@@ -10428,6 +10460,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
   | GithubMergePreflightResultMessage
+  | import("./forge-decision-action.js").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
   | CampaignIssueScopeResultMessage
@@ -12509,6 +12542,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | GitLabMergePreflightMessage
   | GithubMergePreflightMessage
+  | import("./forge-decision-action.js").ForgeDecisionActionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage
   | CampaignIssueScopeMessage

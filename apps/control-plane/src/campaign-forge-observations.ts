@@ -12,6 +12,7 @@ import type { DatabaseSync } from "node:sqlite";
 import {
   CAMPAIGN_FORGE_OBSERVATION,
   campaignRepositoryLocation,
+  forgeActionBranchName,
   runnerSupportsProtocol,
   type CampaignForgeObservationFailure,
   type CampaignForgeObserveMessage,
@@ -160,15 +161,20 @@ export class CampaignForgeObservationStore {
 
   /** For the background pass: when each ref was last read, successfully or not (a failed read waits
    * the same interval as a successful one), and whether its last value is a finished pull request
-   * (merged or closed) with no failure since. */
+   * (merged or closed) with no failure since. A merged pull request whose head branch is still on
+   * the remote is not finished: its cleanup is still owed (#4067). */
   readState(campaignId: string, refs: readonly CampaignPullRequestRef[]): Map<string, { readAt: number; finished: boolean }> {
     return new Map(refs.flatMap((ref) => {
       const row = this.row(campaignId, ref);
       if (!row) return [];
-      const state = row.value_json ? (JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation).state : null;
+      const value = row.value_json ? JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation : null;
+      // A merged branch still on the remote, or a same-repository one the forge did not name usably,
+      // is cleanup still owed: keep reading it.
+      const branchRemains = value?.forge === undefined && value?.state === "merged" &&
+        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch && value.crossRepository === false));
       return [[forgeRefKey(ref), {
         readAt: Math.max(row.observed_at ?? 0, row.failed_at ?? 0),
-        finished: !row.failure_reason && (state === "merged" || state === "closed"),
+        finished: !row.failure_reason && (value?.state === "merged" || value?.state === "closed") && !branchRemains,
       }]];
     }));
   }
@@ -471,7 +477,16 @@ function validObservation(value: unknown): value is CampaignForgePullRequestObse
       (queue.position === null || (Number.isSafeInteger(queue.position) && (queue.position as number) >= 0)))) &&
     (pr.mergeCommitSha === null || (typeof pr.mergeCommitSha === "string" && /^[0-9a-f]{40}$/u.test(pr.mergeCommitSha))) &&
     (pr.defaultBranch === undefined ||
-      (typeof pr.defaultBranch === "string" && pr.defaultBranch.length > 0 && pr.defaultBranch.length <= 256));
+      (typeof pr.defaultBranch === "string" && pr.defaultBranch.length > 0 && pr.defaultBranch.length <= 256)) &&
+    (pr.headBranch === undefined || validHeadBranch(pr.headBranch)) &&
+    (pr.crossRepository === undefined || typeof pr.crossRepository === "boolean");
+}
+
+/** v284 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
+function validHeadBranch(value: unknown): boolean {
+  const branch = value as Record<string, unknown> | null;
+  return Boolean(branch) && typeof branch === "object" && forgeActionBranchName(branch!.name) &&
+    (branch!.tipSha === null || (typeof branch!.tipSha === "string" && /^[0-9a-f]{40}$/u.test(branch!.tipSha)));
 }
 
 /** Store exactly the wire fields of a validated observation. */
@@ -489,5 +504,7 @@ export function sanitizedObservation(pr: CampaignForgePullRequestObservation): C
     mergeQueue: pr.mergeQueue ? { state: pr.mergeQueue.state, position: pr.mergeQueue.position } : null,
     mergeCommitSha: pr.mergeCommitSha,
     ...(pr.defaultBranch !== undefined ? { defaultBranch: pr.defaultBranch } : {}),
+    ...(pr.headBranch !== undefined ? { headBranch: { name: pr.headBranch.name, tipSha: pr.headBranch.tipSha } } : {}),
+    ...(pr.crossRepository !== undefined ? { crossRepository: pr.crossRepository } : {}),
   };
 }

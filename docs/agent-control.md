@@ -2206,6 +2206,57 @@ restarts, or its provider session ends with an armed merge still approved, the o
 at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
 and moves it to consumed if the approved head merged.
 
+A provider's own permission check can refuse an approved command: Claude Code's `auto` classifier
+decides inline, so a refusal never reaches the runner's permission channel. Wollipog then performs
+the one approved forge action itself (protocol v284, #4067) through `execute_workflow_decision`
+(CLI `decision execute <occurrence-id> --resource-digest <sha256>`,
+`POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute`). The classifier is not
+changed or worked around, and the agent's own commands stay subject to it. Only the requester may
+execute. It may execute its approved `merged_branch_deletion` when the snapshot names the merged
+`pullRequest` and `headSha`, whether or not it consumed the approval before its own command was
+refused. It may also execute its approved and armed GitHub `pr_merge`. Every consumption check
+applies again: live ancestry, the policy revision, current authority, and, for a merge, review
+evidence, the reviewed head, and GitHub's closing references re-read before dispatch. The control
+plane then sends `forge_decision_action` to the child's runner. The runner acts through the
+child's own `gh` login, using only `gh api` and `gh pr merge` against the explicit repository, run
+from the filesystem root. No `git` runs in the child's worktree, so no repository configuration the
+agent can write (hooks, `core.sshCommand`, credential helpers, URL rewrites, a changed `origin`) is
+read or executed on its behalf:
+
+- A deletion first proves that the pull request merged the approved head from that branch in the
+  same repository with the approved merge commit, and that no open pull request targets the
+  branch. It then deletes the ref with GitHub's `updateRefs` mutation, with `beforeOid` set to the
+  approved head and an all-zero `afterOid`, so GitHub itself refuses the deletion if the tip moved
+  after the read.
+- An enqueue first proves that the pull request is open at the approved head (already queued or
+  already merged at that head counts as done). It then runs
+  `gh pr merge <url> --squash --match-head-commit <sha>`, never `--delete-branch`.
+
+The decision records `forgeAction` (`kind`, `attempts`, `outcome`, `refusal`). A success consumes
+the approval once. A deletion uses ordinary consumption, an enqueue uses a receipt unique to its
+occurrence, and an already merged head uses the forge receipt that no other occurrence can reuse.
+A refusal proving the snapshot stale (`tip_moved`, `dependent_pull_request_open`,
+`pull_request_mismatch`, `closure_mismatch`) revokes the approval. Any other refusal changed
+nothing and leaves the approval in place, armed for a merge, so it can be retried or reconciled, up
+to five attempts. An uncertain enqueue is never replayed; reconcile it once the forge reads MERGED.
+An uncertain deletion may be executed again, because a compare-and-delete pinned to the approved
+head cannot do more than the approval allowed. The consume result for a merge or deletion names
+this fallback (`forgeActionFallback`).
+
+`get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
+child merged through a consumed `pr_merge`, it gives the head branch the forge last reported as
+`deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
+or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
+too, and a handoff retains it even before the first read. A pending branch keeps
+`campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
+finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
+until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
+A merged pull request whose branch the forge does not name usably, including one read before branches
+were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
+be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
+every campaign observed by a runner older than v284 are not tracked, so those campaigns complete
+as before.
+
 An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
 `decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol
 v269, #3917) and a required reason, rather than by consuming it with a stale snapshot. `:id` is

@@ -119,6 +119,7 @@ const AGENT_CONTROL_API_ROUTES = new Set([
   "GET /api/sessions/:id/workflow-decisions",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile",
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw",
   "POST /api/sessions/:id/prompt",
   "GET /api/sessions/:id/steering",
@@ -183,6 +184,7 @@ const ORCHESTRATOR_API_ROUTES = new Set([
   "GET /api/sessions/:id/workflow-decisions",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/consume",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/reconcile",
+  "POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute",
   "POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw",
   // A Full Control root's owner decisions and one-way handoffs to its owner (#4064).
   "POST /api/sessions/:id/owner-decisions",

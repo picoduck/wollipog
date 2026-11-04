@@ -10,8 +10,9 @@ import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPu
 import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
-import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage } from "@wollipog/protocol";
+import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
 import { contextGhRunner, observeForgeStatus, type GhRunner } from "./campaign-forge-status.js";
+import { executeBranchDeletion, executePullRequestEnqueue } from "./forge-decision-action.js";
 import { contextGlabRunner, type GlabRunner } from "./campaign-gitlab-status.js";
 import { gitlabMergePreflight } from "./gitlab-merge-preflight.js";
 import { githubMergePreflight } from "./github-merge-preflight.js";
@@ -128,9 +129,9 @@ import {
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { mkdir, rm } from "node:fs/promises";
-import { homedir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { ReviewWriterRegistry } from "./review-writers.js";
-import { join, resolve } from "node:path";
+import { join, parse as parsePath, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { makeDriver, type Driver } from "./drivers/factory.js";
 import type { ManagedWorktreeProtection } from "./managed-worktree-protection.js";
@@ -19106,6 +19107,39 @@ export class SessionManager {
       return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitHub could not be checked." };
+    }
+  }
+
+  /** v284 (#4067): perform one approved forge action the control plane checked, through the
+   * requesting session's own `gh` login and context. A fixed outcome, never tool output. `gh` runs
+   * from the filesystem root, never from the session's worktree, so no repository configuration the
+   * agent can write is read or executed on its behalf. */
+  async forgeDecisionAction(
+    message: ForgeDecisionActionMessage,
+    options: { gh?: GhRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
+  ): Promise<ForgeDecisionActionResultMessage> {
+    const base = { type: "forge_decision_action_result" as const, requestId: message.requestId,
+      sessionId: message.sessionId, occurrenceId: message.occurrenceId };
+    const meta = this.store.readMeta(message.sessionId);
+    if (!meta) {
+      return { ...base, outcome: "refused", refusal: { reason: "runner_unavailable",
+        summary: "The session is not known to this runner." } };
+    }
+    try {
+      const agentEnv = options.agentEnv?.(meta) ?? {};
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
+      const gh = options.gh ?? contextGhRunner(meta.context, neutral, agentEnv);
+      const result = message.action?.kind === "branch_deletion"
+        ? await executeBranchDeletion(message.action, gh)
+        : message.action?.kind === "pr_merge_enqueue"
+          ? await executePullRequestEnqueue(message.action, gh)
+          : { outcome: "refused" as const, refusal: { reason: "pull_request_mismatch" as const, summary: "Unknown forge action." } };
+      this.log(JSON.stringify({ event: "forge_decision_action_result", sessionId: message.sessionId,
+        occurrenceId: message.occurrenceId, kind: message.action?.kind, outcome: result.outcome,
+        ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
+      return { ...base, ...result };
+    } catch {
+      return { ...base, outcome: "uncertain" };
     }
   }
 

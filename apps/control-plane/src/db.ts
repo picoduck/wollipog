@@ -199,6 +199,13 @@ import {
   type OrchestratorCampaignProjection,
   type OrchestratorCampaignStatus,
   CAMPAIGN_HANDOFFS_LIMIT,
+  CAMPAIGN_MERGED_BRANCHES_LIMIT,
+  FORGE_DECISION_ACTION_MAX_ATTEMPTS,
+  FORGE_DECISION_ACTION_SUCCESSES,
+  FORGE_DECISION_ACTION_STALE_REFUSALS,
+  type CampaignMergedBranch,
+  type CampaignForgePullRequestObservation,
+  type CampaignPullRequestRef,
   CAMPAIGN_OWNER_DECISIONS_LIMIT,
   campaignStatusTerminal,
   type OrchestratorFollowUpRecord,
@@ -7196,6 +7203,8 @@ export class ControlPlaneDb {
       "superseded_by TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
+      // #4067: what Wollipog did when it performed this approved forge action itself.
+      "forge_action TEXT",
     ]) {
       try { db.exec(`ALTER TABLE workflow_decisions ADD COLUMN ${column}`); } catch { /* already present */ }
     }
@@ -7203,6 +7212,11 @@ export class ControlPlaneDb {
       ON workflow_decisions(session_id, resolved_at) WHERE resume_state='held'`);
     db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_resume_command
       ON workflow_decisions(resume_command_id) WHERE resume_state='delivering'`);
+    // #4067: a campaign's merged branches are found through its consumed merges' Orchestrators.
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_consumed_merges
+      ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND status='consumed'`);
+    db.exec(`CREATE INDEX IF NOT EXISTS idx_workflow_decisions_forge_deletions
+      ON workflow_decisions(controlling_session_id) WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL`);
     admitChildBlockedCampaignEvents(db);
     preserveCampaignFollowUpOrigins(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
@@ -21259,11 +21273,172 @@ export class ControlPlaneDb {
     const agentWork = facts.agentUnfinished.filter((item) => !(scope && item.origin === "original" && item.issue &&
       item.issue.repository.toLowerCase() === scope.repository.toLowerCase() && scope.issueNumbers.includes(item.issue.number) &&
       policy?.issueNumbers?.includes(item.issue.number)));
-    if (!facts.handoffs.length) return fullControl && agentWork.length > 0 ? "blocked" : "verified_complete";
+    // #4067: a merged campaign branch still on the remote is cleanup the campaign owes. A pending one
+    // keeps it going; one retained with a reason (a handoff to a person or an outside party on its
+    // work item) is the owner's to-do, so the campaign finishes with handoffs rather than verified.
+    const branches = this.campaignMergedBranchCounts(campaignId);
+    if (!facts.handoffs.length) {
+      if (fullControl && agentWork.length > 0) return "blocked";
+      return branches.pending > 0 ? "active" : branches.retained > 0 ? "complete_with_handoffs" : "verified_complete";
+    }
     // Only a request or decision the root itself still has pending is left here (the children are
     // done), and the counts above already routed those an Orchestrator owns: a person's turn.
     if (completion.state === "children_unfinished") return "waiting_human";
-    return agentWork.length === 0 ? "complete_with_handoffs" : "blocked";
+    if (agentWork.length > 0) return "blocked";
+    return branches.pending > 0 ? "active" : "complete_with_handoffs";
+  }
+
+  /** For the forge observer's background pass (#4067): each live campaign's merged pull requests
+   * whose branch is pending, so a branch deleted by anyone is eventually seen gone. */
+  campaignMergedBranchTargets(include: (campaignId: string) => boolean = () => true): Array<{ campaignId: string; refs: CampaignPullRequestRef[] }> {
+    const roots = (this.stmt("SELECT id FROM sessions WHERE archived=0 AND orchestrator_policy IS NOT NULL AND parent_session_id IS NULL")
+      .all() as Array<{ id: string }>).map((row) => row.id).filter(include);
+    return roots.map((campaignId) => ({ campaignId, refs: this.campaignMergedBranches(campaignId)
+      .filter((row) => row.state === "pending").map((row) => ({ repository: row.repository, number: row.pullRequest })) }))
+      .filter((target) => target.refs.length > 0);
+  }
+
+  /** The controlling sessions whose consumed `pr_merge` decisions belong to this campaign (#4067):
+   * the root and any session below it, keyed on the decision's controlling session whoever resolved
+   * it (a person, an Orchestrator, or forge reconciliation). Membership is plain ancestry, never a
+   * role, so a nested controller is never dropped. Read through the consumed-merge index, so a
+   * campaign without any costs one probe however many children it has. */
+  private campaignMergeControllers(campaignId: string): string[] {
+    const ids = (this.stmt(
+      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='pr_merge' AND decision.status='consumed'
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
+    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
+  }
+
+  /** The controlling sessions of this campaign's branch deletions Wollipog acted on, found on their
+   * own: a deletion need not share its merge's controller. */
+  private campaignDeletionControllers(campaignId: string): string[] {
+    const ids = (this.stmt(
+      `SELECT DISTINCT decision.controlling_session_id AS id FROM workflow_decisions decision
+       JOIN sessions controller ON controller.id=decision.controlling_session_id
+       WHERE decision.category='merged_branch_deletion' AND decision.forge_action IS NOT NULL
+         AND (decision.controlling_session_id=? OR controller.parent_session_id IS NOT NULL)`,
+    ).all(campaignId) as Array<{ id: string }>).map((row) => row.id);
+    return ids.filter((id) => this.sessionWithinCampaign(id, campaignId));
+  }
+
+  /** Whether `sessionId` is `campaignId` or below it, by walking parents (bounded, cycle-safe). */
+  private sessionWithinCampaign(sessionId: string, campaignId: string): boolean {
+    let current: string | null = sessionId;
+    const seen = new Set<string>();
+    while (current && !seen.has(current) && seen.size < 256) {
+      if (current === campaignId) return true;
+      seen.add(current);
+      current = (this.stmt("SELECT parent_session_id FROM sessions WHERE id=?").get(current) as
+        { parent_session_id: string | null } | undefined)?.parent_session_id ?? null;
+    }
+    return false;
+  }
+
+  private campaignMergedBranchCounts(campaignId: string): { pending: number; retained: number } {
+    const rows = this.campaignMergedBranches(campaignId);
+    return { pending: rows.filter((row) => row.state === "pending").length, retained: rows.filter((row) => row.state === "retained").length };
+  }
+
+  /**
+   * The head branches of the campaign's merged pull requests (#4067): every GitHub pull request a
+   * campaign child merged through a consumed `pr_merge` decision, with the forge's last word on its
+   * branch. `deleted` once the forge reports the branch gone, or once Wollipog deleted it after that
+   * report; `retained` while the work item naming the pull request is handed to a person or an
+   * outside party, with the handoff's reason; otherwise `pending`, including a pull request the
+   * forge has not been read for yet and one still open after its approved enqueue. A pull request
+   * closed without merging is not a merged branch, and a fork's branch, or a merged one read by an
+   * older runner, is not tracked. A campaign whose observing
+   * runner predates v284 tracks nothing, as before. Reads rows only.
+   */
+  campaignMergedBranches(campaignId: string): CampaignMergedBranch[] {
+    const observer = this.campaignForgeObservingRunner(campaignId);
+    if (!observer || !runnerSupportsProtocol(observer.protocolVersion, "forgeDecisionActions")) return [];
+    // Found through the deciding Orchestrator, never by walking every descendant: the projection is
+    // rebuilt as children change, and a campaign without a consumed merge costs one indexed probe.
+    const controllers = this.campaignMergeControllers(campaignId);
+    if (!controllers.length) return [];
+    const merges = this.stmt(
+      `SELECT session_id, resource_snapshot FROM workflow_decisions
+       WHERE category='pr_merge' AND status='consumed' AND session_id<>?
+         AND controlling_session_id IN (SELECT value FROM json_each(?))
+       ORDER BY consumed_at, occurrence_id`,
+    ).all(campaignId, JSON.stringify(controllers)) as Array<{ session_id: string; resource_snapshot: string }>;
+    const latest = new Map<string, { sessionId: string; repository: string; pullRequest: number; headSha: string }>();
+    for (const row of merges) {
+      const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
+      if (snapshot?.category !== "pr_merge" || snapshot.mergeMethod !== undefined) continue;
+      latest.set(`${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`,
+        { sessionId: row.session_id, repository: snapshot.repository, pullRequest: snapshot.pullRequest, headSha: snapshot.headSha });
+    }
+    if (!latest.size) return [];
+    const deletions = new Map<string, { occurrenceId: string; deletedAt?: number; refusal?: string }>();
+    for (const row of this.stmt(
+      `SELECT occurrence_id, resource_snapshot, forge_action FROM workflow_decisions
+       WHERE category='merged_branch_deletion' AND forge_action IS NOT NULL AND session_id<>?
+         AND controlling_session_id IN (SELECT value FROM json_each(?))
+       ORDER BY created_at, occurrence_id`,
+    ).all(campaignId, JSON.stringify(this.campaignDeletionControllers(campaignId))) as Array<{ occurrence_id: string; resource_snapshot: string; forge_action: string }>) {
+      const snapshot = parseJson<WorkflowDecisionResourceSnapshot>(row.resource_snapshot);
+      const action = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action);
+      if (snapshot?.category !== "merged_branch_deletion" || !action) continue;
+      const key = `${snapshot.repository.toLowerCase()}#${snapshot.branch}`;
+      if (action.outcome === "deleted" || action.outcome === "already_deleted") {
+        deletions.set(key, { occurrenceId: row.occurrence_id, deletedAt: action.updatedAt });
+      } else if (!deletions.get(key)?.deletedAt) {
+        deletions.set(key, { occurrenceId: row.occurrence_id, ...(action.outcome === "refused" ? { refusal: action.refusal?.summary } : {}) });
+      }
+    }
+    const workItems = this.campaignWorkLedger.pullRequestWorkItems(campaignId);
+    const rows: CampaignMergedBranch[] = [];
+    for (const [key, merge] of latest) {
+      const observed = this.stmt(
+        `SELECT value_json, observed_at FROM campaign_forge_observations
+         WHERE campaign_session_id=? AND repository_key=? AND number=?`,
+      ).get(campaignId, merge.repository.toLowerCase(), merge.pullRequest) as { value_json: string | null; observed_at: number | null } | undefined;
+      const value = parseJson<CampaignForgePullRequestObservation>(observed?.value_json ?? null);
+      const item = workItems.get(key);
+      const base = { sessionId: merge.sessionId, ...(item ? { workItemId: item.workItemId } : {}), repository: merge.repository,
+        pullRequest: merge.pullRequest, headSha: merge.headSha };
+      // A handoff to a person or an outside party retains the branch whatever the forge last said,
+      // so cleanup handed off before the first successful read still lets the campaign finish.
+      const retained = item?.handoff ? { state: "retained" as const, reason: item.handoff.reason } : null;
+      if (!value || value.state === "open") {
+        // Unread, or approved and enqueued but not merged yet: the merge and its branch are still owed.
+        rows.push({ ...base, branch: value?.headBranch?.name ?? null, ...(retained ?? { state: "pending" as const,
+          reason: value ? "The approved merge has not landed yet; its branch is cleaned up after it does."
+            : "The forge has not been read for this merged pull request yet." }) });
+        continue;
+      }
+      // Closed without merging, or a fork's branch: not this campaign's cleanup.
+      if (value.state !== "merged" || value.crossRepository === true) continue;
+      if (!value.headBranch) {
+        // Fail closed: a merged in-campaign pull request whose branch the forge did not name usably
+        // (or an observation from before the branch was reported) stays owed. A deletion cannot be
+        // pinned to it, so only a handoff, or a later read that names the branch, settles it.
+        rows.push({ ...base, branch: null, ...(observed?.observed_at != null ? { observedAt: observed.observed_at } : {}),
+          ...(retained ?? { state: "pending" as const, reason: "The forge reported no usable branch name for this merged pull request." }) });
+        continue;
+      }
+      const at = observed?.observed_at ?? undefined;
+      const branch = value.headBranch.name;
+      const deletion = deletions.get(`${merge.repository.toLowerCase()}#${branch}`);
+      const seen = { ...(at !== undefined ? { observedAt: at } : {}), ...(deletion ? { decisionOccurrenceId: deletion.occurrenceId } : {}) };
+      if (value.headBranch.tipSha === null || (deletion?.deletedAt !== undefined && deletion.deletedAt >= (at ?? 0))) {
+        rows.push({ ...base, branch, state: "deleted", ...seen });
+      } else if (item?.handoff) {
+        rows.push({ ...base, branch, state: "retained", reason: item.handoff.reason, ...seen });
+      } else {
+        rows.push({ ...base, branch, state: "pending", ...seen,
+          reason: deletion?.refusal ? `The last deletion was refused: ${deletion.refusal}`
+            : value.headBranch.tipSha !== merge.headSha ? "The branch is still on the remote, and its tip moved after the merge."
+            : "The merged branch is still on the remote." });
+      }
+    }
+    return rows;
   }
 
   /** The campaign status alone, for a session summary: identical to `campaignProjection().status`
@@ -21394,6 +21569,18 @@ export class ControlPlaneDb {
           : { status: "available", effectiveOwner: "human" },
       children: { total, active, waitingHuman, blocked, verified: fullyVerified, cleanupPending },
       ...(cleanupWorktrees.length ? { cleanupWorktrees } : {}),
+      ...(() => {
+        // #4067: pending first, then retained, then deleted; the counts stay complete.
+        const branches = this.campaignMergedBranches(resolvedCampaignId);
+        if (!branches.length) return {};
+        const order = { pending: 0, retained: 1, deleted: 2 } as const;
+        return { mergedBranches: {
+          total: branches.length,
+          pending: branches.filter((row) => row.state === "pending").length,
+          retained: branches.filter((row) => row.state === "retained").length,
+          items: [...branches].sort((a, b) => order[a.state] - order[b.state]).slice(0, CAMPAIGN_MERGED_BRANCHES_LIMIT),
+        } };
+      })(),
       ...(heldChildren.length ? { heldChildren } : {}),
       ...(() => {
         const parkedChildren = this.pullRequestWatches.visibleAmong(childIds, CAMPAIGN_PARKED_CHILDREN_LIMIT);
@@ -22737,6 +22924,57 @@ export class ControlPlaneDb {
        WHERE occurrence_id=? AND status='approved'`,
     ).run(now, occurrenceId);
     return Number(result.changes) === 1 ? this.workflowDecisionByOccurrence(occurrenceId) : null;
+  }
+
+  /**
+   * Open one dispatch of a Wollipog-performed forge action (#4067), as one durable write before the
+   * runner is asked. Only an approved decision qualifies, or a consumed deletion whose approved
+   * action was never shown to take effect (its requester ran the command and the provider refused
+   * it). Refused while another dispatch is in flight, once the attempts are spent, after a
+   * success, and after an uncertain enqueue, which is reconciled rather than replayed. A dispatch
+   * left `in_progress` past `staleAfterMs` (a control plane that stopped mid-action) reads as
+   * uncertain. Returns the new record, or null.
+   */
+  beginWorkflowDecisionForgeAction(
+    occurrenceId: string,
+    kind: NonNullable<WorkflowDecisionView["forgeAction"]>["kind"],
+    now: number,
+    staleAfterMs: number,
+  ): NonNullable<WorkflowDecisionView["forgeAction"]> | null {
+    this.db.exec("BEGIN IMMEDIATE");
+    try {
+      const row = this.stmt("SELECT status, category, forge_action FROM workflow_decisions WHERE occurrence_id=?")
+        .get(occurrenceId) as { status: WorkflowDecisionStatus; category: string; forge_action: string | null } | undefined;
+      let previous = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row?.forge_action ?? null);
+      if (previous?.outcome === "in_progress" && now - previous.updatedAt > staleAfterMs) {
+        previous = { ...previous, outcome: "uncertain", updatedAt: now };
+        this.stmt("UPDATE workflow_decisions SET forge_action=? WHERE occurrence_id=?").run(JSON.stringify(previous), occurrenceId);
+      }
+      const eligible = row && (row.status === "approved" ||
+        (row.status === "consumed" && row.category === "merged_branch_deletion" && kind === "branch_deletion"));
+      if (!eligible || (previous && previous.kind !== kind) || previous?.outcome === "in_progress" ||
+          (previous && FORGE_DECISION_ACTION_SUCCESSES.has(previous.outcome)) ||
+          // A consumed deletion cannot be revoked, so a stale refusal ends it here instead.
+          (previous?.refusal && FORGE_DECISION_ACTION_STALE_REFUSALS.has(previous.refusal.reason)) ||
+          (previous?.outcome === "uncertain" && kind === "pr_merge_enqueue") ||
+          (previous?.attempts ?? 0) >= FORGE_DECISION_ACTION_MAX_ATTEMPTS) {
+        this.db.exec("COMMIT");
+        return null;
+      }
+      const next: NonNullable<WorkflowDecisionView["forgeAction"]> = { kind, attempts: (previous?.attempts ?? 0) + 1,
+        outcome: "in_progress", updatedAt: now };
+      this.stmt("UPDATE workflow_decisions SET forge_action=? WHERE occurrence_id=?").run(JSON.stringify(next), occurrenceId);
+      this.db.exec("COMMIT");
+      return next;
+    } catch (error) {
+      this.db.exec("ROLLBACK");
+      throw error;
+    }
+  }
+
+  /** Record the dispatch's outcome (#4067). Consumption, when it succeeded, is written separately. */
+  recordWorkflowDecisionForgeAction(occurrenceId: string, action: NonNullable<WorkflowDecisionView["forgeAction"]>): void {
+    this.stmt("UPDATE workflow_decisions SET forge_action=? WHERE occurrence_id=?").run(JSON.stringify(action), occurrenceId);
   }
 
   armWorkflowDecisionAction(
@@ -33043,6 +33281,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     closing_reference_check?: string | null;
+    forge_action?: string | null;
   } | undefined;
   if (!row?.request_id || !row.occurrence_id || !row.session_id || !row.controlling_session_id ||
       !row.category || !row.resource_key || !row.resource_snapshot || !row.resource_digest ||
@@ -33055,6 +33294,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
   const delegatedImageReview = parseJson<NonNullable<WorkflowDecisionView["delegatedImageReview"]>>(row.delegated_image_review ?? null);
   const humanFallback = parseJson<NonNullable<WorkflowDecisionView["humanFallback"]>>(row.human_fallback ?? null);
   const closingReferenceCheck = parseJson<NonNullable<WorkflowDecisionView["closingReferenceCheck"]>>(row.closing_reference_check ?? null);
+  const forgeAction = parseJson<NonNullable<WorkflowDecisionView["forgeAction"]>>(row.forge_action ?? null);
   return {
     requestId: row.request_id,
     occurrenceId: row.occurrence_id,
@@ -33072,6 +33312,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.issue_closure_result ? { issueClosureResult: JSON.parse(row.issue_closure_result) as NonNullable<WorkflowDecisionView["issueClosureResult"]> } : {}),
     ...(row.automation_creation_result ? { automationCreationResult: JSON.parse(row.automation_creation_result) as NonNullable<WorkflowDecisionView["automationCreationResult"]> } : {}),
     ...(closingReferenceCheck ? { closingReferenceCheck } : {}),
+    ...(forgeAction ? { forgeAction } : {}),
     ...(row.selected_option_id ? { selectedOptionId: row.selected_option_id } : {}),
     ...(evidenceReviewed ? { evidenceReviewed } : {}),
     ...(delegatedVideoEvidence ? { delegatedVideoEvidence } : {}),
