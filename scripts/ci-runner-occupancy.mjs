@@ -1,3 +1,4 @@
+import { timingQuality, timingConflict, timingQualitySummary } from "./ci-job-timing.mjs";
 import { createHash } from "node:crypto";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -143,6 +144,9 @@ export function projectJob(run, job) {
     workflow: run.path ?? null, pullRequest: run.pull_requests?.[0]?.number ?? null, branch: run.head_branch ?? null,
     jobId: job.id, name: job.name, status: job.status ?? null, conclusion: job.conclusion ?? null,
     createdAt: job.created_at ?? null, apiStartedAt: job.started_at ?? null, completedAt: job.completed_at ?? null,
+    timingQuality: timingQuality(job),
+    steps: (job.steps ?? []).map((step) => ({ number: step.number, conclusion: step.conclusion ?? null,
+      startedAt: step.started_at ?? null, completedAt: step.completed_at ?? null })),
     allocated: allocated(job), runnerClass: runnerClass(job.labels),
     hosted: job.runner_group_name === "GitHub Actions" ? true : job.runner_group_name ? false : null,
   };
@@ -297,6 +301,7 @@ export function timeline(jobs, since, until) {
     }
   };
   for (const job of jobs) {
+    if (timingConflict(job)) continue;
     const created = Date.parse(job.createdAt), started = Date.parse(job.apiStartedAt), completed = Date.parse(job.completedAt);
     if (job.allocated && Number.isFinite(started) && Number.isFinite(completed)) {
       if (Number.isFinite(created) && created < started) add(created, started, 1);
@@ -363,6 +368,7 @@ export function mergeGroupCriticalWaits(jobs, runs) {
   const perJob = new Map();
   let measured = 0;
   for (const [runId, list] of byRun) {
+    if (list.some(timingConflict)) continue;
     const raw = list.filter((job) => job.allocated && job.conclusion !== "skipped").map((job) => ({ name: job.name,
       conclusion: job.conclusion, created_at: job.createdAt, started_at: job.apiStartedAt, completed_at: job.completedAt }));
     const aggregator = raw.find((job) => job.name === AGGREGATOR);
@@ -419,7 +425,7 @@ export function parseScenario(text) {
  */
 export function replay(jobs, { capacity, priority = null, drop = null, limit = null }) {
   const label = (job) => `${job.category}|${job.name}|${job.runId}`;
-  const pending = jobs.filter((job) => job.allocated && (!drop || !drop.test(label(job))))
+  const pending = jobs.filter((job) => !timingConflict(job) && job.allocated && (!drop || !drop.test(label(job))))
     .map((job) => ({ id: job.jobId, run: job.runId, ready: Date.parse(job.createdAt),
       service: Date.parse(job.completedAt) - Date.parse(job.apiStartedAt),
       level: priority !== null && job.category === priority ? 0 : 1, limited: Boolean(limit?.pattern.test(label(job))) }))
@@ -474,6 +480,7 @@ export function replay(jobs, { capacity, priority = null, drop = null, limit = n
  * acyclic when the creation slack would let two short jobs each look like the other's dependency.
  */
 export function modeledRequiredMinutes(runCreatedAt, list, waits) {
+  if (list.some(timingConflict)) return null;
   const runStart = Date.parse(runCreatedAt);
   const raw = list.map((job) => ({ id: job.jobId, name: job.name, conclusion: job.conclusion,
     created_at: job.createdAt, started_at: job.apiStartedAt, completed_at: job.completedAt }));
@@ -544,15 +551,21 @@ export function analyze(report, { ceiling = 20, longWaitMinutes = 5, scenarios: 
   const categories = {};
   const runsByCategory = new Map();
   for (const run of report.runs) runsByCategory.set(run.category, [...(runsByCategory.get(run.category) ?? []), run]);
-  const totalMinutes = jobs.filter((job) => job.allocated).reduce((sum, job) => sum + (span(job.apiStartedAt, job.completedAt) ?? 0), 0);
+  const measuredMinutes = (list) => {
+    const values = list.filter((job) => !timingConflict(job) && job.allocated)
+      .map((job) => span(job.apiStartedAt, job.completedAt)).filter(Number.isFinite);
+    return !values.length && list.some(timingConflict) ? null : values.reduce((sum, value) => sum + value, 0);
+  };
+  const totalMinutes = measuredMinutes(jobs);
   for (const name of [...new Set([...runsByCategory.keys(), ...jobs.map((job) => job.category)])].sort()) {
     const own = jobs.filter((job) => job.category === name);
-    const held = own.filter((job) => job.allocated);
-    const runnerMinutes = held.reduce((sum, job) => sum + (span(job.apiStartedAt, job.completedAt) ?? 0), 0);
+    const held = own.filter((job) => !timingConflict(job) && job.allocated);
+    const runnerMinutes = measuredMinutes(own);
     const runs = runsByCategory.get(name) ?? [];
     categories[name] = {
       runs: runs.length, unfinishedRuns: runs.filter((run) => run.status !== "completed").length,
       skippedRuns: runs.filter((run) => run.conclusion === "skipped").length,
+      timingQuality: timingQualitySummary(own),
       jobs: own.length, allocatedJobs: held.length,
       cancelledBeforeRunner: own.filter((job) => !job.allocated && job.conclusion === "cancelled").length,
       runnerMinutes, share: totalMinutes > 0 ? runnerMinutes / totalMinutes : null,
@@ -564,7 +577,7 @@ export function analyze(report, { ceiling = 20, longWaitMinutes = 5, scenarios: 
         .map((kind) => [kind, held.filter((job) => job.runnerClass === kind).length])),
     };
   }
-  const longWaits = jobs.filter((job) => job.allocated && job.attempt === 1 && (span(job.createdAt, job.apiStartedAt) ?? 0) > longWaitMinutes);
+  const longWaits = jobs.filter((job) => !timingConflict(job) && job.allocated && job.attempt === 1 && (span(job.createdAt, job.apiStartedAt) ?? 0) > longWaitMinutes);
   const hours = Array.from({ length: 24 }, (_, hour) => {
     const own = segments.flatMap(([a, b, r, q]) => {
       const pieces = [];
@@ -578,21 +591,22 @@ export function analyze(report, { ceiling = 20, longWaitMinutes = 5, scenarios: 
     return { hour, ...occupancy(own, ceiling) };
   });
   const days = {};
-  for (const job of jobs.filter((item) => item.allocated)) {
+  for (const job of jobs.filter((item) => !timingConflict(item) && item.allocated)) {
     const day = String(job.apiStartedAt).slice(0, 10);
     days[day] ??= {};
     days[day][job.category] = (days[day][job.category] ?? 0) + (span(job.apiStartedAt, job.completedAt) ?? 0);
   }
   return {
     repository: report.repository, windows, collectedAt: report.collectedAt, ceiling,
+    timingQuality: timingQualitySummary(jobs),
     completeness: { runs: report.runs.length, jobs: jobs.length, copiedJobsDropped: report.jobs.length - occupying.length,
       unfinishedRuns: report.runs.filter((run) => run.status !== "completed").length,
       runListingTruncated: report.runListingTruncated, jobListingsTruncated: report.jobListingsTruncated,
       attemptsTruncated: report.attemptsTruncated,
-      runnerClasses: Object.fromEntries([...new Set(jobs.filter((job) => job.allocated).map((job) => job.runnerClass))].sort()
-        .map((kind) => [kind, jobs.filter((job) => job.allocated && job.runnerClass === kind).length])),
-      hostedAllocations: jobs.filter((job) => job.allocated && job.hosted === true).length,
-      nonHostedAllocations: jobs.filter((job) => job.allocated && job.hosted === false).length },
+      runnerClasses: Object.fromEntries([...new Set(jobs.filter((job) => !timingConflict(job) && job.allocated).map((job) => job.runnerClass))].sort()
+        .map((kind) => [kind, jobs.filter((job) => !timingConflict(job) && job.allocated && job.runnerClass === kind).length])),
+      hostedAllocations: jobs.filter((job) => !timingConflict(job) && job.allocated && job.hosted === true).length,
+      nonHostedAllocations: jobs.filter((job) => !timingConflict(job) && job.allocated && job.hosted === false).length },
     occupancy: occupancy(segments, ceiling),
     longWaits: { thresholdMinutes: longWaitMinutes, jobs: longWaits.length,
       runningAtCreation: distribution(longWaits.map((job) => runningAt(segments, Date.parse(job.createdAt)))) },
@@ -611,6 +625,7 @@ export function markdown(result) {
   return [
     `Runner occupancy for ${result.repository}, ${result.windows.map((w) => `${w.since}..${w.until}`).join(", ")}: ` +
       `${result.completeness.runs} runs, ${result.completeness.jobs} jobs, ${fixed(result.totalRunnerMinutes, 0)} runner-minutes.`,
+    `Unmeasured allocation jobs: ${result.timingQuality.unmeasuredAllocationJobs}; occupancy and measured minutes exclude them and can be lower bounds.`,
     "",
     `Peak running ${o.peakRunning} (ceiling ${result.ceiling}); peak demand ${o.peakDemand}; mean running ${fixed(o.meanRunning)}; ` +
       `at ceiling ${percent(o.atCeiling)}, one below ${percent(o.atCeilingMinusOne)}; demand over ceiling ${percent(o.demandOverCeiling)}; ` +

@@ -63,6 +63,57 @@ merge-queue removals by reason, listing each `checks_timed_out` removal.
 
 ## Limits
 
+### Job/Step Timing Quality
+
+Both reports emit `jobs[].timingQuality` with stable fields `state`, `reason`,
+`terminalGapSeconds` (signed job completion minus latest executed-step completion,
+or null), and `stepsOutsideJobInterval` (number of non-skipped steps with any known
+endpoint outside the closed job start/completion interval). Any such step takes
+reason precedence as `executed-steps-outside-job-interval`. Otherwise a terminal
+gap **strictly greater than 180 seconds** is `unexplained-terminal-gap`. This
+conservative threshold allows ordinary finalization lag while detecting the
+195–3,604-second conflicts in #4046. Cancelled steps count as executed evidence;
+skipped steps and skipped jobs do not. Missing endpoints do not invent a gap.
+
+Conflicts have `state: "unmeasured-allocation"`; other jobs have
+`state: "no-conflict-detected"`, which is not a passing or complete-timing verdict.
+API conclusions remain observations of the forge outcome. Event job `state` is
+`unmeasured` for conflicts, even when the forge conclusion is success. Raw job
+`apiStartedAt`/`completedAt` and step `startedAt`/`completedAt` remain unchanged.
+No guessed clock correction is applied. The occupancy collector now retains
+number, conclusion and timestamps for steps, without step names or log content.
+
+Flagged jobs contribute no measured execution, runner wait, overhead, shard
+imbalance, occupancy timeline, replay service time, or percentile input. Their
+durations remain null, never zero. A conflicting required job makes the entire
+critical-path split and modeled required latency unmeasured, even when a different
+branch appears to finish last. Observed forge run outcomes remain separate from
+timing quality. Event summaries (overall and per cohort) and occupancy summaries
+(overall and per category) expose `timingQuality.unmeasuredAllocationJobs` and
+`timingQuality.reasons` counts. Attempt metrics also contain
+`unmeasuredAllocationJobs`; the original trial summary counts these jobs too.
+Measured totals and occupancy fractions are lower bounds with incomplete
+allocation, not pool-wide utilization or billing proof. Old occupancy exports
+without step evidence cannot retrospectively detect conflicts; recollect them.
+Version-2 event inputs are reprojected offline from their timestamp observations;
+an explicit historical conflict survives if a reduced export omitted its steps.
+
+Offline replay: `node scripts/merge-queue-wait-report.mjs --input
+docs/ci-browser-shards-2026-11-02.json --json`. In the source window
+`[2026-10-23T21:02:55Z, 2026-11-02T15:00:00Z)`, first attempts now contain **322**
+flagged job records across **37** attempts: 271 outside-interval and 51 terminal-gap
+records. The original 320 across 36 attempts excluded two cancelled browser jobs,
+124217058777 and 124217058800 in run 41100595057, each with a 233-second terminal
+gap. This implementation includes them conservatively. Job 124793398112 in run
+41288084092 retains its recorded outside-interval classification because the
+export contains no source steps. Rerun records are classified separately and
+remain excluded from measured event execution as before. The offline fixture test
+checks this census and both natural example jobs 124786960842 and 124795175899.
+Replay makes no API requests or CI dispatches and establishes no speedup or cost.
+
+Rollback: revert the #4046 reporting change and rerun collectors; no workflow,
+required check, repository setting or stored source export is changed by it.
+
 Times run from the run's creation. A run can be created well after its queue entry
 (one waited over three hours), and the queue's window starts at the entry, so the
 report understates the window used. Removals are read only for pull requests with
