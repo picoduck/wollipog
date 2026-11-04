@@ -6,7 +6,7 @@ license = "Apache-2.0"
 repository = "https://github.com/picoduck/wollipog"
 homepage = "https://github.com/picoduck/wollipog"
 edition = "2021"
-rust-version = "1.88"
+rust-version = "1.89"
 
 # The library is what Tauri's mobile targets link against; the binary (main.rs)
 # just calls into it. Keep both so `tauri dev`/`build` work on desktop today and
