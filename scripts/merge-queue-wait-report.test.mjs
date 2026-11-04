@@ -252,7 +252,7 @@ test("an aggregator that never ran leaves the required result unmeasured", () =>
   assert.equal(metrics.longestJobWaitMinutes, 5);
 });
 
-test("a successful isolated benchmark with a skipped protected job is not a required result", () => {
+test("historical skipped protected jobs cannot yield measured required-result latency", () => {
   const metrics = runMetrics(run(2, 2741), [job("Browser End-to-End Tests (1)", 0, 1, 10),
     job("PR Browser Benchmark Result", 10, 10, 11), job(AGGREGATOR, 0, 0, 0, "skipped")]);
   assert.equal(metrics.aggregatorRan, false);

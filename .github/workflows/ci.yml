@@ -8,9 +8,13 @@ on:
   workflow_call:
     inputs:
       target_sha:
-        description: Immutable main snapshot admitted by the rolling controller
+        description: Immutable checkout revision for rolling admission or benchmark caller
         type: string
         default: ''
+      browser_benchmark:
+        description: Reduced browser diagnostic; caller prefixes all results
+        type: boolean
+        default: false
   # Merge queue entries run the same required check on the queued merge group.
   merge_group:
   pull_request:

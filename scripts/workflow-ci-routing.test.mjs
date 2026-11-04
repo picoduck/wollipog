@@ -35,7 +35,7 @@ const admission = expression(job("suite_plan"), "if");
 const states = ["success", "failure", "cancelled", "skipped", "", "unexpected"];
 const variables = ["", "false", "disabled", "Enabled", "ENABLED", "true", "enabled ", "enabled"];
 
-test("only the isolated dispatch benchmark can reduce manual coverage and it never emits the protected name", () => {
+test("only the isolated dispatch benchmark can reduce manual coverage and its protected check must fail", () => {
   assert.equal(expression(job("check"), "name"), "Typecheck, Test & Sidecar Bundle");
   assert.equal(expression(job("benchmark_check"), "name"), "PR Browser Benchmark Result");
   const prepare = expression(job("browser").split("      - name: Prepare Benchmark Browser Selection\n")[1], "if");
@@ -57,8 +57,27 @@ test("only the isolated dispatch benchmark can reduce manual coverage and it nev
   }
   const events = workflow.slice(workflow.indexOf("\non:\n"), workflow.indexOf("\npermissions:\n"));
   assert.match(events, /workflow_dispatch:\n    inputs:\n      browser_benchmark:/);
-  assert.doesNotMatch(events.split("  workflow_dispatch:")[0], /browser_benchmark/);
+  assert.match(events.split("  workflow_dispatch:")[0], /browser_benchmark:\n        description: [^\n]+\n        type: boolean\n        default: false/,
+    "reusable callers must opt in; rolling validation retains full coverage by default");
   assert.doesNotMatch(job("unit"), /browser_benchmark|BROWSER_BENCHMARK|PR_FAST/);
+});
+
+test("dispatch-only benchmark caller prefixes every reusable CI job and keeps read-only permissions", () => {
+  const caller = readFileSync(".github/workflows/ci-pr-browser-benchmark.yml", "utf8");
+  assert.match(caller, /^on:\n  workflow_dispatch:\n\npermissions:\n  contents: read$/m);
+  assert.doesNotMatch(caller, /pull_request|merge_group|secrets:|write|continue-on-error/);
+  assert.match(caller, /^  group: pr-browser-benchmark-\$\{\{ github.ref \}\}\n  cancel-in-progress: false$/m);
+  assert.equal((caller.match(/^  [a-z_]+:$/gm) ?? []).filter((line) => line !== "  workflow_dispatch:").length, 1);
+  assert.match(caller, /^  benchmark:\n    if: github.event_name == 'workflow_dispatch'\n    name: Browser Benchmark\n    uses: \.\/\.github\/workflows\/ci.yml\n    with:\n      target_sha: \$\{\{ github.sha \}\}\n      browser_benchmark: true$/m);
+  // A reusable call is named <caller job> / <callee job>; no root protected job exists.
+  for (const id of ["check", "benchmark_check"]) {
+    const checkName = expression(job(id), "name");
+    assert.notEqual(`Browser Benchmark / ${checkName}`, "Typecheck, Test & Sidecar Bundle");
+  }
+  assert.match(job("check"), /if \[ "\$BROWSER_BENCHMARK" != false \]; then/,
+    "direct ci.yml benchmark dispatch retains its independent fail-closed guard");
+  const rolling = readFileSync(".github/workflows/main-rolling-validation.yml", "utf8");
+  assert.doesNotMatch(rolling, /browser_benchmark/);
 });
 
 test("the separate benchmark aggregate fails on every non-success dependency", () => {

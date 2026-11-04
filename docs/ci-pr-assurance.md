@@ -18,7 +18,8 @@ Workflow `CI` remains at `.github/workflows/ci.yml`. Protected result
 | Merge Group | Complete regression | Same; PR routing is never admitted |
 | Main Push or Reusable Rolling Validation | Complete regression | Same |
 | Ordinary Manual Dispatch | Complete regression | Same |
-| Explicit Branch Benchmark Dispatch | Isolated browser simulation | Separate result; protected aggregator deliberately fails |
+| Benchmark Caller Dispatch | Isolated browser simulation | All results prefixed; no exact protected name |
+| Direct CI Dispatch With Benchmark Flag | Unsafe for PR-head status isolation | Fails protected result explicitly; use caller instead |
 
 Every PR retains all three full Node shards, typecheck, engine boundaries,
 web/control-plane/runner bundles, delegated Linux containment/recovery, Platform
@@ -102,22 +103,37 @@ A diagnostic cannot replace required PR/queue checks. Before merge, explicitly
 simulate the reduced lane on a feature branch without repository variables:
 
 ```sh
-gh workflow run ci.yml --repo picoduck/wollipog --ref <benchmark-only-branch> -f browser_benchmark=true
+gh workflow run ci-pr-browser-benchmark.yml --repo picoduck/wollipog --ref <branch>
 ```
 
-The flag exists only under workflow_dispatch, not rolling reusable inputs. The
-same event/input guard controls reduced matrix and a separate job with literal
-name **PR Browser Benchmark Result**. The protected aggregator retains the literal
-**Typecheck, Test & Sidecar Bundle** name and deliberately fails for this diagnostic,
-even when all work passes. Skipping it would count as passing under GitHub branch
-protection and is unsafe. PR/merge-group events cannot exploit the flag. Use a
-dedicated benchmark branch with a distinct marker commit (same tree as the reviewed
-candidate), so the expected failing protected result cannot interfere with the PR
-head. Record both SHAs and verify tree identity. Success means the separate
-benchmark result passed; the overall workflow is expected to fail. Default dispatch stays full. The
+This separate dispatch-only, read-only caller invokes reusable CI with
+`browser_benchmark: true` and `target_sha: github.sha`. Its job name prefixes every
+callee result: **Browser Benchmark / PR Browser Benchmark Result** and
+**Browser Benchmark / Typecheck, Test & Sidecar Bundle**. No exact protected context
+is created, even when a diagnostic finishes after PR CI on the same SHA. The
+caller and callee have different concurrency groups; benchmark dispatches do not
+cancel each other in progress.
+
+The reusable benchmark input defaults to false; ordinary rolling validation never
+sets it and retains complete coverage. The same event/input guard controls reduced
+matrix and benchmark result admission. Direct `ci.yml` dispatch with the flag
+still deliberately fails its literal protected check, even when every work job
+passes. Never run that direct mode on a PR head: a later failed result can replace
+its successful protected result. Skipping the job is unsafe too, because GitHub
+counts a skipped check as passing. PR/merge-group events cannot exploit the flag.
+Benchmark success means the separate diagnostic result passed; the overall run
+is expected to fail because the protected sentinel (prefixed in the caller) fails.
+Ordinary dispatch without the flag stays full. The
 simulation runs critical files, full Node/check/platform work, WebKit, Windows
 and production smoke. It represents critical-only PR work, not arbitrary changed
 specs or live planning latency. At most four additional runs per PR are authorized.
+
+GitHub requires a dispatch workflow path on the default branch. The campaign
+therefore keeps one complete premerge sample from the earlier isolated marker,
+then dispatches this registered caller on main after merge for up to two more
+samples within the four-dispatch budget. Verify observed prefixed result names,
+caller/tested SHA and per-attempt timings, and post repeat results on #3630.
+No temporary caller adapter or repository-setting change is authorized.
 
 A `ci:full-browser` label trigger was evaluated but is not implemented. Existing
 same-head PR runs never cancel one another: an older reduced run could report the
@@ -173,6 +189,8 @@ reinterpreted as a suite-shadow certificate; all these projections retain
 `certification: none`. Historical v1 records never certify v1.1 or this policy.
 
 See [applicability and baseline measurements](ci-pr-browser-measurements-2026-11-04.md).
-Benchmark/full-PR comparison is pending. No latency, queue, runner-minute, cost
-saving or 15-minute achievement is claimed. Link measured run/job evidence before
-implementation merge; post-activation natural measurement remains afterward.
+One premerge synthetic sample completed in 14.33 minutes, versus a 33.32-minute
+natural full-PR baseline, with the limitations recorded in the linked report.
+This establishes neither natural PR latency nor a distribution or billing saving.
+Repeat caller sampling follows implementation merge; post-activation natural PR
+and queue measurements remain afterward. Activation still requires the owner.

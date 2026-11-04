@@ -28,10 +28,13 @@ the separate `benchmark_check` job, whose static name is `PR Browser Benchmark R
 That job requires success from all six work dependencies. The protected aggregator
 executes and deliberately fails in this mode: a skipped check would count as
 passing under [GitHub protection](https://docs.github.com/en/pull-requests/reference/status-checks).
-Dispatch on a separate marker commit with the same
-tree as the reviewed candidate, so that expected failure cannot affect PR-head
-checks. The overall benchmark workflow is expected to fail; only its separate
-benchmark result describes success. PR/merge-group events cannot consume this input.
+Use the separate dispatch-only `ci-pr-browser-benchmark.yml` caller, whose
+`Browser Benchmark` job prefixes every reusable result. It creates no check with
+the exact protected name, so its intentional sentinel failure cannot replace a
+PR result. Direct CI dispatch with the flag remains fail-closed and must not be
+used on a PR head. The overall benchmark workflow is expected to fail; only its
+prefixed diagnostic result describes success. The reusable input defaults to false
+and rolling callers omit it. PR/merge-group events cannot consume this input.
 All other coverage stays mandatory. Checks/browser
 wait for optional routing and use `!cancelled()` plus the same draft guard so an
 expected disabled plan skip cannot skip full work. WebKit/Windows stay independent.
