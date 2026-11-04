@@ -62,17 +62,6 @@ test("the iOS focus-zoom guard is the final rule in the stylesheet", () => {
     `the focus-zoom guard must be the last rule; found trailing CSS: ${remainder.slice(0, 120)}`);
 });
 
-test("known late form rules cannot outrank the focus-zoom guard", () => {
-  // These are the rules that beat the previous attempt. They must appear BEFORE the guard so the
-  // specificity tie resolves in the guard's favour on document order.
-  const guard = css.lastIndexOf(":root .composer-input {");
-  for (const selector of [".usage-retention input"]) {
-    const at = css.indexOf(selector);
-    assert.notEqual(at, -1, `${selector} should still exist`);
-    assert.ok(at < guard, `${selector} must appear before the focus-zoom guard`);
-  }
-});
-
 /**
  * These custom properties were referenced across the stylesheet before they were ever defined, so
  * the declarations using them were invalid and dropped — "paused"/"conflicted" states rendered

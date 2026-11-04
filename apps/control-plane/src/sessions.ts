@@ -1,5 +1,9 @@
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
+import { FORGE_DECISION_ACTION_REFUSAL_REASONS, FORGE_DECISION_ACTION_STALE_REFUSALS, FORGE_DECISION_ACTION_SUCCESSES,
+  FORGE_DECISION_ACTION_SUMMARY_LIMIT, type ExecuteWorkflowDecisionRequest, type ForgeDecisionAction,
+  type ForgeDecisionActionRefusalReason, type ForgeDecisionActionResultMessage, type WorkflowDecisionForgeAction } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
@@ -12,6 +16,7 @@ import { configuredReview, ReviewSettingsError } from "./review-settings.js";
 import { isSessionLaunchFailureCode, parseOrchestratorReviewPolicy } from "@wollipog/protocol";
 import { mintCampaignEvidenceAuthority, campaignEvidenceDisclosuresCurrent, type EvidenceAuthorityProposal, type EvidenceAuthorityDisclosures } from "./evidence-authority.js";
 import { campaignRepositoryLocation, supportsPacedVideoReviewPeer } from "@wollipog/protocol";
+import { normalizeIssueClosureEpicMembers } from "@wollipog/protocol";
 import { providerProfileSessionRefusal } from "./provider-profile-route.js";
 import type { WorkflowVideoEvidenceApprovals } from "./workflow-video-evidence-approvals.js";
 import { MediaSessionPurposes } from "./media-session-purposes.js";
@@ -23,32 +28,35 @@ import { reviewerAdmissionReadiness } from "./evidence-review-worker.js";
 import type { OperatorVideoValidationPermits } from "./operator-video-validation.js";
 import type { OperatorVideoValidationPurpose } from "@wollipog/protocol";
 import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
-import type { HumanPrincipal } from "./identity.js";
+import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
-import type { CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
+import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
-import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, type CampaignAuthorityEvaluation, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
+import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, ownerDecisionProtected, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
-import { firstMessageIssueIntent } from "./first-message-issue-intent.js";
+import { firstMessageIssueIntent, firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
-import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryFailure, closureEvidence, closureExcludedRefs, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
-import { CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure, type CampaignPullRequestRef } from "@wollipog/protocol";
+import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
+import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
+  CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
 import type { ForgeReadResult } from "./campaign-forge-observations.js";
 import {
   REVIEW_FULL_REASON_LIMIT, REVIEW_SESSION_BRIEF_LIMIT_BYTES, reviewerHarnessFor,
   compactReviewFinding, REVIEW_ROUND_REFUSALS, type ReviewLaunchPolicy, type ReviewSessionRequest, type ReviewSessionUpdate, type ReviewSessionView, type ReviewSessionsPage,
+  type PullRequestWatchOutcome, type PullRequestWatchUpdate, type PullRequestWatchView,
 } from "@wollipog/protocol";
 import { SESSION_REVIEW_JOB_ID_PATTERN, type SessionReviewJobArtifacts, type SessionReviewJobRequest, type SessionReviewJobView, type SessionReviewJobsPage,
   type SessionReviewJobUpdate } from "@wollipog/protocol";
 import { normalizeCampaignIssueScopeSnapshot, titleFromPrompt, type CampaignIssueScopeRequest, type CampaignIssueScopeView, type CampaignIssueScopeSnapshot } from "@wollipog/protocol";
-import { normalizeIssueClosureSnapshot, issueClosureActiveChildren } from "./github-issue-closure.js";
+import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosureFailureRefusal, issueClosureResultRefusal } from "./github-issue-closure.js";
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
-import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, validClosingReferenceCheck } from "./pr-merge-closures.js";
+import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
-import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot } from "@wollipog/protocol";
+import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
+import { issueClosureDeliveryFailure, issueClosureProofGapNotice } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
  * runner commands, and ingests runner events back into the DB + UI broadcasts.
@@ -85,6 +93,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   campaignIssueScopeChangesRequirement,
   type RunnerCapabilityRequirementDetails,
   runnerSupportsProtocol,
+  campaignStatusTerminal,
   validatePromptImageInputs,
   validatePromptImages,
   summarizeQuestionAnswers,
@@ -97,6 +106,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   completeParentControlDecisions,
   DEFAULT_ORCHESTRATOR_DEFAULTS,
   WORKFLOW_DECISION_CATEGORIES,
+  OWNER_DECISION_LIMITS,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
   type AgentContext,
   type AgentDriverKind,
@@ -167,6 +177,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type RecordCampaignPlanRequest,
   type RecordCampaignPlanResponse,
   type UpdateCampaignWorkItemRequest,
+  type RecordCampaignWorkItemDeliveryRequest,
+  type RecordCampaignWorkItemDeliveryResponse,
   type VerifyOrchestratorChildWorkItemResult,
   CAMPAIGN_WORK_LEDGER_LIMITS,
   type VerifyOrchestratorChildRequest,
@@ -190,6 +202,8 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type SessionFileEntry,
   type WorkspaceReference,
   type WorkspaceReferenceCandidate,
+  type WorkspaceReferenceSearchLimit,
+  type WorkspaceReferenceSearchMatch,
   type PromptAdmissionView,
   type PromptDelivery,
   type PromptImageInput,
@@ -247,6 +261,9 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type ConsumeWorkflowDecisionRequest,
   type ResolveWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
+  type CreateOwnerDecisionRequest,
+  type HandWorkflowDecisionToOwnerRequest,
+  type WorkflowDecisionOption,
   SESSION_NAMING_RUNNER_BUDGET_MS,
   SESSION_NAMING_SUPERVISION_MARGIN_MS,
   sessionRole,
@@ -280,6 +297,22 @@ import {
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
 import type { UiEvidenceReviewDelivery, UiEvidenceReviewReceipt } from "@wollipog/protocol";
+import {
+  DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS,
+  DELEGATED_IMAGE_REVIEW_TOOLS,
+  delegatedImageReviewReportError,
+  type DelegatedImageReviewReference,
+  type DelegatedImageReviewVerdict,
+  type DelegatedImageReviewView,
+} from "@wollipog/protocol";
+import {
+  DELEGATED_IMAGE_REVIEWER_ERROR,
+  DELEGATED_IMAGE_REVIEW_COST_BUDGET_USD,
+  delegatedImageReviewPrompt,
+  delegatedImageVerdictSha256,
+  type DelegatedImageReviewRecord,
+  type NewDelegatedImageReview,
+} from "./delegated-image-reviews.js";
 import {
   MAX_UI_EVIDENCE_REVIEW_BYTES,
   UI_EVIDENCE_REVIEW_RECEIPT_TTL_MS,
@@ -394,6 +427,14 @@ export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
 /** The child runner's GitHub read for a merge's closing references (#3713): one `gh` call of at
  * most 30 seconds. The session tools wait 75 seconds for a merge request or consume. */
 export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
+/** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
+export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
+
+/** A runner's refusal summary, kept bounded and single-line on the decision. */
+function boundedForgeSummary(value: unknown): string {
+  const text = typeof value === "string" ? value.replace(/[\x00-\x1f\x7f]+/gu, " ").trim() : "";
+  return (text || "The action was refused.").slice(0, FORGE_DECISION_ACTION_SUMMARY_LIMIT);
+}
 export const SESSION_COMMAND_INVOCATION_EXPIRY_MS = 24 * 60 * 60_000;
 export const SESSION_COMMAND_INVOCATION_RETENTION_MS = 30 * 24 * 60 * 60_000;
 /** One day beyond the browser's seven-day queued-edit recovery window. */
@@ -404,8 +445,8 @@ export const SESSION_STOP_RETRY_INTERVAL_MS = 10_000;
 export const SESSION_STOP_TIMEOUT_MS = 45_000;
 export const SESSION_STOP_MAX_ATTEMPTS = 3;
 /** How soon an event that must wake the Orchestrator promptly is delivered: a human resolving a
- * gate, a held child, or a child report awaiting verification. Only near-simultaneous events join
- * it. */
+ * gate, a held child, or a child that completed, failed or stopped. Only near-simultaneous events
+ * join it. An idle child's report waits out the coalescing window (#4073). */
 export const CAMPAIGN_CONTINUATION_FAN_IN_MS = 1_000;
 /** How long any other event waits, from the oldest undelivered one, so that a burst arrives as one
  * continuation (#3083). Each continuation is a full-context model turn, while a child waiting on
@@ -427,6 +468,11 @@ const CAMPAIGN_EVENT_TEXT_MAX_CHARS = 120;
 function boundedCampaignEventText(text: string): string {
   const flat = text.replace(/\s+/gu, " ").replaceAll("[", "(").replaceAll("]", ")").trim();
   return flat.length > CAMPAIGN_EVENT_TEXT_MAX_CHARS ? `${flat.slice(0, CAMPAIGN_EVENT_TEXT_MAX_CHARS - 1)}…` : flat;
+}
+
+/** One member's correctable publication refusal for one recommendation (#4065), hashed. */
+function publicationRefusalCoordinate(sessionId: string, recommendationId: string): string {
+  return recoveryCoordinate(`publication_refusal:${sessionId}:${recommendationId}`);
 }
 
 interface CampaignContinuationEventDetail {
@@ -771,7 +817,10 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
-  const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator" : "A human reviewer";
+  // A decision the owner kept (#4064) is answered by that owner, never by an agent or a reviewer.
+  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined;
+  const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
+    : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
   // that approval chose no longer applies.
   const message = decision.withdrawal ? decision.withdrawal.reason : decision.childMessage;
@@ -787,10 +836,53 @@ function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): strin
     ...(decision.category === "campaign_follow_up_admission" ? [decision.status === "approved"
       ? "Repeat the same request for that follow-up; the campaign applies it once and consumes this approval. Do not call consume_workflow_decision."
       : "Do not repeat that request for that follow-up: it stays refused."] : []),
+    ...(decision.category === "owner_decision" && !decision.withdrawal ? [decision.status === "approved"
+      ? "Act on the option your owner chose; it needs no consumption."
+      : decision.status === "denied" ? "Your owner chose not to proceed with any option: do not act on this decision."
+      : "Nobody answered it: ask again with request_owner_decision if you still need the owner's choice."] : []),
     "The decision record is authoritative: read it with get_workflow_decision before acting. " +
       "If you have already acted on this outcome, continue from where you are.",
     "[End Wollipog Workflow Decision]",
   ].join("\n");
+}
+
+/** What one occurrence decides about, for matching a later request against an occurrence handed to
+ * the campaign's owner (#4064). Its category and resourceKey always count, from any requester; so
+ * do its exact content and what the snapshot names (a pull request, a branch, an issue, a
+ * recommendation, a question, a publication title, evidence, a scope change), so neither a new key
+ * nor a recreated copy can route around the handoff. Matching too much only keeps a request with a
+ * person. A question genuinely reworded is a different question. */
+function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: string, snapshot: WorkflowDecisionResourceSnapshot): string[] {
+  const text = (value: string) => value.normalize("NFKC").toLowerCase().replace(/\s+/gu, " ").trim();
+  const targets = [`key:${category}:${resourceKey}`, `content:${category}:${auditDigest(snapshot)}`];
+  switch (snapshot.category) {
+    case "implementation_question":
+    case "owner_decision":
+      targets.push(`${snapshot.category}:question:${text(snapshot.question)}`);
+      break;
+    case "ui_evidence_approval":
+      for (const item of snapshot.evidence) targets.push(`${snapshot.category}:evidence:${item.sha256}`);
+      break;
+    case "campaign_issue_scope":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:+${[...snapshot.additions].sort((a, b) => a - b).join(",")}` +
+        `:-${[...snapshot.removals].sort((a, b) => a - b).join(",")}`);
+      break;
+    case "pr_merge":
+    case "review_round_extension":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}#${snapshot.pullRequest}`);
+      break;
+    case "merged_branch_deletion":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:${snapshot.branch}`);
+      break;
+    case "issue_closure":
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}#${snapshot.issue}`);
+      break;
+    case "follow_up_issue_publication":
+      if (snapshot.recommendationId) targets.push(`${snapshot.category}:recommendation:${snapshot.recommendationId}`);
+      targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:title:${text(snapshot.sanitizedTitle)}`);
+      break;
+  }
+  return targets;
 }
 
 /** Why an issue closure cannot execute yet, naming the next step (#2940). A pending closure the
@@ -824,12 +916,18 @@ const MALFORMED_ANCESTRY_AUTHORITY_REFUSAL =
  * bounded to single lines (compactReviewFinding) or quoted, so it can never forge a framing line. */
 function reviewContinuationOutcome(review: ReviewSessionView): string[] {
   const reviewer = review.reviewer === "codex" ? "Codex Review" : "Claude Review";
-  const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch})` : "";
+  // A base-merge round (#4075) is named as one, since it uses none of the epoch's rounds.
+  const round = review.round ? ` (round ${review.round.round}, epoch ${review.round.epoch}` +
+    `${review.round.baseMerge ? ", a base-branch merge round that does not count against the round budget" : ""})` : "";
   const separator = campaignRepositoryLocation(review.pullRequest.repository)?.forge === "gitlab" ? "!" : "#";
   const head = `${review.pullRequest.repository}${separator}${review.pullRequest.number} at ${review.headSha.slice(0, 12)}`;
   const verdict = review.verdict;
   let outcome: string;
-  if (review.state === "completed" && verdict?.valid) {
+  if (review.state === "completed" && verdict?.valid && review.round?.mode === "equivalent") {
+    outcome = `a recorded equivalence to the upvoted head ${review.round.equivalentTo!.slice(0, 12)}: this head only merges the ` +
+      "moved base branch and leaves the pull request's own diff unchanged, so no reviewer ran and that upvote carries over. " +
+      `Cite review session ${review.reviewSessionId} as this head's review`;
+  } else if (review.state === "completed" && verdict?.valid) {
     const blocking = review.findings.filter((finding) => finding.blocking).length;
     outcome = verdict.effectiveVote === "UPVOTE"
       ? `a valid UPVOTE${review.findings.length ? ` with ${review.findings.length} non-blocking finding(s)` : ""}`
@@ -864,6 +962,37 @@ function reviewContinuationOutcome(review: ReviewSessionView): string[] {
 
 function reviewContinuationPrompt(reviews: readonly ReviewSessionView[]): string {
   return reviews.flatMap(reviewContinuationOutcome).join("\n");
+}
+
+const PULL_REQUEST_WATCH_OUTCOME_TEXT: Record<PullRequestWatchOutcome, string> = {
+  merged: "merged",
+  closed: "was closed without merging",
+  queue_failed: "is still in the merge queue, but GitHub marked its entry unmergeable",
+  queue_ejected: "left the merge queue without merging",
+  head_changed: "moved to another head",
+  checks_passed: "is not in the merge queue; its required checks passed",
+  checks_failed: "is not in the merge queue; its required checks failed",
+  no_required_checks: "is not in the merge queue, and its base requires no checks",
+};
+
+/** How one ended merge-queue watch reads in its session's wake (#4071). Every line is single-line
+ * by construction, so neither a reason nor a summary can forge a framing line. */
+export function pullRequestWatchWakeLines(watch: PullRequestWatchView & { summary: string | null }): string[] {
+  const oneLine = (text: string) => text.replace(/[\r\n]+/gu, " ");
+  const head = `${watch.repository}#${watch.number} at ${watch.headSha.slice(0, 12)}`;
+  const body = watch.state === "fired" && watch.outcome
+    ? [`${head} ${PULL_REQUEST_WATCH_OUTCOME_TEXT[watch.outcome]} (outcome ${watch.outcome}).`,
+      ...(watch.summary ? [`Summary: ${oneLine(watch.summary)}`] : [])]
+    : [`The watch on ${head} was lost: ${oneLine(watch.reason ?? "the runner stopped watching")}. ` +
+      "Nothing is watching it now: check it with wait_pull_request, or park on it again."];
+  return [
+    `[Wollipog Pull Request Watch — ${watch.watchId}]`,
+    ...body,
+    "Act on it: after a merge, reconcile an armed pr_merge whose occurrence is still unconsumed and finish cleanup; " +
+      "otherwise decide what the outcome needs. This wake grants no approval: re-enqueueing, merging and branch " +
+      "deletion keep their gates.",
+    "[End Wollipog Pull Request Watch]",
+  ];
 }
 
 /** What a restarted child is told about the decisions its restart revoked (#1779). Revocation on a
@@ -904,6 +1033,36 @@ function unrenderableEvidenceArtifact(item: { artifactId?: string; mediaType?: s
 }
 
 /** Normalize untrusted JSON into a canonical key order before hashing or persistence. */
+/** A question with 2 to 12 uniquely identified options, one of which may be recommended. `noun`
+ * names the decision kind in refusals ("implementation questions"). */
+function normalizeDecisionQuestion(value: Record<string, unknown>, noun: string, maxQuestion: number): ServiceResult<{
+  question: string; options: WorkflowDecisionOption[]; recommendedOptionId?: string;
+}> {
+  if (!boundedDecisionString(value.question, maxQuestion) || !Array.isArray(value.options) ||
+      value.options.length < 2 || value.options.length > 12) {
+    return fail(`${noun} require text and 2 to 12 options`);
+  }
+  const options = value.options.flatMap((raw) => {
+    if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
+    const option = raw as Record<string, unknown>;
+    return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
+      (option.description === undefined || boundedDecisionString(option.description, 1000))
+      ? [{ optionId: option.optionId, label: option.label,
+          ...(typeof option.description === "string" ? { description: option.description } : {}) }]
+      : [];
+  });
+  if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
+      new Set(options.map((option) => option.optionId)).size !== options.length) {
+    return fail(`${noun.replace(/s$/u, "")} options must have unique valid ids and labels`);
+  }
+  const recommended = value.recommendedOptionId;
+  if (recommended !== undefined &&
+      (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
+    return fail("recommendedOptionId must identify an offered option");
+  }
+  return ok({ question: value.question, options, ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+}
+
 export function normalizeWorkflowDecisionSnapshot(
   input: unknown,
   /** Only the server's bounded decoder may add this lineage; callers cannot assert it. */
@@ -960,6 +1119,19 @@ export function normalizeWorkflowDecisionSnapshot(
     const normalized = normalizeIssueClosureSnapshot(value);
     return normalized ? ok(normalized) : fail("issue closure requires exact bounded issue, action, and conflict evidence");
   }
+  if (category === "owner_decision") {
+    // A question its campaign's owner kept (#4064): the same option rules as an implementation
+    // question, plus the material the owner needs. Only request_owner_decision creates one.
+    const question = normalizeDecisionQuestion(value, "owner decisions", OWNER_DECISION_LIMITS.question);
+    if (!question.ok || !question.data) return failAs(question);
+    if (value.material !== undefined && !boundedDecisionString(value.material, OWNER_DECISION_LIMITS.material)) {
+      return fail(`material must be nonempty text of at most ${OWNER_DECISION_LIMITS.material} characters`);
+    }
+    if (Object.keys(value).some((key) => !["category", "question", "options", "recommendedOptionId", "material"].includes(key))) {
+      return fail("an owner decision has only a question, options, a recommended option and material");
+    }
+    return ok({ category, ...question.data, ...(typeof value.material === "string" ? { material: value.material } : {}) });
+  }
   if (!WORKFLOW_DECISION_CATEGORIES.includes(category as typeof WORKFLOW_DECISION_CATEGORIES[number])) {
     return fail("unknown workflow decision category");
   }
@@ -980,30 +1152,8 @@ export function normalizeWorkflowDecisionSnapshot(
     }
   };
   if (category === "implementation_question") {
-    if (!boundedDecisionString(value.question, 4000) || !Array.isArray(value.options) ||
-        value.options.length < 2 || value.options.length > 12) {
-      return fail("implementation questions require text and 2 to 12 options");
-    }
-    const options = value.options.flatMap((raw) => {
-      if (!raw || typeof raw !== "object" || Array.isArray(raw)) return [];
-      const option = raw as Record<string, unknown>;
-      return boundedDecisionString(option.optionId, 128) && boundedDecisionString(option.label, 200) &&
-        (option.description === undefined || boundedDecisionString(option.description, 1000))
-        ? [{ optionId: option.optionId, label: option.label,
-            ...(typeof option.description === "string" ? { description: option.description } : {}) }]
-        : [];
-    });
-    if (options.length !== value.options.length || options.some((option) => option.optionId === "__workflow_deny__") ||
-        new Set(options.map((option) => option.optionId)).size !== options.length) {
-      return fail("implementation question options must have unique valid ids and labels");
-    }
-    const recommended = value.recommendedOptionId;
-    if (recommended !== undefined &&
-        (typeof recommended !== "string" || !options.some((option) => option.optionId === recommended))) {
-      return fail("recommendedOptionId must identify an offered option");
-    }
-    return ok({ category, question: value.question, options,
-      ...(typeof recommended === "string" ? { recommendedOptionId: recommended } : {}) });
+    const question = normalizeDecisionQuestion(value, "implementation questions", 4000);
+    return question.ok && question.data ? ok({ category, ...question.data }) : failAs(question);
   }
   if (category === "pr_merge") {
     if (value.reviewSessionId !== undefined && (!boundedDecisionString(value.reviewSessionId, 128) ||
@@ -1102,8 +1252,17 @@ export function normalizeWorkflowDecisionSnapshot(
       return fail("branch deletion decisions require exact merged-branch and dependent-PR evidence");
     }
     if (open.length > 0) return fail("branch deletion cannot be authorized while dependent PRs remain open", 409);
+    // v284 (#4067): the merged pull request and head Wollipog's own deletion is pinned to. Emitted
+    // only when present, so an earlier snapshot keeps its digest.
+    const pullRequest = value.pullRequest === undefined ? undefined
+      : Number.isSafeInteger(value.pullRequest) && (value.pullRequest as number) > 0 ? value.pullRequest as number : null;
+    const headSha = value.headSha === undefined ? undefined : sha(value.headSha);
+    if (pullRequest === null || headSha === null || (pullRequest === undefined) !== (headSha === undefined)) {
+      return fail("a branch deletion names its merged pullRequest and headSha together, or neither");
+    }
     return ok({ category, repository: repo, branch: value.branch, merged: true,
       mergeCommitSha: value.mergeCommitSha as string,
+      ...(pullRequest !== undefined ? { pullRequest, headSha: headSha! } : {}),
       dependentPullRequests: { checkedAt: checked, open: [] } });
   }
   if (category === "follow_up_issue_publication") {
@@ -1680,7 +1839,8 @@ export function sessionBlocksConversationFork(status: SessionStatus): boolean {
 export function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
   if (!session.agentId || isRetiredCodexExec(session)) return null;
   const targetBound = session.executionTarget !== undefined && session.executionTarget.adapter !== "host";
-  return db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
+  return db.getAgentLaunch(session.runnerId, session.agentId, targetBound,
+    { allowAccountSelection: true });
 }
 
 /** Placeholder title for a session created without a first prompt (named by its first message). */
@@ -1965,6 +2125,9 @@ export class SessionsService {
   private readonly registrationNotifiedHumanTokens = new Map<string, Set<string>>();
   private readonly promptOutbox: SessionPromptOutbox;
   private readonly campaignRecovery: CampaignRecoveryService;
+  /** When each campaign's children's waits were last checked against the stall bound (#4073).
+   * Process-local: after a restart the first check covers every wait that has already expired. */
+  private readonly campaignChildWaitsCheckedAt = new Map<string, number>();
   /** Process-local epochs fence late initial/manual results. Durable title/source checks provide
    * the cross-restart fence, so an abandoned request can never overwrite newer state. */
   private readonly titleGenerationEpochs = new Map<string, number>();
@@ -1972,6 +2135,8 @@ export class SessionsService {
   private readonly titleGenerationOwnership = new Map<string, "generated" | "user">();
   /** Armed merge occurrences whose lifecycle-end forge read is in flight. */
   private readonly forgeMergeSettlements = new Set<string>();
+  /** Occurrences whose Wollipog-performed forge action is being dispatched (#4067). */
+  private readonly forgeActionsInFlight = new Set<string>();
   private readonly archiveWorktreeRetirements = new Set<string>();
   /** Full Control campaigns whose first message is being established (#2940). */
   private readonly firstMessagesInFlight = new Set<string>();
@@ -3852,6 +4017,7 @@ export class SessionsService {
     childCount = 1,
   ): ServiceResult<null> {
     if (this.mediaSessionPurposes.owns(parentSessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    if (this.db.delegatedImageReviews.isReviewer(parentSessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     const parent = this.db.getSession(parentSessionId);
     if (!parent) return fail("parent session not found", 404);
     const now = Date.now();
@@ -4244,6 +4410,8 @@ export class SessionsService {
       };
       /** Internal only (#3368): this session is a review of the requester's pull request. */
       review?: { policy: ReviewLaunchPolicy };
+      /** Internal only (#4074): this session is the delegated image reviewer of one decision. */
+      delegatedImageReview?: NewDelegatedImageReview;
     },
   ): ServiceResult<SessionView> {
     // Attribution is supplied only by the authenticated route, never by the request payload.
@@ -4355,7 +4523,7 @@ export class SessionsService {
       context: snapshotSpec.context ?? { kind: "native" as const },
       version: snapshotSpec.agentVersion,
       capabilities: snapshotSpec.capabilities,
-    } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
+    } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch, { allowAccountSelection: true });
     if (isRetiredCodexExec(launch ?? {}) || (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.agentId))) {
       return fail(CODEX_EXEC_RETIRED_REASON, 409);
     }
@@ -4495,6 +4663,13 @@ export class SessionsService {
       const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
       if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
       if (profileRefusal) return fail(profileRefusal.error, 409);
+    }
+    // Manual account selection and recorded session snapshots retain their bindings/auth recovery.
+    // Unattended/implicit requests must assess the account this launch will actually use.
+    const selectedAgent = runner.agents.find((agent) => agent.id === req.agentId);
+    if (usesRunnerProviderAccount && !snapshotSpec && req.providerAccountId === undefined &&
+        selectedAgent?.providerAccountReadiness && !agentAvailableForImplicitLaunch(selectedAgent, providerAccountId)) {
+      return fail("The default provider account is not ready. Choose a ready account or review its sign-in and ownership details.", 409);
     }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&
@@ -4980,7 +5155,10 @@ export class SessionsService {
       orchestratorPolicy.issueNumbersSource = "human_launch_request";
     }
     let text = requestedText;
-    if (!snapshotCommand && campaignController?.orchestratorPolicy && (requestedText || images.length > 0)) {
+    // A delegated image reviewer receives only its server-pinned review prompt, never a campaign
+    // assignment: it does no campaign work and holds no campaign authority (#4074).
+    if (!snapshotCommand && !creationContext?.delegatedImageReview && campaignController?.orchestratorPolicy &&
+        (requestedText || images.length > 0)) {
       const campaign = this.db.campaignProjection(campaignController.id);
       if (campaign) text = this.campaignAssignment(campaignController, campaign, text);
     }
@@ -5155,6 +5333,8 @@ export class SessionsService {
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
+      ...(creationContext?.delegatedImageReview
+        ? { uiEvidenceReviewer: { reviewId: creationContext.delegatedImageReview.reviewId } } : {}),
     };
     const command: DurableSessionCommand = snapshotCommand ?? {
       type: "start_session",
@@ -5242,6 +5422,9 @@ export class SessionsService {
     };
     const insert = () => {
       const policy = creationContext?.review?.policy;
+      if (creationContext?.delegatedImageReview) {
+        return this.db.createDelegatedImageReviewSession(sessionInput, creationContext.delegatedImageReview);
+      }
       return policy ? this.db.createReviewSession(sessionInput, {
         requesterSessionId: policy.requesterSessionId, pullRequest: policy.pullRequest,
         headSha: policy.headSha, reviewer: policy.harness,
@@ -5538,6 +5721,11 @@ export class SessionsService {
     const references = [...intent.scope, ...intent.context].sort((a, b) => a - b);
     const verified = references.length ? await this.verifiedMessageIssues(session, repository, references) : [];
     const issueNumbers = verified.filter((n) => intent.scope.includes(n));
+    // A derived Maximum Issues leaves room for the verified members of target epics the message
+    // names (#4061), so the Orchestrator can add them by epic lineage; an explicit one never grows.
+    const epics = policy.firstMessageScope?.state === "pending" && policy.firstMessageScope.derivedLimits?.maxIssues
+      ? firstMessageTargetEpics(text, repository, issueNumbers) : [];
+    const epicMembers = epics.length ? await this.verifiedEpicMembers(session, repository, epics) : [];
     const current = this.db.getSession(sessionId);
     const revision = current?.parentControlPolicy?.revision ?? 0;
     const scope = current?.orchestratorPolicy?.issueScope;
@@ -5558,7 +5746,7 @@ export class SessionsService {
       authorizedByUserId: principal.userId, authorizedAt: now };
     const nextControl: CampaignControl = { mode: "full_control", boundary: firstMessageBoundary(currentControl.boundary,
       current.orchestratorPolicy!.behavior.followUps, scoped, firstMessageObjective(text), revision + 1, nextScope.revision, now,
-      pending.derivedLimits) };
+      pending.derivedLimits, epicMembers) };
     let established: boolean;
     try {
       established = this.db.establishFirstMessageScope(sessionId, { control: nextControl, scope: nextScope, contextIssueNumbers,
@@ -5567,7 +5755,7 @@ export class SessionsService {
     if (!established) return fail("This campaign's authorization changed; send the message again.", 409);
     this.log.info(JSON.stringify({ event: "full_control_first_message_scope", sessionId, policyRevision: revision + 1,
       scopeRevision: nextScope.revision, referencedIssues: references.length, scopedIssues: scoped.length,
-      contextIssues: contextIssueNumbers.length, messageDigest }));
+      contextIssues: contextIssueNumbers.length, targetEpics: epics.length, epicMembers: epicMembers.length, messageDigest }));
     // A runner that misses this keeps its older revision, which authorizes no issue write; every
     // issue operation synchronizes again before it acts.
     await this.synchronizeCampaignIssueScope(sessionId);
@@ -5650,6 +5838,27 @@ export class SessionsService {
     return kept;
   }
 
+  /** The issues the runner verifies as members of each epic (#4061): its sub-issues and member
+   * checklist issues in the campaign repository, as epic-lineage scope additions verify them. An
+   * epic the runner can't read in full, or an unreachable runner, adds none. */
+  private async verifiedEpicMembers(root: SessionView, repository: string, epics: number[]): Promise<number[]> {
+    const members = new Set<number>();
+    await Promise.all(epics.map(async (epic) => {
+      const requestId = `first_message_epic_${randomUUID()}`;
+      try {
+        const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+          { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, epic }, 30_000);
+        if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
+            response.repository?.toLowerCase() !== repository) return;
+        for (const c of response.candidates ?? []) {
+          if (c.issue.number !== epic && c.issue.repository.toLowerCase() === repository &&
+              (c.source === "sub_issue" || c.source === "member_checklist")) members.add(c.issue.number);
+        }
+      } catch { /* An unreadable epic leaves no room. */ }
+    }));
+    return [...members].sort((a, b) => a - b);
+  }
+
   /** A campaign child's assignment carries its Orchestrator's server-derived policy preamble. It
    * is applied here rather than inline so every delivery lane wraps identically — a message that
    * reaches the child by steering must not arrive stripped of the policy a queued one carries. */
@@ -5662,6 +5871,36 @@ export class SessionsService {
     if (!controller || controller === "refused") return text;
     const campaign = this.db.campaignProjection(controller.id);
     return campaign ? this.campaignAssignment(controller, campaign, text) : text;
+  }
+
+  /** #4022: the durable prompt-outbox command whose running turn `sender` may steer, or undefined.
+   *
+   * The runner refuses steering into any turn a durable command started, because an automation's
+   * turn must keep its ordering and receipt (#3173). This names the one exception: the child's
+   * controlling Orchestrator, steering a turn the control plane started from its own prompt outbox
+   * (assignments, Orchestrator prompts, decision resumes and continuations). Every input is a
+   * server-owned record, never request data, and authority is deliberately narrow:
+   *
+   * - the sender is an Orchestrator credential bound to the child's immediate parent, and that parent
+   *   is also the child's outermost controlling Orchestrator, so a nested Orchestrator, a grandparent,
+   *   a sibling, a descendant or an unrelated session gains nothing; malformed, cyclic or missing
+   *   ancestry resolves no controller at all;
+   * - the turn's command is the session's single started outbox `prompt_session`. An automation's
+   *   command lives in its own outbox and never matches, and a recovered answer is not a prompt.
+   *
+   * The runner then admits it only if this exact id started the active turn. */
+  private controllingOrchestratorSteerableCommand(session: SessionView, sender: AgentPrincipal | undefined): string | undefined {
+    const controllerId = sender?.kind === "agent" && sender.orchestrator === true ? sender.credentialSessionId : undefined;
+    if (!controllerId || session.parentSessionId !== controllerId) return undefined;
+    if (this.db.sessionResultOrchestrator(session.id) !== controllerId) return undefined;
+    const controller = this.orchestratorCampaignController(session);
+    if (!controller || controller === "refused" || controller.id !== controllerId) return undefined;
+    const command = this.db.startedSessionPromptCommand(session.id, session.runnerId);
+    if (!command) return undefined;
+    let payload: unknown;
+    try { payload = JSON.parse(command.payloadJson); } catch { return undefined; }
+    const prompt = payload as Partial<DurableSessionCommand> | null;
+    return prompt?.type === "prompt_session" && prompt.sessionId === session.id ? command.commandId : undefined;
   }
 
   /** Admit a message for a session that may already be mid-turn.
@@ -5685,10 +5924,12 @@ export class SessionsService {
     slashCommand?: string,
     config?: SessionConfig,
     holdReader?: HoldAdviceReader,
+    /** The authenticated agent sending it; only its server-derived identity is read (#4022). */
+    sender?: AgentPrincipal,
   ): Promise<ServiceResult<PromptAdmissionView>> {
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
-    const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config);
+    const steered = await this.steerMidTurnPrompt(sessionId, text, images, slashCommand, config, sender);
     return steered ??
       this.prompt(sessionId, text, images, slashCommand, config, undefined, "session", false, undefined, holdReader);
   }
@@ -5703,8 +5944,10 @@ export class SessionsService {
     images: PromptImageInput[],
     slashCommand: string | undefined,
     config: SessionConfig | undefined,
+    sender: AgentPrincipal | undefined,
   ): Promise<ServiceResult<PromptAdmissionView> | null> {
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     // The steering lane carries plain conversational text only. A slash command, an attachment, or
     // a per-turn config change is turn-scoped work that must start a turn of its own.
     if (slashCommand || images.length > 0 || config) return null;
@@ -5719,11 +5962,12 @@ export class SessionsService {
     const turnId = this.hub.activeTurnIdForSession(sessionId);
     if (!turnId) return null;
     const submissionId = `prompt_steer_${randomUUID().slice(0, 12)}`;
+    const controllingOrchestratorCommandId = this.controllingOrchestratorSteerableCommand(session, sender);
     const steered = await this.steer(sessionId, {
       submissionId,
       turnId,
       text: this.campaignWrappedText(session, text),
-    });
+    }, controllingOrchestratorCommandId);
     if (!steered.ok) {
       // Falling back to the queue after a failure that already crossed the runner boundary would
       // deliver the same instruction twice. steer() refuses with 400/404/409/500 only before it
@@ -5820,6 +6064,7 @@ export class SessionsService {
     const firstMessageRefusal = this.firstMessageFence(sessionId, session);
     if (firstMessageRefusal) return fail(firstMessageRefusal, 409);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     // An older runner would still resume a persisted exec session for this turn (#3259).
     if (isRetiredCodexExec(session)) return fail(CODEX_EXEC_RETIRED_REASON, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId);
@@ -5836,7 +6081,7 @@ export class SessionsService {
     }
     const tuiGuardrailError = this.activeAgentTuiGuardrailError(session, requestedConfig);
     if (tuiGuardrailError) return fail(tuiGuardrailError, 409);
-    const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
+    const pendingInputBarrier = session.status === "input_required" || awaitsPendingInput(session.pendingApproval);
     const incomingMode = snapshotCommand?.type === "prompt_session" ? snapshotCommand.config?.permissionMode : config?.permissionMode;
     if (incomingMode !== undefined && (incomingMode === "orchestrator") !== (session.permissionMode === "orchestrator")) {
       return fail("the Orchestrator preset permission mode is fixed at session creation; start a new session to change it", 409);
@@ -6152,6 +6397,13 @@ export class SessionsService {
     for (const sessionId of this.db.sessionsWithHeldReviewContinuations(runnerId)) {
       this.deliverHeldReviewContinuations(sessionId, now);
     }
+    // And for an ended merge-queue watch's wake to its parked session (#4071).
+    for (const commandId of this.db.pullRequestWatches.settledCommands(runnerId)) {
+      this.reconcilePullRequestWatchWakeCommand(commandId, now);
+    }
+    for (const sessionId of this.db.pullRequestWatches.sessionsWithHeldWakes(runnerId)) {
+      this.deliverHeldPullRequestWatchWakes(sessionId, now);
+    }
     this.reconcileReviewSessionDisposal(runnerId);
     return this.promptOutbox.flush(now, runnerId);
   }
@@ -6172,12 +6424,22 @@ export class SessionsService {
       this.reconcileWorkflowDecisionResumeCommand(message.commandId, Date.now());
       this.reconcileRestartNoticeCommand(message.commandId, Date.now());
       this.reconcileReviewContinuationCommand(message.commandId, Date.now());
+      this.reconcilePullRequestWatchWakeCommand(message.commandId, Date.now());
     }
     return handled;
   }
 
   private maintainCampaignContinuations(now: number, runnerId?: string): void {
     for (const campaignSessionId of this.db.listOrchestratorCampaignSessionIds(runnerId)) {
+      // A waiting child's turn end records nothing (#4073). A job that reaches the stall bound ends
+      // that wait without any runner update, so record what is now ready here.
+      const waitsCheckedAt = this.campaignChildWaitsCheckedAt.get(campaignSessionId) ?? 0;
+      if (now > waitsCheckedAt) {
+        if (this.db.campaignChildWaitsExpired(campaignSessionId, waitsCheckedAt, now)) {
+          this.db.recordCampaignContinuationEvents(this.campaignChildReadyEvents(campaignSessionId, now));
+        }
+        this.campaignChildWaitsCheckedAt.set(campaignSessionId, now);
+      }
       const latest = this.db.latestCampaignContinuation(campaignSessionId);
       if (latest) this.reconcileCampaignContinuationCommand(latest.commandId, now);
       const active = this.db.activeCampaignContinuation(campaignSessionId);
@@ -6190,7 +6452,7 @@ export class SessionsService {
       if (!this.db.hasPendingCampaignContinuationEvents(campaignSessionId)) continue;
       const projection = this.db.campaignProjection(campaignSessionId);
       if (!projection || (projection.status === "waiting_human" &&
-          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || projection.status === "verified_complete" ||
+          !this.db.campaignMayContinueWhileHumanWaiting(campaignSessionId)) || campaignStatusTerminal(projection.status) ||
           !runnerSupportsProtocol(
             this.db.getRunner(campaign.runnerId)?.protocolVersion,
             "campaignContinuations",
@@ -6222,16 +6484,27 @@ export class SessionsService {
         : events[0]!.createdAt + CAMPAIGN_CONTINUATION_COALESCE_MS;
       if (now < dueAt) continue;
       const sessions = new Map<string, SessionView | null>();
-      const details = events.map((event) => {
+      // Several turn ends of one child in this range are one entry, carrying its latest status and
+      // how many it stands for (#4073). The range itself still covers every event.
+      const turnEnds = new Map<string, { latestSeq: number; count: number }>();
+      for (const event of events) {
+        if (event.kind !== "child_ready" || !event.subjectSessionId) continue;
+        turnEnds.set(event.subjectSessionId, { latestSeq: event.seq,
+          count: (turnEnds.get(event.subjectSessionId)?.count ?? 0) + 1 });
+      }
+      const details = events.flatMap((event) => {
+        const child = event.kind === "child_ready" && event.subjectSessionId ? turnEnds.get(event.subjectSessionId) : undefined;
+        if (child && child.latestSeq !== event.seq) return [];
         try {
-          return this.campaignContinuationEventDetail(campaignSessionId, event, sessions);
+          const detail = this.campaignContinuationEventDetail(campaignSessionId, event, sessions, now);
+          return [child && child.count > 1 ? { ...detail, summary: { ...detail.summary, turnEnds: child.count } } : detail];
         } catch (error) {
           // Detail is a convenience. Never let it hold up delivery (or every other prompt this pass
           // flushes): fall back to the bare metadata, and to the full sweep it then requires.
           this.log.warn(`campaign continuation detail for event ${event.seq} deferred: ${(error as Error).message}`);
-          return { actionable: true, summary: { seq: event.seq, kind: event.kind,
+          return [{ actionable: true, summary: { seq: event.seq, kind: event.kind,
             ...(event.subjectSessionId ? { sessionId: event.subjectSessionId } : {}),
-            ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}), createdAt: event.createdAt } };
+            ...(event.occurrenceId ? { occurrenceId: event.occurrenceId } : {}), createdAt: event.createdAt } }];
         }
       });
       const continuationId = `campaign_cont_${randomUUID().replaceAll("-", "")}`;
@@ -6241,7 +6514,7 @@ export class SessionsService {
       // and a child report whose own child_ready event was consumed without verification (an
       // interrupted turn whose result was dismissed). Neither can be judged to need nothing.
       const outstanding = this.db.hasCampaignContinuationEventAfter(campaignSessionId, eventThroughSeq) ||
-        this.db.campaignContinuationChildCandidates(campaignSessionId).length > 0;
+        this.db.campaignContinuationChildCandidates(campaignSessionId, now).length > 0;
       const prompt = campaignContinuationPrompt(continuationId, campaignSessionId, eventFromSeq, eventThroughSeq,
         details, projection, outstanding);
       this.promptOutbox.stageCampaignContinuation({
@@ -6280,6 +6553,7 @@ export class SessionsService {
     campaignSessionId: string,
     event: CampaignContinuationEventRecord,
     sessions: Map<string, SessionView | null>,
+    now: number,
   ): CampaignContinuationEventDetail {
     const base = { seq: event.seq, kind: event.kind, createdAt: event.createdAt };
     const session = (id: string) => {
@@ -6320,7 +6594,7 @@ export class SessionsService {
             recovery.policyRevision === this.db.parentControlPolicy(campaignSessionId)?.revision;
           return { actionable: pending, summary: { ...base, ...subject(event.subjectSessionId),
             recoveryId: recovery.id, action: recovery.action, reason: recovery.reason,
-            resource: recovery.resource, requiredInput: recovery.requiredInput,
+            ...(recovery.admissionFailure ? { admissionFailure: recovery.admissionFailure } : {}), resource: recovery.resource, requiredInput: recovery.requiredInput,
             attempts: recovery.attempts, maxAttempts: recovery.maxAttempts, pending } };
         }
         const occurrenceId = event.occurrenceId ?? "";
@@ -6367,10 +6641,22 @@ export class SessionsService {
           ...settled(resolution, visible),
         } };
       }
-      case "child_ready":
-        return { actionable: true, summary: {
-          ...base, ...subject(event.subjectSessionId), ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
+      case "child_ready": {
+        // A child running again at delivery, or one that reported again since and is now idle
+        // behind a live wait, has moved past this turn end (#4073). Its later turn end is recorded
+        // on its own: when it ends, or once that wait ends. A wait behind this very report is not
+        // enough, since this report's event is never recorded again.
+        const current = subject(event.subjectSessionId);
+        const status = "childStatus" in current ? current.childStatus : undefined;
+        const reportSeq = Number(/^event-seq:(\d+)$/u.exec(event.occurrenceId ?? "")?.[1] ?? Number.NaN);
+        const waiting = status === "idle" && event.subjectSessionId &&
+          (this.db.latestTopLevelReportSeq(event.subjectSessionId) ?? 0) > reportSeq
+          ? this.db.campaignChildWait(event.subjectSessionId, now) : null;
+        return { actionable: status !== "running" && !waiting, summary: {
+          ...base, ...current, ...(waiting ? { waiting } : {}),
+          ...(event.subjectStatus ? { status: event.subjectStatus } : {}),
         } };
+      }
       case "child_blocked":
         return { actionable: true, summary: {
           ...base, ...subject(event.subjectSessionId),
@@ -6533,7 +6819,7 @@ export class SessionsService {
       if (unsupported) return unsupported;
     }
 
-    const pendingInputBarrier = session.status === "input_required" || session.pendingApproval != null;
+    const pendingInputBarrier = session.status === "input_required" || awaitsPendingInput(session.pendingApproval);
     const result = this.promptOutbox.retryKnownUndeliveredFailure(sessionId, commandId, now, false);
     if (result === "not_found") return fail("pending prompt not found", 404);
     if (result === "not_retryable") {
@@ -6614,6 +6900,7 @@ export class SessionsService {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     const configInputError = sessionGuardrailConfigError(config);
     if (configInputError) return fail(configInputError, 400);
     const budgetConfigError = this.campaignBudgetConfigError(session, config);
@@ -7071,8 +7358,15 @@ export class SessionsService {
     })).digest("hex");
   }
 
-  async steer(sessionId: string, request: SteerRequest): Promise<ServiceResult<SteeringAttemptView>> {
+  /** `controllingOrchestratorCommandId` is never read from `request`: only promptOrSteer supplies
+   * it, after proving the sender's controlling ancestry (#4022). */
+  async steer(
+    sessionId: string,
+    request: SteerRequest,
+    controllingOrchestratorCommandId?: string,
+  ): Promise<ServiceResult<SteeringAttemptView>> {
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     const reviewRefusal = this.reviewSessionRefusal(sessionId, "takes no messages");
     if (reviewRefusal) return fail(reviewRefusal, 409);
     this.db.compactSteeringAttempts(Date.now());
@@ -7231,6 +7525,7 @@ export class SessionsService {
       ...(promotion ? { promotePromptId: request.promotePromptId } : {
         ...(text ? { text } : {}),
         ...(commandImages.length ? { images: commandImages } : {}),
+        ...(controllingOrchestratorCommandId ? { controllingOrchestratorCommandId } : {}),
       }),
     };
     try {
@@ -7885,6 +8180,7 @@ export class SessionsService {
     let session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (this.mediaSessionPurposes.owns(sessionId)) return fail(MEDIA_SESSION_PURPOSE_ERROR, 409);
+    if (this.db.delegatedImageReviews.isReviewer(sessionId)) return fail(DELEGATED_IMAGE_REVIEWER_ERROR, 409);
     const budgetError = this.db.campaignBudgets.admissionError(sessionId) ?? this.campaignBudgetConfigError(session);
     if (budgetError) return campaignRefusalFail(budgetError);
     const budgetRoot = this.db.campaignBudgets.governingRoot(sessionId);
@@ -8439,6 +8735,13 @@ export class SessionsService {
             const result = await this.hub.requestFromRunner(child.runnerId, requestId, {
               type: "git_action", requestId, sessionId: child.id, worktreePath, action: { kind: "status" },
             }, 30_000);
+            // The runner no longer links this worktree to the child (it was retired, #4070): there is
+            // nothing of the child's left there to protect, and archival would not touch it.
+            if (result.type === "git_result" && !result.ok && result.code === "GIT_WORKTREE_UNLINKED") continue;
+            if (result.type === "git_result" && !result.ok) {
+              return fail(`runner could not inspect child worktree ${JSON.stringify(worktreePath)}` +
+                `${result.error ? `: ${result.error.slice(0, 300)}` : ""}; update Wollipog on the child's runner if this persists, then retry`, 409);
+            }
             const status = result.type === "git_result" && result.ok ? result.data?.status : undefined;
             if (!status || !Number.isSafeInteger(status.changedPathCount) || status.changedPathCount! < 0 ||
                 status.hasChanges !== (status.changedPathCount! > 0) || !Array.isArray(status.files)) {
@@ -8738,6 +9041,178 @@ export class SessionsService {
     return ok({ revision: updated.data.revision, item });
   }
 
+  /**
+   * `record_campaign_work_item_delivery` (#4070): a ledger write by the controlling Orchestrator,
+   * from evidence checked here rather than taken from the caller. Each pull request must be in the
+   * campaign's repository, named by the item's reported stage, and read from the forge now as merged
+   * into the repository's default branch. A report must be the exact completed top-level response of
+   * one of the caller's campaign children, inside that child's attempt on this item, even one
+   * closed as reassigned or superseded. Nothing here inspects a worktree, verifies or archives the
+   * child, closes an issue, merges, or publishes.
+   */
+  async recordCampaignWorkItemDelivery(
+    callerSessionId: string,
+    request: RecordCampaignWorkItemDeliveryRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<RecordCampaignWorkItemDeliveryResponse>> {
+    const scope = this.campaignLedgerScope(callerSessionId, canAccess);
+    if (!scope.ok || !scope.data) return failAs(scope);
+    const root = scope.data.root;
+    if (typeof request !== "object" || request === null || !boundedDecisionString(request.workItemId, 256)) {
+      return fail("workItemId is required", 400);
+    }
+    const refs = request.pullRequests ?? [];
+    if (!Array.isArray(refs) || refs.length > CAMPAIGN_WORK_LEDGER_LIMITS.pullRequestsPerStage ||
+        refs.some((ref) => typeof ref !== "object" || ref === null || campaignRepositoryLocation(ref.repository) === null ||
+          !Number.isSafeInteger(ref.number) || ref.number < 1)) {
+      return fail(`pullRequests must list at most ${CAMPAIGN_WORK_LEDGER_LIMITS.pullRequestsPerStage} refs, each {repository, number}`, 400);
+    }
+    const report = request.report;
+    if (report !== undefined && (typeof report !== "object" || report === null ||
+        !boundedDecisionString(report.childSessionId, 256) || !Number.isSafeInteger(report.reportEventSeq) || report.reportEventSeq < 1)) {
+      return fail("report requires childSessionId and an exact reportEventSeq", 400);
+    }
+    if (!refs.length && !report) return fail("delivery needs pullRequests, a report, or both", 400);
+    if (request.note !== undefined && (!boundedDecisionString(request.note, CAMPAIGN_WORK_LEDGER_LIMITS.textLength) || !request.note.trim())) {
+      return fail(`note must be at most ${CAMPAIGN_WORK_LEDGER_LIMITS.textLength} characters`, 400);
+    }
+    if (!this.db.campaignWorkLedger.detail(root.id, request.workItemId, Date.now())) return fail("work item not found in this campaign", 404);
+    if (report) {
+      const child = this.db.getSession(report.childSessionId);
+      if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
+        return fail("campaign child not found", 404);
+      }
+      await this.hydrateHistory(child.id);
+      if (this.db.campaignReportIdentity(child.id, report.reportEventSeq).digest === null) {
+        await this.hydrateHistory(child.id, { force: true });
+      }
+    }
+    let forge: ForgeReadResult[] | null = null;
+    if (refs.length) {
+      // Refuse what the evidence check would refuse anyway before asking the forge.
+      const early = this.campaignDeliveryEvidence(root, callerSessionId, request, null, canAccess);
+      if (!early.ok) return failAs(early);
+      if (!this.campaignForgeReadNow) return fail("forge reads are unavailable on this control plane", 503);
+      forge = await this.campaignForgeReadNow(root.id, refs).catch(() => null);
+      if (!forge) return fail("the campaign's runner could not read the forge; retry once it is online", 409);
+    }
+    // Nothing is awaited from here on: every check reads the ledger and sessions as they are now,
+    // and the write follows in the same turn, so nothing can change between the two.
+    const evidence = this.campaignDeliveryEvidence(root, callerSessionId, request, forge, canAccess);
+    if (!evidence.ok || !evidence.data) return failAs(evidence);
+    const now = Date.now();
+    const written = this.ledgerWrite(scope.data, () =>
+      this.db.campaignWorkLedger.recordDelivery(root.id, callerSessionId, evidence.data!, now));
+    if (!written.ok || !written.data) return failAs(written);
+    return ok({
+      revision: written.data.revision,
+      delivery: this.db.campaignWorkLedger.delivery(root.id, written.data.deliveryId)!,
+      item: this.db.campaignWorkLedger.detail(root.id, written.data.itemId, now, canAccess)!,
+    });
+  }
+
+  /**
+   * Every check a recorded delivery needs, synchronously against the current ledger and sessions,
+   * so the caller can write in the same turn (#4070). `forge` is the forge's answer for the request's
+   * pull requests; null checks everything else, before the forge is asked. History must already be
+   * local for a report.
+   */
+  private campaignDeliveryEvidence(
+    root: SessionView,
+    callerSessionId: string,
+    request: RecordCampaignWorkItemDeliveryRequest,
+    forge: ForgeReadResult[] | null,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<CampaignDeliveryEvidence> {
+    const item = this.db.campaignWorkLedger.detail(root.id, request.workItemId, Date.now());
+    if (!item) return fail("work item not found in this campaign", 404);
+    const report = request.report;
+    let reportEvidence: CampaignDeliveryEvidence["report"] = null;
+    let reportAttemptId: string | null = null;
+    if (report) {
+      const child = this.db.getSession(report.childSessionId);
+      if (!child || !this.db.isSessionDescendant(callerSessionId, child.id) || !canAccess(child.id)) {
+        return fail("campaign child not found", 404);
+      }
+      const identity = this.db.campaignReportIdentity(child.id, report.reportEventSeq);
+      // Only a top-level report has a digest.
+      if (identity.digest === null) return fail("reportEventSeq is not a completed top-level agent response", 409);
+      const attempt = this.db.campaignWorkLedger.reportAttempt(root.id, item.id,
+        { childSessionId: child.id, seq: identity.seq, eventEpoch: identity.eventEpoch });
+      if (!attempt.ok) return fail(attempt.error, attempt.status);
+      if (attempt.data.open) {
+        // While the attempt is open, only a finished turn's latest report is final (the verify_campaign_child rule).
+        if (child.status !== "idle" && child.status !== "completed" &&
+            !(child.status === "stopped" && this.db.durableFinalReportSeq(child.id) !== null)) {
+          return fail("the child is still working on this item; record its report once its turn has finished", 409);
+        }
+        if (!this.db.hasCompletedAgentReportAt(child.id, report.reportEventSeq)) {
+          return fail("reportEventSeq is not the child's latest completed report", 409);
+        }
+      } else if (attempt.data.endSeq === null ||
+          this.db.lastAgentReportThrough(child.id, attempt.data.endSeq) !== report.reportEventSeq) {
+        // A closed attempt's report is the last one the child gave before that attempt closed.
+        return fail("reportEventSeq is not the child's last report before its attempt on this work item closed", 409);
+      }
+      reportAttemptId = attempt.data.attempt.id;
+      reportEvidence = { childSessionId: child.id, ...identity };
+    }
+    // A later attempt that is still working reopened the item: earlier evidence must not close it,
+    // even when the same child is the one working on it again.
+    const open = item.currentAttempt;
+    if (open && open.id !== reportAttemptId) {
+      const working = open.sessionId ? this.db.getSession(open.sessionId) : null;
+      if (working && !isTerminal(working.status) && working.status !== "idle") {
+        return fail(`session ${working.id} is still working on this item in a later attempt; ` +
+          "stop or reassign it before recording delivery", 409);
+      }
+    }
+
+    const refs = request.pullRequests ?? [];
+    const pullRequests: CampaignDeliveryEvidence["pullRequests"] = [];
+    if (refs.length) {
+      const repository = root.orchestratorPolicy?.issueScope?.repository ?? item.issue?.repository;
+      if (!repository) {
+        return fail("the campaign has no repository to check pull requests against; record the work item's issue first", 409);
+      }
+      const named = (ref: { repository: string; number: number }) =>
+        `${ref.repository}${campaignRepositoryLocation(ref.repository)?.forge === "gitlab" ? "!" : "#"}${ref.number}`;
+      const same = (a: { repository: string; number: number }, b: { repository: string; number: number }) =>
+        a.repository.toLowerCase() === b.repository.toLowerCase() && a.number === b.number;
+      for (const ref of refs) {
+        if (ref.repository.toLowerCase() !== repository.toLowerCase()) {
+          return fail(`pull request ${named(ref)} is not in the campaign repository ${repository}`, 409);
+        }
+        if (campaignRepositoryLocation(ref.repository)?.forge !== "github") {
+          return fail("recording delivery from a GitLab merge request is not supported yet", 409);
+        }
+        if (!item.stage?.pullRequests.some((reported) => same(reported, ref))) {
+          return fail(`pull request ${named(ref)} is not named by the work item's reported stage; ` +
+            "report it with update_campaign_work_item first", 409);
+        }
+        if (!forge) continue;
+        const result = forge.find((candidate) => same(candidate.ref, ref));
+        const observed = result?.observation;
+        if (!observed || observed.forge === "gitlab") {
+          return fail(`pull request ${named(ref)} could not be read from the forge` +
+            `${result?.failure ? ` (${result.failure})` : ""}; retry`, 409);
+        }
+        if (observed.state !== "merged" || !observed.mergeCommitSha) {
+          return fail(`pull request ${named(ref)} is not merged (the forge reports it ${observed.state})`, 409);
+        }
+        if (!observed.defaultBranch) {
+          return fail("the campaign's runner does not report the repository's default branch; " +
+            "update Wollipog on that runner and retry", 409);
+        }
+        if (observed.baseRef !== observed.defaultBranch) {
+          return fail(`pull request ${named(ref)} merged into ${observed.baseRef}, not the default branch ${observed.defaultBranch}`, 409);
+        }
+        pullRequests.push({ repository: ref.repository, number: ref.number, mergeCommitSha: observed.mergeCommitSha, baseRef: observed.baseRef });
+      }
+    }
+    return ok({ workItemId: item.id, pullRequests, report: reportEvidence, note: request.note?.trim() ?? null });
+  }
+
   assignCampaignWorkItem(
     callerSessionId: string,
     request: AssignCampaignWorkItemRequest,
@@ -8847,7 +9322,7 @@ export class SessionsService {
     const projection = this.db.campaignProjection(root.id);
     const summary = ledger.summary(root.id, {
       campaignCreatedAt: root.createdAt,
-      complete: projection?.status === "verified_complete",
+      complete: campaignStatusTerminal(projection?.status),
       childSessionIds: this.db.campaignDescendantIds(root.id),
       cleanupPending: projection?.children.cleanupPending ?? 0,
       canSeeSession: canAccess,
@@ -9050,17 +9525,7 @@ export class SessionsService {
         now,
       });
     }
-    for (const child of this.db.campaignContinuationChildCandidates(before.id)) {
-      continuationEvents.push({
-        eventId: `child-ready:${before.id}:${child.sessionId}:${child.status}:${child.eventSeq}`,
-        campaignSessionId: before.id,
-        kind: "child_ready",
-        subjectSessionId: child.sessionId,
-        subjectStatus: child.status,
-        occurrenceId: `event-seq:${child.eventSeq}`,
-        now,
-      });
-    }
+    continuationEvents.push(...this.campaignChildReadyEvents(before.id, now));
     this.db.recordCampaignContinuationEvents(continuationEvents);
     if (humanBlockersCleared) {
       // An immediate HTTP/direct publication can clear the last blocker while a runtime or
@@ -9079,6 +9544,22 @@ export class SessionsService {
     // tokens must still come from the deferred before-view, or their urgent push can be lost.
     this.notifyTransition({ ...(notificationBefore ?? before), ...this.registrationNotificationViews.get(before.id) }, before.id);
     this.hub.sessionChangedById(before.id);
+  }
+
+  /** One child_ready event per unverified child whose latest turn end the Orchestrator still has
+   * to see. A child that is only waiting has none (#4073); its event is recorded once the wait
+   * ends, on the runner update that ends it or, for a stalled job, on the continuation tick. The
+   * identity names the child's status and report, so recording again is idempotent. */
+  private campaignChildReadyEvents(campaignSessionId: string, now: number): Parameters<ControlPlaneDb["recordCampaignContinuationEvent"]>[0][] {
+    return this.db.campaignContinuationChildCandidates(campaignSessionId, now).map((child) => ({
+      eventId: `child-ready:${campaignSessionId}:${child.sessionId}:${child.status}:${child.eventSeq}`,
+      campaignSessionId,
+      kind: "child_ready",
+      subjectSessionId: child.sessionId,
+      subjectStatus: child.status,
+      occurrenceId: `event-seq:${child.eventSeq}`,
+      now,
+    }));
   }
 
   private orchestratorOwnsGenericRequest(session: SessionView, request: PendingApproval): boolean {
@@ -9183,9 +9664,14 @@ export class SessionsService {
     // reconnect restores the card. An Orchestrator's explicit decline is its own single action.
     const fence = explicit ? { claimed: true, release: () => {} } : this.standingResponseFence(controller, session, request);
     if (!fence.claimed) return true;
+    // The agent is told, in the same tool result, that Full Control policy declined it and no person
+    // saw it (#4063). Only a runner that can carry that text receives it; an older one keeps its
+    // fixed text and the notices below. A person's response never carries this attribution.
+    const automaticResponse = runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "fullControlResponseAttribution")
+      ? fullControlAutomaticResponse(evaluation) : undefined;
     const result = request.kind === "question"
-      ? this.answerQuestion(session.id, request.requestId, {}, actor, "dismiss", controller.id, request.occurrenceId)
-      : this.approve(session.id, request.requestId, reject, actor, controller.id);
+      ? this.answerQuestion(session.id, request.requestId, {}, actor, "dismiss", controller.id, request.occurrenceId, automaticResponse)
+      : this.approve(session.id, request.requestId, reject, actor, controller.id, undefined, undefined, undefined, automaticResponse);
     if (!result.ok) { fence.release(); return false; }
     if (request.kind === "authentication" &&
         !runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "durableAuthDismissal")) {
@@ -9223,12 +9709,14 @@ export class SessionsService {
       // that nobody sees its questions and how to decide them itself, after this event settles; a
       // root that ended its turn on the dismissal is woken by this message rather than left idle.
       // Later questions are still dismissed but wake nothing: one notice per question could loop a
-      // root that answers each notice with another question. Neither provider's dismissal carries
-      // text (Claude Code sends a fixed deny message; Codex an empty answer set), so the guidance
-      // cannot ride on the dismissal itself without a runner protocol change.
+      // root that answers each notice with another question. A v282 Claude Code runner also carries
+      // the guidance in every dismissal itself (#4063); this notice stays for older runners and for
+      // providers whose dismissal has no text (Codex answers with an empty answer set).
       if (first) setImmediate(() => {
         try {
-          const delivered = this.prompt(session.id, FULL_CONTROL_ROOT_QUESTION_MESSAGE);
+          // A root whose runner has the owner-decision tools (#4064) is told how to reach its owner.
+          const delivered = this.prompt(session.id, runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion,
+            "ownerDecisions") ? FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE : FULL_CONTROL_ROOT_QUESTION_MESSAGE);
           if (!delivered.ok) this.log.warn(`root question guidance not delivered to ${session.id}: ${delivered.error}`);
         } catch (error) {
           this.log.warn(`root question guidance failed for ${session.id}: ${(error as Error).message}`);
@@ -9722,6 +10210,8 @@ export class SessionsService {
     // #3369: a runner that plans review runs gets the run's history; an older one reviews in full.
     if (runnerSupportsProtocol(runner?.protocolVersion, "reviewRuns")) {
       policy.history = this.db.reviewSessions.history(session.id, policy.pullRequest, request.headSha, true, configured?.configuration.roundBudget);
+      // #4075: a runner that proves base merges plans them outside the budget; older ones never do.
+      if (runnerSupportsProtocol(runner?.protocolVersion, "reviewBaseMergeRounds")) policy.history.baseMergeRounds = true;
       if (policy.history.postUpvoteExtension && !runnerSupportsProtocol(runner?.protocolVersion, "postUpvoteReviewExtensions")) {
         return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "postUpvoteReviewExtensions", "post-upvote review extensions"));
       }
@@ -9847,6 +10337,177 @@ export class SessionsService {
     if (view.terminal) this.deliverHeldReviewContinuations(view.requesterSessionId, now);
   }
 
+  /**
+   * Park a session on its own enqueued GitHub pull request (#4071). The control plane keeps the
+   * watch, so it survives a runner restart; the runner polls GitHub through its read-only `gh` login
+   * and reports the outcome once; the session is then woken by one durable prompt. Parking again
+   * replaces the previous watch. Nothing here grants authority: the wake is an ordinary prompt.
+   */
+  requestPullRequestWatch(callerSessionId: string, request: unknown,
+    canAccess: (id: string) => boolean = () => true): ServiceResult<{ watch: PullRequestWatchView }> {
+    const session = this.db.getSession(callerSessionId);
+    if (!session || !canAccess(session.id)) return fail("session not found", 404);
+    if (this.db.reviewSessions.isReviewSession(session.id)) return fail("A review session cannot park on a pull request.", 409);
+    const body = request as { repository?: unknown; number?: unknown; headSha?: unknown } | null;
+    if (!body || typeof body !== "object" || Array.isArray(body) ||
+        Object.keys(body).some((key) => !["repository", "number", "headSha"].includes(key)) ||
+        typeof body.repository !== "string" ||
+        !/^[A-Za-z0-9-]{1,39}\/(?!\.\.?$)[A-Za-z0-9._-]{1,100}$/u.test(body.repository) ||
+        !Number.isSafeInteger(body.number) || (body.number as number) <= 0) {
+      return fail("a merge-queue watch needs {repository: \"owner/name\" on GitHub, number: a positive pull request number, headSha}", 400);
+    }
+    if (typeof body.headSha !== "string" || !/^[0-9a-f]{40}$/u.test(body.headSha)) {
+      return fail("headSha must be the enqueued pull request's full 40-character lowercase head commit", 400);
+    }
+    if (session.archived || isTerminal(session.status)) return fail("an archived or finished session cannot park", 409);
+    const runner = this.db.getRunner(session.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "pullRequestWatch")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "pullRequestWatch", "merge-queue watches"));
+    }
+    const now = Date.now();
+    const watchId = `prw_${randomUUID().replaceAll("-", "")}`;
+    const repository = body.repository;
+    const number = body.number as number;
+    const headSha = body.headSha;
+    const replaced = this.db.pullRequestWatches.register({ watchId, sessionId: session.id, runnerId: session.runnerId,
+      repository, number, headSha, now });
+    for (const id of replaced) this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_cancel", watchId: id });
+    // An offline runner receives it on registration, like every other watch still `watching`.
+    this.hub.sendToRunner(session.runnerId, { type: "pull_request_watch_start", watchId, sessionId: session.id, repository, number, headSha });
+    this.hub.sessionChangedById(session.id);
+    return ok({ watch: this.db.pullRequestWatches.view(watchId)! });
+  }
+
+  /** The runner's report of a watch's end: the first one counts, and owes the session its wake. */
+  onPullRequestWatchUpdate(runnerId: string, update: PullRequestWatchUpdate): void {
+    const now = Date.now();
+    const sessionId = this.db.pullRequestWatches.accept(runnerId, update, now);
+    if (!sessionId) return;
+    this.hub.sessionChangedById(sessionId);
+    this.deliverHeldPullRequestWatchWakes(sessionId, now);
+  }
+
+  /** On registration: resend every watch still `watching` on this runner, so a restarted runner
+   * resumes them. A runner that can no longer watch has each one reported lost to its session,
+   * whose wake then says so; a parked session is never left silently without a watch. */
+  recoverPullRequestWatches(runnerId: string): void {
+    const watches = this.db.pullRequestWatches.watchingOn(runnerId);
+    if (!watches.length) return;
+    const now = Date.now();
+    if (!runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "pullRequestWatch")) {
+      for (const watch of watches) {
+        if (!this.db.pullRequestWatches.markLost(watch.watchId, "the session's runner no longer supports merge-queue watches", now)) continue;
+        this.hub.sessionChangedById(watch.sessionId);
+        this.deliverHeldPullRequestWatchWakes(watch.sessionId, now);
+      }
+      return;
+    }
+    for (const watch of watches) this.hub.sendToRunner(runnerId, { type: "pull_request_watch_start", ...watch });
+  }
+
+  /** A session that ended or was archived no longer waits: stop its watch, and owe it no wake. */
+  private cancelPullRequestWatches(sessionId: string, reason: string, now = Date.now()): void {
+    const cancelled = this.db.pullRequestWatches.cancelForSession(sessionId, reason, now);
+    const runnerId = this.db.getSession(sessionId)?.runnerId;
+    if (runnerId) for (const watchId of cancelled) this.hub.sendToRunner(runnerId, { type: "pull_request_watch_cancel", watchId });
+  }
+
+  /**
+   * Wake a parked session with the outcomes its ended watches owe it (#4071): one framed prompt,
+   * carried by a durable command bound to every watch it names, so a reconnect or runner restart
+   * delivers it exactly once. Like a review continuation, it goes only to an idle session nothing
+   * would refuse it for; one mid-turn takes it at its next settle, through the retry sweep. A pending
+   * asynchronous question also holds it, so this automatic prompt can never dismiss that card.
+   * Returns why it is still held, or null once nothing is owed.
+   */
+  private deliverHeldPullRequestWatchWakes(sessionId: string, now = Date.now()): string | null {
+    const held = this.db.pullRequestWatches.heldWakes(sessionId);
+    if (!held.length) return null;
+    const session = this.db.getSession(sessionId);
+    if (!session) return "session not found";
+    if (session.status !== "idle") return `session is ${session.status}`;
+    if (!this.hub.isRunnerOnline(session.runnerId)) return "runner is offline";
+    if (session.worktreeRecovery) return "worktree recovery is required";
+    if (hasBlockingPendingRequest(session.pendingApproval)) return "a request is waiting for an answer";
+    if (pendingRequests(session.pendingApproval).some((request) => request.async && request.kind === "question")) return "a question is waiting for an answer";
+    const daily = this.dailyBudgetFor(sessionId);
+    if (daily && daily.spentUsd >= daily.budgetUsd) return "daily budget reached";
+    const ids = held.map((watch) => watch.watchId);
+    let claimed = false;
+    const sent = this.prompt(
+      sessionId, held.flatMap(pullRequestWatchWakeLines).join("\n"), [], undefined, undefined, undefined, "session", true, {
+        admitAs: "queued" as const,
+        durable: true,
+        stage: (runnerId, command, at) => this.promptOutbox.stagePullRequestWatchWake(ids, sessionId, runnerId, command, at),
+        // Without a durable command there is no receipt to follow: recorded delivered before the
+        // send, so a crash between the two can lose it but never send it twice.
+        claimImmediate: () => (claimed = this.db.pullRequestWatches.claimHeld(sessionId, ids, now)),
+      },
+    );
+    if (!sent.ok) {
+      if (claimed) this.db.pullRequestWatches.releaseClaim(sessionId, ids, Date.now());
+      return sent.error ?? "the wake was refused";
+    }
+    this.hub.sessionChangedById(sessionId);
+    return null;
+  }
+
+  /** Follow the durable command that carries a watch wake, as a review continuation's is. */
+  private reconcilePullRequestWatchWakeCommand(commandId: string, now: number): void {
+    const sessionId = this.db.pullRequestWatches.sessionForCommand(commandId);
+    if (!sessionId) return;
+    const command = this.db.getSessionPromptCommand(commandId);
+    if (!command) return;
+    const session = this.db.getSession(sessionId);
+    const retryUnsent = session && !isTerminal(session.status) && !session.archived &&
+      command.errorCode === "COMMAND_CANCELLED" && command.error === AUTOMATIC_TURN_RESTART_CANCELLED_REASON;
+    // A never-sent command (worktree recovery, or Restart cancelling the automatic turn before it
+    // was submitted) keeps the wake owed, without replaying any user event or uncertain delivery.
+    if (command.state === "failed" && command.userEventSeq === undefined &&
+        (command.errorCode === "WORKTREE_RECOVERY_REQUIRED" || retryUnsent)) {
+      if (!this.db.holdPullRequestWatchWakeCommand(sessionId, commandId, now)) return;
+      this.settleQueuedAdmission(command, now);
+      this.hub.sessionChangedById(sessionId);
+      this.deliverHeldPullRequestWatchWakes(sessionId, now);
+      return;
+    }
+    const state = command.state === "started" || command.state === "completed" ? "delivered" as const
+      : command.state === "uncertain" ? "uncertain" as const
+      : command.state === "failed" ? "failed" as const
+      : null;
+    if (!state) return;
+    this.db.pullRequestWatches.setCommandState(commandId, state, now);
+    if (state === "failed") this.log.warn(`pull request watch wake failed for ${sessionId}: ${command.error ?? "unknown error"}`);
+    this.hub.sessionChangedById(sessionId);
+    this.settleQueuedAdmission(command, now);
+    // A wake that never started leaves the child idle and no longer parked, and its parking report
+    // was never recorded (campaignChildWait): record what is now ready, so its Orchestrator hears of it.
+    if (state !== "delivered") this.recordCampaignReadinessAfterWatch(sessionId, commandId, now);
+  }
+
+  /** A merge-queue watch stopped counting as a wait without the child's status changing (#4071).
+   * A failed wake leaves the child idle, so its report is an ordinary ready candidate. An uncertain
+   * one leaves it queued, which no candidate covers, so record its turn end as it stands: the
+   * Orchestrator sees a queued child behind a wake that may or may not have started. */
+  private recordCampaignReadinessAfterWatch(sessionId: string, commandId: string, now: number): void {
+    const campaignSessionId = this.db.campaignRootForMember(sessionId);
+    if (!campaignSessionId || campaignSessionId === sessionId) return;
+    const events = this.campaignChildReadyEvents(campaignSessionId, now);
+    const child = this.db.getSession(sessionId);
+    if (child?.status === "queued" && !events.some((event) => event.subjectSessionId === sessionId)) {
+      events.push({
+        eventId: `child-ready:${campaignSessionId}:${sessionId}:watch-wake:${commandId}`,
+        campaignSessionId,
+        kind: "child_ready",
+        subjectSessionId: sessionId,
+        subjectStatus: child.status,
+        occurrenceId: `event-seq:${this.db.latestTopLevelReportSeq(sessionId) ?? 0}`,
+        now,
+      });
+    }
+    this.db.recordCampaignContinuationEvents(events);
+  }
+
   /** On registration: a runner without review sessions can no longer report its reviews. */
   recoverReviewSessions(runnerId: string): void {
     if (runnerSupportsProtocol(this.db.getRunner(runnerId)?.protocolVersion, "reviewSession")) return;
@@ -9880,7 +10541,7 @@ export class SessionsService {
     const supportsQuestionRetention = runnerSupportsReviewQuestionPreservation(this.db.getRunner(session.runnerId));
     // Older runners mistake this automatic prompt for human input and dismiss the async card.
     // Keep the review owed until the person answers or the runner upgrades.
-    if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async)) {
+    if (!supportsQuestionRetention && pendingRequests(session.pendingApproval).some((request) => request.async && request.kind === "question")) {
       return "runner upgrade is required to preserve a pending async question";
     }
     const ids = held.map((review) => review.reviewSessionId);
@@ -10098,6 +10759,12 @@ export class SessionsService {
       if (initialController?.session.id !== currentController?.session.id || initialController?.policy.revision !== currentController?.policy.revision) {
         return "failure" in admitted ? fail("Publication authority changed during inspection; request it again", 409) : admitted;
       }
+      // A mistake the requester can fix in one step is refused, never put to a person (#4065). Only
+      // a Full Control issue boundary reaches these checks. A replayed requestId keeps its decision.
+      if ("failure" in admitted && CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES.has(admitted.failure) &&
+          boundedDecisionString(request.requestId, 256) && !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
+        return this.refuseCorrectablePublication(sessionId, normalized.data.recommendationId, admitted.failure);
+      }
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
       // preserve the original configured/human request path without a standing issue grant,
       // and record why on the decision so the person is never asked without a reason (#2940).
@@ -10292,6 +10959,23 @@ export class SessionsService {
     }
   }
 
+  /** Refuses a correctable publication request (#4065): a 409 with the failure code and its fixed
+   * sentence. Nothing is created or granted and no person is asked. A member's refusal is recorded
+   * for the root's recovery, which wakes the root as for any child request needing it; the root's
+   * own refusal reaches it directly. */
+  private refuseCorrectablePublication(sessionId: string, recommendationId: string,
+    failure: CampaignPublicationAdmissionFailure): ServiceResult<WorkflowDecisionView> {
+    const rootId = this.db.campaignRootForMember(sessionId);
+    const root = rootId && rootId !== sessionId ? this.db.getSession(rootId) : null;
+    if (root) {
+      const now = Date.now();
+      this.db.campaignRecovery.recordPublicationRefusal(root.id, sessionId, publicationRefusalCoordinate(sessionId, recommendationId),
+        failure, root.parentControlPolicy?.revision ?? 0, now);
+      this.campaignRecovery.synchronize(root, now);
+    }
+    return { ok: false, status: 409, error: CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure], errorDetails: { code: failure } };
+  }
+
   /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
    * any member whose gates the root controls may request it: the drafting child usually does. A
    * refusal names its condition, logged here and recorded on the human-owned fallback (#2940). */
@@ -10304,7 +10988,8 @@ export class SessionsService {
     const refused = (failure: CampaignPublicationAdmissionFailure, boundaryRevision?: number) => {
       this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
         ...(root ? { controllingSessionId: root.id } : {}), ...(boundaryRevision === undefined ? {} : { boundaryRevision }),
-        recommendationId: snapshot.recommendationId, outcome: "human_fallback", reason: failure }));
+        recommendationId: snapshot.recommendationId, outcome: CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES.has(failure) ? "refused" : "human_fallback",
+        reason: failure }));
       return { failure };
     };
     if (!caller || !root || !canAccess(sessionId) || !canAccess(root.id)) return refused("requester_outside_campaign");
@@ -10336,7 +11021,8 @@ export class SessionsService {
     return this.createWorkflowDecision(sessionId, { ...request, resourceKey: `publication:${snapshot.recommendationId}`,
       resourceSnapshot: { ...snapshot, issueAdmission: { boundaryRevision: evidence.boundaryRevision,
         evidenceDigest: issueEvidenceDigest({ evidence, publicationDigest }),
-        publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess, { trustedPublication: true });
+        publicationAuthority: { authorizedByUserId: boundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(boundary.objective) } } } }, canAccess,
+      { trustedPublication: true, requestedResourceKey: request.resourceKey });
   }
 
   /** `humanApproved`: the caller verified a person's qualifying approval of a publication that has
@@ -10434,15 +11120,16 @@ export class SessionsService {
       const boundary = issueBoundary(latest);
       if (!human && boundary && boundary.operations.includes("campaign_issue_scope")) {
         // Each refusal names the one condition that failed, in a fixed sentence and code (#2940).
-        const refuse = (code: CampaignScopeAdmissionFailure): ServiceResult<WorkflowDecisionView> => {
+        const refuse = (code: CampaignScopeAdmissionFailure, details: Record<string, number> = {}): ServiceResult<WorkflowDecisionView> => {
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
             boundaryRevision: boundary.revision, scopeRevision: snapshot.expectedRevision, lineage: snapshot.lineage?.kind ?? "none", outcome: "refused", reason: code }));
           const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS[code];
-          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code } };
+          return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code, ...details } };
         };
         const excludedReservation = snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined;
-        if (snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation) >
-            this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues)) return refuse("capacity_exhausted");
+        const requested = snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reservedPublicationSlots(this.db, latest, excludedReservation);
+        const limit = this.db.campaignIssueLimit(sessionId, boundary.issueAuthority!.maxIssues);
+        if (requested > limit) return refuse("capacity_exhausted", { limit, requested });
         let evidence: unknown = { removals: snapshot.removals };
         if (snapshot.additions.length) {
           if (!snapshot.lineage) return refuse("lineage_missing");
@@ -10557,11 +11244,39 @@ export class SessionsService {
     return read;
   }
 
+  /** The epic source's snapshot (#4060): the runner's inspection with the issue's members, and, when
+   * they would prove the closure, its delivery verified at the same digest and member read. `false`
+   * for an issue without members, or a runner whose forge has no member read (GitLab), whose
+   * ordinary snapshot stands; null when the members could not be read. */
+  private async inspectEpicClosure(sessionId: string, runnerId: string, base: GithubIssueClosureSnapshot): Promise<GithubIssueClosureSnapshot | false | null> {
+    const inspect = async (deliveryPullRequests?: Array<{ number: number; headSha: string }>) => {
+      const requestId = `issue_closure_epic_${randomUUID()}`;
+      const result = await this.hub.requestFromRunner(runnerId, requestId, { type: "github_issue_closure", operation: "inspect", requestId, sessionId,
+        issue: base.issue, scopeRevision: base.scopeRevision, epicMembers: true, ...(deliveryPullRequests ? { deliveryPullRequests } : {}) }, 60_000).catch(() => null);
+      return result?.type === "github_issue_closure_result" && result.ok && result.sessionId === sessionId && result.inspection?.state === "OPEN" &&
+        result.inspection.repository === base.repository && result.inspection.issue === base.issue ? result.inspection : null;
+    };
+    const read = await inspect();
+    if (read && read.epicMembers === undefined) return false;
+    const members = read && normalizeIssueClosureEpicMembers(read.epicMembers);
+    if (!read || !members?.readable) return null;
+    if (!members.members.length) return false;
+    const { state: _state, delivery: _delivery, ...inspection } = read;
+    const { delivery: _ordinary, ...rest } = base;
+    let snapshot: GithubIssueClosureSnapshot = { ...rest, ...inspection, epicMembers: members };
+    const delivery = closureDeliveryPullRequests(this.db, this.db.getSession(sessionId)!, base.issue);
+    if (delivery.length && closureEvidence(this.db, this.db.getSession(sessionId)!, { ...snapshot, delivery })) {
+      const verified = await inspect(delivery.map(({ number, headSha }) => ({ number, headSha })));
+      if (verified?.forgeDigest === snapshot.forgeDigest && verified.delivery) snapshot = { ...snapshot, delivery: verified.delivery };
+    }
+    return snapshot;
+  }
+
   async requestGithubIssueClosure(
     sessionId: string,
     request: GithubIssueClosureRequest,
     canAccess: (id: string) => boolean = () => true,
-  ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string }>> {
+  ): Promise<ServiceResult<{ decision?: WorkflowDecisionView; outcome?: "already_closed"; url?: string; proofGaps?: IssueClosureProofGapNotice }>> {
     const session = this.db.getSession(sessionId);
     if (!session || !canAccess(sessionId)) return fail("session not found", 404);
     if (sessionRole(session) !== "orchestrator" || !session.orchestratorPolicy ||
@@ -10605,12 +11320,16 @@ export class SessionsService {
       if (inspected.inspection.state === "CLOSED") return ok({ outcome: "already_closed", url: inspected.inspection.url });
       if (inspected.inspection.state !== "OPEN") return fail("runner returned invalid issue state", 409);
       const { state: _state, ...inspection } = inspected.inspection;
-      const snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
+      let snapshot: GithubIssueClosureSnapshot = { ...inspection, category: "issue_closure", reason: request.reason,
         ...(session.orchestratorPolicy.issueScope ? { scopeRevision: session.orchestratorPolicy.issueScope.revision } : {}),
         explanation: request.explanation, evidence: request.evidence,
         ...(request.comment === undefined ? {} : { comment: request.comment }),
         ...(request.dispositionRecommendationId === undefined ? {} : { dispositionRecommendationId: request.dispositionRecommendationId }),
         activeChildren: issueClosureActiveChildren(this.db, sessionId, { repository: inspection.repository, number: request.issue }) };
+      const resourceKey = `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`;
+      // Whoever reviews this request sees why the last executed approval was refused (#4059).
+      const previousRefusal = this.db.latestIssueClosureRefusal(sessionId, resourceKey);
+      if (previousRefusal) snapshot.previousRefusal = previousRefusal;
       if (fullBoundary && fullBoundary.operations.includes("issue_closure")) {
         // Inspect normal conflict evidence first. A missing ledger proof or a non-delegated
         // reason must retain the existing human route, never become a rejected human request.
@@ -10628,21 +11347,39 @@ export class SessionsService {
                 verified.inspection.state === "OPEN" && verified.inspection.forgeDigest === snapshot.forgeDigest) snapshot.delivery = verified.inspection.delivery;
           }
         }
-        const proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
-        if (!proof) {
-          snapshot.deliveryFailure = closureDeliveryFailure(this.db, this.db.getSession(sessionId)!, snapshot);
-          this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
-            boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback", reason: "delivery_or_disposition_unverified" }));
+        let proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot);
+        // Without the ordinary proof, an epic may be proven from its members (#4060). The runner reads
+        // them on the forge; an issue without members keeps the ordinary snapshot, unchanged.
+        let membersUnreadable = false;
+        if (!proof && epicSourceApplies(this.db, this.db.getSession(sessionId)!, snapshot) &&
+            runnerSupportsProtocol(this.db.getRunner(session.runnerId)?.protocolVersion, "epicClosureMembers")) {
+          const epic = await this.inspectEpicClosure(sessionId, session.runnerId, snapshot);
+          if (epic === null) membersUnreadable = true;
+          else if (epic) { snapshot = epic; proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot); }
         }
         const commentSafe = !request.comment || campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, []);
         if (proof && commentSafe) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
+        else {
+          // The person-owned route stays, but names every gap and what would fix it (#4058).
+          const gaps = closureDeliveryGaps(this.db, this.db.getSession(sessionId)!, snapshot, { proven: Boolean(proof), commentSafe, membersUnreadable });
+          if (gaps) snapshot.deliveryGaps = gaps;
+          snapshot.deliveryFailure = gaps ? issueClosureDeliveryFailure(gaps) : "outside_boundary";
+          this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+            boundaryRevision: fullBoundary.revision, scopeRevision: snapshot.scopeRevision, outcome: "human_fallback",
+            reason: gaps ? "closure_proof_incomplete" : "outside_boundary", ...(gaps ? { gaps: gaps.map((gap) => gap.code) } : {}) }));
+        }
       }
       const created = this.createWorkflowDecision(sessionId, {
         requestId: request.requestId,
-        resourceKey: `issue_closure:${inspection.repository.toLowerCase()}#${request.issue}`,
+        resourceKey,
         resourceSnapshot: snapshot,
       }, canAccess, { trustedIssueClosure: true });
-      return created.ok ? ok({ decision: created.data }, created.status) : failAs(created);
+      if (!created.ok) return failAs(created);
+      const decided = created.data!.resourceSnapshot;
+      // Say so beside the decision, so the root sees a person now decides and what it can fix (#4058).
+      const proofGaps = created.data!.authorityEvaluation?.reason === "closure_proof_incomplete" && decided.category === "issue_closure" &&
+        decided.deliveryGaps?.length ? issueClosureProofGapNotice(decided.deliveryGaps) : undefined;
+      return ok({ decision: created.data, ...(proofGaps ? { proofGaps } : {}) }, created.status);
     } catch {
       return fail("issue inspection failed or the runner did not respond; no closure was attempted", 409);
     }
@@ -10739,17 +11476,24 @@ export class SessionsService {
       }, 150_000);
       if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && response.ok &&
           response.result && ["closed", "already_closed", "refused", "uncertain"].includes(response.result.outcome) &&
-          Number.isSafeInteger(response.result.completedAt)) result = response.result;
-      else if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && !response.ok) {
-        result = { outcome: "refused", completedAt: Date.now() };
+          Number.isSafeInteger(response.result.completedAt)) {
+        // Every refusal records why (#4059); a runner that predates reasons yields `unspecified`.
+        result = { outcome: response.result.outcome, completedAt: response.result.completedAt,
+          ...(response.result.outcome === "refused" ? { refusal: issueClosureResultRefusal(response.result.refusal) } : {}) };
+      } else if (response.type === "github_issue_closure_result" && response.sessionId === sessionId && !response.ok) {
+        // The runner refuses with `ok: false` only before its mutation fence. Its message is kept,
+        // sanitized and bounded, rather than discarded.
+        result = { outcome: "refused", completedAt: Date.now(), refusal: issueClosureFailureRefusal(response.failure, response.error) };
       }
       // A malformed receipt after dispatch cannot prove that no mutation occurred.
     } catch (error) {
-      if (isRunnerRequestNotSentError(error)) result = { outcome: "refused", completedAt: Date.now() };
+      if (isRunnerRequestNotSentError(error)) {
+        result = { outcome: "refused", completedAt: Date.now(), refusal: githubIssueClosureRefusal("runner_unreachable") };
+      }
     }
     this.db.recordGithubIssueClosureResult(occurrenceId, result);
     this.log.info(JSON.stringify({ event: "github_issue_closure_result", sessionId, occurrenceId,
-      resourceDigest: decision.resourceDigest, outcome: result.outcome }));
+      resourceDigest: decision.resourceDigest, outcome: result.outcome, ...(result.refusal ? { reason: result.refusal.reason } : {}) }));
     this.hub.sessionChangedById(sessionId);
     return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
   }
@@ -10816,10 +11560,14 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
     internal?: { trustedDerivedVideo?: boolean; videoFallbackReason?: string; trustedIssueClosure?: boolean; trustedIssueScope?: boolean; trustedPublication?: boolean; trustedAutomationCreation?: boolean;
       publicationAdmissionFailure?: CampaignPublicationAdmissionFailure;
+      /** The resourceKey an admitted publication was requested under, before it was stored under its recommendation (#4066). */
+      requestedResourceKey?: string;
       /** The server's own request when a follow-up passes the campaign's approval limit (#2940). */
       trustedFollowUpAdmission?: boolean;
       /** #3713: the child runner's GitHub read, taken just before this request. */
-      closingReferenceCheck?: PullRequestClosingReferenceCheck },
+      closingReferenceCheck?: PullRequestClosingReferenceCheck;
+      /** A Full Control root's owner decision, checked by createOwnerDecision (#4064). */
+      trustedOwnerDecision?: boolean },
   ): ServiceResult<WorkflowDecisionView> {
     if (this.db.roleConversionBlocksSession(sessionId)) return fail("wait for the session role change to finish before requesting another decision", 409);
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
@@ -10853,6 +11601,9 @@ export class SessionsService {
     }
     if (normalized.data.category === "issue_closure" && !internal?.trustedIssueClosure) {
       return fail("use request_github_issue_closure for server-verified issue evidence", 403);
+    }
+    if (normalized.data.category === "owner_decision" && !internal?.trustedOwnerDecision) {
+      return fail("use request_owner_decision: only a Full Control root asks its campaign's owner a decision the owner kept", 403);
     }
     if (normalized.data.category === "review_round_extension") {
       const refused = this.reviewRoundExtensionRefusal(child, request.resourceKey, normalized.data);
@@ -10893,10 +11644,18 @@ export class SessionsService {
         code: "media_video_unsupported", reason: internal.videoFallbackReason,
       } };
     }
-    const authority = evaluated.effectiveOwner;
+    let authority = evaluated.effectiveOwner;
     const authorityEvaluation = evaluateCampaignAuthority(controller.session, child,
       this.db.getRunner(child.runnerId)?.protocolVersion, normalized.data, controller.policy,
-      this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id));
+      this.db.getRunner(controller.session.runnerId)?.protocolVersion, this.campaignPeerContracts(controller.session, child.id),
+      this.reviewExtensionCap(child.id, normalized.data));
+    // A refused scope change cannot be routed around through a merge's closing references (#4062):
+    // the merge is refused with the issues named, rather than becoming a person's new decision.
+    if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
+      this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request_refused",
+        sessionId, controllingSessionId: controller.session.id, requestId: request.requestId, ...authorityEvaluation }));
+      return fail(unscopedClosureRefusal(authorityEvaluation.unscopedClosures), 409);
+    }
     // Full Control cannot supply credentials or sign-in, so it declines such a question once,
     // records it as blocked work, and creates no decision for anyone to answer (#2940).
     if (authorityEvaluation.disposition === "decline") {
@@ -10916,8 +11675,24 @@ export class SessionsService {
       authorityEvaluation.basis = "human_required";
       authorityEvaluation.reason = "evidence_review_unavailable";
     }
-    if (internal?.publicationAdmissionFailure && category === "follow_up_issue_publication" && authority === "human") {
-      authorityEvaluation.admissionFailure = internal.publicationAdmissionFailure;
+    // A resource its owner kept stays theirs (#4064): a later request for it, under any key and from
+    // any campaign member, is the person's too, so withdrawing and asking again cannot move it back.
+    if (authority === "orchestrator" && this.ownerKept(controller.session.id, category, request.resourceKey, normalized.data)) {
+      authority = "human";
+      Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+    }
+    if (category === "follow_up_issue_publication" && normalized.data.category === category && authority === "human") {
+      // Under an issue boundary no person-owned publication is recorded without its reason (#4065):
+      // a request that named no recommendation says so, and one that reached here without a
+      // bounded admission on the current authority says that. Custom campaigns are unchanged.
+      const control = controller.session.orchestratorPolicy?.control;
+      const issueBounded = control?.mode === "full_control" && control.boundary.issueAuthority ? control.boundary : null;
+      const failure = internal?.publicationAdmissionFailure ?? (issueBounded
+        ? !issueBounded.issueAuthority!.relatedFollowUps || !issueBounded.operations.includes(category) ? "no_issue_boundary"
+          : normalized.data.recommendationId ? "authority_unavailable" : "recommendation_missing"
+        : undefined);
+      if (failure) authorityEvaluation.admissionFailure = failure;
+      if (failure && issueBounded) authorityEvaluation.admissionMessage = CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure];
     }
     if (authority === "orchestrator") {
       const parentUnsupported = this.capabilityFailure(
@@ -10926,6 +11701,14 @@ export class SessionsService {
         "typed parent control workflow decisions",
       );
       if (parentUnsupported) return parentUnsupported;
+    }
+    let retired: string[] = [];
+    if (category === "follow_up_issue_publication" && normalized.data.category === category &&
+        !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
+      const guarded = this.personOwnedPublicationGuard(sessionId, request.resourceKey, normalized.data,
+        internal?.trustedPublication && normalized.data.issueAdmission ? internal.requestedResourceKey ?? request.resourceKey : null);
+      if ("refusal" in guarded) return guarded.refusal;
+      retired = guarded.retire;
     }
     const now = Date.now();
     const resourceDigest = auditDigest(normalized.data)!;
@@ -10943,6 +11726,7 @@ export class SessionsService {
       authorityEvaluation,
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
+      ...(retired.length ? { alsoSupersede: retired } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
@@ -10951,15 +11735,23 @@ export class SessionsService {
       return ok(this.withMergeReviewEvidence(created.decision));
     }
     const decision = created.decision;
+    // The member requested this recommendation again, so its earlier correctable refusal is settled (#4065).
+    if (decision.resourceSnapshot.category === "follow_up_issue_publication" && decision.resourceSnapshot.recommendationId) {
+      const rootId = this.db.campaignRootForMember(sessionId);
+      if (rootId) this.db.campaignRecovery.retirePublicationRefusals(rootId, sessionId,
+        publicationRefusalCoordinate(sessionId, decision.resourceSnapshot.recommendationId));
+    }
     const approval = this.workflowDecisionApproval(decision);
-    if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
+    // A root's owner decision does not park it (#4064): its card waits for the owner while the root
+    // keeps working and campaign continuations keep reaching it.
+    if (!approval.async && child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     // Project the replacement before settling older occurrences. Otherwise a supersession after
     // swallowed Idle briefly restores Ready, clears the resume proof, and strands the new card.
     this.db.setPendingApproval(
       sessionId,
       appendPendingApproval(this.db.getSession(sessionId)?.pendingApproval, approval),
     );
-    this.db.updateSessionStatus(sessionId, "input_required", now);
+    if (!approval.async) this.db.updateSessionStatus(sessionId, "input_required", now);
     for (const occurrenceId of created.supersededOccurrenceIds) {
       const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
       if (!superseded) continue;
@@ -10976,6 +11768,158 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(controller.session);
     this.hub.sessionChangedById(sessionId);
     return ok(this.withMergeReviewEvidence(decision), 201);
+  }
+
+  /** The Full Control root the owner-decision routes serve (#4064), or why `session` is not one. */
+  private ownerDecisionRoot(session: SessionView | null): ServiceResult<SessionView> {
+    if (!session) return fail("session not found", 404);
+    const unsupported = this.capabilityFailure(session.runnerId, "ownerDecisions", "owner decisions");
+    if (unsupported) return unsupported;
+    const root = this.orchestratorCampaignController(session);
+    if (isTerminal(session.status) || session.orchestratorPolicy?.control?.mode !== "full_control" || !root ||
+        root === "refused" || root.id !== session.id || !session.parentControlPolicy || !campaignBoundaryCurrent(session)) {
+      return fail("Only a Full Control campaign's root Orchestrator can ask its owner or hand a decision to its owner. " +
+        "Elsewhere a person already sees the campaign's requests.", 409);
+    }
+    return ok(session);
+  }
+
+  /** A Full Control root asks its campaign's owner a decision the owner kept (#4064). The decision
+   * is always the person's: no agent can answer, approve or resolve it. Its card waits on the root
+   * without parking it, and the owner's choice comes back as the decision's resume prompt. */
+  createOwnerDecision(sessionId: string, request: CreateOwnerDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+    const root = this.ownerDecisionRoot(this.db.getSession(sessionId));
+    if (!root.ok) return failAs(root);
+    if (!request || typeof request !== "object" || Array.isArray(request) || Object.keys(request).some((key) =>
+      !["requestId", "resourceKey", "question", "options", "recommendedOptionId", "material"].includes(key))) {
+      return fail("an owner decision has a requestId, resourceKey, question, options, and optionally recommendedOptionId and material", 400);
+    }
+    const snapshot = { category: "owner_decision" as const, question: request.question, options: request.options,
+      ...(request.recommendedOptionId !== undefined ? { recommendedOptionId: request.recommendedOptionId } : {}),
+      ...(request.material !== undefined ? { material: request.material } : {}) };
+    const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
+    if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
+    // Full Control never asks anyone for credentials or sign-in, the owner included.
+    if (ownerDecisionProtected(normalized.data)) {
+      return fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
+        "created. Ask about the design without requesting a value, or continue without it.", 403);
+    }
+    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
+      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true });
+  }
+
+  /** A Full Control root hands one pending Orchestrator-owned occurrence (#4064), its own or a
+   * campaign member's, to the campaign's owner. One way: the occurrence becomes the person's, the
+   * root and every child are refused if they try to resolve it, and every later request for the
+   * same resource in the campaign is the person's too. Nothing about it can grant authority. */
+  handWorkflowDecisionToOwner(callerSessionId: string, occurrenceId: string, request: HandWorkflowDecisionToOwnerRequest,
+    canAccess: (sessionId: string) => boolean = () => true): ServiceResult<WorkflowDecisionView> {
+    const rooted = this.ownerDecisionRoot(this.db.getSession(callerSessionId));
+    if (!rooted.ok || !rooted.data) return failAs(rooted);
+    const root = rooted.data;
+    if (!boundedDecisionString(request?.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
+      return fail("a bounded nonempty reason is required", 400);
+    }
+    const requesterId = request.sessionId ?? callerSessionId;
+    if (!boundedDecisionString(requesterId, 256)) return fail("sessionId must be a nonempty session id", 400);
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    const requester = this.db.getSession(requesterId);
+    if (!decision || !requester || decision.sessionId !== requesterId || decision.controllingSessionId !== root.id ||
+        !canAccess(root.id) || !canAccess(requesterId) || !this.workflowDecisionRelationship(root.id, requesterId)) {
+      return fail("workflow decision not found", 404);
+    }
+    if (decision.ownerHandoff || decision.category === "owner_decision") {
+      return fail("this decision is already your campaign owner's", 409);
+    }
+    if (decision.status !== "pending") {
+      return this.supersededWorkflowDecisionRefusal(decision) ??
+        fail(`only a pending decision can be handed to the owner, and this one is ${decision.status}`, 409);
+    }
+    if (decision.authority !== "orchestrator") return fail("this decision already waits for a person", 409);
+    const policy = root.parentControlPolicy!;
+    if (policy.revision !== decision.policyRevision || !this.workflowDecisionAuthorityCurrent(root, policy, decision)) {
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: root.id } });
+      return fail("workflow decision authority was revoked or superseded", 409);
+    }
+    const now = Date.now();
+    const reason = request.reason.trim();
+    const control = root.orchestratorPolicy?.control;
+    const handed = this.db.handWorkflowDecisionToOwner(occurrenceId, { bySessionId: root.id, at: now, reason }, {
+      owner: "human", basis: "human_required", reason: "owner_kept", operation: decision.category,
+      ...(control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {}),
+    });
+    if (!handed) return fail("workflow decision changed concurrently; read it again", 409);
+    const card = this.workflowDecisionApproval(handed);
+    if (card.async) {
+      // The root's own card stops holding it: settle the pause it held, then keep the owner's card.
+      this.settleWorkflowDecisionPause(requesterId, occurrenceId, now);
+      this.db.setPendingApproval(requesterId, appendPendingApproval(this.db.getSession(requesterId)?.pendingApproval, card));
+    } else {
+      // A child still waits on the same occurrence; its card now names the person as its owner.
+      this.db.setPendingApproval(requesterId, appendPendingApproval(
+        removePendingRequest(this.db.getSession(requesterId)?.pendingApproval, occurrenceId), card));
+    }
+    this.recordWorkflowDecisionAudit(handed, "pending", { kind: "agent", id: root.id }, now, reason);
+    this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_owner_handoff",
+      sessionId: requesterId, controllingSessionId: root.id, occurrenceId, policyRevision: handed.policyRevision,
+      ...handed.authorityEvaluation }));
+    if (requesterId !== root.id) this.hub.sessionChangedById(requesterId);
+    this.publishCampaignAttentionTransition(root);
+    this.hub.sessionChangedById(root.id);
+    return ok(this.withMergeReviewEvidence(handed));
+  }
+
+  /** Whether the campaign's owner kept this resource (#4064): its root handed an occurrence for it
+   * to the owner. See ownerKeptTargets for what counts as the same resource. */
+  private ownerKept(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
+    snapshot: WorkflowDecisionResourceSnapshot): boolean {
+    const handed = this.db.ownerHandedWorkflowDecisions(controllerId);
+    if (!handed.length) return false;
+    const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
+    return handed.some((decision) =>
+      ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
+  }
+
+  /** A requester's new publication never silently replaces one a person owns (#4066). A request
+   * that would supersede the requester's own pending or approved person-owned publication is
+   * refused, naming it and the withdrawal route, and creates nothing. The one exception is a
+   * publication the server admitted for recommendation R (`admittedFromKey` is the key it was
+   * requested under): that retires the requester's person-owned publications for R, or under the
+   * same key when they name no recommendation, so its stale twin cannot be approved and published
+   * again. One naming another recommendation is never retired. Other categories are unchanged. */
+  private personOwnedPublicationGuard(sessionId: string, resourceKey: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, admittedFromKey: string | null,
+  ): { retire: string[] } | { refusal: ServiceResult<WorkflowDecisionView> } {
+    const retire: string[] = [];
+    for (const held of this.db.unconsumedWorkflowDecisionsForSession(sessionId)) {
+      if (held.category !== "follow_up_issue_publication" || held.authority !== "human" ||
+          held.resourceSnapshot.category !== "follow_up_issue_publication") continue;
+      const heldRecommendation = held.resourceSnapshot.recommendationId;
+      if (admittedFromKey !== null && snapshot.recommendationId && (heldRecommendation === snapshot.recommendationId ||
+          heldRecommendation === undefined && (held.resourceKey === admittedFromKey || held.resourceKey === resourceKey))) {
+        retire.push(held.occurrenceId);
+        continue;
+      }
+      if (held.resourceKey !== resourceKey) continue;
+      const next = held.status === "approved"
+        ? "It is approved: consume it to publish,"
+        : "Wait for the person's decision,";
+      return { refusal: { ok: false, status: 409, errorDetails: { code: "person_owned_publication_open", occurrenceId: held.occurrenceId },
+        error: `A person owns follow-up publication decision ${held.occurrenceId} (${held.status}) under resourceKey ${JSON.stringify(resourceKey)}, ` +
+          `and a new request would replace it without telling them. Nothing was created. ${next} or withdraw it first with ` +
+          `withdraw_workflow_decision (wollipog decision withdraw ${held.occurrenceId} --reason <text>) and request again.` } };
+    }
+    return { retire };
+  }
+
+  /** Why a superseded occurrence can no longer be resolved, naming what replaced it (#4066). */
+  private supersededWorkflowDecisionRefusal(decision: WorkflowDecisionView): ServiceResult<never> | null {
+    if (decision.status !== "superseded") return null;
+    return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded",
+      ...(decision.supersededBy ? { supersededBy: decision.supersededBy } : {}) },
+      error: `workflow decision ${decision.occurrenceId} was superseded by ${decision.supersededBy
+        ? `workflow decision ${decision.supersededBy}` : "a newer request for the same resource"} and can no longer be approved or denied` };
   }
 
   workflowDecision(sessionId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
@@ -11047,7 +11991,9 @@ export class SessionsService {
         !canAccess(parentSessionId) || !canAccess(childSessionId)) {
       return fail("workflow decision not found", 404);
     }
-    if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    if (decision.status !== "pending") {
+      return this.supersededWorkflowDecisionRefusal(decision) ?? fail("workflow decision is stale or already resolved", 409);
+    }
     if (resolution?.outcome === "approve" && decision.resourceSnapshot.category === "pr_merge") {
       const requester = this.db.getSession(childSessionId);
       const refused = requester && this.mergeReviewEvidenceRefusal(requester, decision.resourceSnapshot);
@@ -11081,6 +12027,13 @@ export class SessionsService {
     if (decision.authority !== authority) {
       return fail(`this workflow decision requires a ${decision.authority} response`, 403);
     }
+    // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
+    // other person's who can open the session.
+    if ((decision.category === "owner_decision" || decision.ownerHandoff ||
+        this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot)) &&
+        (authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(decision.controllingSessionId, actor.id))) {
+      return fail("Only the campaign's owner can decide a decision the owner kept", 403);
+    }
     if (authority === "orchestrator" && parentSessionId === childSessionId &&
         evaluateCampaignAuthority(currentParent, currentChild, this.db.getRunner(currentChild.runnerId)?.protocolVersion,
           decision.resourceSnapshot, currentPolicy, this.db.getRunner(currentParent.runnerId)?.protocolVersion,
@@ -11105,6 +12058,9 @@ export class SessionsService {
     if (resolution?.delegatedVideoEvidence !== undefined && (authority !== "orchestrator" || !this.workflowVideoApprovals)) {
       return fail("Delegated video approval requires an admitted current managed-media runtime and Orchestrator owner", 403);
     }
+    if (resolution?.delegatedImageReview !== undefined && authority !== "orchestrator") {
+      return fail("Delegated image approval requires the Orchestrator owner", 403);
+    }
     if (decision.resourceSnapshot.category === "review_round_extension" && resolution?.outcome === "approve") {
       const refused = this.reviewRoundExtensionRefusal(currentChild, decision.resourceKey, decision.resourceSnapshot);
       if (refused) {
@@ -11123,8 +12079,15 @@ export class SessionsService {
     // Repeating evidence identifiers proves nothing. An Orchestrator approval is backed only by
     // receipts the server itself recorded when it delivered each exact artifact to this reviewer.
     let reviewReceipts: UiEvidenceReviewReceipt[] = [];
+    // A delegated image approval (#4074) rests on the reviewer's receipts instead, and only once the
+    // server's own records prove that reviewer's approving verdict for this exact occurrence.
+    const delegatedImage = normalizedResolution.delegatedImageReview;
     if (decision.resourceSnapshot.category === "ui_evidence_approval" && authority === "orchestrator") {
-      reviewReceipts = this.db.validUiEvidenceReviewReceipts(occurrenceId, parentSessionId, now);
+      if (delegatedImage) {
+        const refused = this.delegatedImageApprovalRefusal(decision, delegatedImage, now);
+        if (refused) return fail(refused, 409);
+      }
+      reviewReceipts = this.db.validUiEvidenceReviewReceipts(occurrenceId, delegatedImage?.reviewerSessionId ?? parentSessionId, now);
       const unreviewed = decision.resourceSnapshot.evidence.filter((item) =>
         !(normalizedResolution.delegatedVideoEvidence?.some((reference) => reference.evidenceId === item.evidenceId)) && !reviewReceipts.some((receipt) =>
         receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 &&
@@ -11247,6 +12210,7 @@ export class SessionsService {
       normalizedResolution.childMessage,
       oweResume,
       normalizedResolution.delegatedVideoEvidence,
+      delegatedImage,
     );
     let resolved: WorkflowDecisionView | null;
     try {
@@ -11254,6 +12218,7 @@ export class SessionsService {
         ? this.workflowVideoApprovals!.resolve(decision, normalizedResolution, now, commitResolution) : commitResolution();
     } catch { return fail("Original video approval lacks current complete worker and image provenance", 409); }
     if (!resolved) return fail("workflow decision was resolved concurrently", 409);
+    if (delegatedImage) this.db.delegatedImageReviews.consume(delegatedImage.reviewId, now);
     this.db.consumeUiEvidenceReviewReceipts(occurrenceId, now);
     if (resolvedBySelf) this.settleWorkflowDecisionPause(childSessionId, occurrenceId, now);
     else this.settleResolvedWorkflowDecision(resolved, now, oweResume ? "held" : null);
@@ -11513,7 +12478,12 @@ export class SessionsService {
         this.revokeWorkflowDecision(decision, { reason: "consume_refused_precondition", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(evidenceRefusal, 409);
       }
-      if (!this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+      // Read the controller again: the campaign's issue scope may have changed during the forge
+      // reads above, and a merge closing an issue it no longer names is not the Orchestrator's (#4062).
+      const armingParent = this.db.getSession(parent.id);
+      const armingPolicy = armingParent?.parentControlPolicy;
+      if (!armingParent || !armingPolicy || armingPolicy.revision !== decision.policyRevision ||
+          !this.workflowDecisionAuthorityCurrent(armingParent, armingPolicy, decision)) {
         this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
         return fail("Merge review evidence or authority changed while arming; request a new exact merge decision.", 409);
       }
@@ -11549,6 +12519,232 @@ export class SessionsService {
     this.hub.sessionChangedById(sessionId);
     this.hub.sessionChangedById(parent.id);
     return ok(this.withMergeReviewEvidence(consumed));
+  }
+
+  /**
+   * Wollipog performs one approved forge action itself (#4067), so an approval never depends on the
+   * requester's provider agreeing to run its command: Claude Code's `auto` classifier, for one,
+   * decides inline and can refuse an approved command without the runner ever seeing a prompt.
+   * The classifier is not touched; the requester's own commands stay subject to it.
+   *
+   * Only the requester may ask, only for its own approved `merged_branch_deletion` that names the
+   * merged pull request and head, or its own approved and armed GitHub `pr_merge`, under every
+   * check consumption applies (live ancestry, unchanged policy revision, current authority, and for
+   * a merge its review evidence, reviewed head and closing references, re-read from GitHub). The
+   * child's runner then performs exactly that action through the child's own forge login.
+   *
+   * One approval, one action: a success consumes it once (a deletion through ordinary consumption,
+   * an enqueue against a one-occurrence receipt, a merged head against the forge receipt nothing
+   * else may reuse). A refusal proving the snapshot stale revokes it. A refusal that changed nothing
+   * leaves it approved, so it can be retried or reconciled, within FORGE_DECISION_ACTION_MAX_ATTEMPTS.
+   * An uncertain enqueue is never replayed; it is reconciled once the forge reads MERGED. A deletion
+   * its requester consumed before its own command was refused may still be performed here, because
+   * the compare-and-delete pinned to the approved head cannot do more than the approval allowed.
+   */
+  async executeWorkflowDecision(
+    sessionId: string,
+    occurrenceId: string,
+    request: ExecuteWorkflowDecisionRequest,
+    canAccess: (sessionId: string) => boolean = () => true,
+  ): Promise<ServiceResult<WorkflowDecisionView>> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== sessionId || !canAccess(sessionId)) return fail("workflow decision not found", 404);
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "merged_branch_deletion" && snapshot.category !== "pr_merge") {
+      return fail("Wollipog performs only an approved merged_branch_deletion or an armed pr_merge", 403);
+    }
+    if (typeof request?.resourceDigest !== "string" || request.resourceDigest !== decision.resourceDigest) {
+      return fail("the resource digest does not match this decision; read get_workflow_decision and pass its resourceDigest", 409);
+    }
+    const kind: WorkflowDecisionForgeAction["kind"] = snapshot.category === "pr_merge" ? "pr_merge_enqueue" : "branch_deletion";
+    const performed = decision.forgeAction && (FORGE_DECISION_ACTION_SUCCESSES as ReadonlySet<string>).has(decision.forgeAction.outcome);
+    const consumedDeletion = kind === "branch_deletion" && decision.status === "consumed" && !performed;
+    if (decision.status !== "approved" && !consumedDeletion) {
+      return fail(performed ? `Wollipog already performed this decision (${decision.forgeAction!.outcome})`
+        : `workflow decision cannot be executed from ${decision.status} state`, 409);
+    }
+    const child = this.db.getSession(sessionId);
+    const parent = this.db.getSession(decision.controllingSessionId);
+    if (child) {
+      const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
+      if (unsupported) return unsupported;
+    }
+    const authorityCurrent = (): boolean => {
+      const currentChild = this.db.getSession(sessionId);
+      const currentParent = this.db.getSession(decision.controllingSessionId);
+      const policy = currentParent?.parentControlPolicy;
+      // The occurrence itself must still stand: one superseded, revoked or settled meanwhile (for
+      // example by a new request for the same resource during the forge read) never dispatches.
+      const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+      return Boolean(latest && latest.status === decision.status && latest.resourceDigest === decision.resourceDigest &&
+        currentChild && currentParent && policy && !isTerminal(currentChild.status) && !isTerminal(currentParent.status) &&
+        canAccess(currentChild.id) && canAccess(currentParent.id) &&
+        this.workflowDecisionRelationship(currentParent.id, currentChild.id) && policy.revision === decision.policyRevision &&
+        this.workflowDecisionAuthorityCurrent(currentParent, policy, latest));
+    };
+    if (!child || !parent || !authorityCurrent()) {
+      if (decision.status === "approved") {
+        this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+      }
+      return fail("workflow decision authority was revoked or ancestry changed before the action", 409);
+    }
+    let action: ForgeDecisionAction;
+    if (snapshot.category === "merged_branch_deletion") {
+      if (campaignRepositoryLocation(snapshot.repository)?.forge === "gitlab") {
+        return fail("Wollipog performs branch deletions on GitHub only; nothing was deleted", 409);
+      }
+      if (snapshot.pullRequest === undefined || snapshot.headSha === undefined) {
+        return fail("this deletion decision does not name its merged pullRequest and headSha, which Wollipog's compare-and-delete " +
+          "is pinned to; withdraw it and request a new merged_branch_deletion that includes both", 409);
+      }
+      action = { kind: "branch_deletion", repository: snapshot.repository, branch: snapshot.branch, pullRequest: snapshot.pullRequest,
+        headSha: snapshot.headSha, mergeCommitSha: snapshot.mergeCommitSha };
+    } else {
+      const command = canonicalPrMergeEnqueueCommand(snapshot);
+      const admission = decision.actionAdmission;
+      if (snapshot.mergeMethod !== undefined) return fail("Wollipog performs GitHub enqueues only; nothing was enqueued", 409);
+      if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
+          admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
+        return fail("arm the merge first: consume_workflow_decision with its exact pr_merge_enqueue action, then execute it", 409);
+      }
+      const refused = this.mergeReviewEvidenceRefusal(child, snapshot);
+      const run = this.db.reviewSessions.history(child.id, { repository: snapshot.repository, number: snapshot.pullRequest });
+      if (refused || (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha)) {
+        this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        return fail(refused ?? "the current pull request head needs a valid review before merge", 409);
+      }
+      action = { kind: "pr_merge_enqueue", repository: snapshot.repository, pullRequest: snapshot.pullRequest, headSha: snapshot.headSha };
+    }
+    if (!this.hub.isRunnerOnline(child.runnerId)) return fail("the session's runner is offline; nothing was performed", 409);
+    if (this.forgeActionsInFlight.has(occurrenceId)) return fail("Wollipog is already performing this decision", 409);
+    this.forgeActionsInFlight.add(occurrenceId);
+    try {
+      const begun = this.db.beginWorkflowDecisionForgeAction(occurrenceId, kind, Date.now(), FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS * 2);
+      if (!begun) {
+        const current = this.db.workflowDecisionByOccurrence(occurrenceId);
+        return fail(current?.forgeAction?.outcome === "uncertain" && kind === "pr_merge_enqueue"
+          ? "the earlier enqueue may have run, so it is not replayed: reconcile_workflow_decision once the pull request reads MERGED"
+          : "this decision has no attempt left, is being performed, or was already performed; read get_workflow_decision", 409);
+      }
+      const finish = (outcome: WorkflowDecisionForgeAction["outcome"], refusal?: WorkflowDecisionForgeAction["refusal"]) => {
+        this.db.recordWorkflowDecisionForgeAction(occurrenceId, { ...begun, outcome, ...(refusal ? { refusal } : {}), updatedAt: Date.now() });
+      };
+      if (snapshot.category === "pr_merge") {
+        // The description can change after arming, so GitHub is read again, as arming did (#3713).
+        const checked = await this.githubMergeClosures(child, snapshot);
+        if (!checked.ok) {
+          const reason: ForgeDecisionActionRefusalReason = checked.revoke ? "closure_mismatch" : "forge_unavailable";
+          finish("refused", { reason, summary: boundedForgeSummary(checked.message) });
+          if (checked.revoke) this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
+      if (!authorityCurrent()) {
+        finish("refused", { reason: "runner_unavailable", summary: "Authority changed while the action was being prepared; nothing was performed." });
+        const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+        if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: sessionId } });
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      // The review run may have moved during the forge read too: an uncited merge is only as good as
+      // the run's last valid head, checked again here with nothing awaited before dispatch.
+      if (snapshot.category === "pr_merge") {
+        const currentChild = this.db.getSession(sessionId)!;
+        const refused = this.mergeReviewEvidenceRefusal(currentChild, snapshot);
+        const run = this.db.reviewSessions.history(sessionId, { repository: snapshot.repository, number: snapshot.pullRequest });
+        if (refused || (!snapshot.reviewSessionId && run.epoch > 0 && run.lastValid?.headSha !== snapshot.headSha)) {
+          finish("refused", { reason: "pull_request_mismatch",
+            summary: boundedForgeSummary(refused ?? "The review run moved to another head; the current head needs a valid review before merge.") });
+          const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+          if (latest?.status === "approved") this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
+      const requestId = `forge_decision_action_${randomUUID()}`;
+      let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
+      try {
+        answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "forge_decision_action", requestId, sessionId, occurrenceId, action,
+        }, FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS) as unknown as Partial<ForgeDecisionActionResultMessage>;
+      } catch (error) {
+        if (isRunnerRequestNotSentError(error)) {
+          finish("refused", { reason: "runner_unavailable", summary: "The session's runner could not be asked; nothing was performed." });
+          return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+        }
+      }
+      const valid = answer?.type === "forge_decision_action_result" && answer.sessionId === sessionId &&
+        answer.occurrenceId === occurrenceId && typeof answer.outcome === "string";
+      const outcome = valid ? answer!.outcome! : "uncertain";
+      const allowed: ReadonlySet<string> = kind === "branch_deletion"
+        ? new Set(["deleted", "already_deleted", "refused", "uncertain"])
+        : new Set(["enqueued", "already_queued", "already_merged", "refused", "uncertain"]);
+      if (!allowed.has(outcome)) {
+        finish("uncertain");
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      if (outcome === "refused") {
+        const reason = FORGE_DECISION_ACTION_REFUSAL_REASONS.includes(answer!.refusal?.reason as ForgeDecisionActionRefusalReason)
+          ? answer!.refusal!.reason : "forge_refused";
+        finish("refused", { reason, summary: boundedForgeSummary(answer!.refusal?.summary) });
+        const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+        if (FORGE_DECISION_ACTION_STALE_REFUSALS.has(reason) && latest?.status === "approved") {
+          this.revokeWorkflowDecision(latest, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
+        }
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      if (outcome === "uncertain") {
+        finish("uncertain");
+        return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+      }
+      finish(outcome);
+      const now = Date.now();
+      const latest = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (latest?.status === "approved") {
+        const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-action" };
+        let consumed: WorkflowDecisionView | null;
+        if (snapshot.category === "pr_merge" && outcome === "already_merged") {
+          consumed = this.consumeForgeAttestedMerge(latest, snapshot, { forgeHeadSha: snapshot.headSha });
+        } else if (snapshot.category === "pr_merge") {
+          // One enqueue per occurrence; a later re-approved enqueue of the same head is its own action.
+          const receiptDigest = auditDigest({ transport: "wollipog-enqueue", occurrenceId, repository: snapshot.repository,
+            pullRequest: snapshot.pullRequest, headSha: snapshot.headSha })!;
+          const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(sessionId, occurrenceId,
+            latest.actionAdmission!.commandDigest, receiptDigest, now, { forgeAttested: true });
+          consumed = reconciled?.decision ?? null;
+          if (reconciled) {
+            this.recordWorkflowDecisionAudit(reconciled.decision, "consumed", actor, now);
+            this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
+          }
+        } else {
+          consumed = this.db.consumeWorkflowDecision(occurrenceId, now);
+          if (consumed) this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+        }
+        if (consumed) this.retireResumeConsumedByRequester(consumed, now);
+        else this.log.warn(`forge action ${outcome} for ${occurrenceId} took effect but its approval could not be consumed`);
+      }
+      if (snapshot.category === "merged_branch_deletion" && snapshot.pullRequest !== undefined) {
+        this.refreshMergedBranchObservation(sessionId, snapshot.repository, snapshot.pullRequest);
+      }
+      return this.forgeActionResult(sessionId, parent.id, occurrenceId);
+    } finally {
+      this.forgeActionsInFlight.delete(occurrenceId);
+    }
+  }
+
+  private forgeActionResult(sessionId: string, parentId: string, occurrenceId: string): ServiceResult<WorkflowDecisionView> {
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId)!;
+    this.log.info(JSON.stringify({ event: "forge_decision_action_result", sessionId, occurrenceId,
+      kind: decision.forgeAction?.kind, outcome: decision.forgeAction?.outcome, status: decision.status,
+      ...(decision.forgeAction?.refusal ? { reason: decision.forgeAction.refusal.reason } : {}) }));
+    this.hub.sessionChangedById(sessionId);
+    this.hub.sessionChangedById(parentId);
+    return ok(this.withMergeReviewEvidence(decision));
+  }
+
+  /** Read the deleted branch's pull request again so the campaign sees it gone (#4067). */
+  private refreshMergedBranchObservation(sessionId: string, repository: string, pullRequest: number): void {
+    const campaign = this.db.campaignAncestryRoot(sessionId);
+    if (typeof campaign !== "object" || !campaign.hasPolicy || !this.campaignForgeReadNow) return;
+    void this.campaignForgeReadNow(campaign.id, [{ repository, number: pullRequest }]).catch(() => null);
   }
 
   /**
@@ -11659,6 +12855,11 @@ export class SessionsService {
   ): Promise<ServiceResult<WorkflowDecisionView>> {
     const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
     if (!decision || decision.sessionId !== sessionId) return fail("workflow decision not found", 404);
+    if (decision.status === "superseded" && decision.supersededBy) {
+      return { ok: false, status: 409, errorDetails: { code: "workflow_decision_superseded", supersededBy: decision.supersededBy },
+        error: `workflow decision ${occurrenceId} was superseded by workflow decision ${decision.supersededBy}; ` +
+          "it is settled and has nothing left to reconcile" };
+    }
     if (decision.status !== "approved" &&
         !this.db.isRecoverableWorkflowDecisionActionRevocation(sessionId, occurrenceId)) {
       return fail(`workflow decision cannot be reconciled from ${decision.status} state`, 409);
@@ -11695,7 +12896,8 @@ export class SessionsService {
         admission.armedAt < 1) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
     }
-    if (child.driver === "claude-code") {
+    // An enqueue Wollipog ran itself left no provider receipt in any harness, so the forge settles it.
+    if (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) {
       const proven = await this.forgeAttestedMergeProof(child, decision, normalized.data);
       if (!proven.ok) return fail(proven.error!, 409);
       const current = this.forgeAttestedMergeAuthority(decision, true, canAccess);
@@ -11783,16 +12985,18 @@ export class SessionsService {
       itemId: proof.providerItemId,
     })!;
     const now = Date.now();
-    const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
+    const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       sessionId,
       occurrenceId,
       admission.commandDigest,
       receiptDigest,
       now,
     );
-    if (!consumed) return fail("workflow action proof was already used or the decision changed", 409);
+    if (!reconciled) return fail("workflow action proof was already used or the decision changed", 409);
+    const consumed = reconciled.decision;
     const actor: GovernanceActor = { kind: "system", id: "workflow-decision-action-reconciliation" };
     this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+    this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.retireResumeConsumedByRequester(consumed, now);
     this.recordGovernanceAudit(
       child,
@@ -12089,7 +13293,12 @@ export class SessionsService {
     const requester = this.db.getSession(childSessionId);
     return requester ? evaluateCampaignAuthority(controller, requester,
       this.db.getRunner(requester.runnerId)?.protocolVersion, snapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
-      this.campaignPeerContracts(controller, requester.id)).owner : "human";
+      this.campaignPeerContracts(controller, requester.id), this.reviewExtensionCap(requester.id, snapshot)).owner : "human";
+  }
+
+  /** #4075: the durable per-pull-request cap fact a review_round_extension's owner depends on. */
+  private reviewExtensionCap(requesterSessionId: string, snapshot: WorkflowDecisionResourceSnapshot): "within" | "exceeded" | undefined {
+    return snapshot.category === "review_round_extension" ? this.db.reviewExtensionCap(requesterSessionId, snapshot) : undefined;
   }
 
   /** Whether the Orchestrator can inspect every evidence item itself, before Full Control routing. */
@@ -12230,9 +13439,15 @@ export class SessionsService {
   ): boolean {
     if (decision.category === "automation_creation") return decision.authority === "human" &&
       decision.controllingSessionId === decision.sessionId;
+    // A decision the owner kept (#4064) stays the person's whatever the boundary would now delegate.
+    // An Orchestrator-owned occurrence for a resource the owner kept (one requested before the
+    // handoff) is never current: nobody acting for the campaign can approve or consume it.
+    const ownerKept = decision.category === "owner_decision" ||
+      this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot);
+    if (ownerKept && decision.authority !== "human") return false;
     // Human scope approval intentionally invalidates prior standing authorization. The
     // independent human issue routes remain usable under the current workflow policy.
-    if (decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
+    if (!ownerKept && decision.authority === "human" && ["campaign_issue_scope", "issue_closure", "campaign_follow_up_admission"].includes(decision.category)) {
       return this.evaluateWorkflowDecisionAuthority(controller, policy, decision.sessionId, decision.resourceSnapshot).effectiveOwner === "human";
     }
     const requester = this.db.getSession(decision.sessionId);
@@ -12243,7 +13458,11 @@ export class SessionsService {
           decision.resourceSnapshot, policy, this.db.getRunner(controller.runnerId)?.protocolVersion,
           this.campaignPeerContracts(controller, requester.id)).boundaryRevision !== decision.authorityEvaluation.boundaryRevision ||
         !campaignBoundaryCurrent(controller))) return false;
+    if (ownerKept) return true;
     if (decision.category === "ui_evidence_approval" && decision.authority === "human") return true;
+    // Likewise a person's review round extension stays theirs when Full Control could now own it
+    // within the cap (#4075): a human decision never broadens authority.
+    if (decision.category === "review_round_extension" && decision.authority === "human") return true;
     if (decision.status === "approved" && this.uiEvidenceApprovalNeedsDirectRoute(decision, "approve") &&
         !this.uiEvidenceDirectRouteCurrent(controller, policy, decision)) return false;
     return this.evaluateWorkflowDecisionAuthority(
@@ -12377,6 +13596,382 @@ export class SessionsService {
     return ok({ receipt, mimeType: item.mediaType!, sizeBytes: bytes.byteLength, data: bytes.toString("base64") });
   }
 
+  /** Hand every image of a pending descendant UI evidence decision this root Orchestrator owns to a
+   * managed reviewer Session with a fresh context (#4074). The reviewer is created here, by the
+   * server, on the root's own runner, agent and model, as a budget-accounted child of the root, and
+   * receives only a pinned review prompt and two tools. Nothing here changes who owns the decision:
+   * the Orchestrator still resolves it, backed by the reviewer's server-recorded receipts and verdict.
+   * Every gate that guards direct review guards this too, and only evidence the Orchestrator could
+   * inspect itself is delegated, so evidence never reaches a provider direct review would not. */
+  prepareDescendantImageEvidenceReview(
+    parentSessionId: string,
+    childSessionId: string,
+    occurrenceId: string,
+    brief: string,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<DelegatedImageReviewView> {
+    const parent = this.db.getSession(parentSessionId);
+    if (!parent) return fail("session not found", 404);
+    const rootCampaign = this.orchestratorCampaignController(parent);
+    if (rootCampaign === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    if (rootCampaign && rootCampaign.id !== parent.id) {
+      return fail("Parent Control for this descendant belongs to the root campaign Orchestrator", 403);
+    }
+    if (typeof brief !== "string" || !brief.trim() || brief.length > DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS) {
+      return fail(`brief must state the child's claims and the UI acceptance criteria in at most ${DELEGATED_IMAGE_REVIEW_BRIEF_MAX_CHARS} characters`, 400);
+    }
+    const decision = this.db.workflowDecisionByOccurrence(occurrenceId);
+    if (!decision || decision.sessionId !== childSessionId || decision.controllingSessionId !== parentSessionId ||
+        decision.resourceSnapshot.category !== "ui_evidence_approval" ||
+        !this.workflowDecisionRelationship(parentSessionId, childSessionId) ||
+        !canAccess(parentSessionId) || !canAccess(childSessionId)) {
+      return fail("workflow decision not found", 404);
+    }
+    if (decision.status !== "pending") return fail("workflow decision is stale or already resolved", 409);
+    const child = this.db.getSession(childSessionId);
+    const policy = parent.parentControlPolicy;
+    if (!child || isTerminal(child.status) || isTerminal(parent.status) || !policy ||
+        policy.revision !== decision.policyRevision ||
+        !this.workflowDecisionAuthorityCurrent(parent, policy, decision)) {
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: parentSessionId } });
+      return fail("workflow decision authority was revoked or superseded", 409);
+    }
+    if (decision.authority !== "orchestrator") {
+      return fail(`this workflow decision requires a ${decision.authority} response`, 403);
+    }
+    const snapshot = decision.resourceSnapshot;
+    const direct = "Use review_descendant_ui_evidence to inspect the images directly.";
+    if (snapshot.videoReview || snapshot.evidence.some((item) => !item.artifactId || !item.mediaType?.startsWith("image/"))) {
+      return fail(`Only decisions whose evidence is all artifact-backed images can be handed to an image reviewer. ${direct}`, 409);
+    }
+    // Delegation never widens evidence access: the reviewer may see exactly what the Orchestrator
+    // could inspect itself right now, on the same provider and model.
+    if (this.directWorkflowDecisionAuthority(parent, policy, childSessionId, snapshot).effectiveOwner !== "orchestrator") {
+      return fail("The Orchestrator cannot inspect this evidence itself, so it cannot hand it to a reviewer either. Ask the child for screenshots attached as Session artifacts, or deny the claim as unproven.", 409);
+    }
+    const runner = this.db.getRunner(parent.runnerId);
+    if (!runnerSupportsProtocol(runner?.protocolVersion, "delegatedImageEvidenceReview")) {
+      return capabilityFail(runnerCapabilityRequirementError(runner?.protocolVersion, "delegatedImageEvidenceReview",
+        "delegated image evidence review"));
+    }
+    // The reviewer launch restricts the harness to its two review tools, which only Claude Code
+    // supports today. Other Orchestrators keep direct review.
+    if (parent.driver !== "claude-code" || !parent.agentId) {
+      return fail(`This Orchestrator's harness cannot host a delegated image reviewer. ${direct}`, 409);
+    }
+    if (!this.hub.isRunnerOnline(parent.runnerId)) {
+      return fail(`The Orchestrator's runner is offline, so no image reviewer can start. ${direct}`, 409);
+    }
+    const now = Date.now();
+    // The reviewer sees exactly the audience its root has, which must not reach beyond the child's.
+    const rootScope = this.db.sessionScope(parent.id), childScope = this.db.sessionScope(childSessionId);
+    if (!rootScope || !childScope || !this.db.scopeAudienceContainedWithMembership(rootScope, childScope)) {
+      return fail(`This Orchestrator's audience reaches beyond the child's, so its evidence cannot go to a reviewer. ${direct}`, 409);
+    }
+    // A live review is returned as it is. One that can no longer back an approval (its reviewer ended
+    // without a verdict, or its verdict's receipts expired) is retired, and a fresh reviewer replaces it.
+    const live = this.db.delegatedImageReviews.liveForOccurrence(occurrenceId);
+    if (live) {
+      const settled = this.settleDelegatedImageReview(live, now);
+      if (settled.state === "running" || settled.state === "verdict") {
+        return ok(this.delegatedImageReviewViewOf(settled, decision));
+      }
+    }
+    const evidence = snapshot.evidence.map((item) => ({ evidenceId: item.evidenceId, artifactId: item.artifactId!, sha256: item.sha256 }));
+    const review: NewDelegatedImageReview = {
+      reviewId: `uiimgreview_${randomUUID().replace(/-/gu, "")}`,
+      occurrenceId,
+      rootSessionId: parentSessionId,
+      childSessionId,
+      policyRevision: decision.policyRevision,
+      resourceDigest: decision.resourceDigest,
+      evidence,
+      briefSha256: createHash("sha256").update(brief).digest("hex"),
+    };
+    const workspacePath = this.db.getAdHocWorkspacePath(parent.id) ?? undefined;
+    const created = this.createSession({
+      runnerId: parent.runnerId,
+      workspaceId: parent.workspaceId ?? "",
+      ...(workspacePath ? { workspacePath } : {}),
+      agentId: parent.agentId,
+      title: `UI Evidence Review of ${child.title}`.slice(0, 120),
+      prompt: delegatedImageReviewPrompt(evidence.map((item) => item.evidenceId), brief),
+      useWorktree: false,
+      // No permission mode: the runner's reviewer launch replaces the provider policy with its own
+      // (no built-in tools, only the two review tools, never asking), whatever the installation offers.
+      config: {
+        ...(parent.model ? { model: parent.model } : {}),
+        ...(parent.effort ? { effort: parent.effort } : {}),
+        // A bounded review: one delivery per image, one verdict, and a little room to retry.
+        costBudgetUsd: DELEGATED_IMAGE_REVIEW_COST_BUDGET_USD,
+        maxToolCalls: evidence.length * 2 + 8,
+      },
+    }, undefined, this.db.sessionScope(parent.id) ?? undefined, true, false, true,
+    { parentSessionId: parent.id, delegatedImageReview: review });
+    if (!created.ok || !created.data) {
+      return { ...failAs<DelegatedImageReviewView>(created),
+        error: `The image reviewer could not be started: ${created.error ?? "unknown reason"}. ${direct}` };
+    }
+    // A "review" stage entry, so it never displaces the child's request as the card's provenance.
+    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: parentSessionId }, now, undefined, undefined, "review");
+    this.log.info(JSON.stringify({ event: "delegated_image_review_prepared", sessionId: parentSessionId, childSessionId,
+      occurrenceId, reviewId: review.reviewId, reviewerSessionId: created.data.id, evidenceCount: evidence.length }));
+    this.hub.sessionChangedById(parentSessionId);
+    return ok(this.delegatedImageReviewViewOf(this.db.delegatedImageReviews.get(review.reviewId)!, decision), 201);
+  }
+
+  /** The Orchestrator's read of one of its delegated image reviews: the verdict as bounded text, and
+   * the exact reference to resolve with only while that verdict can still back an approval. */
+  delegatedImageReviewForOrchestrator(
+    parentSessionId: string,
+    reviewId: string,
+    canAccess: (sessionId: string) => boolean,
+  ): ServiceResult<DelegatedImageReviewView> {
+    const review = typeof reviewId === "string" ? this.db.delegatedImageReviews.get(reviewId) : null;
+    if (!review || review.rootSessionId !== parentSessionId || !canAccess(parentSessionId) ||
+        !canAccess(review.childSessionId)) {
+      return fail("delegated image review not found", 404);
+    }
+    return ok(this.delegatedImageReviewViewOf(review, this.db.workflowDecisionByOccurrence(review.occurrenceId)));
+  }
+
+  /** Ends a live review that can never back an approval, and returns its current record. */
+  private settleDelegatedImageReview(review: DelegatedImageReviewRecord, now: number): DelegatedImageReviewRecord {
+    let reason: string | null = null;
+    if (review.state === "running") {
+      // A reviewer whose turn or Session ended without a verdict will never submit one.
+      const reviewer = this.db.getSession(review.reviewerSessionId);
+      if (!reviewer || isTerminal(reviewer.status) || reviewer.status === "idle") reason = "reviewer_finished_without_verdict";
+    } else if (review.state === "verdict" && review.verdict) {
+      // A verdict rests on its receipts. Once any of them expires the reviewer cannot look again
+      // (nothing is delivered after a verdict), so the review is retired for a fresh one (#4074).
+      const current = this.db.validUiEvidenceReviewReceipts(review.occurrenceId, review.reviewerSessionId, now);
+      if (review.verdict.receiptIds.some((receiptId) => !current.some((receipt) => receipt.receiptId === receiptId))) {
+        reason = "verdict_expired";
+      }
+    }
+    if (!reason) return review;
+    this.db.delegatedImageReviews.end(review.reviewId, reason, now);
+    return this.db.delegatedImageReviews.get(review.reviewId) ?? review;
+  }
+
+  private delegatedImageReviewViewOf(review: DelegatedImageReviewRecord, decision: WorkflowDecisionView | null): DelegatedImageReviewView {
+    const current = this.settleDelegatedImageReview(review, Date.now());
+    const approvable = current.state === "verdict" && current.verdict?.recommendation === "approve" && decision !== null &&
+      this.delegatedImageApprovalRefusal(decision, {
+        reviewId: current.reviewId, verdictId: current.verdict.verdictId, reviewerSessionId: current.reviewerSessionId,
+      }, Date.now()) === null;
+    return this.db.delegatedImageReviews.view(current, approvable);
+  }
+
+  /** Why a delegated image reference cannot back an approval of this exact pending decision, or null
+   * with the reviewer's current receipts for every item. Each fact comes from the server's own
+   * records: the caller supplies only identifiers, and a mismatch in any of them refuses. */
+  private delegatedImageApprovalRefusal(
+    decision: WorkflowDecisionView,
+    reference: DelegatedImageReviewReference,
+    now: number,
+  ): string | null {
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "ui_evidence_approval" || decision.authority !== "orchestrator" || decision.status !== "pending") {
+      return "a delegated image review backs only a pending Orchestrator-owned UI evidence decision";
+    }
+    const review = this.db.delegatedImageReviews.get(reference.reviewId);
+    const verdict = review?.verdict;
+    if (!review || !verdict || review.occurrenceId !== decision.occurrenceId ||
+        review.rootSessionId !== decision.controllingSessionId || review.childSessionId !== decision.sessionId ||
+        review.reviewerSessionId !== reference.reviewerSessionId || verdict.reviewerSessionId !== reference.reviewerSessionId ||
+        verdict.verdictId !== reference.verdictId) {
+      return "the delegated image review does not identify an actual reviewer verdict for this decision";
+    }
+    if (review.state !== "verdict") return `the delegated image review is ${review.state}${review.endedReason ? ` (${review.endedReason})` : ""}`;
+    if (review.verdictSha256 !== delegatedImageVerdictSha256(verdict)) return "the delegated image review verdict is invalid";
+    if (verdict.recommendation !== "approve") return "the reviewer recommended denial, so its verdict cannot back an approval";
+    // The producing child, and the Orchestrator itself, can never be the reviewer.
+    const reviewer = this.db.getSession(review.reviewerSessionId);
+    if (review.reviewerSessionId === decision.sessionId || review.reviewerSessionId === decision.controllingSessionId ||
+        !reviewer || reviewer.parentSessionId !== decision.controllingSessionId) {
+      return "the delegated image reviewer is not an independent reviewer of this decision";
+    }
+    if (!this.delegatedImageReviewerAudienceCurrent(review)) {
+      return "the delegated image reviewer's audience no longer sits inside the decision's audience";
+    }
+    if (review.policyRevision !== decision.policyRevision || review.resourceDigest !== decision.resourceDigest ||
+        review.evidence.length !== snapshot.evidence.length || snapshot.evidence.some((item) => !review.evidence.some((bound) =>
+          bound.evidenceId === item.evidenceId && bound.artifactId === item.artifactId && bound.sha256 === item.sha256))) {
+      return "the decision changed after the image review was prepared";
+    }
+    const receipts = this.db.validUiEvidenceReviewReceipts(decision.occurrenceId, review.reviewerSessionId, now);
+    const unreviewed = snapshot.evidence.filter((item) => !receipts.some((receipt) =>
+      receipt.evidenceId === item.evidenceId && receipt.sha256 === item.sha256 && receipt.artifactId === item.artifactId &&
+      receipt.childSessionId === decision.sessionId && receipt.policyRevision === decision.policyRevision &&
+      verdict.receiptIds.includes(receipt.receiptId)));
+    if (unreviewed.length) {
+      return `the reviewer has no current review receipt for ${unreviewed.map((item) => JSON.stringify(item.evidenceId)).join(", ")}; ` +
+        "receipts expire after an hour, so prepare a fresh review";
+    }
+    return null;
+  }
+
+  private delegatedImageReviewerAudienceCurrent(review: DelegatedImageReviewRecord,
+    canAccess: (sessionId: string) => boolean = () => true): boolean {
+    const reviewerScope = this.db.sessionScope(review.reviewerSessionId);
+    const rootScope = this.db.sessionScope(review.rootSessionId);
+    const childScope = this.db.sessionScope(review.childSessionId);
+    return canAccess(review.rootSessionId) && canAccess(review.childSessionId) &&
+      Boolean(reviewerScope && rootScope && childScope) &&
+      this.db.scopeAudienceContainedWithMembership(reviewerScope!, rootScope!) &&
+      this.db.scopeAudienceContainedWithMembership(reviewerScope!, childScope!);
+  }
+
+  /** Every reviewer call re-runs the gates that guard direct review, against the decision exactly
+   * as it was when the review was prepared. Anything stale ends the review or revokes the decision. */
+  private delegatedImageReviewerGate(reviewerSessionId: string, canAccess: (sessionId: string) => boolean): ServiceResult<{
+    review: DelegatedImageReviewRecord;
+    decision: WorkflowDecisionView & { resourceSnapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "ui_evidence_approval" }> };
+  }> {
+    const review = this.db.delegatedImageReviews.byReviewer(reviewerSessionId);
+    if (!review) return fail("this session is not a delegated image reviewer", 403);
+    if (review.state !== "running") {
+      return fail(review.state === "verdict" ? "this review's verdict is already recorded"
+        : `this image review is no longer active${review.endedReason ? ` (${review.endedReason})` : ""}`, 409);
+    }
+    const end = (reason: string, message: string, status = 409) => {
+      this.db.delegatedImageReviews.end(review.reviewId, reason, Date.now());
+      return fail<never>(message, status);
+    };
+    const decision = this.db.workflowDecisionByOccurrence(review.occurrenceId);
+    if (!decision || decision.status !== "pending") return end("decision_resolved", "the decision under review is stale or already resolved");
+    const snapshot = decision.resourceSnapshot;
+    if (snapshot.category !== "ui_evidence_approval" || decision.resourceDigest !== review.resourceDigest ||
+        decision.policyRevision !== review.policyRevision || decision.controllingSessionId !== review.rootSessionId ||
+        decision.sessionId !== review.childSessionId || decision.authority !== "orchestrator") {
+      return end("decision_changed", "the decision changed after this review was prepared");
+    }
+    const reviewer = this.db.getSession(reviewerSessionId);
+    if (reviewerSessionId === review.childSessionId || reviewerSessionId === review.rootSessionId ||
+        reviewer?.parentSessionId !== review.rootSessionId) {
+      return end("reviewer_identity", "this session cannot review this decision", 403);
+    }
+    // Evidence is never readable more widely than it is now: as direct review does on every
+    // delivery, the reviewer's own credential must still reach the root and the child, and its
+    // audience must sit inside both, whatever changed since the review was prepared.
+    if (!this.delegatedImageReviewerAudienceCurrent(review, canAccess)) {
+      return end("audience_changed", "workflow decision not found", 404);
+    }
+    const root = this.db.getSession(review.rootSessionId);
+    const child = this.db.getSession(review.childSessionId);
+    const policy = root?.parentControlPolicy;
+    if (!root || !child || isTerminal(child.status) || isTerminal(root.status) || !policy ||
+        policy.revision !== decision.policyRevision || !this.workflowDecisionAuthorityCurrent(root, policy, decision)) {
+      // Revoking the decision also ends this review, with its receipts.
+      this.revokeWorkflowDecision(decision, { reason: "authority_superseded", triggeredBy: { kind: "agent", id: reviewerSessionId } });
+      return fail("workflow decision authority was revoked or superseded", 409);
+    }
+    if (this.directWorkflowDecisionAuthority(root, policy, child.id, snapshot).effectiveOwner !== "orchestrator") {
+      return end("route_unavailable", "the decision's owner can no longer inspect this evidence, so neither can its reviewer");
+    }
+    return ok({ review, decision: decision as WorkflowDecisionView & { resourceSnapshot: typeof snapshot } });
+  }
+
+  /** Deliver one image of the review's decision to the reviewer, exactly as direct review delivers
+   * it to an Orchestrator, and record the receipt against the reviewer. */
+  reviewDelegatedImageEvidence(reviewerSessionId: string, evidenceId: string,
+    canAccess: (sessionId: string) => boolean): ServiceResult<UiEvidenceReviewDelivery> {
+    const gate = this.delegatedImageReviewerGate(reviewerSessionId, canAccess);
+    if (!gate.ok || !gate.data) return failAs(gate);
+    const { review, decision } = gate.data;
+    const bound = review.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    const item = decision.resourceSnapshot.evidence.find((candidate) => candidate.evidenceId === evidenceId);
+    if (!bound || !item?.artifactId || item.artifactId !== bound.artifactId || item.sha256 !== bound.sha256) {
+      return fail("evidence item not found on this review", 404);
+    }
+    let bytes: Buffer | null;
+    try {
+      bytes = this.db.readWorkflowArtifactBytes(item.artifactId);
+    } catch {
+      bytes = null;
+    }
+    if (!bytes || bytes.byteLength > MAX_UI_EVIDENCE_REVIEW_BYTES ||
+        createHash("sha256").update(bytes).digest("hex") !== item.sha256) {
+      this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: { kind: "agent", id: reviewerSessionId } });
+      return fail("evidence content no longer matches the digest bound to this workflow decision", 409);
+    }
+    const now = Date.now();
+    const receipt = this.db.recordUiEvidenceReviewReceipt({
+      receiptId: `uireceipt_${randomUUID().replace(/-/gu, "")}`,
+      occurrenceId: decision.occurrenceId,
+      reviewerSessionId,
+      childSessionId: decision.sessionId,
+      policyRevision: decision.policyRevision,
+      evidenceId: item.evidenceId,
+      artifactId: item.artifactId,
+      sha256: item.sha256,
+      deliveredAt: now,
+    }, now + UI_EVIDENCE_REVIEW_RECEIPT_TTL_MS);
+    this.recordWorkflowDecisionAudit(
+      decision, "answered", { kind: "agent", id: reviewerSessionId }, now, undefined, [receipt.receiptId], "review",
+    );
+    return ok({ receipt, mimeType: item.mediaType!, sizeBytes: bytes.byteLength, data: bytes.toString("base64") });
+  }
+
+  /** The reviewer's runner re-hashed the bytes and handed them to the reviewer's model. */
+  acknowledgeDelegatedImageEvidence(reviewerSessionId: string, receiptId: string, sha256: string,
+    canAccess: (sessionId: string) => boolean): ServiceResult<{ acknowledged: true }> {
+    const gate = this.delegatedImageReviewerGate(reviewerSessionId, canAccess);
+    if (!gate.ok) return failAs(gate);
+    return this.db.acknowledgeUiEvidenceReviewReceipt(receiptId, reviewerSessionId, sha256, Date.now())
+      ? ok({ acknowledged: true })
+      : fail("review receipt is unknown, replaced, expired, or no longer usable", 409);
+  }
+
+  /** Record the reviewer's one verdict, only once it holds a current receipt for every image. */
+  submitDelegatedImageVerdict(reviewerSessionId: string, report: unknown,
+    canAccess: (sessionId: string) => boolean): ServiceResult<{ verdictId: string }> {
+    const gate = this.delegatedImageReviewerGate(reviewerSessionId, canAccess);
+    if (!gate.ok || !gate.data) return failAs(gate);
+    const { review, decision } = gate.data;
+    const invalid = delegatedImageReviewReportError(report, review.evidence.map((item) => item.evidenceId));
+    if (invalid) return fail(`invalid verdict: ${invalid}`, 400);
+    const now = Date.now();
+    const receipts = this.db.validUiEvidenceReviewReceipts(decision.occurrenceId, reviewerSessionId, now);
+    const spent: string[] = [];
+    const unreviewed: string[] = [];
+    for (const item of review.evidence) {
+      const receipt = receipts.find((candidate) => candidate.evidenceId === item.evidenceId &&
+        candidate.artifactId === item.artifactId && candidate.sha256 === item.sha256 &&
+        candidate.childSessionId === decision.sessionId && candidate.policyRevision === decision.policyRevision);
+      if (receipt) spent.push(receipt.receiptId);
+      else unreviewed.push(item.evidenceId);
+    }
+    if (unreviewed.length) {
+      return fail(`review every image before the verdict; call ${DELEGATED_IMAGE_REVIEW_TOOLS[0]} for ${unreviewed.map((id) => JSON.stringify(id)).join(", ")}`, 409);
+    }
+    const value = report as DelegatedImageReviewVerdict;
+    // Items are stored in the decision's order, so a verdict reads the same whatever order it came in.
+    const verdict: DelegatedImageReviewVerdict = {
+      recommendation: value.recommendation,
+      summary: value.summary,
+      items: review.evidence.map((item) => {
+        const entry = value.items.find((candidate) => candidate.evidenceId === item.evidenceId)!;
+        return { evidenceId: entry.evidenceId, outcome: entry.outcome, defects: [...entry.defects] };
+      }),
+      verdictId: `uiimgverdict_${randomUUID().replace(/-/gu, "")}`,
+      reviewerSessionId,
+      submittedAt: now,
+      receiptIds: spent,
+    };
+    if (!this.db.delegatedImageReviews.recordVerdict(review.reviewId, verdict, now)) {
+      return fail("this review's verdict is already recorded", 409);
+    }
+    this.recordWorkflowDecisionAudit(decision, "answered", { kind: "agent", id: reviewerSessionId }, now, undefined, spent, "review");
+    this.log.info(JSON.stringify({ event: "delegated_image_review_verdict", reviewId: review.reviewId, reviewerSessionId,
+      occurrenceId: decision.occurrenceId, recommendation: verdict.recommendation,
+      failed: verdict.items.filter((item) => item.outcome === "fail").length }));
+    this.hub.sessionChangedById(review.rootSessionId);
+    return ok({ verdictId: verdict.verdictId });
+  }
+
   private workflowDecisionApproval(decision: WorkflowDecisionView): PendingApproval {
     const snapshot = decision.resourceSnapshot;
     const categoryTitle: Record<WorkflowDecisionCategory, string> = {
@@ -12390,8 +13985,9 @@ export class SessionsService {
       campaign_follow_up_admission: "Follow-Up Approval Required",
       ui_evidence_approval: "UI Evidence Approval Required",
       review_round_extension: "Review Round Extension Approval Required",
+      owner_decision: "Owner Decision Required",
     };
-    const options = snapshot.category === "implementation_question"
+    const options = snapshot.category === "implementation_question" || snapshot.category === "owner_decision"
       ? [
           ...snapshot.options.map((option) => ({
             optionId: option.optionId,
@@ -12411,6 +14007,11 @@ export class SessionsService {
       title: categoryTitle[decision.category],
       options,
       kind: "workflow_decision",
+      // A root's own decision its owner kept (#4064) waits for that person without parking the root:
+      // the root keeps working, and campaign continuations keep reaching it.
+      ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
+        (decision.category === "owner_decision" || decision.ownerHandoff ||
+          decision.authorityEvaluation?.reason === "owner_kept") ? { async: true } : {}),
       context: {
         toolName: "Typed Workflow Decision",
         input: JSON.stringify(snapshot, null, 2),
@@ -12438,11 +14039,11 @@ export class SessionsService {
       );
     }
     const snapshot = decision.resourceSnapshot;
-    if (snapshot.category === "implementation_question") {
+    if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
       if (resolution.outcome === "approve" &&
           (typeof resolution.selectedOptionId !== "string" ||
             !snapshot.options.some((option) => option.optionId === resolution.selectedOptionId))) {
-        return fail("implementation approval must select one offered option", 400);
+        return fail(`${snapshot.category === "owner_decision" ? "an owner" : "implementation"} approval must select one offered option`, 400);
       }
       if (resolution.outcome === "deny" && resolution.selectedOptionId !== undefined) {
         return fail("a denied implementation decision cannot select an option", 400);
@@ -12468,6 +14069,13 @@ export class SessionsService {
           snapshot.evidence.some((item) => item.mediaType?.startsWith("video/"))) {
           return fail("Original video approval requires separate actual-worker provenance", 400);
         }
+        const image = resolution.delegatedImageReview;
+        if (image !== undefined && (decision.authority !== "orchestrator" || snapshot.videoReview || delegated !== undefined ||
+          !image || typeof image !== "object" || Array.isArray(image) ||
+          Object.keys(image).sort().join(",") !== "reviewId,reviewerSessionId,verdictId" ||
+          Object.values(image).some((value) => !boundedDecisionString(value, 256)))) {
+          return fail("delegatedImageReview must be exactly the reviewId, verdictId and reviewerSessionId returned by the delegated image review", 400);
+        }
         const requested = snapshot.evidence.filter((item) => !delegated?.some((reference) => reference.evidenceId === item.evidenceId))
           .map((item) => item.evidenceId).sort();
         const reviewed = Array.isArray(resolution.evidenceReviewed) &&
@@ -12481,10 +14089,16 @@ export class SessionsService {
       if (resolution.outcome === "deny" && (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined)) {
         return fail("a denied UI evidence decision cannot carry evidenceReviewed; omit it when denying", 400);
       }
-    } else if (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined) {
+      if (resolution.outcome === "deny" && resolution.delegatedImageReview !== undefined) {
+        return fail("a denied UI evidence decision cannot carry delegatedImageReview; omit it when denying", 400);
+      }
+    } else if (resolution.evidenceReviewed !== undefined || resolution.delegatedVideoEvidence !== undefined ||
+        resolution.delegatedImageReview !== undefined) {
       return fail(resolution.evidenceReviewed !== undefined
         ? "evidenceReviewed is valid only for ui_evidence_approval decisions"
-        : "delegatedVideoEvidence is valid only for ui_evidence_approval decisions", 400);
+        : resolution.delegatedVideoEvidence !== undefined
+          ? "delegatedVideoEvidence is valid only for ui_evidence_approval decisions"
+          : "delegatedImageReview is valid only for ui_evidence_approval decisions", 400);
     }
     return ok(resolution);
   }
@@ -12579,10 +14193,13 @@ export class SessionsService {
     const current = this.db.getSession(sessionId);
     if (!current) return;
     const remaining = removePendingRequest(current.pendingApproval, occurrenceId);
+    // A root's owner-kept cards (#4064) wait for a person without parking it, so the session leaves
+    // the pause once nothing else remains, exactly as if no card remained.
+    const parked = awaitsPendingInput(remaining);
     // A child parked for worktree recovery is input_required because the runner said so, not because
     // of this card, so settling the card neither idles nor runs it; a resume waits for recovery.
     const recovering = current.worktreeRecovery != null;
-    const restoreIdle = !recovering && !remaining && current.status === "input_required" &&
+    const restoreIdle = !recovering && !parked && current.status === "input_required" &&
       this.db.policyResumeStatus(sessionId) === "idle";
     this.db.setPendingApproval(sessionId, remaining);
     if (restoreIdle && resume && !this.pendingPolicyAsk(this.db.getSession(sessionId)!) &&
@@ -12601,7 +14218,7 @@ export class SessionsService {
       this.replayRestoredPolicyIdle(current, sessionId, now);
       return;
     }
-    if (!remaining && current.status === "input_required" && !recovering) {
+    if (!parked && current.status === "input_required" && !recovering) {
       this.db.updateSessionStatus(
         sessionId,
         restoreIdle ? "idle" : "running",
@@ -12618,7 +14235,7 @@ export class SessionsService {
       // the card is present, so the last settlement must immediately surface any deferred gate.
       if (deferLifecycle) deferLifecycle("active", current);
       else {
-        if (!remaining) this.gateOnPolicy(sessionId, now);
+        if (!parked) this.gateOnPolicy(sessionId, now);
         this.clearSettledPolicyResumeStatus(sessionId);
         resume?.(false);
       }
@@ -12953,6 +14570,7 @@ export class SessionsService {
     if (!child || isTerminal(child.status)) return;
     let pending = child.pendingApproval;
     let restored = false;
+    let blocking = false;
     for (const decision of this.db.pendingWorkflowDecisionsForSession(sessionId)) {
       const controller = this.workflowDecisionController(child, decision.category);
       if (!controller || decision.controllingSessionId !== controller.session.id ||
@@ -12974,10 +14592,17 @@ export class SessionsService {
         continue;
       }
       if (pendingRequests(pending).some((request) => request.requestId === decision.occurrenceId)) continue;
-      pending = appendPendingApproval(pending, this.workflowDecisionApproval(decision));
+      const card = this.workflowDecisionApproval(decision);
+      pending = appendPendingApproval(pending, card);
       restored = true;
+      // A root's owner-kept card (#4064) waits for its owner without parking the root.
+      if (!card.async) blocking = true;
     }
     if (!restored) return;
+    if (!blocking) {
+      this.db.setPendingApproval(sessionId, pending);
+      return;
+    }
     if (child.status === "idle") this.db.notePolicyResumeStatus(sessionId, "idle");
     this.db.setPendingApproval(sessionId, pending);
     this.db.updateSessionStatus(sessionId, "input_required", Date.now());
@@ -13010,15 +14635,19 @@ export class SessionsService {
     if (actorId !== "session-restarted") {
       this.db.abandonRestartNotices(sessionId, Date.now());
       this.db.abandonReviewContinuations(sessionId, Date.now());
+      // An ended session waits for nothing: its merge-queue watch stops and owes no wake (#4071).
+      // A restarted one is still parked, and its watch keeps running.
+      this.cancelPullRequestWatches(sessionId, "the session ended");
     }
   }
 
   /** A Claude Code child's armed enqueue never produces a permission receipt in auto or Full Access
-   * mode, so a lifecycle end would leave a merge that already landed revoked. The grant is still
-   * revoked first, so a relaunched provider can never reuse it and a crash leaves it terminal; the
-   * forge then moves it to consumed only when it reports the approved head merged. */
+   * mode, and neither does one Wollipog ran itself in any harness (#4067), so a lifecycle end would
+   * leave a merge that already landed revoked. The grant is still revoked first, so a relaunched
+   * provider can never reuse it and a crash leaves it terminal; the forge then moves it to consumed
+   * only when it reports the approved head merged. */
   private forgeSettlesArmedMerge(child: SessionView, decision: WorkflowDecisionView): boolean {
-    return child.driver === "claude-code" && decision.status === "approved" &&
+    return (child.driver === "claude-code" || this.wollipogMayHaveEnqueued(decision)) && decision.status === "approved" &&
       decision.category === "pr_merge" && decision.actionAdmission?.kind === "pr_merge_enqueue" &&
       !this.capabilityFailure(
         child.runnerId,
@@ -13050,6 +14679,17 @@ export class SessionsService {
     }
   }
 
+  /** Whether Wollipog itself may have run this armed enqueue (#4067): its own record shows an
+   * attempt in flight, uncertain, enqueued or already queued. Such an enqueue left no provider
+   * receipt in any harness, so only the forge can settle it. Nothing else qualifies: no record (the
+   * child ran the command itself), only refusals (nothing ran), or `already_merged` (Wollipog found
+   * it merged and enqueued nothing) keeps the harness's own proof, a provider receipt for Codex. */
+  private wollipogMayHaveEnqueued(decision: WorkflowDecisionView): boolean {
+    const outcome = decision.forgeAction?.kind === "pr_merge_enqueue" ? decision.forgeAction.outcome : undefined;
+    return decision.category === "pr_merge" &&
+      (outcome === "in_progress" || outcome === "uncertain" || outcome === "enqueued" || outcome === "already_queued");
+  }
+
   /** Ask the child's runner whether the forge merged the exact approved head. The runner never runs
    * the enqueue; it only reads the pull request. */
   private async forgeAttestedMergeProof(
@@ -13062,6 +14702,32 @@ export class SessionsService {
     if (!admission || admission.kind !== "pr_merge_enqueue" || admission.command !== command ||
         admission.commandDigest !== auditDigest({ kind: "pr_merge_enqueue", command })) {
       return fail("workflow decision has no exact armed enqueue action to reconcile", 409);
+    }
+    // Claude Code's proof below reads the forge alone. Another harness's proof is a provider receipt
+    // that an enqueue Wollipog ran never produced, so that one is read the same way Wollipog ran it:
+    // from the filesystem root through the session's own login, read only, never enqueuing.
+    if (child.driver !== "claude-code" && this.wollipogMayHaveEnqueued(decision)) {
+      const unsupported = this.capabilityFailure(child.runnerId, "forgeDecisionActions", "Wollipog-performed forge actions");
+      if (unsupported) return failAs(unsupported);
+      const requestId = `forge_decision_action_${randomUUID()}`;
+      let answer: Partial<ForgeDecisionActionResultMessage> | null = null;
+      try {
+        answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
+          type: "forge_decision_action", requestId, sessionId: child.id, occurrenceId: decision.occurrenceId,
+          // Its own action kind, so a runner that does not know it refuses it rather than enqueuing.
+          action: { kind: "pr_merge_observe", repository: snapshot.repository, pullRequest: snapshot.pullRequest,
+            headSha: snapshot.headSha },
+        }, 45_000) as unknown as Partial<ForgeDecisionActionResultMessage>;
+      } catch (error) {
+        return fail(isRunnerRequestTimeoutError(error) ? "workflow action reconciliation timed out"
+          : isRunnerRequestNotSentError(error) ? "runner is offline" : "workflow action reconciliation failed", 409);
+      }
+      // The runner reports already_merged only when GitHub merged exactly the approved head.
+      if (answer?.type !== "forge_decision_action_result" || answer.sessionId !== child.id ||
+          answer.occurrenceId !== decision.occurrenceId || answer.outcome !== "already_merged") {
+        return fail("forge did not prove the exact approved head was merged", 409);
+      }
+      return ok({ forgeHeadSha: snapshot.headSha });
     }
     const pullRequestUrl = prMergeChangeRequestUrl(snapshot);
     const requestId = `workflow_action_reconcile_${randomUUID()}`;
@@ -13133,7 +14799,7 @@ export class SessionsService {
     const child = this.db.getSession(decision.sessionId);
     const parent = this.db.getSession(decision.controllingSessionId);
     const policy = parent?.parentControlPolicy;
-    if (!child || !parent || !policy || child.driver !== "claude-code" ||
+    if (!child || !parent || !policy || (child.driver !== "claude-code" && !this.wollipogMayHaveEnqueued(decision)) ||
         (requireLive && (isTerminal(child.status) || isTerminal(parent.status))) ||
         !canAccess(child.id) || !canAccess(parent.id) ||
         !this.workflowDecisionRelationship(parent.id, child.id) ||
@@ -13161,7 +14827,7 @@ export class SessionsService {
       headSha: proof.forgeHeadSha,
     })!;
     const now = Date.now();
-    const consumed = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
+    const reconciled = this.db.consumeReconciledWorkflowDecisionActionWithReceipt(
       decision.sessionId,
       decision.occurrenceId,
       decision.actionAdmission!.commandDigest,
@@ -13169,16 +14835,25 @@ export class SessionsService {
       now,
       { forgeAttested: true },
     );
-    if (!consumed) return null;
-    this.recordWorkflowDecisionAudit(
-      consumed,
-      "consumed",
-      { kind: "system", id: "workflow-decision-forge-reconciliation" },
-      now,
-    );
+    if (!reconciled) return null;
+    const consumed = reconciled.decision;
+    const actor: GovernanceActor = { kind: "system", id: "workflow-decision-forge-reconciliation" };
+    this.recordWorkflowDecisionAudit(consumed, "consumed", actor, now);
+    this.settleSupersededArmedMerges(reconciled.supersededOccurrenceIds, actor, now);
     this.hub.sessionChangedById(consumed.sessionId);
     this.hub.sessionChangedById(consumed.controllingSessionId);
     return consumed;
+  }
+
+  /** Record each armed merge a reconciliation superseded (#3991). Its command is the one the
+   * reconciled occurrence proved merged, so it ends without replay, withdrawal or a new approval. */
+  private settleSupersededArmedMerges(occurrenceIds: string[], actor: GovernanceActor, now: number): void {
+    for (const occurrenceId of occurrenceIds) {
+      const superseded = this.db.workflowDecisionByOccurrence(occurrenceId);
+      if (!superseded) continue;
+      this.settleWorkflowDecisionPause(superseded.sessionId, occurrenceId, now);
+      this.recordWorkflowDecisionAudit(superseded, "superseded", actor, now);
+    }
   }
 
   private recordWorkflowDecisionAudit(
@@ -13219,6 +14894,16 @@ export class SessionsService {
     const approvalBoundary = controller ? issueBoundary(controller) : null;
     const publicationAuthority = approvalBoundary
       ? { authorizedByUserId: approvalBoundary.authorizedByUserId, objectiveDigest: issueEvidenceDigest(approvalBoundary.objective) } : undefined;
+    // The resolving record names the delegated image reviewer and the exact verdict it relied on (#4074).
+    const imageReview = resolvingRecord && decision.delegatedImageReview
+      ? this.db.delegatedImageReviews.get(decision.delegatedImageReview.reviewId) : null;
+    const delegatedImageReview = imageReview?.verdict && imageReview.verdictSha256 ? {
+      reviewId: imageReview.reviewId,
+      verdictId: imageReview.verdict.verdictId,
+      reviewerSessionId: imageReview.reviewerSessionId,
+      recommendation: imageReview.verdict.recommendation,
+      verdictSha256: imageReview.verdictSha256,
+    } : undefined;
     this.db.appendGovernanceAudit({
       requestId: decision.occurrenceId,
       approvalKind: "workflow_decision",
@@ -13247,6 +14932,7 @@ export class SessionsService {
             frameCount: decision.resourceSnapshot.videoReview.frames.length,
           } } : {}),
         ...(reviewReceiptIds?.length ? { reviewReceiptIds } : {}),
+        ...(delegatedImageReview ? { delegatedImageReview } : {}),
         ...(rationale ? { rationaleDigest: auditDigest(rationale)! } : {}),
         ...(resolvingRecord && decision.childMessage
           ? { childMessageDigest: auditDigest(decision.childMessage)! }
@@ -13404,7 +15090,7 @@ export class SessionsService {
         return fail("workflow decision not found", 404);
       }
       if (decision.status !== "pending") return fail("only pending workflow requests can be withdrawn", 409);
-      if (decision.authority !== "human" || decision.category !== "review_round_extension") {
+      if (decision.authority !== "human" || decision.category !== "review_round_extension" || decision.ownerHandoff) {
         return fail("this category is not designated for Orchestrator withdrawal", 403);
       }
       if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {
@@ -13511,6 +15197,8 @@ export class SessionsService {
     action: "submit" | "dismiss" = Object.keys(answers).length > 0 ? "submit" : "dismiss",
     resolvedByParentSessionId?: string,
     occurrenceId?: string,
+    /** Only the server's own Full Control dismissal passes this (#4063). */
+    automaticResponse?: FullControlAutomaticResponse,
   ): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
@@ -13633,6 +15321,7 @@ export class SessionsService {
       ...(answerSummary ? { answerSummary } : {}),
       ...(answeredByUserId ? { answeredByUserId } : {}),
       ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+      ...(automaticResponse && action === "dismiss" && actor.kind === "system" ? { automaticResponse } : {}),
     });
     if (!sent) {
       this.recordGovernanceAudit(session, pending, "resolution", "delivery_failed", actor, Date.now(), {
@@ -13700,6 +15389,8 @@ export class SessionsService {
     canAccess: (sessionId: string) => boolean = () => true,
     evidenceReviewed?: string[],
     evidenceReviewDigest?: string,
+    /** Only the server's own Full Control decline passes this (#4063). */
+    automaticResponse?: FullControlAutomaticResponse,
   ): ServiceResult<SessionView> {
     const now = Date.now();
     this.reconcilePolicyHookTimeouts(now, sessionId);
@@ -13712,6 +15403,12 @@ export class SessionsService {
     // duplicate POST, or wrong id must not clear pendingApproval / unblock the column
     // while the runner ignores the unknown id and the agent stays parked.
     const pending = pendingRequests(session.pendingApproval).find((request) => request.requestId === requestId) ?? session.pendingApproval;
+    // A card a newer request replaced names its replacement (#4066); a workflow card's requestId is its occurrenceId.
+    if (pending?.requestId !== requestId) {
+      const replaced = this.db.workflowDecisionByOccurrence(requestId);
+      const refused = replaced?.sessionId === sessionId ? this.supersededWorkflowDecisionRefusal(replaced) : null;
+      if (refused) return refused;
+    }
     if (!pending) return fail("no pending approval for this session", 409);
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
@@ -13720,15 +15417,15 @@ export class SessionsService {
       if (actor.kind !== "human") return fail("this workflow decision requires an authenticated human", 403);
       const decision = this.db.workflowDecisionByOccurrence(pending.occurrenceId ?? requestId);
       if (!decision || decision.status !== "pending") {
-        return fail("workflow decision is stale or no longer pending", 409);
+        return (decision && this.supersededWorkflowDecisionRefusal(decision)) ?? fail("workflow decision is stale or no longer pending", 409);
       }
       const snapshot = decision.resourceSnapshot;
-      const implementation = snapshot.category === "implementation_question";
+      const implementation = snapshot.category === "implementation_question" || snapshot.category === "owner_decision";
       let deny: boolean;
-      if (snapshot.category === "implementation_question") {
+      if (snapshot.category === "implementation_question" || snapshot.category === "owner_decision") {
         if (optionId !== null && optionId !== "__workflow_deny__" &&
             !snapshot.options.some((option) => option.optionId === optionId)) {
-          return fail("implementation decision option is not offered", 409);
+          return fail(`${snapshot.category === "owner_decision" ? "owner" : "implementation"} decision option is not offered`, 409);
         }
         deny = optionId === "__workflow_deny__" || optionId === null;
       } else {
@@ -13871,6 +15568,7 @@ export class SessionsService {
         // so does a finished review's continuation (#3369).
         this.deliverHeldRestartNotices(sessionId, now);
         this.deliverHeldReviewContinuations(sessionId, now);
+        this.deliverHeldPullRequestWatchWakes(sessionId, now);
       } else {
         // Declining stops the turn and records nothing, so the same checkpoint asks again on the
         // next turn that crosses it.
@@ -13988,6 +15686,11 @@ export class SessionsService {
     const resolvedBy: PermissionResolver | undefined = actor.kind === "human" && actor.id && !resolvedByParentSessionId
       ? { kind: "user", userId: actor.id }
       : undefined;
+    // A Full Control attribution rides only on the server's own decline: never on an allow, and
+    // never beside a person's name (#4063).
+    const attributed = automaticResponse && actor.kind === "system" && !resolvedBy && (pending.kind === "question" ||
+      optionId === null || pending.options.find((option) => option.optionId === optionId)?.kind?.startsWith("reject"))
+      ? { automaticResponse } : {};
     const sent = this.hub.sendToRunner(
       session.runnerId,
       pending.kind === "question"
@@ -13995,11 +15698,13 @@ export class SessionsService {
             type: "answer_question", sessionId, requestId, answers: {}, action: "dismiss",
             ...(pending.occurrenceId ? { occurrenceId: pending.occurrenceId } : {}),
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
+            ...attributed,
           }
         : {
             type: "resolve_permission", sessionId, requestId, optionId,
             ...(resolvedByParentSessionId ? { resolvedByParentSessionId } : {}),
             ...(resolvedBy ? { resolvedBy } : {}),
+            ...attributed,
           },
     );
     if (!sent) {
@@ -16303,7 +18008,7 @@ export class SessionsService {
     }
     if (status === "idle") this.db.noteSpawnApprovalsSettled(sessionId);
     const childAttention = !isTerminal(status) && pendingRequests(session.pendingApproval).some(
-      (request) => request.ownerToolUseId || request.kind === "workflow_decision",
+      (request) => request.ownerToolUseId || request.kind === "workflow_decision" && !request.async,
     );
     if (isTerminal(status)) {
       this.revokeUnconsumedWorkflowDecisionsForSession(sessionId, "provider-session-ended");
@@ -17869,6 +19574,7 @@ export class SessionsService {
                 this.deliverHeldRestartNotices(snap.id, now);
                 this.applyStandingCampaignResponses(snap.id);
                 this.deliverHeldReviewContinuations(snap.id, now);
+                this.deliverHeldPullRequestWatchWakes(snap.id, now);
                 this.hub.sessionChangedById(snap.id);
                 recordAppliedVersion(snap.id);
               }
@@ -17960,6 +19666,7 @@ export class SessionsService {
         // A card the runner restores at registration gets its standing response, once (#2940).
         this.applyStandingCampaignResponses(snap.id);
         this.deliverHeldReviewContinuations(snap.id, now);
+        this.deliverHeldPullRequestWatchWakes(snap.id, now);
         this.hub.sessionChangedById(snap.id);
         recordAppliedVersion(snap.id);
       }
@@ -18245,6 +19952,7 @@ export class SessionsService {
     this.deliverHeldRestartNotices(sessionId, now);
     this.applyStandingCampaignResponses(sessionId);
     this.deliverHeldReviewContinuations(sessionId, now);
+    this.deliverHeldPullRequestWatchWakes(sessionId, now);
     this.hub.sessionChangedById(sessionId);
     this.publishCampaignAttentionTransition(campaignBefore, batch);
   }
@@ -18823,7 +20531,13 @@ export class SessionsService {
   async searchWorkspaceReferences(
     sessionId: string,
     query: string,
-  ): Promise<ServiceResult<{ results: WorkspaceReferenceCandidate[]; truncated: boolean }>> {
+    match?: WorkspaceReferenceSearchMatch,
+  ): Promise<ServiceResult<{
+    results: WorkspaceReferenceCandidate[];
+    truncated: boolean;
+    match?: WorkspaceReferenceSearchMatch;
+    limit?: WorkspaceReferenceSearchLimit;
+  }>> {
     const session = this.db.getSession(sessionId);
     if (!session) return fail("session not found", 404);
     if (!this.hub.isRunnerOnline(session.runnerId)) return fail("runner is offline", 409);
@@ -18832,11 +20546,17 @@ export class SessionsService {
     const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
     try {
       const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "search_workspace_references", requestId, sessionId, query,
+        type: "search_workspace_references", requestId, sessionId, query, ...(match ? { match } : {}),
       }, 20_000);
       if (res.type !== "search_workspace_references_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "could not search workspace paths", 502);
-      return ok({ results: res.results ?? [], truncated: res.truncated === true });
+      // A runner that predates `match` answers without echoing it: its results contain the query.
+      return ok({
+        results: res.results ?? [],
+        truncated: res.truncated === true,
+        ...(match && res.match === match ? { match } : {}),
+        ...(res.limit === "entries" || res.limit === "results" ? { limit: res.limit } : {}),
+      });
     } catch (err) {
       return fail((err as Error).message, 504);
     }
@@ -19091,6 +20811,12 @@ function hasPolicyApproval(pending: PendingApproval | null | undefined): boolean
 
 function hasBlockingPendingRequest(pending: PendingApproval | null | undefined): boolean {
   return pendingRequests(pending).some((request) => !request.async);
+}
+
+/** Whether a prompt waits behind pending input. A root's owner-kept card (#4064) waits for a
+ * person without being input the root's provider waits on, so it never holds a prompt back. */
+function awaitsPendingInput(pending: PendingApproval | null | undefined): boolean {
+  return pendingRequests(pending).some((request) => !(request.kind === "workflow_decision" && request.async));
 }
 
 /** Unlike addPendingRequest (which intentionally gives a CP policy card exclusive ownership), a

@@ -55,7 +55,21 @@ export interface CampaignAuthorityEvaluation {
   basis: "human_required" | "custom_policy" | "campaign_delegation" | "standing_authorization" | "standing_decline";
   reason: "custom_owner" | "authorized_operation" | "outside_boundary" | "protected_request" |
     "unverified_intent" | "unsupported_provider" | "human_required_rule" | "evidence_review_unavailable" | "provider_delivery_unavailable" |
-    "declined_request" | "unresolved_effects";
+    "declined_request" | "unresolved_effects" |
+    /** #4062: a Full Control merge that would close an issue outside the campaign's issue scope. */
+    "outside_issue_scope" |
+    /** #4062: a Full Control merge whose closures nothing reads (a GitLab merge, or a GitHub merge
+     * from a runner older than the closing-reference check) and whose declared ones prove nothing. */
+    "unverified_closures" |
+    /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
+     * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
+    "closure_proof_incomplete" |
+    /** #4075: a Full Control review_round_extension that would take this pull request's
+     * Orchestrator-granted rounds past the server-enforced cap. It stays the person's. */
+    "review_extension_cap_reached" |
+    /** #4064: the campaign's owner kept this decision: an owner decision, or an occurrence the root
+     * handed to the owner (and any later request for the same resource). Only a person resolves it. */
+    "owner_kept";
   operation: CampaignAuthorityOperation;
   boundaryRevision?: number;
   /** Full Control only: which formerly human class this occurrence belongs to. Content-safe. */
@@ -63,25 +77,35 @@ export interface CampaignAuthorityEvaluation {
   /** The server answers this occurrence itself with its one-time reject or dismissal. A
    * declined occurrence can never be approved or answered by anyone acting for the campaign. */
   disposition?: "decline";
-  /** A publication that named a recommendation the server could not admit (#2940). */
+  /** A publication the server could not admit (#2940). Under an issue boundary every human-owned
+   * publication carries one, including one that names no recommendation (#4065). */
   admissionFailure?: CampaignPublicationAdmissionFailure;
+  /** The fixed sentence for `admissionFailure` from CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES. */
+  admissionMessage?: string;
+  /** With `outside_issue_scope`: each issue the merge would close outside the scope, as sorted `owner/repo#N`. */
+  unscopedClosures?: string[];
 }
 
 const operations: CampaignAuthorityOperation[] = ["implementation_question", "pr_merge", "merged_branch_deletion",
   "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question", "tool_approval", "policy_ask"];
 
 /** Category-level projection only. A concrete request still needs provenance, resource and
- * sensitive-effect evaluation; this value is never a consumable grant. */
+ * sensitive-effect evaluation; this value is never a consumable grant. `fullControlReviewExtensions`
+ * says every peer supports capped Full Control extensions (v277); for review_round_extension,
+ * "orchestrator" then means within the per-pull-request cap only. */
 export function campaignWorkflowOwner(control: CampaignControl | undefined, decisions: ParentControlDecisionPolicy,
-  category: WorkflowDecisionCategory, supported: boolean): "human" | "orchestrator" {
-  // A follow-up past the campaign's approval limit is the Human's in every mode (#2940).
-  if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission") return "human";
+  category: WorkflowDecisionCategory, supported: boolean, fullControlReviewExtensions = false): "human" | "orchestrator" {
+  // A follow-up past the campaign's approval limit is the Human's in every mode (#2940), and so is a
+  // decision its owner kept (#4064).
+  if (!supported || category === "automation_creation" || category === "campaign_follow_up_admission" ||
+      category === "owner_decision") return "human";
   if (category === "issue_closure" || category === "campaign_issue_scope") return control?.mode === "full_control" &&
     validCampaignControl(control) && control.boundary.issueAuthority && control.boundary.operations.includes(category) ? "orchestrator" : "human";
   if (!control || control.mode === "custom") return decisions[category];
-  // More review rounds than the policy allows are never part of Full Control's own authority: only
-  // an explicit Parent Control grant delegates them (#3369).
-  if (category === "review_round_extension") return decisions[category];
+  // An explicit Parent Control grant delegates extra review rounds without a cap (#3369). Otherwise
+  // Full Control owns them only up to the server-enforced cap per pull request (#4075).
+  if (category === "review_round_extension") return decisions[category] === "orchestrator" ||
+    (fullControlReviewExtensions && validCampaignControl(control)) ? "orchestrator" : "human";
   return validCampaignControl(control) && control.boundary.operations.includes(category) ? "orchestrator" : "human";
 }
 
@@ -561,6 +585,17 @@ function protectedRequestClass(request: PendingApproval, verifiedPlanning: boole
   return null;
 }
 
+/** Whether an owner decision (#4064) asks its owner for a credential, a sign-in or wider access,
+ * which Full Control never asks anyone for. Its question, options and material are screened as a
+ * design form, like an implementation question: a credential design is a fair question, a value is not. */
+export function ownerDecisionProtected(snapshot: { question: string; options: Array<{ optionId: string; label: string; description?: string }>; material?: string }): boolean {
+  // The material is screened on its own: a pull-request link beside a credential-design question is
+  // context, not a place to send a credential.
+  const screened = (question: string, options: typeof snapshot.options) => protectedRequestClass({ requestId: "", title: "", options: [],
+    kind: "question", questions: [{ id: "", question, options }] }, true, false, true) !== null;
+  return screened(snapshot.question, snapshot.options) || (snapshot.material !== undefined && screened(snapshot.material, []));
+}
+
 export function campaignRequestProtected(request: PendingApproval, verifiedPlanning: boolean, verifiedCodeOperation = false): boolean {
   return protectedRequestClass(request, verifiedPlanning, verifiedCodeOperation) !== null;
 }
@@ -590,6 +625,10 @@ export function resolveCampaignAuthority(input: {
   humanRequired?: boolean;
   /** Server-resolved workspace/worktree root, not a resource selector supplied by an agent. */
   repositoryRoot?: string;
+  /** #4075: for a review_round_extension, whether granting it keeps the pull request's
+   * Orchestrator-granted rounds within the server-enforced cap, counted durably by the server.
+   * Set only when every peer supports capped Full Control extensions; absent keeps them human. */
+  reviewExtensionCap?: "within" | "exceeded";
 }): CampaignAuthorityEvaluation {
   const request = input.request;
   const category = input.snapshot?.category;
@@ -600,6 +639,8 @@ export function resolveCampaignAuthority(input: {
   // The server answers a declined occurrence itself; owning it never lets the Orchestrator approve it.
   const declined = (requestClass: FullControlRequestClass) => result("orchestrator", "standing_decline", "declined_request", { requestClass, disposition: "decline" });
   if (Boolean(request) === Boolean(input.snapshot)) return result("human", "human_required", "unverified_intent");
+  // The owner kept this decision (#4064): no mode, boundary or grant makes it an agent's.
+  if (category === "owner_decision") return result("human", "human_required", "owner_kept");
   if (category === "automation_creation" || category === "campaign_follow_up_admission") return result("human", "human_required", "protected_request");
   if (!input.supported) return result("human", "human_required", "unsupported_provider");
   // Rules a person marked Human Required, and built-in safety rules, stay theirs in every mode.
@@ -614,6 +655,14 @@ export function resolveCampaignAuthority(input: {
     // Extra review rounds follow the explicit Parent Control grant under Full Control too: they are
     // never part of a boundary's own operations (#3369).
     const eligible = !input.root && (category ? campaignWorkflowOwner(input.control, input.decisions, category, true) === "orchestrator" : Boolean(request && parentControlRequestEligible(input.parentControl, request)));
+    // Without that grant, a current Full Control boundary still owns a child's extra rounds within
+    // the server-enforced cap of its pull request (#4075). Past the cap they stay the person's.
+    if (!eligible && category === "review_round_extension" && input.control?.mode === "full_control" && !input.root &&
+        input.reviewExtensionCap !== undefined && validCampaignControl(input.control) && input.trustedSource === "workflow_route" &&
+        input.snapshot!.repository.toLowerCase() === input.control.boundary.repository.toLowerCase()) {
+      return input.reviewExtensionCap === "within" ? result("orchestrator", "campaign_delegation", "authorized_operation")
+        : result("human", "human_required", "review_extension_cap_reached");
+    }
     return result(eligible ? "orchestrator" : "human", "custom_policy", "custom_owner");
   }
   if (!validCampaignControl(input.control)) return result("human", "human_required", "outside_boundary");
@@ -718,15 +767,93 @@ export const FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE = "[Wollipog Full Control] 
   "command), so it could not rule out credential access. Nobody was asked and the request will not be replayed. Retry with " +
   "explicit file paths inside your worktree, such as reading or editing named files, or continue without it.";
 
-/** Delivered to a Full Control root after the server dismisses its own question (#2940). No person
- * sees a root's questions, and none of its options is applied for it. Content-safe: it never
- * repeats the question. */
-export const FULL_CONTROL_ROOT_QUESTION_MESSAGE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +
-  "no person sees this campaign's questions, and none of its options was chosen for you. You own every Orchestrator-owned " +
+const FULL_CONTROL_ROOT_QUESTION_GUIDANCE = "You own every Orchestrator-owned " +
   "decision under your standing authorization, so decide it yourself and continue with the typed tools. To approve your own " +
   "pending workflow decision, such as an issue closure or scope change, call resolve_descendant_workflow_decision with your own " +
   "session ID as sessionId, then execute it (for a closure, close_github_issue with the same occurrenceId and resourceDigest). " +
   "A human-owned decision still waits for a person in Wollipog; report it instead of asking.";
+
+/** The root guidance with the owner-decision route (#4064) in place of "report it instead of asking". */
+const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE = FULL_CONTROL_ROOT_QUESTION_GUIDANCE.slice(0,
+  FULL_CONTROL_ROOT_QUESTION_GUIDANCE.indexOf("A human-owned decision")) +
+  "For a decision the campaign's owner kept for themselves, call request_owner_decision with the question, its options " +
+  "and the decision material: it reaches the owner's Inbox without stopping your turn or other work, and their choice " +
+  "is delivered back to you. To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
+  "child's pr_merge, call hand_workflow_decision_to_owner; that cannot be undone. Never decide a human-owned decision yourself.";
+
+const FULL_CONTROL_ROOT_QUESTION_NOTICE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +
+  "no person sees this campaign's questions, and none of its options was chosen for you. ";
+
+/** Delivered to a Full Control root after the server dismisses its own question (#2940). No person
+ * sees a root's questions, and none of its options is applied for it. Content-safe: it never
+ * repeats the question. */
+export const FULL_CONTROL_ROOT_QUESTION_MESSAGE = FULL_CONTROL_ROOT_QUESTION_NOTICE + FULL_CONTROL_ROOT_QUESTION_GUIDANCE;
+
+/** FULL_CONTROL_ROOT_QUESTION_MESSAGE for a root whose runner and control plane support owner
+ * decisions (v281, #4064): it names the typed route for a decision the campaign's owner kept. */
+export const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE = FULL_CONTROL_ROOT_QUESTION_NOTICE + FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE;
+
+/** Why the server's Full Control policy settled a request itself, as far as it is safe to say
+ * (#4063). Each is a policy category, never request content. The credential, sign-in, provider
+ * access and lasting-grant classes are deliberately absent: naming them would describe what the
+ * request filter withheld, so those declines carry the generic policy sentence instead. */
+export type FullControlAutomaticBasis = "root_questions" | "external_elicitation" | "unverified_tool_effects" |
+  "git_execution_without_bounded_effect_proof" | "script_execution_without_bounded_effect_proof" |
+  "relative_shell_commands_without_verified_cwd" | "undelegated_policy_asks" | "unresolved_effects";
+
+const FULL_CONTROL_AUTOMATIC_BASES: ReadonlySet<string> = new Set<FullControlAutomaticBasis>(["root_questions",
+  "external_elicitation", "unverified_tool_effects", "git_execution_without_bounded_effect_proof",
+  "script_execution_without_bounded_effect_proof", "relative_shell_commands_without_verified_cwd", "undelegated_policy_asks",
+  "unresolved_effects"]);
+
+/** Sent with a dismissal or decline only when the server's Full Control policy made it (#4063). A
+ * person's response, or an Orchestrator's own choice among options, never carries it. */
+export interface FullControlAutomaticResponse {
+  policy: "full_control";
+  basis?: FullControlAutomaticBasis;
+}
+
+/** The content-safe attribution for one standing decline: the class only when it is safe to name,
+ * and the unresolved-effect rule ahead of the class it refines. */
+export function fullControlAutomaticResponse(evaluation: Pick<CampaignAuthorityEvaluation, "reason" | "requestClass">): FullControlAutomaticResponse {
+  const basis = evaluation.reason === "unresolved_effects" ? "unresolved_effects" : evaluation.requestClass;
+  return { policy: "full_control", ...(basis && FULL_CONTROL_AUTOMATIC_BASES.has(basis) ? { basis: basis as FullControlAutomaticBasis } : {}) };
+}
+
+/** A received attribution, or undefined when malformed. Never invents one: a runner claims an
+ * automatic response only when the server said so, and an unknown basis falls back to none. */
+export function parseFullControlAutomaticResponse(value: unknown): FullControlAutomaticResponse | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { policy, basis } = value as { policy?: unknown; basis?: unknown };
+  if (policy !== "full_control") return undefined;
+  return { policy, ...(typeof basis === "string" && FULL_CONTROL_AUTOMATIC_BASES.has(basis) ? { basis: basis as FullControlAutomaticBasis } : {}) };
+}
+
+/** The text an agent receives in the same tool result when the server's Full Control policy
+ * dismissed its question or declined its tool call (#4063). It says Wollipog did it, that no
+ * person saw it, that nothing was chosen or approved, and what to do instead. Content-safe: it
+ * never repeats the request. */
+export function fullControlAutomaticResponseText(kind: "question" | "tool", response: FullControlAutomaticResponse): string {
+  const basis = response.basis;
+  const label = basis === "unresolved_effects" ? undefined : basis && FULL_CONTROL_HUMAN_REQUIRED_LABELS[basis];
+  const subject = kind === "question" ? "this question" : "this tool call";
+  const verb = kind === "question" ? "dismissed" : "declined";
+  const head = `[Wollipog Full Control] Wollipog ${verb} ${subject} automatically under the campaign's Full Control policy` +
+    (label ? ` (${label})` : "") + ". No person saw it, ";
+  if (kind === "question") {
+    // Only a v282 runner receives this attribution, so its root also has the owner-decision tools.
+    if (basis === "root_questions") return head + "and none of its options was chosen. " + FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE;
+    return head + "and none of its options was chosen. Do not ask again; continue without it, decide what you can with your " +
+      "own tools, and report anything still blocked in your final report.";
+  }
+  if (basis === "unresolved_effects") {
+    return head + "and it was not approved: the runner could not resolve every file it would touch to a real path inside " +
+      "this session's worktree. Retry with explicit file paths inside your worktree, such as reading or editing named files, " +
+      "or continue without it.";
+  }
+  return head + "and it was not approved. It will not be replayed. Continue without it, using a bounded alternative inside " +
+    "your worktree where one exists, and report anything still blocked in your final report.";
+}
 
 /** Shown beside the Human Required list: the classes the Orchestrator cannot supply. */
 export const FULL_CONTROL_DECLINED_NOTE = "Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status. You are not asked.";

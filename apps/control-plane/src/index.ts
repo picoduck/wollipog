@@ -1,6 +1,8 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
+import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
 import { mediaSessionMutationAllowed } from "./media-session-route-policy.js";
 import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js";
+import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
 import { AutomationCreationService } from "./automation-creation.js";
@@ -62,6 +64,7 @@ import {
   type RunnerCapabilityRequirementDetails,
   type ProviderHomeLaunchRefusalView,
   runnerSupportsProtocol,
+  workspaceRemovalBlockedMessage,
   validProviderHomeLaunchRefusal,
   scopeAudienceContained,
   isPromptImageReference,
@@ -94,11 +97,15 @@ import {
   type CreateWorkflowDecisionRequest,
   type ConsumeWorkflowDecisionRequest,
   type WithdrawWorkflowDecisionRequest,
+  type ExecuteWorkflowDecisionRequest,
+  type CreateOwnerDecisionRequest,
+  type HandWorkflowDecisionToOwnerRequest,
   type RecordOrchestratorFollowUpRequest,
   type AdjudicateCampaignRecommendationRequest,
   type GetCampaignWorkItemsRequest,
   type RecordCampaignPlanRequest,
   type UpdateCampaignWorkItemRequest,
+  type RecordCampaignWorkItemDeliveryRequest,
   type VerifyOrchestratorChildRequest,
   type CreateWorkspaceReferenceRequest,
   type CreateProjectRequest,
@@ -639,7 +646,9 @@ function authedApiPrincipal(
   const agentControl = authedAgentControl(req);
   const mediaPurpose = agentControl ? svc.mediaSessionPurposes.owns(agentControl.id) : false;
   if (agentControl && mediaPurpose && !svc.mediaSessionPurposes.credentialCurrent(agentControl.id)) return null;
-  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose)) {
+  // A delegated image reviewer's credential reaches only its own review routes (#4074).
+  const imageReviewer = agentControl ? db.delegatedImageReviews.isReviewer(agentControl.id) : false;
+  if (agentControl && isAgentControlApiRouteAllowed(req.method, routePath, sessionRole(agentControl), mediaPurpose, imageReviewer)) {
     const delegatedScope = db.sessionScope(agentControl.id);
     if (!delegatedScope) return null;
     return {
@@ -799,6 +808,8 @@ function authorizeApiRequest(req: FastifyRequest, authenticated: { principal?: A
   }
   const mediaTarget = routePath.startsWith("/api/sessions/:id/") ? params.id : null;
   if (typeof mediaTarget === "string" && svc.mediaSessionPurposes.owns(mediaTarget) && !mediaSessionMutationAllowed(req.method, routePath)) return MEDIA_SESSION_PURPOSE_ERROR;
+  if (typeof mediaTarget === "string" && db.delegatedImageReviews.isReviewer(mediaTarget) &&
+      !delegatedImageReviewerMutationAllowed(req.method, routePath)) return DELEGATED_IMAGE_REVIEWER_ERROR;
   const runnerId = typeof params.runnerId === "string" ? params.runnerId
     : typeof params.id === "string" && routePath.startsWith("/api/runners/") ? params.id : null;
   if (runnerId) {
@@ -1084,7 +1095,8 @@ const campaignForgeObserver = new CampaignForgeObserver({
   },
   requestFromRunner: (runnerId, requestId, message, timeoutMs) => hub.requestFromRunner(runnerId, requestId, message, timeoutMs),
   store: db.campaignForgeObservations,
-  backgroundTargets: (include) => db.campaignWorkLedger.forgeBackgroundTargets(include),
+  // Unfinished items' pull requests, and merged campaign pull requests whose branch is pending (#4067).
+  backgroundTargets: (include) => [...db.campaignWorkLedger.forgeBackgroundTargets(include), ...db.campaignMergedBranchTargets(include)],
   changed: (campaignId) => campaignWorkObservations.forgeChanged(campaignId),
   warn: (message) => app.log.warn(message),
   newRequestId: () => `campaign_forge_${randomUUID()}`,
@@ -1225,7 +1237,7 @@ app.addHook("preSerialization", (req, _reply, payload, done) => {
   const protocol = parseUiProtocolVersion(req.query) ?? parseUiProtocolVersion({
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
-  done(null, projectBackgroundRetryExhaustionForUi(payload, protocol));
+  done(null, projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(payload, protocol), protocol));
 });
 // @fastify/websocket installs one `upgrade` listener on the underlying HTTP server. Register it
 // exactly once: sibling registrations make both listeners claim every socket and eventually turn
@@ -1469,6 +1481,8 @@ app.register(async (instance) => {
         svc.recoverCampaignReviewJobs(runnerId);
         svc.recoverSessionReviewJobs(runnerId);
         svc.recoverReviewSessions(runnerId);
+        // Every merge-queue watch on this runner resumes, or is reported lost to its session (#4071).
+        svc.recoverPullRequestWatches(runnerId);
         // Media reviewers live outside the Session inventory; read back their durable outcomes.
         videoEvidence.delegated.readback(runnerId);
         automations.tick(Date.now());
@@ -1534,6 +1548,9 @@ app.register(async (instance) => {
       case "review_session_update":
         if (runnerId) svc.onReviewSessionUpdate(runnerId, msg);
         break;
+      case "pull_request_watch_update":
+        if (runnerId) svc.onPullRequestWatchUpdate(runnerId, msg);
+        break;
       case "policy_hook_credential":
         {
           if (deferNewCredentialBinding(msg)) break;
@@ -1564,6 +1581,7 @@ app.register(async (instance) => {
       case "campaign_launch_inspection_result":
       case "gitlab_merge_preflight_result":
       case "github_merge_preflight_result":
+      case "forge_decision_action_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;
       case "github_issue_closure_result":
@@ -1865,6 +1883,7 @@ app.register(async (instance) => {
       case "edit_queued_prompt_result":
       case "provider_login_result":
       case "remove_provider_account_result":
+      case "remove_workspace_result":
       case "adopt_provider_profile_result":
       case "import_provider_credential_result":
       case "revoke_provider_profile_grant_result":
@@ -3723,11 +3742,14 @@ app.get("/api/sessions/:id/file", async (req, reply) => {
 
 app.get("/api/sessions/:id/workspace-references/search", async (req, reply) => {
   const id = (req.params as { id: string }).id;
-  const q = req.query as { q?: unknown };
+  const q = req.query as { q?: unknown; match?: unknown };
   if (typeof q.q !== "string" || !q.q.trim() || q.q.length > 256) {
     return reply.code(400).send({ error: "q must contain 1-256 characters" });
   }
-  const r = await svc.searchWorkspaceReferences(id, q.q);
+  if (q.match !== undefined && q.match !== "fuzzy") {
+    return reply.code(400).send({ error: "match must be fuzzy when given" });
+  }
+  const r = await svc.searchWorkspaceReferences(id, q.q, q.match);
   if (!r.ok) return reply.code(r.status).send(failureBody(r));
   return r.data;
 });
@@ -4247,8 +4269,9 @@ app.get("/api/sessions", async (req,reply) => {
     protocolVersion: req.headers["x-wollipog-ui-protocol"],
   });
   const supportsRetryExhaustion = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "backgroundRetryExhaustion");
+  const supportsHandoffs = principal?.kind === "agent" || runnerSupportsProtocol(uiProtocol, "campaignHandoffs");
   return reply.type("application/json").send(principal
-    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion)
+    ? db.sessionListJsonForPrincipal(principal,includeArchived,supportsRetryExhaustion,supportsHandoffs)
     : '{"sessions":[]}');
 });
 
@@ -4353,6 +4376,12 @@ app.get("/api/sessions/:id/orchestrator-campaign", async (req, reply) => {
   const principal = requestPrincipal(req);
   if (principal?.kind !== "agent" || principal.credentialSessionId !== id || !principal.orchestrator) {
     return reply.code(403).send({ error: "a matching Orchestrator session credential is required" });
+  }
+  // #4067: a pending merged branch is read again (rate-limited, bounded wait) so a deletion shows.
+  const campaignId = db.resolvedCampaignSessionId(id);
+  const pendingBranches = campaignId ? db.campaignMergedBranches(campaignId).filter((row) => row.state === "pending") : [];
+  if (campaignId && pendingBranches.length) {
+    await refreshCampaignForge(campaignId, pendingBranches.map((row) => ({ repository: row.repository, number: row.pullRequest })));
   }
   const projection = await svc.campaignProjectionWithHistory(id);
   const policy = db.getSession(id)?.orchestratorPolicy;
@@ -4503,6 +4532,13 @@ app.post("/api/sessions/:id/review-sessions", async (req, reply) => {
   return respond(reply, svc.requestReviewSession(id, req.body as ReviewSessionRequest,
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
+// Merge-queue watches (#4071): only the session's own credential parks it on its own pull request.
+app.post("/api/sessions/:id/pull-request-watch", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.requestPullRequestWatch(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
 app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
@@ -4584,6 +4620,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId", async (re
   if (!principal) return reply;
   return respond(reply, svc.updateCampaignWorkItem(id,
     { ...(req.body as Omit<UpdateCampaignWorkItemRequest, "workItemId">), workItemId: itemId },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/orchestrator-campaign/work-items/:itemId/delivery", async (req, reply) => {
+  const { id, itemId } = req.params as { id: string; itemId: string };
+  const principal = campaignLedgerPrincipal(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, await svc.recordCampaignWorkItemDelivery(id,
+    { ...(req.body as Omit<RecordCampaignWorkItemDeliveryRequest, "workItemId">), workItemId: itemId },
     (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
@@ -4711,6 +4756,23 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/reconcile", async (
   ));
 });
 
+// #4067: Wollipog performs the requester's own approved branch deletion or armed enqueue itself.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/execute", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  return respond(reply, await svc.executeWorkflowDecision(
+    id,
+    occurrenceId,
+    req.body as ExecuteWorkflowDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
 // #3917: `:id` is always the caller's own credential session, as for consume. The body names the
 // requesting session when the caller is its controlling Orchestrator; the service checks that
 // relationship and the decision's owner, and a withdrawal never approves or consumes anything.
@@ -4735,6 +4797,39 @@ app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/withdraw", async (r
     { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
     (sessionId) => db.canAccessSession(principal, sessionId),
   ));
+});
+
+// #4064: a Full Control root's question for its campaign's owner. `:id` is the caller's own
+// credential session; the service checks that it is the campaign's root and that only a person
+// can answer.
+app.post("/api/sessions/:id/owner-decisions", async (req, reply) => {
+  const { id } = req.params as { id: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  return respond(reply, svc.createOwnerDecision(id, req.body as CreateOwnerDecisionRequest,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// #4064: the root hands one of its pending Orchestrator-owned decisions to the campaign's owner.
+// `:id` is the caller's own credential session; the body names the requester when it is a child.
+app.post("/api/sessions/:id/workflow-decisions/:occurrenceId/hand-to-owner", async (req, reply) => {
+  const { id, occurrenceId } = req.params as { id: string; occurrenceId: string };
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id || principal.orchestrator !== true) {
+    return reply.code(403).send({ error: "a matching root Orchestrator credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  if (!validParentControlCoordinate(occurrenceId)) return reply.code(400).send({ error: "invalid occurrenceId" });
+  const body = req.body as Partial<HandWorkflowDecisionToOwnerRequest> | null;
+  if (body?.sessionId !== undefined && !validParentControlCoordinate(body.sessionId)) {
+    return reply.code(400).send({ error: "invalid sessionId" });
+  }
+  return respond(reply, svc.handWorkflowDecisionToOwner(id, occurrenceId,
+    { reason: body?.reason as string, ...(body?.sessionId !== undefined ? { sessionId: body.sessionId } : {}) },
+    (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/descendant-requests", async (req, reply) => {
@@ -4829,6 +4924,78 @@ app.post("/api/sessions/:id/descendant-requests/review-ui-evidence/acknowledge",
     return reply.code(400).send({ error: "receiptId and sha256 are required" });
   }
   return respond(reply, svc.acknowledgeDescendantUiEvidence(id, body.receiptId, body.sha256));
+});
+
+// Delegated image review (#4074). The controlling Orchestrator hands a decision's images to a
+// server-created reviewer Session and later reads its verdict; it never receives the images here.
+app.post("/api/sessions/:id/descendant-requests/delegated-image-review", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { sessionId?: unknown; occurrenceId?: unknown; brief?: unknown };
+  if (!validParentControlCoordinate(body?.sessionId) || !validParentControlCoordinate(body.occurrenceId) ||
+      typeof body.brief !== "string") {
+    return reply.code(400).send({ error: "sessionId, occurrenceId, and brief are required" });
+  }
+  return respond(reply, svc.prepareDescendantImageEvidenceReview(
+    id, body.sessionId, body.occurrenceId, body.brief, (sessionId) => db.canAccessSession(principal, sessionId),
+  ));
+});
+
+app.post("/api/sessions/:id/descendant-requests/delegated-image-review/get", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "a matching parent session credential is required" });
+  }
+  if (!db.canAccessSession(principal, id)) return reply.code(404).send({ error: "session not found" });
+  const body = req.body as { reviewId?: unknown };
+  if (!validParentControlCoordinate(body?.reviewId)) return reply.code(400).send({ error: "reviewId is required" });
+  return respond(reply, svc.delegatedImageReviewForOrchestrator(id, body.reviewId, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+// The reviewer's own credential only: the review it belongs to is the one its Session was created
+// for, so it names no review, decision or child. Evidence bytes are never logged.
+app.post("/api/sessions/:id/delegated-image-review/image", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { evidenceId?: unknown };
+  if (typeof body?.evidenceId !== "string" || !body.evidenceId || body.evidenceId.length > 256) {
+    return reply.code(400).send({ error: "evidenceId is required" });
+  }
+  reply.header("cache-control", "no-store");
+  return respond(reply, svc.reviewDelegatedImageEvidence(id, body.evidenceId, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/delegated-image-review/acknowledge", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { receiptId?: unknown; sha256?: unknown };
+  if (!validParentControlCoordinate(body?.receiptId) ||
+      typeof body.sha256 !== "string" || !/^[0-9a-f]{64}$/u.test(body.sha256)) {
+    return reply.code(400).send({ error: "receiptId and sha256 are required" });
+  }
+  return respond(reply, svc.acknowledgeDelegatedImageEvidence(id, body.receiptId, body.sha256,
+    (sessionId) => db.canAccessSession(principal, sessionId)));
+});
+
+app.post("/api/sessions/:id/delegated-image-review/verdict", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "agent" || principal.credentialSessionId !== id) {
+    return reply.code(403).send({ error: "the reviewer's own session credential is required" });
+  }
+  const body = req.body as { report?: unknown };
+  return respond(reply, svc.submitDelegatedImageVerdict(id, body?.report, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
 
 app.get("/api/sessions/:id/child-sessions", async (req, reply) => {
@@ -5274,7 +5441,8 @@ app.post("/api/sessions/:id/prompt", async (req, reply) => {
   const principal = requestPrincipals.get(req) ?? requestPrincipal(req);
   const target = db.getSession(id);
   const holdReader = target ? sessionHoldReaderFor(db, principal, target) : undefined;
-  const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader);
+  const result = await svc.promptOrSteer(id, text, images, slashCommand, body?.config, holdReader,
+    principal?.kind === "agent" ? principal : undefined);
   return respond(reply, result.ok && result.data
     ? { ...result, data: withSessionHoldAdviceFor(db, principal, result.data, holdReader) }
     : result);
@@ -6399,6 +6567,68 @@ app.post("/api/runners/:runnerId/workspaces/register", async (req, reply) => {
     const message = (error as Error).message;
     return reply.code(message.includes("already registered") ? 409 : 400).send({ error: message });
   }
+});
+
+// Remove Workspace (#4123): unregister one Workspace from a Machine with the authority that
+// registers one (owners and admins). Nothing on disk is deleted. Anything that still uses the
+// Workspace refuses removal with what to resolve; a configured Workspace is removed by its runner,
+// which keeps it removed across restarts, and older runners are refused with an update hint.
+app.delete("/api/runners/:runnerId/workspaces/:workspaceId", async (req, reply) => {
+  const { runnerId, workspaceId } = req.params as { runnerId: string; workspaceId: string };
+  // A person removes a workspace, never an agent credential, and only one they may manage.
+  const principal = requestHuman(req);
+  if (!principal) return reply.code(403).send({ error: "human identity is required" });
+  const runner = db.getRunner(runnerId);
+  if (!runner) return reply.code(404).send({ error: "runner not found" });
+  if (!db.canManageWorkspace(principal, runnerId, workspaceId)) {
+    return reply.code(404).send({ error: "workspace not found" });
+  }
+  const source = db.workspaceSource(runnerId, workspaceId);
+  if (!source) return reply.code(404).send({ error: "workspace not found" });
+  if (!hub.isRunnerOnline(runnerId)) return reply.code(409).send({ error: "runner is offline" });
+  if (source === "configured") {
+    const unsupported = runnerCapabilityError(runnerId, "workspaceRemoval", "removing configured workspaces");
+    if (unsupported) return reply.code(409).send(failureBody(unsupported));
+  }
+  // Checking what uses it and hiding it is one transaction, so nothing can come to depend on the
+  // workspace while its runner is asked; a managed workspace is gone at this point.
+  const started = db.beginWorkspaceRemoval(runnerId, workspaceId);
+  if (!started) return reply.code(404).send({ error: "workspace not found" });
+  if (!started.ok) {
+    return reply.code(409).send({ error: workspaceRemovalBlockedMessage(started.blockers), blockers: started.blockers });
+  }
+  hub.runnerChanged(runnerId);
+  if (started.source === "managed") return { removed: true };
+  const requestId = `workspace_remove_${randomUUID()}`;
+  try {
+    const result = await hub.requestFromRunner(runnerId, requestId, {
+      type: "remove_workspace",
+      requestId,
+      runnerId,
+      workspaceId,
+      path: started.path,
+    });
+    if (result.type !== "remove_workspace_result" || !result.ok) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return result.type === "remove_workspace_result"
+        ? reply.code(409).send({ error: result.error ?? "The machine could not remove the workspace." })
+        : reply.code(502).send({ error: "unexpected runner reply" });
+    }
+  } catch (error) {
+    if (isRunnerRequestNotSentError(error)) {
+      db.cancelWorkspaceRemoval(runnerId, workspaceId);
+      hub.runnerChanged(runnerId);
+      return reply.code(409).send({ error: "runner is offline" });
+    }
+    // The runner may have recorded it. The workspace stays hidden; the runner's next registration
+    // restores it if the runner still has it.
+    return reply.code(504).send({
+      error: "The machine didn't confirm the removal. The workspace stays hidden, and comes back when the machine reconnects if it wasn't removed.",
+    });
+  }
+  db.finishWorkspaceRemoval(runnerId, workspaceId);
+  return { removed: true };
 });
 
 app.post("/api/runners/:runnerId/workspaces/:workspaceId/rename", async (req, reply) => {

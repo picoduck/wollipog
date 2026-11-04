@@ -15,8 +15,6 @@ import {
   projectFallbacksAwaitingStore,
   projectLocationForSessionPreset,
   projectInventoryWithFallbacks,
-  projectRunPlacementIssue,
-  projectSelectionLabel,
   projectSessionPlacement,
   suggestedProjectLocation,
 } from "./project-session-selection.js";
@@ -73,12 +71,6 @@ test("Project Location selection uses exact IDs and never display names", () => 
   assert.equal(projectLocationForSessionPreset(second, { projectLocationId: secondLocation.id }), secondLocation);
   assert.equal(projectLocationForSessionPreset(first, { projectLocationId: secondLocation.id }), null,
     "an explicit Location from another Project fails closed");
-  assert.equal(projectSelectionLabel(first, true), "Same Name — /repos/one · runner-one");
-  assert.notEqual(
-    projectSelectionLabel(first, true),
-    projectSelectionLabel(project("third", [location("one", { projectId: "third", runnerId: "another-runner" })], "Same Name"), true),
-    "duplicate names with equal paths still include distinct runner identity",
-  );
 });
 
 test("authoritative Project inventory replaces temporary inline fallbacks", () => {
@@ -197,34 +189,4 @@ test("a launchable default or sole Location is suggested without silently replac
     "an unavailable exact preset remains visible instead of falling through elsewhere");
   assert.equal(suggestedProjectLocation(project("project-1", [offlineDefault, availableOne]), runners), availableOne);
   assert.equal(suggestedProjectLocation(project("project-1", [availableOne, { ...availableTwo, isDefault: true }]), runners)?.id, availableTwo.id);
-});
-
-test("run placement requires an explicit Project choice and exact available Location", () => {
-  const first = location("one");
-  const second = location("two");
-  const onlineRunners = new Map([
-    [first.runnerId, runner(first)],
-    [second.runnerId, runner(second)],
-  ]);
-  const multiLocation = project("project-1", [first, second]);
-
-  assert.equal(projectRunPlacementIssue(true, "", null, null, onlineRunners),
-    "Choose a Project or No Project.");
-  assert.equal(projectRunPlacementIssue(true, "project-1", multiLocation, null, onlineRunners),
-    "Choose an available Project Location.", "multiple Locations without a default do not silently pick one");
-  assert.equal(projectRunPlacementIssue(true, "project-1", multiLocation, second, onlineRunners), null);
-  assert.equal(projectRunPlacementIssue(true, NO_PROJECT_SELECTION, null, null, onlineRunners), null,
-    "No Project is a valid explicit choice");
-});
-
-test("run placement explains empty and offline Projects without falling back to another workspace", () => {
-  const offlineLocation = location("offline", { availability: "runner_offline" });
-  const offlineRunners = new Map([[offlineLocation.runnerId, runner(offlineLocation, "offline")]]);
-
-  assert.equal(projectRunPlacementIssue(true, "empty", project("empty", []), null, offlineRunners),
-    "This Project has no Locations. Add a Location before starting a run.");
-  assert.equal(projectRunPlacementIssue(true, "offline", project("offline", [offlineLocation]), offlineLocation, offlineRunners),
-    "No Project Locations are currently available.");
-  assert.equal(projectRunPlacementIssue(false, "", null, null, offlineRunners), null,
-    "legacy control planes retain runner/workspace validation");
 });

@@ -297,7 +297,7 @@ import {
 import { deriveSteeringReceipts, SteeringReceipts } from "./SteeringReceipts.js";
 import { SessionCommandReceipts, visibleSessionCommandReceipts } from "./SessionCommandReceipts.js";
 import { ReceiptLine, RECEIPT_ROW_ATTRIBUTE, receiptRowId, receiptRowIds } from "./TranscriptReceipt.js";
-import { ArrowUpIcon, AtSignIcon, CheckIcon, ChevronDownIcon, EditIcon, FolderIcon, GuardrailsIcon, ImageIcon, ImageOffIcon, MicIcon, OrchestratorControlsIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon, WarningIcon } from "./Icons.js";
+import { ArrowUpIcon, AtSignIcon, CheckIcon, ChevronDownIcon, EditIcon, FolderIcon, GuardrailsIcon, ImageIcon, ImageOffIcon, MicIcon, OrchestratorIcon, PlanIcon, PlusIcon, ProjectsIcon, RefreshIcon, StopTurnIcon, WarningIcon } from "./Icons.js";
 import {
   durableCommandAttachmentNote,
   buildComposerCommandRegistry,
@@ -8875,7 +8875,7 @@ export function ComposerPlusMenu({
           </MenuItem>
           {orchestratorOffered && (
             <MenuItem
-              icon={<OrchestratorControlsIcon size={16} />}
+              icon={<OrchestratorIcon size={16} />}
               description={orchestratorControlsSummary(session)}
               onClick={() => {
                 // The row goes with the menu, so the dialog returns focus to + instead.

@@ -24,9 +24,10 @@ import { useRemovedFocus } from "./useRemovedFocus.js";
  * page header, its action row and the group tabs. The title is the group picker, which opens the
  * Session Groups sheet (more than four tabs become a picker, §10.1); then Search, which swaps the
  * bar for a full-width search field and Cancel; in Board mode, Filters, which opens the Board's
- * Filters sheet (#2216); ⋯, a sheet with View, Show, New Project… and the current project's actions;
- * and New Session as the 44px `+`. While Snoozed is on, a strip under the bar says so and offers Show
- * Active; while a Board filter is set, a second strip says what is filtered and offers Clear Filters.
+ * Filters sheet (#2216); New Session as the quiet `+`, an `.icon-btn` like Search; and ⋯, a sheet with
+ * View, Show, New Project… and the current project's actions. While Snoozed is on, a strip under the
+ * bar says so and offers Show Active; while a Board filter is set, a second strip says what is
+ * filtered and offers Clear Filters.
  */
 
 export interface SessionsAppBarProps {
@@ -51,7 +52,7 @@ export interface SessionsAppBarProps {
     /** Clears the query and restores the bar. */
     onCancel: () => void;
   };
-  /** New Session's key, announced though its keycap is not drawn on the 44px `+` (§11.5). */
+  /** New Session's key, announced though its keycap is not drawn on the `+` (§11.5). */
   newSessionShortcut?: string;
   /** Board mode's Filters button (`BoardFiltersSheet`, #2216), after Search. */
   boardFilters?: ReactNode;
@@ -330,13 +331,19 @@ export function SessionsAppBar({
           <SearchIcon />
         </button>
         {boardFilters}
-        {more}
         {onNewSession && (
-          <button type="button" className="btn primary page-primary" aria-keyshortcuts={newSessionShortcut} onClick={onNewSession}>
+          <button
+            type="button"
+            className="icon-btn page-primary"
+            title="New Session"
+            aria-keyshortcuts={newSessionShortcut}
+            onClick={onNewSession}
+          >
             <PlusIcon />
             <span className="page-primary-label">New Session</span>
           </button>
         )}
+        {more}
       </div>
     </div>
   );

@@ -12,7 +12,6 @@ import {
   RUNNER_REASON_PATTERNS,
   currentAgentSelectionIssue,
   firstEnabledAgentId,
-  runnableAgentIds,
   savedAgentSelection,
   sessionAgentLabel,
 } from "./agent-options.js";
@@ -99,7 +98,6 @@ test("the retired Codex exec driver is never an option, configured or discovered
   ];
   assert.deepEqual(labels(agents), ["Claude Code", "Codex App Server"]);
   assert.deepEqual(agentOptions(agents, { includeProviderAdapters: true }).map((option) => option.agent.id), ["claude", "codex"]);
-  assert.deepEqual(runnableAgentIds(agents), ["claude", "codex"]);
   assert.equal(firstEnabledAgentId(agentOptions(agents)), "claude");
 });
 
@@ -343,7 +341,6 @@ test("an omitted legacy availability state is visible but never selectable", () 
   ]);
   assert.equal(opts.length, 1);
   assert.equal(opts[0]!.disabled, true);
-  assert.deepEqual(runnableAgentIds(opts.map((option) => option.agent)), []);
   assert.equal(firstEnabledAgentId(opts), "");
 });
 
@@ -490,21 +487,6 @@ test("an unavailable native harness does NOT hide a working ACP fallback", () =>
     agent({ id: "claude-acp", name: "Claude Code (ACP)", available: true }), // acp fallback
   ]);
   assert.ok(out.some((l) => /ACP/.test(l)), `ACP fallback should stay visible, got ${JSON.stringify(out)}`);
-});
-
-test("a newly available native harness removes its now-hidden ACP duplicate from runnable ids", () => {
-  assert.deepEqual(runnableAgentIds([
-    agent({ id: "claude-acp", name: "Claude Code (ACP)", available: true }),
-    agent({ id: "claude-native", name: "Claude Code", driver: "claude-code", available: true }),
-  ]), ["claude-native"]);
-});
-
-test("multi-agent runs exclude unavailable and unverified discovery rows", () => {
-  assert.deepEqual(runnableAgentIds([
-    agent({ id: "codex", name: "Codex", driver: "codex-app-server", available: false }),
-    agent({ id: "claude", name: "Claude", driver: "claude-code", available: true }),
-    agent({ id: "config", name: "Config agent", driver: "acp", available: undefined }),
-  ]), ["claude"]);
 });
 
 test("persisted session labels audit the actual Codex driver", () => {

@@ -157,7 +157,7 @@ wollipog session prompt ID TEXT --json
 wollipog session steering ID --json
 wollipog session steering-get ID SUBMISSION_ID --json
 wollipog session resolve-steering ID SUBMISSION_ID queue_again|dismiss --json
-wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] --json
+wollipog session wait ID [--for STATE,...] [--timeout MS] [--interval MS] [--full] --json
 wollipog session stop ID --json
 wollipog session restart ID --json
 wollipog session archive ID --json
@@ -219,6 +219,27 @@ checks only. Timeouts are clamped to 1 ms–3 hours (default 4 minutes); reads s
 starts more than 20 seconds past it and one still in flight then is abandoned. Resolving a bare
 number's repository is one of those reads, so `--timeout 1` still returns one snapshot. Polling is clamped to
 10 seconds–10 minutes (default 30 seconds); lists are capped at 30 required checks and 20 failed jobs.
+
+MCP `park_on_pull_request` (#4071, protocol 272) lets a session stop waiting inside a turn. The
+session names its own enqueued GitHub pull request and exact head, gets a watch back, and ends its
+turn. The control plane stores the watch (`POST /api/sessions/:id/pull-request-watch`, own session
+credential only) and sends `pull_request_watch_start` to the session's runner. The runner repeats
+3-hour `wait_pull_request` waits through its own read-only `gh` login and reports the first outcome
+other than `timeout` (`merged`, `closed`, `queue_failed`, `queue_ejected`, `head_changed`, or for a
+pull request that is not queued, its checks' outcome) in `pull_request_watch_update`. The control
+plane accepts only the first report from the watch's runner, then wakes the session once: an idle
+session receives one durable `[Wollipog Pull Request Watch — <id>]` prompt with the outcome and the
+bounded wait summary (at most 16 KiB, on one line), carried exactly like a review continuation.
+Every runner registration resends the watches still watching on it, so a runner restart resumes
+them. A runner that cannot watch any more (an older version), or one that could not read GitHub
+for about half an hour, reports the watch `lost`, and the wake says so. Parking again replaces the
+watch; an ended or archived session's watch is cancelled and owes no wake. `get_session` shows the
+watch as `pullRequestWatch`, and `get_campaign` lists parked children as `parkedChildren`. While a
+child is parked (watching, or its wake not yet started), its turn end is no `child_ready`
+continuation for its Orchestrator; the woken child's next turn end is. The wake is an ordinary
+prompt and grants nothing: enqueueing, merging and branch deletion keep their typed gates. GitLab
+merge requests, older runners and older control planes are refused, so those sessions keep
+blocking waits.
 
 A GitLab merge request (#3602) is waited on through the local `glab` login instead, with the same
 timeout, interval, budget, and read-only contract. Give it as a merge request URL,
@@ -429,6 +450,21 @@ attempt, mode, base and the files in scope):
   retried in the same round; an attempt that timed out or failed before producing a report does
   not count. A head with an upvote, a head unchanged since the last valid round, a spent round
   budget and a spent round are refused with fixed reasons.
+- Integrating the moved base branch is treated like a rebase (#4075, protocol 277 runner and
+  control plane). The runner proves strictly that a head's only change since the last valid round
+  is one merge of the moved base: a two-parent merge whose first parent is the last valid head,
+  whose second is a commit of the pull request's current base that head did not contain, and whose
+  tree differs from Git's own merge only inside its conflicted hunks. Such a head gets a
+  base-merge round (`round.baseMerge`): a delta round scoped to the merge's effect on the pull
+  request's own diff, which does not count against the epoch's budget and needs no extension. When
+  the last valid round was an upvote and the merge leaves the pull request's own diff byte-identical
+  (each changed path's mode and blobs against its merge base), no reviewer runs: the run records a
+  reviewed-head equivalence (`round.mode` `equivalent`, `round.equivalentTo`) that carries the
+  upvote and its findings, and a `pr_merge` decision may cite it. The control plane checks the
+  claim against the run's current epoch and last valid head before recording it. An octopus
+  merge, a merged parent outside the base branch, a path-level conflict, a change outside a
+  conflict block, any commit after the merge, or a requested full review is an ordinary commit and
+  counts as before. Older peers keep counting every round.
 - An epoch that used its rounds takes more only through a typed
   `review_round_extension` workflow decision (`request_workflow_decision`).
   - **Snapshot:** the repository, pull request, epoch, head, rounds used, the open blocking findings
@@ -443,8 +479,19 @@ attempt, mode, base and the files in scope):
     Unused grants are rechecked against the run at consumption and admission; stale and superseded
     grants do not add rounds. Extensions keep the normal campaign admission and cost accounting.
   - **Ownership:** it is human-owned by default. A session with no Orchestrator above it controls it
-    itself, and a person resolves it from its card. Under an Orchestrator it is delegated only by
-    an explicit Parent Control grant; Full Control never takes it as part of its own boundary.
+    itself, and a person resolves it from its card. Under an Orchestrator an explicit Parent Control
+    grant delegates it without a cap. Under Full Control it is also the controlling Orchestrator's
+    within a server-enforced cap per pull request (#4075, which the owner approved in place of the
+    #3369 rule that Full Control never takes it): every approved or consumed Orchestrator-owned
+    extension of that pull request, from any epoch or requester, counts toward at most the run's
+    configured round budget of extra rounds in total. The count is durable, so a re-request
+    cannot reset it. Past the cap, under a stale boundary, from a root Orchestrator's own run, in
+    every Custom campaign, and whenever the requester's or the controller's runner is older than
+    protocol 277, it stays the person's (reason `review_extension_cap_reached` past the cap).
+    `get_campaign` reports it as Orchestrator-owned with `reviewRoundExtensionCap`, and each
+    occurrence's `authorityEvaluation` records whose decision it is. A grant adds only review
+    rounds, spent from the campaign's review allowance like every review; it grants no merge,
+    filesystem, shell or network authority.
   - **Effect:** approved and consumed extensions add their rounds to that epoch's budget. The next
     review request consumes an approved one, so a session restart, which revokes unconsumed
     decisions, cannot take back rounds already granted. A policy stored before this category
@@ -510,8 +557,10 @@ reads reaches the model and can appear in its output, as with the bridge.
 (default `input_required,completed,failed,stopped`) and returns `outcome: "reached"`, the status it
 `reached`, and the session's metadata. A bounded wait usually ends at its timeout (1 ms–1 hour,
 default 60 seconds), so that is a normal result rather than a tool error (#3269):
-`outcome: "timeout"`, the states it was `waitingFor`, and the session's metadata from its last read.
-Call again to keep waiting. A state outside `queued`, `starting`, `running`, `input_required`,
+`outcome: "timeout"`, the states it was `waitingFor`, and a compact status from its last read
+(`id`, `status`, `attentionRevision`, `pendingRequestCount`, `lastActivityAt`) whose size does not
+grow with the session's metadata (#4071). Pass `fullMetadata: true` (CLI `--full`) for the full
+metadata instead. Call again to keep waiting, or end the turn rather than polling a long wait. A state outside `queued`, `starting`, `running`, `input_required`,
 `idle`, `completed`, `failed`, and `stopped` is refused before any read, with the valid list. A
 missing session, a control-plane failure, and cancellation remain errors. The CLI exits 0 when
 reached, 124 on timeout, and 1 on an error.
@@ -523,6 +572,18 @@ successful replies, and ambiguous steering errors identify the exact submission 
 `session resolve-steering` (`resolve_steering_attempt`) uses the dashboard's existing Queue Again
 and Dismiss path. Agent reads and resolution have the same descendant scope and visibility checks
 as `prompt_session`; an agent cannot use them on itself, ancestors, siblings, or unrelated sessions.
+
+A turn started by a durable command refuses ordinary steering. One exception (#4022): a child's
+controlling Orchestrator can steer `prompt_session` text into a running turn that the control plane
+started from its own prompt outbox (an assignment, an Orchestrator prompt, a decision resume, or a
+continuation). The sender must be the child's immediate parent and also its outermost
+policy-bearing Orchestrator. The control plane passes the exact started command to the runner, and
+the runner admits the steer only when that command started the active turn. Turns started by an
+automation, recovered answers, recovery continuations, nested Orchestrators, grandparents and
+people keep the existing refusal, and every other steering guard still applies. The steering
+attempt gets its own receipt, and the outbox command still settles at its own turn boundary. A
+refused steer still falls back to the queue, and so does every steer on a runner that predates this
+exception.
 
 Queue Again explicitly admits one ordinary queued message; it cannot prove that an uncertain
 provider write was never delivered. Inspect the attempt and session events before choosing an
@@ -642,6 +703,38 @@ at 300 seconds. The setting sits inside the `wollipog` entry alone: no other MCP
 configuration changes, and other Wollipog tools keep their own shorter bounds (control-plane
 requests 30 seconds, `wait_session` one hour).
 
+**Code mode (#4023).** Some models put Codex in code mode: every GPT-6 model in codex-cli 0.164.0
+and 0.165.0 sets `tool_mode = "code_mode_only"` in its catalog entry. Those models reach MCP tools
+only from an `exec` script cell. `exec` hands a still-running cell back to the model. To get the
+result, the model then has to call `wait` on the cell, which blocks for the `yield_time_ms` it
+asks for. Real models asked for about a minute at a time, often with sleeps in between. One long
+`wait_pull_request` call therefore cost one full-context model request a minute. In one campaign
+child, 531 of 616 requests were spent this way. The runner adds
+`-c features.code_mode.direct_only_tool_namespaces=["mcp__wollipog"]` directly after its own entry.
+Codex then offers the `wollipog` tools as ordinary direct tools again, outside `exec`, so a wait
+blocks in one tool call with no model request. This holds for sessions and for native-host
+Orchestrators that start from their worktree or repository. Measured on codex-cli 0.165.0, the setting has no effect without code mode,
+with the hybrid `code_mode` mode, or with a user's own `features.code_mode = true` (which stays
+enabled). Codex refuses its whole configuration when `features.code_mode` contains a field it does
+not know. So the runner adds the setting only when a `codex mcp list --json` read with it still
+loads the `wollipog` entry. On a Codex without the field, the launch is exactly what it was before,
+and the runner log says so. Resume removes the setting only when it directly follows the runner's
+own entry; a user's identical setting anywhere else is kept.
+
+A `-c` array replaces the configured value rather than merging into it, so the setting would drop
+namespaces a user already keeps out of code mode. The runner therefore adds nothing if the launch
+arguments or a Codex configuration file it can read already name `direct_only_tool_namespaces`.
+Those files are the Codex home's `config.toml`, and each `.codex/config.toml` from the launch
+directory up and from every directory a `-C`/`--cd` argument names. They also include
+`/etc/codex/config.toml` and `managed_config.toml`. A mention in a profile or a comment counts too.
+The log then says to add `"mcp__wollipog"` to that list. Two kinds of Orchestrator get no setting
+and keep today's behavior, because the runner cannot read the configuration that applies:
+- A preset Orchestrator with Strict Project Isolation, which starts from a session scratch
+  directory chosen after this check.
+- A target-local WSL Orchestrator, which is launched inside its distribution. A session or Orchestrator whose tools stay inside
+`exec` should follow the shipped skill's code-mode guidance: one call, then one long `wait`, never
+short polls.
+
 **What a session without the Orchestrator role gains.** The entry starts the same
 `--agent-control-mcp` re-entry Claude sessions already run, with the same session-scoped transport
 the injected CLI already uses: a token-file path, or in `provider` mode the relay coordinates
@@ -677,7 +770,38 @@ and disables the rest.
 `pnpm probe:codex-mcp-wait` re-measures this against a real `codex app-server`, a scripted local
 model, and a stub `wait_pull_request` behind the exact entry the runner builds. It counts every
 model request while the call blocks and can show the default cutoff (`--default-limit`) and the
-reviewer request (`--without-approval`).
+reviewer request (`--without-approval`). `--code-mode` runs the same wait for a code-mode-only
+model, with the direct-tools setting and without it. On codex-cli 0.165.0, a 150-second wait made
+no model request with the setting. Without it, the call ran from an `exec` cell that two model
+requests polled.
+
+### Claude Code Sessions and the `wollipog` MCP Server
+
+Claude Code aborts a stdio MCP call that sends no response or progress for 30 minutes, whatever
+`timeoutMs` the call asked for (#4072). The `wollipog` server sends nothing while a wait blocks, so
+before this limit was raised a `wait_pull_request` of 40 or 50 minutes, or a `wait_session` of 50,
+failed at exactly 1800 seconds instead of returning its own result.
+
+**Per-call limit.** Every runner-written Claude `wollipog` entry sets the per-server
+`"timeout": 10860000` (3 hours 1 minute, `CLAUDE_WOLLIPOG_MCP_TIMEOUT_MS`, the same as Codex's).
+The native `--mcp-config` file and the WSL bridge's `mcp.json` are both built by
+`claudeWollipogMcpServer`, so the two launch paths carry the same entry. In claude 2.1.312 the
+per-server `timeout` does two things for that server alone:
+- Its idle limit becomes the larger of the `timeout` and the global idle limit. A user's
+  `CLAUDE_CODE_MCP_TOOL_IDLE_TIMEOUT=0` still turns it off.
+- Its total per-call limit becomes the `timeout`, in place of `MCP_TOOL_TIMEOUT` and the 27.8-hour
+  default. No `wollipog` tool runs that long: `wait_pull_request` ends within 3 hours and 20
+  seconds, and `wait_session` within one hour.
+
+The setting sits in the runner-written file's `wollipog` entry alone, so other MCP servers and the
+user's own Claude settings are unchanged. The server sends no `notifications/progress`. Claude Code
+would accept them, but the configuration-only change covers the same calls without new protocol
+traffic for every harness.
+
+`pnpm probe:claude-mcp-wait` re-measures this against a real `claude -p`, a scripted local
+Messages API, and the runner's own `wait_pull_request` and `wait_session` handlers with stubbed
+reads, behind the exact entry the runner builds. `--without-limit` also runs the entry without its
+`timeout`, and `--idle-ms` scales the global idle limit down for a quick check.
 
 Agent-created children do not receive invented cost or tool-call limits. Explicit creation values
 take precedence over the parent Project's child defaults, and a finite parent's remaining ceiling
@@ -1397,6 +1521,25 @@ Known limits of the `provider`-mode form:
   command-text veto remains the only control over READING the directory; what the directory no
   longer does, on native Linux, is decide the guard's verdict.
 
+### Parameter Operators in the Hook-State Veto
+
+The hook-state command-text veto refuses shell parameter operators it cannot inspect (#4031),
+including pattern removal/substitution, substring/length, default/alternate/assignment/error,
+case conversion, indirection/name enumeration and `@` transformations (including prompt expansion).
+Only plain identifiers, positional digits and single special parameters retain the existing
+variable treatment. Operator expressions refuse even in non-path positions such as `echo ${#x}`;
+this conservative restriction avoids emulating Bash and covers partial operands and nested forms.
+Single-quoted or escaped literal text and already admitted inert copy-only heredoc bodies retain
+their existing treatment. No new command allowance is introduced.
+
+Sessions without OS isolation rely on this best-effort text veto to protect hook state. This
+includes Claude in provider mode and Codex launches whose provider boundary is not enforced, as
+described above; native Windows and WSL launches must likewise not assume a filesystem deny unless
+their selected isolation boundary enforces one. OS-isolated launches retain the veto as defense in
+depth. It is not a sandbox: plain unknown variables remain opaque, quoted command substitution
+(#3322) and script-file indirection remain limitations; #1336 tracks the OS boundary. The separate
+misleading managed-worktree refusal wording tracked under #1734 is unchanged here.
+
 ## Typed Parent Control Decisions
 
 An Orchestrator that cannot continue without a human response must create a structured blocking
@@ -1948,6 +2091,99 @@ to `resolve_descendant_workflow_decision`; a rejection is evidence for denying. 
 sends anything unless `/api/compatibility` declares the paced video review contract, and both are
 listed only for Orchestrators. See `docs/video-evidence-production.md`.
 
+#### Delegated Image Review
+
+Protocol v276 (#4074) lets an Orchestrator review a decision's images without loading them into its
+own conversation. With direct review, each image stays in the Orchestrator's context for the rest
+of the campaign, and every later turn pays to read it again.
+`prepare_descendant_ui_evidence_review` (`sessionId`, `occurrenceId`, `brief`) instead hands every
+image of a pending decision this root Orchestrator owns to a **delegated image reviewer**. The
+reviewer is a managed Session with a fresh context. The `brief`, at most 16,000 characters, holds
+the child's claims and the UI acceptance criteria. It is the reviewer's only context besides the
+images.
+
+`get_descendant_ui_evidence_review` (`reviewId`) returns the review's state. Once the reviewer
+finishes, it also returns a bounded verdict:
+
+- a pass or fail for each image, with at most 10 observed defects of 500 characters each;
+- a summary of at most 2,000 characters;
+- an approve or deny recommendation.
+
+The Orchestrator resolves the decision as before, with `resolve_descendant_workflow_decision`. It
+lists every evidence id in `evidenceReviewed` and passes the exact `delegatedImageReview`
+reference (`reviewId`, `verdictId`, `reviewerSessionId`) the read returned.
+
+The reviewer follows the video reviewer's provenance pattern, but for images:
+
+- **Same gates as direct review.** Preparing, each delivery, each acknowledgement and the verdict
+  re-run every gate direct review runs: root campaign controller, ancestry, audience, pending
+  status, policy revision and current authority. Only a decision whose evidence is all
+  artifact-backed images can be delegated, and only one the Orchestrator could inspect directly
+  right now. Delegation therefore never reaches evidence or a provider that direct review would
+  not.
+- **Audience is rechecked on every call.** As direct review does on every delivery, each reviewer
+  call requires the reviewer's own credential to reach the root and the child. The reviewer's
+  audience must also sit inside both of theirs. An Orchestrator whose audience reaches beyond the
+  child's cannot delegate. A later scope change that breaks containment ends the review before
+  any bytes or receipt are produced, and blocks approval on its verdict.
+- **Created by the server.** The reviewer runs on the root's own runner, agent and model, as a
+  child of the root. It gets a server-pinned review prompt and no campaign assignment. Its cost is
+  bounded at $10 and two tool calls per image plus eight. Under a campaign allowance it is a budget
+  member like any child, so its cost is reserved against the allowance and shows in campaign
+  accounting. Like a review session, it holds no concurrency slot.
+- **Two tools only.** The runner launches it as a native Claude Code session with no built-in
+  tools, no slash commands, no user or project settings, and only the runner's management MCP
+  server. That server exposes exactly `review_evidence_image` and `submit_evidence_verdict`. The
+  control plane narrows the reviewer's credential to the matching three routes under
+  `/api/sessions/:id/delegated-image-review/` (`image`, `acknowledge`, `verdict`) plus
+  `GET /api/compatibility`. It also refuses prompts, steering, configuration, restarts and
+  children for a reviewer. Stop and archival still work.
+- **Never relaunched.** A runner never relaunches a reviewer, and it refuses the marker for any
+  other harness, an Orchestrator launch, a non-native context or an older control plane, before a
+  credential exists.
+- **Receipts recorded against the reviewer.** `review_evidence_image` uses the same digest-verified
+  handoff as `review_descendant_ui_evidence`. The server reads and re-hashes the bytes, revokes
+  the decision on a mismatch, and records a receipt bound to the reviewer, child, occurrence,
+  policy revision, evidence identifier, artifact and digest. The reviewer's runner re-hashes the
+  bytes and acknowledges the exact receipt before the image reaches the model.
+- **One verdict, only after every image.** The verdict is accepted once, and only when the
+  reviewer holds a current acknowledged receipt for every item. Nothing is delivered after it.
+  The child that produced the evidence, and the Orchestrator itself, can never be the reviewer.
+- **Approval checks everything again.** An approval on a reviewer verdict re-checks the
+  following against the server's own records:
+  - the review, the verdict and its digest;
+  - the reviewer identity, which must be neither the child nor the root;
+  - the occurrence, policy revision, resource digest and evidence digests the review was
+    prepared against;
+  - an approve recommendation;
+  - an unexpired, unconsumed and unrevoked reviewer receipt for every item, as named by the
+    verdict.
+
+  Repeated identifiers, a plain message forwarded from the reviewer, a deny recommendation, or a
+  reference with a single field changed are all refused. Approval spends the receipts and the
+  verdict. The resolution audit lists the receipt ids and the reviewer's identity, verdict id,
+  recommendation and verdict digest. The decision records the `delegatedImageReview` it rested on.
+- **Stale evidence fails closed.** Anything that revokes or supersedes the decision ends its review
+  with the reviewer's receipts: supersession, a policy or ownership change, an authority loss, or
+  a digest mismatch. A resolved decision ends any other live review. Receipts expire after an hour,
+  as they do under direct review, so an old verdict has to be prepared again.
+- **One review at a time.** An occurrence has at most one live review, and preparing again returns
+  it. Some reviews can no longer back an approval: the reviewer ended its turn or Session without a
+  verdict, or one of its verdict's receipts expired. Such a review is retired, and preparing again
+  starts a fresh reviewer.
+
+The path adds no setting, form or confirmation. It uses the existing UI Evidence Approval
+authority, and decision ownership does not change. Direct `review_descendant_ui_evidence` keeps
+working, and remains the route for one image or a targeted follow-up look.
+
+Where the path is unavailable, the Orchestrator keeps direct review and preparing refuses with the
+reason:
+
+- a runner before v276, refused with the shared capability sentence;
+- a control plane before v276, where the runner tools refuse before sending anything;
+- an Orchestrator not on Claude Code;
+- an offline runner.
+
 This boundary governs actions performed through Wollipog's workflow-decision tools. It cannot
 intercept a separate shell, forge client, browser, or other credential that can independently
 perform the action. Orchestrator instructions must therefore require `request_workflow_decision`,
@@ -1969,6 +2205,63 @@ it reports the approved head merged. One merged head settles one occurrence. Whe
 restarts, or its provider session ends with an armed merge still approved, the occurrence is revoked
 at once as before, so a relaunched provider cannot reuse it; the control plane then reads the forge
 and moves it to consumed if the approved head merged.
+
+A provider's own permission check can refuse an approved command: Claude Code's `auto` classifier
+decides inline, so a refusal never reaches the runner's permission channel. Wollipog then performs
+the one approved forge action itself (protocol v284, #4067) through `execute_workflow_decision`
+(CLI `decision execute <occurrence-id> --resource-digest <sha256>`,
+`POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute`). The classifier is not
+changed or worked around, and the agent's own commands stay subject to it. Only the requester may
+execute. It may execute its approved `merged_branch_deletion` when the snapshot names the merged
+`pullRequest` and `headSha`, whether or not it consumed the approval before its own command was
+refused. It may also execute its approved and armed GitHub `pr_merge`. Every consumption check
+applies again: live ancestry, the policy revision, current authority, and, for a merge, review
+evidence, the reviewed head, and GitHub's closing references re-read before dispatch. The control
+plane then sends `forge_decision_action` to the child's runner. The runner acts through the
+child's own `gh` login, using only `gh api` and `gh pr merge` against the explicit repository, run
+from the filesystem root. No `git` runs in the child's worktree, so no repository configuration the
+agent can write (hooks, `core.sshCommand`, credential helpers, URL rewrites, a changed `origin`) is
+read or executed on its behalf:
+
+- A deletion first proves that the pull request merged the approved head from that branch in the
+  same repository with the approved merge commit, and that no open pull request targets the
+  branch. It then deletes the ref with GitHub's `updateRefs` mutation, with `beforeOid` set to the
+  approved head and an all-zero `afterOid`, so GitHub itself refuses the deletion if the tip moved
+  after the read.
+- An enqueue first proves that the pull request is open at the approved head (already queued or
+  already merged at that head counts as done). It then runs
+  `gh pr merge <url> --squash --match-head-commit <sha>`, never `--delete-branch`.
+
+The decision records `forgeAction` (`kind`, `attempts`, `outcome`, `refusal`). A success consumes
+the approval once. A deletion uses ordinary consumption, an enqueue uses a receipt unique to its
+occurrence, and an already merged head uses the forge receipt that no other occurrence can reuse.
+A refusal proving the snapshot stale (`tip_moved`, `dependent_pull_request_open`,
+`pull_request_mismatch`, `closure_mismatch`) revokes the approval. Any other refusal changed
+nothing and leaves the approval in place, armed for a merge, so it can be retried or reconciled, up
+to five attempts. An uncertain enqueue is never replayed; reconcile it once the forge reads MERGED.
+An enqueue Wollipog ran left no provider receipt in any harness, so for every harness, Codex App
+Server included, reconciliation and a lifecycle end settle it from the forge alone. The runner
+reads the pull request (a separate `pr_merge_observe` action, from the filesystem root, which a
+runner that does not know it refuses) and never enqueues.
+An uncertain deletion may be executed again, because a compare-and-delete pinned to the approved
+head cannot do more than the approval allowed. The consume result for a merge or deletion names
+this fallback (`forgeActionFallback`).
+
+`get_campaign` reports `mergedBranches` on the same version. For each GitHub pull request a campaign
+child merged through a consumed `pr_merge`, or through one whose enqueue Wollipog performed (a
+success or an uncertain attempt, even if a new request superseded or a revocation ended that
+occurrence while it ran), it gives the head branch the forge last reported as
+`deleted`, `retained` (its work item is handed to `human` or `external`, with the handoff's reason),
+or `pending`. A pull request not read yet, or still open after its approved enqueue, is `pending`
+too, and a handoff retains it even before the first read. A pending branch keeps
+`campaignTerminalStatus` from `verified_complete` and leaves the campaign `active`. A retained one
+finishes it as `complete_with_handoffs`. The forge observer keeps re-reading such a pull request
+until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
+A merged pull request whose branch the forge does not name usably, including one read before branches
+were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
+be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
+every campaign observed by a runner older than v284 are not tracked, so those campaigns complete
+as before.
 
 An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI
 `decision withdraw`, `POST /api/sessions/:id/workflow-decisions/:occurrenceId/withdraw`, protocol

@@ -33,6 +33,20 @@ const probeConfiguredAcpAgent: typeof realProbeConfiguredAcpAgent = (agent, env,
 const probeConfiguredPiAgents: typeof realProbeConfiguredPiAgents = (agents, env, options) =>
   realProbeConfiguredPiAgents(agents, env, { ...testAdmission, ...options });
 
+test("configured Pi executes in the environment admitted by discovery ownership", async () => {
+  const agent = cfg({ id: "pi-isolated", driver: "pi", command: "fixture-pi", source: "config" });
+  let observed = false;
+  await probeConfiguredPiAgents([agent], () => ({}), {
+    authorize: async () => ({ env: { HOME: "/isolated-probe" }, settle: async () => {} }),
+    probe: async (_launch, _context, options) => {
+      observed = true;
+      assert.deepEqual(options?.env, { HOME: "/isolated-probe" });
+      return { available: true, authStatus: "unknown", capabilities: capabilitiesFor("pi")! };
+    },
+  });
+  assert.equal(observed, true);
+});
+
 const ACP_INITIALIZE_FIXTURE = [
   'let input="";',
   'process.stdin.setEncoding("utf8");',
@@ -480,6 +494,7 @@ test("a config-declared OPENAI_API_KEY keeps Codex available despite a missing a
   // A key-less config row must not resurrect a gated discovery result.
   const plain = mergeAgents([cfg({ id: "codex", command: "/usr/bin/codex", driver: "codex-app-server" })], discovered)[0]!;
   assert.equal(plain.available, false);
+  assert.equal(plain.authStatus, "unauthenticated");
 });
 
 test("a failed or timed-out auth-file probe reports unknown, not signed-out", () => {

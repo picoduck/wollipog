@@ -1009,6 +1009,10 @@ test("CLI session wait exits 124 on a timeout result and 1 on an unknown state",
   assert.equal(timedOut.body.outcome, "timeout");
   assert.deepEqual(timedOut.body.waitingFor, ["completed"]);
   assert.equal(timedOut.body.session.status, "running");
+  assert.equal(timedOut.body.session.runnerId, undefined, "a timeout prints the compact status by default");
+  const full = await run("--for", "completed", "--timeout", "1", "--interval", "50", "--full");
+  assert.equal(full.code, 124);
+  assert.equal(full.body.session.runnerId, "r1", "--full prints the full metadata");
 
   const readsBefore = sessionReads.length;
   const refused = await run("--for", "needs_input");
@@ -1396,13 +1400,14 @@ test("CLI reconciliation forwards only the original snapshot and preserves the s
 
 test("CLI typed-decision help is discoverable and malformed or cross-session commands make no request", async () => {
   const rootHelpText = await captureCli(["help"]);
-  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, reconcile, and withdraw typed workflow decisions/mu);
+  assert.match(rootHelpText.stdout, /^\s+decision\s+Request, read, consume, execute, reconcile, and withdraw typed workflow decisions/mu);
   const topic = await captureCli(["help", "workflow-decisions"]);
   assert.equal(topic.code, 0);
   for (const text of [
     "decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision",
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
     "decision withdraw", "withdraw_workflow_decision", "protocol v269",
+    "decision ask-owner", "decision hand-to-owner", "request_owner_decision", "hand_workflow_decision_to_owner", "protocol v281",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
@@ -1426,6 +1431,14 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "withdraw", "workflow_1"],
     ["decision", "withdraw", "workflow_1", "--reason", " "],
     ["decision", "withdraw", "workflow_1", "--reason", "Not needed", "--session"],
+    ["decision", "ask-owner", "--resource-key", "k", "--question", "Q?", "--options", "[]"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "not-json"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "{}"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "[]", "--session", "child"],
+    ["decision", "hand-to-owner", "--reason", "Kept"],
+    ["decision", "hand-to-owner", "workflow_1"],
+    ["decision", "hand-to-owner", "workflow_1", "--reason", "Kept", "--session"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));

@@ -152,7 +152,7 @@ function handle(request) {
       return response("get_state", request, { sessionId, sessionFile, model: selected,
         thinkingLevel: selected.id === "sonnet" ? "high" : "off", isStreaming: false });
     case "get_available_models":
-      return response("get_available_models", request, { models });
+      return response("get_available_models", request, { models: scenario === "no-models" ? [] : models });
     case "set_model":
       selected = models.find((model) => model.provider === request.provider && model.id === request.modelId) ?? selected;
       if (scenario === "slow-discovery") {

@@ -126,9 +126,13 @@ test("identified browser phases include every full-run shard and reconcile activ
   const identities = new Set(evidence.samples.map((row) => `${row.runId}/${row.attempt}/${row.shard}`));
   assert.equal(identities.size, evidence.samples.length, "do not count carried-forward successes as fresh retry measurements");
   assertFullShardCoverage(evidence.samples);
+  for (const run of evidence.completeRunAttempts.filter((run) => run.runId >= 40018244256)) {
+    assert.ok(Number.isFinite(Date.parse(run.createdAt)), "redistributed runs retain source creation time");
+    assert.match(run.workloadTreeSha256, /^[a-f0-9]{64}$/, "redistributed runs retain workload provenance");
+  }
   const retry = evidence.samples.filter((row) => row.runId === 37478932815 && row.attempt === 2);
   assert.deepEqual(retry.map((row) => row.shard), [4], "only the genuinely rerun job is a new measurement");
-  assert.equal(measuredRemainder(evidence.samples), 2016, "refresh the workload envelope from the identified recent jobs");
+  assert.equal(measuredRemainder(evidence.samples), 2453, "refresh the workload envelope from the identified recent jobs");
   const current = evidence.samples.filter((row) => row.runId === evidence.baselineRunId);
   assert.equal(current.length, 5, "remeasure all shards after the baseline workload changes");
   assert.ok(current.every((row) => row.headSha === evidence.baselineHead));
@@ -156,7 +160,7 @@ test("recent sizing evidence covers five natural full runs and rejects incomplet
 
 test("browser budget covers either bounded install path, measured remainder, enforcement and three minutes spare", () => {
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 4080, install: 720, cache: 480, remainder: 2020, enforcement: 180, diagnostics: 480, required: 4060 });
+  assert.deepEqual(result, { budget: 4500, install: 720, cache: 480, remainder: 2460, enforcement: 180, diagnostics: 480, required: 4500 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
@@ -186,7 +190,7 @@ test("redistributed sizing retains the measured floor and accounts for the bound
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 40, 48, 49, 50, 55, 58, 59, 67]) {
+  for (const minutes of [25, 40, 48, 49, 50, 55, 58, 59, 67, 68, 74]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
   for (const name of [...paths.flatMap((name) => [name, `Retry ${name}`]), ...systemCacheSteps]) {

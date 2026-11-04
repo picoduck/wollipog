@@ -2,7 +2,6 @@ import React, { useEffect, useLayoutEffect, useMemo, useRef, useState } from "re
 import { State, useSnapshotState } from "./State.js";
 import { TabList } from "./Tabs.js";
 import {
-  type AgentDefinition,
   type IdentityAdministrationView,
   type RunnerView,
 } from "@wollipog/protocol";
@@ -47,10 +46,6 @@ import {
   readLocalRunnerStatus,
   type LocalRunnerStatus,
 } from "../local-runner.js";
-
-export function agentAvailabilityLabel(agent: AgentDefinition): "Available" | "Unavailable" | "Unverified" {
-  return agent.available === true ? "Available" : agent.available === false ? "Unavailable" : "Unverified";
-}
 
 /**
  * A machine's sections under its header and notice (#2988), each its own block so the units that

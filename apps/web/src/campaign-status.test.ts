@@ -190,6 +190,12 @@ test("The summary keeps rejected and duplicate recommendations out of committed 
   assert.deepEqual(view.stateCounts.map((entry) => entry.count), [1, 1, 1, 0, 0, 2]);
   assert.equal(view.planNotice, null);
   assert.deepEqual(view.costBreakdown.map((row) => row.text), ["$2.00", "$0.50", "$0.00"]);
+  assert.equal(view.costUncertainty, null);
+  // Turns that billed a running total stay in the amount and are named as uncertain (#4069).
+  const uncertain = campaignSummaryView({ ...work, cost: { ...work.cost!, runningTotalClaudeRecords: 2 } }, projection, NOW);
+  assert.equal(uncertain.cost.text, view.cost.text);
+  assert.equal(uncertain.costUncertainty,
+    "2 Claude Code turns may also include the cost of earlier turns in the same conversation, so this cost may be overstated.");
 });
 
 test("A missing plan and partial coverage are explicit", () => {

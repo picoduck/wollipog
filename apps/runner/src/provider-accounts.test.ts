@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { mkdtempSync } from "node:fs";
 import { test } from "node:test";
 import type { SessionLaunchSpec } from "@wollipog/protocol";
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import {
   agentForProviderAccount,
   agentsWithoutConfiguredProviderAccounts,
@@ -13,9 +14,13 @@ import {
   providerAccountAgentContextCompatible,
   providerAccountDefinition,
   providerAccountEnvironment,
+  probeProviderAccountsForDiscovery,
+  projectProviderAccountDiscoveryReadiness,
   selectProviderAccount,
+  selectProviderAccountForDiscovery,
   skillReconciliationProviderAccountPlan,
 } from "./provider-accounts.js";
+import { unavailableClaudeCode } from "./discovery/claude-code.js";
 
 const claudeAgent = {
   id: "claude", name: "Claude", command: "claude", args: [], env: {},
@@ -25,6 +30,144 @@ const codexAgent = {
   id: "codex", name: "Codex", command: "codex", args: [], env: {},
   driver: "codex-app-server" as const, context: { kind: "native" as const },
 };
+
+test("discovery selects a usable persistent account and never falls back from an inaccessible default", () => {
+  const accounts = [
+    { id: "other", label: "Other", provider: "codex" as const, directory: "/profiles/other" },
+    { id: "own", label: "Own", provider: "codex" as const, directory: "/profiles/own" },
+  ];
+  const usable = (account: { id: string }) => account.id === "own";
+  assert.equal(selectProviderAccount(accounts, codexAgent, "codex-app-server", undefined, "linux")?.id, "other");
+  assert.equal(selectProviderAccount(accounts, codexAgent, "codex-app-server", undefined, "linux", usable)?.id, "own");
+  assert.equal(selectProviderAccountForDiscovery(accounts, codexAgent, usable, "linux")?.id, "own",
+    "with no configured default, discovery matches grant-aware implicit session creation");
+  assert.equal(selectProviderAccountForDiscovery(accounts, { ...codexAgent, defaultProviderAccountId: "own" }, usable, "linux")?.credentialHome, "/profiles/own");
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, { ...codexAgent, defaultProviderAccountId: "other" }, usable, "linux"), /not granted/);
+  assert.throws(() => selectProviderAccountForDiscovery(accounts, codexAgent, () => false, "linux"), /granted/);
+  assert.equal(selectProviderAccountForDiscovery([], codexAgent, usable, "linux"), undefined, "only an account-free launch uses the legacy HOME");
+  assert.throws(() => selectProviderAccount([], { ...codexAgent, defaultProviderAccountId: "missing" },
+    "codex-app-server", undefined, "linux", usable), /not configured/,
+  "a removed configured default must not fall back to the legacy HOME");
+});
+
+for (const provider of ["claude", "codex"] as const) {
+  test(`implicit ${provider} readiness and launch skip an ungranted first account without replacing an explicit default`, () => {
+    const accounts = [
+      { id: "x", label: "Foreign", provider, directory: join(tmpdir(), "fixture-foreign") },
+      { id: "y", label: "Granted", provider, directory: join(tmpdir(), "fixture-granted") },
+    ];
+    const agent = provider === "claude" ? { ...claudeAgent, available: true,
+      claudeCode: { ...unavailableClaudeCode(), status: "ready" as const } }
+      : { ...codexAgent, available: true, codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+    const usable = (account: { id: string }) => account.id === "y";
+    const statuses = new Map([["x", "unknown" as const], ["y", "authenticated" as const]]);
+    const projected = projectProviderAccountDiscoveryReadiness([agent], accounts, statuses, usable)[0]!;
+    assert.deepEqual(projected.providerAccountReadiness, {
+      defaultAccountId: "y", defaultAuthStatus: "authenticated", readyAccountIds: ["y"],
+    });
+    assert.equal(agentAvailableForImplicitLaunch(projected), true);
+    assert.equal(selectProviderAccount(accounts, agent, agent.driver!, undefined, process.platform, usable)?.id, "y");
+    assert.equal(selectProviderAccountForDiscovery(accounts, agent, usable)?.id, "y");
+    const explicit = { ...agent, defaultProviderAccountId: "x" };
+    assert.equal(agentAvailableForImplicitLaunch(projectProviderAccountDiscoveryReadiness([explicit], accounts, statuses, usable)[0]!), false);
+    assert.throws(() => selectProviderAccountForDiscovery(accounts, explicit, usable), /not granted/);
+    assert.equal(selectProviderAccount(accounts, agent, agent.driver!, "x", process.platform, usable)?.id, "x",
+      "an explicit binding retains its identity for the existing structured profile/lease refusal");
+  });
+
+  test(`a signed-out default ${provider} account does not suppress another granted account's probe or readiness`, async () => {
+    const accounts = [
+      { id: "a", label: "Expired", provider, directory: join(tmpdir(), "fixture-account-a") },
+      { id: "b", label: "Ready", provider, directory: join(tmpdir(), "fixture-account-b") },
+      { id: "ungranted", label: "Ungrant", provider, directory: join(tmpdir(), "fixture-account-ungranted") },
+    ];
+    const agent = provider === "claude"
+      ? { ...claudeAgent, available: false, authStatus: "unauthenticated" as const, defaultProviderAccountId: "a",
+          claudeCode: { ...unavailableClaudeCode(), status: "unauthenticated" as const, streamJsonInput: true,
+            permissionModes: ["acceptEdits", "plan"], controlProtocol: true,
+            auth: { status: "unauthenticated" as const, billingSource: "unknown" as const } } }
+      : { ...codexAgent, available: false, authStatus: "unauthenticated" as const, defaultProviderAccountId: "a",
+          codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+    const observed: string[] = [];
+    const statuses = await probeProviderAccountsForDiscovery({ accounts, agents: [agent],
+      usable: (account) => account.id !== "ungranted", environment: () => ({ HOME: "/runner", PRIVATE_FIXTURE_KEY: "fixture" }),
+      probe: async (_agent, env) => {
+        const home = provider === "claude" ? env.CLAUDE_CONFIG_DIR : env.CODEX_HOME;
+        observed.push(home!);
+        return home === accounts[0]!.directory ? "unauthenticated" : "authenticated";
+      },
+    });
+    assert.deepEqual(observed.sort(), accounts.slice(0, 2).map((account) => account.directory).sort());
+    assert.deepEqual([...statuses].sort(), [["a", "unauthenticated"], ["b", "authenticated"], ["ungranted", "unknown"]]);
+    const projected = projectProviderAccountDiscoveryReadiness([agent], accounts, statuses, (account) => account.id !== "ungranted")[0]!;
+    assert.equal(projected.available, true, "the harness remains selectable for the ready account");
+    assert.equal(projected.authStatus, "authenticated");
+    assert.equal(projected.defaultProviderAccountId, "a", "readiness must never rewrite the saved default");
+    assert.deepEqual(projected.providerAccountReadiness, {
+      defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+    });
+    assert.equal(agent.available, false, "the original observation is not mutated");
+    if (provider === "claude") assert.equal(projected.claudeCode?.status, "ready");
+  });
+}
+
+test("an unsupported installation cannot probe accounts or be resurrected by stored account status", async () => {
+  const agent = { ...codexAgent, available: false, codexAppServer: { status: "unsupported" as const, appServerAvailable: true } };
+  const accounts = [{ id: "ready", label: "Ready", provider: "codex" as const, directory: join(tmpdir(), "fixture-account-ready") }];
+  const statuses = await probeProviderAccountsForDiscovery({ accounts, agents: [agent], usable: () => true,
+    environment: () => ({}), probe: async () => { throw new Error("unsupported executable must never run"); } });
+  assert.equal(statuses.get("ready"), "unknown");
+  assert.equal(projectProviderAccountDiscoveryReadiness([agent], accounts, new Map([["ready", "authenticated"]]), () => true)[0], agent);
+});
+
+test("account readiness remains gated when all accounts are signed out or ungranted, and account-free legacy observations stay intact", () => {
+  const agent = { ...codexAgent, available: true, authStatus: "authenticated" as const,
+    codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  const accounts = [{ id: "a", label: "A", provider: "codex" as const, directory: join(tmpdir(), "fixture-account-a") }];
+  const signedOut = projectProviderAccountDiscoveryReadiness([agent], accounts, new Map([["a", "unauthenticated"]]), () => true)[0]!;
+  assert.equal(signedOut.available, false);
+  assert.equal(signedOut.authStatus, "unauthenticated");
+  const ungranted = projectProviderAccountDiscoveryReadiness([agent], accounts, new Map([["a", "authenticated"]]), () => false)[0]!;
+  assert.equal(ungranted.available, false);
+  assert.equal(ungranted.authStatus, "unknown", "a stored positive observation cannot grant access");
+  assert.equal(projectProviderAccountDiscoveryReadiness([agent], [], new Map(), () => true)[0], agent);
+});
+
+test("WSL harnesses without an explicit account keep their legacy-HOME readiness despite native accounts", () => {
+  const agent = { ...codexAgent, context: { kind: "wsl" as const, distro: "Ubuntu" }, available: true,
+    authStatus: "authenticated" as const, codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  const accounts = [{ id: "native", label: "Native", provider: "codex" as const, directory: "C:\\profiles\\native" }];
+  assert.equal(selectProviderAccount(accounts, agent, "codex-app-server", undefined, "win32"), undefined);
+  assert.equal(projectProviderAccountDiscoveryReadiness([agent], accounts, new Map([["native", "authenticated"]]), () => true, "win32")[0], agent);
+  const explicit = { ...agent, defaultProviderAccountId: "native" };
+  assert.equal(projectProviderAccountDiscoveryReadiness([explicit], accounts, new Map([["native", "authenticated"]]), () => true, "win32")[0]?.available, false,
+    "an explicit account in the wrong execution context must not fall back to the legacy HOME");
+});
+
+test("configured API authentication and Claude billing metadata take precedence over unrelated signed-out accounts", () => {
+  const accounts = [
+    { id: "codex-expired", label: "Expired", provider: "codex" as const, directory: join(tmpdir(), "expired-codex") },
+    { id: "claude-expired", label: "Expired", provider: "claude" as const, directory: join(tmpdir(), "expired-claude") },
+  ];
+  const codex = { ...codexAgent, source: "config" as const, available: true, authStatus: "authenticated" as const,
+    codexBillingSource: "api" as const, codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  const claude = { ...claudeAgent, source: "config" as const, available: true, authStatus: "authenticated" as const,
+    claudeCode: { ...unavailableClaudeCode(), status: "ready" as const,
+      auth: { status: "authenticated" as const, method: "api_key" as const, billingSource: "api" as const } } };
+  const statuses = new Map(accounts.map((account) => [account.id, "unauthenticated" as const]));
+  const result = projectProviderAccountDiscoveryReadiness([codex, claude], accounts, statuses, () => true);
+  assert.deepEqual(result[0], { ...codex, providerAccountReadiness: {
+    defaultAccountId: "codex-expired", defaultAuthStatus: "authenticated", readyAccountIds: ["codex-expired"],
+  } });
+  assert.deepEqual(result[1], { ...claude, providerAccountReadiness: {
+    defaultAccountId: "claude-expired", defaultAuthStatus: "authenticated", readyAccountIds: ["claude-expired"],
+  } });
+  assert.equal(result[1]?.claudeCode?.auth.billingSource, "api");
+  const unrelated = { ...codexAgent, available: false, env: { ANTHROPIC_API_KEY: "fixture-other-provider" },
+    codexAppServer: { status: "supported" as const, appServerAvailable: true } };
+  assert.equal(projectProviderAccountDiscoveryReadiness([unrelated], accounts, statuses, () => true)[0]?.available, false,
+    "a key for a different provider cannot assert readiness");
+});
 
 test("selectProviderAccount honors an explicit account and maps only the provider credential variable", () => {
   const accounts = [

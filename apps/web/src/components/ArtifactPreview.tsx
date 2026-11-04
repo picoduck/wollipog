@@ -193,9 +193,14 @@ function useArtifactAuthor(artifact: WorkflowArtifactView): string | null {
 /**
  * Download (#2855; docs/design-system.md §9.1): a `.btn` that opens a menu of Download Original File,
  * which carries the one warning about raw bytes as its description, and Copy Checksum, which copies
- * the full SHA-256. `inline` keeps the menu inside a dialog's layer.
+ * the full SHA-256. `inline` keeps the menu inside a dialog's layer. `icon` makes it an `.icon-btn`
+ * named Download, for a panel header that has no room for the label (#3036).
  */
-export function ArtifactDownloadMenu({ model, inline = false }: { model: ArtifactPreviewModel; inline?: boolean }) {
+export function ArtifactDownloadMenu({ model, inline = false, icon = false }: {
+  model: ArtifactPreviewModel;
+  inline?: boolean;
+  icon?: boolean;
+}) {
   const [open, setOpen] = useState(false);
   const menu = useAccessibleMenu(open, setOpen, "artifact-download");
   const { showToast } = useFeedback();
@@ -224,17 +229,19 @@ export function ArtifactDownloadMenu({ model, inline = false }: { model: Artifac
     <>
       <BusyButton
         ref={menu.triggerRef}
-        className="btn"
+        className={icon ? "icon-btn" : "btn"}
         busy={busy}
         progress="Downloading the original file…"
-        icon={<DownloadIcon size={16} />}
+        icon={icon ? <DownloadIcon /> : <DownloadIcon size={16} />}
+        aria-label={icon ? "Download" : undefined}
+        title={icon ? "Download" : undefined}
         aria-haspopup="menu"
         aria-expanded={open}
         aria-controls={open ? menu.menuId : undefined}
         onClick={menu.toggle}
         onKeyDown={menu.onTriggerKeyDown}
       >
-        Download<ChevronDownIcon size={14} />
+        {icon ? null : <>Download<ChevronDownIcon size={14} /></>}
       </BusyButton>
       {open && (
         <MenuSurface
@@ -324,20 +331,21 @@ function HtmlFrame({ artifact, source, className }: { artifact: WorkflowArtifact
 }
 
 /**
- * The preview's bar in the Browser (#2855, #2914; docs/design-system.md §11.9): one 48px `.art-bar`
- * of Enlarge and Download at its trailing edge. The artifact is a page of the side panel, whose
- * header carries its Back and its title, so the bar has neither.
+ * An open artifact's actions in the Browser (#2855, #2914, #3036; docs/design-system.md §11.9):
+ * Enlarge, for an image or HTML once shown, then Download as an icon button. The artifact is a page of
+ * the side panel, so they render in its header's action slot through `PanelHeaderActions`, beside
+ * its Back and its title, and the page has no bar of its own.
  */
-export function ArtifactPreviewBar({ model, onEnlarge }: {
+export function ArtifactPageActions({ model, onEnlarge }: {
   model: ArtifactPreviewModel;
   /** Enlarge opens the host's own viewer (the Browser's gallery, #3924) instead of the plain one. */
   onEnlarge?: (opener: HTMLElement | null) => void;
 }) {
   return (
-    <div className="toolbar art-bar">
+    <>
       <EnlargeButton model={model} onEnlarge={onEnlarge} />
-      <ArtifactDownloadMenu model={model} />
-    </div>
+      <ArtifactDownloadMenu model={model} icon />
+    </>
   );
 }
 

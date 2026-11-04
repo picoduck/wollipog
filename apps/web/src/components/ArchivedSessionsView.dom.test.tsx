@@ -634,6 +634,29 @@ test("unarchive uses the existing authorized mutation and removes the row from t
   await fixture.unmount();
 });
 
+test("an archived Orchestrator or review session's title leads with its type, and an ordinary one's does not (#4076)", async () => {
+  const fixture = await mount([
+    session(1, { role: "orchestrator" }),
+    session(2, { kind: "review" }),
+    session(3, { role: "normal", kind: "standard" }),
+  ]);
+  try {
+    const title = (index: number) => fixture.container.querySelector(`#archive-title-session-${index}`)!;
+    for (const [index, label] of [[1, "Orchestrator Session"], [2, "Review Session"]] as const) {
+      const icon = title(index).firstElementChild!;
+      assert.ok(icon.classList.contains("session-type-icon"), `${label}: the mark comes before the title`);
+      assert.equal(icon.getAttribute("role"), "img");
+      assert.equal(icon.getAttribute("aria-label"), label);
+      assert.equal(icon.getAttribute("title"), label);
+      assert.equal(icon.querySelector("svg")?.getAttribute("width"), "14");
+      assert.equal(title(index).textContent, `Archived Session ${index}`);
+    }
+    assertNoDomNode(title(3).querySelector(".session-type-icon"), "an ordinary session's title has no type mark");
+  } finally {
+    await fixture.unmount();
+  }
+});
+
 function hasButton(container: HTMLElement, label: string): boolean {
   return [...container.querySelectorAll("button")].some((candidate) => candidate.textContent?.trim() === label);
 }

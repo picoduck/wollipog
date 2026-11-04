@@ -1,6 +1,6 @@
 import type { DatabaseSync } from "node:sqlite";
 import {
-  DEFAULT_REVIEW_SETTINGS, agentHarnessIdentityKey, builtInAgentHarnessName, canonicalAgentHarnessIdentity,
+  DEFAULT_REVIEW_SETTINGS, agentAvailableForImplicitLaunch, agentHarnessIdentityKey, builtInAgentHarnessName, canonicalAgentHarnessIdentity,
   reviewModelSupported, reviewerHarnessFor, sameReviewFamily,
   type AgentCapabilities, type AgentDriverKind, type AgentHarnessIdentity, type ReviewConfiguration, type ReviewReviewerRule, type ReviewSettings, type ReviewSettingsView,
   type RunnerView, type SessionView,
@@ -16,7 +16,7 @@ const identifier = (v: unknown): v is string => typeof v === "string" && v.lengt
 export function reviewReviewerCatalog(runners: readonly RunnerView[]): ReviewSettingsView["reviewers"] {
   return runners.filter(r => r.status === "online" && r.runtime?.reviewSession?.configuration === true).flatMap(r =>
     (r.runtime?.reviewSession?.reviewers ?? []).flatMap(entry => {
-      const agent = r.agents.find(a => a.id === entry.agentId && a.available === true);
+      const agent = r.agents.find(a => a.id === entry.agentId && agentAvailableForImplicitLaunch(a));
       return agent?.capabilities ? [{ ...entry, name: entry.harness === "codex" ? "Codex" : "Claude Code",
         runnerId: r.runnerId, capabilities: agent.capabilities }] : [];
     }));
@@ -194,7 +194,7 @@ export function configuredReview(db: ControlPlaneDb, session: SessionView, runne
     throw new ReviewSettingsError(`This machine cannot apply the configured ${harness} reviewer (${requestedModel ?? "default model"}, ${effort} effort). Update Wollipog on it before requesting a review.`, 409);
   }
   const reviewerId = runner.runtime.reviewSession.reviewers.find(r => r.harness === harness)?.agentId;
-  const reviewer = runner.agents.find(a => a.id === reviewerId && a.available === true);
+  const reviewer = runner.agents.find(a => a.id === reviewerId && agentAvailableForImplicitLaunch(a));
   // Use the same concrete-model resolution as createSession. The catalog's "default" entry is a
   // UI placeholder, never an immutable launch model that the runner can compare with its spec.
   const resolved = resolveModelEffort({ ...(requestedModel ? { model: requestedModel } : {}), effort }, reviewer?.capabilities,

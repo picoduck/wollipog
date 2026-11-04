@@ -1,0 +1,7 @@
+{
+  "reason": "Pre-existing Git skill source request contract copied between server discovery/preview and the skills client, including held-update commit semantics. Awaiting shared protocol ownership; not an incidental record shape.",
+  "declarations": [
+    { "path": "apps/control-plane/src/skill-git.ts", "symbol": "SkillGitSource" },
+    { "path": "apps/web/src/skills.ts", "symbol": "SkillGitSource" }
+  ]
+}

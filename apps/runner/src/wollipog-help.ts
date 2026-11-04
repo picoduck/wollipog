@@ -25,7 +25,7 @@ export function rootHelp(): string {
     "  worktree            Create, attach, select, and discard session worktrees",
     "  artifact            Attach an image file to a session without passing its bytes through the model",
     "  automation          Propose, inspect, and create an automation with human approval",
-    "  decision            Request, read, consume, reconcile, and withdraw typed workflow decisions",
+    "  decision            Request, read, consume, execute, reconcile, and withdraw typed workflow decisions",
     "  issue-closure       Request human approval and execute one campaign issue closure",
     "  campaign            Record and read an Orchestrator campaign's work ledger",
     "  pr                  Wait for a pull request's required checks or merge-queue outcome",
@@ -84,7 +84,7 @@ export function sessionHelp(): string {
     "  session steering-get <session-id> <submission-id> [--json]",
     "  session resolve-steering <session-id> <submission-id> <queue_again|dismiss> [--json]",
     "  session handoff-result <session-id> --revision <result-revision> [--json]",
-    "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--json]",
+    "  session wait <session-id> [--for <state,...>] [--timeout <ms>] [--interval <ms>] [--full] [--json]",
     "  session stop <session-id> [--json]",
     "  session stop-job <session-id> <job-id> [--json]",
     "  session release-hold <session-id> <hold-id> [--json]",
@@ -93,7 +93,7 @@ export function sessionHelp(): string {
     "  session guardrails <session-id> [--cost-budget <usd>] [--max-tool-calls <count>]",
     "                     [--max-child-sessions <count>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "session wait --for defaults to input_required,completed,failed,stopped and accepts queued, starting, running, input_required, idle, completed, failed, and stopped; any other state is refused at once. --timeout defaults to 60000, up to 3600000. It prints outcome \"reached\" or, when the timeout elapses first, outcome \"timeout\" with the session's last-read metadata. Exit status: 0 reached; 124 timeout; 1 unknown state, missing session, or control-plane failure.",
+    "session wait --for defaults to input_required,completed,failed,stopped and accepts queued, starting, running, input_required, idle, completed, failed, and stopped; any other state is refused at once. --timeout defaults to 60000, up to 3600000. It prints outcome \"reached\" or, when the timeout elapses first, outcome \"timeout\" with a compact last-read status (id, status, attentionRevision, pendingRequestCount, lastActivityAt); --full returns the full metadata instead. Exit status: 0 reached; 124 timeout; 1 unknown state, missing session, or control-plane failure.",
     "session events without --after returns the newest events. With --after it pages forward from that seq; pass the returned lastSeq as the next --after, and eventEpoch as --event-epoch, while hasMore is true.",
     "For uncertain steering delivery, inspect the exact submission before resolving it. A pending resolution is not confirmed; read it before retrying the identical action. These commands use the same descendant scope as session prompt.",
   ].join("\n");
@@ -135,8 +135,10 @@ The proposal requires requestId, issue, reason (completed or not_planned), expla
 evidence, and an optional exact comment. Repository and current work conflicts are derived
 by the runner and control plane. Only an injected root Orchestrator with protocol v194+
 may close a campaign-scoped issue. Approval expires after 30 minutes; changed evidence
-requires renewed human review. Read issueClosureResult to verify completion. If the
-result is uncertain, inspect GitHub and never replay the action or substitute a shell command.
+requires renewed human review. Read issueClosureResult to verify completion. A refused
+result wrote nothing; its refusal.reason and refusal.summary say why, and a new request is
+needed. If the result is uncertain, inspect GitHub and never replay the action or substitute
+a shell command.
 
 Issue scope: issue-scope get [--epic <number>]; issue-scope request --proposal <json>.
 Tools: get_campaign_issue_scope, request_campaign_issue_scope_change, request_github_issue_closure, close_github_issue; recover with decision get.
@@ -148,7 +150,10 @@ export function campaignHelp(): string {
 
 Commands:
   plan --input '<json>'                          Upsert work items by key: {items[], planComplete}
-  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, or endAttempt
+  update-item <work-item-id> --input '<json>'    Update fields, commitment, stage, blocker, handoff, or endAttempt
+  deliver <work-item-id> --input '<json>'        Record delivery from checked evidence (protocol v275+):
+                                                 {pullRequests?, report?: {childSessionId,
+                                                 reportEventSeq}, note?}
   assign <work-item-id> <child-session-id>       Record that a descendant now works on the item
   adjudicate <recommendation-id> --input '<json>'
                                                  Record {disposition, reason, resultingWorkItemKey?,
@@ -161,10 +166,12 @@ Commands:
 Only an injected Orchestrator session with control plane protocol v196+ may use these. Every
 record lands in the root campaign's ledger. Records grant no authority: they never dispatch,
 publish, merge, or resolve a decision. Record delivery with verify_campaign_child and its
-workItem; a reported merged stage does not mark an item delivered.
+workItem, or with deliver when merged pull requests or an earlier exact report prove it; a
+reported merged stage does not mark an item delivered. Hand an item whose next step belongs to a
+person to them with update-item's handoff.
 
 Tools: record_campaign_plan, update_campaign_work_item, assign_campaign_work_item,
-adjudicate_campaign_recommendation, get_campaign_work_items.
+record_campaign_work_item_delivery, adjudicate_campaign_recommendation, get_campaign_work_items.
 `;
 }
 
@@ -176,13 +183,18 @@ export function decisionHelp(): string {
     "  decision list [--session <id>] [--limit <1-100>] [--cursor <occurrence-id>] [--json]",
     "  decision consume <occurrence-id> --snapshot <json> [--action <json>] [--json]",
     "  decision reconcile <occurrence-id> --snapshot <json> [--json]",
+    "  decision execute <occurrence-id> --resource-digest <sha256> [--json]",
     "  decision withdraw <occurrence-id> --reason <text> [--session <id>] [--json]",
+    "  decision ask-owner --request-id <id> --resource-key <key> --question <text> --options <json-array> [--recommended <option-id>] [--material <text>] [--json]",
+    "  decision hand-to-owner <occurrence-id> --reason <text> [--session <id>] [--json]",
     "Options: --url <control-plane-origin>, --token-file <credential-file>.",
-    "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
+    "Reads may target an accessible descendant with --session for an Orchestrator, and so may a withdrawal of a decision that Orchestrator owns; request, consume, execute, and reconcile remain self-scoped and refuse --session. Tools: request_workflow_decision, get_workflow_decision, list_workflow_decisions, consume_workflow_decision, execute_workflow_decision, reconcile_workflow_decision, withdraw_workflow_decision.",
+    "Execute has Wollipog perform one approved forge action itself through this session's forge login: a merged_branch_deletion naming pullRequest and headSha (compare-and-delete pinned to that head), or an armed GitHub pr_merge (the canonical pinned enqueue). Use it when your provider refuses the approved command; never retry that command another way. Read forgeAction for the outcome. Requires control plane protocol v284.",
     "Descendant reads and lists require control plane v214. Follow nextCursor until absent. Older runners can use an updated CLI or GET /api/sessions/:id/workflow-decisions[/<occurrence-id>] against v214 where a session token is provisioned. Provider-isolated sessions have only a relay key: upgrade the runner/CLI instead of seeking a bearer token. Older control planes expose pending requests only through list_descendant_requests. A 404 or missing list entry never proves consumption.",
     "Pass the exact typed resourceSnapshot as a JSON object in --snapshot. For a pr_merge consume, pass the exact WorkflowDecisionAction JSON object in --action; other categories omit it.",
     "Reconcile only an already-successful, exactly armed pr_merge action after the approved head has merged. Use its original snapshot; reconciliation never runs the merge command and requires control plane protocol v153.",
     "Withdraw a pending or approved decision that was never consumed or armed when it is no longer needed. It approves and consumes nothing, records you and the reason, and the decision then reads revoked with withdrawal provenance. Withdrawal requires control plane protocol v269.",
+    "ask-owner and hand-to-owner are for a Full Control campaign's root Orchestrator (tools request_owner_decision and hand_workflow_decision_to_owner; control plane protocol v281). ask-owner gives the campaign's owner a decision the owner kept, with the options as a JSON array of {optionId, label, description?}; it waits in the owner's Inbox without stopping your turn, only the owner can answer it, and their choice comes back to you. hand-to-owner gives the owner one of your pending Orchestrator-owned decisions (pass --session for a child's); that is one way, and you can never resolve it afterwards.",
     "The control plane remains authoritative: it validates the category, policy owner, current resource snapshot, and one-shot consumption. This command cannot resolve its own decision.",
   ].join("\n");
 }

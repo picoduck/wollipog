@@ -9,7 +9,7 @@ import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 const INVENTORY_BYPASS_TYPES = new Set([
   "heartbeat", "agent_control_credential", "policy_hook_credential",
   "policy_hook_decision_recorded", "workflow_action_admission_recorded", "workflow_action_reconciliation_result",
-  "gitlab_merge_preflight_result", "github_merge_preflight_result",
+  "gitlab_merge_preflight_result", "github_merge_preflight_result", "forge_decision_action_result",
   "git_result", "session_history_result", "session_history_page_result", "reprocess_session_result",
   "list_external_sessions_result", "adopt_session_result", "list_directory_result", "list_session_files_result",
   "read_session_file_result", "search_workspace_references_result", "create_workspace_reference_result",
@@ -17,7 +17,7 @@ const INVENTORY_BYPASS_TYPES = new Set([
   "logout_agent_result", "switch_session_provider_account_result", "inspect_provider_authentication_result",
   "select_provider_authentication_account_result", "acp_registry_approval_result", "host_action_result",
   "interrupt_turn_result", "stop_background_job_result", "release_queue_hold_result", "read_queued_prompt_result", "edit_queued_prompt_result",
-  "provider_login_result", "remove_provider_account_result", "adopt_provider_profile_result", "import_provider_credential_result",
+  "provider_login_result", "remove_provider_account_result", "remove_workspace_result", "adopt_provider_profile_result", "import_provider_credential_result",
   "revoke_provider_profile_grant_result", "inspect_provider_home_lease_result", "recover_provider_home_lease_result",
   "session_worktree_progress",
   "campaign_forge_observe_result",

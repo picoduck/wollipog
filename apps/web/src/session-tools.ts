@@ -30,14 +30,14 @@ export const SESSION_TOOLS: readonly SessionTool[] = [
   { id: "launcher", name: "Session Tools", group: null },
   { id: "review", name: "Review", group: "Code", shortcut: "open-review" },
   { id: "files", name: "Files", group: "Code", shortcut: "open-files" },
-  { id: "browser", name: "Browser", group: "Code" },
+  { id: "browser", name: "Browser", group: "Code", shortcut: "open-browser" },
   { id: "terminal", name: "Terminal", group: "Code", shortcut: "toggle-terminal" },
-  { id: "subagents", name: "Agents", group: "Work" },
+  { id: "subagents", name: "Agents", group: "Work", shortcut: "open-agents" },
   { id: "sidechat", name: "Side Chat", group: "Work", shortcut: "open-side-chat" },
-  { id: "background", name: "Background Work", group: "Work" },
-  { id: "campaign", name: "Campaign Status", group: "Work" },
-  { id: "requests", name: "Requests", group: "Decisions" },
-  { id: "decisions", name: "Decision History", group: "Decisions" },
+  { id: "background", name: "Background Work", group: "Work", shortcut: "open-background-work" },
+  { id: "campaign", name: "Campaign Status", group: "Work", shortcut: "open-campaign-status" },
+  { id: "requests", name: "Requests", group: "Decisions", shortcut: "open-requests" },
+  { id: "decisions", name: "Decision History", group: "Decisions", shortcut: "open-decision-history" },
 ];
 
 export function sessionTool(id: SessionToolId): SessionTool {
@@ -106,15 +106,17 @@ export const SIDE_CHAT_FACT = "Ask a question without interrupting the agent";
  * Review: the uncommitted change count from the session's one git status reader, as Review's own
  * summary counts it (a capped list reads "50+", and staging reads "1 of 9 changes staged"), and the
  * required findings still open, the number Review's findings section shows in its "N Required" badge.
+ * With nothing uncommitted, `branch` is the work Review opens on instead (#3035): its summary's
+ * "3 commits ahead of main", or null when Review opens on an empty Uncommitted.
  */
 export function reviewFact(
-  changes: { files: number; truncated: boolean; staged: number } | "checking" | "unknown",
+  changes: { files: number; truncated: boolean; staged: number; branch: string | null } | "checking" | "unknown",
   requiredFindings: number,
 ): string {
   let first: string;
   if (changes === "checking") first = "Checking for changes…";
   else if (changes === "unknown") first = "See what this session changed";
-  else if (changes.files === 0) first = "No changes yet";
+  else if (changes.files === 0) first = changes.branch ?? "No changes yet";
   else {
     const total = `${changes.files}${changes.truncated ? "+" : ""}`;
     const noun = changes.files === 1 && !changes.truncated ? "change" : "changes";
@@ -238,6 +240,7 @@ export function requestKindPhrase(request: Pick<PendingApproval, "kind" | "workf
       case "campaign_follow_up_admission": return "a follow-up past the limit";
       case "follow_up_issue_publication": return "an issue publication";
       case "implementation_question": return "an implementation decision";
+      case "owner_decision": return "a decision you kept";
       case "review_round_extension": return "more review rounds";
       default: return "a workflow decision";
     }

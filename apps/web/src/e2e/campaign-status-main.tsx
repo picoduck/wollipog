@@ -8,7 +8,8 @@
  * - `planless`: a campaign whose Orchestrator never recorded a plan, with untracked children;
  * - `legacy`: a campaign on a server without the ledger (no `work` on its projection);
  * - `unrelated`: a session outside any campaign.
- * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode.
+ * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode, and
+ * `open=requests` on Requests.
  * `forge=gitlab` moves the Campaign Status Panel item to a GitLab project in a nested namespace.
  * `scope=outdated-runner` or `scope=issue-limits` makes issue scope unavailable because a participating
  * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
@@ -16,6 +17,11 @@
  * leaves the loaded list under a Couldn't Refresh Work Items notice.
  * With `budget=1`, `followUps=pending` puts the campaign at its follow-up limit with two follow-ups
  * waiting for the person's approval (#2940); Change Limit saves to the fixture.
+ * `handoffs=after` finishes the campaign with two items handed to people (#4070); `handoffs=before`
+ * is the same campaign as a server without handoffs reports it.
+ * `owners=after` gives the owner a decision they kept and a merge the Orchestrator handed to them
+ * (#4064); `owners=before` is the same campaign as a server without owner decisions reports it, the
+ * merge still the Orchestrator's and the owner's decision nowhere in Wollipog.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -24,6 +30,7 @@ import {
   campaignIssueScopeChangesRequirement,
   PROTOCOL_VERSION,
   type CampaignWorkItemDetail,
+  type CampaignWorkItemHandoff,
   type CampaignWorkItemSummary,
   type ControlPlaneToUi,
   type DescendantRequestView,
@@ -68,8 +75,9 @@ if (params.get("theme") === "light") document.documentElement.dataset.theme = "l
 const NOW = Date.now();
 const recoveryReason = params.get("recovery");
 const recoveryRecord = recoveryReason && ["missing_access", "missing_human_information", "boundary_enlargement",
-  "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined"].includes(recoveryReason)
-  ? campaignRecoveryFixture(recoveryReason as import("@wollipog/protocol").CampaignRecoveryReason, NOW) : null;
+  "human_required_rule", "unsupported_capability", "attempts_exhausted", "failed_checks", "reviewer_objection", "uncertain_outcome", "request_declined",
+  "hard_denial", "intentional_stop", "unverified_stop"].includes(recoveryReason)
+  ? campaignRecoveryFixture(recoveryReason as import("@wollipog/protocol").CampaignRecoveryReason, NOW, params.get("subject") === "worker") : null;
 const HOUR = 60 * MINUTE;
 
 const items: CampaignWorkItemSummary[] = [
@@ -231,6 +239,8 @@ const recordedWork = (revision: number) => workSummary(NOW, {
     coordination: knownCost(2.25),
     unattributed: knownCost(0, "providerReported", 0, 0),
     attributedSince: NOW - 3 * HOUR,
+    // Claude turns that billed their conversation's running total (#4069).
+    ...(params.get("runningTotals") === "1" ? { runningTotalClaudeRecords: 2 } : {}),
   },
 });
 
@@ -242,6 +252,53 @@ function baseSession(overrides: Partial<SessionView>): SessionView {
     messageCount: 40, tokensIn: 0, tokensOut: 0, costUsd: 0, costBudgetUsd: null, maxToolCalls: null,
     ...overrides,
   } as SessionView;
+}
+
+/** `handoffs=before|after` (#4070): the agents are done. Every child is verified and cleaned up,
+ * nothing is pending, every other committed item is delivered, and two unfinished items belong to
+ * people: what `campaignTerminalStatus` turns into Complete with Handoffs, as its integration test
+ * shows. The same fixture both ways: `before` is how a server without handoffs reports it. */
+const handoffScenario = params.get("handoffs") === "before" || params.get("handoffs") === "after" ? params.get("handoffs") as "before" | "after" : null;
+const HANDED_OFF: Record<string, CampaignWorkItemHandoff> = {
+  cwi_3: { responsibleActor: "human", reason: "Private vulnerability reporting refused the agent's GitHub account.",
+    nextAction: "File the security advisory from a maintainer account.", recordedAt: NOW - 12 * MINUTE, recordedBySessionId: "s_root" },
+  cwi_6: { responsibleActor: "external", reason: "Integration runs need the hosting provider's change window.",
+    nextAction: "Ask the provider to schedule the change window, then run the integration suite.", recordedAt: NOW - 8 * MINUTE, recordedBySessionId: "s_root" },
+};
+if (handoffScenario) {
+  for (const [index, item] of items.entries()) {
+    if (item.commitment !== "committed") continue;
+    const handoff = HANDED_OFF[item.id];
+    items[index] = { ...item, primaryState: handoff ? "planned" : "delivered", stateCauses: [], currentAttempt: null, blocker: null,
+      ...(handoff && handoffScenario === "after" ? { handoff } : {}),
+      ...(handoff ? {} : { elapsed: { startedAt: item.elapsed.startedAt ?? NOW - 2 * HOUR, endedAt: NOW - 20 * MINUTE } }) };
+    details[item.id] = itemDetail(items[index]!, handoff ? { nextAction: handoff.nextAction } : {});
+  }
+}
+const handoffWork = (rev: number) => ({ ...recordedWork(rev),
+  counts: { committed: 8, delivered: 6, original: 6, followUp: 2, cancelled: 0, removed: 1,
+    byState: { planned: 2, queued: 0, running: 0, waiting: 0, blocked: 0, delivered: 6, cancelled: 0, removed: 1 } },
+  recommendations: { awaiting_adjudication: 0, accepted: 2, rejected: 1, deferred: 1, duplicate: 3 },
+  obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
+  ...(handoffScenario === "after" ? { elapsed: { startedAt: NOW - 3 * HOUR - 12 * MINUTE, endedAt: NOW - 8 * MINUTE } } : {}),
+});
+function handoffProjection(state: "before" | "after"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const declined = { ...campaignRecoveryFixture("request_declined", NOW), state: state === "after" ? "resolved" as const : "blocked" as const };
+  return {
+    status: state === "after" ? "complete_with_handoffs" : "blocked",
+    children: { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 3, cleanupPending: 0 },
+    limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    heldChildren: [],
+    recovery: state === "after"
+      ? { unattendedReady: false, automation: { state: "lifecycle_held" }, automatic: 0, waitingHuman: 0, blocked: 0, records: [declined], truncated: false }
+      : { unattendedReady: false, automation: { state: "lifecycle_held",
+        reason: "Original scoped work remains unfinished, but no current known recovery is eligible. Reconcile its original obligation before continuing." },
+      automatic: 0, waitingHuman: 0, blocked: 1, records: [declined], truncated: false },
+    ...(state === "after" ? { handoffs: { total: 2, items: Object.entries(HANDED_OFF).map(([id, handoff]) => {
+      const item = items.find((candidate) => candidate.id === id)!;
+      return { workItemId: id, key: item.key, title: item.title, issue: item.issue, primaryState: item.primaryState, handoff };
+    }) } } : {}),
+  };
 }
 
 let revision = 1;
@@ -259,7 +316,7 @@ const projectionFor = (rev: number) => campaignProjection(
       obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
       cost: undefined,
     })
-      : recordedWork(rev),
+      : handoffScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
     ...(params.get("budget") === "1" ? { budget: {
@@ -293,8 +350,33 @@ const projectionFor = (rev: number) => campaignProjection(
         recoveryAction: "Restart the session once the account is ready.",
       }],
     }],
+    ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
+    ...ownerProjection,
   },
 );
+
+/** `owners=after` (#4064): the root's question for its owner, and a child's merge handed to them. */
+const ownerScenario = params.get("owners") === "before" || params.get("owners") === "after" ? params.get("owners") as "before" | "after" : null;
+const ownerSnapshot = { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
+  material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
+  recommendedOptionId: "lease", options: [
+    { optionId: "lease", label: "Short-Lived Lease", description: "Credentials expire with the session." },
+    { optionId: "broker", label: "Broker Process", description: "A helper holds credentials for every session." },
+  ] };
+const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScenario === "after" ? {
+  requestId: "workflow_owner_1", occurrenceId: "workflow_owner_1", kind: "workflow_decision", title: "Owner Decision Required", async: true,
+  options: [...ownerSnapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
+    { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" }],
+  context: { toolName: "Typed Workflow Decision", input: JSON.stringify(ownerSnapshot, null, 2) },
+  workflowDecision: { requestId: "credential-design", occurrenceId: "workflow_owner_1", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "owner_decision", resourceKey: "credential-design", resourceSnapshot: ownerSnapshot, resourceDigest: "e".repeat(64), policyRevision: 1,
+    authority: "human", authorityEvaluation: { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision" },
+    status: "pending", createdAt: NOW - 4 * MINUTE },
+} : null;
+const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: 2, items: [
+  { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
+  { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE },
+] } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
 const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get("followUps") === "pending" ? ([
@@ -311,7 +393,8 @@ const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get
 
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
-    ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}) });
+    ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
+    ...(ownerCard ? { pendingApproval: ownerCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -320,8 +403,34 @@ function sessionsFor(rev: number): SessionView[] {
   return [root, child, unrelated];
 }
 
+/** `owners`: the child's merge, the Orchestrator's before #4064 and handed to the owner after it,
+ * and after it the root's own owner decision. */
+const mergeSnapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4141, headSha: "3f9c2e1".padEnd(40, "0"),
+  reviewResult: "merge_with_acknowledged_risk" as const, requiredChecks: { headSha: "3f9c2e1".padEnd(40, "0"), status: "passed" as const, checkedAt: NOW - 9 * MINUTE,
+    checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
+const ownerRequests = (owners: "before" | "after"): DescendantRequestView[] => {
+  const handed = owners === "after";
+  const evaluation = handed
+    ? { owner: "human" as const, basis: "human_required" as const, reason: "owner_kept" as const, operation: "pr_merge" as const }
+    : { owner: "orchestrator" as const, basis: "campaign_delegation" as const, reason: "authorized_operation" as const, operation: "pr_merge" as const };
+  const merge: DescendantRequestView = {
+    sessionId: "s_child_3", sessionTitle: "#2417 Slice 5: Read API", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
+    createdAt: NOW - 8 * MINUTE, responseOwner: evaluation.owner, authorityEvaluation: evaluation, occurrenceId: "occ_1",
+    request: { requestId: "occ_1", occurrenceId: "occ_1", kind: "workflow_decision", title: "PR Merge Approval Required",
+      options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+      context: { toolName: "Typed Workflow Decision", input: JSON.stringify(mergeSnapshot, null, 2) },
+      workflowDecision: { requestId: "merge-4141", occurrenceId: "occ_1", sessionId: "s_child_3", controllingSessionId: "s_root", category: "pr_merge",
+        resourceKey: "picoduck/wollipog#4141", resourceSnapshot: mergeSnapshot, resourceDigest: "a".repeat(64), policyRevision: 1,
+        authority: evaluation.owner, authorityEvaluation: evaluation, status: "pending", createdAt: NOW - 8 * MINUTE,
+        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}) } },
+  };
+  return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
+    createdAt: NOW - 4 * MINUTE, responseOwner: "human", authorityEvaluation: ownerCard.workflowDecision!.authorityEvaluation,
+    occurrenceId: "workflow_owner_1", request: ownerCard }, merge] : [merge];
+};
+
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = scenario === "campaign" ? [{
+const descendantRequests: DescendantRequestView[] = ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",
@@ -469,7 +578,7 @@ function Fixture() {
   setRevision = setRev;
   const session = sessionsFor(rev).find((candidate) => candidate.id === sessionId)!;
   const [open, setOpen] = useState(true);
-  const [mode, setMode] = useState<RightPanelMode>(params.get("open") === "launcher" ? "launcher" : "campaign");
+  const [mode, setMode] = useState<RightPanelMode>(params.get("open") === "launcher" ? "launcher" : params.get("open") === "requests" ? "requests" : "campaign");
   const [width, setWidth] = useState(420);
   const state: RightPanelState = {
     open, mode, width, dragging: false, subagentTarget: null,
@@ -527,6 +636,7 @@ function Fixture() {
 
 function PanelForSession({ state, session, onOpenSession }: { state: RightPanelState; session: SessionView; onOpenSession: (id: string) => void }) {
   const availability = useCampaignStatusAvailability(session);
+  const [requestKey, setRequestKey] = useState<string | null>(selectedRequestKey);
   return (
     <RightPanel
       state={state}
@@ -545,8 +655,8 @@ function PanelForSession({ state, session, onOpenSession }: { state: RightPanelS
       campaignAvailability={availability}
       onOpenSession={onOpenSession}
       descendantRequests={session.orchestratorCampaign ? descendantRequests : []}
-      selectedRequestKey={selectedRequestKey}
-      onSelectedRequestKeyChange={(key) => { selectedRequestKey = key; }}
+      selectedRequestKey={requestKey}
+      onSelectedRequestKeyChange={(key) => { selectedRequestKey = key; setRequestKey(key); }}
     />
   );
 }

@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
+import { githubIssueClosureRefusal } from "@wollipog/protocol";
 import { IssueClosureSummary } from "./IssueClosureSummary.js";
 test("issue closure summary displays exact action, evidence, comment, and current work", () => {
   const markup = renderToStaticMarkup(<IssueClosureSummary snapshot={{ category: "issue_closure",
@@ -15,4 +16,17 @@ test("issue closure summary displays exact action, evidence, comment, and curren
     "See replacement issue 124.", "Retired. &lt;literal&gt;", "#77: Active fix", "Implement issue 123",
     "Work is still associated", "does not verify implementation"]) assert.ok(markup.includes(text), text);
   assert.ok(markup.includes('href="https://github.com/team/repo/issues/123"'));
+});
+
+test("an issue closure request shows why the last approved closure was refused (#4059)", () => {
+  const snapshot = { category: "issue_closure" as const, repository: "team/repo", issue: 123, title: "Obsolete task",
+    url: "https://github.com/team/repo/issues/123", forgeDigest: "a".repeat(64), reason: "completed" as const,
+    explanation: "Delivered.", evidence: ["Merged PR 80."], openPullRequests: [], activeChildren: [] };
+  const plain = renderToStaticMarkup(<IssueClosureSummary snapshot={snapshot} />);
+  assert.ok(!plain.includes("was refused"), "a first request shows no earlier attempt");
+  const markup = renderToStaticMarkup(<IssueClosureSummary snapshot={{ ...snapshot, previousRefusal: { occurrenceId: "wd_occ_1", completedAt: 1,
+    refusal: githubIssueClosureRefusal("closing_reference_changed", { pullRequests: [77] }) } }} />);
+  assert.ok(markup.includes("The last approved closure of this issue was refused before anything was written, so it used up that approval."));
+  assert.ok(markup.includes("A related open pull request gained or lost a closing reference to the issue: #77."));
+  assert.ok(!markup.includes("request a new closure"), "the request being reviewed is the new closure");
 });

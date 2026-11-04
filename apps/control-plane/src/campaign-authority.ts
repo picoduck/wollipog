@@ -61,6 +61,41 @@ export function campaignBoundaryCurrent(controller: Pick<SessionView, "orchestra
     controller.parentControlPolicy?.revision === control.boundary.revision);
 }
 
+/** Whether the campaign's current issue scope names this issue (#4062). Both copies of the scope
+ * must name it, so a scope the server is still synchronizing never admits more than either says. */
+export function campaignIssueInScope(policy: SessionView["orchestratorPolicy"], issue: { repository: string; number: number }): boolean {
+  const scope = policy?.issueScope;
+  return Boolean(scope && scope.repository.toLowerCase() === issue.repository.toLowerCase() &&
+    scope.issueNumbers.includes(issue.number) && policy?.issueNumbers?.includes(issue.number));
+}
+
+/** Under Full Control the issue scope bounds what the Orchestrator may deliver (#4062): a child is
+ * never dispatched on a work item whose issue is outside it. Recording that item stays allowed. */
+export function campaignDispatchScopeRefusal(policy: SessionView["orchestratorPolicy"],
+  issue: { repository: string; number: number } | null): string | null {
+  if (policy?.control?.mode !== "full_control" || !issue || campaignIssueInScope(policy, issue)) return null;
+  return `its issue ${issue.repository}#${issue.number} is outside this Full Control campaign's issue scope. ` +
+    "Add it with request_campaign_issue_scope_change first; if that is refused, only the campaign owner can add it, " +
+    "so leave the item undispatched and report it as blocked work.";
+}
+
+/** Under Full Control a merge may close only issues in the campaign's current issue scope (#4062).
+ * A GitHub merge's `intendedClosures` are exactly what GitHub would close: a v242 runner reads that
+ * before the merge is requested and again before it is armed, and a mismatch refuses it (#3713).
+ * Nothing reads a GitLab merge's closures, or a GitHub merge's from an older runner, so such a merge
+ * is never assumed to close nothing, and its declaration proves nothing either: it is the person's. */
+function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: number | null | undefined,
+  snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): Pick<CampaignAuthorityEvaluation, "reason" | "unscopedClosures"> | null {
+  const declared = snapshot.intendedClosures ?? [];
+  const unscoped = declared.filter((reference) => {
+    const separator = reference.lastIndexOf("#");
+    return !campaignIssueInScope(policy, { repository: reference.slice(0, separator), number: Number(reference.slice(separator + 1)) });
+  });
+  if (unscoped.length) return { reason: "outside_issue_scope", unscopedClosures: unscoped };
+  const read = snapshot.mergeMethod === undefined && runnerSupportsProtocol(protocol, "githubMergeClosingReferences");
+  return read ? null : { reason: "unverified_closures" };
+}
+
 export function evaluateCampaignAuthority(
   controller: Pick<SessionView, "id" | "driver" | "orchestratorPolicy" | "parentControl" | "parentControlPolicy"> & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
   requester: Pick<SessionView, "id" | "driver"> & { repositoryRoot?: string } & Partial<Pick<SessionView, "runnerId" | "workspaceId">>,
@@ -72,6 +107,8 @@ export function evaluateCampaignAuthority(
   } },
   controllerProtocol: number | null | undefined = protocol,
   peerContracts?: { requester?: unknown; controller?: unknown },
+  /** #4075: `ControlPlaneDb.reviewExtensionCap` for a review_round_extension snapshot. */
+  reviewExtensionCap?: "within" | "exceeded",
 ): CampaignAuthorityEvaluation {
   const control = controller.orchestratorPolicy?.control;
   const full = control?.mode === "full_control";
@@ -87,7 +124,11 @@ export function evaluateCampaignAuthority(
     supported: full ? campaignAuthorityPreflight(control, requester.driver, protocol, peerContracts?.requester).supported &&
       campaignAuthorityPreflight(control, controller.driver, controllerProtocol, peerContracts?.controller).supported : (protocol ?? 0) >= (snapshot ? 139 : 136),
     snapshot, request: pending, trustedSource: snapshot ? "workflow_route" : pending?.requestSource,
-    humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot });
+    humanRequired: pending?.humanRequired, repositoryRoot: requester.repositoryRoot,
+    // Both the requester's runner and the controller's must support capped extensions (#4075).
+    ...(snapshot?.category === "review_round_extension" && reviewExtensionCap &&
+      runnerSupportsProtocol(protocol, "fullControlReviewExtensions") &&
+      runnerSupportsProtocol(controllerProtocol, "fullControlReviewExtensions") ? { reviewExtensionCap } : {}) });
   const repositoryBound = !pending || (controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
     controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId);
   const issueOperation = snapshot?.category === "campaign_issue_scope" || snapshot?.category === "issue_closure" ||
@@ -97,7 +138,28 @@ export function evaluateCampaignAuthority(
   if (full && (!campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) || !repositoryBound || !issueBound)) {
     // A stale boundary authorizes nothing, including the server's own Full Control declines.
     const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
-    return { ...rest, owner: "human", basis: "human_required", reason: "outside_boundary" };
+    return { ...rest, owner: "human", basis: "human_required",
+      reason: repositoryBound && closureProofIncomplete(controller, policy, protocol, controllerProtocol, snapshot) ? "closure_proof_incomplete" : "outside_boundary" };
   }
+  const closures = full && evaluated.owner === "orchestrator" && snapshot?.category === "pr_merge"
+    ? mergeClosureScope(controller.orchestratorPolicy, protocol, snapshot) : null;
+  if (closures) return { ...evaluated, owner: "human", basis: "human_required", ...closures };
   return evaluated;
+}
+
+/** A closure the current boundary delegates, of an issue in scope, that the server admitted no
+ * proof for and named gaps instead (#4058). It names why a person decides it; it never changes who
+ * does. A stale boundary, an issue outside the scope or a reason the boundary does not delegate
+ * stays `outside_boundary`, as does an admission bound to another boundary revision. */
+function closureProofIncomplete(
+  controller: Pick<SessionView, "orchestratorPolicy" | "parentControlPolicy">, policy: ParentControlPolicy,
+  protocol: number | null | undefined, controllerProtocol: number | null | undefined, snapshot: WorkflowDecisionResourceSnapshot | undefined,
+): boolean {
+  const control = controller.orchestratorPolicy?.control;
+  if (snapshot?.category !== "issue_closure" || control?.mode !== "full_control" || !control.boundary.issueAuthority ||
+      snapshot.issueAdmission || !snapshot.deliveryGaps?.length || (protocol ?? 0) < 217 || (controllerProtocol ?? 0) < 217) return false;
+  const boundary = control.boundary;
+  return campaignBoundaryCurrent({ ...controller, parentControlPolicy: policy }) && boundary.operations.includes("issue_closure") &&
+    boundary.issueAuthority!.closureReasons.includes(snapshot.reason) && snapshot.repository.toLowerCase() === boundary.repository.toLowerCase() &&
+    campaignIssueInScope(controller.orchestratorPolicy, { repository: snapshot.repository, number: snapshot.issue });
 }

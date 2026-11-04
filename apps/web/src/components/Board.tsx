@@ -36,6 +36,7 @@ import { inboxRowTimestamp, sessionStalledForMs, SessionRowTime } from "./InboxR
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
+import { SessionTypeIcon } from "./SessionTypeIcon.js";
 import { TabList } from "./Tabs.js";
 import { useIsMobile } from "./useIsMobile.js";
 
@@ -555,6 +556,7 @@ function SessionCard({
         className="card-title card-open"
         onClick={(event) => { event.stopPropagation(); onOpen(); }}
       >
+        <SessionTypeIcon session={session} />
         {sessionDisplayTitle(session.title)}
       </button>
       {/* Line 1 (#2222), drawn first by `order`: who and where, which gives up width first, then the

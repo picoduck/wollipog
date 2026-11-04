@@ -136,7 +136,7 @@ export function nativeTuiCreationError(
       ),
     };
   }
-  const launch = db.getAgentLaunch(request.runnerId, request.agentId);
+  const launch = db.getAgentLaunch(request.runnerId, request.agentId, false, { allowAccountSelection: true });
   if (!launch) return { status: 404, error: "agent not found on runner" };
   if (!TUI_DRIVERS.has(launch.driver ?? "acp")) {
     return { status: 409, error: "this agent does not expose a standalone Native TUI" };

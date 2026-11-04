@@ -116,6 +116,8 @@ function campaignStatusMeta(status: OrchestratorCampaignProjection["status"]): S
     case "active": return statusMeta("workflow", "running");
     case "blocked": return statusMeta("campaignWork", "blocked");
     case "verified_complete": return statusMeta("workflow", "succeeded");
+    // Finished, but the owner has handed-off items left: Campaign Status lists them.
+    case "complete_with_handoffs": return { ...statusMeta("workflow", "succeeded"), label: "Complete with Handoffs" };
   }
 }
 

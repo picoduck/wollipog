@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import fc from "fast-check";
 import { issueReferencesInMessage } from "./campaign-launch-admission.js";
-import { firstMessageIssueIntent, MAX_CLASSIFIED_MESSAGE_LENGTH, MAX_CLASSIFIED_REFERENCES } from "./first-message-issue-intent.js";
+import { firstMessageIssueIntent, firstMessageTargetEpics, issueReferenceSpans, MAX_CLASSIFIED_MESSAGE_LENGTH, MAX_CLASSIFIED_REFERENCES, MAX_TARGET_EPICS } from "./first-message-issue-intent.js";
 
 const repo = "owner/repo";
 const intent = (text: string, repository = repo) => firstMessageIssueIntent(text, repository);
@@ -101,6 +101,83 @@ test("an epic named as the target is scope, and so its verified members can be a
   assert.deepEqual(intent("Work on the members of epic #40 (see #41 for the design)."), { scope: [40], context: [41] });
 });
 
+test("a range scopes every issue it names, under the cue that governs it, in every written form (#4061)", () => {
+  const all = Array.from({ length: 9 }, (_, i) => 2997 + i);
+  for (const range of ["#2997–#3005", "#2997-#3005", "#2997—#3005", "#2997 – #3005", "#2997 - #3005", "#2997 — #3005",
+    "#2997 to #3005", "#2997 through #3005", "#2997..#3005", "#2997 .. #3005"]) {
+    assert.deepEqual(intent(`Implement units ${range}.`), { scope: all, context: [] }, range);
+    assert.deepEqual(issueReferencesInMessage(`Implement units ${range}.`, repo), all, range);
+  }
+  // The launch the issue reports: the epic and every unit in the range are scope.
+  assert.deepEqual(intent("Implement epic #3032 in owner/repo: units #2997–#3005. Close #3032 when all its units have merged."),
+    { scope: [...all, 3032], context: [] });
+  assert.deepEqual(intent("Deliver:\n- #1–#3\n- #7 through #8"), { scope: [1, 2, 3, 7, 8], context: [] });
+  // A spaced dash ends a clause, but not inside a range, and never across a line.
+  assert.deepEqual(intent("Never close #1 - fix #2 instead."), { scope: [], context: [1, 2] });
+  assert.deepEqual(intent("Deliver:\n- #1\n- #4"), { scope: [1, 4], context: [] });
+  // A chain names no range, spaced or not and whatever its separators: each reference stands alone,
+  // so no issue between them is ever scoped.
+  for (const chain of ["#1–#3–#5", "#1 – #3 – #5", "#1 - #3 - #5", "#1 to #3 to #5", "#1 – #3 to #5", "#1..#3 through #5",
+    "#1 through #3–#5", "#1—#3 .. #5", "#1 – #3 – #5 – #7"]) {
+    assert.equal(issueReferenceSpans(`Fix ${chain}.`, repo).some((r) => r.range), false, chain);
+    // A spaced dash still ends a clause (#3920), and a reference right after ".." is not read at all,
+    // so a later reference may be context or absent; an unwritten one is never there.
+    const { scope, context } = intent(`Fix ${chain}.`);
+    assert.ok([...scope, ...context].every((n) => [1, 3, 5, 7].includes(n)), chain);
+    assert.ok(scope.includes(1), chain);
+  }
+  // A range beside a chain-like word is still a range.
+  assert.deepEqual(intent("Fix #1–#3 - then close #9.").scope, [1, 2, 3, 9]);
+});
+
+test("a negated, background or cited range withholds every issue in it (#4061)", () => {
+  const context = (text: string, expected: number[]) => assert.deepEqual(intent(text), { scope: [], context: expected }, text);
+  context("Don't touch #10–#13.", [10, 11, 12, 13]);
+  context("Fix everything except #10 through #13.", [10, 11, 12, 13]);
+  context("See #10–#13.", [10, 11, 12, 13]);
+  context("Fix the bug (#10..#13).", [10, 11, 12, 13]);
+  context("Background:\n- #10 to #13", [10, 11, 12, 13]);
+  assert.deepEqual(intent("Fix #10–#13. Don't close #12."), { scope: [10, 11, 13], context: [12] });
+  assert.deepEqual(intent("Fix #10 and #12. Do not touch #11–#13."), { scope: [10], context: [11, 12, 13] });
+});
+
+test("an oversized, inverted or empty range scopes nothing and records its endpoints as context (#4061)", () => {
+  // Wider than the 100-issue limit: 1 through 101 is 101 issues; 1 through 100 is exactly 100.
+  assert.deepEqual(intent("Fix #1–#101."), { scope: [], context: [1, 101] });
+  assert.equal(intent("Fix #1–#100.").scope.length, 100);
+  assert.deepEqual(intent("Fix #9–#5."), { scope: [], context: [5, 9] });
+  assert.deepEqual(intent("Fix #5–#5."), { scope: [], context: [5] });
+  // An endpoint the message asks for on its own is still scope.
+  assert.deepEqual(intent("Fix #1 and #300. Implement #1–#300."), { scope: [1, 300], context: [] });
+  // Ranges that together pass 100 distinct issues expand none of them.
+  assert.deepEqual(intent("Fix #1–#60 and #101–#160."), { scope: [], context: [1, 60, 101, 160] });
+  assert.deepEqual(intent("Fix #1–#60 and #31–#90.").scope.length, 90);
+  // Expansion is bounded however many ranges a message repeats.
+  const started = performance.now();
+  assert.deepEqual(intent(`Fix ${"#1–#100 ".repeat(5000)}`), { scope: [], context: [1, 100] });
+  assert.ok(performance.now() - started < 1000);
+  // Separator and whitespace runs the range's guards read around each reference stay fast.
+  const near = MAX_CLASSIFIED_MESSAGE_LENGTH - 64;
+  for (const filler of [`#1${" ".repeat(near)}–#2`, "#1 – ".repeat(near / 5), "#1 to ".repeat(near / 6), `#1 ${"– ".repeat(near / 2)}#2`,
+    "#1..".repeat(near / 4), `${" ".repeat(near)}#1 through #2`]) {
+    const begun = performance.now();
+    intent(`Fix ${filler}`.slice(0, MAX_CLASSIFIED_MESSAGE_LENGTH));
+    assert.ok(performance.now() - begun < 1000, `${filler.slice(0, 12)}… took ${Math.round(performance.now() - begun)}ms`);
+  }
+});
+
+test("only a scoped reference written after the word epic names a target epic (#4061)", () => {
+  const epics = (text: string) => firstMessageTargetEpics(text, repo, intent(text).scope);
+  assert.deepEqual(epics("Implement epic #3032 in owner/repo: units #2997–#3005."), [3032]);
+  assert.deepEqual(epics("Deliver Epic: https://github.com/owner/repo/issues/40 and #41."), [40]);
+  assert.deepEqual(epics("Fix #41. See epic #40."), [], "a background epic is not a target");
+  assert.deepEqual(epics("Don't touch epic #40. Fix #41."), []);
+  assert.deepEqual(epics("Implement epic #1–#3."), [], "a range is never an epic");
+  assert.deepEqual(epics(`Deliver ${[1, 2, 3, 4, 5].map((n) => `epic #${n}`).join(", ")}.`), [1, 2, 3, 4, 5]);
+  assert.deepEqual(epics(`Deliver ${Array.from({ length: MAX_TARGET_EPICS + 1 }, (_, i) => `epic #${i + 1}`).join(", ")}.`), [],
+    "more target epics than the bound name none");
+});
+
 test("every reference format is classified the same way, and other repositories' references are ignored (#3920)", () => {
   assert.deepEqual(intent("Fix #1, Owner/Repo#2 and https://github.com/owner/repo/issues/3#issuecomment-9. " +
     "See #4, owner/repo#5 and https://github.com/owner/repo/issues/6. Fix other/repo#7 and https://github.com/owner/repo/pull/8."),
@@ -131,7 +208,8 @@ test("classification is bounded: a message too long or too dense scopes nothing,
 
 test("the split covers every reference exactly once; citing or negating a reference never grants it (#3920)", () => {
   const word = fc.constantFrom("Fix", "deliver", "see", "not", "and", "the", "bug", "(", ")", ":", ".", ",", "\n", "- ", "related", "close",
-    "#1", "#2", "#3", "owner/repo#4", "https://github.com/owner/repo/issues/5", "`#6`", "elsewhere", "don't", "work on");
+    "#1", "#2", "#3", "owner/repo#4", "https://github.com/owner/repo/issues/5", "`#6`", "elsewhere", "don't", "work on",
+    "#1–#3", "#2 through #5", "#5..#2");
   fc.assert(fc.property(fc.array(word, { maxLength: 40 }), fc.constantFrom(1, 2, 3, 4, 5), (words, n) => {
     const text = words.join(" ");
     const { scope, context } = intent(text);

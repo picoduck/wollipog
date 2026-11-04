@@ -3,7 +3,7 @@ import { after, before, test } from "node:test";
 import React, { act } from "react";
 import { createRoot } from "react-dom/client";
 import { Window } from "happy-dom";
-import { DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
+import { AppBarSearchProvider, DetailBar, PageHeader, type PageMenuAction } from "./PageHeader.js";
 import { FeedbackProvider, useFeedback } from "./FeedbackProvider.js";
 import { SkillDetailHeader } from "./SkillDetailHeader.js";
 import { ErrorBoundary } from "./ErrorBoundary.js";
@@ -121,6 +121,70 @@ test("the page header owns the page title and orders its actions for priority+ o
     assert.ok(domWindow.document.activeElement === (more as never), "choosing an item returns focus to ⋯");
   } finally {
     await view.unmount();
+  }
+});
+
+test("on a phone the primary is a quiet `+` between Search and ⋯, named and titled by its label", async () => {
+  const calls: string[] = [];
+  const action = (label: string) => ({ label, onClick: () => calls.push(label) });
+  const header = (
+    <AppBarSearchProvider onSearch={() => calls.push("search")}>
+      <PageHeader
+        title="Automations"
+        secondary={[action("Import"), action("Templates")]}
+        menu={[action("Automation Settings")]}
+        primary={{ ...action("New Automation"), shortcut: "N" }}
+      />
+    </AppBarSearchProvider>
+  );
+  await act(async () => domWindow.happyDOM.setWindowSize({ width: 390, height: 844 }));
+  const phone = await mount(header);
+  try {
+    // §15.1: Search, `+`, ⋯ in the markup, so Tab meets them in the order drawn. The secondaries
+    // stay in the tree for ⋯ to read, and the phone stylesheet hides them.
+    assert.deepEqual([...phone.container.querySelector(".page-actions")!.children].map((element) => element.className), [
+      "icon-btn",
+      "btn page-action",
+      "btn page-action",
+      "icon-btn page-primary",
+      "overflow-menu page-more",
+    ]);
+    const plus = phone.container.querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(plus.className, "icon-btn page-primary", "the `.icon-btn` recipe Search uses, with no accent fill");
+    assert.equal(plus.querySelector(".page-primary-label")?.textContent, "New Automation", "the clipped label is its name");
+    assert.equal(plus.title, "New Automation", "and its tooltip");
+    assert.equal(plus.getAttribute("aria-keyshortcuts"), "N");
+    await act(async () => plus.click());
+    assert.deepEqual(calls, ["New Automation"]);
+  } finally {
+    await phone.unmount();
+    await act(async () => domWindow.happyDOM.setWindowSize({ width: 1024, height: 768 }));
+  }
+
+  // A visible reason still wins the tooltip on a phone; the label stays the name.
+  await act(async () => domWindow.happyDOM.setWindowSize({ width: 390, height: 844 }));
+  const reason = await mount(
+    <PageHeader title="Automations" primary={{ label: "New Automation", disabled: true, title: "Connect a machine first.", onClick: () => undefined }} />,
+  );
+  try {
+    const plus = reason.container.querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(plus.title, "Connect a machine first.");
+    assert.equal(plus.disabled, true);
+  } finally {
+    await reason.unmount();
+    await act(async () => domWindow.happyDOM.setWindowSize({ width: 1024, height: 768 }));
+  }
+
+  // From 761px up nothing changes: the labelled, filled primary stays last, after ⋯ (§3.3).
+  await act(async () => domWindow.happyDOM.setWindowSize({ width: 761, height: 844 }));
+  const wider = await mount(header);
+  try {
+    const actions = [...wider.container.querySelector(".page-actions")!.children];
+    assert.deepEqual(actions.slice(-2).map((element) => element.className), ["overflow-menu page-more", "btn primary page-primary"]);
+    assert.equal(wider.container.querySelector<HTMLButtonElement>(".page-primary")!.title, "", "a visible label needs no tooltip");
+  } finally {
+    await wider.unmount();
+    await act(async () => domWindow.happyDOM.setWindowSize({ width: 1024, height: 768 }));
   }
 });
 
@@ -312,12 +376,14 @@ test("a primary with items is a menu button with a caret, and on a phone its `+`
     await view.unmount();
   }
 
-  // A phone: the stylesheet clips the label to leave the `+`, which keeps the label as its name, and
-  // the menu is a docked sheet with the grabber, unplaced.
+  // A phone: the quiet `+` icon button; the stylesheet clips the label, which stays its name and is
+  // its tooltip, and the menu is a docked sheet with the grabber, unplaced.
   await act(async () => domWindow.happyDOM.setWindowSize({ width: 390, height: 844 }));
   const phone = await mount(<PageHeader title="Connections" primary={primary} />);
   try {
     const plus = phone.container.querySelector<HTMLButtonElement>(".page-primary")!;
+    assert.equal(plus.className, "icon-btn page-primary");
+    assert.equal(plus.title, "Add Machine");
     assert.equal(plus.textContent, "Add Machine");
     assert.ok(plus.querySelector(".page-primary-label") && plus.querySelector("svg:first-child"), "the `+` and the clipped label");
     await act(async () => plus.click());

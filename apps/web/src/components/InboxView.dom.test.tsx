@@ -2685,6 +2685,83 @@ test("InboxView keeps a hidden selection on its nearest visible ancestor and Shi
   assert.equal(previewTitle(), "Session Lone");
 });
 
+test("InboxView nests a child's review one step deeper, between its siblings, and walks rows in display order (#4077)", async () => {
+  mobileViewport = false;
+  setVisibility("visible");
+  setWindowFocused(true);
+  saveKeySet(INBOX_COLLAPSED_THREADS_KEY, new Set());
+  const { container, root } = mountTestRoot();
+  const socket = new FakeSocket();
+  const connection: UiConnectionRuntime = {
+    instanceId: "inbox-thread-depth-test",
+    runtimeKey: "inbox-thread-depth-test:1",
+    createSocket: () => socket,
+    close() {},
+  };
+  await act(async () => {
+    root.render(
+      <StoreProvider connection={connection} navigation={navigation}>
+        <InboxView rightPanel={rightPanel} onOpenTerminal={() => undefined} />
+      </StoreProvider>,
+    );
+  });
+  await act(async () => {
+    socket.push(snapshot([
+      session("Orchestrator", 40, { status: "running", role: "orchestrator" }),
+      session("A", 30, { status: "running", parentSessionId: "Orchestrator" }),
+      session("Review", 25, { status: "running", parentSessionId: "A", kind: "review" }),
+      session("B", 20, { status: "running", parentSessionId: "Orchestrator" }),
+      session("Lone", 5),
+    ]));
+  });
+  const shells = () => [...container.querySelectorAll<HTMLElement>(".inbox-row-shell")];
+  const shape = () => shells().map((shell) => [
+    shell.querySelector(".inbox-row-title")?.textContent,
+    ["thread-child", "thread-depth-2", "thread-last", "thread-outer"].filter((name) => shell.classList.contains(name)).join(" "),
+  ]);
+  assert.deepEqual(shape(), [
+    ["Session Orchestrator", ""],
+    ["Session A", "thread-child"],
+    ["Session Review", "thread-child thread-depth-2 thread-last thread-outer"],
+    ["Session B", "thread-child thread-last"],
+    ["Session Lone", ""],
+  ]);
+  const familyText = (title: string) => shells().find((shell) =>
+    shell.querySelector(".inbox-row-title")?.textContent === title)?.querySelector(".inbox-thread-family-text")?.textContent;
+  assert.equal(familyText("Session A"), "1 Review");
+  assert.equal(familyText("Session Orchestrator"), "2 Children");
+
+  const selectedTitle = () =>
+    container.querySelector<HTMLElement>('.inbox-row-shell[aria-selected="true"] .inbox-row-title')?.textContent ?? null;
+  const press = async (key: string, shiftKey = false) => {
+    await act(async () => {
+      domWindow.dispatchEvent(new domWindow.KeyboardEvent("keydown", { key, shiftKey, bubbles: true, cancelable: true }));
+    });
+  };
+  container.querySelector<HTMLElement>(".inbox-list")!.focus();
+  const visited = [selectedTitle()];
+  for (let step = 0; step < 4; step += 1) { await press("j"); visited.push(selectedTitle()); }
+  assert.deepEqual(visited, rowTitles(container), "j visits every row in display order");
+  await press("k"); await press("k");
+  assert.equal(selectedTitle(), "Session Review");
+  await press("ArrowLeft");
+  assert.equal(selectedTitle(), "Session A", "Left on the review selects its own parent");
+
+  // Collapsing A hides only its review; collapsing the Orchestrator hides A, B, and the review.
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Orchestrator", "Session A", "Session B", "Session Lone"]);
+  assert.equal(familyText("Session A"), "1 Review", "the rollup survives collapse");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Orchestrator", "Session A", "Session Review", "Session B", "Session Lone"]);
+  await press("k");
+  assert.equal(selectedTitle(), "Session Orchestrator");
+  await press("t");
+  assert.deepEqual(rowTitles(container), ["Session Orchestrator", "Session Lone"]);
+  await press("t");
+  assert.equal(rowTitles(container).length, 5);
+  await act(async () => root.unmount());
+});
+
 test("an expanded child inside a collapsed thread is the session marked seen, not its projected parent (#896)", async () => {
   mobileViewport = false;
   setVisibility("visible");

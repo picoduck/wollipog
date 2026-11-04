@@ -1,7 +1,7 @@
 import type {
   AgentDefinition, AutomationSchedule, SavedHarnessInstallation, RunnerView, WorkflowDefinition,
 } from "@wollipog/protocol";
-import { isRetiredCodexExec, runnerSupportsProtocol } from "@wollipog/protocol";
+import { agentAvailableForRunnerDefault, isRetiredCodexExec, runnerSupportsProtocol } from "@wollipog/protocol";
 import { agentOptions } from "./components/agent-options.js";
 
 /**
@@ -13,9 +13,9 @@ import { agentOptions } from "./components/agent-options.js";
 type Runner = RunnerView | undefined;
 
 /** The agent a new or re-targeted automation starts with: the first one that can run. */
-export function defaultAgentId(agents: readonly AgentDefinition[] | undefined): string {
-  return agentOptions([...(agents ?? [])]).find((option) => !option.disabled)?.agent.id ??
-    agents?.find((agent) => !isRetiredCodexExec(agent))?.id ?? "";
+export function defaultAgentId(agents: readonly AgentDefinition[] | undefined, defaults?: RunnerView["providerAccountDefaults"]): string {
+  return agentOptions([...(agents ?? [])]).find((option) => !option.disabled &&
+    agentAvailableForRunnerDefault(option.agent, defaults))?.agent.id ?? "";
 }
 
 /**
@@ -28,14 +28,15 @@ export function offeredAgents(agents: readonly AgentDefinition[] | undefined, cu
 
 /** The agents a workflow role can be bound to on this Machine. */
 export function bindableAgents(runner: Runner) {
-  return agentOptions(runner?.agents ?? []).filter((option) => !option.disabled);
+  return agentOptions(runner?.agents ?? []).filter((option) => !option.disabled &&
+    agentAvailableForRunnerDefault(option.agent, runner?.providerAccountDefaults));
 }
 
 /** The exact installation an agent would be pinned to on this Machine, or null when none can be. */
 export function installationFor(runner: Runner, agentId: string): SavedHarnessInstallation | null {
   const agent = runner?.agents.find((candidate) => candidate.id === agentId);
   return runnerSupportsProtocol(runner?.protocolVersion, "harnessInstallations") &&
-    agent?.installation && agent.available === true &&
+    agent?.installation && agentAvailableForRunnerDefault(agent, runner?.providerAccountDefaults) &&
     agent.installation.selection !== "other" && !agent.harnessSelectionBlocked
     ? { driver: agent.driver ?? "acp", context: agent.context ?? { kind: "native" as const },
         installationId: agent.installation.id } : null;
