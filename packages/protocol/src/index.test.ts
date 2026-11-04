@@ -370,6 +370,11 @@ test("PROTOCOL_VERSION is 283", () => {
     "a^b", "a?b", "a*b", "a[b", "a\\b", "a@{b", "@", "a\u0001b", "x".repeat(256)]) {
     assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
   }
+  // Full Control response text rides only on a runner that can carry it (#4063), which also has
+  // the owner-decision tools its root guidance names.
+  assert.equal(runnerSupportsProtocol(281, "fullControlResponseAttribution"), false);
+  assert.equal(runnerSupportsProtocol(282, "fullControlResponseAttribution"), true);
+  assert.ok(RUNNER_CAPABILITY_MIN_PROTOCOL.fullControlResponseAttribution >= RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions);
   // Owner decisions need a v281 root runner and control plane (#4064).
   assert.equal(runnerSupportsProtocol(280, "ownerDecisions"), false);
   assert.equal(runnerSupportsProtocol(281, "ownerDecisions"), true);

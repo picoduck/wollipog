@@ -7,7 +7,7 @@ import { campaignOperationEvidenceCurrent } from "./campaign-operation-evidence.
 import { effectiveProjectMemoryKey, prepareProjectMemory, prepareProjectMemoryArgs, projectMemoryKey, projectMemoryUnavailable } from "./project-memory.js";
 import { type BackgroundFollowUpView, CODEX_EXEC_RETIRED_REASON, isRetiredCodexExec, isTerminal } from "@wollipog/protocol";
 import { CampaignIssueScopeRefusal, inspectCampaignIssueScope, inspectCampaignPublication } from "./campaign-issue-scope.js";
-import { boundedIssueNumbers, campaignRepositoryLocation, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
+import { boundedIssueNumbers, campaignRepositoryLocation, parseFullControlAutomaticResponse, titleFromPrompt, validCampaignControl } from "@wollipog/protocol";
 import { executeGithubIssueClosure, inspectGithubIssueClosure, issueClosureRun, IssueClosureInspectionError } from "./github-issue-closure.js";
 import type { GithubIssueClosureMessage, GithubIssueClosureResultMessage } from "@wollipog/protocol";
 import type { CampaignForgeObserveMessage, CampaignForgeObserveResultMessage, GitLabMergePreflightMessage, GitLabMergePreflightResultMessage, GithubMergePreflightMessage, GithubMergePreflightResultMessage, ForgeDecisionActionMessage, ForgeDecisionActionResultMessage } from "@wollipog/protocol";
@@ -17733,10 +17733,13 @@ export class SessionManager {
     optionId: string | null,
     resolvedByParentSessionId?: string,
     resolvedBy?: unknown,
+    automaticResponse?: unknown,
   ): void {
     // Who decided (#2628), recorded on this exact resolution. A Parent Control decision names its
     // parent session instead, and a malformed value is dropped rather than recorded.
     const decidedBy = resolvedByParentSessionId ? undefined : permissionResolver(resolvedBy);
+    // Full Control policy attribution (#4063): only as the server sent it, never beside a person.
+    const automatic = decidedBy?.kind === "user" ? undefined : parseFullControlAutomaticResponse(automaticResponse);
     const setupApproval = this.worktreeSetupApprovals.get(`${sessionId}:${requestId}`);
     if (setupApproval) {
       this.worktreeSetupApprovals.delete(`${sessionId}:${requestId}`);
@@ -17764,7 +17767,7 @@ export class SessionManager {
       optionId = null;
       this.log(JSON.stringify({ event: "campaign_operation_evidence_stale", sessionId, requestId }));
     }
-    const delivered = entry ? entry.client.resolvePermission(requestId, optionId) : false;
+    const delivered = entry ? entry.client.resolvePermission(requestId, optionId, automatic) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);
@@ -17823,8 +17826,11 @@ export class SessionManager {
     occurrenceId?: string,
     answerSummary?: QuestionAnswerSummaryEntry[],
     answeredByUserId?: string,
+    automaticResponse?: unknown,
   ): void {
     const entry = this.active.get(sessionId);
+    // Full Control policy attribution (#4063) applies only to a dismissal, as the server sent it.
+    const automatic = action === "dismiss" && !answeredByUserId ? parseFullControlAutomaticResponse(automaticResponse) : undefined;
     const asyncQuestion = pendingRequests(this.store.readMeta(sessionId)?.pendingApproval)
       .find((request) => request.requestId === requestId && request.kind === "question" && request.async);
     if (asyncQuestion) {
@@ -17845,7 +17851,7 @@ export class SessionManager {
       });
       return;
     }
-    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action) : false;
+    const delivered = entry?.client.answerQuestion ? entry.client.answerQuestion(requestId, answers, action, automatic) : false;
     if (delivered) {
       const started = this.approvalStarted.get(`${sessionId}:${requestId}`);
       this.approvalStarted.delete(`${sessionId}:${requestId}`);

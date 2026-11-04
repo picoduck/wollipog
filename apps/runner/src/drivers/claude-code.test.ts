@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { test } from "node:test";
-import type { SessionEventPayload } from "@wollipog/protocol";
+import { fullControlAutomaticResponseText, type SessionEventPayload } from "@wollipog/protocol";
 import {
   claudeHookCircuitPath,
   claudeHookProtectionsPath,
@@ -4983,6 +4983,67 @@ test("resolvePermission('deny') writes the deny message and returns true; deny d
   assert.equal(h.driver.resolvePermission("req-1", "deny"), true);
   const frame = JSON.parse(writes[0]!);
   assert.deepEqual(frame.response.response, { behavior: "deny", message: "The user declined this tool call." });
+});
+
+test("a Full Control policy tool decline says Wollipog declined it under Full Control, never the user (#4063)", () => {
+  const h = makeHarness();
+  const writes = askThenChild(h);
+  assert.equal(h.driver.resolvePermission("req-1", "deny", { policy: "full_control", basis: "git_execution_without_bounded_effect_proof" }), true);
+  const response = JSON.parse(writes[0]!).response.response;
+  assert.equal(response.behavior, "deny");
+  assert.equal(response.message, fullControlAutomaticResponseText("tool", { policy: "full_control", basis: "git_execution_without_bounded_effect_proof" }));
+  assert.match(response.message, /Wollipog declined this tool call automatically under the campaign's Full Control policy \(Git Commands Without Bounded Effect Proof\)\. No person saw it/);
+  assert.doesNotMatch(response.message, /\buser\b/i);
+});
+
+test("a Full Control decline never turns an allow into a deny", () => {
+  const h = makeHarness();
+  const writes = askThenChild(h);
+  assert.equal(h.driver.resolvePermission("req-1", "allow", { policy: "full_control" }), true);
+  assert.deepEqual(JSON.parse(writes[0]!).response.response, { behavior: "allow", updatedInput: { command: "ls" } });
+});
+
+function questionThenChild(h: Harness, requestId: string): string[] {
+  const writes: string[] = [];
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  (h.driver as any).child = { stdin: { write: (s: string) => writes.push(s) } };
+  h.feed({
+    type: "control_request",
+    request_id: requestId,
+    request: { subtype: "can_use_tool", tool_name: "AskUserQuestion", input: { questions: [
+      { question: "Proceed?", header: "Proceed", multiSelect: false, options: [{ label: "Yes", description: "" }, { label: "No", description: "" }] },
+    ] } },
+  });
+  return writes;
+}
+
+test("a person's question dismissal still says the user dismissed it", () => {
+  const h = makeHarness();
+  const writes = questionThenChild(h, "q-person");
+  assert.equal(h.driver.answerQuestion("q-person", {}, "dismiss"), true);
+  assert.deepEqual(JSON.parse(writes[0]!).response.response, { behavior: "deny", message: "The user dismissed the question." });
+});
+
+test("every Full Control root question dismissal carries the guidance in its own result, not only the first (#4063)", () => {
+  const h = makeHarness();
+  const first = questionThenChild(h, "q-1");
+  assert.equal(h.driver.answerQuestion("q-1", {}, "dismiss", { policy: "full_control", basis: "root_questions" }), true);
+  const second = questionThenChild(h, "q-2");
+  assert.equal(h.driver.answerQuestion("q-2", {}, "dismiss", { policy: "full_control", basis: "root_questions" }), true);
+  for (const writes of [first, second]) {
+    const response = JSON.parse(writes[0]!).response.response;
+    assert.equal(response.behavior, "deny");
+    assert.match(response.message, /^\[Wollipog Full Control\] Wollipog dismissed this question automatically under the campaign's Full Control policy \(Root Questions\)\. No person saw it, and none of its options was chosen\./);
+    assert.match(response.message, /resolve_descendant_workflow_decision/);
+    assert.doesNotMatch(response.message, /\buser\b/i);
+  }
+});
+
+test("a Full Control dismissal never answers a submitted question", () => {
+  const h = makeHarness();
+  const writes = questionThenChild(h, "q-submit");
+  assert.equal(h.driver.answerQuestion("q-submit", { "Proceed?": "Yes" }, "submit", { policy: "full_control" }), true);
+  assert.equal(JSON.parse(writes[0]!).response.response.behavior, "allow");
 });
 
 test("resolvePermission returns false for an unknown requestId and writes nothing", () => {

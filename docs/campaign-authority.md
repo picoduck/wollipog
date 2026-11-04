@@ -111,11 +111,12 @@ root's questions, and that the root decides Orchestrator-owned matters with the 
 approving its own pending occurrence with `resolve_descendant_workflow_decision` and its own
 session ID. Later questions in the same revision are still dismissed but wake the root with no
 further notice, so a root that answers each notice with another question cannot loop; the bound is
-the durable decline ledger's first-for-class record. Neither provider's dismissal can carry text
-(Claude Code sends a fixed deny message, Codex an empty answer set), so the guidance travels as a
-prompt. The dismissal is not blocked work. A root whose runner supports owner decisions (v281)
-receives `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE` instead, which also names the route for
-a decision the campaign's owner kept.
+the durable decline ledger's first-for-class record. The dismissal is not blocked work. A root
+whose runner supports owner decisions (v281) receives `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`
+instead, which also names the route for a decision the campaign's owner kept. Since v282 that
+owner-route guidance also rides on every dismissal itself where the provider result can carry text
+(see [Full Control Response Text](#full-control-response-text)); the notice remains as the wake-up
+and for runners and providers that cannot.
 
 Owner decisions (#4064) are that route. `request_owner_decision` creates an `owner_decision`
 workflow decision: a question with explicit options and decision material that the evaluator makes
@@ -176,7 +177,7 @@ root standing response the runner could not receive (`provider_delivery_unavaila
 | Any tool effect not attested inside the session's own worktree (a target or cwd outside it, an escaping symlink, globs, scripts, interpreters, Git, partial or pre-v230 evidence) | Declined | Declined |
 | `external_elicitation` and other forms | Orchestrator decides once | Declined |
 | `unverified_tool_effects`, `script_execution_without_bounded_effect_proof` with every target inside the worktree | Orchestrator decides once | Declined |
-| `root_questions` (every question the root asks) | Not applicable | Dismissed, with a notice |
+| `root_questions` (every question the root asks) | Not applicable | Dismissed, with guidance in the result and a notice |
 | `undelegated_policy_asks` (every target inside the worktree) | Orchestrator decides once | Declined |
 | `human_required_rules` (marked Human Required, or built in) | Human | Human |
 
@@ -185,6 +186,44 @@ The server answers it itself with its one-time reject, or a dismissal for a ques
 card; the Orchestrator may decline it too, but no one acting for the campaign can approve or answer
 it. A credential question asked as a typed implementation question creates no decision at all. A
 request offering no one-time allow is never converted into anything else: it is declined.
+
+### Full Control Response Text
+
+A bare dismissal reads as a person's choice, and agents once told the owner "you dismissed my
+question" and saved that as memory (#4063). So when the server's Full Control policy dismisses a
+question or declines a tool call, for a root or a child, the control plane sends
+`automaticResponse: { policy: "full_control", basis? }` with that exact `answer_question` or
+`resolve_permission`. It sends the field only to a runner with capability
+`fullControlResponseAttribution` (v282), only with a dismissal or reject, and never with a person's
+answer or decision, which still read "The user dismissed the question." and "The user declined
+this tool call." The Orchestrator's own choice among a child's options carries no field either. Its
+forced decline of an occurrence the policy already declines does carry it, because the policy
+decided that.
+
+The runner accepts the field only in its exact shape and drops it beside a person's name. The
+Claude Code driver then replaces the person-worded deny text with
+`fullControlAutomaticResponseText`. It says that Wollipog dismissed or declined the request
+automatically under the campaign's Full Control policy, that no person saw it, that no option was
+chosen or nothing was approved, and what to do instead. A root question's text carries the same
+guidance as `FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE`, including the owner-decision route
+(a v282 runner always has those v281 tools), on every dismissal and not only the first in a
+revision. An
+unresolved-effect decline says to retry with explicit worktree paths.
+
+`basis` names a class only when that is safe: `root_questions`, `external_elicitation`, the
+unverified tool-effect classes, `undelegated_policy_asks` and `unresolved_effects`. The text shows
+the class's label. A credential, sign-in, provider-access or lasting-grant decline carries no
+basis and gets the generic policy sentence, so the result never describes what the request filter
+withheld. No text repeats the request.
+
+An older runner is never sent the field. It keeps today's fixed text, and the server still sends
+the existing notices: the root-question notice and the unresolved-effect notice, each once per
+policy revision. The protocol cannot carry text for Codex App Server: a declined approval is a bare
+`decline` decision, a dismissed question an empty answer set and a declined elicitation a bare
+`decline`. Codex therefore keeps those shapes, which never name a person, and relies on the same
+notices. ACP and other drivers ignore the field likewise. A Full Control decline of a server-minted
+policy hook ask still returns the hook's own reason ("Denied by a manager approval."), which names
+no person.
 
 A design question about credential handling is not a credential question (#3844). A typed
 implementation question's approval selects one offered option id, so it can carry no value back;

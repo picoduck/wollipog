@@ -767,24 +767,93 @@ export const FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE = "[Wollipog Full Control] 
   "command), so it could not rule out credential access. Nobody was asked and the request will not be replayed. Retry with " +
   "explicit file paths inside your worktree, such as reading or editing named files, or continue without it.";
 
-/** Delivered to a Full Control root after the server dismisses its own question (#2940). No person
- * sees a root's questions, and none of its options is applied for it. Content-safe: it never
- * repeats the question. */
-export const FULL_CONTROL_ROOT_QUESTION_MESSAGE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +
-  "no person sees this campaign's questions, and none of its options was chosen for you. You own every Orchestrator-owned " +
+const FULL_CONTROL_ROOT_QUESTION_GUIDANCE = "You own every Orchestrator-owned " +
   "decision under your standing authorization, so decide it yourself and continue with the typed tools. To approve your own " +
   "pending workflow decision, such as an issue closure or scope change, call resolve_descendant_workflow_decision with your own " +
   "session ID as sessionId, then execute it (for a closure, close_github_issue with the same occurrenceId and resourceDigest). " +
   "A human-owned decision still waits for a person in Wollipog; report it instead of asking.";
 
-/** FULL_CONTROL_ROOT_QUESTION_MESSAGE for a root whose runner and control plane support owner
- * decisions (v281, #4064): it names the typed route for a decision the campaign's owner kept. */
-export const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE = FULL_CONTROL_ROOT_QUESTION_MESSAGE.slice(0,
-  FULL_CONTROL_ROOT_QUESTION_MESSAGE.indexOf("A human-owned decision")) +
+/** The root guidance with the owner-decision route (#4064) in place of "report it instead of asking". */
+const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE = FULL_CONTROL_ROOT_QUESTION_GUIDANCE.slice(0,
+  FULL_CONTROL_ROOT_QUESTION_GUIDANCE.indexOf("A human-owned decision")) +
   "For a decision the campaign's owner kept for themselves, call request_owner_decision with the question, its options " +
   "and the decision material: it reaches the owner's Inbox without stopping your turn or other work, and their choice " +
   "is delivered back to you. To give the owner one of your pending Orchestrator-owned decisions instead, such as a " +
   "child's pr_merge, call hand_workflow_decision_to_owner; that cannot be undone. Never decide a human-owned decision yourself.";
+
+const FULL_CONTROL_ROOT_QUESTION_NOTICE = "[Wollipog Full Control] Your question was dismissed: under Full Control " +
+  "no person sees this campaign's questions, and none of its options was chosen for you. ";
+
+/** Delivered to a Full Control root after the server dismisses its own question (#2940). No person
+ * sees a root's questions, and none of its options is applied for it. Content-safe: it never
+ * repeats the question. */
+export const FULL_CONTROL_ROOT_QUESTION_MESSAGE = FULL_CONTROL_ROOT_QUESTION_NOTICE + FULL_CONTROL_ROOT_QUESTION_GUIDANCE;
+
+/** FULL_CONTROL_ROOT_QUESTION_MESSAGE for a root whose runner and control plane support owner
+ * decisions (v281, #4064): it names the typed route for a decision the campaign's owner kept. */
+export const FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE = FULL_CONTROL_ROOT_QUESTION_NOTICE + FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE;
+
+/** Why the server's Full Control policy settled a request itself, as far as it is safe to say
+ * (#4063). Each is a policy category, never request content. The credential, sign-in, provider
+ * access and lasting-grant classes are deliberately absent: naming them would describe what the
+ * request filter withheld, so those declines carry the generic policy sentence instead. */
+export type FullControlAutomaticBasis = "root_questions" | "external_elicitation" | "unverified_tool_effects" |
+  "git_execution_without_bounded_effect_proof" | "script_execution_without_bounded_effect_proof" |
+  "relative_shell_commands_without_verified_cwd" | "undelegated_policy_asks" | "unresolved_effects";
+
+const FULL_CONTROL_AUTOMATIC_BASES: ReadonlySet<string> = new Set<FullControlAutomaticBasis>(["root_questions",
+  "external_elicitation", "unverified_tool_effects", "git_execution_without_bounded_effect_proof",
+  "script_execution_without_bounded_effect_proof", "relative_shell_commands_without_verified_cwd", "undelegated_policy_asks",
+  "unresolved_effects"]);
+
+/** Sent with a dismissal or decline only when the server's Full Control policy made it (#4063). A
+ * person's response, or an Orchestrator's own choice among options, never carries it. */
+export interface FullControlAutomaticResponse {
+  policy: "full_control";
+  basis?: FullControlAutomaticBasis;
+}
+
+/** The content-safe attribution for one standing decline: the class only when it is safe to name,
+ * and the unresolved-effect rule ahead of the class it refines. */
+export function fullControlAutomaticResponse(evaluation: Pick<CampaignAuthorityEvaluation, "reason" | "requestClass">): FullControlAutomaticResponse {
+  const basis = evaluation.reason === "unresolved_effects" ? "unresolved_effects" : evaluation.requestClass;
+  return { policy: "full_control", ...(basis && FULL_CONTROL_AUTOMATIC_BASES.has(basis) ? { basis: basis as FullControlAutomaticBasis } : {}) };
+}
+
+/** A received attribution, or undefined when malformed. Never invents one: a runner claims an
+ * automatic response only when the server said so, and an unknown basis falls back to none. */
+export function parseFullControlAutomaticResponse(value: unknown): FullControlAutomaticResponse | undefined {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return undefined;
+  const { policy, basis } = value as { policy?: unknown; basis?: unknown };
+  if (policy !== "full_control") return undefined;
+  return { policy, ...(typeof basis === "string" && FULL_CONTROL_AUTOMATIC_BASES.has(basis) ? { basis: basis as FullControlAutomaticBasis } : {}) };
+}
+
+/** The text an agent receives in the same tool result when the server's Full Control policy
+ * dismissed its question or declined its tool call (#4063). It says Wollipog did it, that no
+ * person saw it, that nothing was chosen or approved, and what to do instead. Content-safe: it
+ * never repeats the request. */
+export function fullControlAutomaticResponseText(kind: "question" | "tool", response: FullControlAutomaticResponse): string {
+  const basis = response.basis;
+  const label = basis === "unresolved_effects" ? undefined : basis && FULL_CONTROL_HUMAN_REQUIRED_LABELS[basis];
+  const subject = kind === "question" ? "this question" : "this tool call";
+  const verb = kind === "question" ? "dismissed" : "declined";
+  const head = `[Wollipog Full Control] Wollipog ${verb} ${subject} automatically under the campaign's Full Control policy` +
+    (label ? ` (${label})` : "") + ". No person saw it, ";
+  if (kind === "question") {
+    // Only a v282 runner receives this attribution, so its root also has the owner-decision tools.
+    if (basis === "root_questions") return head + "and none of its options was chosen. " + FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_GUIDANCE;
+    return head + "and none of its options was chosen. Do not ask again; continue without it, decide what you can with your " +
+      "own tools, and report anything still blocked in your final report.";
+  }
+  if (basis === "unresolved_effects") {
+    return head + "and it was not approved: the runner could not resolve every file it would touch to a real path inside " +
+      "this session's worktree. Retry with explicit file paths inside your worktree, such as reading or editing named files, " +
+      "or continue without it.";
+  }
+  return head + "and it was not approved. It will not be replayed. Continue without it, using a bounded alternative inside " +
+    "your worktree where one exists, and report anything still blocked in your final report.";
+}
 
 /** Shown beside the Human Required list: the classes the Orchestrator cannot supply. */
 export const FULL_CONTROL_DECLINED_NOTE = "Requests for credentials, sign-in, wider provider access or a lasting permission grant are declined automatically and shown as blocked work in Campaign Status. You are not asked.";

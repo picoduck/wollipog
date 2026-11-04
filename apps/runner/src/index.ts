@@ -3007,11 +3007,12 @@ function handleCommand(msg: ControlPlaneToRunner): void {
       void agentControlFifoRelays?.close(msg.sessionId);
       break;
     case "resolve_permission":
-      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy);
+      sessions.resolvePermission(msg.sessionId, msg.requestId, msg.optionId, msg.resolvedByParentSessionId, msg.resolvedBy,
+        msg.automaticResponse);
       break;
     case "answer_question":
       sessions.answerQuestion(msg.sessionId, msg.requestId, msg.answers, msg.action, msg.resolvedByParentSessionId,
-        msg.occurrenceId, msg.answerSummary, msg.answeredByUserId);
+        msg.occurrenceId, msg.answerSummary, msg.answeredByUserId, msg.automaticResponse);
       break;
     case "rewind_session": {
       // Serialize behind the same per-session queue as mutating git actions: a rewind
