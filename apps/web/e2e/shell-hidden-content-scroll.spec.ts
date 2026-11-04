@@ -72,12 +72,17 @@ for (const width of [390, 1280]) {
       await expect(copy).toHaveAccessibleDescription("Copies SKILL.md");
       await expect(page.locator('.skill-assignment > [role="status"]')).not.toHaveCount(0);
       await assertShellAnchored(page);
+      const assertOuterDoesNotScroll = async () => expect(await page.locator(".main-body")
+        .evaluate((element) => element.scrollHeight - element.clientHeight)).toBe(0);
+      await assertOuterDoesNotScroll();
       await copy.scrollIntoViewIfNeeded();
       await expect(copy).toBeInViewport();
       await assertShellAnchored(page);
+      await assertOuterDoesNotScroll();
       await page.locator("table.skill-deployment").scrollIntoViewIfNeeded();
       await expect(page.locator("table.skill-deployment")).toBeInViewport();
       await assertShellAnchored(page);
+      await assertOuterDoesNotScroll();
     });
   });
 }

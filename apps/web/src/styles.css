@@ -1566,6 +1566,8 @@ kbd {
   padding: 0;
 }
 .master-detail-detail {
+  /* Nested details own their hidden status text too; it must not extend the outer page scroller. */
+  position: relative;
   display: grid;
   grid-template-columns: minmax(0, 920px);
   align-content: start;
