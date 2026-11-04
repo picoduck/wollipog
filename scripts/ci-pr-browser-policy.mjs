@@ -34,10 +34,10 @@ export function browserSelection({ entries, inventory, complete = true, baseKnow
     }
     // Only ordinary application implementation files qualify. Fixtures, harnesses, scripts,
     // docs, manifests, assets, shared packages and configuration remain full.
-    if (!/^apps\/(?:web|control-plane|runner)\/src\/.+\.[cm]?[jt]sx?$/.test(path) ||
+    if (!/^apps\/(?:web|control-plane)\/src\/.+\.[cm]?[jt]sx?$/.test(path) ||
         /(?:^|\/)(?:shared|fixtures|test-support|test-utils|e2e)\//.test(path) ||
         /(?:\.test\.|(?:^|\/)(?:index|main|App)\.)/.test(path) ||
-        /(?:auth|approv|permission|workflow|campaign|sandbox|containment|cgroup|security|secret|credential|provider-home|provider-account|identity|principal|token|encrypt|crypto|policy|lease|governance|persist|migration|database|(?:^|\/)db[./-]|store|sqlite|retention)/i.test(path))
+        /(?:auth|approv|permission|workflow|campaign|sandbox|containment|cgroup|security|secret|credential|provider-home|provider-account|identity|principal|token|encrypt|crypto|policy|lease|governance|persist|migration|database|(?:^|\/)(?:db[./-]|hub\.|sessions\.|devices\.)|store|sqlite|retention)/i.test(path))
       return full("shared-high-risk-or-unknown-input");
   }
   return { policy: PR_BROWSER_POLICY, mode: "fast", reason: "critical-and-changed-browser-files", files: [...selected].sort() };

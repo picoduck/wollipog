@@ -54,7 +54,7 @@ The optional PR plan checks out immutable base with non-persisted credentials,
 reads tested Git objects without importing tested policy, verifies base/head
 ancestry in the tested merge, and requires identical base/tested workflow blobs.
 Every critical file and each added/modified browser spec is selected. Ordinary
-application implementation can qualify. High-risk security/persistence/approval/
+web/control-plane implementation can qualify. Runner source stays full. High-risk security/persistence/approval/
 execution paths, shared helpers/fixtures/harnesses, Playwright config, inventory,
 profile/routing scripts, workflow, lockfiles, manifests, shared packages,
 docs/assets and unknown inputs require full. Renames/deletions/type changes,
