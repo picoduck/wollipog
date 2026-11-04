@@ -6,7 +6,7 @@ import { parseDiff, hash } from "./ci-suite-selection-v1-1.mjs";
 import { browserSelection, PR_BROWSER_POLICY, CRITICAL_BROWSER_FILES } from "./ci-pr-browser-policy.mjs";
 
 export const BROWSER_SELECTION_MARKER = "ci-pr-browser-v1 ";
-const policyId = hash(["./ci-pr-browser-policy.mjs", "./ci-pr-browser-route.mjs", "../playwright.pr.config.ts"]
+const loadPolicyId = () => hash(["./ci-pr-browser-policy.mjs", "./ci-pr-browser-route.mjs", "../playwright.pr.config.ts"]
   .map((path) => readFileSync(new URL(path, import.meta.url), "utf8")).join("\n"));
 
 /** Independent metadata domain: never interpreted as a historical v1/v1.1 suite selection. */
@@ -14,7 +14,7 @@ export function browserEvidence(route, env = process.env) {
   if (!route.context || !route.selectedFileIds) return null;
   const { base, tested, head, diffBase } = route.context;
   return parseBrowserEvidence(BROWSER_SELECTION_MARKER + JSON.stringify({
-    version: 1, policy: route.policy, policyId, mode: route.mode,
+    version: 1, policy: route.policy, policyId: loadPolicyId(), mode: route.mode,
     inventoryCount: route.inventoryCount, inventoryId: route.inventoryId,
     selectedCount: route.selectedFileIds.length, selectedFileIds: route.selectedFileIds,
     context: { baseSha: base, testedSha: tested, changeHeadSha: head, diffBaseSha: diffBase,

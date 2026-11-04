@@ -16,26 +16,32 @@ test("ordinary implementation selects critical journeys and every added/changed 
   assert.deepEqual(CRITICAL_BROWSER_FILES, ["authentication-recovery.spec.ts", "new-session-choices.spec.ts",
     "request-surfaces.spec.ts", "issue-closure.spec.ts", "conversation-handoff.spec.ts",
     "automation-triggers.spec.ts", "command-inbox-projects.spec.ts"], "review manifest changes with the policy version");
-  for (const path of ["apps/web/src/components/Timeline.tsx", "apps/control-plane/src/format-label.ts"])
-    assert.deepEqual(select([entry(path)]).files, [...critical].sort());
+  for (const path of ["apps/web/src/components/Timeline.tsx", "apps/control-plane/src/format-label.ts",
+    "apps/web/src/store.ts", "apps/control-plane/src/auth.ts", "apps/control-plane/src/sessions.ts",
+    "apps/control-plane/src/hub.ts", "apps/control-plane/src/db/migrations.ts", "apps/runner/src/display.ts",
+    "apps/runner/src/provider-home.ts", "apps/web/src/main.tsx", "apps/web/src/components/Timeline.test.tsx",
+    "packages/protocol/src/index.test.ts", "scripts/ordinary.test.mjs", "docs/ci-suite-evidence-2026-10-23.md",
+    "apps/web/src/styles.css", "apps/web/public/icon.svg", "README.md"])
+    for (const status of ["A", "M", "D"])
+      assert.deepEqual(select([entry(path, status)]).files, [...critical].sort(), `${status} ${path}`);
   const entries = [entry("apps/web/src/components/Timeline.tsx"), entry(inventory.at(-1), "A"), entry(inventory.at(-2))];
   const result = select(entries);
   assert.equal(result.mode, "fast");
-  assert.equal(result.policy, "pr-browser-critical-v1");
+  assert.equal(result.policy, "pr-browser-critical-v2");
   assert.deepEqual(result.files, [...inventory].sort());
   assert.deepEqual(select(entries.reverse()), result);
   assert.deepEqual(validateBrowserFiles(JSON.stringify(result.files), inventory), result.files);
 });
 
-test("shared fixtures, routing, configuration and unknown/high-risk inputs force full", () => {
+test("shared fixtures, browser/routing infrastructure, toolchain and unknown inputs force full", () => {
   for (const path of ["apps/web/e2e/page-state.ts", "apps/web/e2e/fixtures/live-database.ts",
     "apps/web/e2e/fixtures/shared.spec.ts", "apps/web/e2e/helpers/shared.spec.ts",
     "playwright.config.ts", "playwright.pr.config.ts", "playwright.shards.ts", "scripts/ci-pr-browser-policy.mjs",
-    ".github/workflows/ci.yml", "package.json", "pnpm-lock.yaml", "apps/web/src/store.ts",
-    "apps/control-plane/src/auth.ts", "apps/control-plane/src/sessions.ts", "apps/control-plane/src/hub.ts",
-    "apps/runner/src/display.ts", "apps/runner/src/provider-home.ts", "apps/web/src/main.tsx",
-    "apps/web/src/components/Timeline.test.tsx", "apps/web/src/e2e/fixture.ts", "packages/protocol/src/index.ts",
-    "docs/ci-suite-evidence-2026-10-23.md", "apps/web/src/styles.css", "apps/web/e2e/missing.spec.ts",
+    ".github/workflows/ci.yml", "scripts/ci-pr-browser-route.test.mjs", "scripts/ci-suite-policy-v1-1.mjs",
+    "scripts/browser-shards.test.mjs", "package.json", "apps/web/package.json", "pnpm-lock.yaml",
+    "pnpm-workspace.yaml", "devbox.json", ".nvmrc", "apps/runner/tsconfig.json",
+    "apps/web/src/e2e/fixture.ts", "packages/protocol/src/index.ts", "packages/test-support/src/x.test.ts",
+    "apps/web/src/test-utils/browser.test.ts", "apps/web/e2e/missing.spec.ts",
     "../apps/web/e2e/x.spec.ts", "apps/web/e2e//x.spec.ts", "apps/web/e2e/x.spec.ts\nmode=fast"])
     assert.equal(select([entry(path)]).mode, "full", path);
   for (const status of ["D", "R100", "C100", "T", "U", ""])

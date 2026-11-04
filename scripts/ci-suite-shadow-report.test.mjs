@@ -329,7 +329,7 @@ test("v1.1 shadow and PR-browser evidence collect separately without changing hi
   assert.deepEqual(collected.browserSelections, [browser]);
   assert.ok(!JSON.stringify(collected).includes("PRIVATE_SENTINEL"));
   assert.equal(parseBrowserEvidence(SELECTION_MARKER + JSON.stringify(corrected)), null);
-  for (const change of [{ policy: "fast-required-v1.1" }, { mode: "unknown" }, { selectedCount: 0 },
+  for (const change of [{ policy: "fast-required-v1.1" }, { policy: "pr-browser-critical-v1" }, { mode: "unknown" }, { selectedCount: 0 },
     { selectedFileIds: browser.selectedFileIds.slice(1) }, { selectedFileIds: browser.selectedFileIds.map(() => hash("duplicate")) },
     { context: { ...browser.context, trustedPolicySha: testedSha } }])
     assert.equal(parseBrowserEvidence(BROWSER_SELECTION_MARKER + JSON.stringify({ ...browser, ...change })), null);

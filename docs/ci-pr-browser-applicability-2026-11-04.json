@@ -1,0 +1,1039 @@
+{
+  "version": 1,
+  "repository": "picoduck/wollipog",
+  "policy": "pr-browser-critical-v2",
+  "policySourceSha256": "1ae6239cf7065a87d56b7ae5e51d033a1f1af9752390a82609c0c8e2234b1108",
+  "sourceHead": "dc1230a350c768152e1c7b4b12bc738bd6348b2a",
+  "pinnedMainSha": "aaadff56faab892f6ab4f101e2e2485ce2bbe55a",
+  "method": "Most recent unique standard squash PR suffixes (#N) on first-parent main history; keep newest commit per PR identity and replay parent-to-commit name-status diff against that commit's browser inventory",
+  "certification": "none",
+  "limitations": [
+    "No runtime/latency prediction",
+    "PR suffix is a Git-history convention, not a fresh forge lookup",
+    "Commit timestamps are not merge landing times",
+    "Trigger categories overlap and do not sum to the sample count"
+  ],
+  "commitClockWindow": {
+    "since": "2026-11-01T22:50:21.000Z",
+    "until": "2026-11-04T20:39:39.000Z"
+  },
+  "sampleCount": 100,
+  "skippedNonPrCommits": 0,
+  "skippedDuplicatePrCommits": 1,
+  "reduced": 32,
+  "full": 68,
+  "reasons": {
+    "browser-infrastructure-or-toolchain": 19,
+    "browser-harness-or-support": 25,
+    "unknown-input": 23,
+    "critical-and-changed-browser-files": 32,
+    "diff-unavailable": 1
+  },
+  "overlappingFullTriggerReasons": {
+    "browser-infrastructure-or-toolchain": 20,
+    "unknown-input": 41,
+    "browser-harness-or-support": 26
+  },
+  "samples": [
+    {
+      "pullRequest": 4148,
+      "commitSha": "aaadff56faab892f6ab4f101e2e2485ce2bbe55a",
+      "committedAt": "2026-11-04T20:39:38.000Z",
+      "changedPaths": 9,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 3690,
+      "commitSha": "19e93b807be5a612d3dec784bd24f5bded49d39b",
+      "committedAt": "2026-11-04T20:03:51.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 4147,
+      "commitSha": "0a4c30e75c016d2e207f527c6e355d11eea2256e",
+      "committedAt": "2026-11-04T19:20:50.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 4021,
+      "commitSha": "21da5a5b30d012faf069a707aa3c2311161fb529",
+      "committedAt": "2026-11-04T18:53:22.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 4018,
+      "commitSha": "bf70eafc1053821a1b752414dc2c3c96ec7e64f0",
+      "committedAt": "2026-11-04T18:17:31.000Z",
+      "changedPaths": 4,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 1940,
+      "commitSha": "6cee79e59188d4901c79b5e8fba532f928e287ac",
+      "committedAt": "2026-11-04T16:56:33.000Z",
+      "changedPaths": 4,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 4143,
+      "commitSha": "0bd9723e6175539be03127160cdcc2425c5c4857",
+      "committedAt": "2026-11-04T14:10:05.000Z",
+      "changedPaths": 4,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 307,
+      "inventoryBrowserFiles": 307
+    },
+    {
+      "pullRequest": 3689,
+      "commitSha": "cf5cf9a9945dd03a2790682902d2d462a66c7b68",
+      "committedAt": "2026-11-04T14:06:17.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4020,
+      "commitSha": "dd5df51914c770ef2b8f200a5055800c2dc8163d",
+      "committedAt": "2026-11-04T13:25:39.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3477,
+      "commitSha": "2346cd2529d23ef04e00bff3375b75be522ec1ac",
+      "committedAt": "2026-11-04T12:55:16.000Z",
+      "changedPaths": 1,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3687,
+      "commitSha": "c64f7854d928bd7894dcfe21ca8a74bbaa86ede0",
+      "committedAt": "2026-11-04T12:54:15.000Z",
+      "changedPaths": 1,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4144,
+      "commitSha": "a4a7dd05a3dd21b35d2169461c01723ca46b5840",
+      "committedAt": "2026-11-04T16:56:54.000Z",
+      "changedPaths": 1,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3688,
+      "commitSha": "68a198ca5be42ded0f87b431cf007600ba9b0c21",
+      "committedAt": "2026-11-04T12:53:37.000Z",
+      "changedPaths": 1,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3691,
+      "commitSha": "aa9d89e9a6d1e7ae7476b44e6efa879ab2ddb496",
+      "committedAt": "2026-11-04T12:50:40.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3692,
+      "commitSha": "a38832b9add0f457810ed5cfae71c759691444c4",
+      "committedAt": "2026-11-04T12:50:01.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3697,
+      "commitSha": "b43a9670a28c53efa55ea0749e2d4858ea016370",
+      "committedAt": "2026-11-04T12:49:06.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 3791,
+      "commitSha": "5f27d0358e133bf658ab9d50f9cd0a1d4f50a206",
+      "committedAt": "2026-11-04T12:49:04.000Z",
+      "changedPaths": 5,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4019,
+      "commitSha": "b9e7e6e9130af38b34c2a8c4f37f472ef9158c8d",
+      "committedAt": "2026-11-04T12:44:29.000Z",
+      "changedPaths": 1,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4140,
+      "commitSha": "5da829e53a645f14e259789772fc8cca7917ca2e",
+      "committedAt": "2026-11-04T04:58:23.000Z",
+      "changedPaths": 29,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4139,
+      "commitSha": "93de21cdc4cca6ea4b72fed8dda69aa5d3d8eb48",
+      "committedAt": "2026-11-04T04:37:28.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4080,
+      "commitSha": "ace5f132e94030a164309cdae87b1c6b28e7d3a5",
+      "committedAt": "2026-11-04T02:59:42.000Z",
+      "changedPaths": 46,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4133,
+      "commitSha": "a33011ab5f9f4091d88d904350504dbbff27b465",
+      "committedAt": "2026-11-04T01:32:23.000Z",
+      "changedPaths": 14,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4134,
+      "commitSha": "79d5175877fbf196057685b10a3f47609a9199a4",
+      "committedAt": "2026-11-04T00:02:40.000Z",
+      "changedPaths": 28,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4128,
+      "commitSha": "99c483594f6733ce4cd27e4efdb6b47304d88434",
+      "committedAt": "2026-11-03T22:36:50.000Z",
+      "changedPaths": 27,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4131,
+      "commitSha": "e75a289d59ebacc57aeca1f745283fdddc4e84d9",
+      "committedAt": "2026-11-03T19:56:11.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4127,
+      "commitSha": "681cd749e9049243fb7e4a40a64a3af7154645b5",
+      "committedAt": "2026-11-03T19:52:41.000Z",
+      "changedPaths": 8,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4130,
+      "commitSha": "7188b5f0ba7bc05e8ff233217e2b87b908588d02",
+      "committedAt": "2026-11-03T19:50:33.000Z",
+      "changedPaths": 11,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4109,
+      "commitSha": "9f88c9d82d2cc6782504b5ce211847ab1d81c6b8",
+      "committedAt": "2026-11-03T19:40:47.000Z",
+      "changedPaths": 17,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4110,
+      "commitSha": "39171515c69b32f1bb7f669aa768bb557b0c7147",
+      "committedAt": "2026-11-03T18:20:32.000Z",
+      "changedPaths": 10,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4121,
+      "commitSha": "8d70c42fceae32bbe61dd0e9b73a78d3ddc38270",
+      "committedAt": "2026-11-03T18:09:19.000Z",
+      "changedPaths": 28,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4124,
+      "commitSha": "05608797b6517d07dae73b0bda2f424839ff301f",
+      "committedAt": "2026-11-03T17:34:39.000Z",
+      "changedPaths": 8,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4113,
+      "commitSha": "7a281c34b4e5c73f5ef8d39ecb4eed7f25601d96",
+      "committedAt": "2026-11-03T15:51:56.000Z",
+      "changedPaths": 24,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4112,
+      "commitSha": "4d5bfc8b6a2a0afcc847329b07c4637b7e309740",
+      "committedAt": "2026-11-03T14:49:52.000Z",
+      "changedPaths": 5,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4111,
+      "commitSha": "6cc1d3d29e101624b68ff63a7111fd67b5cfc999",
+      "committedAt": "2026-11-03T14:18:59.000Z",
+      "changedPaths": 35,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4108,
+      "commitSha": "1d3be7ec8973b53ff2f878e0e4a0108454e0f3cc",
+      "committedAt": "2026-11-03T13:31:22.000Z",
+      "changedPaths": 19,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4105,
+      "commitSha": "a9901ca023a77b64acd4e6200c67edd181c20eed",
+      "committedAt": "2026-11-03T12:48:50.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4107,
+      "commitSha": "70b309f640dc4dda257925c6289680709737fd9d",
+      "committedAt": "2026-11-03T12:18:34.000Z",
+      "changedPaths": 5,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4099,
+      "commitSha": "02e0b1aa7e26111f95912f9c488cd5d7bb41a464",
+      "committedAt": "2026-11-03T11:35:48.000Z",
+      "changedPaths": 20,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4094,
+      "commitSha": "5aaa4f25a8fad50904218f1ec0129f3285156055",
+      "committedAt": "2026-11-03T11:11:55.000Z",
+      "changedPaths": 12,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4096,
+      "commitSha": "b31415c00c7e7b0efe5ca2938b675e61ec3aa58b",
+      "committedAt": "2026-11-03T10:34:28.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4097,
+      "commitSha": "3962f6a830e8fb18d151d2f1fdcd72a6e29dcb1e",
+      "committedAt": "2026-11-03T10:32:28.000Z",
+      "changedPaths": 10,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4092,
+      "commitSha": "937ac335e6473856b1b012ff865f57d1dd8d1aea",
+      "committedAt": "2026-11-03T08:18:43.000Z",
+      "changedPaths": 12,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4085,
+      "commitSha": "b144e9970b51e8328aa613b010707b67953e3c95",
+      "committedAt": "2026-11-03T07:48:30.000Z",
+      "changedPaths": 4,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4079,
+      "commitSha": "d4a2d3ee8e7e2a0f37a12fb1fda89ad7156fb9d0",
+      "committedAt": "2026-11-03T07:07:55.000Z",
+      "changedPaths": 10,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4081,
+      "commitSha": "b5c4792e0cb277a02964396786133d89a1543c35",
+      "committedAt": "2026-11-03T06:23:51.000Z",
+      "changedPaths": 22,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4087,
+      "commitSha": "3ce19578a0a5c78a7634404897b59f75a01f17eb",
+      "committedAt": "2026-11-03T06:21:13.000Z",
+      "changedPaths": 16,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4089,
+      "commitSha": "f25ba0cb4b4942596f8e9250a06bbff5a2e8a6f1",
+      "committedAt": "2026-11-03T06:13:14.000Z",
+      "changedPaths": 13,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4086,
+      "commitSha": "5f76f78266c5cca4d13bb268d4d44c1097109c47",
+      "committedAt": "2026-11-03T05:55:52.000Z",
+      "changedPaths": 24,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4088,
+      "commitSha": "b6bf112139dfe8cbaad861c3d8d036384ef6a252",
+      "committedAt": "2026-11-03T05:55:27.000Z",
+      "changedPaths": 10,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4082,
+      "commitSha": "e6bbb41d9c83eb50873ebf8d5286941dc6d4b40a",
+      "committedAt": "2026-11-03T05:27:18.000Z",
+      "changedPaths": 8,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4083,
+      "commitSha": "03090e69c693371098ff98926c062ee7695ece3e",
+      "committedAt": "2026-11-03T05:20:41.000Z",
+      "changedPaths": 10,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 8,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4057,
+      "commitSha": "229ecf1c1eb76ce761905e9acb9486b2652b35d2",
+      "committedAt": "2026-11-03T04:10:53.000Z",
+      "changedPaths": 10,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4055,
+      "commitSha": "e7a7e1fa52af31ca1f1f8955c959eb136fc96561",
+      "committedAt": "2026-11-03T03:59:13.000Z",
+      "changedPaths": 7,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 9,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4052,
+      "commitSha": "27e361eab0fb5eea308147f7fd4b13971eace572",
+      "committedAt": "2026-11-03T02:11:00.000Z",
+      "changedPaths": 13,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4053,
+      "commitSha": "572ef8287328234421274fbaa4af2806d805a798",
+      "committedAt": "2026-11-03T00:42:30.000Z",
+      "changedPaths": 3,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4044,
+      "commitSha": "abeeb0da0eef43d67570afbe18a6cb60e0373495",
+      "committedAt": "2026-11-03T00:39:20.000Z",
+      "changedPaths": 23,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4051,
+      "commitSha": "bc5d1f3ca05df4de2f0754809918d9dfb5725d8a",
+      "committedAt": "2026-11-02T23:09:15.000Z",
+      "changedPaths": 21,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4035,
+      "commitSha": "986763ca5482044a7298d18d99d5da75923367db",
+      "committedAt": "2026-11-02T21:31:04.000Z",
+      "changedPaths": 12,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 306,
+      "inventoryBrowserFiles": 306
+    },
+    {
+      "pullRequest": 4041,
+      "commitSha": "646998ac58350dd8605afad2bab38d3dc1bbfed0",
+      "committedAt": "2026-11-02T20:58:12.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4013,
+      "commitSha": "0afb7e70619cd8967d6804105b0b6d64538f79db",
+      "committedAt": "2026-11-02T18:05:05.000Z",
+      "changedPaths": 22,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4039,
+      "commitSha": "5bc195c862e087ea5b0ca99ede2bd7400be2373c",
+      "committedAt": "2026-11-02T17:57:25.000Z",
+      "changedPaths": 9,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 8,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4040,
+      "commitSha": "8dacee8e9d3f305dee54d67aba97f15003544e72",
+      "committedAt": "2026-11-02T17:09:13.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4032,
+      "commitSha": "a80f8f294442fd9b473d666e2ee401708822eaf4",
+      "committedAt": "2026-11-02T16:31:30.000Z",
+      "changedPaths": 3,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4027,
+      "commitSha": "89b014cce03e68fbd242949739b209d06865fa81",
+      "committedAt": "2026-11-02T16:14:36.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4042,
+      "commitSha": "cecbea87db8473fc09394142a89234b63ba0065d",
+      "committedAt": "2026-11-02T16:11:54.000Z",
+      "changedPaths": 9,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 9,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4038,
+      "commitSha": "1182b84c6284c0e894d20c4a628ad9b62daba645",
+      "committedAt": "2026-11-02T16:10:39.000Z",
+      "changedPaths": 5,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4037,
+      "commitSha": "bef64381b88d19eee017e1e327f765a79a346e9b",
+      "committedAt": "2026-11-02T15:46:12.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4036,
+      "commitSha": "cb687dd3f0021bbf757e699121a9ad2473ab835a",
+      "committedAt": "2026-11-02T15:41:39.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4033,
+      "commitSha": "770e0775d0f67a32e8916dbf495adfc260792d57",
+      "committedAt": "2026-11-02T15:24:28.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4028,
+      "commitSha": "4ba88b1af2d6cd57c3bd0aec64f88a9505c74b4c",
+      "committedAt": "2026-11-02T14:56:37.000Z",
+      "changedPaths": 12,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4025,
+      "commitSha": "4d04f69bfd4468d03128008eb26042f6e431c0c5",
+      "committedAt": "2026-11-02T14:14:10.000Z",
+      "changedPaths": 7,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3997,
+      "commitSha": "191fa4e5dc025110fd389d008e0d5902cf4bac5c",
+      "committedAt": "2026-11-02T13:31:54.000Z",
+      "changedPaths": 4,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4009,
+      "commitSha": "62bc8e85a3c3fc2979190ae08fc8443d57d8660b",
+      "committedAt": "2026-11-02T12:46:39.000Z",
+      "changedPaths": 1,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4016,
+      "commitSha": "0a229b9c045dc0a8b0c33fb82c40efc087feeae2",
+      "committedAt": "2026-11-02T12:40:48.000Z",
+      "changedPaths": 10,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4017,
+      "commitSha": "1b756ed11dad081d9b5fb32894477a32d15c9de7",
+      "committedAt": "2026-11-02T12:35:47.000Z",
+      "changedPaths": 8,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 8,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4014,
+      "commitSha": "3a763138452d35d8a01469a49e0891979476be32",
+      "committedAt": "2026-11-02T11:47:09.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4012,
+      "commitSha": "3f3b7808b6bbe63497f82dca7ee6936c84a7381e",
+      "committedAt": "2026-11-02T11:37:48.000Z",
+      "changedPaths": 16,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4011,
+      "commitSha": "544c928821a0bfb031400a1cad8cdf27fe83f9dd",
+      "committedAt": "2026-11-02T09:37:33.000Z",
+      "changedPaths": 3,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4008,
+      "commitSha": "516115d1df575aed79d9c1e8c09727acda298e57",
+      "committedAt": "2026-11-02T07:41:14.000Z",
+      "changedPaths": 2,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4000,
+      "commitSha": "b56708ad44c02adb1d9d034f6aa40c51faac0c37",
+      "committedAt": "2026-11-02T07:37:12.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4006,
+      "commitSha": "4538b71ed6cb0f011239fe6728e1ce2995820745",
+      "committedAt": "2026-11-02T07:07:24.000Z",
+      "changedPaths": 15,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 10,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3999,
+      "commitSha": "c8514260161b4d606d7a1ea0ec5d95e5af1cf9ee",
+      "committedAt": "2026-11-02T07:00:48.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4005,
+      "commitSha": "e292910494ccdbbc3c15657893feefd43c65e656",
+      "committedAt": "2026-11-02T07:00:23.000Z",
+      "changedPaths": 28,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4001,
+      "commitSha": "459ddec8a6562e680db6542c787d820e7bef6673",
+      "committedAt": "2026-11-02T07:00:04.000Z",
+      "changedPaths": 46,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3992,
+      "commitSha": "54f7b068d924cfe88a868f9f80470e949851b898",
+      "committedAt": "2026-11-02T06:54:39.000Z",
+      "changedPaths": 4,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 4004,
+      "commitSha": "92cfcd70454dc5880560d487d27a0674f6d365b1",
+      "committedAt": "2026-11-02T06:47:30.000Z",
+      "changedPaths": 0,
+      "mode": "full",
+      "reason": "diff-unavailable",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3994,
+      "commitSha": "d279f17b7ebdd622ce878ef52bb543486af4ad53",
+      "committedAt": "2026-11-02T06:39:46.000Z",
+      "changedPaths": 12,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3998,
+      "commitSha": "864444857f613a276e0c0cf2266cc3990313b57a",
+      "committedAt": "2026-11-02T06:13:54.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3996,
+      "commitSha": "e8f167b674e4b9a39e1fddfe65334dfdc9142628",
+      "committedAt": "2026-11-02T06:12:20.000Z",
+      "changedPaths": 7,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3995,
+      "commitSha": "ddb8a669394e02adc44d1b91451aac4ed14af7da",
+      "committedAt": "2026-11-02T06:01:04.000Z",
+      "changedPaths": 2,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 8,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3989,
+      "commitSha": "0f506199e6bbc9a4043e5b2850053d14b944b588",
+      "committedAt": "2026-11-02T05:49:30.000Z",
+      "changedPaths": 15,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3993,
+      "commitSha": "e43b582d71782cde6136d94768de89201f0e8fc7",
+      "committedAt": "2026-11-02T05:49:25.000Z",
+      "changedPaths": 4,
+      "mode": "full",
+      "reason": "unknown-input",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3987,
+      "commitSha": "184403591c32db0765a94cedc0e73cf342267272",
+      "committedAt": "2026-11-02T05:31:25.000Z",
+      "changedPaths": 3,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3985,
+      "commitSha": "c57b8a2c4ed5d6ef7b1fbe05ce55ca19072bb874",
+      "committedAt": "2026-11-02T04:23:27.000Z",
+      "changedPaths": 1,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3986,
+      "commitSha": "930e58804025cc74bb640ab9465bcfff7ef8acfa",
+      "committedAt": "2026-11-02T04:03:57.000Z",
+      "changedPaths": 4,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3984,
+      "commitSha": "eaca1706a38d504d48e2f74de2b96f67c517fe58",
+      "committedAt": "2026-11-02T03:36:51.000Z",
+      "changedPaths": 8,
+      "mode": "full",
+      "reason": "browser-infrastructure-or-toolchain",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3979,
+      "commitSha": "15d1a832590f6799acd6f43e11defc8e35595b26",
+      "committedAt": "2026-11-02T01:34:56.000Z",
+      "changedPaths": 20,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 305,
+      "inventoryBrowserFiles": 305
+    },
+    {
+      "pullRequest": 3978,
+      "commitSha": "9125eaa0feb891885ee813c9727fe607007ba7fb",
+      "committedAt": "2026-11-02T00:46:12.000Z",
+      "changedPaths": 15,
+      "mode": "fast",
+      "reason": "critical-and-changed-browser-files",
+      "selectedBrowserFiles": 7,
+      "inventoryBrowserFiles": 304
+    },
+    {
+      "pullRequest": 3965,
+      "commitSha": "60414fb59edbf3ec8192f26cb34e5af757e4c230",
+      "committedAt": "2026-11-01T23:19:21.000Z",
+      "changedPaths": 74,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 304,
+      "inventoryBrowserFiles": 304
+    },
+    {
+      "pullRequest": 3976,
+      "commitSha": "9af2c7b8cabeedb231c1955383fe483e389f83e8",
+      "committedAt": "2026-11-01T22:50:21.000Z",
+      "changedPaths": 14,
+      "mode": "full",
+      "reason": "browser-harness-or-support",
+      "selectedBrowserFiles": 303,
+      "inventoryBrowserFiles": 303
+    }
+  ]
+}
