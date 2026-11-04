@@ -57,3 +57,31 @@ test("committed prose allowlist has no reference in the tracked test/selector in
   const tree = execFileSync("git", ["ls-files", "-z"], { encoding: "utf8" }).split("\0").filter(Boolean).map((path) => ({ path }));
   assert.equal(verifyProseReferences({ tree, readBlob: ({ path }) => readFileSync(path, "utf8") }), true);
 });
+
+
+test("selection integration cannot ignore a newly introduced prose consumer", () => {
+  const prose = "docs/guide.md";
+  // Exercise the real exported allowlist, restoring the frozen production value afterward.
+  FAST_PROSE_FILES.push(prose);
+  try {
+    const plan = makeSelection({ ...input,
+      tree: [...input.tree, { path: prose, oid: "b".repeat(40) }],
+      diff: { entries: [{ path: prose, status: "M" }] },
+      readBlob: () => `readFileSync("${prose}")`,
+    });
+    assert.equal(plan.mode, "full");
+    assert.ok(plan.reasons.includes("prose-reference-or-unavailable"));
+    assert.equal(plan.deferredFileIds.length, 0);
+    // Default/unavailable readers also force full, rather than trusting a declaration.
+    assert.ok(makeSelection({ ...input, tree: [...input.tree, { path: prose }],
+      diff: { entries: [{ path: prose, status: "M" }] } }).reasons.includes("prose-reference-or-unavailable"));
+  } finally { FAST_PROSE_FILES.pop(); }
+});
+
+test("an accidental self-declared prose allowlist stays full in this retired identity", () => {
+  const prose = "docs/guide.md";
+  assert.equal(verifyProseReferences({ proseFiles: [prose],
+    tree: [{ path: prose }, { path: "scripts/ci-suite-policy-v1-1.mjs" }],
+    readBlob: () => `export const FAST_PROSE_FILES = ["${prose}"];`,
+  }), false);
+});

@@ -97,7 +97,7 @@ an explicit failure requiring full coverage, never an empty passing plan.
 
 | Input | Behavior |
 | --- | --- |
-| Allowlisted Prose | Only explicit `FAST_PROSE_FILES` qualifies: initially `docs/ci-suite-evidence-2026-10-23.md`, reviewed as having no test/runtime consumer. Unknown Markdown, README/CONTRIBUTING and docs consumed by tests require full coverage. |
+| Allowlisted Prose | Historical v1 allowed `docs/ci-suite-evidence-2026-10-23.md`, incorrectly overlooking its readiness test consumer. Corrected v1.1 retires prose-fast with an empty allowlist; that document and unknown Markdown require full coverage. |
 | One App Package | Add all Node partitions (the existing cross-app dependency closure), every Chromium journey and Windows routing. WebKit/production were already mandatory. |
 | Shared, Unknown, Lockfile, CI or Test Configuration | Full contract. This includes shared packages, root scripts, selector/policy/profiles, CSS/assets, manifests and any unrecognized path/extension. |
 | Security, Persistence, Migrations, Execution, Approval | Full contract using the explicit ownership rules above. |
@@ -272,15 +272,23 @@ PR routing now uses v1.1. Its prose allowlist is empty:
 therefore requires full coverage. No nonempty diff currently qualifies as prose
 fast. App changes retain the existing conservative dependency closure.
 
-Before admitting prose, the v1.1 selector checks immutable tested blobs for full
-path and basename mentions in code, configuration and selector/document inputs.
-Missing documents, unreadable inputs and references force full coverage. Broad
-mentions deliberately count as consumers. The guard and its regression fixtures
-must remain part of any future allowlist review; constructed runtime paths still
-require human dependency review. `pnpm ci:selection-v1.1 --base SHA --head SHA`
+Prose-fast is retired in this policy identity. Its empty allowlist must stay
+empty; admitting prose requires a new reviewed identity, dependency analysis and
+a bounded bulk-reader design. As defense in depth, the v1.1 guard checks immutable
+tested blobs for full-path and basename mentions in code, configuration and
+selector/document inputs. Missing documents, unreadable inputs and references
+force full coverage. Broad mentions deliberately count, including the policy
+module itself: an accidental allowlist addition therefore stays full. This guard
+is not a general dependency proof for constructed runtime paths. `pnpm ci:selection-v1.1 --base SHA --head SHA`
 computes this policy locally without executing tested code.
 
 This correction does not activate routing or change repository settings. Rollback
 of routed PR testing remains `gh variable set CI_PR_SUITE_ROUTING --repo
 picoduck/wollipog --body disabled` (owner only); a new ready PR event must then
 show all browser shards and Node shards with a successful required aggregator.
+
+The disabled merge-group gate still uses the historical v1 selector and retains
+its evidence-document misclassification. **Do not activate that gate.** Migrating
+its selector and revalidating its coverage contract is a prerequisite for any
+future, separately authorized gate activation; this campaign preserves full
+merge-group regression and does not change the gate path.
