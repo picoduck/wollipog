@@ -21,7 +21,7 @@ export function prRoute({ event, selection, base, tested, changeHead, workflowMa
 export async function computePrRoute({ env = process.env, cwd = process.cwd() } = {}) {
   if (env.GITHUB_EVENT_NAME !== "pull_request") return { mode: "full", reason: "non-pr-full" };
   try {
-    const { gitSelection, parseSelection, SELECTION_MARKER } = await import("./ci-suite-selection.mjs");
+    const { gitSelection, parseSelection, SELECTION_MARKER } = await import("./ci-suite-selection-v1-1.mjs");
     const { BASE_SHA: base, TESTED_SHA: tested, CHANGE_HEAD_SHA: changeHead } = env;
     const { selection } = gitSelection({ base, head: tested, changeHead, event: env.GITHUB_EVENT_NAME,
       runId: env.GITHUB_RUN_ID ?? null, attempt: Number(env.GITHUB_RUN_ATTEMPT) || null, cwd });

@@ -52,10 +52,12 @@ status-writing token.
 contract. Today's affected closure already contains every portable Node and
 Chromium test; retaining privileged/platform coverage is deliberately more
 conservative than that candidate group definition. **Only `fast` selection with
-validated context and no fallback/risk reasons reduces work.** Its sole current
-qualifying path is the reviewed prose allowlist in `ci-suite-policy.mjs`, initially
-`docs/ci-suite-evidence-2026-10-23.md`. This is not a general Markdown exemption
-or an app-source latency improvement claim.
+validated context and no fallback/risk reasons reduces work.** PR routing now uses `ci-suite-policy-v1-1.mjs` through the separately versioned
+`fast-required-v1.1` selector. Its prose allowlist is empty: no current diff
+qualifies for prose-fast. The evidence document
+`docs/ci-suite-evidence-2026-10-23.md` has a readiness test consumer and requires
+full coverage. Historical v1 shadow records retain their original contract.
+This does not claim an app-source latency improvement.
 
 The fast route changes exactly these two parts:
 
