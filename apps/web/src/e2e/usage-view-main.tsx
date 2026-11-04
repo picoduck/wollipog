@@ -12,7 +12,9 @@ import type {
 } from "@wollipog/protocol";
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
+import { Shell } from "../App.js";
 import { FeedbackProvider } from "../components/FeedbackProvider.js";
+import { ThemeProvider } from "../components/ThemeProvider.js";
 import { UsageView } from "../components/UsageView.js";
 import type { UsageTab, ViewNavigation } from "../navigation.js";
 import { StoreProvider } from "../store.js";
@@ -33,6 +35,7 @@ import "../styles.css";
  * The page's states (#3016): `?state=loading` for a first load that never answers, `?state=error`
  * for one that fails, `?offline=1` for a connection that drops after the page loads, and
  * `?offlineMachine=1` for Build Box offline.
+ * `?fullShell=1` renders the real application shell to exercise page scrolling and navigation.
  */
 const params = new URLSearchParams(window.location.search);
 document.documentElement.setAttribute("data-theme", params.get("theme") === "light" ? "light" : "dark");
@@ -434,7 +437,9 @@ createRoot(document.getElementById("root")!).render(
       <FeedbackProvider>
         <StoreProvider connection={connection} navigation={navigation}>
           {/* The shell's main column, which is the `app` size container the compact tier answers to. */}
-          <main className="main"><UsageRoute /></main>
+          {params.get("fullShell") === "1"
+            ? <ThemeProvider><Shell /></ThemeProvider>
+            : <main className="main"><UsageRoute /></main>}
         </StoreProvider>
       </FeedbackProvider>
     </ApiProvider>

@@ -17577,6 +17577,9 @@ button.review-finding-location {
 /* The Breakdown's tables grow with the page: a long one ends in Show All rather than scrolling
    inside it (#3013). Hairlines and hover come from the table recipe; no zebra (§14). */
 .usage-table-wrap {
+  /* Keep the compact table's absolutely positioned, visually hidden header inside the page
+     scroller. Without a containing block it extends the document and scrolls the phone rail. */
+  position: relative;
   border: 1px solid var(--border);
   border-radius: var(--radius-md);
   background: var(--bg-elev);
