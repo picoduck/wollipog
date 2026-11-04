@@ -8,7 +8,8 @@
  * - `planless`: a campaign whose Orchestrator never recorded a plan, with untracked children;
  * - `legacy`: a campaign on a server without the ledger (no `work` on its projection);
  * - `unrelated`: a session outside any campaign.
- * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode.
+ * `theme=light` switches the palette; `open=launcher` starts on the launcher instead of the mode, and
+ * `open=requests` on Requests.
  * `forge=gitlab` moves the Campaign Status Panel item to a GitLab project in a nested namespace.
  * `scope=outdated-runner` or `scope=issue-limits` makes issue scope unavailable because a participating
  * Orchestrator's runner is older than the scope-change or Full Control issue-limit floor.
@@ -18,6 +19,9 @@
  * waiting for the person's approval (#2940); Change Limit saves to the fixture.
  * `handoffs=after` finishes the campaign with two items handed to people (#4070); `handoffs=before`
  * is the same campaign as a server without handoffs reports it.
+ * `owners=after` gives the owner a decision they kept and a merge the Orchestrator handed to them
+ * (#4064); `owners=before` is the same campaign as a server without owner decisions reports it, the
+ * merge still the Orchestrator's and the owner's decision nowhere in Wollipog.
  */
 import { useState } from "react";
 import { createRoot } from "react-dom/client";
@@ -347,8 +351,32 @@ const projectionFor = (rev: number) => campaignProjection(
       }],
     }],
     ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
+    ...ownerProjection,
   },
 );
+
+/** `owners=after` (#4064): the root's question for its owner, and a child's merge handed to them. */
+const ownerScenario = params.get("owners") === "before" || params.get("owners") === "after" ? params.get("owners") as "before" | "after" : null;
+const ownerSnapshot = { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
+  material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
+  recommendedOptionId: "lease", options: [
+    { optionId: "lease", label: "Short-Lived Lease", description: "Credentials expire with the session." },
+    { optionId: "broker", label: "Broker Process", description: "A helper holds credentials for every session." },
+  ] };
+const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScenario === "after" ? {
+  requestId: "workflow_owner_1", occurrenceId: "workflow_owner_1", kind: "workflow_decision", title: "Owner Decision Required", async: true,
+  options: [...ownerSnapshot.options.map((option) => ({ optionId: option.optionId, name: option.label, description: option.description, kind: "allow_once" as const })),
+    { optionId: "__workflow_deny__", name: "Do Not Proceed", kind: "reject_once" }],
+  context: { toolName: "Typed Workflow Decision", input: JSON.stringify(ownerSnapshot, null, 2) },
+  workflowDecision: { requestId: "credential-design", occurrenceId: "workflow_owner_1", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "owner_decision", resourceKey: "credential-design", resourceSnapshot: ownerSnapshot, resourceDigest: "e".repeat(64), policyRevision: 1,
+    authority: "human", authorityEvaluation: { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision" },
+    status: "pending", createdAt: NOW - 4 * MINUTE },
+} : null;
+const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: 2, items: [
+  { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
+  { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE },
+] } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
 const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get("followUps") === "pending" ? ([
@@ -365,7 +393,8 @@ const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get
 
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
-    ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}) });
+    ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
+    ...(ownerCard ? { pendingApproval: ownerCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -374,8 +403,34 @@ function sessionsFor(rev: number): SessionView[] {
   return [root, child, unrelated];
 }
 
+/** `owners`: the child's merge, the Orchestrator's before #4064 and handed to the owner after it,
+ * and after it the root's own owner decision. */
+const mergeSnapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4141, headSha: "3f9c2e1".padEnd(40, "0"),
+  reviewResult: "merge_with_acknowledged_risk" as const, requiredChecks: { headSha: "3f9c2e1".padEnd(40, "0"), status: "passed" as const, checkedAt: NOW - 9 * MINUTE,
+    checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
+const ownerRequests = (owners: "before" | "after"): DescendantRequestView[] => {
+  const handed = owners === "after";
+  const evaluation = handed
+    ? { owner: "human" as const, basis: "human_required" as const, reason: "owner_kept" as const, operation: "pr_merge" as const }
+    : { owner: "orchestrator" as const, basis: "campaign_delegation" as const, reason: "authorized_operation" as const, operation: "pr_merge" as const };
+  const merge: DescendantRequestView = {
+    sessionId: "s_child_3", sessionTitle: "#2417 Slice 5: Read API", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
+    createdAt: NOW - 8 * MINUTE, responseOwner: evaluation.owner, authorityEvaluation: evaluation, occurrenceId: "occ_1",
+    request: { requestId: "occ_1", occurrenceId: "occ_1", kind: "workflow_decision", title: "PR Merge Approval Required",
+      options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+      context: { toolName: "Typed Workflow Decision", input: JSON.stringify(mergeSnapshot, null, 2) },
+      workflowDecision: { requestId: "merge-4141", occurrenceId: "occ_1", sessionId: "s_child_3", controllingSessionId: "s_root", category: "pr_merge",
+        resourceKey: "picoduck/wollipog#4141", resourceSnapshot: mergeSnapshot, resourceDigest: "a".repeat(64), policyRevision: 1,
+        authority: evaluation.owner, authorityEvaluation: evaluation, status: "pending", createdAt: NOW - 8 * MINUTE,
+        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}) } },
+  };
+  return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
+    createdAt: NOW - 4 * MINUTE, responseOwner: "human", authorityEvaluation: ownerCard.workflowDecision!.authorityEvaluation,
+    occurrenceId: "workflow_owner_1", request: ownerCard }, merge] : [merge];
+};
+
 /** The request the blocked item's recorded blocker names, pending on its child. */
-const descendantRequests: DescendantRequestView[] = scenario === "campaign" ? [{
+const descendantRequests: DescendantRequestView[] = ownerScenario ? ownerRequests(ownerScenario) : scenario === "campaign" ? [{
   sessionId: "s_child_3",
   sessionTitle: "#2417 Slice 5: Read API",
   runnerId: "runner-1",
@@ -523,7 +578,7 @@ function Fixture() {
   setRevision = setRev;
   const session = sessionsFor(rev).find((candidate) => candidate.id === sessionId)!;
   const [open, setOpen] = useState(true);
-  const [mode, setMode] = useState<RightPanelMode>(params.get("open") === "launcher" ? "launcher" : "campaign");
+  const [mode, setMode] = useState<RightPanelMode>(params.get("open") === "launcher" ? "launcher" : params.get("open") === "requests" ? "requests" : "campaign");
   const [width, setWidth] = useState(420);
   const state: RightPanelState = {
     open, mode, width, dragging: false, subagentTarget: null,
@@ -581,6 +636,7 @@ function Fixture() {
 
 function PanelForSession({ state, session, onOpenSession }: { state: RightPanelState; session: SessionView; onOpenSession: (id: string) => void }) {
   const availability = useCampaignStatusAvailability(session);
+  const [requestKey, setRequestKey] = useState<string | null>(selectedRequestKey);
   return (
     <RightPanel
       state={state}
@@ -599,8 +655,8 @@ function PanelForSession({ state, session, onOpenSession }: { state: RightPanelS
       campaignAvailability={availability}
       onOpenSession={onOpenSession}
       descendantRequests={session.orchestratorCampaign ? descendantRequests : []}
-      selectedRequestKey={selectedRequestKey}
-      onSelectedRequestKeyChange={(key) => { selectedRequestKey = key; }}
+      selectedRequestKey={requestKey}
+      onSelectedRequestKeyChange={(key) => { selectedRequestKey = key; setRequestKey(key); }}
     />
   );
 }

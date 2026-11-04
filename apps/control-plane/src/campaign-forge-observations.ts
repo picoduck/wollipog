@@ -482,7 +482,7 @@ function validObservation(value: unknown): value is CampaignForgePullRequestObse
     (pr.crossRepository === undefined || typeof pr.crossRepository === "boolean");
 }
 
-/** v280 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
+/** v283 (#4067): a head branch name Wollipog would act on, and its tip or `null` once deleted. */
 function validHeadBranch(value: unknown): boolean {
   const branch = value as Record<string, unknown> | null;
   return Boolean(branch) && typeof branch === "object" && forgeActionBranchName(branch!.name) &&

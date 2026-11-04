@@ -220,7 +220,7 @@ export function pullRequestObservation(node: unknown, defaultBranch?: unknown): 
   };
 }
 
-/** v280 (#4067): the head branch in the pull request's own repository and its tip, `null` once it
+/** v283 (#4067): the head branch in the pull request's own repository and its tip, `null` once it
  * is deleted. A fork's branch, or anything malformed, is left out rather than guessed. */
 function observedHeadBranch(pr: Record<string, unknown>): CampaignForgePullRequestObservation["headBranch"] {
   if (pr.isCrossRepository !== false || !forgeActionBranchName(pr.headRefName)) return undefined;

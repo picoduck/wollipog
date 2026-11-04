@@ -2208,7 +2208,7 @@ and moves it to consumed if the approved head merged.
 
 A provider's own permission check can refuse an approved command: Claude Code's `auto` classifier
 decides inline, so a refusal never reaches the runner's permission channel. Wollipog then performs
-the one approved forge action itself (protocol v280, #4067) through `execute_workflow_decision`
+the one approved forge action itself (protocol v283, #4067) through `execute_workflow_decision`
 (CLI `decision execute <occurrence-id> --resource-digest <sha256>`,
 `POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute`). The classifier is not
 changed or worked around, and the agent's own commands stay subject to it. Only the requester may
@@ -2254,7 +2254,7 @@ until it merges and its branch is gone, and `get_campaign` refreshes pending one
 A merged pull request whose branch the forge does not name usably, including one read before branches
 were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
 be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
-every campaign observed by a runner older than v280 are not tracked, so those campaigns complete
+every campaign observed by a runner older than v283 are not tracked, so those campaigns complete
 as before.
 
 An occurrence that is no longer needed is retired with `withdraw_workflow_decision` (CLI

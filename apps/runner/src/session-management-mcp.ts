@@ -22,6 +22,7 @@ import {
   SESSION_WORKTREE_CREATE_CLIENT_TIMEOUT_MS,
   WOLLIPOG_AGENT_ACTOR_SESSION_HEADER,
   WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS,
+  OWNER_DECISION_LIMITS,
   type SessionStatus,
   type UiEvidenceReviewDelivery,
 } from "@wollipog/protocol";
@@ -687,6 +688,24 @@ function forgeActionSummary(decision: unknown): string {
   }
 }
 
+/** A pre-v281 control plane has no owner-decision routes (#4064). Refuse by name: nothing reached
+ * the owner, and the decision keeps the owner it had. */
+async function ownerDecisionCompatibilityError(deps: McpDeps): Promise<ToolResult | null> {
+  const required = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  let actual = deps.controlPlaneProtocolVersion;
+  if (!Number.isInteger(actual)) {
+    const result = await cpFetch(deps, "GET", "/api/compatibility");
+    if (!result.ok) {
+      return controlPlaneUpdateRequired(wollipogSupportUnverified("owner decisions", result.message), required);
+    }
+    actual = result.data?.protocolVersion;
+  }
+  return Number.isInteger(actual) && actual! >= required
+    ? null
+    : controlPlaneUpdateRequired(needsNewerWollipog("Owner decisions need",
+      "Update Wollipog; nothing reached the owner."), required, actual);
+}
+
 /** Bounds the fence probe so it cannot push a create call toward the harness's tool timeout. */
 const SPAWN_APPROVAL_FENCE_PROBE_TIMEOUT_MS = 5_000;
 
@@ -1171,8 +1190,8 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
       properties: {
         category: { const: "merged_branch_deletion" }, repository: { type: "string" }, branch: { type: "string" },
         merged: { const: true }, mergeCommitSha: { type: "string", pattern: "^[0-9a-f]{40}$" },
-        pullRequest: { type: "integer", minimum: 1, description: "The merged pull request (v280); with headSha, lets execute_workflow_decision delete it" },
-        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The merged pull request's head, the tip the deletion is pinned to (v280)" },
+        pullRequest: { type: "integer", minimum: 1, description: "The merged pull request (v283); with headSha, lets execute_workflow_decision delete it" },
+        headSha: { type: "string", pattern: "^[0-9a-f]{40}$", description: "The merged pull request's head, the tip the deletion is pinned to (v283)" },
         dependentPullRequests: { type: "object", properties: {
           checkedAt: { type: "integer", minimum: 1 }, open: { type: "array", maxItems: 0 },
         }, required: ["checkedAt", "open"], additionalProperties: false },
@@ -1226,11 +1245,13 @@ const ORCHESTRATOR_TOOLS = new Set(["list_runners", "get_agent_capabilities", "l
   "prepare_descendant_video_evidence_review", "get_descendant_video_evidence_provenance",
   "prepare_descendant_ui_evidence_review", "get_descendant_ui_evidence_review",
   "reconcile_workflow_decision", "execute_workflow_decision", "withdraw_workflow_decision", "list_workflow_decisions",
+  "request_owner_decision", "hand_workflow_decision_to_owner",
   "wait_session", "wait_pull_request", "list_governance_policies", "get_governance_policy", "create_session", "prompt_session",
   "list_steering_attempts", "get_steering_attempt", "resolve_steering_attempt", "handoff_session_result",
   "stop_session", "stop_background_job", "release_queue_hold", "restart_session", "archive_session", "unarchive_session", "set_guardrails", "create_worktree",
   "attach_worktree", "select_worktree", "discard_worktree", "delete_worktree_refs"]);
 const PARENT_CONTROL_TOOLS = new Set(["get_campaign_issue_scope", "request_campaign_issue_scope_change", "request_github_issue_closure", "close_github_issue",
+  "request_owner_decision", "hand_workflow_decision_to_owner",
   "allocate_campaign_budget",
   "get_campaign", "record_campaign_follow_up", "verify_campaign_child", ...CAMPAIGN_WORK_LEDGER_TOOLS,
   "list_descendant_requests", "answer_descendant_question", "dismiss_descendant_question",
@@ -2495,7 +2516,7 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "execute_workflow_decision",
-    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED). Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v280.",
+    description: "Have Wollipog itself perform one approved forge action, bound to its exact snapshot, through this session's own forge login: an approved merged_branch_deletion that names pullRequest and headSha (deleted by compare-and-delete only while the remote tip is still the approved merged head and no open pull request targets the branch), or an approved and already armed GitHub pr_merge (the canonical gh pr merge --squash --match-head-commit enqueue, never --delete-branch, after GitHub's closing references are re-read). Use it when your provider refuses the approved command, or instead of running it. Pass occurrenceId and resourceDigest from get_workflow_decision. Read decision.forgeAction: a success consumes the approval once; a refusal that changed nothing leaves it approved for a retry; a stale snapshot (tip moved, dependent pull request opened, head or closures changed) revokes it and needs a new decision; an uncertain enqueue is never replayed (reconcile it once the PR reads MERGED). Never retry a refused command through another shell, wrapper or permission change. Requires control plane and runner protocol v283.",
     inputSchema: {
       type: "object",
       properties: {
@@ -2589,6 +2610,83 @@ export const TOOLS: McpTool[] = [
         deps,
         "POST",
         `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/withdraw`,
+        { reason: args.reason, ...(args?.sessionId !== undefined ? { sessionId: args.sessionId } : {}) },
+      );
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "request_owner_decision",
+    description: "Full Control root Orchestrator only: give your campaign's owner a decision they kept for themselves (for example a credential design, risk consent to merge a pull request, publishing follow-ups, or closing an epic), as a typed request with explicit options. Put everything the owner needs in material: links, the exact head SHA, check state and what each option does. It waits in the owner's Inbox and Campaign Status without stopping your turn or any other work; only the owner can answer it, never you or a child. Their chosen option (or Do Not Proceed) comes back to you as a Wollipog Workflow Decision prompt, and get_workflow_decision reads it at any time. A newer request under the same resourceKey replaces an unanswered one; withdraw_workflow_decision withdraws it. Full Control never asks anyone for credentials or sign-in, so a request for a value is refused. Requires control plane v281.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        requestId: { type: "string", minLength: 1, maxLength: 256 },
+        resourceKey: { type: "string", minLength: 1, maxLength: 512 },
+        question: { type: "string", minLength: 1, maxLength: OWNER_DECISION_LIMITS.question },
+        options: {
+          type: "array",
+          minItems: OWNER_DECISION_LIMITS.minOptions,
+          maxItems: OWNER_DECISION_LIMITS.maxOptions,
+          items: {
+            type: "object",
+            properties: {
+              optionId: { type: "string", minLength: 1, maxLength: 128 },
+              label: { type: "string", minLength: 1, maxLength: 200 },
+              description: { type: "string", minLength: 1, maxLength: 1000 },
+            },
+            required: ["optionId", "label"],
+            additionalProperties: false,
+          },
+        },
+        recommendedOptionId: { type: "string", minLength: 1, maxLength: 128 },
+        material: { type: "string", minLength: 1, maxLength: OWNER_DECISION_LIMITS.material },
+      },
+      required: ["requestId", "resourceKey", "question", "options"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId) return errorResult("a session identity is required");
+      if (args?.sessionId !== undefined) return errorResult("an owner decision is self-scoped and does not accept sessionId");
+      const compatibilityError = await ownerDecisionCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const { requestId, resourceKey, question, options, recommendedOptionId, material } = args ?? {};
+      const r = await cpFetch(deps, "POST", `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/owner-decisions`, {
+        requestId, resourceKey, question, options,
+        ...(recommendedOptionId !== undefined ? { recommendedOptionId } : {}), ...(material !== undefined ? { material } : {}),
+      });
+      return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);
+    },
+  },
+  {
+    name: "hand_workflow_decision_to_owner",
+    description: "Full Control root Orchestrator only: give your campaign's owner one pending decision you own, such as a child's pr_merge when the owner kept risk consent for that merge, or your own issue closure when the owner kept closing the epic. Pass the child's sessionId for a child's decision; omit it for your own. This is one way: the decision becomes the owner's, you and every child are refused if you try to resolve it, and every later request for the same resource in the campaign (any key, any child, after a withdrawal) is the owner's too. A child keeps waiting on it; your own stops holding you. It never grants anything. Requires control plane v281.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        occurrenceId: { type: "string", minLength: 1, maxLength: 256 },
+        reason: { type: "string", minLength: 1, maxLength: WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS },
+        sessionId: { type: "string", minLength: 1, maxLength: 256 },
+      },
+      required: ["occurrenceId", "reason"],
+      additionalProperties: false,
+    },
+    handler: async (args, deps) => {
+      if (!deps.selfSessionId || typeof args?.occurrenceId !== "string" || !args.occurrenceId) {
+        return errorResult("occurrenceId and a session identity are required");
+      }
+      if (typeof args?.reason !== "string" || !args.reason.trim() || args.reason.length > WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS) {
+        return errorResult("a bounded nonempty reason is required");
+      }
+      if (args?.sessionId !== undefined && (typeof args.sessionId !== "string" || !args.sessionId)) {
+        return errorResult("sessionId must be a nonempty string");
+      }
+      const compatibilityError = await ownerDecisionCompatibilityError(deps);
+      if (compatibilityError) return compatibilityError;
+      const r = await cpFetch(
+        deps,
+        "POST",
+        `/api/sessions/${encodeURIComponent(deps.selfSessionId)}/workflow-decisions/${encodeURIComponent(args.occurrenceId)}/hand-to-owner`,
         { reason: args.reason, ...(args?.sessionId !== undefined ? { sessionId: args.sessionId } : {}) },
       );
       return r.ok ? textResult({ decision: r.data }) : errorResult(r.message);

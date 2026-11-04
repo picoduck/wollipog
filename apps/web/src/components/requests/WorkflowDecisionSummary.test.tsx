@@ -34,3 +34,12 @@ test("a GitLab merge closes issues by GitLab's rules, so it shows no closures ro
   assert.doesNotMatch(text({ ...MERGE, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train",
     squash: false, removeSourceBranch: false }), /Closes on Merge/u);
 });
+
+test("an owner decision shows the question, its material and its options, and says only the owner decides (#4064)", () => {
+  const rendered = text({ category: "owner_decision", question: "Which credential design should the provider bridge use?",
+    material: "PR #7 at head abc1234; both designs pass CI.", recommendedOptionId: "lease",
+    options: [{ optionId: "lease", label: "Short-Lived Lease" }, { optionId: "broker", label: "Broker Process", description: "Adds a helper process." }] });
+  assert.equal(rendered, "Which credential design should the provider bridge use? PR #7 at head abc1234; both designs pass CI. " +
+    "Short-Lived Lease (Recommended) Broker Process: Adds a helper process. " +
+    "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.");
+});

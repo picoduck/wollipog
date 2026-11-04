@@ -206,6 +206,7 @@ import {
   type CampaignMergedBranch,
   type CampaignForgePullRequestObservation,
   type CampaignPullRequestRef,
+  CAMPAIGN_OWNER_DECISIONS_LIMIT,
   campaignStatusTerminal,
   type OrchestratorFollowUpRecord,
   type CampaignAttemptBoundary,
@@ -7199,6 +7200,8 @@ export class ControlPlaneDb {
       "resume_recalled_at INTEGER",
       // #4066: the occurrence that superseded this one.
       "superseded_by TEXT",
+      // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
+      "owner_handoff TEXT",
       // #4067: what Wollipog did when it performed this approved forge action itself.
       "forge_action TEXT",
     ]) {
@@ -19241,8 +19244,9 @@ export class ControlPlaneDb {
       | { status: SessionStatus; pending_approval: string | null; cost_usd: number; cost_budget_usd: number | null }
       | undefined;
     const pending = parseJson<PendingApproval>(current?.pending_approval ?? null);
+    // A root's owner-kept card (#4064) is non-blocking: it waits for a person without parking the root.
     const keepWorkflowPause = !isTerminal(status) &&
-      pendingRequests(pending).some((request) => request.kind === "workflow_decision");
+      pendingRequests(pending).some((request) => request.kind === "workflow_decision" && !request.async);
     const effectiveStatus: SessionStatus = keepWorkflowPause ? "input_required" : status;
     if (current && current.status !== effectiveStatus) this.stmt(`
       INSERT INTO session_attention(session_id,meaningful_at) VALUES (?,?)
@@ -21333,7 +21337,7 @@ export class ControlPlaneDb {
    * forge has not been read for yet and one still open after its approved enqueue. A pull request
    * closed without merging is not a merged branch, and a fork's branch, or a merged one read by an
    * older runner, is not tracked. A campaign whose observing
-   * runner predates v280 tracks nothing, as before. Reads rows only.
+   * runner predates v283 tracks nothing, as before. Reads rows only.
    */
   campaignMergedBranches(campaignId: string): CampaignMergedBranch[] {
     const observer = this.campaignForgeObservingRunner(campaignId);
@@ -21568,6 +21572,10 @@ export class ControlPlaneDb {
         return parkedChildren.length ? { parkedChildren } : {};
       })(),
       pendingDecisions: { human: pendingHuman.length, orchestrator: pendingOrchestrator.length },
+      ...(() => {
+        const ownerDecisions = resolvedCampaignId === campaignSessionId ? this.campaignOwnerDecisions(resolvedCampaignId) : null;
+        return ownerDecisions ? { ownerDecisions } : {};
+      })(),
       ...(resolvedCampaignId === campaignSessionId ? { pendingRequests: {
         human: pendingHuman.length + pendingGenericHuman,
         orchestrator: pendingOrchestrator.length + pendingGenericOrchestrator,
@@ -21982,6 +21990,51 @@ export class ControlPlaneDb {
       this.revokeUiEvidenceReviewReceipts(occurrenceId, now);
       return { decision: this.workflowDecisionByOccurrence(occurrenceId)!, unheard };
     });
+  }
+
+  /** Hand one pending, unarmed Orchestrator-owned occurrence to the campaign's owner (#4064). The
+   * write only ever moves authority from the Orchestrator to a person; nothing moves it back. */
+  handWorkflowDecisionToOwner(
+    occurrenceId: string,
+    handoff: NonNullable<WorkflowDecisionView["ownerHandoff"]>,
+    authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
+  ): WorkflowDecisionView | null {
+    return this.atomic(() => {
+      const changed = Number(this.stmt(
+        `UPDATE workflow_decisions SET authority='human', owner_handoff=?, authority_evaluation=?
+         WHERE occurrence_id=? AND status='pending' AND authority='orchestrator' AND owner_handoff IS NULL
+           AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
+      ).run(JSON.stringify(handoff), JSON.stringify(authorityEvaluation), occurrenceId).changes) === 1;
+      if (!changed) return null;
+      // Receipts back only an Orchestrator's approval, which this occurrence can no longer have.
+      this.revokeUiEvidenceReviewReceipts(occurrenceId, handoff.at);
+      return this.workflowDecisionByOccurrence(occurrenceId);
+    });
+  }
+
+  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status. */
+  campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
+    const where = `controlling_session_id=? AND status='pending' AND authority='human'
+      AND (category='owner_decision' OR owner_handoff IS NOT NULL)`;
+    const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
+      .get(controllingSessionId) as { count: number }).count);
+    if (!total) return null;
+    const items = (this.stmt(`SELECT * FROM workflow_decisions WHERE ${where}
+      ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(controllingSessionId) as unknown[])
+      .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
+      .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
+        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined, createdAt: decision.createdAt }));
+    return { total, items };
+  }
+
+  /** Every occurrence a campaign's root handed to its owner, in any state (#4064). */
+  ownerHandedWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
+    return (this.stmt(
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND owner_handoff IS NOT NULL
+       ORDER BY created_at ASC, occurrence_id ASC`,
+    ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
+      (decision): decision is WorkflowDecisionView => decision !== null,
+    );
   }
 
   setWorkflowDecisionResume(
@@ -33209,6 +33262,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     child_message?: string | null;
     withdrawal?: string | null;
     superseded_by?: string | null;
+    owner_handoff?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     closing_reference_check?: string | null;
@@ -33272,7 +33326,27 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.child_message ? { childMessage: row.child_message } : {}),
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
+    ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
   };
+}
+
+/** What a decision the owner kept decides, in a line Campaign Status can list (#4064). */
+function ownerDecisionSummary(snapshot: WorkflowDecisionView["resourceSnapshot"]): string {
+  const text = (() => {
+    switch (snapshot.category) {
+      case "owner_decision":
+      case "implementation_question": return snapshot.question;
+      case "pr_merge": return `Merge ${snapshot.repository}#${snapshot.pullRequest}`;
+      case "review_round_extension": return `More review rounds for ${snapshot.repository}#${snapshot.pullRequest}`;
+      case "merged_branch_deletion": return `Delete branch ${snapshot.branch} in ${snapshot.repository}`;
+      case "issue_closure": return `Close ${snapshot.repository}#${snapshot.issue}`;
+      case "follow_up_issue_publication": return `Publish ${JSON.stringify(snapshot.sanitizedTitle)} in ${snapshot.repository}`;
+      case "campaign_issue_scope": return `Change the campaign's issue scope in ${snapshot.repository}`;
+      case "ui_evidence_approval": return `Review ${snapshot.evidence.length} UI evidence item${snapshot.evidence.length === 1 ? "" : "s"}`;
+      default: return snapshot.category;
+    }
+  })().replace(/\s+/gu, " ").trim();
+  return text.length > 200 ? `${text.slice(0, 199)}…` : text;
 }
 
 function pendingApprovalWithOccurrenceIds(

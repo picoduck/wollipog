@@ -269,6 +269,39 @@ test("withdraw_workflow_decision posts to the caller's own path and refuses an o
   }
 });
 
+test("owner-decision tools are the root Orchestrator's, post to its own paths and refuse an older peer (#4064)", async () => {
+  const { deps, calls } = makeDeps(() => ({ status: 201, body: { occurrenceId: "workflow_1", status: "pending", authority: "human" } }));
+  deps.orchestrator = true;
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  const ask = { requestId: "kept-1", resourceKey: "credential-design", question: "Which credential design should the bridge use?",
+    options: [{ optionId: "lease", label: "Short-Lived Lease" }, { optionId: "broker", label: "Broker Process" }],
+    recommendedOptionId: "lease", material: "PR https://github.com/team/repo/pull/7 at head abc." };
+  const asked = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(asked.isError, undefined, resultText(asked));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/owner-decisions`);
+  assert.deepEqual(calls.at(-1)?.body, ask);
+  const handed = await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "The owner kept it.", sessionId: "child" });
+  assert.equal(handed.isError, undefined, resultText(handed));
+  assert.equal(calls.at(-1)?.url, `${CP_URL}/api/sessions/${SELF_ID}/workflow-decisions/workflow_2/hand-to-owner`);
+  assert.deepEqual(calls.at(-1)?.body, { reason: "The owner kept it.", sessionId: "child" });
+  const count = calls.length;
+  for (const args of [{ occurrenceId: "workflow_2" }, { occurrenceId: "workflow_2", reason: " " }, { reason: "Kept." },
+    { occurrenceId: "workflow_2", reason: "Kept.", sessionId: "" }]) {
+    assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", args)).isError, true, JSON.stringify(args));
+  }
+  assert.equal((await callTool(deps, "request_owner_decision", { ...ask, sessionId: "child" })).isError, true);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions - 1;
+  const old = await callTool(deps, "request_owner_decision", ask);
+  assert.equal(old.isError, true);
+  assert.match(resultText(old), /"requiredControlPlaneProtocolVersion":281/u);
+  assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
+  deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions;
+  deps.orchestrator = false;
+  assert.equal((await callTool(deps, "request_owner_decision", ask)).isError, true, "a child never has the tool");
+  assert.equal((await callTool(deps, "hand_workflow_decision_to_owner", { occurrenceId: "workflow_2", reason: "Kept." })).isError, true);
+  assert.equal(calls.length, count, "nothing reaches the control plane");
+});
+
 test("typed workflow decision tools preserve exact request, resolution, and consume snapshots", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 200, body: { occurrenceId: "workflow_1", status: "pending" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;

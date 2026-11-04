@@ -1,5 +1,5 @@
 /**
- * Wollipog-performed forge actions (#4067, protocol v280; see `@wollipog/protocol`
+ * Wollipog-performed forge actions (#4067, protocol v283; see `@wollipog/protocol`
  * forge-decision-action). The control plane has already checked the approval, its authority and
  * its snapshot; this module performs exactly the one approved action through the child session's
  * own `gh` login, after re-reading the forge, and reports a fixed outcome. Nothing `gh` prints

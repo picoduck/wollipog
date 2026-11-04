@@ -92,6 +92,7 @@ export function requestTypeLabel(request: PendingApproval): string {
     if (category === "campaign_follow_up_admission") return "Follow-Up Approval";
     if (category === "follow_up_issue_publication") return "Issue Publication";
     if (category === "implementation_question") return "Implementation Decision";
+    if (category === "owner_decision") return "Owner Decision";
     if (category === "review_round_extension") return "Review Round Extension";
     return "Workflow Decision";
   }

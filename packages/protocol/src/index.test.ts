@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 280);
+  assert.equal(PROTOCOL_VERSION, 283);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,10 +358,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 280", () => {
-  assert.equal(PROTOCOL_VERSION, 280);
-  assert.equal(runnerSupportsProtocol(279, "forgeDecisionActions"), false);
-  assert.equal(runnerSupportsProtocol(280, "forgeDecisionActions"), true);
+test("PROTOCOL_VERSION is 283", () => {
+  assert.equal(PROTOCOL_VERSION, 283);
+  assert.equal(runnerSupportsProtocol(282, "forgeDecisionActions"), false);
+  assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
     assert.equal(forgeActionBranchName(name), true, name);
@@ -370,6 +370,9 @@ test("PROTOCOL_VERSION is 280", () => {
     "a^b", "a?b", "a*b", "a[b", "a\\b", "a@{b", "@", "a\u0001b", "x".repeat(256)]) {
     assert.equal(forgeActionBranchName(name), false, JSON.stringify(name));
   }
+  // Owner decisions need a v281 root runner and control plane (#4064).
+  assert.equal(runnerSupportsProtocol(280, "ownerDecisions"), false);
+  assert.equal(runnerSupportsProtocol(281, "ownerDecisions"), true);
   assert.equal(runnerSupportsProtocol(278, "workspaceRemoval"), false);
   assert.equal(runnerSupportsProtocol(279, "workspaceRemoval"), true);
   // An epic's closure reads its members only from a runner that returns them (#4060).

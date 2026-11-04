@@ -841,16 +841,21 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      remove_workspace, and the runner records the removal in its data directory, stops
 //      advertising it and answers remove_workspace_result. Runner views tag each Workspace's
 //      `source`. Older runners keep their configured Workspaces and the control plane refuses.
-// 280: Wollipog-performed forge actions (#4067). The requester of an approved
+// 281: Owner decisions (#4064). A Full Control root asks its campaign's owner a typed question that
+//      only that person can answer (`owner_decision`), and hands a pending Orchestrator-owned
+//      occurrence to the owner, one way. Both need a v281 root runner and control plane; an older
+//      root keeps today's behavior.
+// 283: Wollipog-performed forge actions (#4067). The requester of an approved
 //      `merged_branch_deletion` (which may now name `pullRequest` and `headSha`) or of an approved,
 //      armed GitHub `pr_merge` calls POST /api/sessions/:id/workflow-decisions/:occurrenceId/execute;
 //      the control plane sends `forge_decision_action` to the child's runner, which deletes the
 //      branch by compare-and-delete or runs the canonical enqueue through the session's own forge
 //      login and answers `forge_decision_action_result`. The decision records `forgeAction`.
-//      GitHub forge observations carry `headBranch`, and the campaign projection lists
-//      `mergedBranches`; a pending merged branch keeps a campaign from `verified_complete`. Older
-//      runners never receive the action, and their campaigns keep today's completion.
-export const PROTOCOL_VERSION = 280;
+//      GitHub forge observations carry `headBranch` and `crossRepository`, and the campaign
+//      projection lists `mergedBranches`; a pending merged branch keeps a campaign from
+//      `verified_complete`. Older runners never receive the action, and their campaigns keep
+//      today's completion.
+export const PROTOCOL_VERSION = 283;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1071,10 +1076,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** v279 runner unregisters a configured Workspace and keeps it removed across restarts (#4123).
    * Workspaces added in Wollipog are removed by the control plane on any runner. */
   workspaceRemoval: 279,
-  /** v280 Wollipog performs an approved branch deletion or armed enqueue itself (#4067), and GitHub
+  /** v283 Wollipog performs an approved branch deletion or armed enqueue itself (#4067), and GitHub
    * forge observations report the head branch that merged-branch cleanup tracks. Checked against
    * the child's runner, and against the control plane by the runner's tools. */
-  forgeDecisionActions: 280,
+  forgeDecisionActions: 283,
   /** v275 campaign handoffs and recorded delivery (#4070). Gates the `complete_with_handoffs`
    * status for dashboards and the delivery and handoff ledger writes for runner tools. */
   campaignHandoffs: 275,
@@ -1231,6 +1236,10 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   workflowDecisionActionReconciliation: 153,
   /** v269 control plane withdraws a pending or approved, unconsumed workflow decision (#3917). */
   workflowDecisionWithdrawal: 269,
+  /** v281 owner decisions (#4064): a Full Control root's typed question for its campaign's owner,
+   * and a one-way handoff of an Orchestrator-owned occurrence to that owner. Checked against the
+   * root's runner by the control plane and against the control plane by the runner. */
+  ownerDecisions: 281,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -2769,8 +2778,10 @@ export type DelegatableWorkflowDecisionCategory = typeof WORKFLOW_DECISION_CATEG
 /** Issue closure is permanently human-owned and never appears in delegation settings. */
 /** `campaign_follow_up_admission` (#2940): one follow-up past the campaign's approval limit. The server
  * creates it when the Orchestrator accepts that follow-up; only the campaign's Human decides it. */
+/** `owner_decision` (#4064): a Full Control root's question for its campaign's owner, created only
+ * through request_owner_decision. Always the person's: no agent can answer, approve or resolve it. */
 export type WorkflowDecisionCategory = DelegatableWorkflowDecisionCategory | "issue_closure" | "campaign_issue_scope" | "automation_creation" |
-  "campaign_follow_up_admission";
+  "campaign_follow_up_admission" | "owner_decision";
 export type WorkflowDecisionAuthority = "human" | "orchestrator";
 
 export type ParentControlDecisionPolicy = Record<DelegatableWorkflowDecisionCategory, WorkflowDecisionAuthority>;
@@ -3003,6 +3014,22 @@ export interface OrchestratorCampaignHandoff {
 /** Handed-off items the projection lists at most; `total` keeps the full count. */
 export const CAMPAIGN_HANDOFFS_LIMIT = 50;
 
+/** One pending decision the campaign's owner kept (#4064), as Campaign Status lists it. */
+export interface CampaignOwnerDecision {
+  occurrenceId: string;
+  /** The session whose request it is: the root for an owner decision, else the requester. */
+  sessionId: string;
+  category: WorkflowDecisionCategory;
+  /** The owner decision's question, or what a handed-off occurrence decides ("Merge team/repo#7"). */
+  summary: string;
+  /** The root handed an Orchestrator-owned occurrence to the owner, rather than asking anew. */
+  handedOff: boolean;
+  createdAt: number;
+}
+
+/** Owner decisions the projection lists at most; `total` keeps the full count. */
+export const CAMPAIGN_OWNER_DECISIONS_LIMIT = 20;
+
 /** Why an Orchestrator assigned UI Evidence Approval cannot exercise it. Client-scoped codes
  * describe the campaign; evidence-scoped codes describe one exact decision. */
 export type UiEvidenceReviewUnavailableCode =
@@ -3089,6 +3116,10 @@ export interface OrchestratorCampaignProjection {
    * (#4070). The owner's to-do list; omitted when there are none. Bounded by
    * CAMPAIGN_HANDOFFS_LIMIT; `total` is the full count. */
   handoffs?: { total: number; items: OrchestratorCampaignHandoff[] };
+  /** v281 (#4064): pending decisions the campaign's owner kept, oldest first: the root's owner
+   * decisions and the occurrences it handed to the owner. Root view only; omitted when there are
+   * none. Bounded by CAMPAIGN_OWNER_DECISIONS_LIMIT; `total` is the full count. */
+  ownerDecisions?: { total: number; items: CampaignOwnerDecision[] };
   uiEvidenceReview: {
     status: "available" | "unavailable";
     effectiveOwner: WorkflowDecisionAuthority;
@@ -3113,7 +3144,7 @@ export interface OrchestratorCampaignProjection {
     status: "pending" | "deferred" | "refused";
     reason: string;
   }>;
-  /** v280 (#4067): the head branches of the campaign's merged pull requests (those its children
+  /** v283 (#4067): the head branches of the campaign's merged pull requests (those its children
    * merged through approved `pr_merge` decisions) and whether each is deleted, retained with a
    * reason, or pending on the remote. A pending branch keeps the campaign from `verified_complete`.
    * Pending first, bounded by CAMPAIGN_MERGED_BRANCHES_LIMIT; the counts are complete. Omitted
@@ -5301,6 +5332,19 @@ export interface AutomationCreationResult {
   createdAt: number;
 }
 
+/** A decision the campaign's owner kept for themselves (#4064), as a Full Control root asks it. */
+export interface OwnerDecisionSnapshot {
+  category: "owner_decision";
+  question: string;
+  options: WorkflowDecisionOption[];
+  recommendedOptionId?: string;
+  /** What the owner needs to decide: links, head SHAs, check state, what each option does. */
+  material?: string;
+}
+
+/** Bounds of an owner decision, shared by the runner tool and the control plane. */
+export const OWNER_DECISION_LIMITS = { question: 4000, material: 8000, minOptions: 2, maxOptions: 12 } as const;
+
 export type WorkflowDecisionResourceSnapshot =
   | AutomationCreationSnapshot
   | GithubIssueClosureSnapshot
@@ -5312,6 +5356,7 @@ export type WorkflowDecisionResourceSnapshot =
       options: WorkflowDecisionOption[];
       recommendedOptionId?: string;
     }
+  | OwnerDecisionSnapshot
   | {
       category: "pr_merge";
       /** A GitHub `owner/repo`, or (v239, #3602) a GitLab project with its host and full namespace. */
@@ -5367,7 +5412,7 @@ export type WorkflowDecisionResourceSnapshot =
       branch: string;
       merged: true;
       mergeCommitSha: string;
-      /** v280 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
+      /** v283 (#4067): the merged pull request and its merged head. Wollipog performs the deletion
        * itself only when both are present; omitted, the snapshot and its digest are unchanged. */
       pullRequest?: number;
       headSha?: string;
@@ -5491,7 +5536,7 @@ export interface WorkflowDecisionView {
   resolvedAt?: number;
   consumedAt?: number;
   actionAdmission?: WorkflowDecisionActionAdmission;
-  /** v280 (#4067): what Wollipog did when it performed this approved forge action itself. */
+  /** v283 (#4067): what Wollipog did when it performed this approved forge action itself. */
   forgeAction?: import("./forge-decision-action.js").WorkflowDecisionForgeAction;
   issueClosureResult?: GithubIssueClosureResult;
   automationCreationResult?: AutomationCreationResult;
@@ -5506,6 +5551,30 @@ export interface WorkflowDecisionView {
   /** The occurrence that replaced this one, when the status reads `superseded` (#4066). Absent for
    * an occurrence superseded before this was recorded. */
   supersededBy?: string;
+  /** v281 (#4064): the Full Control root handed this Orchestrator-owned occurrence to the campaign's
+   * owner. One way: it stays the person's, and so does every later request for the same resource
+   * in the campaign. Only a person resolves it. */
+  ownerHandoff?: { bySessionId: string; at: number; reason: string };
+}
+
+/** v281 (#4064): a Full Control root's question for its campaign's owner. */
+export interface CreateOwnerDecisionRequest {
+  /** Caller-owned idempotency key. Reuse with different content fails. */
+  requestId: string;
+  /** Stable identity; a newer owner decision under the same key replaces an unanswered older one. */
+  resourceKey: string;
+  question: string;
+  options: WorkflowDecisionOption[];
+  recommendedOptionId?: string;
+  material?: string;
+}
+
+/** v281 (#4064): hand one pending Orchestrator-owned occurrence to the campaign's owner. */
+export interface HandWorkflowDecisionToOwnerRequest {
+  /** Why the owner decides it. Stored on the decision; audit records only its digest. */
+  reason: string;
+  /** The requesting session, when it is not the root itself. */
+  sessionId?: string;
 }
 
 export interface CreateWorkflowDecisionRequest {

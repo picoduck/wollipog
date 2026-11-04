@@ -293,7 +293,7 @@ test("a merged branch with any name Git accepts stays pending until it is delete
 });
 
 test("a merged branch the forge names unusably stays pending, never skipped, until handed off (#4067)", () => {
-  // `crossRepository: false` is a v280 runner's same-repository branch it could not name usably;
+  // `crossRepository: false` is a v283 runner's same-repository branch it could not name usably;
   // an absent field is an observation from before the branch was reported. Both stay owed.
   for (const crossRepository of [false, undefined]) {
     const h = fixture();
@@ -306,7 +306,7 @@ test("a merged branch the forge names unusably stays pending, never skipped, unt
       assert.equal(h.db.campaignStatusOnly("root"), "active");
       assert.deepEqual(h.db.campaignMergedBranchTargets(), [{ campaignId: "root", refs: [{ repository: "picoduck/wollipog", number: 4100 }] }]);
       assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }])
-        .get("picoduck/wollipog#4100")?.finished, crossRepository === undefined, "a v280 same-repository read keeps being re-read");
+        .get("picoduck/wollipog#4100")?.finished, crossRepository === undefined, "a v283 same-repository read keeps being re-read");
       // A person can still take it over, and then the campaign finishes with handoffs.
       assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item, handoff: { responsibleActor: "human",
         reason: "The branch name is one Wollipog will not act on.", nextAction: "Delete the branch by hand." } }).ok);

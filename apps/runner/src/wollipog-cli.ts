@@ -432,8 +432,43 @@ function command(args: string[]): { tool: string; input: Record<string, unknown>
       ["decision", "decisions", "workflow-decision", "workflow-decisions"].includes(arg));
     const verb = args[groupIndex + 1];
     const occurrenceId = args[groupIndex + 2];
-    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw") {
+    if (optionPresent(args, "--session") && verb !== "get" && verb !== "list" && verb !== "withdraw" && verb !== "hand-to-owner") {
       return { error: "decision commands act only on the injected session and do not accept --session" };
+    }
+    if (verb === "ask-owner") {
+      const input: Record<string, unknown> = {};
+      for (const [optionName, key] of [["--request-id", "requestId"], ["--resource-key", "resourceKey"], ["--question", "question"]] as const) {
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `decision ask-owner requires ${optionName}` };
+        input[key] = value;
+      }
+      const raw = option(args, "--options");
+      if (!raw || raw.startsWith("--")) return { error: "decision ask-owner requires --options as a JSON array" };
+      try {
+        input.options = JSON.parse(raw) as unknown;
+      } catch {
+        return { error: "--options must be valid JSON" };
+      }
+      if (!Array.isArray(input.options)) return { error: "--options requires a JSON array of {optionId, label, description?}" };
+      for (const [optionName, key] of [["--recommended", "recommendedOptionId"], ["--material", "material"]] as const) {
+        if (!optionPresent(args, optionName)) continue;
+        const value = option(args, optionName);
+        if (!value || value.startsWith("--")) return { error: `${optionName} requires a value` };
+        input[key] = value;
+      }
+      return { tool: "request_owner_decision", input };
+    }
+    if (verb === "hand-to-owner") {
+      if (!occurrenceId || occurrenceId.startsWith("--")) {
+        return { error: "decision hand-to-owner requires an occurrence id" };
+      }
+      const reason = option(args, "--reason");
+      if (!reason || reason.startsWith("--") || !reason.trim()) return { error: "decision hand-to-owner requires --reason" };
+      const sessionId = option(args, "--session");
+      if (optionPresent(args, "--session") && (!sessionId || sessionId.startsWith("--"))) {
+        return { error: "--session requires a session id" };
+      }
+      return { tool: "hand_workflow_decision_to_owner", input: { occurrenceId, reason, ...(sessionId ? { sessionId } : {}) } };
     }
     if (verb === "request") {
       const requestId = option(args, "--request-id");
@@ -974,6 +1009,8 @@ export async function runWollipogCli(
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionWithdrawal
     : parsed.tool === "execute_workflow_decision"
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions
+    : parsed.tool === "request_owner_decision" || parsed.tool === "hand_workflow_decision_to_owner"
+    ? RUNNER_CAPABILITY_MIN_PROTOCOL.ownerDecisions
     : ["get_campaign_issue_scope", "request_campaign_issue_scope_change"].includes(parsed.tool)
     ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignIssueScopeChanges
     : ["request_github_issue_closure", "close_github_issue"].includes(parsed.tool)

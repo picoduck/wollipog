@@ -1407,6 +1407,7 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     "decision request", "decision get", "decision consume", "decision reconcile", "request_workflow_decision",
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
     "decision withdraw", "withdraw_workflow_decision", "protocol v269",
+    "decision ask-owner", "decision hand-to-owner", "request_owner_decision", "hand_workflow_decision_to_owner", "protocol v281",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
@@ -1430,6 +1431,14 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     ["decision", "withdraw", "workflow_1"],
     ["decision", "withdraw", "workflow_1", "--reason", " "],
     ["decision", "withdraw", "workflow_1", "--reason", "Not needed", "--session"],
+    ["decision", "ask-owner", "--resource-key", "k", "--question", "Q?", "--options", "[]"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "not-json"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "{}"],
+    ["decision", "ask-owner", "--request-id", "r", "--resource-key", "k", "--question", "Q?", "--options", "[]", "--session", "child"],
+    ["decision", "hand-to-owner", "--reason", "Kept"],
+    ["decision", "hand-to-owner", "workflow_1"],
+    ["decision", "hand-to-owner", "workflow_1", "--reason", "Kept", "--session"],
   ]) {
     const result = await captureCli([...malformed, "--json"]);
     assert.equal(result.code, 2, malformed.join(" "));
