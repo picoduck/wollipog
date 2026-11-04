@@ -263,14 +263,17 @@ continues throughout. Do not hold a ready slot waiting for future traffic.
 `fast-required-v1.1` (record schema/policy generation 1). The original v1 modules
 remain historical contracts; v2/v3 experiments continue to use their original v1
 baseline. Never relabel those records as v1.1. Suite version and policy hash keep
-new policy cohorts separate. The advisory shadow and its report retain the legacy
-v1 identity pending coordinated collector support; its original records never
-certify the corrected policy.
+new policy cohorts separate. After #4046's collector work merged, the advisory
+shadow switched to v1.1 and its report gained explicit legacy/v1.1 parsing.
+Original v1 records never certify the corrected policy. The PR-browser policy's
+independent `browserSelections` metadata never joins these shadow cohorts.
 
-PR routing now uses v1.1. Its prose allowlist is empty:
+The v1.1 shadow policy's prose allowlist is empty:
 `docs/ci-suite-evidence-2026-10-23.md` has a readiness-report test consumer and
 therefore requires full coverage. No nonempty diff currently qualifies as prose
-fast. App changes retain the existing conservative dependency closure.
+fast. App changes retain the existing conservative dependency closure. Active PR
+browser routing uses the separate [critical/changed-browser contract](ci-pr-assurance.md)
+and keeps the full Node suite; it does not consume the historical suite-fast choice.
 
 Prose-fast is retired in this policy identity. Its empty allowlist must stay
 empty; admitting prose requires a new reviewed identity, dependency analysis and

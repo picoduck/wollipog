@@ -12,10 +12,11 @@ const job = (id) => workflow.match(new RegExp(`^  ${id}:\\n[\\s\\S]*?(?=^  [\\w-
 const expression = (text, key) => text.match(new RegExp(`^\\s+${key}: (.+)$`, "m"))?.[1];
 const shellOf = (text, name) => text.split(`      - name: ${name}\n`)[1].match(/        run: \|\n((?:          .*\n?)+)/)[1]
   .split("\n").map((line) => line.slice(10)).join("\n");
-function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped") {
-  const context = { github: { event_name: event, event: { action, pull_request: { draft } } },
-    vars: { CI_PR_SUITE_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
-    needs: { suite_plan: { outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
+function evaluate(value, event, variable, mode = "", cancelled = false, draft = false, action = "synchronize", gate = "", gateMode = "", gateResult = "skipped", benchmark = false, workflowName = "CI", planResult = "success") {
+  const context = { github: { event_name: event, workflow: workflowName, event: { action, pull_request: { draft } } },
+    inputs: { browser_benchmark: benchmark },
+    vars: { CI_PR_BROWSER_ROUTING: variable, CI_MERGE_GROUP_GATE: gate },
+    needs: { suite_plan: { result: planResult, outputs: { mode } }, merge_group_gate: { result: gateResult, outputs: { mode: gateMode } } },
     cancelled: () => cancelled, fromJSON: JSON.parse,
     ghaEqual: (a, b) => typeof a === "string" && typeof b === "string" ? a.toUpperCase() === b.toUpperCase() : a == b };
   // GitHub's documented ==/!= ignore string case. JS's native equality concealed a real
@@ -24,7 +25,7 @@ function evaluate(value, event, variable, mode = "", cancelled = false, draft = 
     (_, left, op, right) => `${op === "!=" ? "!" : ""}ghaEqual(${left}, ${right})`);
   return vm.runInNewContext(value.replace(/^\$\{\{\s*|\s*\}\}$/g, ""), context, { timeout: 1000 });
 }
-const fast = expression(job("unit"), "PR_FAST");
+const fast = expression(job("browser"), "PR_FAST");
 const groupFast = expression(job("unit"), "GROUP_FAST");
 const gateEnabled = expression(job("check"), "GATE_ENABLED");
 const gateAdmission = expression(job("merge_group_gate"), "if");
@@ -34,8 +35,87 @@ const admission = expression(job("suite_plan"), "if");
 const states = ["success", "failure", "cancelled", "skipped", "", "unexpected"];
 const variables = ["", "false", "disabled", "Enabled", "ENABLED", "true", "enabled ", "enabled"];
 
+test("only the isolated dispatch benchmark can reduce manual coverage and its protected check must fail", () => {
+  assert.equal(expression(job("check"), "name"), "Typecheck, Test & Sidecar Bundle");
+  assert.equal(expression(job("benchmark_check"), "name"), "PR Browser Benchmark Result");
+  const prepare = expression(job("browser").split("      - name: Prepare Benchmark Browser Selection\n")[1], "if");
+  const benchmarkFlag = expression(job("browser"), "BROWSER_BENCHMARK");
+  for (const event of ["pull_request", "merge_group", "push", "workflow_call", "workflow_dispatch"]) {
+    for (const benchmark of [false, true]) for (const caller of ["CI", "Main Rolling Validation", "PR Browser Benchmark"]) {
+      const args = [event, "", "", false, false, "synchronize", "", "", "skipped", benchmark, caller];
+      const isolated = event === "workflow_dispatch" && benchmark;
+      assert.deepEqual(Array.from(evaluate(matrix, ...args)), isolated ? [1] : [1, 2, 3, 4, 5]);
+      assert.equal(Boolean(evaluate(prepare, ...args)), isolated);
+      assert.equal(evaluate(benchmarkFlag, ...args), isolated ? "true" : "false");
+      assert.equal(Boolean(evaluate(expression(job("check"), "if"), ...args)), true,
+        "benchmark must execute and fail the protected job, never report a passing-equivalent skip");
+      assert.equal(evaluate(expression(job("check"), "BROWSER_BENCHMARK"), ...args), String(isolated));
+      assert.equal(Boolean(evaluate(expression(job("benchmark_check"), "if"), ...args)), isolated);
+      assert.equal(Boolean(evaluate(expression(job("benchmark_check"), "if"), event, "", "", true,
+        false, "synchronize", "", "", "skipped", benchmark, caller)), false);
+    }
+  }
+  const events = workflow.slice(workflow.indexOf("\non:\n"), workflow.indexOf("\npermissions:\n"));
+  assert.match(events, /workflow_dispatch:\n    inputs:\n      browser_benchmark:/);
+  assert.match(events.split("  workflow_dispatch:")[0], /browser_benchmark:\n        description: [^\n]+\n        type: boolean\n        default: false/,
+    "reusable callers must opt in; rolling validation retains full coverage by default");
+  assert.doesNotMatch(job("unit"), /browser_benchmark|BROWSER_BENCHMARK|PR_FAST/);
+});
+
+test("dispatch-only benchmark caller prefixes every reusable CI job and keeps read-only permissions", () => {
+  const caller = readFileSync(".github/workflows/ci-pr-browser-benchmark.yml", "utf8");
+  assert.match(caller, /^on:\n  workflow_dispatch:\n\npermissions:\n  contents: read$/m);
+  assert.doesNotMatch(caller, /pull_request|merge_group|secrets:|write|continue-on-error/);
+  assert.match(caller, /^  group: pr-browser-benchmark-\$\{\{ github.ref \}\}\n  cancel-in-progress: false$/m);
+  assert.equal((caller.match(/^  [a-z_]+:$/gm) ?? []).filter((line) => line !== "  workflow_dispatch:").length, 1);
+  assert.match(caller, /^  benchmark:\n    if: github.event_name == 'workflow_dispatch'\n    name: Browser Benchmark\n    uses: \.\/\.github\/workflows\/ci.yml\n    with:\n      target_sha: \$\{\{ github.sha \}\}\n      browser_benchmark: true$/m);
+  // A reusable call is named <caller job> / <callee job>; no root protected job exists.
+  for (const id of ["check", "benchmark_check"]) {
+    const checkName = expression(job(id), "name");
+    assert.notEqual(`Browser Benchmark / ${checkName}`, "Typecheck, Test & Sidecar Bundle");
+  }
+  assert.match(job("check"), /if \[ "\$BROWSER_BENCHMARK" != false \]; then/,
+    "direct ci.yml benchmark dispatch retains its independent fail-closed guard");
+  const rolling = readFileSync(".github/workflows/main-rolling-validation.yml", "utf8");
+  assert.doesNotMatch(rolling, /browser_benchmark/);
+});
+
+test("the separate benchmark aggregate fails on every non-success dependency", () => {
+  const text = job("benchmark_check");
+  assert.equal(expression(text, "needs"), "[checks, unit, browser, win32, webkit, delegated_pipeline]");
+  const shell = shellOf(text, "Require Every Benchmark Job to Have Succeeded");
+  const keys = ["CHECKS_RESULT", "UNIT_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"];
+  const success = Object.fromEntries(keys.map((key) => [key, "success"]));
+  for (const key of keys) for (const result of states) {
+    const run = spawnSync("bash", ["-c", shell], { env: { ...success, [key]: result }, encoding: "utf8", timeout: 1000 });
+    assert.ifError(run.error);
+    assert.equal(run.status, result === "success" ? 0 : 1, `${key}/${result}`);
+  }
+});
+
+test("reduced dispatch fails the literal protected aggregate even when every work job passes", () => {
+  const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
+  const success = { ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "",
+    GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
+    CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success",
+    WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success" };
+  for (const value of ["true", "", "unexpected"]) {
+    const run = spawnSync("bash", ["-c", shell], { env: { ...success, BROWSER_BENCHMARK: value }, encoding: "utf8", timeout: 1000 });
+    assert.equal(run.status, 1);
+    assert.match(run.stdout, /Reduced benchmark cannot satisfy the protected required check/);
+  }
+});
+
+test("failed, cancelled and missing PR plans cannot reduce browser work using retained outputs", () => {
+  for (const result of ["failure", "cancelled", "skipped", "", "unknown"]) {
+    const args = ["pull_request", "enabled", "fast", false, false, "synchronize", "", "", "skipped", false, "CI", result];
+    assert.deepEqual(Array.from(evaluate(matrix, ...args)), [1, 2, 3, 4, 5]);
+    assert.equal(evaluate(fast, ...args), "false");
+  }
+});
+
 test("off switches preserve full work; case-variant plan admission cannot change non-PR coverage", () => {
-  assert.equal(evaluate("${{ vars.CI_PR_SUITE_ROUTING == 'enabled' }}", "pull_request", "Enabled"), true,
+  assert.equal(evaluate("${{ vars.CI_PR_BROWSER_ROUTING == 'enabled' }}", "pull_request", "Enabled"), true,
     "the expression model must reproduce GitHub's case-insensitive equality");
   for (const event of ["pull_request", "merge_group", "push", "workflow_dispatch", "workflow_call"]) {
     for (const variable of variables) for (const mode of ["", "full", "fast", "unknown"]) {
@@ -52,10 +132,10 @@ test("off switches preserve full work; case-variant plan admission cannot change
       }
     }
   }
-  assert.equal(expression(job("browser"), "PR_FAST"), fast);
+  assert.doesNotMatch(job("unit"), /PR_FAST|ROUTING_SWITCH/);
   assert.equal(expression(job("browser"), "GROUP_FAST"), groupFast);
-  assert.ok(admission.startsWith("github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled'"));
-  assert.ok(enabled.includes("github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled'"));
+  assert.ok(admission.startsWith("github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled'"));
+  assert.ok(enabled.includes("github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled'"));
 });
 
 test("every gate and routing variable, mode and event keeps full coverage unless exactly one admitted fast path applies", () => {
@@ -88,7 +168,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
   for (const variable of variables) for (const plan of states) for (const mode of ["", "full", "fast", "affected", "unknown"]) {
     const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
-      GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
+      BROWSER_BENCHMARK: "false", GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
       ROUTING_SWITCH: variable, ROUTING_ENABLED: String(variable.toLowerCase() === "enabled"), PLAN_RESULT: plan, PLAN_MODE: mode,
       CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
       DELEGATED_PIPELINE_RESULT: "success",
@@ -101,7 +181,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
   for (const mode of ["full", "fast"]) for (const key of ["CHECKS_RESULT", "UNIT_RESULT", "BROWSER_RESULT", "WIN32_RESULT", "WEBKIT_RESULT", "DELEGATED_PIPELINE_RESULT"]) {
     for (const result of states.filter((state) => state !== "success")) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
-        GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
+        BROWSER_BENCHMARK: "false", GATE_ENABLED: "false", GATE_RESULT: "skipped", GATE_MODE: "",
         ROUTING_SWITCH: "enabled", ROUTING_ENABLED: "true", PLAN_RESULT: "success", PLAN_MODE: mode,
         CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success",
         DELEGATED_PIPELINE_RESULT: "success", [key]: result,
@@ -115,7 +195,7 @@ test("the actual aggregate requires an active plan's success and unambiguous out
 test("the actual aggregate requires an admitted gate's success and unambiguous output, and rejects stray gate output", () => {
   const shell = shellOf(job("check"), "Require Every Job to Have Succeeded");
   const work = { CHECKS_RESULT: "success", UNIT_RESULT: "success", BROWSER_RESULT: "success", WIN32_RESULT: "success", WEBKIT_RESULT: "success", DELEGATED_PIPELINE_RESULT: "success",
-    ROUTING_SWITCH: "", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
+    BROWSER_BENCHMARK: "false", ROUTING_SWITCH: "", ROUTING_ENABLED: "false", PLAN_RESULT: "skipped", PLAN_MODE: "" };
   for (const gate of variables) for (const admitted of [true, false]) for (const result of states) {
     for (const mode of ["", "full", "fast", "affected", "unknown"]) {
       const run = spawnSync("bash", ["-c", shell], { encoding: "utf8", timeout: 1000, env: {
@@ -207,6 +287,20 @@ test("the actual plan shell checks exact casing before invoking Git or the selec
   }
 });
 
+test("the actual benchmark shell uses benchmark files as data and propagates failure", () => {
+  const shell = shellOf(job("browser"), "Remote-Instance Browser End-to-End Tests").replaceAll("${{ matrix.shard }}", "1");
+  const files = '["apps/web/e2e/authentication-recovery.spec.ts"]';
+  const stub = 'pnpm() { printf "%s\\n%s\\n" "$*" "$PR_BROWSER_FILES"; return "$STUB_EXIT"; };\n';
+  for (const exit of [0, 7]) {
+    const run = spawnSync("bash", ["-e", "-c", stub + shell], { encoding: "utf8", timeout: 1000,
+      env: { BROWSER_BENCHMARK: "true", BENCHMARK_BROWSER_FILES: files, PR_BROWSER_FILES: "stale PR output",
+        PR_FAST: "false", GROUP_FAST: "false", STUB_EXIT: String(exit) } });
+    assert.ifError(run.error);
+    assert.equal(run.status, exit);
+    assert.equal(run.stdout.trim(), `test:e2e --config playwright.pr.config.ts\n${files}`);
+  }
+});
+
 test("both actual execution branches preserve commands, propagate errors and never accept author arguments", () => {
   const stub = 'pnpm() { printf "pnpm %s\\n" "$*"; return "$STUB_EXIT"; }; node() { printf "node %s\\n" "$*"; return "$STUB_EXIT"; };\n';
   for (const isFast of [false, true]) for (const raw of ["enabled", "Enabled", "ENABLED", ""]) for (const exit of [0, 7]) for (const [id, name] of [
@@ -219,10 +313,10 @@ test("both actual execution branches preserve commands, propagate errors and nev
       env: { ...env, STUB_EXIT: String(exit) } });
     assert.ifError(run.error);
     assert.equal(run.status, exit);
-    if (id === "unit") assert.equal(run.stdout.trim(), isFast && raw === "enabled"
+    if (id === "unit") assert.equal(run.stdout.trim(), path === "group" && isFast && raw === "enabled"
       ? "node scripts/test-suites.mjs --node-only --groups node-fast --ci --shard=1/3" : "pnpm test:ci --shard=1/3");
     else assert.equal(run.stdout.trim(), isFast && raw === "enabled"
-      ? "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
+      ? path === "pr" ? "pnpm test:e2e --config playwright.pr.config.ts" : "pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts"
       : "pnpm test:e2e --config playwright.ci.config.ts --project=shard-1");
   }
   for (const name of ["Verify Node 22 Engine Boundary", "Verify Excluded Node Engine Boundary", "Verify Node 23 Engine Boundary",

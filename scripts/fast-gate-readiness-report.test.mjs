@@ -35,6 +35,8 @@ test("nothing passes by default: only computed evidence is met, and the verdict 
     assert.ok(row.status === expected || row.classification === "code-gap" && row.status === "failing", `${row.id}: ${row.status}`);
   }
   const by = Object.fromEntries(report.criteria.map((row) => [row.id, row]));
+  assert.match(by["prereq-3630-post-activation"].evidence, /CI_PR_BROWSER_ROUTING is unmeasured/);
+  assert.equal(by["prereq-3630-post-activation"].classification, "approval-gap");
   // AC3/AC4 have no post-activation sample: incomplete, never met.
   for (const id of ["rollout-window", "required-p90", "no-green-expiry", "first-real-gate-group", "prereq-3633-enforcement-bound"])
     assert.equal(by[id].classification, "observation-gap", id);

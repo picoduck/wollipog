@@ -2,6 +2,8 @@ import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
 import test from "node:test";
+import { browserEvidence, BROWSER_SELECTION_MARKER } from "./ci-pr-browser-route.mjs";
+import { CRITICAL_BROWSER_FILES, PR_BROWSER_POLICY } from "./ci-pr-browser-policy.mjs";
 import {
   applyTimingContext, attemptRecord, dependencyCandidates, combineReports, collectEvents, eventSummary, listJobs, outcome, queueHistory, readTimingLog,
   AGGREGATOR, compareReports, collect, listRemovals, main, markdown, MAX_PAGES, options, pullRequestOf, quantile, runMetrics, summarize,
@@ -234,6 +236,7 @@ test("the assumed dependency structure matches the CI workflow files", () => {
   assert.deepEqual(ci.match(/^\s+needs:.*$/gm).map((line) => line.trim()), ["needs: [suite_plan, merge_group_gate]",
     "needs: [suite_plan, merge_group_gate]", "needs: suite_plan", "needs: [suite_plan, merge_group_gate]",
     "needs: [checks, unit, browser, win32, webkit]",
+    "needs: [checks, unit, browser, win32, webkit, delegated_pipeline]",
     "needs: [checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate]"]);
   assert.match(ci, /\n  check:\n(?:    .*\n)*?    name: Typecheck, Test & Sidecar Bundle\n(?:    .*\n)*?    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]\n/);
   assert.deepEqual(ci.match(/uses: \.\/\.github\/workflows\/[^\s]+/g), ["uses: ./.github/workflows/settings-rows-win32.yml"]);
@@ -247,6 +250,13 @@ test("an aggregator that never ran leaves the required result unmeasured", () =>
   assert.equal(metrics.requiredMinutes, null);
   assert.equal(metrics.criticalWaitMinutes, null);
   assert.equal(metrics.longestJobWaitMinutes, 5);
+});
+
+test("historical skipped protected jobs cannot yield measured required-result latency", () => {
+  const metrics = runMetrics(run(2, 2741), [job("Browser End-to-End Tests (1)", 0, 1, 10),
+    job("PR Browser Benchmark Result", 10, 10, 11), job(AGGREGATOR, 0, 0, 0, "skipped")]);
+  assert.equal(metrics.aggregatorRan, false);
+  assert.equal(metrics.requiredMinutes, null);
 });
 
 test("quantiles use nearest rank and ignore missing values", () => {
@@ -560,6 +570,43 @@ test("optional timing transport failure cannot discard collected metadata", asyn
   });
   assert.equal(timedOut.state, "unmeasured");
   assert.ok(!JSON.stringify(timedOut).includes("PRIVATE_SENTINEL"));
+});
+
+test("CLI routing projections bind run, attempt and PR head before changing tested identity", async () => {
+  const hash = (value) => createHash("sha256").update(value).digest("hex");
+  const source = { ...run(1, 1), event: "pull_request", head_branch: "feature/example", head_sha: "a".repeat(40) };
+  const evidence = browserEvidence({ policy: PR_BROWSER_POLICY, mode: "fast", inventoryCount: 7,
+    inventoryId: hash("inventory"), selectedFileIds: CRITICAL_BROWSER_FILES.map((file) => hash(`apps/web/e2e/${file}`)),
+    context: { base: "b".repeat(40), tested: "c".repeat(40), head: source.head_sha, diffBase: "b".repeat(40) } },
+    { GITHUB_RUN_ID: "1", GITHUB_RUN_ATTEMPT: "1" });
+  assert.ok(evidence);
+  for (const change of [{}, { runId: "2" }, { attempt: 2 }, { changeHeadSha: "d".repeat(40) }]) {
+    let result;
+    const fetchImpl = async (url) => {
+      const parsed = new URL(url);
+      if (parsed.hostname.endsWith(".blob.core.windows.net"))
+        return new Response(BROWSER_SELECTION_MARKER + JSON.stringify({ ...evidence, context: { ...evidence.context, ...change } }));
+      if (parsed.pathname.endsWith("/jobs/44/logs"))
+        return new Response(null, { status: 302, headers: { location: "https://safe.blob.core.windows.net/job" } });
+      if (parsed.pathname.endsWith("/workflows/ci.yml/runs")) {
+        const rows = parsed.searchParams.get("event") === "pull_request" ? [source] : [];
+        return Response.json({ total_count: rows.length, workflow_runs: rows });
+      }
+      if (parsed.pathname.endsWith("/runs/1/attempts/1")) return Response.json(source);
+      if (parsed.pathname.endsWith("/runs/1/attempts/1/jobs")) return Response.json({ total_count: 1,
+        jobs: [{ ...job("PR Suite Routing", 0, 0, 1), id: 44, status: "completed",
+          steps: [{ name: "Compute Trusted PR Route", status: "completed", conclusion: "success", started_at: at(0), completed_at: at(1) }] }] });
+      throw Error("Unexpected fake API path");
+    };
+    const errors = [];
+    const code = await main(["--repo", repository, "--all-events", "--json", "--since", at(-1), "--until", at(2), "--timing-job", "44"],
+      { env: { GITHUB_TOKEN: "test-token" }, fetchImpl, out: (value) => { result = JSON.parse(value); }, err: (value) => errors.push(value) });
+    assert.equal(code, 0, errors.join("\n"));
+    const record = result.records[0], valid = Object.keys(change).length === 0;
+    assert.equal(record.testedSha, valid ? "c".repeat(40) : null);
+    assert.equal(record.suiteRevision, valid ? "c".repeat(40) : null);
+    assert.equal(record.jobs[0].testTiming.browserSelections.length, valid ? 1 : 0);
+  }
 });
 
 test("missing timing SHA never erases known source evidence", () => {

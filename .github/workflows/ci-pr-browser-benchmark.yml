@@ -1,0 +1,22 @@
+name: PR Browser Benchmark
+
+# A reusable-call job prefixes every CI check name. The diagnostic must never
+# produce the exact protected context, whether its intentional sentinel fails or not.
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pr-browser-benchmark-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  benchmark:
+    if: github.event_name == 'workflow_dispatch'
+    name: Browser Benchmark
+    uses: ./.github/workflows/ci.yml
+    with:
+      target_sha: ${{ github.sha }}
+      browser_benchmark: true

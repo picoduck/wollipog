@@ -3,6 +3,9 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { FAST_API_FILES, FAST_PROSE_FILES, CRITICAL_BROWSER_FILES } from "./ci-suite-policy.mjs";
 import { makeSelection, hash, SELECTION_MARKER } from "./ci-suite-selection.mjs";
+import { makeSelection as makeSelectionV11 } from "./ci-suite-selection-v1-1.mjs";
+import { browserEvidence, parseBrowserEvidence, BROWSER_SELECTION_MARKER } from "./ci-pr-browser-route.mjs";
+import { CRITICAL_BROWSER_FILES as PR_CRITICAL, PR_BROWSER_POLICY } from "./ci-pr-browser-policy.mjs";
 import { COHORT_KEY_CUTOVER, shadowCohorts, shadowReport } from "./ci-suite-shadow-report.mjs";
 import { readTimingLog } from "./merge-queue-wait-report.mjs";
 
@@ -304,6 +307,41 @@ test("the existing bounded log collector projects safe selection metadata with t
   assert.deepEqual(result.selections, [row]);
   assert.equal(result.state, "measured");
   assert.ok(!JSON.stringify(result).includes("PRIVATE_SENTINEL"));
+});
+
+test("v1.1 shadow and PR-browser evidence collect separately without changing historical cohort contracts", async () => {
+  const old = plan();
+  const corrected = makeSelectionV11({ tree, fastFiles: [], diff: { entries: [{ path: FAST_PROSE_FILES[0], status: "M" }] },
+    policyId: hash("corrected-policy"), context: old.context });
+  const browser = browserEvidence({ policy: PR_BROWSER_POLICY, mode: "fast", inventoryCount: 8, inventoryId: hash("inventory"),
+    selectedFileIds: PR_CRITICAL.map((file) => hash(`apps/web/e2e/${file}`)).sort(),
+    context: { base: baseSha, tested: testedSha, head: testedSha, diffBase: baseSha } },
+    { GITHUB_RUN_ID: "101", GITHUB_RUN_ATTEMPT: "1" });
+  assert.ok(browser);
+  const log = SELECTION_MARKER + JSON.stringify({ ...corrected, filenames: "PRIVATE_SENTINEL" }) + "\n" +
+    BROWSER_SELECTION_MARKER + JSON.stringify({ ...browser, filenames: "PRIVATE_SENTINEL" }) + "\n";
+  const collected = await readTimingLog("private-token", "picoduck/wollipog", "101", async (url, options) => {
+    if (String(url).startsWith("https://api.github.com")) return new Response(null, { status: 302, headers: { location: "https://safe.blob.core.windows.net/job" } });
+    assert.equal(options.headers, undefined);
+    return new Response(log);
+  });
+  assert.deepEqual(collected.selections, [corrected]);
+  assert.deepEqual(collected.browserSelections, [browser]);
+  assert.ok(!JSON.stringify(collected).includes("PRIVATE_SENTINEL"));
+  assert.equal(parseBrowserEvidence(SELECTION_MARKER + JSON.stringify(corrected)), null);
+  for (const change of [{ policy: "fast-required-v1.1" }, { policy: "pr-browser-critical-v1" }, { mode: "unknown" }, { selectedCount: 0 },
+    { selectedFileIds: browser.selectedFileIds.slice(1) }, { selectedFileIds: browser.selectedFileIds.map(() => hash("duplicate")) },
+    { context: { ...browser.context, trustedPolicySha: testedSha } }])
+    assert.equal(parseBrowserEvidence(BROWSER_SELECTION_MARKER + JSON.stringify({ ...browser, ...change })), null);
+  const data = input();
+  data.records[0].jobs.at(-1).testTiming = collected;
+  data.records[0].createdAt = "2026-11-04T01:00:00.000Z";
+  data.windows = [{ since: "2026-11-04T00:00:00Z", until: "2026-11-05T00:00:00Z" }];
+  const report = shadowReport(data);
+  assert.equal(report.comparisons[0].suiteVersion, "fast-required-v1.1");
+  assert.equal(report.cohorts.length, 1);
+  assert.equal(report.cohorts[0].suiteVersion, "fast-required-v1.1");
+  assert.equal(report.comparisons[0].policyId, corrected.policyId);
 });
 
 test("invalid selection echoes and oversized unrelated lines do not truncate legacy timing", async () => {

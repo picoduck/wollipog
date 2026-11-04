@@ -1,188 +1,196 @@
-# Proposed PR Assurance Routing
+# PR Browser Assurance Routing
 
-Refs #3630 and tracker #3625. **Inactive.** This change installs routing machinery;
-it does not authorize activation. `CI_PR_SUITE_ROUTING` is a repository Actions
-variable. Only its exact value `enabled` activates routing. Missing, empty,
-misspelled and all other values mean off. The implementation agent must not
-create, set or change this variable, including for live tests. Activation is a
-human policy decision, separate from implementation/merge approval.
+Refs #3630 and #3812. **Inactive until separate owner activation.** Independent
+policy `pr-browser-critical-v2` uses new variable `CI_PR_BROWSER_ROUTING=enabled`.
+The former `CI_PR_SUITE_ROUTING` cannot activate it: legacy prose/Node-reduction
+approval must not silently activate a different assurance contract. Agents never
+create, change or delete repository variables or settings.
 
-GitHub expression equality is case-insensitive. `Enabled`, `ENABLED` and other
-case variants therefore admit one short planning job, but a case-sensitive raw
-shell check returns **full** before invoking the selector. The work shells and
-aggregate also enforce the exact lowercase value before fast coverage can pass.
-This is an overhead exception only: case variants never activate reduced
-assurance. Missing/ordinary off values and every non-PR event add no executed job.
+## Coverage and Required Context
 
-## Exact Required-Context Contract
+Workflow `CI` remains at `.github/workflows/ci.yml`. Protected result
+**Typecheck, Test & Sidecar Bundle** retains these event-specific meanings:
 
-The workflow remains `CI` at `.github/workflows/ci.yml`. The single protected
-context remains **Typecheck, Test & Sidecar Bundle**. No ruleset, required-check
-name, write permission or queue-coverage change is proposed.
-
-| Event | Switch Off | Switch Enabled |
+| Event | Default/Off | Exact Enabled Value |
 | --- | --- | --- |
-| Draft PR: Opened, Synchronize, Reopened | No work or required aggregator | Same |
-| Ready PR: Opened, Synchronize, Reopened, Ready for Review | Complete current required coverage | Trusted plan; only validated allowlisted prose can reduce Node/Chromium |
-| Ready for Review with Stale Draft Payload | Complete current required coverage | Same routing as other ready events |
-| Merge Group | Complete current required coverage | Complete current required coverage; no routing job is admitted |
-| Main Push | Complete current required coverage | Same |
-| Manual Workflow Dispatch | Complete current required coverage | Same, including branch diagnostics |
-| Reusable Rolling Validation | Complete current required coverage on its immutable target | Same |
+| Draft PR | Existing draft exclusion | Same |
+| Ready PR, Including Stale Draft Payload on Ready Event | Complete coverage | Critical Chromium files plus every added/modified browser spec, or full fallback |
+| Merge Group | Complete regression | Same; PR routing is never admitted |
+| Main Push or Reusable Rolling Validation | Complete regression | Same |
+| Ordinary Manual Dispatch | Complete regression | Same |
+| Benchmark Caller Dispatch | Isolated browser simulation | All results prefixed; no exact protected name |
+| Direct CI Dispatch With Benchmark Flag | Unsafe for PR-head status isolation | Fails protected result explicitly; use caller instead |
 
-The full contract is unchanged: every discovered Node test, all five disjoint
-development Chromium projects, production build/smoke on shard 1, complete
-configured WebKit, Windows scope/conditional baseline comparison, all package
-typechecks and bundles, provisioned Node/pnpm engine boundaries, and both
-delegated Linux containment checks. The existing intentional Windows comparison
-skip remains inside its reusable workflow; the caller must still succeed.
+Every PR retains all three full Node shards, typecheck, engine boundaries,
+web/control-plane/runner bundles, delegated Linux containment/recovery, Platform
+Isolation, full WebKit, Windows change detection and conditional comparison.
+Only development Chromium shrinks. Shard 1 retains production build/smoke.
+The disabled fast-only merge-group gate and legacy selector are unchanged;
+this campaign does not authorize activation. Full queue regression remains the
+premerge integration gate.
 
-An activated PR acquires a required `PR Suite Routing` job. It checks out the
-event's immutable base SHA with credentials persistence disabled, computes
-#3629's selection from Git objects, and verifies the tested CI workflow blob
-equals that trusted base workflow blob. It never checks out, imports or executes
-PR code to select coverage. PR edits to policy, tests, scripts, config or workflow
-select full. A workflow edit cannot qualify for reduced assurance. The workflow
-itself still uses GitHub's ordinary PR delivery and existing review protections;
-this is not a new security boundary against an author rewriting the workflow
-to bypass checks altogether. There is no `pull_request_target` execution or
-status-writing token.
+## Reviewed Critical Manifest
 
-`full`, `affected`, unknown and high-risk selections run the complete existing
-contract. Today's affected closure already contains every portable Node and
-Chromium test; retaining privileged/platform coverage is deliberately more
-conservative than that candidate group definition. **Only `fast` selection with
-validated context and no fallback/risk reasons reduces work.** PR routing now uses `ci-suite-policy-v1-1.mjs` through the separately versioned
-`fast-required-v1.1` selector. Its prose allowlist is empty: no current diff
-qualifies for prose-fast. The evidence document
-`docs/ci-suite-evidence-2026-10-23.md` has a readiness test consumer and requires
-full coverage. Historical v1 shadow records retain their original contract.
-This does not claim an app-source latency improvement.
+`scripts/ci-pr-browser-policy.mjs` owns seven complete critical files:
 
-The fast route changes exactly these two parts:
+| File | Reason |
+| --- | --- |
+| authentication-recovery.spec.ts | Authentication recovery |
+| new-session-choices.spec.ts | Session creation |
+| request-surfaces.spec.ts | Approval/decision surfaces |
+| issue-closure.spec.ts | Issue closure/campaign boundary |
+| conversation-handoff.spec.ts | Conversation continuity |
+| automation-triggers.spec.ts | Recorded UTC trigger regression #3617 |
+| command-inbox-projects.spec.ts | Recorded Composer Escape regression #3517 |
 
-- Node runs #3629's `node-fast` group: #3627's 22 protocol files plus authentication,
-  recovery API and real-server runner-channel tests (25 files at introduction).
-- One Chromium job runs the five complete critical files: authentication recovery,
-  new-session choices, request surfaces, issue closure and conversation handoff.
-  The existing unpartitioned config preserves file fixtures, one worker, retries
-  and fail-on-flaky semantics. That job also runs all shard-1 production work.
+The original five remain; additions follow committed regression exercises in
+`scripts/fixtures/ci-suite-regressions.json`. Runner-channel regression #2601
+remains covered by full Node testing. This is a reviewed risk tradeoff, not proof
+of complete browser behavior. Deferred journeys remain mandatory in the queue.
+Manifest changes require a reviewed version change and measurement.
 
-All engine, Linux containment, Windows, WebKit, typecheck and bundle coverage
-still runs. Deferred Node/development Chromium files remain required in the
-complete merge-group integration. PR success therefore means the selected PR
-contract passed; merge-group success continues to mean full combined-integration
-coverage passed. A PR result never substitutes for queue validation.
+## Trusted Selection and Failure Behavior
 
-## Failure and Cancellation Contract
+The optional PR plan checks out immutable base with non-persisted credentials,
+reads tested Git objects without importing tested policy, verifies base/head
+ancestry in the tested merge, and requires identical base/tested workflow blobs.
+Every critical file and each added/modified browser spec is selected. Ordinary
+web/control-plane/runner source qualifies, including auth, sessions, hub, database,
+store and execution paths. Node tests, docs, CSS and assets qualify too. Shared
+helpers/fixtures/harnesses/test-support, Playwright config and inventory wiring,
+routing/CI scripts, workflows, toolchain config, lockfiles and manifests require
+full. Shared package implementation and other unknown paths also stay full.
+Browser-spec deletions/renames, uncertain statuses, missing base, incomplete diff
+and missing critical/changed inventory stay full. Ordinary source/docs deletions
+can qualify; Git renames are conservatively represented as delete plus add.
 
-The plan job has a five-minute bound. Setup failure, job timeout or cancellation
-fails the required aggregate when routing is enabled. Git-fetch or selector
-unavailability is an explicit successful **full** fallback, not an empty plan.
-Missing/malformed selection, missing mandatory inventory, uncertain diff or
-context, deleted/renamed paths, security/approval/persistence/runner changes,
-cross-package edits and unknown paths all retain full coverage. The aggregator
-rejects an active plan's missing/unknown output even if every work job succeeds.
+V2 replaces the unshipped v1 proposal that selected full for all 100 recent PRs.
+The tradeoff is explicit: a browser regression outside the selected journeys can
+escape PR CI, then fail the complete merge-group browser suite and eject the PR
+from the queue. Full Node/typecheck/platform/WebKit coverage still runs on PRs.
+After activation, watch the fraction of merge-group attempts with browser failures,
+separately for routed PRs and full PRs. Record run/head, failing spec, prior PR
+coverage, retries and whether the same failure reproduces on main; distinguish
+new escaped regressions from existing flakes. Compare with the preactivation
+baseline and roll back if browser queue ejections increase materially.
 
-With a missing/ordinary off value or on a non-PR event, the plan must be explicitly
-`skipped` with no output. Case variants require successful planning and explicit
-`full` output; `fast` is rejected by the raw shell check. Any other result is
-rejected. This is the one newly expected job skip;
-work-job skips remain errors. With routing enabled, plan and all four existing
-work-job results must be `success`. Failed, missing, cancelled, unexpectedly
-skipped and unknown results cannot pass. Selection is a two-mode fixed command
-choice; neither PR metadata nor plan output supplies arbitrary commands/arguments.
+Execution independently validates selected canonical paths against live inventory
+and requires every critical file. Exact matches preserve whole files, serial
+fixtures, one worker, retries and fail-on-flaky semantics. JSON is an environment
+value, never executable shell interpolation or arbitrary CLI arguments.
 
-Checks/browser depend only on optional routing and use an explicit status
-function so disabled routing's skip does not suppress full work. Windows/WebKit
-remain independent. The aggregator retains its exact PR-only `!cancelled()` and
-draft/ready condition, unconditional non-PR failure reporting, and five-minute
-budget. Workflow name/path, per-head PR concurrency, no in-progress PR
-cancellation, stale-head superseding, rerun admission and merge-group replacement
-are unchanged. The advisory selection job stays advisory. Release/rolling
-supervision continues to inspect the same complete non-PR job/step identities.
+Only exact lowercase `enabled` reduces coverage. Case-insensitive GitHub equality
+can admit planning for `Enabled`, but the raw shell selects full and aggregation
+rejects reduction. Default/off adds no executed plan. Failed/cancelled/skipped
+planning cannot shrink the matrix. Active planning must succeed with explicit
+full/fast mode; every work dependency must succeed. Missing, cancelled, unexpected
+skips and unknown outcomes fail. Setup/timeouts remain failures; unavailable
+Git/selection explicitly selects full. Existing draft/ready admission, duplicate
+head safety, PR cancellation, stale-head superseding, reruns, queue replacement
+and read-only permissions remain. `fast` means browser selection, never fewer
+Node tests on a PR.
 
-## Full PR Diagnostic and Rollback
+## Full Diagnostics and Isolated Measurement
 
-An author can run the existing manual full workflow on the pushed PR branch:
+Authors/maintainers can run complete CI regardless of routing:
 
 ```sh
-gh workflow run ci.yml --repo picoduck/wollipog --ref <pushed-pr-branch>
+gh workflow run ci.yml --repo picoduck/wollipog --ref <branch>
 ```
 
-Dispatch has no reduced-suite input and ignores the routing variable. Inspect its
-tested SHA: this diagnoses the branch head, while ordinary PR CI tests GitHub's
-PR merge commit. It does not replace exact-head required PR/queue verification.
-The existing synthetic-artifact probe remains opt-in, default false, and full.
-Do not dispatch extra runs for measurement or during a prohibited CI window.
-
-**Rollback:** the authorized human/operator deletes `CI_PR_SUITE_ROUTING` or sets
-it to any value other than exactly `enabled`. Start a **new PR CI run**, for example
-with a new push, to establish full rollback coverage. Re-running failed jobs
-retains the earlier successful plan/output and selected matrix. It cannot expand
-a prior one-job fast matrix into five full shards; the aggregate rejects this
-stale plan after rollback rather than passing partial coverage. A re-run-all-jobs
-attempt counts as full evidence only after verifying a skipped plan, all five
-full Chromium shards and the full Node command. If expansion is retained, use a
-new PR event. Do not infer what an in-flight run saw during a variable change.
-No workflow/ruleset/check-name migration is needed. Normal reruns under an
-unchanged switch retain the existing workflow behavior.
-
-Before activation, put this exact assurance contract in the implementing PR,
-request the campaign's typed `implementation_question`, and obtain the human's
-activation decision through the Orchestrator. Merge approval does not authorize
-the variable write. Record the approved revision, actor and UTC activation time
-before an authorized operator changes it. Read the variable back afterward.
-
-## Job Count and Runner-Minute Accounting
-
-Missing/ordinary off routing adds **zero executed jobs**: the optional plan is skipped; the
-existing full work jobs and advisory shadow are unchanged. A full PR has five
-Chromium jobs. An activated fast PR replaces these with one and adds one routing
-job: **net three fewer executed jobs** (four browser jobs removed, one plan added).
-An activated full-fallback PR adds one routing job, with no removed work jobs.
-Case-variant off values add one planning job but remove no full work. Merge
-groups/main/manual/reusable validation add zero executed jobs for every value.
-
-The plan's five-minute timeout bounds its execution after runner admission;
-checkout/network/setup failure still blocks the active PR. Its actual elapsed
-runner-minute cost is unmeasured until activation. The fast-route delta is:
-
-`routing minutes + fast Node/checks minutes - full Node/checks minutes
-+ one critical/production browser job minutes - five full browser job minutes`.
-
-Windows, WebKit, required aggregation and advisory shadow still contribute their
-actual elapsed minutes; their queueing can also change. File-count reduction or
-separately timed local phases cannot establish this delta, billing savings or
-feedback speedup. No natural fast PR has been executed by this implementation.
-
-## Measurement and Remaining Work
-
-Use the existing `merge-queue-wait-report.mjs`, reporters and October 22 baseline.
-The [pre-change evidence](ci-pr-assurance-baseline-2026-10-24.md) records the
-baseline window, outcome denominators and limits. Collect post-activation
-**natural** traffic with explicit UTC bounds, then compare offline:
+Verify tested SHA. Dispatch tests branch head; PR CI tests GitHub's merge commit.
+A diagnostic cannot replace required PR/queue checks. Before merge, explicitly
+simulate the reduced lane on a feature branch without repository variables:
 
 ```sh
-# Read-only collection; provision the existing GitHub credential as documented in merge-queue-wait.md.
-node scripts/merge-queue-wait-report.mjs --repo picoduck/wollipog --all-events \
-  --since <activation-or-later-UTC> --until <exclusive-UTC> --json > /tmp/post.json
-node scripts/merge-queue-wait-report.mjs --input /tmp/post.json \
-  --baseline docs/ci-baseline-2026-10-22.json --json > /tmp/comparison.json
+gh workflow run ci-pr-browser-benchmark.yml --repo picoduck/wollipog --ref <branch>
 ```
 
-The comparison reuses deduplicated raw attempt records, requires ordered,
-nonoverlapping windows for the same repository, rejects repeated attempts,
-and keeps first attempts/reruns and passing/failing/cancelled/skipped outcomes
-separate. It reports passing PR feedback and merge-group required-result latency,
-all-state cancellations, measured elapsed runner minutes, and merged queue-entry
-to merge latency. Truncation and missing timing remain explicit. It does not
-claim causal speedup, billing cost, selection certification or activation approval.
-The existing bounded log collector can include the routing/selection job to
-retain exact policy/suite/tested identities; compare compatible cohorts, and
-keep fast, affected/full, rollback and infrastructure interruptions distinct.
+This separate dispatch-only, read-only caller invokes reusable CI with
+`browser_benchmark: true` and `target_sha: github.sha`. Its job name prefixes every
+callee result: **Browser Benchmark / PR Browser Benchmark Result** and
+**Browser Benchmark / Typecheck, Test & Sidecar Bundle**. No exact protected context
+is created, even when a diagnostic finishes after PR CI on the same SHA. The
+caller and callee have different concurrency groups; benchmark dispatches do not
+cancel each other in progress.
 
-**Remaining:** human activation approval/operator action; natural post-activation
-PR/queue observations; compatible before/after feedback, queue, cancellation and
-runner-minute comparison; and #3629's independent shadow evidence/certification
-requirements. Do not manufacture traffic or hold the campaign ready slot for it.
+The reusable benchmark input defaults to false; ordinary rolling validation never
+sets it and retains complete coverage. The same event/input guard controls reduced
+matrix and benchmark result admission. Direct `ci.yml` dispatch with the flag
+still deliberately fails its literal protected check, even when every work job
+passes. Never run that direct mode on a PR head: a later failed result can replace
+its successful protected result. Skipping the job is unsafe too, because GitHub
+counts a skipped check as passing. PR/merge-group events cannot exploit the flag.
+Benchmark success means the separate diagnostic result passed; the overall run
+is expected to fail because the protected sentinel (prefixed in the caller) fails.
+Ordinary dispatch without the flag stays full. The
+simulation runs critical files, full Node/check/platform work, WebKit, Windows
+and production smoke. It represents critical-only PR work, not arbitrary changed
+specs or live planning latency. At most four additional runs per PR are authorized.
+
+GitHub requires a dispatch workflow path on the default branch. The campaign
+therefore keeps one complete premerge sample from the earlier isolated marker,
+then dispatches this registered caller on main after merge for up to two more
+samples within the four-dispatch budget. Verify observed prefixed result names,
+caller/tested SHA and per-attempt timings, and post repeat results on #3630.
+No temporary caller adapter or repository-setting change is authorized.
+
+A `ci:full-browser` label trigger was evaluated but is not implemented. Existing
+same-head PR runs never cancel one another: an older reduced run could report the
+same protected context after a label-triggered full run, and removing the label
+or rerunning stale payloads would add ambiguity. Safely pinning author opt-in to
+the latest intent needs a separate superseding contract. Use ordinary full
+workflow_dispatch for diagnostics; there is no pull_request_target or expanded
+token permission.
+
+Record run/job IDs, SHA and UTC half-open window. Compare with a recent natural
+full PR; report result latency, critical job/step, elapsed runner-minutes, runner
+wait, test execution and separate unmeasured timestamp conflicts. Never impute
+zero wait, subtract assumed offsets or translate elapsed minutes into billing
+dollars. Name Node/WebKit/platform bottlenecks even if 15 minutes is missed.
+Natural post-activation PR/queue/cancellation evidence remains required by #3630.
+
+## Owner Activation and Rollback
+
+After merge, exact assurance approval and v1.1 shadow compatibility:
+
+```sh
+# Owner only; never execute from this implementation session.
+gh variable set CI_PR_BROWSER_ROUTING --repo picoduck/wollipog --body enabled
+gh variable get CI_PR_BROWSER_ROUTING --repo picoduck/wollipog
+```
+
+Record revision, actor and UTC activation. A new ordinary source PR event must
+prove successful routing, all full Node shards, selected Chromium plus production,
+WebKit/Windows/platform work and the protected result. A workflow/helper edit
+must prove all Chromium shards. Queue integration must remain complete.
+
+Rollback restores full PR testing:
+
+```sh
+# Owner only.
+gh variable set CI_PR_BROWSER_ROUTING --repo picoduck/wollipog --body disabled
+gh variable get CI_PR_BROWSER_ROUTING --repo picoduck/wollipog
+```
+
+Use a new PR event: verify skipped planning, all five full Chromium shards, all
+full Node shards and successful protected result. Failed-jobs reruns can retain
+an earlier plan/matrix and cannot prove rollback. In-flight observations do not
+prove later settings. No ruleset migration is needed.
+
+## Coordinated Shadow Compatibility and Measurement Status
+
+After #4046/#4148 merged, the deferred compatibility was integrated: advisory
+shadow emission now uses v1.1, and collector/report accept both historical v1 and
+v1.1 without changing cohort identities. PR-browser routing evidence uses its
+own `ci-pr-browser-v1` marker and `browserSelections` collection, with hashed file
+identities, bounded counts and exact run/attempt/context metadata. It is never
+reinterpreted as a suite-shadow certificate; all these projections retain
+`certification: none`. Historical v1 records never certify v1.1 or this policy.
+
+See [applicability and baseline measurements](ci-pr-browser-measurements-2026-11-04.md).
+One premerge synthetic sample completed in 14.33 minutes, versus a 33.32-minute
+natural full-PR baseline, with the limitations recorded in the linked report.
+This establishes neither natural PR latency nor a distribution or billing saving.
+Repeat caller sampling follows implementation merge; post-activation natural PR
+and queue measurements remain afterward. Activation still requires the owner.

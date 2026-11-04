@@ -21,7 +21,7 @@ test("cutover or explicit rollback retains PR, merge-group, manual and reusable 
   assert.match(events, /^  workflow_call:\n/m);
   assert.match(events, /^  workflow_dispatch:\n/m);
   assert.match(events, /pull_request:\n    types: \[opened, synchronize, reopened, ready_for_review\]/);
-  assert.match(actualWorkflow, /name: Typecheck, Test & Sidecar Bundle/);
+  assert.match(actualWorkflow, /name: .*Typecheck, Test & Sidecar Bundle/);
   const controller = readFileSync(new URL("../.github/workflows/main-rolling-controller.yml", import.meta.url), "utf8");
   assert.match(controller, /on:\n  push:\n    branches: \[main\]/);
 });

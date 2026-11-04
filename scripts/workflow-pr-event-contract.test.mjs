@@ -64,7 +64,11 @@ function workflowContract(path) {
       return false;
     }
     if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "suite_plan:") {
-      assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
+      assert.equal(match[1].trim(), "github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && (github.event.action == 'ready_for_review' || github.event.pull_request.draft == false)");
+      return false;
+    }
+    if (path === ".github/workflows/ci.yml" && jobIds[index].trim() === "benchmark_check:") {
+      assert.equal(match[1].trim(), "${{ !cancelled() && github.event_name == 'workflow_dispatch' && inputs.browser_benchmark }}");
       return false;
     }
     return true;
@@ -253,7 +257,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     match[1],
     jobsText.slice(match.index, index + 1 < starts.length ? starts[index + 1].index : undefined),
   ]));
-  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "unit", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "check"], "CI jobs drifted");
+  assert.deepEqual(Object.keys(byId), ["suite_plan", "merge_group_gate", "checks", "unit", "delegated_pipeline", "browser", "win32", "webkit", "suite-shadow", "regression-admission-shadow", "benchmark_check", "check"], "CI jobs drifted");
   assert.match(byId["suite-shadow"], /^    continue-on-error: true$/m);
   assert.match(byId["suite-shadow"], /^    timeout-minutes: 5$/m);
   assert.doesNotMatch(byId["suite-shadow"], /^    needs:/m);
@@ -284,18 +288,22 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // expectation by hand, which is the reviewable act the guard exists to force.
   // Assert the exact new routing text before normalising to the established full shard shape.
   // workflow-ci-routing.test.mjs executes these same expressions and both actual shell branches.
-  const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
+  const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
   const groupFastExpression = "${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}";
-  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_SUITE_ROUTING == 'enabled' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}";
   const critical = "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts";
   const routedRun = [
-    "          ROUTING_SWITCH: ${{ vars.CI_PR_SUITE_ROUTING }}",
+    "          ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}",
     `          PR_FAST: ${fastExpression}`,
+    "          PR_BROWSER_FILES: ${{ needs.suite_plan.outputs.files }}",
+    "          BROWSER_BENCHMARK: ${{ github.event_name == 'workflow_dispatch' && inputs.browser_benchmark && 'true' || 'false' }}",
     "          GATE_SWITCH: ${{ vars.CI_MERGE_GROUP_GATE }}",
     `          GROUP_FAST: ${groupFastExpression}`,
     "        run: |",
-    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
-    critical,
+    '          if [ "$BROWSER_BENCHMARK" = true ]; then',
+    '            PR_BROWSER_FILES="$BENCHMARK_BROWSER_FILES" pnpm test:e2e --config playwright.pr.config.ts',
+    '          elif [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
+    "            pnpm test:e2e --config playwright.pr.config.ts",
     '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
     critical,
     "          else",
@@ -384,21 +392,18 @@ test("the required CI check aggregates parallel jobs that each own a time budget
     "      - name: Unit Tests",
     "        timeout-minutes: 18",
     "        env:",
-    `          ROUTING_SWITCH: \${{ vars.CI_PR_SUITE_ROUTING }}`,
-    `          PR_FAST: ${fastExpression}`,
     `          GATE_SWITCH: \${{ vars.CI_MERGE_GROUP_GATE }}`,
     `          GROUP_FAST: ${groupFastExpression}`,
     "        run: |",
-    '          if [ "$PR_FAST" = true ] && [ "$ROUTING_SWITCH" = enabled ]; then',
-    `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
-    '          elif [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
+    '          if [ "$GROUP_FAST" = true ] && [ "$GATE_SWITCH" = enabled ]; then',
     `            node scripts/test-suites.mjs --node-only --groups node-fast --ci ${shardArg}`,
     "          else",
     `            pnpm test:ci ${shardArg}`,
     "          fi",
   ].join("\n")), "unit: the Unit Tests step must be the job's last step, exactly as reviewed, and its denominator must equal the shard list");
 
-  assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the required context is the aggregator");
+  assert.match(byId.check, /^    name: Typecheck, Test & Sidecar Bundle$/m, "the protected context must always be a static literal");
+  assert.match(byId.benchmark_check, /^    name: PR Browser Benchmark Result$/m, "benchmark result has its own static name");
   assert.match(byId.check, /^    needs: \[checks, unit, browser, win32, webkit, delegated_pipeline, suite_plan, merge_group_gate\]$/m, "the aggregator must wait for every work job");
   assert.match(byId.check, /^    if: \$\{\{ \(github\.event_name != 'pull_request' \|\| !cancelled\(\)\) && \(/m,
     "active dependency failures must report; cancellation admission changes only for PR runs");
@@ -693,7 +698,11 @@ test("Playwright system package caches pin exact keys, optional failures and ver
     const first = steps.findIndex((step) => step.startsWith(`${names[0]}\n`));
     assert.ok(first >= 0);
     assert.deepEqual(steps.slice(first, first + names.length).map((step) => step.split("\n")[0]), names);
-    assert.equal(steps[first + names.length].split("\n")[0], suite,
+    const afterSetup = first + names.length;
+    if (browser === "chromium") {
+      assert.match(steps[afterSetup], /^Prepare Benchmark Browser Selection\n        if: github.event_name == 'workflow_dispatch' && inputs.browser_benchmark\n        run: node scripts\/ci-pr-browser-benchmark.mjs$/);
+    }
+    assert.equal(steps[afterSetup + (browser === "chromium" ? 1 : 0)].split("\n")[0], suite,
       "cache phases and real browser launch must finish before tests");
     const expected = [
       [names[0], `        id: ${id}-resolve`, "        continue-on-error: true", "        timeout-minutes: 2",

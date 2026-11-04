@@ -16,10 +16,26 @@ GitHub's case-insensitive expression matching admits a plan for case variants of
 fast aggregate. The absent/ordinary off state still adds no executed jobs.
 
 Full coverage remains five browser shards on every event while routing is off,
-and always on main, manual dispatch and reusable rolling validation. Merge groups
+and always on main, ordinary manual dispatch and reusable rolling validation. Merge groups
 stay full unless the disabled merge-group gate below is separately activated.
-Only an activated, trusted allowlisted prose fast PR uses one critical Chromium
-job and the fast Node group. All other coverage stays mandatory. Checks/browser
+Only an activated, trusted `CI_PR_BROWSER_ROUTING` plan uses critical-plus-changed
+Chromium files in one job. All PR Node shards execute the full suite.
+The former `CI_PR_SUITE_ROUTING` variable no longer controls PR coverage.
+The protected job name is always the static literal `Typecheck, Test & Sidecar Bundle`,
+including before GitHub starts it. An explicit dispatch-only `browser_benchmark`
+input simulates critical-only work under
+the separate `benchmark_check` job, whose static name is `PR Browser Benchmark Result`.
+That job requires success from all six work dependencies. The protected aggregator
+executes and deliberately fails in this mode: a skipped check would count as
+passing under [GitHub protection](https://docs.github.com/en/pull-requests/reference/status-checks).
+Use the separate dispatch-only `ci-pr-browser-benchmark.yml` caller, whose
+`Browser Benchmark` job prefixes every reusable result. It creates no check with
+the exact protected name, so its intentional sentinel failure cannot replace a
+PR result. Direct CI dispatch with the flag remains fail-closed and must not be
+used on a PR head. The overall benchmark workflow is expected to fail; only its
+prefixed diagnostic result describes success. The reusable input defaults to false
+and rolling callers omit it. PR/merge-group events cannot consume this input.
+All other coverage stays mandatory. Checks/browser
 wait for optional routing and use `!cancelled()` plus the same draft guard so an
 expected disabled plan skip cannot skip full work. WebKit/Windows stay independent.
 
@@ -32,7 +48,9 @@ skipped dependencies. A dependency's `needs.<job>.result` is inspected separatel
 by the aggregator shell while the PR workflow remains active. Whole-workflow
 cancellation permits the PR aggregator to be cancelled with its obsolete run.
 The cancellation term is `(github.event_name != 'pull_request' || !cancelled())`:
-non-PR runs retain unconditional aggregation, including after cancellation.
+non-PR full runs retain unconditional aggregation, including after cancellation.
+The benchmark's protected aggregate fails explicitly even when every work job
+passes. Its independent diagnostic aggregate uses `!cancelled()`.
 This preserves merge-group and reusable rolling-main failure-reporting behavior
 instead of extending the PR cancellation change to those events.
 
@@ -60,8 +78,8 @@ build after every test had passed, and a cancelled job names no step. The work i
 
 Coverage is unchanged: each shard runs the same discovery and plan as `pnpm test:ci`, and
 `scripts/node-test-plan.test.mjs` proves the shards are disjoint and their union is the
-plan, for every suite and shard count. The PR fast path and the disabled merge-group gate
-shard their `node-fast` selection the same way. The `unit` job uses the same guard and
+plan, for every suite and shard count. Only the disabled merge-group gate retains
+a sharded `node-fast` selection; every PR runs full Node testing. The `unit` job uses the same guard and
 `needs` as `checks`, and the aggregator requires `needs.unit.result` to be `success`: one
 failed, cancelled or skipped shard fails the required check under the name **Unit Tests**.
 Main-push validation reuses this workflow, so the rolling inventory, release
@@ -134,7 +152,7 @@ post-merge traffic; do not manufacture runs or cancellations to measure this cha
 ## Disabled Merge-Group Gate
 
 Refs #3637 under #3625. **Nothing is activated.** Today every merge group runs full
-regression; `CI_PR_SUITE_ROUTING` only ever reduces ready pull-request runs. The
+regression; `CI_PR_BROWSER_ROUTING` only reduces ready pull-request browser runs. The
 merge-group gate is prepared, inert machinery for a later, separately approved cutover.
 
 | Repository Variable `CI_MERGE_GROUP_GATE` | Behavior |
@@ -161,7 +179,7 @@ when **all** of these hold:
    A group that does not descend from current main, and every affected, full,
    high-risk or uncertain selection, stays full.
 
-A `fast` decision applies exactly the PR fast reduction: the `node-fast` group and one
+A `fast` decision retains the historical gate reduction: the `node-fast` group and one
 critical Chromium leg. Typecheck, engine boundaries, delegated containment, bundles,
 production smoke, WebKit and Windows comparison stay mandatory. The gate job records
 the decision as job-level evidence: exactly one of **Record Full Merge Group Coverage**
