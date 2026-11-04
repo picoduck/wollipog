@@ -78,6 +78,8 @@ export async function probePiRpc(
     cwd?: string;
     timeoutMs?: number;
     env?: Record<string, string>;
+    /** Empty probe state still proves installation/RPC compatibility, never authentication. */
+    installationOnly?: boolean;
     spawn?: typeof spawnAgent;
     kill?: typeof killTree;
   } & CodexProbeObserver = {},
@@ -220,10 +222,10 @@ export async function probePiRpc(
     };
     if (!models.length) {
       return {
-        available: false,
-        authStatus: "unauthenticated",
+        available: options.installationOnly === true,
+        authStatus: options.installationOnly ? "unknown" : "unauthenticated",
         capabilities,
-        unavailableReason: "Pi is installed, but it reported no authenticated models. Run `pi` and configure a provider account.",
+        unavailableReason: options.installationOnly ? undefined : "Pi is installed, but it reported no authenticated models. Run `pi` and configure a provider account.",
       };
     }
     return {

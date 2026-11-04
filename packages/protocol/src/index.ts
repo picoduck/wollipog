@@ -853,7 +853,8 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      question, including the v281 owner-decision route). The field is sent only to a v282 runner;
 //      older runners keep the fixed person-worded text and the separate notices. A person's
 //      dismissal or decline never carries it.
-export const PROTOCOL_VERSION = 282;
+// 283: distinguish explicit-account availability from effective-default readiness (#4078).
+export const PROTOCOL_VERSION = 283;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1133,6 +1134,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   providerProfiles: 225,
   /** v270 runner paces regenerable reconnect snapshots with FIFO processing acknowledgements. */
   runnerProcessingBarriers: 270,
+  /** Account-aware implicit launches; older peers receive conservative availability. */
+  providerAccountReadiness: 283,
   /** v226 runner launches typed, read-only review sessions (#3368); the session tools check the
    * same floor against the connected control plane. */
   reviewSession: 226,
@@ -3508,6 +3511,13 @@ export interface AgentDefinition {
   authStatus?: "authenticated" | "unauthenticated" | "unknown";
   /** Opaque runner-local account selected when a client omits an explicit account. */
   defaultProviderAccountId?: string;
+  /** Secret-free observations; aggregate availability may offer a ready explicit account while
+   * the unchanged implicit default is signed out. Never contains credential paths or values. */
+  providerAccountReadiness?: {
+    defaultAccountId?: string;
+    defaultAuthStatus: "authenticated" | "unauthenticated" | "unknown";
+    readyAccountIds: string[];
+  };
   /** Secret-free Codex billing boundary derived locally from configured auth or CLI account state. */
   codexBillingSource?: "api" | "provider_account";
   /** Runtime-negotiated ACP capabilities safe for presentation; absent for native/legacy agents. */
@@ -4299,7 +4309,7 @@ export interface HostAdminStatusView {
     harnessReadiness?: {
       connectedAt: number | null;
       refreshed: boolean;
-      agents: Array<{ id: string; available: boolean; ownershipBlocked: boolean }>;
+      agents: Array<{ id: string; available: boolean; installationAvailable?: boolean; ownershipBlocked: boolean }>;
       accounts?: Array<{ id: string; authStatus: ProviderAccountDefinition["authStatus"] }>;
     };
   }> };

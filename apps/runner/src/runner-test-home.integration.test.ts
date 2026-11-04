@@ -66,8 +66,8 @@ setTimeout(() => console.log("0.71.0"), 10000);
         const call = JSON.parse(line) as { home: string; codexHome?: string; claudeHome?: string; hasCredential: boolean };
         observedHomes.add(call.home);
         assert.notEqual(call.home, home, "the provider must receive the test runner's private HOME");
-        assert.equal(call.codexHome, undefined);
-        assert.equal(call.claudeHome, undefined);
+        assert.equal(call.codexHome, join(call.home, "codex"), "Codex state stays inside the private discovery HOME");
+        assert.equal(call.claudeHome, join(call.home, "claude"), "Claude state stays inside the private discovery HOME");
         assert.equal(call.hasCredential, false, "provider credentials must not reach a transport test runner");
       }
       assert.equal(observedHomes.size, file.startsWith("heartbeat") ? 2 : 1, "every real runner spawn must reach the synthetic probe");

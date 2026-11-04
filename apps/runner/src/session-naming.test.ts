@@ -90,6 +90,9 @@ test("provider eligibility requires verified authenticated native account surfac
     billingSource: "api",
   });
   assert.equal(sessionNamingAccountForAgent({ ...claudeAgent(), authStatus: "unknown" }), null);
+  assert.equal(sessionNamingAccountForAgent({ ...claudeAgent(), providerAccountReadiness: {
+    defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+  } }), null, "automatic naming does not silently use ready B instead of default A");
   assert.equal(sessionNamingAccountForAgent({
     ...codexAgent(),
     codexAppServer: { status: "unsupported", appServerAvailable: true },

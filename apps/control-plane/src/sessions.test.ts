@@ -9601,6 +9601,36 @@ test("ACP context fails closed against a pre-v38 runner instead of being silentl
   assert.equal(hub.sentToRunner.length, 0);
 });
 
+test("implicit launches reject signed-out A, explicit B and B-bound restarts preserve their accounts", async () => {
+  const { db, hub, svc } = makeHarness();
+  const metadata = runnerMeta();
+  metadata.providerAccounts = [
+    { id: "a", label: "A", provider: "claude", authStatus: "unauthenticated" },
+    { id: "b", label: "B", provider: "claude", authStatus: "authenticated" },
+  ];
+  metadata.agents = metadata.agents.map((agent) => agent.id === AGENT_ID ? { ...agent,
+    defaultProviderAccountId: "a", providerAccountReadiness: {
+      defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+    } } : agent);
+  db.registerRunner(metadata, Date.now(), PROTOCOL_VERSION);
+  const implicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.equal(implicit.status, 409);
+  assert.match(implicit.error ?? "", /default provider account is not ready/u);
+  assert.equal(hub.sentOfType("start_session").length, 0);
+  const explicit = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, providerAccountId: "b" });
+  assert.ok(explicit.ok && explicit.data, explicit.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "b");
+  svc.onSessionStatus(explicit.data.id, "stopped");
+  const restarted = await svc.restart(explicit.data.id);
+  assert.ok(restarted.ok, restarted.error);
+  assert.equal(hub.sentOfType("start_session").at(-1)?.spec.providerAccountId, "b");
+  db.setMachineProviderAccountDefault(RUNNER_ID, "claude", "b", 0, Date.now());
+  const saved = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
+  assert.ok(saved.ok && saved.data, saved.error);
+  assert.equal(saved.data.providerAccountId, "b");
+  assert.equal(db.getRunner(RUNNER_ID)?.agents.find((agent) => agent.id === AGENT_ID)?.defaultProviderAccountId, "a");
+});
+
 test("provider account selection is capability-gated, persisted, and sent on restart", async () => {
   const { db, hub, svc } = makeHarness();
   const accountMeta = runnerMeta();
@@ -9756,7 +9786,12 @@ test("a session without a chosen account never takes a profile only other contro
     { id: "theirs", label: "Theirs", provider: "claude", authStatus: "authenticated", profile: { id: "6f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "not_granted" } },
     { id: "ours", label: "Ours", provider: "claude", authStatus: "authenticated", profile: { id: "7f1c2d3e-4a5b-4c6d-8e7f-001122334455", access: "granted" } },
   ];
+  accountMeta.agents = accountMeta.agents.map((agent) => agent.id === AGENT_ID ? { ...agent,
+    providerAccountReadiness: { defaultAccountId: "ours", defaultAuthStatus: "authenticated", readyAccountIds: ["ours"] },
+  } : agent);
   db.registerRunner(accountMeta, Date.now(), PROTOCOL_VERSION);
+
+  assert.ok(db.getAgentLaunch(RUNNER_ID, AGENT_ID), "automatic admission agrees with direct creation's first granted account");
 
   const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID });
   assert.ok(created.ok && created.data, created.error);

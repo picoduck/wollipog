@@ -119,7 +119,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 282);
+  assert.equal(PROTOCOL_VERSION, 283);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -357,8 +357,8 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 282", () => {
-  assert.equal(PROTOCOL_VERSION, 282);
+test("PROTOCOL_VERSION is 283", () => {
+  assert.equal(PROTOCOL_VERSION, 283);
   // Full Control response text rides only on a runner that can carry it (#4063), which also has
   // the owner-decision tools its root guidance names.
   assert.equal(runnerSupportsProtocol(281, "fullControlResponseAttribution"), false);
@@ -387,6 +387,8 @@ test("PROTOCOL_VERSION is 282", () => {
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);
   assert.equal(runnerSupportsProtocol(270, "runnerProcessingBarriers"), true);
+  assert.equal(runnerSupportsProtocol(282, "providerAccountReadiness"), false);
+  assert.equal(runnerSupportsProtocol(283, "providerAccountReadiness"), true);
   assert.equal(runnerSupportsProtocol(268, "workflowDecisionWithdrawal"), false);
   assert.equal(runnerSupportsProtocol(269, "workflowDecisionWithdrawal"), true);
   assert.equal(runnerSupportsProtocol(267, "campaignFixedBy"), false);

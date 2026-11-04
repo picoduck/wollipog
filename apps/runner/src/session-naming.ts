@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -69,7 +70,7 @@ export interface SessionNamingAccount {
 }
 
 export function sessionNamingAccountForAgent(agent: AgentDefinition | undefined): SessionNamingAccount | null {
-  if (!agent || agent.available !== true || agent.authStatus !== "authenticated") return null;
+  if (!agent || !agentAvailableForImplicitLaunch(agent) || agent.authStatus !== "authenticated") return null;
   const driver = agent.driver ?? "acp";
   if ((driver === "codex" || driver === "codex-app-server") && agent.codexAppServer?.status === "supported" &&
       agent.codexAppServer.sessionNaming === true) {

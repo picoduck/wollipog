@@ -26,6 +26,7 @@ import {
   applyNativeClaudeGitBashReadiness,
   claudeCapabilitiesFromProbe,
   probeNativeClaudeCode,
+  parseClaudeAuthStatus,
   probeWslClaudeCode,
   resolveNativeClaudeGitBash,
   unavailableClaudeCode,
@@ -48,7 +49,10 @@ export interface ConfiguredAcpProbeOptions {
   platform?: NodeJS.Platform;
   /** Production admission holds the same credential-HOME lease as sessions. Missing admission
    * refuses execution; the ACP initialize contract cannot stop an executable writing its HOME. */
-  authorize?: (agent: AgentDefinition, env: Record<string, string>) => Promise<{ settle(proofs: Promise<boolean>[]): Promise<void> }>;
+  authorize?: (agent: AgentDefinition, env: Record<string, string>) => Promise<{ env?: Record<string, string>; settle(proofs: Promise<boolean>[]): Promise<void> }>;
+  /** Separately admit the selected account/default launch HOME. Contention here must not hide
+   * a successfully probed installation or label uninspected credentials as signed out. */
+  authorizeLaunchHome?: ConfiguredAcpProbeOptions["authorize"];
 }
 
 /** Verify an operator-configured ACP launch with the protocol's side-effect-free initialize call.
@@ -86,7 +90,7 @@ export async function probeConfiguredAcpAgent(
       command: agent.command,
       args: [...(agent.args ?? [])],
       cwd: options.cwd ?? process.cwd(),
-      env,
+      env: authorization.env ?? env,
       context,
       initializeOnly: true,
     }, {
@@ -175,6 +179,7 @@ export async function probeConfiguredPiAgents(
     probe?: typeof probePiRpc;
     discovered?: AgentDefinition[];
     authorize?: ConfiguredAcpProbeOptions["authorize"];
+    authorizeLaunchHome?: ConfiguredAcpProbeOptions["authorize"];
   } = {},
 ): Promise<AgentDefinition[]> {
   const pending = agents.filter((agent) => agent.driver === "pi");
@@ -223,14 +228,20 @@ export async function probeConfiguredPiAgents(
           continue;
         }
         if (!options.authorize) throw new Error("provider-HOME admission unavailable");
-        authorization = await options.authorize(launchAgent, env);
+        let launchHomeAdmitted = false;
+        if (options.authorizeLaunchHome) {
+          try { authorization = await options.authorizeLaunchHome(launchAgent, env); launchHomeAdmitted = true; }
+          catch { /* Retain installation capability without inspecting a busy launch HOME. */ }
+        }
+        authorization ??= await options.authorize(launchAgent, env);
         const result = await (options.probe ?? probePiRpc)(
           { command: launchAgent.command, args: [...(launchAgent.args ?? [])] },
           context,
           {
             ...(options.cwd ? { cwd: options.cwd } : {}),
             ...(options.timeoutMs ? { timeoutMs: options.timeoutMs } : {}),
-            env,
+            env: authorization.env ?? env,
+            installationOnly: !!options.authorizeLaunchHome && !launchHomeAdmitted,
             onProcess: (proof) => processes.push(proof),
           },
         );
@@ -239,11 +250,13 @@ export async function probeConfiguredPiAgents(
           command: launchAgent.command,
           args: [...(launchAgent.args ?? [])],
           env: {},
-          available: result.available,
-          authStatus: result.authStatus,
+          available: options.authorizeLaunchHome && !launchHomeAdmitted ? false : result.available,
+          authStatus: options.authorizeLaunchHome && !launchHomeAdmitted ? "unknown" : result.authStatus,
           capabilities: result.capabilities,
           piAgentControl: result.piAgentControl,
-          unavailableReason: result.unavailableReason,
+          unavailableReason: options.authorizeLaunchHome && !launchHomeAdmitted
+            ? "The launch account could not be inspected. Set up a managed profile or inspect its ownership details."
+            : result.unavailableReason,
         };
       } catch {
         results[index] = {
@@ -280,11 +293,13 @@ export function commandDirectoriesForDriver(
   return COMMAND_DIRS[driver] ?? [];
 }
 
-function nativeSlashCommands(driver: AgentDriverKind): AgentSlashCommand[] {
+function nativeSlashCommands(driver: AgentDriverKind, env: Record<string, string> = {}): AgentSlashCommand[] {
   const out: AgentSlashCommand[] = [];
   for (const { dir, source } of commandDirectoriesForDriver(driver)) {
     try {
-      for (const f of readdirSync(join(homedir(), dir))) {
+      const path = driver === "claude-code" && env.CLAUDE_CONFIG_DIR
+        ? join(env.CLAUDE_CONFIG_DIR, "commands") : join(env.HOME ?? homedir(), dir);
+      for (const f of readdirSync(path)) {
         if (f.endsWith(".md")) out.push({ name: f.slice(0, -3), source });
       }
     } catch {
@@ -389,7 +404,8 @@ function withoutConfiguredImageToolResults(agent: AgentDefinition): AgentDefinit
 function modelKey(a: AgentDefinition): string {
   const ctx = a.context ?? { kind: "native" as const };
   const contextKey = ctx.kind === "wsl" ? `wsl:${ctx.distro}` : "native";
-  return JSON.stringify([a.driver ?? "acp", contextKey, a.version ?? "unknown-version", a.command, ...(a.args ?? [])]);
+  return JSON.stringify([a.id, a.driver ?? "acp", contextKey, a.version ?? "unknown-version", a.source,
+    a.env.HOME, a.env.CODEX_HOME, a.env.CLAUDE_CONFIG_DIR, a.command, ...(a.args ?? [])]);
 }
 
 /**
@@ -400,7 +416,7 @@ function modelKey(a: AgentDefinition): string {
  */
 export async function enrichAgentModels(
   agents: AgentDefinition[],
-  options: { refresh?: boolean; authorize?: ConfiguredAcpProbeOptions["authorize"] } = {},
+  options: { refresh?: boolean; authorize?: ConfiguredAcpProbeOptions["authorize"]; authorizeLaunchHome?: ConfiguredAcpProbeOptions["authorize"]; resolveEnv?: (agent: AgentDefinition) => Record<string, string> } = {},
 ): Promise<AgentDefinition[]> {
   const pairs = new Map<string, AgentDefinition>();
   for (const agent of agents) pairs.set(modelKey(agent), agent);
@@ -412,8 +428,10 @@ export async function enrichAgentModels(
       const processes: Promise<boolean>[] = [];
       try {
         if (!options.authorize) return;
-        authorization = await options.authorize(agent, agent.env);
-        discoveries.set(key, await discoverAgentModels(agent, { ...options, onProcess: (proof) => processes.push(proof) }));
+        const env = options.resolveEnv?.(agent) ?? agent.env;
+        try { authorization = await options.authorizeLaunchHome?.(agent, env); } catch { /* Busy launch HOME: use isolated installation state. */ }
+        authorization ??= await options.authorize(agent, env);
+        discoveries.set(key, await discoverAgentModels({ ...agent, env: authorization.env ?? env }, { ...options, onProcess: (proof) => processes.push(proof) }));
       } catch { /* discovery cannot bypass another runner's HOME lease */ }
       finally { await authorization?.settle(processes); }
     }),
@@ -487,14 +505,13 @@ export function codexAgentDefinitions(
   slashCommands: AgentSlashCommand[],
 ): AgentDefinition[] {
   const supported = compatibility.status === "supported";
-  // An installed-but-signed-out Codex accepts a session and then fails every turn with an
-  // OpenAI 401 behind a reconnect loop, so it is not ready — mirror Claude, whose readiness
-  // already folds auth in. "unknown" stays selectable: only a confirmed missing login gates.
   const signedIn = base.authStatus !== "unauthenticated";
   return [{
     ...base,
     driver: "codex-app-server",
-    available: supported && signedIn,
+    // Keep installation capability visible while launch readiness follows the intended account.
+    // Add Account may use this installed CLI even when its current launch account is unavailable.
+    available: supported && signedIn && base.available !== false,
     // The host fix is named where the Machine's agents are listed, before any session exists.
     ...(compatibility.failure?.code === "codex_sandbox_unavailable" ? { unavailableReason: compatibility.failure.message } : {}),
     capabilities: verifiedCodexAppServerCapabilities(slashCommands, compatibility),
@@ -629,10 +646,13 @@ export function supportedWslAgentControlNodeRuntime(
   return Number.isInteger(major) && major >= 22 ? launch.command : undefined;
 }
 
-async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch, observer: CodexProbeObserver): Promise<{ version?: string; authStatus: AuthStatus }> {
+async function nativeProbe(k: KnownAgent, launch: ResolvedLaunch, observer: CodexProbeObserver & { env?: Record<string, string> }): Promise<{ version?: string; authStatus: AuthStatus }> {
   const v = await run(launch.command, [...launch.args, "--version"], { timeoutMs: 5000, trackDescendants: true, ...observer });
   const version = v.code === 0 ? parseVersion(v.stdout || v.stderr) : undefined;
-  const authStatus = k.authFile ? localAuthFileStatus(join(homedir(), k.authFile)) : "unknown";
+  const authFile = k.bin === "codex" && observer.env?.CODEX_HOME
+    ? join(observer.env.CODEX_HOME, "auth.json")
+    : k.authFile ? join(observer.env?.HOME ?? homedir(), k.authFile) : undefined;
+  const authStatus = authFile ? localAuthFileStatus(authFile) : "unknown";
   return { version, authStatus };
 }
 
@@ -676,7 +696,7 @@ export function localAuthFileStatus(path: string, stat: typeof statSync = statSy
 }
 
 /** Probe the native host + every WSL distro for known agent CLIs. */
-export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "authorize"> = {}): Promise<AgentDefinition[]> {
+export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "authorize" | "authorizeLaunchHome"> = {}): Promise<AgentDefinition[]> {
   // Probe in parallel, but publish in resolver order. A bare configured command must always
   // adopt the PATH-first installation even when its version/update probe finishes last.
   const nativeSlots: AgentDefinition[][][] = KNOWN.map(() => []);
@@ -711,10 +731,11 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
         return;
       }
       let authorization: Awaited<ReturnType<NonNullable<ConfiguredAcpProbeOptions["authorize"]>>> | undefined;
+      const probeAgent: AgentDefinition = { id: k.id, name: k.name, command: bin.launch.command,
+        args: bin.launch.args, driver: k.driver, env: {}, source: "discovered", context: { kind: "native" } };
       try {
       if (!options.authorize) throw new Error("provider-HOME admission unavailable");
-      authorization = await options.authorize({ id: k.id, name: k.name, command: bin.launch.command,
-        args: bin.launch.args, driver: k.driver, env: {}, context: { kind: "native" } }, {});
+      authorization = await options.authorize(probeAgent, {});
       } catch (error) {
         const id = index === 0 ? k.id : `${k.id}-installation-${suffix}`;
         const name = index === 0 ? k.name : `${k.name} (${bin.path})`;
@@ -734,22 +755,60 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
         return;
       }
       const processes: Promise<boolean>[] = [];
-      const observer: CodexProbeObserver = { onProcess: (proof) => processes.push(proof) };
+      const observer = { env: authorization.env, onProcess: (proof: Promise<boolean>) => processes.push(proof) };
       try {
       const gitBashPath = k.bin === "claude" ? await resolveNativeClaudeGitBash() : undefined;
-      const claudeCode = k.bin === "claude"
+      let claudeCode = k.bin === "claude"
         ? applyNativeClaudeGitBashReadiness(await probeNativeClaudeCode(bin.launch, bin.via, observer), gitBashPath)
         : undefined;
-      const { version, authStatus } = claudeCode
+      let { version, authStatus } = claudeCode
         ? { version: claudeCode.installedVersion, authStatus: claudeCode.auth.status }
         : await nativeProbe(k, bin.launch, observer);
       const codexAppServer = k.bin === "codex" ? await probeNativeCodexAppServer(bin.launch, version, observer) : undefined;
-      const piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "native" }, observer) : undefined;
+      let piRpc = k.bin === "pi" ? await probePiRpc(bin.launch, { kind: "native" }, { ...observer, installationOnly: true }) : undefined;
+      let commandEnv = authorization.env;
+      let launchHomeUnavailableReason: string | undefined;
+      if (options.authorizeLaunchHome) {
+        let launchAuthorization: typeof authorization | undefined = undefined;
+        const launchProcesses: Promise<boolean>[] = [];
+        try {
+          launchAuthorization = await options.authorizeLaunchHome(probeAgent, {});
+          const launchObserver = { env: launchAuthorization.env, onProcess: (proof: Promise<boolean>) => launchProcesses.push(proof) };
+          if (k.bin === "claude") {
+            const auth = parseClaudeAuthStatus(await run(bin.launch.command, [...bin.launch.args, "auth", "status"],
+              { ...launchObserver, timeoutMs: 5_000, trackDescendants: true }));
+            authStatus = auth.status;
+            if (claudeCode) {
+              const compatible = claudeCode.status === "ready" || claudeCode.status === "unauthenticated";
+              claudeCode = { ...claudeCode, auth,
+                ...(compatible ? { status: auth.status === "unauthenticated" ? "unauthenticated" as const : "ready" as const,
+                  failure: auth.status === "unauthenticated"
+                    ? { code: "unauthenticated" as const, message: "Claude Code is not signed in. Run `claude auth login`." }
+                    : undefined } : {}) };
+            }
+          } else if (k.bin === "codex") {
+            authStatus = (await nativeProbe(k, bin.launch, launchObserver)).authStatus;
+          } else if (k.bin === "pi") {
+            piRpc = await probePiRpc(bin.launch, { kind: "native" }, launchObserver);
+          }
+          commandEnv = launchAuthorization.env;
+        } catch (error) {
+          // Installation state proves no fact about an uninspected launch HOME's credentials.
+          authStatus = "unknown";
+          if (claudeCode && claudeCode.status === "unauthenticated") {
+            claudeCode = { ...claudeCode, status: "ready", auth: { status: "unknown", billingSource: "unknown" }, failure: undefined };
+          }
+          if (piRpc) piRpc = { ...piRpc, authStatus: "unknown" };
+          launchHomeUnavailableReason = error instanceof ProviderHomeLeaseError
+            ? `The launch account could not be inspected. ${error.message}`
+            : "The launch account could not be inspected. Set up a managed profile or inspect its ownership details.";
+        } finally { await launchAuthorization?.settle(launchProcesses); }
+      }
       const update = launchTargetStillMatches(bin.launch, { kind: "native" }, installation.targetIdentity)
         ? await checkHarnessUpdate(k.bin as "claude" | "codex" | "pi", bin, { kind: "native" }, version,
           k.bin === "codex" ? codexAppServer?.status === "supported" : k.bin === "claude" ? claudeCode?.status === "ready" : piRpc?.available === true, observer)
         : undefined;
-      const slashCommands = nativeSlashCommands(k.driver);
+      const slashCommands = nativeSlashCommands(k.driver, commandEnv);
       const catalogCapabilities = withSlashCommands(k.driver, slashCommands);
       const base: AgentDefinition = {
         id: index === 0 ? k.id : `${k.id}-installation-${suffix}`,
@@ -766,9 +825,9 @@ export async function discoverAgents(options: Pick<ConfiguredAcpProbeOptions, "a
         context: { kind: "native" },
         version,
         update,
-        available: piRpc ? piRpc.available : claudeCode ? claudeCode.status === "ready" : true,
+        available: !launchHomeUnavailableReason && (piRpc ? piRpc.available : claudeCode ? claudeCode.status === "ready" : true),
         authStatus: piRpc?.authStatus ?? authStatus,
-        unavailableReason: piRpc?.unavailableReason,
+        unavailableReason: launchHomeUnavailableReason ?? piRpc?.unavailableReason,
         capabilities: piRpc?.capabilities ?? (claudeCode && catalogCapabilities
           ? claudeCapabilitiesFromProbe(catalogCapabilities, claudeCode)
           : catalogCapabilities),

@@ -73,6 +73,18 @@ test("SSH replacement requires fresh discovery, reports regressions, and recover
   db.updateRunnerAgents("runner", [agent], 13);
   orchestrator.onRunnerAgentsUpdated("runner");
   assert.notEqual(db.getBox("box-0123abcd")?.status, "online", "an offline inventory cannot clear a readiness failure");
+  // A healthy installation with a busy launch account is separate from a broken executable.
+  const installed: AgentDefinition = { ...agent, driver: "codex-app-server",
+    codexAppServer: { status: "supported", appServerAvailable: true } };
+  db.updateRunnerAgents("runner", [installed], 20, undefined, [account]);
+  internal.launch(db.getBoxConfig("box-0123abcd"), rt, 0, "credential-file", null, "runner");
+  db.registerRunner({ ...metadata, agents: [installed], providerAccounts: [account] }, 21, PROTOCOL_VERSION);
+  orchestrator.onRunnerRegistered("runner", "current");
+  db.updateRunnerAgents("runner", [{ ...installed, available: false, authStatus: "unknown",
+    unavailableReason: "The launch account could not be inspected. Another runner is using it." }], 22, undefined, [account]);
+  orchestrator.onRunnerAgentsUpdated("runner");
+  assert.equal(db.getBox("box-0123abcd")?.status, "online", "account contention must not turn a healthy SSH reconnect into a Machine failure");
+  assert.equal(db.getBox("box-0123abcd")?.lastError, null);
 });
 
 test("SSH stop closes stdin and waits for remote drain acknowledgement", async t => {

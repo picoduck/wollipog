@@ -273,6 +273,22 @@ test("capability names one available native agent per reviewer harness and repor
   assert.deepEqual(noTools.launcher.capability(agents, "linux"), { reviewers: [], configuration: true, questionPreservation: true, unavailable: { tools: "git is not installed" } });
 });
 
+test("review admission skips a signed-out implicit default even when explicit B is ready", (t) => {
+  const f = fixture(t);
+  const agents: AgentDefinition[] = [{ ...AGENTS[0]!, providerAccountReadiness: {
+    defaultAccountId: "a", defaultAuthStatus: "unauthenticated", readyAccountIds: ["b"],
+  } }];
+  const result = f.launcher.capability(agents, "linux");
+  assert.deepEqual(result?.reviewers, []);
+  assert.ok(result?.unavailable?.codex);
+  assert.equal(agents[0]?.providerAccountReadiness?.defaultAccountId, "a");
+  agents[0]!.providerAccountReadiness = {
+    defaultAccountId: "b", defaultAuthStatus: "authenticated", readyAccountIds: ["b"],
+  };
+  assert.deepEqual(f.launcher.capability(agents, "linux")?.reviewers, [{ harness: "codex", agentId: "codex" }],
+    "an implicit granted default remains reviewable when an earlier account is not granted");
+});
+
 test("long writer refusals stay within the control plane capability limit", () => {
   const reason = "Codex packages are unprotected from the following writers: " + Array.from({ length: 10 }, (_, index) =>
     `session s_writer_${index} (complete exit unproven; ${"retained writer detail ".repeat(7)}).`).join("\n");

@@ -1,3 +1,4 @@
+import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
 import { AUTOMATIC_TURN_RESTART_CANCELLED_REASON } from "@wollipog/protocol";
 import { REVIEW_JOBS_RETIRED_REASON } from "@wollipog/protocol";
@@ -1818,7 +1819,8 @@ export function sessionBlocksConversationFork(status: SessionStatus): boolean {
 export function launchForRestart(db: ControlPlaneDb, session: SessionView): AgentLaunch | null {
   if (!session.agentId || isRetiredCodexExec(session)) return null;
   const targetBound = session.executionTarget !== undefined && session.executionTarget.adapter !== "host";
-  return db.getAgentLaunch(session.runnerId, session.agentId, targetBound);
+  return db.getAgentLaunch(session.runnerId, session.agentId, targetBound,
+    { allowAccountSelection: true });
 }
 
 /** Placeholder title for a session created without a first prompt (named by its first message). */
@@ -4499,7 +4501,7 @@ export class SessionsService {
       context: snapshotSpec.context ?? { kind: "native" as const },
       version: snapshotSpec.agentVersion,
       capabilities: snapshotSpec.capabilities,
-    } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch);
+    } : this.db.getAgentLaunch(req.runnerId, req.agentId, targetBoundLaunch, { allowAccountSelection: true });
     if (isRetiredCodexExec(launch ?? {}) || (!launch && retiredCodexExecAgent(this.db, req.runnerId, req.agentId))) {
       return fail(CODEX_EXEC_RETIRED_REASON, 409);
     }
@@ -4639,6 +4641,13 @@ export class SessionsService {
       const profileRefusal = providerProfileSessionRefusal(this.db, runner, providerAccount);
       if (profileRefusal && "capability" in profileRefusal) return capabilityFail(profileRefusal.capability);
       if (profileRefusal) return fail(profileRefusal.error, 409);
+    }
+    // Manual account selection and recorded session snapshots retain their bindings/auth recovery.
+    // Unattended/implicit requests must assess the account this launch will actually use.
+    const selectedAgent = runner.agents.find((agent) => agent.id === req.agentId);
+    if (usesRunnerProviderAccount && !snapshotSpec && req.providerAccountId === undefined &&
+        selectedAgent?.providerAccountReadiness && !agentAvailableForImplicitLaunch(selectedAgent, providerAccountId)) {
+      return fail("The default provider account is not ready. Choose a ready account or review its sign-in and ownership details.", 409);
     }
     const acpSessionContext = snapshotSpec?.acpSessionContext ?? req.acpSessionContext;
     if ((executionTarget.adapter === "container" || executionTarget.adapter === "cloud") &&
