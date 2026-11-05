@@ -36,7 +36,8 @@ const cleanup: NonNullable<OrchestratorCampaignProjection["cleanup"]> = { total:
     state: "pending", reason: "The last deletion was refused: the forge could not be reached.",
     action: { kind: "delete_merged_branches", occurrenceId: "workflow_delete" } },
   { kind: "worktree", sessionId: "child-3", path: "/worktrees/child-3", status: "refused",
-    reason: "the worktree has uncommitted changes", action: { kind: "command", command: "git worktree remove '/worktrees/child-3'" } },
+    reason: "The worktree has uncommitted changes.", action: { kind: "command", command: "git -C '/worktrees/child-3' status",
+      then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." } },
   { kind: "handoff", workItemId: "item-1", title: "Rotate the signing key", issue: null, responsibleActor: "human",
     reason: "Only the owner can rotate it.", action: { kind: "person", text: "Rotate the key in the release settings." } },
 ] };
@@ -55,7 +56,9 @@ test("Cleanup lists each item with its reason and exact action, and Delete Merge
       "Title Case labels; handed-off items keep their own section");
     const codes = [...container.querySelectorAll("code")].map((node) => node.textContent);
     assert.ok(codes.includes("gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/child-1'"), "the exact command");
-    assert.ok(codes.includes("git worktree remove '/worktrees/child-3'"));
+    assert.ok(codes.includes("git -C '/worktrees/child-3' status"), "a dirty worktree is inspected, never removed");
+    assert.match(container.textContent ?? "", /Commit and push the changes you want to keep, or discard them yourself\./u);
+    assert.doesNotMatch(container.textContent ?? "", /worktree remove|--force|reset --hard|git clean/u);
     assert.ok(container.querySelector("button[aria-label='Copy Command for agent/child-1']"), "each command can be copied, named");
     assert.match(container.textContent ?? "", /1 handed-off item is listed under Handed Off\./u);
     assert.match(container.textContent ?? "", /Wollipog can delete it with its approved deletion/u);

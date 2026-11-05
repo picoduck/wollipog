@@ -2,7 +2,7 @@ import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REV
 import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES,
   type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { CAMPAIGN_CLEANUP_ITEMS_LIMIT, CAMPAIGN_LIVE_WORK_KINDS, CAMPAIGN_STUCK_ITEMS_LIMIT, mergedBranchDeletionCommand,
-  worktreeRemovalCommand, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
+  worktreeRefusalAction, cleanupReasonSentence, PROTOCOL_VERSION, type CampaignActivityView, type CampaignCleanupItem, type CampaignLiveWorkKind,
   type CampaignRepairView, type CampaignStuckItem, type OrchestratorCampaignHandoff } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
@@ -22402,7 +22402,7 @@ export class ControlPlaneDb {
         const key = `${row.repository.toLowerCase()}#${row.pullRequest}`;
         const handoff = workItems.get(key)?.handoff;
         const base = { kind: "merged_branch" as const, sessionId: row.sessionId, repository: row.repository,
-          pullRequest: row.pullRequest, branch: row.branch, reason: row.reason ?? "The merged branch is still on the remote." };
+          pullRequest: row.pullRequest, branch: row.branch, reason: cleanupReasonSentence(row.reason ?? "The merged branch is still on the remote.") };
         if (row.state === "retained") {
           items.push({ ...base, state: "retained", action: { kind: "person", text: handoff?.nextAction ?? row.reason ?? "" } });
           continue;
@@ -22429,9 +22429,11 @@ export class ControlPlaneDb {
     // Delete Merged Branches performs.
     items.sort((a, b) => Number(b.action.kind === "delete_merged_branches") - Number(a.action.kind === "delete_merged_branches"));
     for (const worktree of worktrees) {
-      items.push({ kind: "worktree", sessionId: worktree.sessionId, path: worktree.path, status: worktree.status, reason: worktree.reason,
-        action: worktree.status === "refused" ? { kind: "command", command: worktreeRemovalCommand(worktree.path) }
-          : { kind: "automatic", text: worktree.reason } });
+      // A refused worktree may hold work Wollipog must preserve: the person inspects it and decides
+      // what to keep, and nothing offered here removes or discards it.
+      const reason = cleanupReasonSentence(worktree.reason);
+      items.push({ kind: "worktree", sessionId: worktree.sessionId, path: worktree.path, status: worktree.status, reason,
+        action: worktree.status === "refused" ? worktreeRefusalAction(worktree.path, worktree.reason) : { kind: "automatic", text: reason } });
     }
     for (const handoff of handoffs) {
       items.push({ kind: "handoff", workItemId: handoff.workItemId, title: handoff.title, issue: handoff.issue,

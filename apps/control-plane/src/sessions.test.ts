@@ -1431,6 +1431,12 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }]);
     assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete",
       "a stopped child with a retained worktree is not campaign-complete");
+    // #4146: Cleanup offers only an inspection, never a removal that could discard the changes.
+    const dirty = db.campaignProjection(parent.id)?.cleanup?.items.find((item) => item.kind === "worktree");
+    assert.ok(dirty, "the refused worktree is listed under Cleanup");
+    assert.equal(dirty.reason, "The worktree has uncommitted changes.");
+    assert.deepEqual(dirty.action, { kind: "command", command: `git -C '/worktrees/${child.data.id}' status`,
+      then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." });
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
     // #4067, #4146: the grandchild's merged pull request still owes its branch until the forge reports it

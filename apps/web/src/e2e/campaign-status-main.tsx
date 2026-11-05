@@ -307,6 +307,33 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
  * the same facts (Active for owed cleanup, Blocked for stuck work, and no lists). */
 const activityScenario = (["active", "cleanup", "complete", "stuck"] as const).find((value) => params.get("activity") === value) ?? null;
 const activityLegacy = params.get("legacy") === "1";
+// Each state's work matches its facts: delivered states have every committed item delivered; Active
+// keeps the Campaign Status Panel item running in its child, its PR waiting in the merge queue.
+if (activityScenario === "active" || activityScenario === "cleanup" || activityScenario === "complete") {
+  for (const [index, item] of items.entries()) {
+    if (item.commitment !== "committed") continue;
+    const live = activityScenario === "active" && item.id === "cwi_2";
+    items[index] = live ? { ...item, primaryState: "running", stateCauses: [], blocker: null }
+      : { ...item, primaryState: "delivered", stateCauses: [], currentAttempt: null, blocker: null,
+        elapsed: { startedAt: item.elapsed.startedAt ?? NOW - 2 * HOUR, endedAt: item.elapsed.endedAt ?? NOW - 20 * MINUTE } };
+    details[item.id] = itemDetail(items[index]!);
+  }
+}
+const activityWork = (rev: number) => {
+  const committed = items.filter((item) => item.commitment === "committed");
+  const delivered = committed.filter((item) => item.primaryState === "delivered").length;
+  const running = committed.filter((item) => item.primaryState === "running").length;
+  return { ...recordedWork(rev),
+    counts: { committed: committed.length, delivered, original: committed.filter((item) => item.origin === "original").length,
+      followUp: committed.filter((item) => item.origin !== "original").length, cancelled: 0,
+      removed: items.filter((item) => item.commitment !== "committed").length,
+      byState: { planned: 0, queued: 0, running, waiting: 0, blocked: 0, delivered, cancelled: 0,
+        removed: items.filter((item) => item.commitment !== "committed").length } },
+    recommendations: { awaiting_adjudication: 0, accepted: 2, rejected: 1, deferred: 1, duplicate: 3 },
+    obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
+    elapsed: { startedAt: NOW - 3 * HOUR - 12 * MINUTE, endedAt: activityScenario === "active" ? null : NOW - 8 * MINUTE },
+  };
+};
 function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
   const status = state === "active" ? "active" : state === "cleanup" ? (activityLegacy ? "active" : "complete_needs_cleanup")
     : state === "complete" ? "verified_complete" : activityLegacy ? "blocked" : "stuck";
@@ -315,10 +342,11 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
     status: status as import("@wollipog/protocol").OrchestratorCampaignStatus,
     children: state === "stuck"
       ? { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 }
+      : state === "active" ? { total: 3, active: 1, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 }
       : { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 3, cleanupPending: 0 },
-    limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    limits: { maximumConcurrentChildren: 4, occupied: state === "active" ? 1 : 0, remaining: state === "active" ? 3 : 4, costBudgetUsd: 40, maxToolCalls: null },
     heldChildren: [],
-    ...(activityLegacy ? {} : { activity: state === "active" ? { live: ["merge_queue_wait" as const] } : { live: [], ...(state === "complete" ? {} : { repair }) } }),
+    ...(activityLegacy ? {} : { activity: state === "active" ? { live: ["child_turn" as const, "merge_queue_wait" as const] } : { live: [], ...(state === "complete" ? {} : { repair }) } }),
     ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: 3, items: [
       { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4217, branch: "agent/s_9d2f41c07a11",
         state: "pending" as const, reason: "The merged branch is still on the remote.",
@@ -327,8 +355,9 @@ function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"):
         state: "pending" as const, reason: "The last deletion was refused: The forge could not be reached.",
         action: { kind: "delete_merged_branches" as const, occurrenceId: "workflow_delete_4223" } },
       { kind: "worktree" as const, sessionId: "s_child", path: "/home/dev/worktrees/wollipog/s_079714ea231c", status: "refused" as const,
-        reason: "the worktree has uncommitted changes",
-        action: { kind: "command" as const, command: "git worktree remove '/home/dev/worktrees/wollipog/s_079714ea231c'" } },
+        reason: "The worktree has uncommitted changes.",
+        action: { kind: "command" as const, command: "git -C '/home/dev/worktrees/wollipog/s_079714ea231c' status",
+          then: "Commit and push the changes you want to keep, or discard them yourself. Then ask the Orchestrator to retire the worktree through Wollipog." } },
     ] } } : {}),
     ...(state === "stuck" && !activityLegacy ? { stuck: { total: 2, items: [
       { kind: "unverified_child" as const, sessionId: "s_child", status: "idle", reason: "The child's latest report has not been verified." },
@@ -355,6 +384,7 @@ const projectionFor = (rev: number) => campaignProjection(
       obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
       cost: undefined,
     })
+      : activityScenario && activityScenario !== "stuck" ? activityWork(rev)
       : handoffScenario || activityScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
@@ -629,6 +659,9 @@ const client = {
     // count, and the failure route.
     ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
       ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
+    // `activity=…` (#4146): the authorized scope covers every work item, so nothing reads as outside it.
+    ...(activityScenario ? { repository: "picoduck/wollipog", revision: 1, canPropose: false, outsideScope: [], candidates: [],
+      issueNumbers: [...new Set(items.flatMap((item) => item.issue ? [item.issue.number] : []))] } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],

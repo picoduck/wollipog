@@ -62,12 +62,13 @@ export interface CampaignActivityView {
 
 /** What settles one cleanup item. `delete_merged_branches`: Wollipog can perform an approved
  * `merged_branch_deletion` itself through the existing forge action, so Campaign Status offers
- * **Delete Merged Branches**. `command`: the exact command a person runs. `automatic`: nothing is
- * needed from anyone; Wollipog settles it when the named condition clears. `person`: the next
- * action a handoff names, in its own words. */
+ * **Delete Merged Branches**. `command`: the exact command a person runs, then `then`, the step
+ * that settles the item, when the command only inspects. `automatic`: nothing is needed from
+ * anyone; Wollipog settles it when the named condition clears. `person`: the next action a handoff
+ * names, in its own words. */
 export type CampaignCleanupAction =
   | { kind: "delete_merged_branches"; occurrenceId: string }
-  | { kind: "command"; command: string }
+  | { kind: "command"; command: string; then?: string }
   | { kind: "automatic"; text: string }
   | { kind: "person"; text: string };
 
@@ -133,8 +134,43 @@ export function mergedBranchDeletionCommand(repository: string, branch: string |
     `--json headRefName -q .headRefName)"`;
 }
 
-/** The exact command that removes one retained child worktree on its machine. Git itself refuses
- * a worktree with uncommitted changes, so nothing is discarded without the person's own choice. */
-export function worktreeRemovalCommand(path: string): string {
-  return `git worktree remove '${path.replaceAll("'", "'\\''")}'`;
+/**
+ * What settles a child worktree whose retirement the runner refused, by the refusal's reason: a
+ * read-only inspection command for the person, and the step that follows. It never removes,
+ * resets, cleans or discards anything: the refused worktree may hold work Wollipog must preserve,
+ * so the person decides what to keep, and the retirement itself goes through Wollipog.
+ */
+export function worktreeRefusalAction(path: string, reason: string): { kind: "command"; command: string; then: string } {
+  const quoted = `'${path.replaceAll("'", "'\\''")}'`;
+  const retire = "Then ask the Orchestrator to retire the worktree through Wollipog.";
+  const has = (text: string) => reason.toLowerCase().startsWith(text);
+  if (has("the worktree has uncommitted changes")) {
+    return { kind: "command", command: `git -C ${quoted} status`,
+      then: `Commit and push the changes you want to keep, or discard them yourself. ${retire}` };
+  }
+  if (has("the branch has unpushed commits")) {
+    return { kind: "command", command: `git -C ${quoted} log --oneline '@{upstream}..HEAD'`,
+      then: `Push the commits you want to keep, or confirm they are not needed. ${retire}` };
+  }
+  if (has("the branch has no upstream")) {
+    return { kind: "command", command: `git -C ${quoted} log --oneline -10`,
+      then: `Push the branch if its commits are needed, or confirm they are not. ${retire}` };
+  }
+  if (has("attached operator-owned worktrees")) {
+    return { kind: "command", command: `git -C ${quoted} status`,
+      then: "This worktree is yours, not Wollipog's, so Wollipog leaves it in place. Keep it, or remove it yourself once you no longer need it." };
+  }
+  if (has("the linked pull request is not verified as merged")) {
+    return { kind: "command", command: `git -C ${quoted} status`,
+      then: "Check that its pull request merged. Wollipog retires the worktree once the forge reports the merge; until then it stays in place." };
+  }
+  return { kind: "command", command: `git -C ${quoted} status`, then: `Inspect it and keep what you need. ${retire}` };
+}
+
+/** A stored reason as Campaign Status shows it: a sentence, capitalized and ending in a period. */
+export function cleanupReasonSentence(reason: string): string {
+  const text = reason.trim();
+  if (!text) return text;
+  const capitalized = text[0]!.toUpperCase() + text.slice(1);
+  return /[.!?]$/u.test(capitalized) ? capitalized : `${capitalized}.`;
 }

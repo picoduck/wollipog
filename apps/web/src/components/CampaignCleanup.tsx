@@ -26,6 +26,7 @@ function CleanupAction({ action, subject }: { action: CampaignCleanupItem["actio
         <span className="campaign-status-meta">
           <CopyButton text={action.command} label="Copy Command" ariaLabel={`Copy Command for ${subject}`} className="btn ghost sm" />
         </span>
+        {action.then && <span className="campaign-status-note">{action.then}</span>}
       </>;
     case "automatic":
       return <>{action.text}<span className="campaign-status-meta">Nothing is needed from you.</span></>;
@@ -34,8 +35,45 @@ function CleanupAction({ action, subject }: { action: CampaignCleanupItem["actio
   }
 }
 
-function cleanupSubject(item: Exclude<CampaignCleanupItem, { kind: "handoff" }>): string {
+type CleanupItem = Exclude<CampaignCleanupItem, { kind: "handoff" }>;
+
+function cleanupSubject(item: CleanupItem): string {
   return item.kind === "merged_branch" ? item.branch ?? `the branch of ${item.repository}#${item.pullRequest}` : item.path;
+}
+
+function CleanupList({ items, onOpenSession }: { items: readonly CleanupItem[]; onOpenSession: (sessionId: string) => ReactNode }) {
+  return (
+    <ul className="campaign-detail-list">
+      {items.map((item) => (
+        <li key={item.kind === "merged_branch" ? `${item.repository}#${item.pullRequest}` : `${item.sessionId}:${item.path}`}>
+          <dl className="facts">
+            {item.kind === "merged_branch" ? (
+              <div>
+                <dt>Merged Branch</dt>
+                <dd>
+                  {item.branch ? <code>{item.branch}</code> : "Not Read Yet"}
+                  <span className="campaign-status-meta">
+                    {issueRefLabel({ repository: item.repository, number: item.pullRequest }, "pull")}
+                    {item.state === "retained" ? " · Retained" : ""}
+                  </span>
+                </dd>
+              </div>
+            ) : (
+              <div>
+                <dt>Worktree</dt>
+                <dd>
+                  <code>{item.path}</code>
+                  <span className="campaign-status-meta">{onOpenSession(item.sessionId)}</span>
+                </dd>
+              </div>
+            )}
+            <div><dt>Reason</dt><dd>{item.reason}</dd></div>
+            <div><dt>Action</dt><dd><CleanupAction action={item.action} subject={cleanupSubject(item)} /></dd></div>
+          </dl>
+        </li>
+      ))}
+    </ul>
+  );
 }
 
 export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: {
@@ -49,10 +87,13 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
   const headingId = useId();
   const [busy, setBusy] = useState(false);
   const [outcome, setOutcome] = useState<{ tone: "success" | "danger"; text: string } | null>(null);
-  const items = cleanup.items.filter((item): item is Exclude<CampaignCleanupItem, { kind: "handoff" }> => item.kind !== "handoff");
+  const items = cleanup.items.filter((item): item is CleanupItem => item.kind !== "handoff");
+  // Merged branches first, with Delete Merged Branches right under them, then retained worktrees.
+  const branches = items.filter((item) => item.kind === "merged_branch");
+  const worktrees = items.filter((item) => item.kind === "worktree");
   const handoffs = cleanup.items.length - items.length;
   const hidden = cleanup.total - cleanup.items.length;
-  const performable = items.some((item) => item.action.kind === "delete_merged_branches");
+  const performable = branches.some((item) => item.action.kind === "delete_merged_branches");
   const deleteBranches = async () => {
     if (busy) return;
     setBusy(true); setOutcome(null);
@@ -74,40 +115,7 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
         The campaign's work is delivered. {cleanup.total === 1 ? "This item is" : "These items are"} left; each says why and
         what settles it.
       </p>
-      {items.length > 0 && <ul className="campaign-detail-list">
-        {items.map((item) => (
-          <li key={item.kind === "merged_branch" ? `${item.repository}#${item.pullRequest}` : `${item.sessionId}:${item.path}`}>
-            <dl className="facts">
-              {item.kind === "merged_branch" ? (
-                <div>
-                  <dt>Merged Branch</dt>
-                  <dd>
-                    {item.branch ? <code>{item.branch}</code> : "Not Read Yet"}
-                    <span className="campaign-status-meta">
-                      {issueRefLabel({ repository: item.repository, number: item.pullRequest }, "pull")}
-                      {item.state === "retained" ? " · Retained" : ""}
-                    </span>
-                  </dd>
-                </div>
-              ) : (
-                <div>
-                  <dt>Worktree</dt>
-                  <dd>
-                    <code>{item.path}</code>
-                    <span className="campaign-status-meta">{onOpenSession(item.sessionId)}</span>
-                  </dd>
-                </div>
-              )}
-              <div><dt>Reason</dt><dd>{item.reason}</dd></div>
-              <div><dt>Action</dt><dd><CleanupAction action={item.action} subject={cleanupSubject(item)} /></dd></div>
-            </dl>
-          </li>
-        ))}
-      </ul>}
-      {handoffs > 0 && <p className="section-note">
-        {handoffs} handed-off item{handoffs === 1 ? " is" : "s are"} listed under Handed Off.
-      </p>}
-      {hidden > 0 && <p className="section-note">{hidden} more item{hidden === 1 ? " is" : "s are"} listed through the campaign tools.</p>}
+      {branches.length > 0 && <CleanupList items={branches} onOpenSession={onOpenSession} />}
       {outcome && <Notice tone={outcome.tone} role={outcome.tone === "danger" ? "alert" : "status"}
         title={outcome.tone === "success" ? "Merged Branches Deleted" : "Some Branches Remain"}>{outcome.text}</Notice>}
       {performable && canAct && <div>
@@ -115,6 +123,11 @@ export function CampaignCleanup({ campaignId, cleanup, canAct, onOpenSession }: 
           Delete Merged Branches
         </BusyButton>
       </div>}
+      {worktrees.length > 0 && <CleanupList items={worktrees} onOpenSession={onOpenSession} />}
+      {handoffs > 0 && <p className="section-note">
+        {handoffs} handed-off item{handoffs === 1 ? " is" : "s are"} listed under Handed Off.
+      </p>}
+      {hidden > 0 && <p className="section-note">{hidden} more item{hidden === 1 ? " is" : "s are"} listed through the campaign tools.</p>}
     </section>
   );
 }
