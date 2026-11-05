@@ -2208,6 +2208,7 @@ export class CodexAppServerDriver implements Driver {
 
   private registerHandlers(transport: Pick<JsonRpcPeer, "onRequest" | "onNotification">): void {
     // Each notification can confirm an unconfirmed root turn before its handler reads the turn.
+    // Handlers that check for a replaced process compare `this.peer` with `transport`, not `peer`.
     const peer: Pick<JsonRpcPeer, "onRequest" | "onNotification"> = {
       onRequest: (method, handler) => transport.onRequest(method, handler),
       onNotification: (method, handler) => transport.onNotification(method, (params) => {
@@ -2345,7 +2346,7 @@ export class CodexAppServerDriver implements Driver {
 
     peer.onNotification("skills/changed", () => this.refreshSkillCatalog());
     peer.onNotification("warning", (params: Json) => {
-      if (this.disposed || this.peer !== peer) return;
+      if (this.disposed || this.peer !== transport) return;
       if (!codexHttpFallbackWarning(params?.message)) return;
       if (params?.threadId && params.threadId !== this.threadId) {
         if (this.subagentToolByThread.has(params.threadId)) this.reportInferenceHttpFallback("subagent", params.threadId);
