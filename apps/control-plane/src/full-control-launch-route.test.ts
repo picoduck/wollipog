@@ -1646,7 +1646,10 @@ test("an explicit Maximum Issues never grows when the owner changes the selectio
     const revision = () => f.db.getSession(id)!.parentControlPolicy!.revision;
     const over = f.sessions.setScopeGrantSelectionCount(id, { count: 3, expectedRevision: revision() }, f.human);
     assert.equal(over.status, 400);
-    assert.match(over.error ?? "", /from 0 to 2: the Maximum Issues set at launch \(4\) never grows/u);
+    assert.match(over.error ?? "", /from 0 to 2: the Maximum Issues you set \(4\) never grows/u);
+    // Campaign Status reads the ceiling the current authorization holds.
+    assert.deepEqual((({ maxIssues, maxIssuesSource }) => ({ maxIssues, maxIssuesSource }))((await f.sessions.campaignIssueScope(id)).data!.scopeGrant!.ceilings),
+      { maxIssues: 4, maxIssuesSource: "explicit" });
     assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 1, expectedRevision: revision() }, f.human).ok, true);
     assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 4, "an explicit limit never moves");
     assert.deepEqual(grantOf(f, id).selection, { repository: "owner/repo", count: 1, defaulted: false, setByOwner: true,
@@ -1659,6 +1662,37 @@ test("an explicit Maximum Issues never grows when the owner changes the selectio
     const none = f.sessions.setScopeGrantSelectionCount(named, { count: 3, expectedRevision: f.db.getSession(named)!.parentControlPolicy!.revision }, f.human);
     assert.equal(none.status, 409);
     assert.match(none.error ?? "", /no selection count to change/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("after a reauthorization sets Maximum Issues explicitly, Campaign Status shows it as set and the selection count no longer moves it (#4102 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
+    let view = (await f.sessions.campaignIssueScope(id)).data!;
+    assert.equal(view.scopeGrant!.ceilings.maxIssuesSource, "derived");
+    assert.equal(view.policyRevision, f.db.getSession(id)!.parentControlPolicy!.revision, "the view names the revision it was read at");
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    const payload = { overrides: { issues: { maxIssues: 5 } } };
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { ...payload, expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    view = (await f.sessions.campaignIssueScope(id)).data!;
+    assert.deepEqual((({ maxIssues, maxIssuesSource }) => ({ maxIssues, maxIssuesSource }))(view.scopeGrant!.ceilings),
+      { maxIssues: 5, maxIssuesSource: "explicit" }, "the current authorization's ceiling, as set");
+    assert.equal(view.policyRevision, f.db.getSession(id)!.parentControlPolicy!.revision);
+    const over = f.sessions.setScopeGrantSelectionCount(id, { count: 6, expectedRevision: view.policyRevision! }, f.human);
+    assert.equal(over.status, 400);
+    assert.match(over.error ?? "", /from 0 to 5: the Maximum Issues you set \(5\) never grows/u);
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 4, expectedRevision: view.policyRevision! }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 5, "an explicit limit never moves");
   } finally { await server.close(); f.db.close(); }
 });
 

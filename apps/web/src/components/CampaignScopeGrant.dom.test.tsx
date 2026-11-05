@@ -45,19 +45,23 @@ const granted: FullControlScopeGrant = {
 };
 
 async function mount(scopeGrant: FullControlScopeGrant | undefined, options: { owner?: boolean; policyRevision?: number } = {}) {
-  let current = scopeGrant;
+  // The server's state: the grant and the policy revision a read sees.
+  const server = { grant: scopeGrant, policyRevision: options.policyRevision ?? 7 };
   const loads: number[] = [];
   const counts: Array<{ id: string; count: number; expectedRevision: number }> = [];
   const client = {
     ...api,
     campaignIssueScope: async () => {
       loads.push(loads.length);
-      return { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: current?.namedIssues ?? [], revision: 2, supported: true,
-        canPropose: options.owner ?? false, outsideScope: [], ...(current ? { scopeGrant: current } : {}) } satisfies CampaignIssueScopeView;
+      return { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: server.grant?.namedIssues ?? [], revision: 2, supported: true,
+        canPropose: options.owner ?? false, outsideScope: [],
+        ...(server.grant ? { scopeGrant: server.grant, policyRevision: server.policyRevision } : {}) } satisfies CampaignIssueScopeView;
     },
     setScopeGrantSelectionCount: async (id: string, count: number, expectedRevision: number) => {
       counts.push({ id, count, expectedRevision });
-      current = { ...current!, selection: { ...current!.selection!, count, defaulted: false, setByOwner: true } };
+      if (expectedRevision !== server.policyRevision) throw new Error("Campaign authority changed; refresh and try again.");
+      server.grant = { ...server.grant!, selection: { ...server.grant!.selection!, count, defaulted: false, setByOwner: true } };
+      server.policyRevision++;
       return {} as SessionView;
     },
   } as ApiClient;
@@ -65,10 +69,13 @@ async function mount(scopeGrant: FullControlScopeGrant | undefined, options: { o
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  await act(async () => { root.render(<ApiProvider client={client}><CampaignIssueScopePanel session={session} campaignId="s_root"
-    {...(options.policyRevision === undefined ? {} : { policyRevision: options.policyRevision })} /></ApiProvider>); });
-  await settle();
-  return { host, loads, counts, unmount: () => act(async () => root.unmount()) };
+  const render = async (policyRevision: number | undefined) => {
+    await act(async () => { root.render(<ApiProvider client={client}><CampaignIssueScopePanel session={session} campaignId="s_root"
+      {...(policyRevision === undefined ? {} : { policyRevision })} /></ApiProvider>); });
+    await settle();
+  };
+  await render(options.policyRevision);
+  return { host, loads, counts, server, render, unmount: () => act(async () => root.unmount()) };
 }
 
 const button = (host: HTMLElement, name: string) => [...host.querySelectorAll("button")].find((b) => b.textContent === name) as HTMLButtonElement | undefined;
@@ -178,6 +185,40 @@ test("the owner changes the defaulted selection count from the Scope Grant secti
   } finally { await unmount(); }
 });
 
+test("another tab's change reloads the count and closes an open editor, and a stale view's save is refused, never applied (#4102 review)", async () => {
+  const { host, counts, server, render, unmount } = await mount(granted, { owner: true, policyRevision: 7 });
+  try {
+    await act(async () => { button(section(host, "Scope Grant")!, "Change Count")!.click(); });
+    // Another tab sets the count to 5: the server's revision moves to 8 and Campaign Status follows.
+    server.grant = { ...granted, selection: { ...granted.selection!, count: 5, defaulted: false, setByOwner: true } };
+    server.policyRevision = 8;
+    await render(8);
+    const grant = section(host, "Scope Grant")!;
+    assert.equal(facts(grant)["Selection Count"], "5 Set by You", "the count reloads with the new revision");
+    assert.ok(button(grant, "Save Count") === undefined, "the editor opened on the older revision is closed");
+    // An editor opened now is bound to the revision its view was read at.
+    await act(async () => { button(grant, "Change Count")!.click(); });
+    const input = grant.querySelector("input") as unknown as HTMLInputElement;
+    assert.equal(input.value, "5");
+    await typeInto(input, "4");
+    await act(async () => { button(grant, "Save Count")!.click(); });
+    await settle();
+    assert.deepEqual(counts, [{ id: "s_root", count: 4, expectedRevision: 8 }]);
+
+    // A view read before a change the panel hasn't heard about yet sends its own, older revision,
+    // which the server refuses; nothing is overwritten.
+    server.grant = { ...server.grant!, selection: { ...server.grant!.selection!, count: 9 } };
+    server.policyRevision = 20;
+    const stale = section(host, "Scope Grant")!;
+    await act(async () => { button(stale, "Change Count")!.click(); });
+    await act(async () => { button(stale, "Save Count")!.click(); });
+    await settle();
+    assert.equal(counts.at(-1)!.expectedRevision, 9, "the view's own revision, never a newer one");
+    assert.match(stale.querySelector("[role=alert]")!.textContent!, /Campaign authority changed/u);
+    assert.equal(server.grant!.selection!.count, 9, "the other change stands");
+  } finally { await unmount(); }
+});
+
 test("only the owner on the campaign's own session sees Change Count, and only for a granted selection (#4102)", async () => {
   for (const [label, grant, options] of [
     ["someone who can't propose scope", granted, { owner: false, policyRevision: 7 }],
@@ -196,6 +237,7 @@ test("under an explicit Maximum Issues the editor says the limit stays as it is 
   try {
     const grant = section(host, "Scope Grant")!;
     await act(async () => { button(grant, "Change Count")!.click(); });
-    assert.match(grant.textContent!, /The Maximum Issues you set at launch \(4\) stays as it is, so the count must fit within it\./u);
+    assert.match(grant.textContent!, /The Maximum Issues you set \(4\) stays as it is, so the count must fit within it\./u);
+    assert.equal(facts(grant)["Maximum Issues"], "4 Set by You");
   } finally { await unmount(); }
 });

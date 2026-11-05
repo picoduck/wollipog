@@ -5366,8 +5366,13 @@ export interface CampaignIssueScopeView {
   /** Issues a Full Control first message referenced only as context (#3920), less the current
    * scope. They carry no authority; adding one goes through scope review. */
   contextIssueNumbers?: number[];
-  /** The scope grant the owner's first message established (#4102), for Campaign Status. */
+  /** The scope grant the owner's first message established (#4102), for Campaign Status. Its
+   * ceilings are the current authorization's: `maxIssuesSource` is `derived` only while that
+   * authorization still derives Maximum Issues. */
   scopeGrant?: FullControlScopeGrant;
+  /** With `scopeGrant`: the policy revision this view was read at. A selection count change is
+   * compare-and-set against it, so a change made from a stale view is refused. */
+  policyRevision?: number;
   outsideScope: Array<{ workItemId: string; title: string; issue: CampaignIssueRef; sessionId: string | null }>;
   candidates?: Array<{ issue: CampaignIssueRef; title: string; source: "umbrella" | "sub_issue" | "member_checklist" }>;
 }

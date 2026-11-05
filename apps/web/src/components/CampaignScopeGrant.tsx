@@ -80,7 +80,7 @@ export function CampaignScopeGrantSection({ grant, edit }: { grant: FullControlS
       </> : "None"}</dd></div>
       {selection && <div><dt>Selection Criteria</dt><dd>{selection.criteria || "None Stated"}</dd></div>}
       {selection && <div><dt>Selection Constraints</dt><dd>{selection.constraints.length ? selection.constraints.join("; ") : "None Stated"}</dd></div>}
-      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set at Launch" : "Derived"} /></dd></div>
+      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>
       <div><dt>Repository</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
       <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>
       {grant.ceilings.removedOperations?.length ? <div><dt>Withheld by Your Message</dt><dd>{grant.ceilings.removedOperations.map(operationLabel).join(", ")}</dd></div> : null}
@@ -135,7 +135,7 @@ function SelectionCountEditor({ grant, count, edit }: { grant: FullControlScopeG
       <input type="text" inputMode="numeric" value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
     </label>
     <p>{explicit
-      ? `The Maximum Issues you set at launch (${grant.ceilings.maxIssues}) stays as it is, so the count must fit within it.`
+      ? `The Maximum Issues you set (${grant.ceilings.maxIssues}) stays as it is, so the count must fit within it.`
       : "Maximum Issues moves by the same amount."} Saving re-authorizes Full Control. Any request or approval the Orchestrator hasn't used yet is withdrawn, and it asks again.</p>
     {error && <Notice tone="danger" role="alert" title="Couldn't Change the Selection Count">{error}</Notice>}
     <div>

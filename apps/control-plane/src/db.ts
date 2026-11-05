@@ -17479,7 +17479,7 @@ export class ControlPlaneDb {
       } else {
         const most = Math.max(0, issues.maxIssues - grant.namedIssues.length);
         if (count > most) {
-          return refuse(400, `Enter a count from 0 to ${most}: the Maximum Issues set at launch (${issues.maxIssues}) never grows.`);
+          return refuse(400, `Enter a count from 0 to ${most}: the Maximum Issues you set (${issues.maxIssues}) never grows.`);
         }
       }
       const reminted = remintCampaignBoundary({ ...boundary, issueAuthority: { ...issues, maxIssues } },
