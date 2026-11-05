@@ -451,7 +451,7 @@ export function resolveCampaignAuthority(input: {
     // the server-enforced cap of its pull request (#4075). Past the cap they stay the person's.
     if (!eligible && category === "review_round_extension" && input.control?.mode === "full_control" && !input.root &&
         input.reviewExtensionCap !== undefined && validCampaignControl(input.control) && input.trustedSource === "workflow_route" &&
-        input.snapshot!.repository.toLowerCase() === input.control.boundary.repository.toLowerCase()) {
+        campaignBoundaryRepository(input.control.boundary, input.snapshot!.repository) !== null) {
       return input.reviewExtensionCap === "within" ? result("orchestrator", "campaign_delegation", "authorized_operation")
         : result("human", "human_required", "review_extension_cap_reached");
     }
@@ -462,8 +462,10 @@ export function resolveCampaignAuthority(input: {
   const boundary = input.control.boundary;
   if (category === "follow_up_issue_publication" && boundary.issueAuthority &&
       !(input.snapshot && "issueAdmission" in input.snapshot && input.snapshot.issueAdmission)) return result("human", "human_required", "unverified_intent");
+  // A gate is in the boundary when its repository is one of the boundary's entries (#4119); the
+  // server checks the requester's own place and the gate's evidence against that entry.
   if (!boundary.operations.includes(operation) || (input.snapshot && "repository" in input.snapshot &&
-      input.snapshot.repository.toLowerCase() !== boundary.repository.toLowerCase())) return result("human", "human_required", "outside_boundary");
+      campaignBoundaryRepository(boundary, input.snapshot.repository) === null)) return result("human", "human_required", "outside_boundary");
   if (category) {
     if (input.trustedSource !== "workflow_route") return result("human", "human_required", "unverified_intent");
     if (category === "implementation_question") {

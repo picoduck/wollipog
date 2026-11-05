@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { campaignAuthorityPreflight, isTerminal, pendingRequests, runnerSupportsProtocol, FULL_CONTROL_DECLINED_CLASSES, type FullControlRequestClass,
   type CampaignAuthorityEvaluation, type CampaignRecoveryReason, type SessionView } from "@wollipog/protocol";
 import { campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import type { ControlPlaneDb, SessionStopProvenance } from "./db.js";
 import type { CampaignRecoveryObservation } from "./campaign-recovery-store.js";
 
@@ -79,7 +80,8 @@ export class CampaignRecoveryService {
         if (!request.occurrenceId) continue;
         const decision = request.kind === "workflow_decision" ? this.db.workflowDecisionByOccurrence(request.occurrenceId) : null;
         const evaluated = evaluateCampaignAuthority(root, { ...session,
-          repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined },
+          repositoryRoot: this.db.sessionRepositoryRoot(session.id) ?? undefined,
+          boundaryRepository: campaignBoundaryRepositoryAt(this.db, root, session) },
         this.db.getRunner(session.runnerId)?.protocolVersion,
         decision?.resourceSnapshot ?? this.db.campaignPolicyRequest(session.id, root.orchestratorPolicy?.control, request),
         root.parentControlPolicy, this.db.getRunner(root.runnerId)?.protocolVersion, undefined,

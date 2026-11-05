@@ -587,6 +587,15 @@ Orchestrators never switch: they stay in their Location and dispatch a child to 
 that repository. A child session keeps the repository it was assigned and reports the
 mismatch to the session that started it instead. Both are refused by the tool.
 
+Under Full Control a child must run in a Location of a repository in the campaign's
+boundary: every verified Location of the campaign's Project, grouped by repository. Any other
+machine, folder or ad-hoc path is refused with "Full Control children must use a Location of a
+repository in the campaign's boundary". Each child, and every session it starts, works in
+exactly one repository: tool approvals are checked against its own worktree, and an effect on
+another Location's path is declined. Its pull request gates (merge, extra review rounds, merged
+branch deletion) must name a pull request of its own repository and follow that repository's
+own checks, merge queue and instructions.
+
 ## Private Session Artifacts
 
 Session artifacts let authorized users view screenshots and short videos remotely, including when

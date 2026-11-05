@@ -6,6 +6,7 @@ import {
   campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
   type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
+  type WorkflowDecisionResourceSnapshot,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
@@ -22,6 +23,7 @@ import { composeHostingVideoEvidence } from "./hosting-video-evidence.js";
 import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, syntheticVideoReviewerTarget } from "./video-live-validation-test-fixture.js";
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
+import { campaignBoundaryRepositoryAt } from "./campaign-repository-boundary.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
@@ -2485,6 +2487,103 @@ test("a pre-v288 root keeps a single-repository boundary and inspects only its l
     assert.equal(admitted.statusCode, 201, admitted.body);
     const control = f.db.getSession(admitted.json().id)!.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>;
     assert.equal(control.boundary.repositories, undefined);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("Full Control children run in any boundary repository's Location, and each pull request gate stays in its own repository (#4119)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  // The second machine can run the child's harness, and has a folder in no Project.
+  f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test",
+    workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" },
+      { id: "c", name: "r2 c", path: "/fixture/two/elsewhere" }],
+    agents: [{ id: "claude", name: "Claude", command: "claude", args: [], env: {}, driver: "claude-code", context: { kind: "native" }, available: true,
+      capabilities: { models: [{ id: "claude-opus-5-5", default: true }], effortLevels: ["high"], slashCommands: [],
+        permissionModes: ["default"], supportsImages: true, supportsApprovals: true } }],
+    runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } }, Date.now(), PROTOCOL_VERSION);
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...p.body, requestId: "multi-repository-children", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const rootId = admitted.json().id as string;
+    f.db.updateSessionStatus(rootId, "running", Date.now());
+    const child = (parentSessionId: string, place: Partial<CreateSessionRequest>) => f.sessions.createSession({
+      runnerId: "r2", workspaceId: "a", agentId: "claude", title: "Child", prompt: "Deliver the work", useWorktree: false, ...place,
+    }, undefined, f.scope, false, false, false, { parentSessionId });
+    const refusal = "Full Control children must use a Location of a repository in the campaign's boundary";
+
+    // A Location of the second boundary repository, and the launch repository's Location on another machine.
+    const api = child(rootId, {});
+    assert.equal(api.ok, true, api.error ?? "created");
+    assert.equal(child(rootId, { workspaceId: "b" }).ok, true);
+    // An excluded Location, a folder in no boundary entry, and an ad-hoc path are refused.
+    for (const place of [{ runnerId: "r", workspaceId: (f.db.getProjectLocation(p.plain.id)!).workspaceId },
+      { runnerId: "r2", workspaceId: "c" }, { runnerId: "r2", workspaceId: "a", workspacePath: "/fixture/two/other" }]) {
+      const refused = child(rootId, place);
+      assert.equal(refused.ok, false);
+      assert.equal(refused.error, refusal);
+      assert.equal(refused.status, 409);
+    }
+    // A child's own children stay in its repository.
+    f.db.updateSessionStatus(api.data!.id, "running", Date.now());
+    assert.equal(child(api.data!.id, { workspaceId: "b" }).error, refusal);
+    const worker = child(api.data!.id, {});
+    assert.equal(worker.ok, true, worker.error ?? "created");
+    // The campaign allowance covers the child and the worker it serves, both in its repository's Location.
+    assert.ok(f.db.campaignBudgets.allocation(api.data!.id));
+    assert.ok(f.db.campaignBudgets.allocation(worker.data!.id));
+    f.db.updateSessionStatus(worker.data!.id, "running", Date.now());
+    const workerAdmission = f.sessions.campaignBudgetWorkerPreflight(rootId, { kind: "managed", sessionId: worker.data!.id });
+    assert.equal(workerAdmission.ok, true, workerAdmission.error ?? "admitted");
+
+    // Its tool approvals are evaluated against its own worktree: a contained read is the
+    // Orchestrator's, and an effect on the root's Location path is declined once.
+    const tool = (requestId: string, root: string) => f.sessions.onSessionEvent(api.data!.id, { kind: "permission_request", requestId, occurrenceId: requestId,
+      requestSource: "provider_tool", title: "Inspect Source", context: { toolName: "Bash", input: "cat src/implementation.ts", operation: { kind: "command",
+        input: "cat src/implementation.ts", cwd: root, filesystem: { cwd: root, targets: [{ path: "src/implementation.ts", resolvedPath: `${root}/src/implementation.ts` }],
+          ...(root === "/fixture/two/other" ? { containment: { version: 1 as const, root, sessionRoot: root } } : {}) } } },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "reject", name: "Reject", kind: "reject_once" }] });
+    tool("own", "/fixture/two/other");
+    assert.equal(f.db.getSession(api.data!.id)!.pendingRequestOwners!.requests!.find((request) => request.occurrenceId === "own")?.owner, "orchestrator");
+    tool("foreign", "/fixture/repository");
+    assert.deepEqual(f.sent.filter((message) => message.type === "resolve_permission" && message.requestId === "foreign")
+      .map((message) => (message as { optionId: string | null }).optionId), ["reject"]);
+
+    const root = f.db.getSession(rootId)!, apiChild = f.db.getSession(api.data!.id)!;
+    assert.equal(campaignBoundaryRepositoryAt(f.db, root, apiChild), "other/repo");
+    assert.equal(campaignBoundaryRepositoryAt(f.db, root, root), "owner/repo");
+    // A Location that left the Project is no longer a boundary Location.
+    f.db.removeProjectLocation(p.twin.id);
+    assert.equal(campaignBoundaryRepositoryAt(f.db, root, { runnerId: "r2", workspaceId: "b" }), null);
+    assert.equal(child(rootId, { workspaceId: "b" }).error, refusal);
+
+    // Each pull request gate belongs to the requester's own repository.
+    const head = "a".repeat(40);
+    const merge = (repository: string): WorkflowDecisionResourceSnapshot => ({ category: "pr_merge", repository, pullRequest: 7, headSha: head, reviewResult: "merge",
+      requiredChecks: { headSha: head, status: "passed", checkedAt: 1, checks: [{ name: "CI", state: "passed" }] } });
+    const deletion = (repository: string): WorkflowDecisionResourceSnapshot => ({ category: "merged_branch_deletion", repository, branch: "agent/x", merged: true,
+      mergeCommitSha: head, dependentPullRequests: { checkedAt: 1, open: [] } });
+    const policy = { revision: root.parentControlPolicy!.revision, decisions: { ...HUMAN_ONLY_PARENT_CONTROL_POLICY } };
+    const evaluate = (requester: typeof root, snapshot: Parameters<typeof evaluateCampaignAuthority>[3]) => {
+      const { owner, reason } = evaluateCampaignAuthority(root, { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(f.db, root, requester) },
+        PROTOCOL_VERSION, snapshot, policy, PROTOCOL_VERSION);
+      return { owner, reason };
+    };
+    const control = root.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>;
+    for (const gate of [merge, deletion]) {
+      assert.ok(control.boundary.operations.includes(gate("x/y").category as (typeof control.boundary.operations)[number]));
+      assert.deepEqual(evaluate(apiChild, gate("other/repo")), { owner: "orchestrator", reason: "authorized_operation" });
+      assert.deepEqual(evaluate(apiChild, gate("Owner/Repo")), { owner: "human", reason: "outside_boundary" }, "another boundary repository's pull request");
+      assert.deepEqual(evaluate(root, gate("owner/repo")), { owner: "orchestrator", reason: "authorized_operation" }, "the root's own repository is unchanged");
+      assert.deepEqual(evaluate(root, gate("other/repo")), { owner: "human", reason: "outside_boundary" });
+      assert.deepEqual(evaluate(apiChild, gate("third/repo")), { owner: "human", reason: "outside_boundary" }, "a repository outside the boundary");
+      // An unresolved place is never the second repository.
+      const { owner, reason } = evaluateCampaignAuthority(root, apiChild, PROTOCOL_VERSION, gate("other/repo"), policy, PROTOCOL_VERSION);
+      assert.deepEqual({ owner, reason }, { owner: "human", reason: "outside_boundary" });
+    }
   } finally { await server.close(); f.db.close(); }
 });
 
