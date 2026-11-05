@@ -7,6 +7,7 @@ import type { CampaignIssueScopeSnapshot, CampaignIssueScopeView, FullControlSco
 import { api, type ApiClient } from "../api.js";
 import { ApiProvider } from "../api-context.js";
 import { installDomTestCleanup } from "../dom-test-cleanup.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 import { CampaignIssueScopePanel, CampaignIssueScopeSummary } from "./CampaignIssueScopePanel.js";
 
 const domWindow = new Window({ url: "http://localhost/" });
@@ -77,7 +78,7 @@ test("Campaign Status shows the Scope Grant with its named issues, selection, ce
       "Decision Model": "claude-haiku-4-5 (low) · Claude Code on Studio",
       "Reason": "The owner names #12 and asks for 3 more high-priority issues.",
     });
-    assert.equal(grant.querySelector("[role=alert], .notice"), null, "a healthy grant raises no notice");
+    assertNoDomNode(grant.querySelector("[role=alert], .notice"), "a healthy grant raises no notice");
   } finally { await unmount(); }
 });
 
@@ -104,7 +105,7 @@ test("a failed or uncertain grant says why, grants nothing, and points to the ow
 
 test("a campaign without a scope grant shows no Scope Grant section", async () => {
   const { host, unmount } = await mount(undefined);
-  try { assert.equal(section(host, "Scope Grant"), undefined); } finally { await unmount(); }
+  try { assert.ok(section(host, "Scope Grant") === undefined); } finally { await unmount(); }
 });
 
 test("the owner's scope approval shows their first message, the proposal's rationale and why it is theirs (#4102)", async () => {
