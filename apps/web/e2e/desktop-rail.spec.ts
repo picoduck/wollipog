@@ -183,7 +183,6 @@ test.describe("at 1440×900 with a mouse", () => {
     // is set on the item before hovering it, as Rail does.
     const longest = railAttention("runners", {
       blocked: 0,
-      stalled: 0,
       machines: { offlineWithActiveSessions: 12, updateRequired: 13 },
     })!.note;
     await page.locator(".main").hover();

@@ -19,7 +19,7 @@ async function expectButtonUnclipped(control: Locator) {
   })).toBe(true);
 }
 
-/** A Sessions row's one status badge (#2209): its whole label shows, inside every clipping ancestor. */
+/** Every Sessions row badge keeps its whole label inside every clipping ancestor. */
 async function expectRowBadgeWhole(badge: Locator) {
   await expect(badge).toBeVisible();
   expect(await badge.evaluate((element) => {
@@ -60,11 +60,10 @@ for (const width of [320, 390, 700, 1280]) {
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
     // Measured in the widest face CI renders, so a line that only just fits here cannot clip there.
     await pinWidestFace(page, row);
-    // #2209: a row shows one status on the bar's ranking. The approval needs the person, so it is the
-    // badge, and the background work is left to the Session Status popover.
+    // Lifecycle stays visible beside the approval; background work remains in status details.
     await expect(row.locator(".status")).toHaveCount(2);
     await expectRowBadgeWhole(row.getByLabel("Status: Approval Required"));
-    // Without the request, the background work is the row's one status, whole at every width.
+    // Without the request, background work is the secondary, whole at every width.
     await page.evaluate(() => {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null });
     });

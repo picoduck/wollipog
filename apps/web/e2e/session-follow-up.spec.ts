@@ -212,7 +212,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
 }
 
 
-for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row update without refresh at ${width}px (#3301, #3302)`, async ({ page }) => {
+for (const width of [1440, 390]) test(`idle priorities and a resumed quiet row update without refresh at ${width}px (#3301, #3302)`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 });
   await open(page);
   await page.mouse.move(0, 0);
@@ -229,8 +229,7 @@ for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row
     const old = Date.now() - 700_000;
     fixture.replaceSessionSnapshot("session-working", { status: "input_required", updatedAt: old, lastEventAt: old });
   });
-  // The prior Running observation has a recent anchor. Use a fresh snapshot to reproduce a
-  // session that was already waiting when this client connected, without waiting ten minutes.
+  // A fresh snapshot of an old wait must not infer a failure from transcript silence.
   await page.reload();
   await expect(row(page, work)).not.toHaveClass(/stalled/);
   await page.evaluate(() => {
