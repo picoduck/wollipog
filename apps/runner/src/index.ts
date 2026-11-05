@@ -3578,6 +3578,20 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         ),
       );
       break;
+    case "session_location_switch":
+      runCommandTask(
+        "session_location_switch",
+        sessions.requestLocationSwitch(msg).then((result) =>
+          sendUp({
+            type: "session_location_switch_result",
+            requestId: msg.requestId,
+            sessionId: msg.sessionId,
+            ok: result.ok,
+            ...(result.error ? { error: result.error } : {}),
+          }),
+        ),
+      );
+      break;
     case "prepare_session_role":
       runCommandTask("prepare_session_role", sessions.prepareSessionRole(msg, () => {
         removeAgentControlFiles(msg.sessionId, agentControlHost.configDir);

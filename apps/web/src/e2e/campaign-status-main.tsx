@@ -48,6 +48,7 @@ import { UI_SOCKET_OPEN, type UiConnectionRuntime, type UiSocket } from "../ui-t
 import { MINUTE, campaignProjection, forgeObservation, itemDetail, itemSummary, knownCost, workSummary } from "./campaign-status-fixtures.js";
 import "../styles.css";
 import { campaignRecoveryFixture } from "./campaign-recovery-fixtures.js";
+import { campaignDecisionsFixture } from "./decision-model-fixtures.js";
 
 declare global {
   interface Window {
@@ -515,8 +516,16 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
 
 const client = {
   ...api,
-  campaignDecisions: async (id: string) => ({ campaignSessionId: id, decisions: screenDecisions,
-    usage: { ...decisionUsage, calls: screenDecisions.length, unpricedCalls: 0 } }),
+  // `decisions=1` adds three Decision Model calls for the Decision Model section (#4101); the
+  // credential checks stay with the Question Screen section (#4104).
+  campaignDecisions: async (id: string) => params.get("decisions") === "1"
+    ? (() => {
+        const fixture = campaignDecisionsFixture(id);
+        return { ...fixture, decisions: [...screenDecisions, ...fixture.decisions],
+          usage: { ...fixture.usage, calls: fixture.usage.calls + screenDecisions.length } };
+      })()
+    : ({ campaignSessionId: id, decisions: screenDecisions,
+        usage: { ...decisionUsage, calls: screenDecisions.length, unpricedCalls: 0 } }),
   classifyCampaignDecision: async (_id: string, occurrenceId: string, classification: "decline" | "orchestrator") => {
     (window as unknown as { __CLASSIFIED__: unknown }).__CLASSIFIED__ = { occurrenceId, classification };
     screenDecisions = screenDecisions.map((decision) => decision.occurrenceId === occurrenceId

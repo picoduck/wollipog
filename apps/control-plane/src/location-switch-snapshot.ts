@@ -1,5 +1,5 @@
 import {
-  LOCATION_SWITCH_LIMITS, LOCATION_SWITCH_TRIGGERS, parseLocationSwitchOption,
+  LOCATION_SWITCH_LIMITS, LOCATION_SWITCH_TRIGGERS, parseLocationSwitchOption, validLocationSwitchBranch,
   type LocationSwitchCandidate, type LocationSwitchSnapshot,
 } from "@wollipog/protocol";
 
@@ -26,8 +26,8 @@ function place(value: unknown, candidate: boolean): boolean {
 
 /** Shape only. The generic decision route refuses caller-prepared Location switch snapshots. */
 export function normalizeLocationSwitchSnapshot(value: Record<string, unknown>): LocationSwitchSnapshot | null {
-  const keys = ["category", "repository", "reason", "handoff", "trigger", "projectId", "projectName", "current", "candidates",
-    "unavailable", "options", "targetDigest", "expiresAt"];
+  const keys = ["category", "repository", "reason", "handoff", "trigger", "recoverBranch", "projectId", "projectName", "current",
+    "candidates", "unavailable", "options", "targetDigest", "expiresAt"];
   const candidates = Array.isArray(value.candidates) ? value.candidates as LocationSwitchCandidate[] : [];
   const offered = (option: unknown): boolean => {
     if (!record(option)) return false;
@@ -42,6 +42,7 @@ export function normalizeLocationSwitchSnapshot(value: Record<string, unknown>):
   if (Object.keys(value).some((key) => !keys.includes(key)) || value.category !== "location_switch" ||
       !text(value.repository, LOCATION_SWITCH_LIMITS.repository) || !text(value.reason, LOCATION_SWITCH_LIMITS.reason) ||
       !text(value.handoff, LOCATION_SWITCH_LIMITS.handoff) || !LOCATION_SWITCH_TRIGGERS.includes(value.trigger as never) ||
+      (value.recoverBranch !== undefined && !validLocationSwitchBranch(value.recoverBranch)) ||
       !bounded(value.projectId, 256) || !text(value.projectName) || !place(value.current, false) ||
       !Array.isArray(value.candidates) || value.candidates.length > LOCATION_SWITCH_MAX_LOCATIONS ||
       !value.candidates.every((candidate) => place(candidate, true)) ||

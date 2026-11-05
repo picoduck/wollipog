@@ -883,13 +883,19 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      receives the list, and a Location whose runner is older is excluded as too old. Older
 //      roots keep single-repository boundaries, and stored boundaries read as one entry. (It
 //      was first claimed as 286, which no released version uses.)
+// 289: Switch and Continue (#4138). A same-runner `location_switch` approval can name the action
+//      `switch`; the control plane sends `session_location_switch` to the session's runner, which
+//      re-verifies the target workspace, path and origin, records `pendingLocationSwitch` durably,
+//      and at the next turn boundary moves the live session into a new (or recovered-branch)
+//      worktree of the target repository, carries the provider conversation over and continues.
+//      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
+//      row only under a consumed switch naming exactly that Location.
 // 290: repository-qualified campaign issue scope (#4118). The control plane stores the scope as
 //      `issues`, `{ repository, number }` pairs across the boundary's repositories, and sends each
 //      participating runner only its own Location repository's numbers, in the earlier shape. A
 //      v290 runner accepts that part when its origin is any repository of the boundary, not only
 //      the launch one. An Orchestrator participant in another boundary repository needs v290;
-//      one-repository campaigns are unchanged for older runners. (289 is claimed by an open
-//      pull request.)
+//      one-repository campaigns are unchanged for older runners.
 export const PROTOCOL_VERSION = 290;
 
 export * from "./campaign-authority.js";
@@ -1284,6 +1290,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
    * the control plane and against the control plane by the runner. */
   sessionLocationSwitch: 287,
+  /** (#4138) A same-runner Location switch of the live session: `session_location_switch` moves it
+   * at its next turn boundary and resumes the same conversation in the target repository. */
+  sessionLocationSwitchLive: 289,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -7394,6 +7403,8 @@ export interface DecisionModelResolvedTarget {
   driver: SessionNamingHarnessOption["driver"];
   provider: SessionNamingAccountBoundary["provider"];
   model: string;
+  /** The model's advertised display name, as Settings shows it. Absent on older records. */
+  modelName?: string;
   effort: string;
 }
 
@@ -8755,6 +8766,9 @@ export interface SessionView {
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** (#4138) An approved Location switch waiting for the provider's turn to end, or one that failed
+   * and left the session in its previous Location. */
+  locationSwitch?: import("./location-switch.js").LocationSwitchStateView;
   /** Protocol v233 (#3240): the lease refusal that stopped the session's last launch. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Protocol v248 (#3240): the busy provider account a starting session is waiting for. */
@@ -8978,6 +8992,8 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  /** (#4138) Three-valued like the account switch failure: null clears an earlier state. */
+  locationSwitch?: import("./location-switch.js").LocationSwitchStateView | null;
   /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier
    * refusal. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView | null;
@@ -9092,6 +9108,9 @@ export interface SessionWorktreeView {
   /** Commit resolved from baseRef when this worktree was created. */
   baseCommit?: string;
   source: "legacy" | "created" | "attached";
+  /** (#4138) The runner created this worktree on a branch that existed before it, such as one a
+   * Location switch recovered. Removing the worktree never deletes or force-removes that branch. */
+  branchPreexisted?: boolean;
   /** Protocol v141: repository-owned setup lifecycle. Environment values and copied contents are
    * deliberately runner-private; only names, timing, and bounded outcomes cross the wire. */
   setup?: WorktreeSetupState;
@@ -10931,6 +10950,7 @@ export type RunnerToControlPlane =
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | import("./location-switch.js").SessionLocationSwitchResultMessage
   | SessionRoleResultMessage
   | InspectProviderAuthenticationResultMessage
   | SelectProviderAuthenticationAccountResultMessage
@@ -13013,6 +13033,7 @@ export type ControlPlaneToRunner =
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
   | SwitchSessionProviderAccountMessage
+  | import("./location-switch.js").SessionLocationSwitchMessage
   | PrepareSessionRoleMessage
   | CommitSessionRoleMessage
   | InspectProviderAuthenticationMessage

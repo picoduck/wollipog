@@ -40,7 +40,7 @@ import {
 import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } from "./ChooseAccountDialog.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
-import { LocationSwitchSummary, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
+import { LocationSwitchSummary, locationSwitchCardActions, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
   REQUEST_CARD_COPY,
@@ -222,7 +222,7 @@ export function RequestCard({
   useClipEdges(bodyRef);
   const actions: SignInCardActions = signIn
     ? signInCardActions(request.options)
-    : { ...requestCardActions(cardOptions), recheck: null, methods: [] };
+    : { ...(locationSwitch ? locationSwitchCardActions(cardOptions) : requestCardActions(cardOptions)), recheck: null, methods: [] };
   const { tertiary, secondary, menu: menuOptions, primary, recheck, methods } = actions;
   const recovery = !accountUnknown && authenticationRecoveryPanelApplies(session, request);
   // Check Again lives on the recovery body's Last Checked fact. Where that body is not shown (a

@@ -130,6 +130,9 @@ export interface WorktreeCleanupRecord {
   branch?: string;
   source?: "legacy" | "created";
   baseRef?: string;
+  /** (#4138) The branch existed before this worktree: cleanup removes only an unchanged worktree
+   * and keeps the branch, whatever the removal mode. */
+  preserveBranch?: boolean;
   /** Exact checkpoint namespace owned by this worktree generation. Absent means legacy refs. */
   checkpointOwnerHash?: string;
   /** Durable proof that rollback owns the session's current checkpoint generation, not merely an
@@ -896,6 +899,55 @@ export async function createRequestedWorktree(
   await removeExternalDirectory(context, repoPath, path, options);
   await command(context, repoPath, ["worktree", "add", "-b", branch, path, baseCommit], 120_000);
   return { path, branch, baseRef, baseCommit, attached: false, created: true };
+}
+
+/** Create a session-owned worktree on an EXISTING branch, so work that already exists (a pushed
+ * pull request's head branch, or a local branch) continues without being recreated (#4138). The
+ * branch is checked out as it is, never reset or rebased. A branch checked out in any other
+ * worktree is refused rather than moved, so changes there stay where they are. A branch only the
+ * remote has is fetched and tracked under the same name. */
+export async function createRecoveredBranchWorktree(
+  repoPath: string,
+  sessionId: string,
+  branchName: string,
+  options: RequestedWorktreeOptions = {},
+  remote = "origin",
+): Promise<SessionWorktreeHandle> {
+  const context = options.context ?? nativeContext;
+  const branch = await validateBranch(context, repoPath, branchName);
+  safeGitArgument(remote, "Git remote");
+  const boundary = await requestedWorktreeBoundary(repoPath, sessionId, options);
+  const path = context.kind === "wsl"
+    ? `${boundary}/${requestedSlot(branch)}`
+    : join(boundary, requestedSlot(branch));
+  const listed = parseWorktreePorcelain(await command(context, repoPath, ["worktree", "list", "--porcelain", "-z"]));
+  const matching = listed.find((entry) => sameWorktreePath(context, entry.path, path));
+  if (matching) {
+    if (matching.branch === branch && matching.head) {
+      return { path: matching.path, branch, baseRef: branch, baseCommit: matching.head, attached: false, created: false };
+    }
+    throw new Error("the recovery worktree slot is already registered with different Git coordinates");
+  }
+  const elsewhere = listed.find((entry) => entry.branch === branch);
+  if (elsewhere) {
+    throw new Error(`branch ${branch} is checked out in another worktree (${elsewhere.path}); ` +
+      "commit or move that work, switch that worktree to another branch, then ask again");
+  }
+  const branchRef = `refs/heads/${branch}`;
+  const local = (await command(context, repoPath, ["for-each-ref", "--format=%(refname)", branchRef])).trim() === branchRef;
+  await removeExternalDirectory(context, repoPath, path, options);
+  if (local) {
+    await command(context, repoPath, ["worktree", "add", path, branch], 120_000);
+  } else {
+    const advertised = (await command(context, repoPath, ["ls-remote", "--heads", remote, branchRef], 120_000)).trim();
+    if (!advertised) throw new Error(`branch ${branch} exists neither in this repository nor on its remote`);
+    const trackingRef = `refs/remotes/${remote}/${branch}`;
+    await command(context, repoPath, ["fetch", "--no-tags", remote, `+${branchRef}:${trackingRef}`], 120_000);
+    await command(context, repoPath, ["worktree", "add", "--track", "-b", branch, path, trackingRef], 120_000);
+  }
+  const head = (await command(context, path, ["rev-parse", "HEAD"])).trim();
+  if (!/^[a-f0-9]{40,64}$/u.test(head)) throw new Error("the recovered branch did not resolve to a commit");
+  return { path, branch, baseRef: branch, baseCommit: head, attached: false, created: true };
 }
 
 /** Resolve and fetch the remote's advertised default branch. No primary-checkout HEAD or current
@@ -2551,6 +2603,13 @@ export async function discardWorktreeIfSafe(
   } catch {
     return { removed: false, reason: "unavailable" };
   }
+}
+
+/** Remove a worktree this runner just checked out on an existing branch, keeping the branch. Git
+ * refuses (and the worktree stays) if anything in it changed. */
+export async function releaseRecoveredWorktree(repoPath: string, path: string, options: WorktreeOptions = {}): Promise<void> {
+  const context = options.context ?? nativeContext;
+  await command(context, repoPath, ["worktree", "remove", safeGitArgument(path, "worktree path")], 120_000);
 }
 
 /** Remove the linked worktree, its branch, and stale administrative records. */

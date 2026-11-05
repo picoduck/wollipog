@@ -1,4 +1,6 @@
+import { randomUUID } from "node:crypto";
 import {
+  validLocationSwitchBranch, type SessionLocationSwitchMessage,
   LOCATION_SWITCH_GUIDANCE, LOCATION_SWITCH_LIMITS, LOCATION_SWITCH_TRIGGERS, isTerminal, locationSwitchOptionId, locationSwitchRole,
   normalizeLocationSwitchRepository, parseLocationSwitchOption, runnerSupportsProtocol, sameLocationSwitchRepository, sessionRole,
   type CreateSessionRequest, type LocationSwitchAction, type LocationSwitchCandidate, type LocationSwitchPlace, type LocationSwitchRequest,
@@ -21,6 +23,10 @@ export type LocationInspection = ProjectLocationInspection | { ok: false; locati
 export type LocationInspector = (locationId: string, options: { projectId: string }) => Promise<ProjectLocationInspection>;
 /** Creates a session as the approving person, through the ordinary creation route's ownership rules. */
 export type HandoffSessionCreator = (human: HumanPrincipal, request: CreateSessionRequest) => ServiceResult<SessionView>;
+/** Sends one Location switch to the session's runner and returns its answer; throws when none came. */
+export type LiveSessionSwitcher = (runnerId: string, message: SessionLocationSwitchMessage) => Promise<{ ok: boolean; error?: string }>;
+/** Harnesses whose conversation resumes across a working-directory change on the same runner. */
+const LIVE_SWITCH_DRIVERS: ReadonlySet<string> = new Set(["claude-code", "codex-app-server"]);
 
 const fail = <T>(error: string, status = 409): ServiceResult<T> => ({ ok: false, status, error });
 const ok = <T>(data: T, status = 200): ServiceResult<T> => ({ ok: true, status, data });
@@ -48,6 +54,25 @@ function sessionBinding(session: SessionView) {
   return { id: session.id, runnerId: session.runnerId, workspaceId: session.workspaceId, projectId: session.projectId,
     projectLocationId: session.projectLocationId, agentId: session.agentId, model: session.model, effort: session.effort,
     permissionMode: session.permissionMode };
+}
+
+/** What the moved session is told when it resumes in its new Location, framed like the handoff. */
+export function locationSwitchContinuationPrompt(source: SessionView, snapshot: LocationSwitchSnapshot, target: LocationSwitchCandidate): string {
+  const literal = (value: string) => JSON.stringify(value).replace(LINE_SEPARATORS, (separator) => `\\u${separator.charCodeAt(0).toString(16)}`);
+  return [
+    `[Wollipog Location Switch — session ${source.id}]`,
+    `Your person approved moving this session to Location ${literal(target.name)} on ${literal(target.machineName)}, ` +
+      `repository ${target.repository}` + (snapshot.current.repository ? `, from repository ${snapshot.current.repository}` : "") +
+      ". The conversation is the same; your working directory is now a worktree of that repository, and its instructions " +
+      "and permissions apply." + (snapshot.recoverBranch ? ` It is on the existing branch ${literal(snapshot.recoverBranch)}.` : "") +
+      " Work from the earlier Location stays there. Continue the task from where you were; check what is already done first.",
+    "Everything below this frame was written by this session when it asked to move; its person read it before approving.",
+    "[End Wollipog Location Switch]",
+    "",
+    `Why it belongs here: ${snapshot.reason}`,
+    "",
+    snapshot.handoff,
+  ].join("\n");
 }
 
 /** What the new session is told. The handoff is the requester's own words, shown to the person on
@@ -82,7 +107,7 @@ export class LocationSwitchService {
     private db: ControlPlaneDb,
     private sessions: SessionsService,
     private hub: Hub,
-    private deps: { inspect: LocationInspector; createSession: HandoffSessionCreator },
+    private deps: { inspect: LocationInspector; createSession: HandoffSessionCreator; switchSession: LiveSessionSwitcher },
   ) {}
 
   private requester(principal: AgentPrincipal, sessionId: string): ServiceResult<SessionView> {
@@ -150,11 +175,16 @@ export class LocationSwitchService {
           inspection.location.runnerId === location.runnerId && inspection.location.workspaceId === location.workspaceId) {
         const target = this.db.getRunner(location.runnerId);
         const agent = target?.agents.find((candidate) => candidate.id === session.agentId && candidate.available);
-        const actions: LocationSwitchAction[] = agent ? ["new_session"] : [];
+        const sameRunner = location.runnerId === session.runnerId;
+        // The live session moves only on its own runner, and only where the harness keeps its
+        // conversation across a working-directory change; elsewhere the task moves to a new session.
+        const switchable = sameRunner && LIVE_SWITCH_DRIVERS.has(session.driver ?? "") &&
+          runnerSupportsProtocol(target?.protocolVersion, "sessionLocationSwitchLive");
+        const actions: LocationSwitchAction[] = [...(switchable ? ["switch" as const] : []), ...(agent ? ["new_session" as const] : [])];
         candidates.push({
           ...this.place(location, inspection.location.repository), locationId: location.id, repository: inspection.location.repository,
-          sameRunner: location.runnerId === session.runnerId, actions,
-          ...(agent ? {} : { unavailableReason: `${session.agentName ?? "This session's agent"} isn't available on that machine.` }),
+          sameRunner, actions,
+          ...(actions.length ? {} : { unavailableReason: `${session.agentName ?? "This session's agent"} isn't available on that machine.` }),
         });
       }
     }
@@ -174,8 +204,7 @@ export class LocationSwitchService {
     })));
     // Identity, not content: the Locations and the repositories they verified as. The runner's own
     // inspection digest also covers the checkout's HEAD, which may move between request and approval.
-    const targetDigest = auditDigest({ session: sessionBinding(session), current, candidates })!;
-    return ok({ projectId: project.id, projectName: project.name, current, candidates, unavailable, options, targetDigest });
+    const targetDigest = auditDigest({ session: sessionBinding(session), current, candidates })!;    return ok({ projectId: project.id, projectName: project.name, current, candidates, unavailable, options, targetDigest });
   }
 
   private unavailablePlace(location: ProjectLocationView): Omit<LocationSwitchUnavailable, "reason"> {
@@ -188,8 +217,11 @@ export class LocationSwitchService {
     if (!requester.ok) return fail(requester.error!, requester.status);
     const session = requester.data!;
     if (!input || typeof input !== "object" || Array.isArray(input) ||
-        Object.keys(input).some((key) => !["requestId", "repository", "reason", "handoff", "trigger"].includes(key))) {
-      return fail("A Location switch request names only requestId, repository, reason, handoff and trigger", 400);
+        Object.keys(input).some((key) => !["requestId", "repository", "reason", "handoff", "trigger", "recoverBranch"].includes(key))) {
+      return fail("A Location switch request names only requestId, repository, reason, handoff, trigger and recoverBranch", 400);
+    }
+    if (input.recoverBranch !== undefined && !validLocationSwitchBranch(input.recoverBranch)) {
+      return fail("recoverBranch must be a branch name of the target repository", 400);
     }
     const repository = normalizeLocationSwitchRepository(input.repository);
     if (!bounded(input.requestId, LOCATION_SWITCH_LIMITS.requestId) || !repository ||
@@ -210,7 +242,9 @@ export class LocationSwitchService {
     if (existing) {
       const s = existing.resourceSnapshot;
       if (s.category !== "location_switch" || existing.resourceKey !== resourceKey || s.reason !== input.reason ||
-          s.handoff !== input.handoff || s.trigger !== trigger) return fail("requestId was already used for a different Location switch request");
+          s.handoff !== input.handoff || s.trigger !== trigger || s.recoverBranch !== input.recoverBranch) {
+        return fail("requestId was already used for a different Location switch request");
+      }
       return this.sessions.createWorkflowDecision(sessionId, { requestId: input.requestId, resourceKey, resourceSnapshot: s },
         (id) => this.db.canAccessSession(principal, id), trusted);
     }
@@ -220,7 +254,8 @@ export class LocationSwitchService {
     const still = this.requester(principal, sessionId);
     if (!still.ok) return fail(still.error!, still.status);
     const snapshot: LocationSwitchSnapshot = { category: "location_switch", repository, reason: input.reason, handoff: input.handoff,
-      trigger, ...prepared.data!, expiresAt: now + LOCATION_SWITCH_PROPOSAL_TTL_MS };
+      trigger, ...(input.recoverBranch ? { recoverBranch: input.recoverBranch } : {}), ...prepared.data!,
+      expiresAt: now + LOCATION_SWITCH_PROPOSAL_TTL_MS };
     return this.sessions.createWorkflowDecision(sessionId, { requestId: input.requestId, resourceKey, resourceSnapshot: snapshot },
       (id) => this.db.canAccessSession(principal, id), trusted);
   }
@@ -246,7 +281,6 @@ export class LocationSwitchService {
     const chosen = parseLocationSwitchOption(decision.selectedOptionId);
     const target = chosen && snapshot.candidates.find((candidate) => candidate.locationId === chosen.locationId);
     if (!chosen || !target || !target.actions.includes(chosen.action)) return fail("The approval does not name an offered Location");
-    if (chosen.action !== "new_session") return fail("This control plane cannot switch a live session yet; ask again and start a new session instead");
     const before = this.authorizeExecution(principal, sessionId, occurrenceId, target);
     if (!before.ok) return fail(before.error!, before.status);
     if (this.executing.has(occurrenceId)) return fail("This Location switch is already being carried out");
@@ -267,7 +301,9 @@ export class LocationSwitchService {
       if (JSON.stringify(sessionBinding(session)) !== JSON.stringify(sessionBinding(before.data!.session))) {
         return fail("This session's Location or settings changed while the Locations were checked; ask again for a fresh approval");
       }
-      const result = this.startHandoffSession(occurrenceId, digest, session, snapshot, target, human, now);
+      const result = chosen.action === "switch"
+        ? await this.switchLiveSession(occurrenceId, digest, session, snapshot, target, now)
+        : this.startHandoffSession(occurrenceId, digest, session, snapshot, target, human, now);
       if (!result.ok) return fail(result.error!, result.status);
       this.hub.sessionChangedById(sessionId);
       return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!, 201);
@@ -294,11 +330,50 @@ export class LocationSwitchService {
     return ok({ session, human });
   }
 
+  /** Hand the verified target to the session's own runner, which re-verifies it and moves the live
+   * session at its next turn boundary. The approval is consumed once the runner has durably accepted
+   * the switch; a refusal gives the claim back, so nothing moved and the approval can be retried. */
+  private async switchLiveSession(occurrenceId: string, digest: string, session: SessionView, snapshot: LocationSwitchSnapshot,
+    target: LocationSwitchCandidate, now: number): Promise<ServiceResult<LocationSwitchResult>> {
+    const workspacePath = this.db.getWorkspacePath(target.runnerId, target.workspaceId);
+    if (!workspacePath || target.runnerId !== session.runnerId) return fail("The target Location is no longer available on this session's machine");
+    // The claim names its target, so a runner snapshot that arrives after a lost reply still moves
+    // the session row and completes this receipt.
+    if (!this.db.claimLocationSwitch(occurrenceId, digest, now, { action: "switch", locationId: target.locationId })) {
+      return fail("A previous attempt to carry out this approval may already have moved this session; check it before asking again");
+    }
+    let reply: { ok: boolean; error?: string };
+    try {
+      reply = await this.deps.switchSession(session.runnerId, {
+        type: "session_location_switch", requestId: `location_switch_${randomUUID()}`, sessionId: session.id,
+        workspaceId: target.workspaceId, workspacePath, repository: target.repository, locationName: target.name, occurrenceId,
+        continuation: locationSwitchContinuationPrompt(session, snapshot, target),
+        ...(snapshot.recoverBranch ? { recoverBranch: snapshot.recoverBranch } : {}),
+      });
+    } catch {
+      // Whether the runner recorded the switch is unknown, so the claim stays and nothing is retried.
+      return fail("The session's machine did not confirm the Location switch; check the session before asking again", 502);
+    }
+    if (!reply.ok) {
+      this.db.releaseLocationSwitchClaim(occurrenceId);
+      return fail(`The session's machine refused the Location switch: ${reply.error ?? "unknown reason"}`);
+    }
+    const result: LocationSwitchResult = { action: "switch", locationId: target.locationId, sessionId: session.id,
+      navigationPath: navigationPath(session.id), completedAt: now };
+    if (!this.db.completeLocationSwitch(occurrenceId, digest, result, now)) {
+      // The runner may already have moved the session and its snapshot completed this receipt.
+      const recorded = this.db.workflowDecisionByOccurrence(occurrenceId)?.locationSwitchResult;
+      if (recorded?.action === "switch" && recorded.locationId === target.locationId) return ok(recorded);
+      throw new Error(`Location switch ${occurrenceId} was accepted by the runner but its receipt could not be recorded`);
+    }
+    return ok(result);
+  }
+
   private startHandoffSession(occurrenceId: string, digest: string, session: SessionView, snapshot: LocationSwitchSnapshot,
     target: LocationSwitchCandidate, human: HumanPrincipal, now: number): ServiceResult<LocationSwitchResult> {
     // The claim is durable before anything starts, so neither a retry nor a crash between creation
     // and consumption can start a second session for one approval.
-    if (!this.db.claimLocationSwitch(occurrenceId, digest, now)) {
+    if (!this.db.claimLocationSwitch(occurrenceId, digest, now, { action: "new_session", locationId: target.locationId })) {
       return fail("A previous attempt to carry out this approval may already have started a session; check Sessions before asking again");
     }
     const created = this.deps.createSession(human, {

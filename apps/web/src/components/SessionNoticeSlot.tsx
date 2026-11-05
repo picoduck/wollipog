@@ -92,6 +92,8 @@ export const SESSION_NOTICE_RANK = {
   worktreeSetupFailed: 3,
   worktreeSetupConfigInvalid: 4,
   accountSwitchFailed: 5,
+  // An approved Location switch waiting for the turn to end, or one that failed (#4138).
+  locationSwitch: 5,
   // The provider-HOME lease refusal that stopped the session's last launch (#3240), or, while the
   // session starts, the busy account its launch is waiting for. Never both at once.
   providerHomeRefusal: 6,

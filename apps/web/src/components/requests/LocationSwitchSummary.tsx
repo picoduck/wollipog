@@ -3,6 +3,7 @@ import { parseLocationSwitchOption, type LocationSwitchCandidate, type LocationS
   type PermissionOption } from "@wollipog/protocol";
 import { ChevronRightIcon } from "../Icons.js";
 import { ChoiceRows } from "../ui/ChoiceControls.js";
+import type { RequestCardActions } from "./request-meta.js";
 
 export const LOCATION_SWITCH_COPY = {
   details: "Location Switch Details",
@@ -14,6 +15,7 @@ export const LOCATION_SWITCH_COPY = {
   sameMachine: "This Machine",
   otherMachine: "Another Machine",
   taskHandoff: "Task Handoff",
+  existingBranch: "Existing Branch",
   unavailableLocations: "Unavailable Locations",
   unknownRepository: "an unverified repository",
 } as const;
@@ -30,6 +32,16 @@ export function locationSwitchOptions(options: readonly PermissionOption[], loca
     const parsed = parseLocationSwitchOption(option.optionId);
     return parsed ? parsed.locationId === locationId : option.kind === "reject_once" || option.kind === "reject_always";
   });
+}
+
+/** The footer for one chosen Location: Switch and Continue is the primary when the live session can
+ * move there, Start a New Session otherwise; every other choice stays a visible button. */
+export function locationSwitchCardActions(options: readonly PermissionOption[]): RequestCardActions {
+  const action = (name: "switch" | "new_session") => options.find((option) => parseLocationSwitchOption(option.optionId)?.action === name) ?? null;
+  const live = action("switch");
+  const handoff = action("new_session");
+  const stay = options.filter((option) => option.kind === "reject_once" || option.kind === "reject_always");
+  return { tertiary: null, primary: live ?? handoff, secondary: [...stay, ...(live && handoff ? [handoff] : [])], menu: [] };
 }
 
 /** One Location's rows, headed by its role, inside the summary's single facts list so every label
@@ -88,8 +100,16 @@ export function LocationSwitchSummary({ snapshot, chosenLocationId, onChoose }: 
         </dd></div>
       ) : null}
     </dl>
-    {chosen && !chosen.actions.includes("switch") && <p>
-      {chosen.sameRunner
+    {snapshot.recoverBranch && chosen?.actions.includes("switch") && <dl className="facts">
+      <div><dt>{LOCATION_SWITCH_COPY.existingBranch}</dt><dd><code>{snapshot.recoverBranch}</code></dd></div>
+    </dl>}
+    {chosen && <p>
+      {chosen.actions.includes("switch")
+        ? "Switch and Continue moves this session to that Location: it keeps its conversation and continues the task in a " +
+          (snapshot.recoverBranch ? "worktree of the existing branch above" : "new worktree there") +
+          ", under that repository's instructions and permissions. Start a New Session leaves this session here and " +
+          "starts another there with the handoff below."
+        : chosen.sameRunner
         ? "Start a New Session continues this task in that Location with the handoff below. This session stays where it is."
         : "That Location is on another machine, so the task continues in a new session there with the handoff below. " +
           "This session stays where it is."}

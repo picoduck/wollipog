@@ -1321,7 +1321,8 @@ export const TOOLS: McpTool[] = [
       "repository than this session's (for example, the issue or pull request you were asked to work on is in another repository). " +
       "Call it before implementing when you notice the mismatch, or when attaching a worktree or requesting a review is refused " +
       "because the repository differs (trigger worktree_attach or review). The control plane inspects every Location of the Project, " +
-      "and the person chooses one: Start a New Session there with your handoff, or Stay Here. Only the person approves; nothing " +
+      "and the person chooses one: Switch and Continue (this session moves there on the same machine and keeps its conversation), " +
+      "Start a New Session there with your handoff, or Stay Here. Only the person approves; nothing " +
       "moves until they do. Regular sessions only: Orchestrators dispatch children instead, and a child session reports the mismatch " +
       "to the session that started it. Then end your turn; the outcome resumes you.",
     inputSchema: { type: "object", properties: {
@@ -1331,6 +1332,9 @@ export const TOOLS: McpTool[] = [
       handoff: { type: "string", minLength: 1, maxLength: 8000, description: "The task as whoever continues it needs it: the request, what is done so far, " +
         "branches or pull requests that exist, and what remains. The person sees it before approving." },
       trigger: { type: "string", enum: ["early", "worktree_attach", "review"] },
+      recoverBranch: { type: "string", minLength: 1, maxLength: 255, description: "An existing branch of the target repository that " +
+        "already holds this task's work, such as an open pull request's head branch. Switch and Continue continues on it, " +
+        "never resetting it, instead of starting a new branch." },
     }, required: ["requestId", "repository", "reason", "handoff"], additionalProperties: false },
     handler: async (args, deps) => locationSwitchCall(deps, "POST", "", args),
   },
@@ -1345,7 +1349,8 @@ export const TOOLS: McpTool[] = [
     name: "execute_location_switch",
     description: "Carry out the exact Location and action your person approved, after the control plane verifies the Location again. " +
       "Supply the occurrenceId and resourceDigest of the request; no target can be supplied. The approval expires after an hour. " +
-      "After Start a New Session, tell your person where the task continues and stop working on it here.",
+      "After Start a New Session, tell your person where the task continues and stop working on it here. After Switch and " +
+      "Continue, end your turn: this session moves when the turn ends and continues the task in the new Location by itself.",
     inputSchema: { type: "object", properties: { occurrenceId: { type: "string", minLength: 1, maxLength: 256 }, resourceDigest: { type: "string", pattern: "^[0-9a-f]{64}$" } }, required: ["occurrenceId", "resourceDigest"], additionalProperties: false },
     handler: async (args, deps) => locationSwitchCall(deps, "POST", `/${encodeURIComponent(args.occurrenceId)}/execute`, { resourceDigest: args.resourceDigest }),
   },

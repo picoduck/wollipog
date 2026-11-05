@@ -2,8 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
-  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
-  campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT, RUNNER_CAPABILITY_MIN_PROTOCOL,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
+  campaignWorkflowOwner, SCOPE_GRANT_DEFAULT_SELECTION_COUNT,
   type CampaignIssueScopeSnapshot, type FullControlScopeGrant, type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlFirstMessageScope, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
 } from "@wollipog/protocol";
@@ -28,8 +28,6 @@ import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, uncertainVerdict, type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
 import { createHash } from "node:crypto";
-/** A runner just older than multi-repository boundaries (#4117), whatever the current version. */
-const PRE_BOUNDARY_PROTOCOL = RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1;
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
   operations: ["implementation_question", "pr_merge"], delegatablePolicyIds: [],
@@ -2329,7 +2327,7 @@ function multiRepositoryProject(f: ReturnType<typeof fixture>) {
   const plainFolder = f.db.createWorkspace("r", { name: "r plain", path: "/fixture/plain-folder" }, f.scope);
   register("r2", [{ id: "a", path: "/fixture/two/other" }, { id: "b", path: "/fixture/two/repository" }]);
   register("offline", [{ id: "o", path: "/fixture/offline" }]);
-  register("old", [{ id: "x", path: "/fixture/old" }], { protocolVersion: PRE_BOUNDARY_PROTOCOL });
+  register("old", [{ id: "x", path: "/fixture/old" }], { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1 });
   register("v2", [{ id: "y", path: "/fixture/v2" }], { inspection: 2 });
   const online = f.hub.isRunnerOnline;
   f.hub.isRunnerOnline = (runnerId) => runnerId !== "offline" && online(runnerId);
@@ -2472,7 +2470,7 @@ test("a launch Location that fails inspection still fails the launch with #4090'
 });
 
 test("a pre-v288 root keeps a single-repository boundary and inspects only its launch Location (#4117)", async () => {
-  const f = fixture({ protocolVersion: PRE_BOUNDARY_PROTOCOL });
+  const f = fixture({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1 });
   const p = multiRepositoryProject(f);
   const { server } = await app(f);
   try {
@@ -2513,7 +2511,7 @@ test("a one-Location Project yields a one-entry boundary that reads like today's
     assert.ok(validCampaignControl({ mode: "full_control", boundary: stored }));
     assert.deepEqual(campaignBoundaryRepositories(stored), [{ repository: "owner/repo", locationIds: [] }]);
     // A pre-v288 runner's diagnostic copy drops the list; v288 keeps it.
-    assert.deepEqual(campaignControlForRunner(policy.control!, PRE_BOUNDARY_PROTOCOL), { mode: "full_control", boundary: stored });
+    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1), { mode: "full_control", boundary: stored });
     assert.equal(campaignControlForRunner(policy.control!, PROTOCOL_VERSION), policy.control);
   } finally { await server.close(); f.db.close(); }
 });
