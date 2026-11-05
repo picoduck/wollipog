@@ -252,8 +252,25 @@ order, and the first that fails refuses the proposal with its code and no Decisi
    one of the issue's labels. Such a rule never matches a tool request.
 
 A runner older than v291 reports no facts, so floors 2 and 6 stay unverified and the proposal goes to
-the owner. A proposal that passes every floor is the owner's one typed approval, with
-`grantReview.cause: "selection"`, until the Decision Model reviews selection proposals.
+the owner as `grantReview.cause: "selection_unverified"`, with no model call.
+
+A proposal that passes every floor gets the Decision Model's `scope_review` (`docs/decision-model.md`):
+
+- `admit`: the server sets `issueAdmission` from the evidence (the review occurrence, the digest of
+  the grant it read, the verdict) and records it as `selectionReview`. The scope change is then
+  Orchestrator-owned and applied like an epic-lineage admission, with no human step.
+- `refuse`: the proposal is refused as `selection_refused`, with the model's reason in
+  `errorDetails.reason`. No request is created; the Orchestrator may propose another issue.
+- `uncertain`, retries exhausted or a non-transient failure: exactly one owner-owned scope approval
+  with `grantReview.cause` `selection_uncertain` or `selection_failed`, its `reviewOccurrenceId`, and
+  the uncertain reason or failure class beside the proposal, its rationale and the grant. Approving it
+  revokes every outstanding decision, as every human Full Control scope approval does (#3915).
+
+One review covers the campaign, the scope revision, the grant and the set of additions. Repeating the
+same additions at the same revision, whatever the rationale says, returns the same verdict, the same
+owner request or the same scope change: a retry can neither admit twice nor ask the owner twice, and
+a reworded rationale is not a second review. Campaign Status lists every reviewed proposal in
+Decision Model Checks with its issues, rationale, verdict, reason and outcome.
 
 The server binds lineage evidence, rationale, expected revision, affected assignments, related
 active children and affected grants into the snapshot. Root standing authorization resolves and

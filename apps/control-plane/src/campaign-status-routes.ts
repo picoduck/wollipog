@@ -26,6 +26,7 @@ import { FORGE_NOT_AUTHORIZED } from "./campaign-forge-observations.js";
 import { campaignSeedSubjectState } from "./campaign-issue-scope-seed.js";
 import type { ControlPlaneDb } from "./db.js";
 import { decisionOccurrenceView } from "./decision-runtime.js";
+import { selectionProposalView } from "./scope-selection.js";
 import type { AuthPrincipal } from "./identity.js";
 
 /* ------------------------------ Cost visibility ------------------------------ */
@@ -212,8 +213,11 @@ export function registerCampaignStatusRoutes(
         const state = "sessionId" in subject && subject.surface === "issue_scope_seed"
           ? campaignSeedSubjectState(policy, occurrence.occurrenceId) : undefined;
         const seedState = state ? { seed: state } : {};
+        // A selection proposal's review (#4103): the issues, the rationale and what it led to.
+        const selectionProposal = occurrence.kind === "scope_review" ? selectionProposalView(db, occurrence) : null;
         return { ...decisionOccurrenceView(occurrence, db.listDecisionAttempts(occurrence.occurrenceId)),
-          ...("sessionId" in subject ? { subject: { ...subject as CampaignDecisionSubject, ...seedState } } : {}) };
+          ...("sessionId" in subject ? { subject: { ...subject as CampaignDecisionSubject, ...seedState } } : {}),
+          ...(selectionProposal ? { selectionProposal } : {}) };
       }),
       usage: db.campaignDecisionUsage(read.rootId),
     };
