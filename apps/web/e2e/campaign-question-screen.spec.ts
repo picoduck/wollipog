@@ -1,13 +1,13 @@
 import { expect, test } from "@playwright/test";
 
-/** Campaign Status's Question Screen (#4104): each Decision Model verdict beside the request it
+/** Campaign Status's Decision Model Checks (#4104): each Decision Model verdict beside the request it
  * affected, and the owner's classification of one the model could not screen. */
 
 for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390", { width: 390, height: 844 }]] as const) {
   test(`the owner classifies a question the Decision Model could not screen (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=1&owner=1");
-    const section = page.getByRole("region", { name: "Question Screen" });
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
     await expect(section).toBeVisible();
     const items = section.locator("li");
     await expect(items).toHaveCount(4);
@@ -42,8 +42,33 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   });
 }
 
-test("Campaign Status shows no Question Screen before the Decision Model screens anything", async ({ page }) => {
+for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390", { width: 390, height: 844 }]] as const) {
+  test(`follow-up relatedness and closure-reason checks read beside their request (${label}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&checks=1");
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    const items = section.locator("li");
+    await expect(items).toHaveCount(4);
+    await expect(items.nth(0)).toContainText("Follow-Up Publication");
+    await expect(items.nth(0)).toContainText("Related");
+    await expect(items.nth(0)).toContainText("The Orchestrator may publish it.");
+    await expect(items.nth(1)).toContainText("Unrelated");
+    await expect(items.nth(1)).toContainText("Refused back to the Orchestrator.");
+    await expect(items.nth(2)).toContainText("Issue Closure");
+    await expect(items.nth(2)).toContainText("Reason Doesn't Fit");
+    await expect(items.nth(3)).toContainText("Waiting for you to decide the closure.");
+    await expect(items.nth(3)).toContainText("Timed Out");
+    // These checks are decided on their own request: nothing here classifies them.
+    for (let index = 0; index < 4; index += 1) await expect(items.nth(index).getByRole("button")).toHaveText(["Open Session"]);
+    await section.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: testInfo.outputPath(`decision-checks-${label}.png`) });
+    const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  });
+}
+
+test("Campaign Status shows no Decision Model Checks before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
   await expect(page.locator(".campaign-status-summary")).toBeVisible();
-  await expect(page.getByRole("heading", { name: "Question Screen" })).toHaveCount(0);
+  await expect(page.getByRole("heading", { name: "Decision Model Checks" })).toHaveCount(0);
 });
