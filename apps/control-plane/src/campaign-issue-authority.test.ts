@@ -993,6 +993,29 @@ test("#4065 a child's title mismatch creates nothing, reaches the root as recove
   } finally { h.db.close(); }
 });
 
+// #2938 criterion 2: the reformulate_request recovery action is emitted and reaches the root as an
+// actionable instruction naming the member and the condition to correct, never the member's text.
+test("#2938 a member's correctable refusal wakes the root with an actionable reformulate_request instruction", async () => {
+  const h = harness();
+  try {
+    const recommendationId = acceptedRecommendation(h);
+    h.db.updateSessionStatus("root", "idle", 3);
+    const refused = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "publish", resourceKey: "publish",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: "[Feature]: Mistitled repairs",
+        sanitizedBody: body, labels: [], recommendationId } });
+    assert.equal(refused.errorDetails?.code, "title_mismatch");
+    const record = publicationRefusalRecord(h)!;
+    const wake = nextContinuation(h);
+    assert.ok(wake, "the refusal wakes the idle root");
+    assert.match(wake.text, /Action needed: yes/u);
+    for (const fact of [`"recoveryId":"${record.id}"`, `"action":"reformulate_request"`, `"reason":"correctable_refusal"`,
+      `"admissionFailure":"title_mismatch"`, `"sessionId":"child"`, `"pending":true`]) {
+      assert.ok(wake.text.includes(fact), `the instruction carries ${fact}`);
+    }
+    assert.equal(wake.text.includes("Mistitled"), false, "the member's refused payload is not repeated to the root");
+  } finally { h.db.close(); }
+});
+
 test("#4065 each correctable failure is refused with its own condition, and the root's own refusal is not recorded as a child's", async () => {
   const h = harness();
   try {

@@ -21211,10 +21211,22 @@ export class ControlPlaneDb {
    * runner; the watch ends by a runner report or a lost notice, never by a stall bound. */
   campaignChildWait(sessionId: string, now: number): CampaignChildWait | null {
     if (this.pullRequestWatches.isParked(sessionId)) return "merge_queue_watch";
-    return this.stmt(
-      `SELECT 1 FROM managed_background_jobs
-       WHERE session_id=? AND source_present=1 AND terminal_observed_at IS NULL AND registered_at>? LIMIT 1`,
-    ).get(sessionId, now - BACKGROUND_JOB_STALL_MS) ? "background_job" : null;
+    return this.sessionsWithLiveBackgroundJobs([sessionId], now).size > 0 ? "background_job" : null;
+  }
+
+  /** The sessions among `sessionIds` with a registered managed background job the runner still
+   * lists and has not reported finished, within the stall bound (#2938). This reads the individual
+   * job records rather than the session's aggregate `backgroundWorkState`, so a job counts even
+   * where that summary is absent or already cleared. A job past the bound is reported as stalled
+   * instead, the same rule campaignChildWait applies. */
+  sessionsWithLiveBackgroundJobs(sessionIds: readonly string[], now: number): Set<string> {
+    if (sessionIds.length === 0) return new Set();
+    return new Set((this.stmt(
+      `SELECT DISTINCT session_id FROM managed_background_jobs
+       WHERE session_id IN (SELECT value FROM json_each(?)) AND source_present=1
+         AND terminal_observed_at IS NULL AND registered_at>?`,
+    ).all(JSON.stringify(sessionIds), now - BACKGROUND_JOB_STALL_MS) as Array<{ session_id: string }>)
+      .map((row) => row.session_id));
   }
 
   /** Whether a campaign descendant's live background job reached the stall bound in (after,
