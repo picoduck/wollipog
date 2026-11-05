@@ -2,6 +2,7 @@ import React, {
   useEffect,
   useId,
   useLayoutEffect,
+  useMemo,
   useRef,
   useState,
   type MutableRefObject,
@@ -39,6 +40,7 @@ import {
 import { CHOOSE_ACCOUNT_COPY, ChooseAccountDialog, type ChooseAccountResult } from "./ChooseAccountDialog.js";
 import { EvidenceReviewBody, useEvidenceReview } from "./EvidenceReview.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
+import { LocationSwitchSummary, locationSwitchChoices, locationSwitchOptions } from "./LocationSwitchSummary.js";
 import { claimDecision, decisionKey, useDecisionFailure, useDecisionInFlight } from "./request-reveal.js";
 import {
   REQUEST_CARD_COPY,
@@ -125,6 +127,13 @@ export function RequestCard({
   );
   const evidence = useEvidenceReview(session.id, request);
   const workflowDecision = request.kind === "workflow_decision" ? request.workflowDecision : undefined;
+  // A Location switch (#4138) asks the person to choose one Location; every control then acts on it.
+  const locationSwitch = workflowDecision?.resourceSnapshot.category === "location_switch" ? workflowDecision.resourceSnapshot : null;
+  const [chosenLocation, setChosenLocation] = useState<string | null>(null);
+  const locationChoices = locationSwitch ? locationSwitchChoices(locationSwitch) : [];
+  const chosenLocationId = (locationChoices.find((candidate) => candidate.locationId === chosenLocation) ?? locationChoices[0])?.locationId ?? null;
+  const cardOptions = useMemo(() => locationSwitch ? locationSwitchOptions(request.options, chosenLocationId) : request.options,
+    [locationSwitch, request.options, chosenLocationId]);
   const meta = requestKindMeta(request);
   // The decision in flight lives outside the card, which remounts when another request is expanded
   // and this one comes back; a second decision for the same occurrence is refused until it settles.
@@ -195,7 +204,7 @@ export function RequestCard({
   useEffect(() => {
     if (!intentRef || readOnlyNotice) return;
     const handler: RequestIntentHandler = (intent) => {
-      const option = requestOptionForIntent(request.options, intent);
+      const option = requestOptionForIntent(cardOptions, intent);
       if (option) void decideRef.current(option);
       // The expanded request owns A and D even when it cannot act on them, so the key never falls
       // through to a different request.
@@ -205,7 +214,7 @@ export function RequestCard({
     return () => {
       if (intentRef.current === handler) intentRef.current = null;
     };
-  }, [intentRef, readOnlyNotice, request.options]);
+  }, [intentRef, readOnlyNotice, cardOptions]);
 
   const signIn = request.kind === "authentication";
   // Every kind marks the edges its scrolling body can still scroll past (#2715).
@@ -213,7 +222,7 @@ export function RequestCard({
   useClipEdges(bodyRef);
   const actions: SignInCardActions = signIn
     ? signInCardActions(request.options)
-    : { ...requestCardActions(request.options), recheck: null, methods: [] };
+    : { ...requestCardActions(cardOptions), recheck: null, methods: [] };
   const { tertiary, secondary, menu: menuOptions, primary, recheck, methods } = actions;
   const recovery = !accountUnknown && authenticationRecoveryPanelApplies(session, request);
   // Check Again lives on the recovery body's Last Checked fact. Where that body is not shown (a
@@ -281,8 +290,8 @@ export function RequestCard({
   const method = methods.find((option) => option.optionId === chosenMethod) ?? methods[0] ?? null;
   const keyHint = (option: PermissionOption): string | null => {
     if (!showKeyHints) return null;
-    if (requestOptionForIntent(request.options, "approve") === option) return "A";
-    if (requestOptionForIntent(request.options, "deny") === option) return "D";
+    if (requestOptionForIntent(cardOptions, "approve") === option) return "A";
+    if (requestOptionForIntent(cardOptions, "deny") === option) return "D";
     return null;
   };
   const optionButton = (option: PermissionOption, variant: "primary" | "secondary" | "tertiary") => {
@@ -313,7 +322,7 @@ export function RequestCard({
   const decisionCategory = workflowDecision?.resourceSnapshot.category;
   const decisionDetails = workflowDecision && decisionCategory !== "issue_closure" &&
     decisionCategory !== "campaign_issue_scope" && decisionCategory !== "automation_creation" &&
-    decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
+    decisionCategory !== "location_switch" && decisionCategory !== "ui_evidence_approval" ? request.context?.input : undefined;
   const facts = [
     { label: "Tool", value: request.context?.toolName },
     { label: "Path", value: request.context?.path },
@@ -390,7 +399,9 @@ export function RequestCard({
       />
     ) : null,
     evidence ? <EvidenceReviewBody key="evidence" review={evidence} /> : null,
-    workflowDecision && !evidence ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot}
+    locationSwitch ? <LocationSwitchSummary key="decision" snapshot={locationSwitch} chosenLocationId={chosenLocationId}
+      onChoose={setChosenLocation} /> : null,
+    workflowDecision && !evidence && !locationSwitch ? <WorkflowDecisionSummary key="decision" snapshot={workflowDecision.resourceSnapshot}
       {...(workflowDecision.closingReferenceCheck ? { closingReferenceCheck: workflowDecision.closingReferenceCheck } : {})} /> : null,
     decisionDetails ? (
       <details key="details" className="disclosure">
