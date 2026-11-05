@@ -3022,6 +3022,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
    * its fixed reason. Server-owned and informational: it grants nothing. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
+  /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
+  pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
+  /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
+  locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
   issueScopeProposalEpic?: number;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
@@ -3215,6 +3219,9 @@ export interface UiEvidenceReviewDelivery {
 export interface OrchestratorCampaignProjection {
   /** Current authorized root control, paired with policyRevision; child snapshots may be stale. */
   control?: CampaignControl;
+  /** The repository boundary's Locations, exclusions and joins (#4117). Omitted for a campaign
+   * whose boundary predates the repository list. */
+  repositoryBoundary?: import("./project-location-inspection.js").CampaignRepositoryBoundaryView;
   budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   /** Durable content-safe recovery state; control-plane-owned, never an execution grant. */
@@ -7309,7 +7316,7 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7455,7 +7462,7 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
   /** The owner's classification of an uncertain or failed screen. */

@@ -139,10 +139,53 @@ const CREDENTIAL_SCREEN: DecisionKindDefinition = {
   dataFields: ["request"],
 };
 
+/** Follow-up relatedness (#4104): whether a follow-up the Orchestrator would publish on its own
+ * belongs to the work the owner asked for. It runs only after the structural floor admitted the
+ * publication, and it may only refuse one: `unrelated` is refused back to the Orchestrator,
+ * `uncertain` makes the publication the owner's. */
+const FOLLOW_UP_RELATEDNESS: DecisionKindDefinition = {
+  kind: "follow_up_relatedness",
+  promptVersion: "follow_up_relatedness.v1",
+  instructions:
+    "A campaign owner asked an orchestrating agent to deliver some work. While delivering it, the agent proposes to " +
+    "publish a new follow-up issue on its own. You answer one question: is this follow-up related to the work the " +
+    "owner asked for? `grant` lists the issues and any selection the owner's request covers, `origins` the campaign " +
+    "work the follow-up came from, and `follow_up` the issue the agent would publish and why it accepted it. " +
+    "Answer `related` when the follow-up finishes, fixes, tests or documents that work, or covers a defect or gap " +
+    "found while doing it that the work depends on or exposed. Answer `unrelated` when it starts new or separate work " +
+    "the owner's request does not cover, such as a different feature, an unrelated cleanup or a wish-list item, even " +
+    "if it is in the same repository or worth doing. " + DATA_RULES,
+  verdicts: ["related", "unrelated", "uncertain"],
+  ownerMessage: true,
+  dataFields: ["grant", "origins", "follow_up"],
+};
+
+/** Closure-reason choice (#4104): whether the reason the Orchestrator gives for closing an issue
+ * fits the issue and the evidence the server already proved. It runs only after the delivery or
+ * disposition floor, and it may only refuse: `does_not_fit` is refused back to the Orchestrator,
+ * `uncertain` makes the closure the owner's. */
+const CLOSURE_REASON: DecisionKindDefinition = {
+  kind: "closure_reason",
+  promptVersion: "closure_reason.v1",
+  instructions:
+    "An orchestrating agent asks to close a GitHub issue with a stated reason: `completed` means the issue's work was " +
+    "delivered, `not_planned` means the campaign decided not to do it. You answer one question: does the stated reason " +
+    "fit the issue and the evidence? `closure` gives the issue, the reason and the agent's explanation; `evidence` " +
+    "gives what the campaign recorded: cancelled or removed work with its recorded reason, and any rejected or " +
+    "duplicate recommendation with its reason. Answer `fits` when the evidence supports closing the issue for that " +
+    "reason. Answer `does_not_fit` when it does not, for example a not-planned closure whose recorded reason shows " +
+    "the work is still wanted or was only paused, or an explanation that contradicts the evidence. " + DATA_RULES,
+  verdicts: ["fits", "does_not_fit", "uncertain"],
+  ownerMessage: false,
+  dataFields: ["closure", "evidence"],
+};
+
 export const DECISION_KINDS: Readonly<Record<DecisionKind, DecisionKindDefinition>> = {
   probe: PROBE,
   scope_grant: SCOPE_GRANT,
   credential_screen: CREDENTIAL_SCREEN,
+  follow_up_relatedness: FOLLOW_UP_RELATEDNESS,
+  closure_reason: CLOSURE_REASON,
 };
 
 /** The fixed Test Decision Model inputs. The request carries a planted instruction, so a passing

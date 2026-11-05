@@ -41,7 +41,10 @@ A dispatched wake stays in flight until its parent turn finishes. It counts as u
 when all of these hold: the runner confirmed the turn delivering that exact wake as `completed`;
 the root is idle with nothing pending; neither the root nor any live descendant is queued,
 starting, running, waiting for a pending Stop or still returning background work; and the
-observation's signal is unchanged. Unanswered for 2, 4, 8 or 16 minutes after its first to fourth
+observation's signal is unchanged. Background work is read from each registered managed background
+job as well as the session's summary state: a job the runner still lists without a terminal status
+keeps its session working, even where the summary is absent. A job past the one-hour stall bound is
+reported as stalled instead and stops counting, as it stops counting as a child's wait. Unanswered for 2, 4, 8 or 16 minutes after its first to fourth
 wake (capped at 30), the same record and occurrence is woken again under a new attempt identity
 through the same single-flight reservation. A failed, missing or acknowledged-unknown turn never
 counts as answered, so an unknown outcome is not a reason to wake again. Once the four-attempt

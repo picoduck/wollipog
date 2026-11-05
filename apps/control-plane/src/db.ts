@@ -1,5 +1,6 @@
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
-import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES } from "@wollipog/protocol";
+import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, CAMPAIGN_LOCATION_JOINS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES,
+  type CampaignExcludedLocation, type CampaignLocationJoin, type CampaignPendingLocation, type CampaignRepositoryBoundaryView } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
@@ -2991,7 +2992,8 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   occurrence_id       TEXT PRIMARY KEY,
   campaign_session_id TEXT NOT NULL,
   session_id          TEXT NOT NULL,
-  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision')),
+  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
+                        'follow_up_publication','issue_closure')),
   request_id          TEXT NOT NULL,
   classification      TEXT CHECK (classification IN ('decline','orchestrator')),
   classified_by       TEXT,
@@ -5807,6 +5809,49 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Admit the follow-up relatedness and closure-reason subjects (#4104 Slice B). A table written by
+ * the question screen's release checked its surface against the four question surfaces; SQLite
+ * cannot alter a CHECK, so that table is rebuilt with the wider check. Every row is preserved.
+ */
+function widenCampaignDecisionSubjects(db: DatabaseSync): void {
+  const schema = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaign_decision_subjects'",
+  ).get() as { sql?: string } | undefined;
+  if (!schema?.sql || schema.sql.includes("'issue_closure'")) return;
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    db.exec("BEGIN;");
+    db.exec(`
+      CREATE TABLE campaign_decision_subjects_v2 (
+        occurrence_id       TEXT PRIMARY KEY,
+        campaign_session_id TEXT NOT NULL,
+        session_id          TEXT NOT NULL,
+        surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
+                              'follow_up_publication','issue_closure')),
+        request_id          TEXT NOT NULL,
+        classification      TEXT CHECK (classification IN ('decline','orchestrator')),
+        classified_by       TEXT,
+        classified_at       INTEGER,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+      );
+      INSERT INTO campaign_decision_subjects_v2
+        (occurrence_id, campaign_session_id, session_id, surface, request_id, classification, classified_by, classified_at, created_at)
+        SELECT occurrence_id, campaign_session_id, session_id, surface, request_id, classification, classified_by, classified_at, created_at
+        FROM campaign_decision_subjects;
+      DROP TABLE campaign_decision_subjects;
+      ALTER TABLE campaign_decision_subjects_v2 RENAME TO campaign_decision_subjects;
+    `);
+    db.exec("COMMIT;");
+  } catch (error) {
+    try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 /** Session-row assignment that folds a cached event's time into its last activity, binding
  * (ts, ts). Last activity keeps the later time, so replayed history, a restored control-plane
  * event, or a runner clock that trails the control plane's never moves it backward. The first
@@ -7405,6 +7450,7 @@ export class ControlPlaneDb {
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
     admitChildBlockedCampaignEvents(db);
     preserveCampaignFollowUpOrigins(db);
+    widenCampaignDecisionSubjects(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
     // narrower and permits multiple distinct invocations in one provider turn.
     db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_provider_turn_action");
@@ -8207,6 +8253,11 @@ export class ControlPlaneDb {
         db.exec(`ALTER TABLE orchestrator_campaign_request_resolutions ADD COLUMN ${column}`);
       }
     }
+    // The person who added a Project Location (#4117). Only a campaign owner's own additions join
+    // its boundary automatically; earlier rows, and any added without a person, read as nobody's.
+    if (!(db.prepare("PRAGMA table_info(project_locations)").all() as Array<{ name: string }>).some((column) => column.name === "added_by_user_id")) {
+      db.exec("ALTER TABLE project_locations ADD COLUMN added_by_user_id TEXT");
+    }
     const controlPlane = new ControlPlaneDb(
       db, artifactBlobs, instanceId, journalMode === "wal" ? `${resolvePath(location)}-wal` : null, hostRebooted, false,
     );
@@ -8869,6 +8920,7 @@ export class ControlPlaneDb {
     input: { name: string; path: string },
     now = Date.now(),
     requestedScope?: ResourceScope,
+    addedByUserId?: string,
   ): WorkspaceInfo {
     const name = input.name.trim();
     const path = input.path.trim();
@@ -8907,7 +8959,7 @@ export class ControlPlaneDb {
          (runner_id, workspace_id, organization_id, owner_kind, owner_id, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?)`,
       ).run(runnerId, id, workspaceScope.organizationId, workspaceScope.owner.kind, ownerId, now, now);
-      this.addProjectLocation(projectId, { runnerId, workspaceId: id }, now);
+      this.addProjectLocation(projectId, { runnerId, workspaceId: id, ...(addedByUserId ? { addedByUserId } : {}) }, now);
     });
     return { id, name, path };
   }
@@ -9594,9 +9646,16 @@ export class ControlPlaneDb {
     return this.resolveImportedSessionLocation(runnerId, path).projectLocation;
   }
 
+  /** The person who added this Project Location, or null when no person did (#4117). */
+  projectLocationAddedBy(locationId: string): string | null {
+    const row = this.stmt("SELECT added_by_user_id FROM project_locations WHERE id=?").get(locationId) as
+      | { added_by_user_id: string | null } | undefined;
+    return row?.added_by_user_id ?? null;
+  }
+
   addProjectLocation(
     projectId: string,
-    input: { runnerId: string; workspaceId: string },
+    input: { runnerId: string; workspaceId: string; addedByUserId?: string },
     now = Date.now(),
   ): ProjectLocationView {
     const project = this.getProject(projectId);
@@ -9625,15 +9684,19 @@ export class ControlPlaneDb {
         this.stmt(
           `UPDATE project_locations
            SET name=CASE WHEN name_source='user' THEN name ELSE ? END,
-             path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
+             path=?, source=?, last_seen_at=?, detached_at=NULL, added_by_user_id=?, updated_at=?
            WHERE id=? AND detached_at IS NOT NULL AND removed_at IS NULL`,
-        ).run(workspace.name, workspace.path, workspace.source, now, now, locationId);
+        ).run(workspace.name, workspace.path, workspace.source, now, input.addedByUserId ?? null, now, locationId);
+        // A revived Location is added anew (#4117): nothing a campaign recorded about its earlier
+        // life (an exclusion a reconnect would retry, a pending entry) survives. Only the adding
+        // route's own provenance check can record it again.
+        this.forgetCampaignLocation(projectId, locationId, now);
       } else {
         this.stmt(
           `INSERT INTO project_locations
            (id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
-            detached_at, removed_at, created_at, updated_at)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?)`,
+            detached_at, removed_at, created_at, updated_at, added_by_user_id)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, ?, ?, ?)`,
         ).run(
           locationId,
           projectId,
@@ -9645,6 +9708,7 @@ export class ControlPlaneDb {
           now,
           now,
           now,
+          input.addedByUserId ?? null,
         );
       }
       this.stmt(
@@ -9655,7 +9719,7 @@ export class ControlPlaneDb {
     return this.projectLocation(locationId)!;
   }
 
-  moveProjectLocation(locationId: string, targetProjectId: string, now = Date.now()): ProjectLocationView | null {
+  moveProjectLocation(locationId: string, targetProjectId: string, now = Date.now(), movedByUserId?: string): ProjectLocationView | null {
     const location = this.projectLocation(locationId);
     const target = this.getProject(targetProjectId);
     if (!location || !target) return null;
@@ -9731,6 +9795,12 @@ export class ControlPlaneDb {
       ).run(targetProjectId, now, targetProjectId);
       this.stmt("UPDATE projects SET name_source='user' WHERE id IN (?, ?)")
         .run(sourceProjectId, targetProjectId);
+      // Moving a Location into a Project adds it there, by whoever moved it (#4117), so nothing a
+      // campaign recorded about its earlier life there survives the move.
+      if (!targetLocation) {
+        this.stmt("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(movedByUserId ?? null, locationId);
+        this.forgetCampaignLocation(targetProjectId, locationId, now);
+      }
     });
     return targetLocation ? this.projectLocation(targetLocation.id) : this.projectLocation(locationId);
   }
@@ -12447,6 +12517,20 @@ export class ControlPlaneDb {
         classification: "decline" | "orchestrator" | null } | undefined;
     return row ? { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
       requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
+  }
+
+  /** The latest check of one subject that did not confirm it (#4104): a refusing verdict, an
+   * uncertain one or a failure. Such an outcome sticks to the server-owned subject, so rewording the
+   * request's text never buys a second verdict. */
+  latestUnconfirmedCampaignCheck(campaignSessionId: string, surface: CampaignDecisionSubject["surface"], requestId: string,
+    kind: string, refuse: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt(
+      `SELECT d.* FROM campaign_decision_subjects s JOIN decision_occurrences d ON d.occurrence_id = s.occurrence_id
+       WHERE s.campaign_session_id=? AND s.surface=? AND s.request_id=? AND d.kind=?
+         AND (d.state IN ('uncertain','failed') OR (d.state='decided' AND d.verdict=?))
+       ORDER BY d.created_at DESC, d.occurrence_id DESC LIMIT 1`,
+    ).get(campaignSessionId, surface, requestId, kind, refuse) as DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
@@ -17227,6 +17311,60 @@ export class ControlPlaneDb {
     return [...roots].flatMap((id) => { const root=this.getSession(id); return root?.orchestratorPolicy?.issueScope ? [root] : []; });
   }
 
+  /** Campaign Status's repository boundary (#4117): each entry's Locations with their current
+   * availability and default marker, read live, so a Location that left the Project shows as
+   * removed while its repository keeps its entry. */
+  campaignRepositoryBoundaryView(rootId: string, policy: OrchestratorCampaignPolicy): CampaignRepositoryBoundaryView | null {
+    const control = policy.control;
+    if (control?.mode !== "full_control" || !control.boundary.repositories) return null;
+    // Read the row directly: a session view embeds this projection.
+    const projectId = (this.stmt("SELECT project_id FROM sessions WHERE id=?").get(rootId) as { project_id: string | null } | undefined)?.project_id;
+    const project = projectId ? this.getProject(projectId) : null;
+    const current = new Map((project?.locations ?? []).map((location) => [location.id, location]));
+    const named = new Map([...(policy.locationJoins ?? []).map((join) => [join.locationId, join.name] as const)]);
+    return {
+      revision: control.boundary.revision,
+      repositories: control.boundary.repositories.map((entry) => ({ repository: entry.repository,
+        locations: entry.locationIds.map((locationId) => {
+          const location = current.get(locationId);
+          // A Location outside the campaign's Project is never read live: it may now belong to a
+          // Project this campaign's readers can't see. Only the name the campaign recorded is shown.
+          return { locationId, name: location?.name ?? named.get(locationId) ?? "Removed Location",
+            availability: location?.availability ?? "removed" as const, isDefault: location?.isDefault ?? false };
+        }) })),
+      excludedLocations: structuredClone(policy.excludedLocations ?? []),
+      pendingLocations: structuredClone((policy.pendingLocations ?? []).filter((item) => current.has(item.locationId))),
+      joins: structuredClone(policy.locationJoins ?? []),
+    };
+  }
+
+  /** Drop one Location's exclusion and pending records from the Project's campaigns (#4117). */
+  private forgetCampaignLocation(projectId: string, locationId: string, now: number): void {
+    for (const root of this.campaignRepositoryRoots({ projectId })) {
+      const policy = this.sessionOrchestratorPolicy(root.id);
+      if (!policy) continue;
+      const excluded = (policy.excludedLocations ?? []).filter((item) => item.locationId !== locationId);
+      const pending = (policy.pendingLocations ?? []).filter((item) => item.locationId !== locationId);
+      if (excluded.length === (policy.excludedLocations ?? []).length && pending.length === (policy.pendingLocations ?? []).length) continue;
+      if (excluded.length) policy.excludedLocations = excluded; else delete policy.excludedLocations;
+      if (pending.length) policy.pendingLocations = pending; else delete policy.pendingLocations;
+      this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, root.id);
+    }
+  }
+
+  /** Live root campaigns whose boundary has a repository list (#4117), in one Project or in any
+   * Project with a Location on one runner. */
+  campaignRepositoryRoots(filter: { projectId: string } | { runnerId: string }): SessionView[] {
+    const projectIds = "projectId" in filter ? [filter.projectId] : this.projectIdsForRunner(filter.runnerId);
+    return projectIds.flatMap((projectId) => (this.stmt(`SELECT id FROM sessions WHERE project_id=? AND parent_session_id IS NULL
+      AND archived=0 AND status NOT IN ('completed','failed','stopped')
+      AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.control.boundary.repositories') ELSE NULL END='array'`)
+      .all(projectId) as Array<{ id: string }>).flatMap(({ id }) => {
+      const root = this.getSession(id);
+      return root?.orchestratorPolicy?.control?.mode === "full_control" && root.orchestratorPolicy.control.boundary.repositories ? [root] : [];
+    }));
+  }
+
   campaignPublicationReservations(rootId: string): WorkflowDecisionView[] {
     return (this.stmt("SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND category='follow_up_issue_publication' AND status IN ('pending','approved','consumed')")
       .all(rootId) as Array<{ occurrence_id: string }>).flatMap((row) => {
@@ -17461,6 +17599,85 @@ export class ControlPlaneDb {
       }
       this.db.exec("COMMIT");
       return { ok: true, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** Record what a mid-campaign Location inspection found (#4117). Verified Locations join their
+   * repository's boundary entry, or a new entry, at one new boundary revision authorized by the
+   * campaign's owner, exactly as any owner-authorized boundary change: every Full Control member
+   * gets the re-minted boundary and unconsumed decisions under the old revision are revoked.
+   * Exclusions and pending Locations are informational and never change the revision. The caller
+   * proves each join's provenance; this only refuses a boundary that is stale or not the owner's. */
+  recordCampaignLocations(rootId: string, ownerUserId: string, update: {
+    joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }>;
+    excluded: CampaignExcludedLocation[];
+    pending: CampaignPendingLocation[];
+  }, now: number): { ok: true; revision: number; joined: boolean; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.repositories) {
+        return refuse(409, "Only a Full Control campaign with a repository boundary takes Project Locations.");
+      }
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (!parentControlPolicy || !campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date.");
+      }
+      if (control.boundary.authorizedByUserId !== ownerUserId) return refuse(403, "Only the campaign's owner can widen its boundary.");
+      const touched = new Set([...update.joins, ...update.excluded, ...update.pending].map((item) => item.locationId));
+      // A Location keeps one state: whatever this update says replaces what was recorded before.
+      const excluded = [...(policy.excludedLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.excluded];
+      const pending = [...(policy.pendingLocations ?? []).filter((item) => !touched.has(item.locationId)), ...update.pending];
+      let revision = control.boundary.revision;
+      const joins = update.joins.filter((join) => !control.boundary.repositories!.some((entry) => entry.locationIds.includes(join.locationId)));
+      let revoked: WorkflowDecisionView[] = [];
+      if (joins.length) {
+        const order = new Map((this.getProject(this.getSession(rootId)?.projectId ?? "")?.locations ?? []).map((location, index) => [location.id, index]));
+        const repositories = structuredClone(control.boundary.repositories);
+        for (const join of joins) {
+          const name = join.repository.toLowerCase();
+          const entry = repositories.find((item) => item.repository.toLowerCase() === name);
+          if (entry) entry.locationIds.push(join.locationId);
+          else repositories.push({ repository: name, locationIds: [join.locationId] });
+        }
+        // Within an entry, Locations keep Project order (default first); Locations no longer in the
+        // Project keep their place after the rest.
+        for (const entry of repositories) {
+          entry.locationIds = entry.locationIds.map((id, index) => ({ id, index }))
+            .sort((a, b) => (order.get(a.id) ?? Number.MAX_SAFE_INTEGER) - (order.get(b.id) ?? Number.MAX_SAFE_INTEGER) || a.index - b.index)
+            .map((item) => item.id);
+        }
+        const reminted = remintCampaignBoundary({ ...control.boundary, repositories }, { revision: control.boundary.issueScopeRevision }, ownerUserId, now);
+        if (reminted?.mode !== "full_control") return refuse(409, "The campaign's boundary cannot hold more repositories or Locations.");
+        revision = reminted.boundary.revision;
+        for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+          if (id === rootId) continue;
+          const memberPolicy = this.sessionOrchestratorPolicy(id);
+          if (memberPolicy?.control?.mode !== "full_control") continue;
+          memberPolicy.control = structuredClone(reminted);
+          this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+        }
+        policy.control = reminted;
+        policy.locationJoins = [...(policy.locationJoins ?? []), ...joins.map((join) => ({ locationId: join.locationId, name: join.name,
+          repository: join.repository.toLowerCase(), revision, at: now, source: join.source }))].slice(-CAMPAIGN_LOCATION_JOINS_MAX);
+        if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+            WHERE id=? AND parent_control_policy_revision=?`).run(rootId, parentControlPolicy.revision).changes) !== 1) {
+          return refuse(409, "Campaign authority changed; inspect the Location again.");
+        }
+        revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+        for (const stale of revoked) {
+          this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+          this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+          this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+        }
+      }
+      if (excluded.length) policy.excludedLocations = excluded.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.excludedLocations;
+      if (pending.length) policy.pendingLocations = pending.slice(-CAMPAIGN_BOUNDARY_LOCATIONS_MAX); else delete policy.pendingLocations;
+      this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
+      this.db.exec("COMMIT");
+      return { ok: true, revision, joined: joins.length > 0, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
@@ -21243,10 +21460,22 @@ export class ControlPlaneDb {
    * runner; the watch ends by a runner report or a lost notice, never by a stall bound. */
   campaignChildWait(sessionId: string, now: number): CampaignChildWait | null {
     if (this.pullRequestWatches.isParked(sessionId)) return "merge_queue_watch";
-    return this.stmt(
-      `SELECT 1 FROM managed_background_jobs
-       WHERE session_id=? AND source_present=1 AND terminal_observed_at IS NULL AND registered_at>? LIMIT 1`,
-    ).get(sessionId, now - BACKGROUND_JOB_STALL_MS) ? "background_job" : null;
+    return this.sessionsWithLiveBackgroundJobs([sessionId], now).size > 0 ? "background_job" : null;
+  }
+
+  /** The sessions among `sessionIds` with a registered managed background job the runner still
+   * lists and has not reported finished, within the stall bound (#2938). This reads the individual
+   * job records rather than the session's aggregate `backgroundWorkState`, so a job counts even
+   * where that summary is absent or already cleared. A job past the bound is reported as stalled
+   * instead, the same rule campaignChildWait applies. */
+  sessionsWithLiveBackgroundJobs(sessionIds: readonly string[], now: number): Set<string> {
+    if (sessionIds.length === 0) return new Set();
+    return new Set((this.stmt(
+      `SELECT DISTINCT session_id FROM managed_background_jobs
+       WHERE session_id IN (SELECT value FROM json_each(?)) AND source_present=1
+         AND terminal_observed_at IS NULL AND registered_at>?`,
+    ).all(JSON.stringify(sessionIds), now - BACKGROUND_JOB_STALL_MS) as Array<{ session_id: string }>)
+      .map((row) => row.session_id));
   }
 
   /** Whether a campaign descendant's live background job reached the stall bound in (after,
@@ -22186,6 +22415,11 @@ export class ControlPlaneDb {
       policyRevision: campaign.parent_control_policy_revision,
       ...(this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
         ? { control: structuredClone(policy.control ?? { mode: "custom" as const }) } : {}),
+      ...(() => {
+        const boundary = this.campaignRootAudienceCanSee(campaignSessionId)(resolvedCampaignId)
+          ? this.campaignRepositoryBoundaryView(resolvedCampaignId, policy) : null;
+        return boundary ? { repositoryBoundary: boundary } : {};
+      })(),
       ...(budget && this.campaignBudgets.members(resolvedCampaignId).every((id) => !this.stmt("SELECT 1 FROM sessions WHERE id=?").get(id) || this.campaignRootAudienceCanSee(resolvedCampaignId)(id))
         ? { budget } : {}),
       ...(recovery ? { recovery } : {}),
@@ -33911,6 +34145,26 @@ function validContextIssueNumbers(value: unknown): value is number[] {
     value.every((n) => Number.isSafeInteger(n) && n > 0);
 }
 
+const locationRecord = (item: unknown, keys: string[]): Record<string, unknown> | null => {
+  const entry = item as Record<string, unknown> | null;
+  return entry && typeof entry === "object" && !Array.isArray(entry) && Object.keys(entry).every((key) => keys.includes(key)) &&
+    typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
+    typeof entry.name === "string" && entry.name.length <= 256 ? entry : null;
+};
+
+function validPendingLocations(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX &&
+    value.every((item) => locationRecord(item, ["locationId", "name", "reason"])?.reason === "added_by_other");
+}
+
+function validLocationJoins(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= CAMPAIGN_LOCATION_JOINS_MAX && value.every((item) => {
+    const entry = locationRecord(item, ["locationId", "name", "repository", "revision", "at", "source"]);
+    return Boolean(entry && campaignRepositoryLocation(entry.repository) && Number.isSafeInteger(entry.revision) && (entry.revision as number) > 0 &&
+      Number.isSafeInteger(entry.at) && ["owner_added", "runner_reconnected", "owner_included"].includes(entry.source as string));
+  });
+}
+
 function validExcludedLocations(value: unknown): boolean {
   return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
     const entry = item as Record<string, unknown> | null;
@@ -34008,6 +34262,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
   // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
   if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
+  if (value.pendingLocations !== undefined && !validPendingLocations(value.pendingLocations)) delete value.pendingLocations;
+  if (value.locationJoins !== undefined && !validLocationJoins(value.locationJoins)) delete value.locationJoins;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);

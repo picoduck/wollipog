@@ -23,6 +23,7 @@ import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, synthet
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
+import { CampaignLocations, registerCampaignLocationRoutes } from "./campaign-locations.js";
 import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
@@ -2657,4 +2658,246 @@ test("each Orchestrator participant's runner stores only its own Location reposi
     assert.equal(old.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.repositoryQualifiedIssueScope);
     assert.ok(p.other.id);
   } finally { await server.close(); f.db.close(); }
+});
+
+/** A launched multi-repository campaign plus the mid-campaign Location machinery (#4117). */
+async function launchedMultiRepositoryCampaign(f: ReturnType<typeof fixture>) {
+  const p = multiRepositoryProject(f);
+  const { server: launchServer } = await app(f);
+  const { preflight: checked } = await preflight(launchServer, p.body);
+  const admitted = await launchServer.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+    payload: { ...p.body, requestId: `mid-campaign-${randomUUID()}`, preflightDigest: checked!.digest } });
+  assert.equal(admitted.statusCode, 201, admitted.body);
+  await launchServer.close();
+  const rootId = admitted.json().id as string;
+  const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id),
+    settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now),
+    log: { warn() {} } });
+  const server = Fastify();
+  registerCampaignLocationRoutes(server, { campaignLocations: locations, requestPrincipal: (req) =>
+    req.headers.authorization === "Bearer human" ? f.human
+      : req.headers.authorization === "Bearer other" ? { ...f.human, userId: "usr_other", actorId: "usr_other" }
+      : req.headers.authorization === "Bearer agent" ? { kind: "agent", actorId: "fixture-agent", organizationId: f.human.organizationId, delegatedScope: f.scope }
+      : null });
+  const boundary = () => (f.db.getSession(rootId)!.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+  const policy = () => f.db.getSession(rootId)!.orchestratorPolicy!;
+  // Another folder on the second machine, in a repository the campaign doesn't cover yet.
+  f.db.registerRunner({ runnerId: "r2", hostname: "r2", os: "linux", version: "test", agents: [], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } },
+    workspaces: [{ id: "a", name: "r2 a", path: "/fixture/two/other" }, { id: "b", name: "r2 b", path: "/fixture/two/repository" },
+      { id: "c", name: "r2 c", path: "/fixture/two/third" }, { id: "d", name: "r2 d", path: "/fixture/two/repository-copy" },
+      { id: "e", name: "r2 e", path: "/fixture/two/not-a-repository" }] }, Date.now(), PROTOCOL_VERSION);
+  const inspect = f.state.inspect;
+  const extra: Record<string, string> = { "/fixture/two/third": "third/repo", "/fixture/two/repository-copy": "owner/repo" };
+  f.state.inspect = (message) => extra[message.workspacePath ?? ""]
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true,
+      repository: extra[message.workspacePath!]!, issueNumbers: [], digest: "d".repeat(64) }
+    : inspect(message);
+  return { p, server, rootId, locations, boundary, policy };
+}
+
+test("a Location the owner adds mid-campaign is inspected and joins at a new boundary revision (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const policyRevision = f.db.getSession(c.rootId)!.parentControlPolicy!.revision;
+    // A new repository adds an entry.
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(third.id, f.human);
+    assert.deepEqual(c.boundary().repositories!.map((entry) => entry.repository), ["owner/repo", "other/repo", "third/repo"]);
+    assert.equal(c.boundary().revision, before + 1);
+    assert.equal(f.db.getSession(c.rootId)!.parentControlPolicy!.revision, policyRevision + 1);
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(c.rootId)!), "the re-minted boundary is current");
+    // A Location of an existing repository joins that entry.
+    const copy = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "d", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(copy.id, f.human);
+    assert.deepEqual(c.boundary().repositories![0], { repository: "owner/repo", locationIds: [c.p.twin.id, c.p.launchLocation.id, copy.id] });
+    assert.equal(c.boundary().revision, before + 2);
+    assert.deepEqual(c.policy().locationJoins!.map((join) => [join.locationId, join.repository, join.revision, join.source]), [
+      [third.id, "third/repo", before + 1, "owner_added"], [copy.id, "owner/repo", before + 2, "owner_added"]]);
+    // Each member's runner is sent the re-minted boundary.
+    const syncs = f.sent.filter((message) => message.type === "campaign_issue_scope" && message.operation === "synchronize");
+    assert.ok(syncs.length >= 2);
+    // A failing Location is excluded with its reason, and the revision does not move.
+    const folder = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "e", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(folder.id, f.human);
+    assert.equal(c.boundary().revision, before + 2);
+    assert.deepEqual(c.policy().excludedLocations!.find((item) => item.locationId === folder.id),
+      { locationId: folder.id, name: "r2 e", failure: "not_repository", reason: PROJECT_LOCATION_INSPECTION_FAILURES.not_repository });
+    // Campaign Status sees each repository's Locations, the exclusions and the joins.
+    const view = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
+    assert.equal(view.revision, before + 2);
+    assert.deepEqual(view.repositories[0]!.locations.map((location) => [location.locationId, location.isDefault, location.availability]),
+      [[c.p.twin.id, true, "available"], [c.p.launchLocation.id, false, "available"], [copy.id, false, "available"]]);
+    assert.ok(view.excludedLocations.some((item) => item.locationId === folder.id && item.failure === "not_repository"));
+    assert.equal(view.joins.length, 2);
+    assert.doesNotMatch(JSON.stringify(view), /\/fixture\//, "Campaign Status never names a local path");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Location excluded because its runner was offline joins once the runner reconnects (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === c.p.offline.id)!.failure, "runner_offline");
+    const before = c.boundary().revision;
+    // Still offline: nothing changes.
+    await c.locations.runnerReconnected("offline");
+    assert.equal(c.boundary().revision, before);
+    f.hub.isRunnerOnline = () => true;
+    await c.locations.runnerReconnected("offline");
+    assert.deepEqual(c.boundary().repositories![0]!.locationIds.includes(c.p.offline.id), true);
+    assert.equal(c.boundary().revision, before + 1);
+    assert.equal(c.policy().excludedLocations!.some((item) => item.locationId === c.p.offline.id), false);
+    assert.equal(c.policy().locationJoins!.at(-1)!.source, "runner_reconnected");
+    // A folder that is not a repository is not retried by a reconnect.
+    await c.locations.runnerReconnected("r");
+    assert.equal(c.policy().excludedLocations!.find((item) => item.locationId === c.p.plain.id)!.failure, "not_repository");
+    assert.equal(c.boundary().revision, before + 1);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an excluded Location that someone else adds again waits for the owner instead of joining on reconnect (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    // The offline Location leaves the Project and another person adds it back; it keeps its id.
+    f.db.removeProjectLocation(c.p.offline.id);
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const readded = f.db.addProjectLocation(c.p.project.id, { runnerId: "offline", workspaceId: "o", addedByUserId: other.userId });
+    await c.locations.locationAdded(readded.id, other);
+    assert.equal(c.policy().excludedLocations!.some((item) => item.locationId === readded.id), false);
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === readded.id));
+    f.hub.isRunnerOnline = () => true;
+    await c.locations.runnerReconnected("offline");
+    assert.equal(c.boundary().revision, before, "only the owner's Include in Campaign can add it now");
+    assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.includes(readded.id)), false);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a detached Location revived without a person loses its exclusion and never joins on reconnect (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    f.hub.isRunnerOnline = (runnerId) => runnerId !== "offline";
+    // Removing the runner detaches the Location; registering it again and re-adding the Location
+    // with no person (as an internal relink does) revives the same id.
+    f.db.deleteRunner("offline");
+    f.db.registerRunner({ runnerId: "offline", hostname: "offline", os: "linux", version: "test", agents: [],
+      workspaces: [{ id: "o", name: "offline o", path: "/fixture/offline" }], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } },
+    Date.now(), PROTOCOL_VERSION);
+    const revived = f.db.addProjectLocation(c.p.project.id, { runnerId: "offline", workspaceId: "o" });
+    assert.equal(revived.id, c.p.offline.id);
+    assert.equal(c.policy().excludedLocations!.some((item) => item.locationId === revived.id), false);
+    f.hub.isRunnerOnline = () => true;
+    await c.locations.runnerReconnected("offline");
+    assert.equal(c.boundary().revision, before);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.includes(revived.id)), false);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a Location another person or no person added waits for the owner's Include in Campaign (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const theirs = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: other.userId });
+    const inspections = f.sent.filter((message) => message.type === "campaign_launch_inspect").length;
+    await c.locations.locationAdded(theirs.id, other);
+    // Created without a person (as an agent-created Location would be): it never joins on its own,
+    // even when the owner's request is the one that reports it.
+    const nobodys = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "d" });
+    await c.locations.locationAdded(nobodys.id, f.human);
+    assert.equal(c.boundary().revision, before);
+    assert.equal(f.sent.filter((message) => message.type === "campaign_launch_inspect").length, inspections, "nothing is inspected before the owner asks");
+    assert.deepEqual(c.policy().pendingLocations!.map((item) => [item.locationId, item.reason]),
+      [[theirs.id, "added_by_other"], [nobodys.id, "added_by_other"]]);
+    // Only the owner's own request can include it; the other person and agents cannot.
+    for (const auth of ["Bearer other", "Bearer agent", "Bearer nobody"]) {
+      const refused = await c.server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/locations/${theirs.id}/include`,
+        headers: { authorization: auth } });
+      assert.equal(refused.statusCode, 403, auth);
+    }
+    assert.equal(c.boundary().revision, before);
+    const included = await c.server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/locations/${theirs.id}/include`,
+      headers: { authorization: "Bearer human" } });
+    assert.equal(included.statusCode, 200, included.body);
+    assert.deepEqual(included.json(), { joined: true, revision: before + 1 });
+    assert.deepEqual(c.boundary().repositories!.at(-1), { repository: "third/repo", locationIds: [theirs.id] });
+    assert.equal(c.policy().pendingLocations!.some((item) => item.locationId === theirs.id), false);
+    assert.equal(c.policy().locationJoins!.at(-1)!.source, "owner_included");
+    // A Location outside the campaign's Project cannot be included.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    const outside = f.db.addProjectLocation(elsewhere.id, { runnerId: "r2", workspaceId: "e", addedByUserId: f.human.userId });
+    const foreign = await c.server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/locations/${outside.id}/include`,
+      headers: { authorization: "Bearer human" } });
+    assert.equal(foreign.statusCode, 404);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an owner addition re-added by someone else while it is being inspected waits for the owner (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const inspect = f.state.inspect;
+    let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+    f.state.inspect = (message) => message.workspacePath === "/fixture/two/third" ? (held = message, null) : inspect(message);
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    const ownerAddition = c.locations.locationAdded(third.id, f.human);
+    for (let tick = 0; tick < 50 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(held, "the owner's addition is being inspected");
+    // Meanwhile another person moves it out of the Project and back: same id, runner, workspace and path.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    f.db.moveProjectLocation(third.id, elsewhere.id, Date.now(), other.userId);
+    f.db.moveProjectLocation(third.id, c.p.project.id, Date.now(), other.userId);
+    const theirAddition = c.locations.locationAdded(third.id, other);
+    const message = held!;
+    f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
+      ok: true, repository: "third/repo", issueNumbers: [], digest: "d".repeat(64) }, "r2");
+    await Promise.all([ownerAddition, theirAddition]);
+    assert.equal(c.boundary().revision, before, "the owner's stale inspection never joins it");
+    assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.includes(third.id)), false);
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === third.id), "it waits for Include in Campaign");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a join revokes the campaign's outstanding decisions through the boundary-change lifecycle (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const pending = f.sessions.createWorkflowDecision(c.rootId, { requestId: "q-1", resourceKey: "design-question",
+      resourceSnapshot: { category: "implementation_question", question: "Which design?",
+        options: [{ optionId: "a", label: "Option A" }, { optionId: "b", label: "Option B" }] } }, () => true);
+    assert.equal(pending.ok, true, pending.error ?? "");
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(third.id, f.human);
+    assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"));
+    assert.equal(f.db.workflowDecisionByOccurrence(pending.data!.occurrenceId)!.status, "revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(c.rootId)), /campaign_control_changed/u,
+      "the revocation is recorded with its reason");
+    assert.equal(f.db.getSession(c.rootId)!.pendingApproval?.requestId === pending.data!.occurrenceId, false,
+      "no card for the revoked decision remains");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("Campaign Status never reads a moved Location's name from another Project (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
+    assert.ok(before.repositories.some((entry) => entry.locations.some((location) => location.locationId === c.p.other.id && location.name === "r2 a")));
+    // The launch Location of other/repo moves to someone's private Project and is renamed there.
+    const privateProject = f.db.createProject({ name: "Private", scope: f.scope });
+    f.db.moveProjectLocation(c.p.other.id, privateProject.id, Date.now(), "usr_other");
+    f.db.renameProjectLocation(privateProject.id, c.p.other.id, "Secret Client Repo");
+    const view = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
+    const entry = view.repositories.find((item) => item.repository === "other/repo")!;
+    assert.deepEqual(entry.locations, [{ locationId: c.p.other.id, name: "Removed Location", availability: "removed", isDefault: false }]);
+    assert.doesNotMatch(JSON.stringify(view), /Secret Client Repo/u);
+  } finally { await c.server.close(); f.db.close(); }
 });
