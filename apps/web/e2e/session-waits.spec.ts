@@ -26,6 +26,7 @@ async function theme(page: Page, colorScheme: "light" | "dark") {
 async function capture(page: Page, name: string) {
   if (!CAPTURE) return;
   await page.mouse.move(0, 0);
+  await page.evaluate(() => (document.activeElement as HTMLElement | null)?.blur());
   await page.screenshot({ path: `.evidence/1280/${CAPTURE}-${name}.png`, fullPage: true, animations: "disabled" });
 }
 
