@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
-  supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol,
+  PROJECT_LOCATION_INSPECTION_FAILURES, supportsPacedVideoReviewPeer, humanRequiredRulesExist, runnerSupportsProtocol,
   type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type ProjectLocationInspection,
 } from "@wollipog/protocol";
 import type { AuthPrincipal } from "./identity.js";
@@ -101,10 +101,16 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
     const launchLocationId = initial.plan.projectLocationId ?? null;
     // Only Locations the launching person can reach themselves are inspected or named; the rest
     // are left out entirely, never listed as excluded.
-    const projectLocations = projectId && db.canAccessProject(principal, projectId) &&
+    const reachableLocations = () => projectId && db.canAccessProject(principal, projectId) &&
       runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary")
       ? (db.getProject(projectId)?.locations ?? []).filter((location) => location.availability !== "runner_removed" &&
         (location.id === launchLocationId || db.canAccessWorkspace(principal, location.runnerId, location.workspaceId))) : null;
+    const projectLocations = reachableLocations();
+    // What each secondary Location was when its inspection started, so a Location that changes
+    // while any inspection is still pending is caught after all of them settle.
+    const inspected = new Map((projectLocations ?? []).filter((location) => location.id !== launchLocationId).map((location) =>
+      [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
+        path: db.getWorkspacePath(location.runnerId, location.workspaceId) }]));
     let inspection: CampaignLaunchInspectionResult | undefined;
     const inspections = new Map<string, ProjectLocationInspection>();
     try {
@@ -139,12 +145,25 @@ export function registerFullControlLaunchRoutes(app: FastifyInstance, dependenci
         (plan.projectLocationId ?? null) !== launchLocationId) {
       return reply.code(409).send({ error: "project location changed during inspection; refresh the preflight" });
     }
+    // Every secondary Location is read again now that all inspections have settled. One that left
+    // the Project or the launching person's reach meanwhile is left out entirely; one now pointing
+    // at another runner, workspace or path is not the Location that was inspected, so it reads as
+    // unread. A Location added meanwhile was never inspected and is left for a later inspection.
+    const settledLocations = projectLocations ? (reachableLocations() ?? []).filter((location) =>
+      location.id === launchLocationId || inspected.has(location.id)) : null;
+    for (const location of settledLocations ?? []) {
+      const before = inspected.get(location.id);
+      if (before && (before.runnerId !== location.runnerId || before.workspaceId !== location.workspaceId ||
+          before.path !== db.getWorkspacePath(location.runnerId, location.workspaceId))) {
+        inspections.set(location.id, { ok: false, locationId: location.id, failure: "read_failed", reason: PROJECT_LOCATION_INSPECTION_FAILURES.read_failed });
+      }
+    }
     const agent = runnerNow.agents.find((candidate) => candidate.id === plan.agentId);
     const policyIds = body.overrides?.delegatablePolicyIds ?? [];
     const { preflight, proposal } = campaignLaunchPreflight({
       request: body, plan, runner: runnerNow, inspection, organizationId: principal.organizationId,
-      projectLocations: projectLocations ? { launchLocationId: plan.projectLocationId ?? null,
-        locations: projectLocations.map((location) => ({ id: location.id, name: location.name })), inspections } : null,
+      projectLocations: settledLocations ? { launchLocationId: plan.projectLocationId ?? null,
+        locations: settledLocations.map((location) => ({ id: location.id, name: location.name })), inspections } : null,
       projectDefaults: plan.projectId ? db.projectChildSessionDefaults(plan.projectId) : null,
       accountingError: (costProtected) => db.campaignBudgetAccountingError(plan.driver, plan.config.model, costProtected),
       dailyLimit: db.getUsageDailyBudget(plan.scope.organizationId).perUserUsd !== null,

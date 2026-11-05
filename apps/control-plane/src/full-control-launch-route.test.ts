@@ -2103,6 +2103,42 @@ test("a Project Location the launching person cannot reach is never inspected or
   } finally { await server.close(); f.db.close(); }
 });
 
+test("secondary Locations that change while the launch inspection is still pending never enter the boundary (#4117)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const inspect = f.state.inspect;
+  let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+  // The launch Location answers last: every secondary inspection has already succeeded.
+  f.state.inspect = (message) => message.workspacePath === "/fixture/repository" ? (held = message, null) : inspect(message);
+  const access = f.db.canAccessWorkspace.bind(f.db);
+  const { server } = await app(f);
+  try {
+    const pending = preflight(server, p.body);
+    for (let tick = 0; tick < 50 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(held, "the launch inspection is pending");
+    // Meanwhile: one secondary Location leaves the Project, one leaves the person's reach, and one
+    // is repointed at another folder.
+    f.db.removeProjectLocation(p.other.id);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => !(runnerId === "r2" && workspaceId === "b") && access(principal, runnerId, workspaceId);
+    f.db.registerRunner({ runnerId: "v2", hostname: "v2", os: "linux", version: "test", agents: [],
+      workspaces: [{ id: "y", name: "v2 y", path: "/fixture/v2-moved" }], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } },
+    Date.now(), PROTOCOL_VERSION);
+    const launchMessage = held!;
+    f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: launchMessage.requestId, workspaceId: launchMessage.workspaceId,
+      ok: true, repository: "owner/repo", issueNumbers: launchMessage.issueNumbers, digest: "d".repeat(64) }, "r");
+    const { response, preflight: checked } = await pending;
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(checked!.summary.repositories, [{ repository: "owner/repo", locations: [{ locationId: p.launchLocation.id, name: "Fixture Repo" }] }]);
+    assert.deepEqual(checked!.advanced.proposal!.repositories, [{ repository: "owner/repo", locationIds: [p.launchLocation.id] }]);
+    const summary = JSON.stringify(checked!.summary);
+    assert.doesNotMatch(summary, new RegExp(p.other.id), "a removed Location is not named");
+    assert.doesNotMatch(summary, new RegExp(p.twin.id), "a Location out of reach is not named");
+    assert.equal(checked!.summary.excludedLocations!.find((item) => item.locationId === p.v2.id)?.failure, "read_failed",
+      "a repointed Location is not the one that was inspected");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("a launch Location that fails inspection still fails the launch with #4090's reason (#4117)", async () => {
   const f = fixture();
   const p = multiRepositoryProject(f);
