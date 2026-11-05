@@ -1628,6 +1628,12 @@ async function retiredWorktreeFixture(options: {
   /** Work in the legacy worktree beside a runner-created sibling that a real discard can retire:
    * it sits in the requested-worktree boundary and its head is on the remote default branch. */
   createdSibling?: boolean;
+  /** How each provider turn ends (#3542). `accept` is acknowledged and answered, as a delivered
+   * continuation needs; `fail_launch` fails before the provider accepts it, as a process whose
+   * isolation names a missing bind source does. Absent: the turn ends without either signal. */
+  turn?: (text: string, driver: number) => "accept" | "fail_launch";
+  /** Each process generation's `providerProcessLive` answer (#3542). Absent: the method is too. */
+  processLive?: (driver: number) => boolean;
 } = {}) {
   const root = realpathSync(mkdtempSync(join(tmpdir(), "wollipog-managed-retired-worktree-")));
   const home = mkdtempSync(join(tmpdir(), "wollipog-managed-retired-home-"));
@@ -1662,13 +1668,28 @@ async function retiredWorktreeFixture(options: {
   const factory = (_driver: unknown, _launch: unknown, cb: DriverCallbacks) => {
     const driver = { prompts: [] as string[], disposed: false, endCalls: 0, cb };
     drivers.push(driver);
+    const index = drivers.length - 1;
+    let lastTurnError: string | null = null;
     return {
       pid: drivers.length, initialize: async () => {}, newSession: async () => "provider-1",
       prompt: async (text: string) => {
         driver.prompts.push(text);
         await options.onPrompt?.(text);
+        lastTurnError = null;
+        const outcome = options.turn?.(text, index);
+        if (outcome === "fail_launch") {
+          lastTurnError = `bwrap: Can't find source path ${sibling}: No such file or directory`;
+          cb.onEvent({ kind: "stderr", text: lastTurnError });
+          return "refusal" as const;
+        }
+        if (outcome === "accept") {
+          cb.onPromptAccepted?.();
+          cb.onEvent({ kind: "agent_message", text: `answer to: ${text.slice(0, 40)}`, final: true });
+        }
         return "end_turn" as const;
       },
+      ...(options.turn ? { lastTurnError: () => lastTurnError } : {}),
+      ...(options.processLive ? { providerProcessLive: () => options.processLive!(index) } : {}),
       cancel: () => {}, dispose: () => { driver.disposed = true; },
       setConfig: () => {}, resolvePermission: () => false,
       agentSessionId: () => options.noResume ? null : "provider-1",
@@ -1872,6 +1893,194 @@ test("background work holding a retirement rebind is bounded like any worktree h
     assert.deepEqual(f.drivers[0]!.prompts, []);
     assert.equal(f.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "monitor-1")?.terminalStatus, "killed");
     f.assertRelaunched();
+  } finally {
+    f.cleanup();
+  }
+});
+
+type RetiredWorktreeFixture = Awaited<ReturnType<typeof retiredWorktreeFixture>>;
+const CONTINUATION_PREFIX = "Managed background jobs reached their terminal barrier.";
+const WATCH_TURN = "watch CI and review";
+
+/** The incident's turn (#3542): it starts a monitor that never ends and a subagent. */
+function launchMonitorAndSubagent(f: RetiredWorktreeFixture, subagentOnly = false): void {
+  const startedAt = Date.now();
+  const jobs: DriverBackgroundJob[] = [
+    { id: "agent-1", launchType: "agent", startedAt },
+    ...(subagentOnly ? [] : [{ id: "monitor-1", launchType: "monitor" as const, startedAt }]),
+  ];
+  for (const job of jobs) f.live.set(job.id, job);
+  const ids = jobs.map((job) => job.id).sort();
+  f.drivers[0]!.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: ids, jobs, observedTaskIds: ids });
+}
+
+/** The subagent finishes after its turn ended, so its result is owed a continuation. */
+function finishSubagent(f: RetiredWorktreeFixture): void {
+  const agent = f.live.get("agent-1")!;
+  f.live.delete("agent-1");
+  const jobs = [...f.live.values()];
+  const ids = jobs.map((job) => job.id).sort();
+  const terminalJobs: DriverBackgroundTerminalJob[] = [
+    { ...agent, status: "completed", terminalAt: Date.now(), continuationRequired: true },
+  ];
+  f.drivers[0]!.cb.onBackgroundWork?.(jobs.length
+    ? { state: "running", pendingTaskIds: ids, jobs, observedTaskIds: ids, terminalJobs }
+    : { state: null, pendingTaskIds: [], terminalJobs });
+}
+
+test("a continuation held behind a retirement rebind runs after it, in a launch without the retired bind (#3542)", async () => {
+  if (process.platform !== "linux") return;
+  let f: RetiredWorktreeFixture | undefined;
+  f = await retiredWorktreeFixture({
+    handoffWaitMaxMs: 300,
+    onPrompt: (text) => { if (text === WATCH_TURN) launchMonitorAndSubagent(f!); },
+    turn: () => "accept",
+    // The bound ends the jobs by retiring the process that owns them, as Claude's driver does.
+    processLive: (driver) => driver > 0 || !f || f.drivers[0]!.endCalls === 0,
+  });
+  try {
+    f.manager.prompt("s1", WATCH_TURN);
+    await f.waitFor(() => f!.drivers[0]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(f);
+    await f.retire();
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f!.drivers[1]?.prompts.length === 2,
+      "the continuation and the queued prompt did not run after the rebind");
+
+    assert.equal(f.drivers[0]!.endCalls, 1, "the bound ended the monitor once");
+    assert.deepEqual(f.drivers[0]!.prompts, [WATCH_TURN], "nothing launched from the retired generation's binds");
+    assert.ok(f.drivers[1]!.prompts[0]!.startsWith(CONTINUATION_PREFIX), "the continuation runs first");
+    assert.match(f.drivers[1]!.prompts[0]!, /"id":"monitor-1","launchType":"monitor","status":"killed"/);
+    assert.equal(f.drivers[1]!.prompts[1], "continue", "then the prompt that waited behind the rebind");
+    f.assertRelaunched();
+    const meta = f.store.readMeta("s1")!;
+    assert.ok(meta.backgroundJobs?.find((job) => job.id === "agent-1")?.assistantResultPersistedAt,
+      "the subagent's result was delivered");
+    assert.equal(meta.backgroundWorkState, undefined);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined, "the retirement rebind completed");
+    assert.deepEqual(f.errors(), []);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a retirement rebind pending behind a continuation whose launch fails runs next and carries it (#3542)", async () => {
+  if (process.platform !== "linux") return;
+  let f: RetiredWorktreeFixture | undefined;
+  let launchFailed = false;
+  f = await retiredWorktreeFixture({
+    handoffWaitMaxMs: 300,
+    onPrompt: (text) => { if (text === WATCH_TURN) launchMonitorAndSubagent(f!); },
+    turn: (text, driver) => {
+      if (driver > 0 || !text.startsWith(CONTINUATION_PREFIX)) return "accept";
+      launchFailed = true;
+      return "fail_launch";
+    },
+    // The process looked live, so the continuation went first, until its launch proved otherwise.
+    processLive: (driver) => driver > 0 || !launchFailed,
+  });
+  try {
+    f.manager.prompt("s1", WATCH_TURN);
+    await f.waitFor(() => f!.drivers[0]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(f);
+    await f.retire();
+    f.manager.prompt("s1", "continue");
+    await f.waitFor(() => f!.drivers[1]?.prompts.length === 2,
+      "the rebind did not run after the continuation's launch failed");
+
+    assert.equal(f.drivers[0]!.prompts.length, 2);
+    assert.ok(f.drivers[0]!.prompts[1]!.startsWith(CONTINUATION_PREFIX), "the continuation's one failed launch");
+    assert.ok(f.drivers[1]!.prompts[0]!.startsWith(CONTINUATION_PREFIX), "the rebind carried it first");
+    assert.equal(f.drivers[1]!.prompts[1], "continue");
+    f.assertRelaunched();
+    const agent = f.store.readMeta("s1")!.backgroundJobs?.find((job) => job.id === "agent-1");
+    assert.ok(agent?.assistantResultPersistedAt, "the result was delivered, not dropped");
+    assert.equal(agent?.continuationLaunchFailures, 1);
+    assert.equal(agent?.continuationLaunchHeldAt, undefined);
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, undefined);
+    assert.equal(f.internals.active.get("s1").pendingWorktreeRebind, undefined, "the retirement rebind completed");
+    // The fallback timer armed while a continuation is in flight finds nothing owed when it fires.
+    if (f.internals.backgroundContinuationTimers.has("s1")) {
+      f.internals.cancelBackgroundContinuationTimer("s1");
+      f.internals.scheduleBackgroundContinuation("s1");
+    }
+    await f.settle();
+    assert.equal(f.drivers.length, 2);
+    assert.equal(f.drivers[1]!.prompts.length, 2, "nothing retries after delivery");
+    assert.equal(f.errors().some((message) => message.includes("failed to start")), false);
+  } finally {
+    f.cleanup();
+  }
+});
+
+test("a continuation that keeps failing before provider acceptance is held after bounded attempts, and a person's accepted turn delivers it (#3542)", async () => {
+  if (process.platform !== "linux") return;
+  let f: RetiredWorktreeFixture | undefined;
+  let failing = true;
+  f = await retiredWorktreeFixture({
+    onPrompt: (text) => { if (text === WATCH_TURN) launchMonitorAndSubagent(f!, true); },
+    turn: (text) => failing && text.startsWith(CONTINUATION_PREFIX) ? "fail_launch" : "accept",
+  });
+  const agent = () => f!.store.readMeta("s1")?.backgroundJobs?.find((job) => job.id === "agent-1");
+  const attempts = () => f!.drivers[0]!.prompts.filter((text) => text.startsWith(CONTINUATION_PREFIX)).length;
+  const statuses = () => f!.sent.filter((message) => message.type === "session_status")
+    .map((message) => message as { status: string; detail?: string });
+  /** Once the failed turn has unwound, the armed retry fires now instead of after its 30 seconds. */
+  const fireRetry = async () => {
+    await f!.waitFor(() => !f!.internals.active.get("s1")?.running, "the failed turn did not unwind");
+    assert.equal(f!.internals.backgroundContinuationTimers.get("s1")?.retry, true, "a delayed retry is armed");
+    f!.internals.cancelBackgroundContinuationTimer("s1");
+    f!.internals.scheduleBackgroundContinuation("s1");
+  };
+  try {
+    f.manager.prompt("s1", WATCH_TURN);
+    await f.waitFor(() => f!.drivers[0]!.prompts.length === 1 && f!.store.readMeta("s1")?.status === "idle",
+      "the launching turn did not finish");
+    finishSubagent(f);
+    await f.waitFor(() => agent()?.continuationLaunchFailures === 1, "the first launch failure was not counted");
+    await fireRetry();
+    await f.waitFor(() => agent()?.continuationLaunchFailures === 2, "the second launch failure was not counted");
+    await fireRetry();
+    await f.waitFor(() => agent()?.continuationLaunchHeldAt !== undefined, "the third failure did not hold it");
+    await f.waitFor(() => f!.store.readMeta("s1")?.status === "input_required", "the session does not show the hold");
+
+    assert.equal(attempts(), 3);
+    const holds = f.errors().filter((message) => message.includes("failed to start 3 times in a row"));
+    assert.equal(holds.length, 1, "the hold is reported once");
+    assert.equal(holds[0],
+      "The automatic turn that returns the result of 1 finished background job failed to start 3 times in a row, " +
+      `before the provider accepted it: bwrap: Can't find source path ${f.sibling}: No such file or directory. ` +
+      "Wollipog stopped retrying it and kept the result. Restart the session to deliver it in a fresh provider " +
+      "process; a message the provider accepts also retries it.");
+    assert.deepEqual(statuses().at(-1), { ...statuses().at(-1), status: "input_required", detail: holds[0] });
+    // Not retried, and not dropped: the result is still owed and unsubmitted.
+    assert.equal(f.internals.backgroundContinuationTimers.has("s1"), false, "no retry is armed");
+    const held = f.store.readMeta("s1")!;
+    assert.equal(held.backgroundWorkState, "continuation_pending");
+    assert.ok(agent()?.continuationQueuedAt);
+    assert.equal(agent()?.continuationSubmittedAt, undefined);
+    assert.equal(agent()?.assistantResultPersistedAt, undefined);
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(held), false, "a held continuation keeps no active-work slot");
+    assert.equal(f.internals.backgroundFollowUp(held), null, "it is not presented as queued");
+    await f.settle();
+    assert.equal(attempts(), 3, "nothing retries on its own");
+    // An unrelated settle keeps the hold visible.
+    f.internals.emitStatus("s1", "idle");
+    assert.equal(statuses().at(-1)?.status, "input_required");
+    assert.match(statuses().at(-1)?.detail ?? "",
+      /^The automatic turn that returns the result of 1 finished background job failed to start 3 times in a row, before the provider accepted it\. Wollipog stopped retrying it .* Restart the session/u);
+
+    failing = false;
+    f.manager.prompt("s1", "hello");
+    await f.waitFor(() => !!agent()?.assistantResultPersistedAt, "a person's accepted turn did not retry the held result");
+    assert.deepEqual(f.drivers[0]!.prompts.slice(-2).map((text) => text.startsWith(CONTINUATION_PREFIX) ? "continuation" : text),
+      ["hello", "continuation"]);
+    assert.equal(agent()?.continuationLaunchHeldAt, undefined);
+    assert.equal(agent()?.continuationLaunchFailures, undefined);
+    await f.waitFor(() => f!.store.readMeta("s1")?.status === "idle", "the session did not return to idle");
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, undefined);
   } finally {
     f.cleanup();
   }

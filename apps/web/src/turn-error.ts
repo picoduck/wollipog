@@ -47,6 +47,23 @@ export function isAutomaticTurnsHeld(message: string): boolean {
   return AUTOMATIC_TURNS_HELD.test(withoutPromptFailedPrefix(message));
 }
 
+/** The runner's notice that it stopped retrying the automatic turn returning finished background
+ * results, after that turn failed to start a bounded number of times (#3542). It begins with this
+ * sentence; the provider's error it may quote comes after. */
+const BACKGROUND_RESULTS_HELD =
+  /^The automatic turn that returns (?:the result of 1 finished background job|the results of \d+ finished background jobs) failed to start \d+ times in a row, before the provider accepted it\b/u;
+
+export const BACKGROUND_RESULTS_HELD_SENTENCE =
+  "The automatic turn that returns finished background results kept failing to start, so Wollipog " +
+  "stopped retrying it. The results are kept. Restart the session to deliver them, or send a message: " +
+  "once the provider accepts it, they follow.";
+
+/** Whether an error row is the background-results hold rather than a failed turn of its own. No
+ * person's turn failed, so it offers no Retry Turn. */
+export function isBackgroundResultsHeld(message: string): boolean {
+  return BACKGROUND_RESULTS_HELD.test(withoutPromptFailedPrefix(message));
+}
+
 /** A failed turn's error in plain words (docs/design-system.md §13.2): what happened and, where
  * one exists, what to do. The raw provider message stays behind Show Details. */
 export function describeTurnError(message: string): string {

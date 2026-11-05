@@ -2573,8 +2573,10 @@ test("ending background work retires the process and reports each unfinished job
     } as any,
   );
   assert.deepEqual(await driver.endBackgroundWork(), { status: "none" }, "nothing to end before any work");
+  assert.equal(driver.providerProcessLive(), false, "no process before the first turn (#3542)");
   const turn = driver.prompt("watch CI");
   await nextTask();
+  assert.equal(driver.providerProcessLive(), true);
   first.stdout.write(JSON.stringify({ type: "system", subtype: "task_started", task_id: "monitor-9" }) + "\n");
   await nextTask();
   assert.deepEqual(await driver.endBackgroundWork(), { status: "refused", reason: "turn_active" },
@@ -2583,12 +2585,16 @@ test("ending background work retires the process and reports each unfinished job
   await turn;
   assert.equal(background.at(-1)?.state, "running");
 
+  assert.equal(driver.providerProcessLive(), true, "the idle process takes the next prompt without a launch");
   const ending = driver.endBackgroundWork();
   await nextTask();
   assert.equal(first.stdin.writableEnded, true, "the owning process is retired");
+  assert.equal(driver.providerProcessLive(), false, "a retiring process takes no further prompt");
   first.emit("close", 0);
   const result = await ending;
   assert.equal(result.status, "ended");
+  // The next turn launches a process (#3542), so a pending retirement rebind may run first.
+  assert.equal(driver.providerProcessLive(), false);
   const jobs = result.status === "ended" ? result.jobs : [];
   assert.deepEqual(jobs.map((job) => ({
     id: job.id, status: job.status, continuationRequired: job.continuationRequired, endedByRunner: job.endedByRunner,
