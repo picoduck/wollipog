@@ -265,7 +265,7 @@ unverified tool effect is declined whatever it names, so it is not screened.
   owner classifies it (**Decline** or **Let Me Answer**) before any of its options can be chosen,
   and it stays the owner's either way.
 
-Each verdict, its reason and failure class appear in Campaign Status under Question Screen, beside
+Each verdict, its reason and failure class appear in Campaign Status under Decision Model Checks, beside
 the request it affected. The evaluation carries only the content-safe `credentialScreen` fact
 (state, verdict, failure class, occurrence); the reason stays in the Decision audit.
 

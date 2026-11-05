@@ -1,8 +1,14 @@
-import type { DecisionErrorClass, DecisionModelResolvedTarget, RunDecisionMessage } from "@wollipog/protocol";
+import type { DecisionErrorClass, DecisionKind, DecisionModelResolvedTarget, RunDecisionMessage } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
+import { DECISION_KINDS } from "./decision-kinds.js";
 import { DecisionRuntime } from "./decision-runtime.js";
 
 /** One fake attempt: a verdict, or a typed failure. No test calls a real provider. */
+export type FakeDecisionStep =
+  | { verdict: string; reason?: string }
+  | { errorClass: DecisionErrorClass; retryAfterMs?: number };
+
+/** One fake question-screen attempt. */
 export type FakeScreenStep =
   | { verdict: "ask" | "discusses" | "uncertain"; reason?: string }
   | { errorClass: DecisionErrorClass; retryAfterMs?: number };
@@ -21,17 +27,36 @@ const TARGET: DecisionModelResolvedTarget = {
   driver: "claude-code", provider: "claude", model: "haiku", effort: "low",
 };
 
-/** Read the quoted `request` data back out of one rendered attempt input. */
-export function fakeScreenRequest(message: RunDecisionMessage): FakeScreenRequest {
-  const quoted = /<untrusted_data name="request">\n(.*)\n<\/untrusted_data>/su.exec(message.input)?.[1];
-  if (!quoted) throw new Error("the attempt carried no request data");
-  return JSON.parse(JSON.parse(quoted) as string) as FakeScreenRequest;
+/** The verdict a healthy model gives each #4104 kind when nothing is wrong: it confirms. */
+export const HEALTHY_VERDICTS: Partial<Record<DecisionKind, string>> = {
+  credential_screen: "discusses",
+  follow_up_relatedness: "related",
+  closure_reason: "fits",
+};
+
+/** Which kind one attempt is for: every kind has its own fixed instructions. */
+export function fakeDecisionKind(message: RunDecisionMessage): DecisionKind {
+  const kind = (Object.keys(DECISION_KINDS) as DecisionKind[]).find((name) => DECISION_KINDS[name].instructions === message.instructions);
+  if (!kind) throw new Error("the attempt carried unknown instructions");
+  return kind;
 }
 
-/** A Decision runtime on the test's database whose harness answers through `answer`, with a fake
- * clock so backoff never sleeps. `calls` records every attempt the runtime sent. */
-export function fakeScreenRuntime(db: ControlPlaneDb,
-  answer: (request: FakeScreenRequest, attempt: number) => FakeScreenStep | Promise<FakeScreenStep>) {
+/** Read one quoted data field back out of one rendered attempt input, parsed as JSON. */
+export function fakeDecisionData<T = unknown>(message: RunDecisionMessage, field: string): T {
+  const quoted = new RegExp(`<untrusted_data name="${field}">\\n(.*?)\\n</untrusted_data>`, "su").exec(message.input)?.[1];
+  if (!quoted) throw new Error(`the attempt carried no ${field} data`);
+  return JSON.parse(JSON.parse(quoted) as string) as T;
+}
+
+/** Read the quoted `request` data back out of one rendered question-screen attempt input. */
+export function fakeScreenRequest(message: RunDecisionMessage): FakeScreenRequest {
+  return fakeDecisionData<FakeScreenRequest>(message, "request");
+}
+
+/** A Decision runtime on the test's database whose harness answers every kind through `answer`,
+ * with a fake clock so backoff never sleeps. `calls` records every attempt the runtime sent. */
+export function fakeDecisionRuntime(db: ControlPlaneDb,
+  answer: (message: RunDecisionMessage, attempt: number) => FakeDecisionStep | Promise<FakeDecisionStep>) {
   const calls: RunDecisionMessage[] = [];
   let clock = Date.now();
   const runtime = new DecisionRuntime({
@@ -40,10 +65,10 @@ export function fakeScreenRuntime(db: ControlPlaneDb,
     transport: async (_runnerId, message) => {
       calls.push(message);
       clock += 100;
-      const step = await answer(fakeScreenRequest(message), message.attempt);
+      const step = await answer(message, message.attempt);
       return "verdict" in step
         ? { type: "run_decision_result", requestId: message.requestId, ok: true, provider: "claude", model: "claude-haiku-4-5",
-          outputText: JSON.stringify({ verdict: step.verdict, reason: step.reason ?? `The request ${step.verdict === "ask" ? "asks for" : "discusses"} access.` }),
+          outputText: JSON.stringify({ verdict: step.verdict, reason: step.reason ?? `The fake model answered ${step.verdict}.` }),
           usage: { inputTokens: 10, outputTokens: 5, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 } }
         : { type: "run_decision_result", requestId: message.requestId, ok: false, errorClass: step.errorClass,
           ...(step.retryAfterMs !== undefined ? { retryAfterMs: step.retryAfterMs } : {}) };
@@ -53,6 +78,24 @@ export function fakeScreenRuntime(db: ControlPlaneDb,
     random: () => 0.5,
   });
   return { runtime, calls };
+}
+
+/** A runtime whose question screen answers through `answer`; every other #4104 check gets a
+ * healthy, confirming verdict, so a test of one decision is not disturbed by another. */
+export function fakeScreenRuntime(db: ControlPlaneDb,
+  answer: (request: FakeScreenRequest, attempt: number) => FakeScreenStep | Promise<FakeScreenStep>) {
+  return fakeDecisionRuntime(db, (message, attempt) => {
+    const kind = fakeDecisionKind(message);
+    if (kind === "credential_screen") return answer(fakeScreenRequest(message), attempt);
+    const verdict = HEALTHY_VERDICTS[kind];
+    if (!verdict) throw new Error(`no healthy verdict for ${kind}`);
+    return { verdict };
+  });
+}
+
+/** A runtime whose every #4104 check confirms what its floor admitted. */
+export function healthyDecisionRuntime(db: ControlPlaneDb) {
+  return fakeScreenRuntime(db, () => ({ verdict: "discusses" }));
 }
 
 /** Wait until every in-flight screen settles: the runtime and its callbacks run on microtasks. */

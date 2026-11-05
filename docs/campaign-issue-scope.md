@@ -309,7 +309,7 @@ Orchestrator-owned and supersedes the person's pending request for the same issu
 | `stale_pull_request`, `delivery_merge_unconfirmed` (item, numbers) | `request_again` |
 | `disposition_unverified` (item when it has one) | `record_disposition` |
 | `comment_unsafe` | `revise_comment` |
-| `missing_work_item`, `work_item_outside_scope` (item), `delivery_not_verified_at_exact_head` (item, numbers), `fixed_by_completion_only`, `delivery_unverified` | `person_decides` |
+| `missing_work_item`, `work_item_outside_scope` (item), `delivery_not_verified_at_exact_head` (item, numbers), `fixed_by_completion_only`, `delivery_unverified`, `reason_unconfirmed` | `person_decides` |
 
 Gaps name what failed; they never admit anything. They are derived from the same ledger, merge
 gates and forge facts as the proof, which does not read them, and every failed proof has at least
@@ -328,6 +328,39 @@ the relation, the snapshot does not carry the PR's body to re-check, and a body 
 at any moment. Treating an edited-out mention as unrelated would let an agent's edit remove a
 proof condition. The gap names each such PR and says it blocks until it merges or closes; the
 person-owned route stays available meanwhile.
+
+### Decision Model Checks on Follow-Ups and Closures (#4104)
+
+Two judgments the Orchestrator used to make alone are checked against the owner's request by the
+Decision Model (`docs/decision-model.md`). Each runs only after the deterministic floor above has
+admitted the request, never reads its text any other way, and may only refuse.
+
+- **Follow-up relatedness** (`follow_up_relatedness`). After a bounded publication passes its
+  structural floor (an accepted recommendation, origins in scope, capacity, a safe payload), the
+  model reads the owner's own words, what their grant covers, the origin work and the follow-up.
+  - `related`: the publication proceeds as before.
+  - `unrelated`: it is refused back to the requester as the correctable `unrelated_follow_up` (a 409,
+    nothing created), with the model's reason appended to the fixed sentence.
+  - `uncertain`, or a failed check: the publication becomes the person's with the admission failure
+    `relatedness_unconfirmed`.
+- **Closure-reason choice** (`closure_reason`). For a closure whose proof rests on a disposition rather
+  than delivery (a `not_planned` closure, or one naming a recommendation), after the proof passes,
+  the model reads the issue, the stated reason and explanation, and the dispositions the campaign
+  recorded.
+  - `fits`: the closure proceeds as before.
+  - `does_not_fit`: the request is refused (a 409, nothing created) with the model's reason.
+  - `uncertain`, or a failed check: the closure becomes the person's with the gap
+    `reason_unconfirmed` (`person_decides`).
+  A closure proven by delivery or by its epic's members is not a choice of reason and is not checked;
+  a closure with no proof keeps the human fallback above without a model call.
+
+A refusal, an uncertain verdict or a failure sticks to the server-owned subject: the recommendation,
+or the issue and the stated reason. A later request for the same subject with reworded text inherits
+that outcome without a new model call, so rewording never buys a second verdict; the person deciding
+the affected request is the only way past it. Checks of one subject run one at a time, so a request
+sent while another is still being checked waits and inherits its outcome, and a confirmation never
+outranks a refusal recorded for the same subject meanwhile. Each check's verdict, reason and failure class appear
+in Campaign Status under Decision Model Checks, beside the follow-up or closure it affected.
 
 ### Closure Refusal Reasons
 

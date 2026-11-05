@@ -14,6 +14,7 @@ import { closureEvidence, closureDeliveryGaps, issueEvidenceDigest } from "./cam
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
+import { healthyDecisionRuntime } from "./credential-screen-test-fixture.js";
 
 /** A related open pull request as the runner reports it, without a closing reference. */
 const openPullRequest = (number: number) => ({ number, title: "Work", url: `https://github.com/team/repo/pull/${number}`, headSha: "b".repeat(40) });
@@ -62,6 +63,8 @@ function harness(full = true, maximum = 5, issues = [100]) {
     throw new Error("Unexpected runner command");
   };
   const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
+  // A healthy Decision Model (#4104) on a fake harness: relatedness and closure-reason checks confirm.
+  svc.setDecisionRuntime(healthyDecisionRuntime(db).runtime);
   if (full) assert.ok(svc.setCampaignControl("root", { mode: "full_control", objective: "Implement epic 100", operations: ["campaign_issue_scope", "issue_closure", "follow_up_issue_publication", "implementation_question"],
     delegatablePolicyIds: [], issueAuthority: { epics: issues, relatedFollowUps: true, maxIssues: maximum, closureReasons: ["completed", "not_planned"] } }, 1, principal).ok);
   const approve = (d: WorkflowDecisionView) => svc.resolveWorkflowDecision("root", "root", d.occurrenceId, { outcome: "approve" }, d.authority,
