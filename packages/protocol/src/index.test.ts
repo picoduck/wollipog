@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 284);
+  assert.equal(PROTOCOL_VERSION, 285);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,10 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 284", () => {
-  assert.equal(PROTOCOL_VERSION, 284);
+test("PROTOCOL_VERSION is 285", () => {
+  assert.equal(PROTOCOL_VERSION, 285);
+  assert.equal(runnerSupportsProtocol(284, "decisionModel"), false);
+  assert.equal(runnerSupportsProtocol(285, "decisionModel"), true);
   assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), false);
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).

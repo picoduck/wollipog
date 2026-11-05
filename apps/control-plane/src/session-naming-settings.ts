@@ -179,15 +179,15 @@ function validHarnessContext(context: AgentContext): boolean {
   );
 }
 
-function contextLabel(context: AgentContext): string {
+export function contextLabel(context: AgentContext): string {
   return context.kind === "wsl" ? `WSL: ${context.distro}` : "Native";
 }
 
-function sameContext(left: AgentContext, right: AgentContext): boolean {
+export function sameContext(left: AgentContext, right: AgentContext): boolean {
   return left.kind === right.kind && (left.kind !== "wsl" || (right.kind === "wsl" && left.distro === right.distro));
 }
 
-function namingHarnesses(agents: AgentDefinition[]): SessionNamingHarnessMachine["harnesses"] {
+export function namingHarnesses(agents: AgentDefinition[]): SessionNamingHarnessMachine["harnesses"] {
   const candidates = agents.flatMap((agent) => {
     const driver = agent.driver ?? "acp";
     // An older runner may still advertise the retired Codex exec row (#3259); it is never offered.

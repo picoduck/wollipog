@@ -232,6 +232,9 @@ import {
   SessionNamingSettings,
 } from "./session-naming-settings.js";
 import { registerSessionNamingRoutes } from "./session-naming-route.js";
+import { registerDecisionModelRoutes } from "./decision-model-route.js";
+import { DecisionModelSettings } from "./decision-model-settings.js";
+import { DecisionRuntime, hubDecisionTransport, sanitizeRunDecisionResult } from "./decision-runtime.js";
 import { WorkflowEventRetention } from "./workflow-event-retention.js";
 import { registerWorkflowEventRetentionRoutes } from "./workflow-event-retention-route.js";
 import { ArchivedHistoryRetention } from "./archived-history-retention.js";
@@ -1012,6 +1015,13 @@ app.post("/api/public/push-receipt", async (req, reply) => {
 });
 
 const sessionNamingSettings = new SessionNamingSettings(db, process.env, hub);
+const decisionModelSettings = new DecisionModelSettings(db);
+const decisionRuntime = new DecisionRuntime({
+  db,
+  settings: decisionModelSettings,
+  transport: hubDecisionTransport(hub),
+  rateTable: () => usagePricing.current(),
+});
 const agentHarnessDefaultsSettings = new AgentHarnessDefaultsSettings(db);
 const orchestratorSettings = new OrchestratorSettings(db);
 
@@ -1060,6 +1070,7 @@ if (VIDEO_FRAME_VALIDATION_SESSION_ID) {
 }
 
 registerSessionNamingRoutes(app, sessionNamingSettings, requestPrincipal);
+registerDecisionModelRoutes(app, { settings: decisionModelSettings, runtime: decisionRuntime, requestPrincipal });
 const archivedHistoryRetention = new ArchivedHistoryRetention(db, { env: process.env, log: app.log, hub });
 registerArchivedHistoryRetentionRoutes(app, archivedHistoryRetention, requestPrincipal);
 const mutationAuditArchiveRetention = new MutationAuditArchiveRetention(db, { env: process.env, log: app.log });
@@ -1803,6 +1814,19 @@ app.register(async (instance) => {
           ok: false,
           code: "invalid_result",
           phase: "output_validation",
+        }, runnerId!);
+        break;
+      }
+      case "run_decision_result": {
+        if (!runnerSupportsProtocol(db.getRunner(runnerId!)?.protocolVersion, "decisionModel")) {
+          app.log.warn(`runner ${runnerId} sent a Decision result without negotiated support`);
+          break;
+        }
+        hub.resolveRunnerRequest(sanitizeRunDecisionResult(msg) ?? {
+          type: "run_decision_result",
+          requestId: msg.requestId,
+          ok: false,
+          errorClass: "invalid_output",
         }, runnerId!);
         break;
       }
