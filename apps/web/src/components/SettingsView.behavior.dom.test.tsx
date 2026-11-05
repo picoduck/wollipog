@@ -88,7 +88,7 @@ async function renderPanel(options: { on?: Device; focus?: SettingsFocus; opened
         <SettingsGroup title="Agent Defaults" scope="Your Account"><div className="setting-row">Agent defaults slot</div></SettingsGroup>
       )}
       sessionNaming={(
-        <SettingsGroup title="Session Titles" scope="Your Account"><div className="setting-row">Session naming slot</div></SettingsGroup>
+        <SettingsGroup title="Session Titles" scope="This Organization"><div className="setting-row">Session naming slot</div></SettingsGroup>
       )}
       onOpenShortcuts={(returnFocus) => options.opened?.push(returnFocus)}
       focus={focus}
@@ -122,7 +122,7 @@ test("Behavior is six groups in order, each naming once where it is kept", async
       ["Transcript", "This Device"],
       ["Privacy", "This Device"],
       ["Agent Defaults", "Your Account"],
-      ["Session Titles", "Your Account"],
+      ["Session Titles", "This Organization"],
       ["Evidence", "Your Account"],
     ]);
     // The slots hold what the shell supplies: Agent Defaults and Session Titles each a whole group.
