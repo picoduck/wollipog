@@ -1,7 +1,9 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL,
-  type CampaignForgePullRequestObservation, type RunnerMetadata } from "@wollipog/protocol";
+import { CAMPAIGN_FORGE_OBSERVATION, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+  RUNNER_CAPABILITY_MIN_PROTOCOL, type CampaignForgePullRequestObservation, type CampaignPullRequestRef,
+  type RunnerMetadata } from "@wollipog/protocol";
+import { CampaignForgeObserver } from "./campaign-forge-observations.js";
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
@@ -61,7 +63,7 @@ function fixture(protocolVersion = PROTOCOL_VERSION) {
     workItem: { id: item, outcome: "delivered" } });
   assert.ok(verified.ok, verified.error ?? "verification refused");
   db.updateSessionStatus("root", "idle", Date.now());
-  return { db, svc, item };
+  return { db, svc, item, metadata };
 }
 
 const observed = (tipSha: string | null, overrides: Partial<CampaignForgePullRequestObservation> = {}): CampaignForgePullRequestObservation => ({
@@ -94,7 +96,7 @@ test("a campaign whose merged branch still exists on origin is not verified comp
       [["agent/child", "pending", "The merged branch is still on the remote.", 100]]);
     assert.deepEqual(h.db.campaignMergedBranchTargets(), [{ campaignId: "root", refs: [{ repository: "picoduck/wollipog", number: 4100 }] }],
       "the background pass keeps reading it");
-    assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }])
+    assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }], true)
       .get("picoduck/wollipog#4100")?.finished, false);
 
     // Deleted on origin: the campaign is complete.
@@ -165,7 +167,7 @@ test("an approved enqueue still in the queue keeps the campaign going until its 
       [["agent/child", "pending", "The approved merge has not landed yet; its branch is cleaned up after it does."]]);
     assert.deepEqual(h.db.campaignMergedBranchTargets(), [{ campaignId: "root", refs: [{ repository: "picoduck/wollipog", number: 4100 }] }],
       "the background pass keeps reading it until it merges");
-    assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }])
+    assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }], true)
       .get("picoduck/wollipog#4100")?.finished, false);
     observe(h, observed("a".repeat(40)), 200);
     projection = h.db.campaignProjection("root")!;
@@ -334,8 +336,8 @@ test("a merged branch the forge names unusably stays pending, never skipped, unt
       assert.equal(projection.status, "active", "a validation gap can only keep the campaign going");
       assert.equal(h.db.campaignStatusOnly("root"), "active");
       assert.deepEqual(h.db.campaignMergedBranchTargets(), [{ campaignId: "root", refs: [{ repository: "picoduck/wollipog", number: 4100 }] }]);
-      assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }])
-        .get("picoduck/wollipog#4100")?.finished, crossRepository === undefined, "a v284 same-repository read keeps being re-read");
+      assert.equal(h.db.campaignForgeObservations.readState("root", [{ repository: "picoduck/wollipog", number: 4100 }], true)
+        .get("picoduck/wollipog#4100")?.finished, false, "the background pass keeps re-reading it, as the status counts it (#4145)");
       // A person can still take it over, and then the campaign finishes with handoffs.
       assert.ok(h.svc.updateCampaignWorkItem("root", { workItemId: h.item, handoff: { responsibleActor: "human",
         reason: "The branch name is one Wollipog will not act on.", nextAction: "Delete the branch by hand." } }).ok);
@@ -356,4 +358,134 @@ test("a fork's branch is not tracked, and an older observing runner keeps today'
     assert.equal(older.db.campaignProjection("root")!.status, "verified_complete");
     assert.equal(older.db.campaignProjection("root")!.mergedBranches, undefined);
   } finally { older.db.close(); }
+});
+
+/** Another merge of the fixture's child, approved and consumed like #4100's. */
+const merge = (h: ReturnType<typeof fixture>, pullRequest: number) => h.db.raw().prepare(`INSERT INTO workflow_decisions(
+  request_id,occurrence_id,session_id,controlling_session_id,category,resource_key,resource_snapshot,resource_digest,
+  policy_revision,authority,status,created_at,resolved_at,consumed_at)
+  VALUES (?,?,'child','root','pr_merge',?,?,'digest',1,'orchestrator','consumed',3,4,5)`)
+  .run(`merge-${pullRequest}`, `merge-${pullRequest}`, `picoduck/wollipog#${pullRequest}`, JSON.stringify({ category: "pr_merge",
+    repository: "picoduck/wollipog", pullRequest, headSha: "a".repeat(40), reviewResult: "merge", requiredChecks: {
+      headSha: "a".repeat(40), status: "passed", checkedAt: 2, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } }));
+
+/** The production background pass over the real store and targets, with a fake runner and clock. */
+function backgroundForge(h: ReturnType<typeof fixture>, clock: { now: number },
+  answer: (ref: CampaignPullRequestRef) => CampaignForgePullRequestObservation) {
+  const requests: number[][] = [];
+  const forge = new CampaignForgeObserver({
+    observingRunner: (campaignId) => {
+      const runner = h.db.campaignForgeObservingRunner(campaignId);
+      return runner ? { ...runner, online: true } : null;
+    },
+    requestFromRunner: async (_runnerId, requestId, message) => {
+      requests.push(message.pullRequests.map((ref) => ref.number));
+      return { type: "campaign_forge_observe_result", requestId, sessionId: message.sessionId, observedAt: clock.now, ok: true,
+        results: message.pullRequests.map((ref) => ({ ref, ok: true, observation: answer(ref) })) };
+    },
+    store: h.db.campaignForgeObservations,
+    backgroundTargets: (include) => [...h.db.campaignWorkLedger.forgeBackgroundTargets(include), ...h.db.campaignMergedBranchTargets(include)],
+    changed: () => {},
+    warn: () => {},
+    newRequestId: (() => { let n = 0; return () => `forge_${n++}`; })(),
+    now: () => clock.now,
+  });
+  return { forge, requests };
+}
+
+/** A merged observation stored by a runner before v284: neither `headBranch` nor `crossRepository`. */
+const legacy = observed(null, { headBranch: undefined });
+
+test("a merged pull request read before branches were reported is re-read once after the upgrade, without an on-demand read (#4145)", async () => {
+  // The mixed, upgraded state: #4100 read by a runner before v284, #4101 by an upgraded one.
+  const h = fixture(RUNNER_CAPABILITY_MIN_PROTOCOL.forgeDecisionActions - 1);
+  try {
+    merge(h, 4101);
+    const clock = { now: Date.now() };
+    observe(h, legacy, clock.now - 2 * 24 * 60 * 60_000);
+    const ref = { repository: "picoduck/wollipog", number: 4100 };
+    // Before the upgrade the runner cannot report the branch: nothing is tracked or re-read.
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+    assert.equal(h.db.campaignForgeObservations.readState("root", [ref], false).get("picoduck/wollipog#4100")?.finished, true);
+
+    h.db.registerRunner(h.metadata, 1, PROTOCOL_VERSION);
+    h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number: 4101 },
+      observation: observed(null, { crossRepository: false }) }], clock.now);
+    let projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "active", "the stored read names no branch, so the status counts it pending");
+    assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.pullRequest, row.state, row.reason]), [
+      [4100, "pending", "The forge reported no usable branch name for this merged pull request."], [4101, "deleted", undefined]]);
+    assert.equal(h.db.campaignForgeObservations.readState("root", [ref], true).get("picoduck/wollipog#4100")?.finished, false,
+      "the background pass agrees it is unfinished");
+
+    // GitHub reports the branch gone: one background read settles it and the campaign completes.
+    const { forge, requests } = backgroundForge(h, clock, () => observed(null, { crossRepository: false }));
+    await forge.backgroundPass();
+    assert.deepEqual(requests, [[4100]], "only the legacy read is due; the upgraded read is finished");
+    projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "verified_complete");
+    assert.equal(h.db.campaignStatusOnly("root"), "verified_complete");
+    assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.pullRequest, row.branch, row.state]),
+      [[4100, "agent/child", "deleted"], [4101, "agent/child", "deleted"]]);
+    assert.deepEqual(h.db.campaignMergedBranchTargets(), []);
+    clock.now += CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs;
+    await forge.backgroundPass();
+    assert.equal(requests.length, 1, "a settled branch is never read again");
+  } finally { h.db.close(); }
+});
+
+test("after one re-read a legacy merged read settles as deleted, still on the remote, or a fork's untracked branch (#4145)", async () => {
+  for (const [label, answer, status, rows] of [
+    ["deleted", observed(null, { crossRepository: false }), "verified_complete", [["agent/child", "deleted", undefined]]],
+    ["remaining", observed("a".repeat(40), { crossRepository: false }), "active",
+      [["agent/child", "pending", "The merged branch is still on the remote."]]],
+    ["fork", observed(null, { headBranch: undefined, crossRepository: true }), "verified_complete", undefined],
+  ] as const) {
+    const h = fixture();
+    try {
+      const clock = { now: Date.now() };
+      observe(h, legacy, clock.now - CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs);
+      const { forge, requests } = backgroundForge(h, clock, () => answer);
+      await forge.backgroundPass();
+      assert.deepEqual(requests, [[4100]], label);
+      const projection = h.db.campaignProjection("root")!;
+      assert.equal(projection.status, status, label);
+      assert.deepEqual(projection.mergedBranches?.items.map((row) => [row.branch, row.state, row.reason]), rows, label);
+      // Within the background interval nothing is read again, whatever it settled as.
+      clock.now += CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs - 1;
+      await forge.backgroundPass();
+      assert.equal(requests.length, 1, label);
+      // A branch still on the remote stays owed and is read once per interval; the others are done.
+      clock.now += 1;
+      await forge.backgroundPass();
+      assert.equal(requests.length, label === "remaining" ? 2 : 1, label);
+    } finally { h.db.close(); }
+  }
+});
+
+test("upgrading with many legacy merged reads re-reads each once, within the per-tick bound (#4145)", async () => {
+  const h = fixture();
+  try {
+    const clock = { now: Date.now() };
+    const numbers = [4100, ...Array.from({ length: CAMPAIGN_FORGE_OBSERVATION.backgroundRefsPerTick + 8 }, (_, index) => 5000 + index)];
+    for (const number of numbers.slice(1)) merge(h, number);
+    for (const number of numbers) {
+      h.db.campaignForgeObservations.record("root", "r", [{ ref: { repository: "picoduck/wollipog", number }, observation: legacy }],
+        clock.now - 2 * 24 * 60 * 60_000);
+    }
+    assert.equal(h.db.campaignProjection("root")!.mergedBranches?.pending, numbers.length);
+    const { forge, requests } = backgroundForge(h, clock, () => observed(null, { crossRepository: false }));
+    const read = () => requests.flat().length;
+    await forge.backgroundPass();
+    assert.equal(read(), CAMPAIGN_FORGE_OBSERVATION.backgroundRefsPerTick, "one pass reads at most its bound");
+    assert.equal(h.db.campaignProjection("root")!.status, "active", "the rest are still owed");
+    clock.now += CAMPAIGN_FORGE_OBSERVATION.backgroundTickMs;
+    await forge.backgroundPass();
+    assert.equal(read(), numbers.length);
+    assert.deepEqual([...requests.flat()].sort(), [...numbers].sort(), "each pull request was read exactly once");
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+    clock.now += CAMPAIGN_FORGE_OBSERVATION.backgroundIntervalMs;
+    await forge.backgroundPass();
+    assert.equal(read(), numbers.length, "nothing settled is read again");
+  } finally { h.db.close(); }
 });
