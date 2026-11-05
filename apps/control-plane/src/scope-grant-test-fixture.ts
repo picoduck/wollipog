@@ -78,7 +78,7 @@ export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
   const calls: RunDecisionMessage[] = [];
   const reviewCalls: RunDecisionMessage[] = [];
   const state = { answer: options.answer ?? ((text: string) => classifierAnswer(text)), resolution: options.resolution,
-    review: ((_message: RunDecisionMessage, _attempt: number) => reviewVerdict("admit")) as (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer };
+    review: ((_message: RunDecisionMessage, _attempt: number) => reviewVerdict("admit")) as (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer | Promise<ScopeGrantAnswer> };
   const other = options.other ??
     (() => ({ ok: true as const, outputText: JSON.stringify({ verdict: "discusses", reason: "The request discusses access as a design subject." }) }));
   const scopeGrant = (message: RunDecisionMessage) => message.instructions === DECISION_KINDS.scope_grant.instructions;
@@ -90,7 +90,7 @@ export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
       if (scopeGrant(message)) calls.push(message);
       if (scopeReview(message)) reviewCalls.push(message);
       const answer = scopeGrant(message) ? state.answer(ownerMessageOf(message), message.attempt)
-        : scopeReview(message) ? state.review(message, message.attempt) : other(message);
+        : scopeReview(message) ? await state.review(message, message.attempt) : other(message);
       return { type: "run_decision_result", requestId: message.requestId, provider: "claude", model: FAKE_DECISION_TARGET.model,
         usage: { inputTokens: 100, outputTokens: 20, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 }, ...answer } as RunDecisionResultMessage;
     },

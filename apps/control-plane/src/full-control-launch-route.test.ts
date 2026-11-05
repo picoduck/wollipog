@@ -28,6 +28,7 @@ import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, uncertainVerdict, type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
+import { scopeGrantDigest, scopeReviewKey } from "./scope-selection.js";
 import { createHash } from "node:crypto";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
@@ -1764,6 +1765,117 @@ test("rationale or issue text that claims a higher count, another repository or 
       additions: [{ repository: "other/repo", number: 9 }], removals: [], explanation: planted, lineage: { kind: "selection" } });
     assert.equal(foreign.errorDetails?.code, "repository_outside_boundary");
     assert.equal(f.decision.reviewCalls.length, 1, "no ceiling refusal reached the model");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an issue another campaign takes while the review runs, or before the admission is applied, is never admitted twice (#4103 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const b = await selectionCampaign(f, server, 2);
+    const a = await selectionCampaign(f, server, 3);
+    // Campaign A's review waits until released; campaign B's answers at once.
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    f.decision.state.review = async (message) => {
+      if (ownerMessageOf(message) === a.message) await held;
+      return reviewVerdict("admit");
+    };
+    const pendingA = a.propose([50]);
+    const takenByB = await b.propose([50]);
+    assert.equal(takenByB.ok, true, takenByB.error ?? "");
+    assert.equal(b.apply(takenByB.data!.occurrenceId).ok, true);
+    release();
+    const refusedA = await pendingA;
+    assert.equal(refusedA.ok, false);
+    assert.deepEqual(refusedA.errorDetails, { code: "other_campaign_scope", issue: 50 });
+
+    // An admission created before the other campaign took the issue is refused when applied.
+    f.decision.state.review = (message) => reviewVerdict("admit", ownerMessageOf(message) === a.message ? "Fits A." : "Fits B.");
+    const admittedA = await a.propose([51]);
+    assert.equal(admittedA.ok, true, admittedA.error ?? "");
+    const admittedB = await b.propose([51]);
+    assert.equal(admittedB.ok, true, admittedB.error ?? "");
+    assert.equal(b.apply(admittedB.data!.occurrenceId).ok, true);
+    const applied = a.apply(admittedA.data!.occurrenceId);
+    assert.equal(applied.ok, false);
+    assert.deepEqual(applied.errorDetails, { code: "other_campaign_scope", issue: 51 });
+    assert.equal(f.db.getSession(a.id)!.orchestratorPolicy!.issueScope!.issueNumbers.includes(51), false);
+    assert.deepEqual(f.db.getSession(b.id)!.orchestratorPolicy!.issueScope!.issueNumbers, [50, 51]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("issue excerpts full of markup shrink until the rendered review fits, and inputs that never fit go to the owner once (#4103 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await selectionCampaign(f, server, 10);
+    const numbers = Array.from({ length: 10 }, (_, i) => 60 + i);
+    for (const n of numbers) f.issues.facts.set(n, { bodyExcerpt: "<".repeat(2000) });
+    const reviewed = await c.propose(numbers);
+    assert.equal(reviewed.ok, true, reviewed.error ?? "");
+    assert.equal(reviewed.data!.authority, "orchestrator", "reviewed with shorter excerpts, never refused for size");
+    assert.equal(f.decision.reviewCalls.length, 1);
+
+    // An owner message no rendering can fit is never reviewed in part: one owner request, kept on a repeat.
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCount: 2, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    // The grant reads this message alone; the review adds the rationale, which no excerpt shrinking can offset.
+    const huge = `Find the 2 highest-priority issues and fix them. ${"<".repeat(7_000)}`;
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, huge)).ok, true);
+    assert.equal(grantOf(f, id).status, "granted");
+    f.issues.facts.set(70, { title: "<".repeat(500) });
+    const propose = (explanation: string) => f.sessions.proposeCampaignIssueScope(id, { requestId: randomUUID(), expectedRevision: 2,
+      additions: [{ repository: "owner/repo", number: 70 }], removals: [], explanation, lineage: { kind: "selection" } });
+    const owner = await propose(`The highest-priority issue. ${"<".repeat(3_900)}`);
+    assert.equal(owner.ok, true, owner.error ?? "");
+    assert.equal(owner.data!.authority, "human");
+    const review = (owner.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!;
+    assert.deepEqual({ cause: review.cause, failureClass: review.failureClass }, { cause: "selection_failed", failureClass: "configuration" });
+    assert.equal(f.decision.reviewCalls.length, 1, "no model call for inputs that cannot fit");
+    const repeat = await propose("Said again.");
+    assert.equal(repeat.data!.occurrenceId, owner.data!.occurrenceId);
+    assert.equal(f.db.pendingWorkflowDecisionsForController(id).filter((d) => d.category === "campaign_issue_scope").length, 1);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a repeat with other inputs joins a review still running, and a review a stopped process left pending reaches the owner once (#4103 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await selectionCampaign(f, server, 3);
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => { release = resolve; });
+    f.decision.state.review = async () => { await held; return reviewVerdict("admit"); };
+    const first = c.propose([30], "The oldest priority/high issue.");
+    // Let the first proposal start its review before the reworded repeat arrives.
+    while (f.decision.reviewCalls.length === 0) await new Promise((resolve) => setTimeout(resolve, 10));
+    const second = c.propose([30], "Reworded while the review runs.");
+    release();
+    const [one, two] = await Promise.all([first, second]);
+    assert.equal(one.ok, true, one.error ?? "");
+    assert.equal(two.ok, true, two.error ?? "");
+    assert.equal(two.data!.occurrenceId, one.data!.occurrenceId, "the same scope change, never a second");
+    assert.equal(f.decision.reviewCalls.length, 1);
+
+    // A review left pending past the runtime's bound by a stopped process is settled as timed out
+    // and routed to the owner once; a repeat returns that request.
+    f.decision.state.review = () => reviewVerdict("admit");
+    const grant = grantOf(f, c.id);
+    const key = scopeReviewKey(c.id, c.revision(), [31], scopeGrantDigest(grant));
+    f.db.createDecisionOccurrence({ occurrenceId: "dec_abandoned", organizationId: f.human.organizationId, campaignSessionId: c.id,
+      occurrenceKey: key, kind: "scope_review", promptVersion: "scope_review.v1", inputDigests: {}, inputDigest: "0".repeat(64),
+      now: Date.now() - 10 * 60_000 });
+    const owner = await c.propose([31], "Another rationale after a restart.");
+    assert.equal(owner.ok, true, owner.error ?? "");
+    assert.equal(owner.data!.authority, "human");
+    const review = (owner.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!;
+    assert.deepEqual({ cause: review.cause, failureClass: review.failureClass, occurrence: review.reviewOccurrenceId },
+      { cause: "selection_failed", failureClass: "timed_out", occurrence: "dec_abandoned" });
+    assert.equal(f.db.getDecisionOccurrence("dec_abandoned")!.humanRequestId, owner.data!.occurrenceId);
+    const repeat = await c.propose([31], "Once more.");
+    assert.equal(repeat.data!.occurrenceId, owner.data!.occurrenceId);
+    assert.equal(f.decision.reviewCalls.length, 1, "the abandoned review is not run again");
   } finally { await server.close(); f.db.close(); }
 });
 

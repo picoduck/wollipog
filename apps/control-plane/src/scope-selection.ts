@@ -1,8 +1,8 @@
 import { createHash } from "node:crypto";
-import { CAMPAIGN_ISSUE_FACT_LIMITS, DECISION_INPUT_MAX_CHARS, type CampaignIssueFacts, type CampaignSelectionProposal,
+import { CAMPAIGN_ISSUE_FACT_LIMITS, type CampaignIssueFacts, type CampaignSelectionProposal,
   type FullControlScopeGrant } from "@wollipog/protocol";
 import type { ControlPlaneDb, DecisionOccurrenceRecord } from "./db.js";
-import type { DecisionInputs } from "./decision-kinds.js";
+import { DECISION_KINDS, DecisionInputError, decisionRequestDigest, renderDecisionInput, type DecisionInputs } from "./decision-kinds.js";
 
 /**
  * The Decision Model's review of a selection proposal (#4103): what it reads, how a repeated
@@ -10,14 +10,41 @@ import type { DecisionInputs } from "./decision-kinds.js";
  */
 
 /** Room the issue facts may take in one Decision input, beside the owner's message, the grant and
- * the rationale. Each body excerpt shrinks so that any number of issues fits. */
+ * the rationale. Each body excerpt starts at its share of this and shrinks until the rendered input,
+ * markup escaping included, fits. */
 const ISSUE_FACTS_BUDGET_CHARS = 24_000;
 
-/** The review's inputs. The owner's words are the only instruction-like text; the grant, every
- * issue fact and the Orchestrator's rationale are quoted, untrusted data. */
+/** The review's inputs, or null when even issue facts without body excerpts cannot fit one Decision
+ * input as rendered. The owner's words are the only instruction-like text; the grant, every issue
+ * fact and the Orchestrator's rationale are quoted, untrusted data. */
 export function scopeReviewInputs(ownerMessage: string, grant: FullControlScopeGrant, facts: readonly CampaignIssueFacts[],
-  rationale: string): DecisionInputs {
-  const excerpt = Math.max(200, Math.min(CAMPAIGN_ISSUE_FACT_LIMITS.bodyExcerptChars, Math.floor(ISSUE_FACTS_BUDGET_CHARS / Math.max(1, facts.length)) - 400));
+  rationale: string): DecisionInputs | null {
+  const start = Math.max(200, Math.min(CAMPAIGN_ISSUE_FACT_LIMITS.bodyExcerptChars, Math.floor(ISSUE_FACTS_BUDGET_CHARS / Math.max(1, facts.length)) - 400));
+  for (const excerpt of [start, Math.floor(start / 2), Math.floor(start / 4), 200, 0]) {
+    const inputs = scopeReviewInputsWith(ownerMessage, grant, facts, rationale, excerpt);
+    if (renderedScopeReview(inputs) !== null) return inputs;
+  }
+  return null;
+}
+
+/** The exact text every attempt sends, or null when it exceeds one Decision input. */
+export function renderedScopeReview(inputs: DecisionInputs): string | null {
+  try {
+    return renderDecisionInput(DECISION_KINDS.scope_review, inputs);
+  } catch (error) {
+    if (error instanceof DecisionInputError) return null;
+    throw error;
+  }
+}
+
+/** The digest the runtime records for these inputs, to tell whether a pending review read them. */
+export function scopeReviewInputDigest(inputs: DecisionInputs): string | null {
+  const rendered = renderedScopeReview(inputs);
+  return rendered === null ? null : decisionRequestDigest(DECISION_KINDS.scope_review, rendered);
+}
+
+function scopeReviewInputsWith(ownerMessage: string, grant: FullControlScopeGrant, facts: readonly CampaignIssueFacts[],
+  rationale: string, excerpt: number): DecisionInputs {
   return {
     ownerMessage,
     data: {
@@ -32,12 +59,6 @@ export function scopeReviewInputs(ownerMessage: string, grant: FullControlScopeG
       rationale,
     },
   };
-}
-
-/** Whether these inputs fit one Decision input with room for its framing. */
-export function scopeReviewInputsFit(inputs: DecisionInputs): boolean {
-  return (inputs.ownerMessage?.length ?? 0) + Object.values(inputs.data).reduce((sum, value) => sum + value.length, 0) <
-    DECISION_INPUT_MAX_CHARS - 4_000;
 }
 
 const sha256 = (value: string) => createHash("sha256").update(value, "utf8").digest("hex");
