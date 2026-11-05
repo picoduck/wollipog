@@ -1476,8 +1476,8 @@ export class CodexAppServerDriver implements Driver {
   private awaitRootTurnConfirmation(generation: number): void {
     const candidates = [...this.provisionalRootTurnIds]
       .filter((id) => id !== this.completedTurnId && !this.staleRootTurnIds.has(id));
-    this.provisionalRootTurnIds.clear();
     if (candidates.length > 1) {
+      // Settlement retires every candidate, so neither can be adopted by the next prompt.
       this.failUnconfirmedTurn(generation,
         "Codex did not confirm which provider turn started, so the turn was ended. Send the message again.");
       return;
@@ -1486,6 +1486,7 @@ export class CodexAppServerDriver implements Driver {
       this.cb.onStderr(JSON.stringify({ event: "codex_turn_confirmed", source: "provisional_notification" }));
       return;
     }
+    this.provisionalRootTurnIds.clear();
     this.cb.onStderr(`Codex turn/start did not confirm a turn id; waiting up to ${formatDuration(this.turnConfirmationTimeoutMs)} for a turn notification to confirm it (running server: ${this.serverIdentity}; installed CLI version may differ).`);
     this.clearTurnConfirmationTimer();
     this.turnConfirmationTimer = setTimeout(() => {
@@ -1965,6 +1966,8 @@ export class CodexAppServerDriver implements Driver {
     this.lastTurnId = this.turnId ?? this.lastTurnId;
     this.completedTurnId = this.turnId ?? this.completedTurnId;
     if (this.turnId) this.rememberStaleRootTurn(this.turnId);
+    // A turn announced to a prompt that settled unconfirmed can never be adopted by a later one.
+    for (const id of this.provisionalRootTurnIds) this.rememberStaleRootTurn(id);
     this.setSteeringTurn(null);
     this.promptBusy = false;
     this.promptGeneration++;

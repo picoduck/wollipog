@@ -5677,4 +5677,51 @@ test("a turn/start without a turn id refuses to pick between several announced t
   assert.equal(await h.driver.prompt("task"), "refusal");
   assert.equal(h.driver.agentTurnId(), null);
   assert.match(h.driver.lastTurnError() ?? "", /did not confirm which provider turn started/u);
+
+  // Neither ambiguous candidate can be adopted by the next unconfirmed prompt.
+  let bPending = true;
+  server.script((respond) => {
+    respond();
+    setTimeout(() => {
+      server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a2", delta: "late a" });
+      server.notify("turn/completed", { turn: { id: "turn-b", status: "completed" } });
+    }, 5);
+  });
+  const next = h.driver.prompt("next").finally(() => { bPending = false; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(bPending, true, "a retired candidate's completion cannot settle the next prompt");
+  assert.equal(h.driver.agentTurnId(), null);
+  server.notify("turn/completed", { turn: { id: "turn-next", status: "completed" } });
+  assert.equal(await next, "end_turn");
+  assert.equal(h.driver.agentTurnId(), "turn-next");
+});
+
+test("a canceled unconfirmed prompt's announced turn is never adopted by the next prompt (#4054)", async () => {
+  const h = makeHarness();
+  const server = unconfirmedTurnAppServer(h);
+  // Prompt A's response is held; it sees a notification naming its turn, then is canceled.
+  server.script(() => {
+    server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a", delta: "a" });
+  });
+  const first = h.driver.prompt("first");
+  await waitForCondition(() => (h.driver as any).provisionalRootTurnIds.has("turn-a"));
+  h.driver.cancel();
+  assert.equal(await first, "cancelled");
+
+  let bPending = true;
+  server.script((respond) => {
+    respond();
+    setTimeout(() => {
+      server.notify("item/agentMessage/delta", { turnId: "turn-a", itemId: "a2", delta: "late a" });
+      server.notify("turn/completed", { turn: { id: "turn-a", status: "interrupted" } });
+    }, 5);
+  });
+  const second = h.driver.prompt("second").finally(() => { bPending = false; });
+  await new Promise((resolve) => setTimeout(resolve, 30));
+  assert.equal(bPending, true, "the canceled turn's completion cannot settle the next prompt");
+  assert.equal(h.driver.agentTurnId(), null, "the canceled turn is never offered to action admission");
+  server.notify("item/agentMessage/delta", { turnId: "turn-b", itemId: "b", delta: "b" });
+  await waitForCondition(() => h.driver.agentTurnId() === "turn-b");
+  server.notify("turn/completed", { turn: { id: "turn-b", status: "completed" } });
+  assert.equal(await second, "end_turn");
 });
