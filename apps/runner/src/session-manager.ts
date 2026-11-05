@@ -19472,20 +19472,22 @@ export class SessionManager {
 
   /** v293 (#3762): read a GitLab `pr_merge` snapshot's merge request through the child session's own
    * `glab` login and context, and report every issue merging it would close. Read-only; a refusal
-   * is a fixed sentence, never `glab` output. */
+   * is a fixed sentence, never `glab` output. Every call names its host and project, so `glab` runs
+   * from the filesystem root, as forge actions do: no repository configuration the agent can write
+   * in its worktree is read on the way to a result that can lift a person's merge gate. */
   async gitlabMergeClosures(
     message: GitLabMergeClosuresMessage,
     options: { glab?: GlabRunner; agentEnv?: (meta: SessionMeta) => Record<string, string> } = {},
   ): Promise<GitLabMergeClosuresResultMessage> {
     const base = { type: "gitlab_merge_closures_result" as const, requestId: message.requestId, sessionId: message.sessionId };
     const meta = this.store.readMeta(message.sessionId);
-    const cwd = meta ? meta.worktreePath ?? meta.repoPath : null;
-    if (!meta || !cwd) {
-      return { ...base, ok: false, refusal: "unavailable", reason: "The session has no repository on this runner to check from." };
+    if (!meta) {
+      return { ...base, ok: false, refusal: "unavailable", reason: "The session is not known to this runner." };
     }
     try {
+      const neutral = meta.context?.kind === "wsl" ? "/" : parsePath(tmpdir()).root;
       const result = await gitlabMergeClosures(message,
-        options.glab ?? contextGlabRunner(meta.context, cwd, options.agentEnv?.(meta) ?? {}));
+        options.glab ?? contextGlabRunner(meta.context, neutral, options.agentEnv?.(meta) ?? {}));
       return result.ok ? { ...base, ok: true, check: result.check } : { ...base, ok: false, refusal: result.refusal, reason: result.reason };
     } catch {
       return { ...base, ok: false, refusal: "unavailable", reason: "GitLab could not be checked." };
