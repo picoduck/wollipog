@@ -1444,7 +1444,10 @@ export function normalizeWorkflowDecisionAction(
   }
   const canonical = canonicalPrMergeEnqueueCommand(snapshot);
   if (action.command !== canonical) {
-    return fail("enqueue command does not match the approved repository and pull request", 409);
+    // #4242: the child can only submit the byte-for-byte command if the refusal names it. It is a
+    // pure function of the snapshot the requester itself passed, so naming it reveals nothing.
+    return fail("enqueue command does not match the approved repository and pull request; " +
+      `resubmit the approved enqueue command exactly: ${canonical}`, 409);
   }
   return ok({ kind: "pr_merge_enqueue", command: canonical });
 }
