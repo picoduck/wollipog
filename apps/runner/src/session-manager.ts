@@ -14528,14 +14528,19 @@ export class SessionManager {
    * and the provider launches there on the next message. */
   private failLocationSwitch(sessionId: string, entry: ActiveSession, pending: PendingLocationSwitch, reason: string): void {
     entry.pendingLocationSwitch = undefined;
+    const current = this.store.readMeta(sessionId);
+    const bounded = reason.length > 500 ? `${reason.slice(0, 499)}…` : reason;
     const updated = this.store.patchMeta(sessionId, {
       pendingLocationSwitch: undefined,
       locationSwitchFailure: { state: "failed", repository: pending.repository, workspaceId: pending.workspaceId,
-        locationName: pending.locationName, reason, at: Date.now() },
+        locationName: pending.locationName, reason: bounded, at: Date.now() },
+      // A provider already retired for the switch is not relaunched here; the session waits, idle,
+      // and its next message launches it where its metadata says it is.
+      ...(!this.active.has(sessionId) && current && current.status !== "stopped" ? { status: "idle" as const } : {}),
     });
     if (!updated) return;
     this.store.flush(sessionId);
-    this.emitEvent(sessionId, { kind: "error", message: `The Location switch to "${pending.locationName}" failed: ${reason}` });
+    this.emitEvent(sessionId, { kind: "error", message: `The Location switch to "${pending.locationName}" failed: ${bounded}` });
     this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
     if (this.active.get(sessionId) === entry && entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
   }
