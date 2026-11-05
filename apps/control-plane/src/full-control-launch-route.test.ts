@@ -2518,7 +2518,8 @@ test("Full Control children run in any boundary repository's Location, and each 
     // A Location of the second boundary repository, and the launch repository's Location on another machine.
     const api = child(rootId, {});
     assert.equal(api.ok, true, api.error ?? "created");
-    assert.equal(child(rootId, { workspaceId: "b" }).ok, true);
+    const twin = child(rootId, { workspaceId: "b" });
+    assert.equal(twin.ok, true, twin.error ?? "created");
     // An excluded Location, a folder in no boundary entry, and an ad-hoc path are refused.
     for (const place of [{ runnerId: "r", workspaceId: (f.db.getProjectLocation(p.plain.id)!).workspaceId },
       { runnerId: "r2", workspaceId: "c" }, { runnerId: "r2", workspaceId: "a", workspacePath: "/fixture/two/other" }]) {
@@ -2530,6 +2531,13 @@ test("Full Control children run in any boundary repository's Location, and each 
     // A child's own children stay in its repository.
     f.db.updateSessionStatus(api.data!.id, "running", Date.now());
     assert.equal(child(api.data!.id, { workspaceId: "b" }).error, refusal);
+    // Runs follow the same placement rule as one child.
+    const run = (parentSessionId: string, workspaceId: string, runnerId = "r2") => f.sessions.createRun({ runnerId, workspaceId, agentIds: ["claude"],
+      task: "Deliver the work", config: { model: "claude-opus-5-5" } }, { parentSessionId });
+    assert.equal(run(api.data!.id, "b").error, refusal, "a run in another repository's Location");
+    assert.equal(run(rootId, f.db.getProjectLocation(p.plain.id)!.workspaceId, "r").error, refusal, "a run in a Project Location outside the boundary");
+    const sameRepository = run(api.data!.id, "a");
+    assert.equal(sameRepository.ok, true, sameRepository.error ?? "created");
     const worker = child(api.data!.id, {});
     assert.equal(worker.ok, true, worker.error ?? "created");
     // The campaign allowance covers the child and the worker it serves, both in its repository's Location.
@@ -2584,6 +2592,17 @@ test("Full Control children run in any boundary repository's Location, and each 
       const { owner, reason } = evaluateCampaignAuthority(root, apiChild, PROTOCOL_VERSION, gate("other/repo"), policy, PROTOCOL_VERSION);
       assert.deepEqual({ owner, reason }, { owner: "human", reason: "outside_boundary" });
     }
+    // A child whose Location left the Project owns no typed decision either.
+    const question: WorkflowDecisionResourceSnapshot = { category: "implementation_question", question: "Which parser should the importer use?",
+      options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+    const twinChild = f.db.getSession(twin.data!.id)!;
+    const screened = (requester: typeof root) => {
+      const { owner, reason } = evaluateCampaignAuthority(root, { ...requester, boundaryRepository: campaignBoundaryRepositoryAt(f.db, root, requester) },
+        PROTOCOL_VERSION, question, policy, PROTOCOL_VERSION, undefined, undefined, { state: "discusses", verdict: "discusses" });
+      return { owner, reason };
+    };
+    assert.deepEqual(screened(apiChild), { owner: "orchestrator", reason: "authorized_operation" });
+    assert.deepEqual(screened(twinChild), { owner: "human", reason: "outside_boundary" }, "its Location was removed above");
   } finally { await server.close(); f.db.close(); }
 });
 

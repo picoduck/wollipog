@@ -155,7 +155,8 @@ export function evaluateCampaignAuthority(
   const atController = controller.runnerId !== undefined && requester.runnerId === controller.runnerId &&
     controller.workspaceId !== undefined && controller.workspaceId !== null && requester.workspaceId === controller.workspaceId;
   const placeRepository = !full ? null : atController ? control.boundary.repository.toLowerCase() : requester.boundaryRepository?.toLowerCase() ?? null;
-  const repositoryBound = !pending || placeRepository !== null;
+  // Every request, typed or not: a participant whose Location left the boundary owns nothing.
+  const repositoryBound = placeRepository !== null;
   // A pull request's gates belong to the requester's own repository: a child in one boundary
   // repository's Location never merges, extends or deletes another repository's pull request.
   const pullRequestGate = snapshot?.category === "pr_merge" || snapshot?.category === "merged_branch_deletion" ||

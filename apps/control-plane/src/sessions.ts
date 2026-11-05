@@ -4179,6 +4179,8 @@ export class SessionsService {
     configs: SessionConfig[],
     request: { title?: string; agentId: string },
     members: Array<{ agentId: string; launch: AgentLaunch }> = [],
+    /** Where every member runs; a Full Control campaign checks it as it checks one child (#4119). */
+    place?: { runnerId: string; workspaceId: string },
   ): ServiceResult<SessionConfig[]> {
     if (!parentSessionId || configs.length === 0) return ok(configs);
     const parent = this.db.getSession(parentSessionId);
@@ -4187,6 +4189,11 @@ export class SessionsService {
     }
     const campaignAuthority = this.orchestratorCampaignController(parent);
     if (campaignAuthority === "refused") return fail(MALFORMED_ANCESTRY_AUTHORITY_REFUSAL, 409);
+    if (campaignAuthority?.orchestratorPolicy?.control?.mode === "full_control") {
+      const misplaced = place ? this.campaignPlacementRefusal(campaignAuthority, parent, place)
+        : "Full Control children must use a Location of a repository in the campaign's boundary";
+      if (misplaced) return fail(misplaced, 409);
+    }
     const campaignPolicy = campaignAuthority?.orchestratorPolicy;
     const campaignBehavior = campaignPolicy?.behavior;
     const reserved = { ...this.db.childSessionAllocations(parentSessionId) };
@@ -4605,14 +4612,8 @@ export class SessionsService {
       if (!preflight.supported || !campaignBoundaryCurrent(campaignController)) {
         return campaignRefusalFail(preflight.requirement ?? preflight.reason ?? "campaign authority boundary is stale");
       }
-      // #4119: any Location of a boundary repository; a child of a child stays in its parent's
-      // repository, so each session works in exactly one. An ad-hoc path is never a Location.
-      const repository = req.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, campaignController, req);
-      const parentRepository = parentSession && parentSession.id !== campaignController.id
-        ? campaignBoundaryRepositoryAt(this.db, campaignController, parentSession) : repository;
-      if (!repository || parentRepository !== repository) {
-        return fail("Full Control children must use a Location of a repository in the campaign's boundary", 409);
-      }
+      const misplaced = this.campaignPlacementRefusal(campaignController, parentSession, req);
+      if (misplaced) return fail(misplaced, 409);
     }
     if (launch.driver === "pi") {
       const unsupported = this.capabilityFailure(req.runnerId, "piHarness", "Pi RPC sessions");
@@ -9737,6 +9738,19 @@ export class SessionsService {
     return evaluateCampaignAuthority(controller, this.campaignPlaced(controller, { ...requester, workspaceId, repositoryRoot: repositoryRoot ?? undefined }), this.db.getRunner(requester.runnerId)?.protocolVersion, this.db.campaignPolicyRequest(requester.id, controller.orchestratorPolicy?.control, request), controller.parentControlPolicy,
       controller.orchestratorPolicy?.control?.mode === "full_control" ? this.db.getRunner(controller.runnerId)?.protocolVersion : undefined,
       this.campaignPeerContracts(controller, requester.id));
+  }
+
+  /** Why a Full Control campaign refuses a new child at this place (#4119), or null. It must use a
+   * Location of a boundary repository, and a child of a child stays in its parent's repository, so
+   * each session works in exactly one. An ad-hoc path is never a Location. Sessions, runs and
+   * workflows all apply it. */
+  private campaignPlacementRefusal(root: SessionView, parent: SessionView | null,
+    place: { runnerId: string; workspaceId?: string | null; workspacePath?: string }): string | null {
+    if (root.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    const repository = place.workspacePath ? null : campaignBoundaryRepositoryAt(this.db, root, place);
+    const parentRepository = parent && parent.id !== root.id ? campaignBoundaryRepositoryAt(this.db, root, parent) : repository;
+    return repository && parentRepository === repository ? null
+      : "Full Control children must use a Location of a repository in the campaign's boundary";
   }
 
   /** A campaign participant runs in a Location of a boundary repository, and in the same one as the
@@ -17245,6 +17259,7 @@ export class SessionsService {
       members.map(() => ({ ...memberConfig })),
       spawnRequest,
       members,
+      { runnerId: req.runnerId, workspaceId: req.workspaceId },
     );
     if (!admitted.ok || !admitted.data) return failAs(admitted);
 
@@ -18308,6 +18323,7 @@ export class SessionsService {
       resolved.map(() => ({ ...memberConfig })),
       spawnRequest,
       resolved,
+      { runnerId: req.runnerId, workspaceId: req.workspaceId },
     );
     if (!admitted.ok || !admitted.data) return failAs(admitted);
 
