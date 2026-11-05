@@ -3444,7 +3444,7 @@ test("#3762 a Full Control GitLab merge is the Orchestrator's only with its clos
     assert.equal(unreadable.status, 409);
     assert.match(unreadable.error!, /GitLab could not be read .*not signed in to gitlab\.example\.com\. Try again\./);
     assert.deepEqual(h.decisions("child").map((decision) => decision.resourceSnapshot.category === "pr_merge" && decision.resourceSnapshot.pullRequest), [31, 32]);
-    // A runner that predates the read (v292) keeps today's behavior: the person's.
+    // A runner that predates the read (v294) keeps today's behavior: the person's.
     h.db.registerRunner(h.metadata, 1, RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1);
     const legacy = await merge(36, [`${project}#100`]);
     assert.ok(legacy.ok, legacy.error ?? "refused");

@@ -5427,7 +5427,7 @@ test("a GitLab merge is requested and armed only while GitLab would close exactl
     const legacy = await ask("legacy-runner");
     assert.ok(legacy.ok && legacy.data, legacy.error);
     assert.equal(legacy.data.closingReferenceCheck, undefined);
-    assert.equal(reads.length, asked, "a pre-v293 runner receives no gitlab_merge_closures");
+    assert.equal(reads.length, asked, "a pre-v295 runner receives no gitlab_merge_closures");
   } finally {
     db.close();
   }

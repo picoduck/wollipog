@@ -7,7 +7,7 @@
  * an undeclared closure is the "This PR does not close #N" mistake that closed #3635, and a declared
  * one GitHub would not make leaves the approved snapshot describing a different merge.
  *
- * A GitLab merge (#3762, protocol v293) follows the same contract: its runner reports GitLab's
+ * A GitLab merge (#3762, protocol v295) follows the same contract: its runner reports GitLab's
  * closing pattern on the description and GitLab's own `closes_issues` list
  * (`gitlab_merge_closures`), and its issues are named `host/group/project#N`.
  */

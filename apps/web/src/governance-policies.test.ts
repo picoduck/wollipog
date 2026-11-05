@@ -36,6 +36,7 @@ test("scope, conditions and timeouts read as label-prefixed meta in sentence cas
     statuses: ["running", "input_required"], minCostUsd: 5, maxCostUsd: 0, minToolCalls: 1, maxToolCalls: 20, escalated: true,
   }), ["status running or input required", "cost at least $5.00", "cost at most $0.00", "at least 1 tool call", "at most 20 tool calls", "escalated"]);
   assert.deepEqual(policyConditionPhrases(undefined), []);
+  assert.deepEqual(policyConditionPhrases({ humanRequired: true, issueLabels: ["security", "infra"] }), ["campaign issue labeled security or infra"]);
   assert.deepEqual([45, 60, 600, 90, 3_600, 5_400].map(formatAskTimeout), ["45 s", "1 min", "10 min", "1 min 30 s", "1 h", "1 h 30 min"]);
   assert.deepEqual(toolPolicyMeta(policy({
     policyId: "p", enabled: false, effect: "ask", askTimeout: 600, scope: { toolName: "Bash" }, conditions: { escalated: false },

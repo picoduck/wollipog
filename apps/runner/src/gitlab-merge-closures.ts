@@ -1,5 +1,5 @@
 /**
- * GitLab merge closures (#3762, protocol v293): before a GitLab `pr_merge` decision is requested or
+ * GitLab merge closures (#3762, protocol v295): before a GitLab `pr_merge` decision is requested or
  * armed, read the merge request through the child session's own `glab` login and report every issue
  * merging it would close. Read-only, always naming the host. Every failure is a fixed sentence,
  * never `glab` output.

@@ -19470,7 +19470,7 @@ export class SessionManager {
     }
   }
 
-  /** v293 (#3762): read a GitLab `pr_merge` snapshot's merge request through the child session's own
+  /** v295 (#3762): read a GitLab `pr_merge` snapshot's merge request through the child session's own
    * `glab` login and context, and report every issue merging it would close. Read-only; a refusal
    * is a fixed sentence, never `glab` output. Every call names its host and project, so `glab` runs
    * from the filesystem root, as forge actions do: no repository configuration the agent can write
@@ -19581,7 +19581,7 @@ export class SessionManager {
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
             message.issues !== undefined && !boundedIssueNumbers(message.issues)) return { ...base, ok: false, error: "Invalid bounded issue selection" };
-        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication) };
+        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication, message.facts === true) };
       }
       const live = this.active.get(message.sessionId)?.orchestratorLaunchPolicy;
       if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];

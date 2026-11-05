@@ -402,7 +402,7 @@ the issues a merge request closes then decides.
 - A `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
   `owner/repo#N`, or an issue URL; for GitLab `#N`, `group/project#N`, `<host>/group/project#N`, or an
   issue URL on that instance); omit it when the merge must close none. A current runner (GitLab from
-  v293) reads the pull or merge request before the decision is created and again before it is armed.
+  v295) reads the pull or merge request before the decision is created and again before it is armed.
   If the forge would close anything else, or not close a declared issue, the request is refused with
   each reference and its line, and a changed description revokes an approval at consume. Fix the text
   or the declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what
@@ -804,9 +804,14 @@ human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` 
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
 objective also qualifies. When the owner's first message set the scope and its Scope Grant in Campaign
-Status failed, was uncertain, or asked the campaign to select issues, propose the issues you chose
-without lineage: the proposal goes to the owner as one typed approval, so put your rationale in
-`explanation`. The server
+Status failed or was uncertain, propose the issues you chose without lineage: the proposal goes to the
+owner as one typed approval, so put your rationale in `explanation`. When the grant asked the campaign
+to select issues, propose the open issues you chose with `lineage: {kind: "selection"}`, additions
+only, with your ranking in `explanation`, including any you find mid-run. Deterministic checks refuse
+an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope,
+one another active campaign holds, one past the selection count or Maximum Issues, and one with a
+label a Human Required rule names; choose another issue rather than asking. A proposal that passes
+goes to the owner as one typed approval. The server
 refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
 failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve

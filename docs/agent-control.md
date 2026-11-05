@@ -1635,15 +1635,15 @@ title and commit messages are not read: GitHub never links from the title, and a
 commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
 an open pull request, or for a draft description with `--file`, compared with `--intended`.
 
-Protocol v293 applies the same contract to GitLab merges (#3762). A GitLab `pr_merge` snapshot may
+Protocol v295 applies the same contract to GitLab merges (#3762). A GitLab `pr_merge` snapshot may
 carry `intendedClosures` as `#N`, `group/project#N`, `<host>/group/project#N`, or an issue URL on the
 project's instance, normalized to sorted unique `<host>/group/project#N`, lowercased. When the
-child's runner is v293, the control plane asks it for `gitlab_merge_closures` before creating the
+child's runner is v295, the control plane asks it for `gitlab_merge_closures` before creating the
 decision, and again when arming, alongside the GitLab merge preflight. The runner reads the open merge
 request through the child's own `glab` login with two read-only GETs naming the host: the merge
 request (state, head and description) and `closes_issues?per_page=100`. It reports every issue either
 source would close; the comparison, refusal, recorded `closingReferenceCheck`, revocation and
-retry rules are the GitHub ones above. A pre-v293 child runner is not asked, and its card says
+retry rules are the GitHub ones above. A pre-v295 child runner is not asked, and its card says
 **Not checked**. Unlike GitHub, a GitLab merge whose closures cannot be read on a current runner is
 refused rather than created: a current runner's GitLab decision always carries its check, which is
 what Full Control's ownership of it rests on (see campaign-issue-scope.md).
