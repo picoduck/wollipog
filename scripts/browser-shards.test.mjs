@@ -8,6 +8,7 @@ import base from "../playwright.config.ts";
 import ci from "../playwright.ci.config.ts";
 import productionConfig from "../playwright.production.config.ts";
 import webkitConfig from "../playwright.webkit.config.ts";
+import { REQUIRED } from "./main-rolling-validation.mjs";
 
 const read = (path) => readFileSync(new URL(path, import.meta.url), "utf8");
 const workflow = read("../.github/workflows/ci.yml");
@@ -87,6 +88,9 @@ test("all ten CI projects cover every configured development test once with inta
     .split(",").map((id) => `shard-${id.trim()}`);
   assert.deepEqual(report.config.projects.map((project) => project.name), scheduledProjects,
     "every configured project must have exactly one scheduled browser matrix job");
+  assert.deepEqual(REQUIRED.filter((name) => name.includes("/ Browser End-to-End Tests ("))
+    .map((name) => `shard-${name.match(/\((\d+)\)$/)[1]}`), scheduledProjects,
+    "rolling certification must require the entire workflow inventory");
   for (const file of new Set(grouped.map((row) => row.file))) {
     assert.equal(new Set(grouped.filter((row) => row.file === file).map((row) => row.project)).size, 1, file);
   }

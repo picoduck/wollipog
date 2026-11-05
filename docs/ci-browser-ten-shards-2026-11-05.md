@@ -68,6 +68,16 @@ Elapsed runner-minutes are not billed usage or a dollar estimate. Measure the
 extra setup cost and Node critical-path bound rather than assuming linear gains.
 Natural merge-group results are required after enqueue and actual merge.
 
+The timing collector accepts `--all-events --browser-shards 10` for an explicitly
+bounded ten-shard window. It records the expectation with each attempt; offline
+reprojection preserves it. Without the option it retains the historical five-shard
+expectation. Do not apply a current inventory to old runs or infer completeness
+from the highest job number observed. Rolling validation takes its expected set
+from the shared shard-count module, guarded against the actual workflow matrix
+and Playwright discovery. Main-health checks use job names rather than five-shard
+array positions; historical five-job rolling runs remain uncertified under the
+new current inventory until a complete current run is observed.
+
 ## Rollback
 
 Revert the eventual delivery commit through a reviewed PR and the ordinary merge
