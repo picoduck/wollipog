@@ -64,6 +64,8 @@ test("compact member signals preserve requests and disconnected staleness", () =
   assert.equal(sessionStatusSignal(session({ pendingApproval: {
     requestId: "approval", title: "Run?", options: [],
   } })).meta.label, "Approval Required");
+  assert.equal(sessionStatusSignal(session({ backgroundWorkState: "running" })).meta.label, "Running",
+    "passive background work does not replace an executing turn in a compact signal");
 });
 
 test("family input outranks the parent's own review result and keeps that result discoverable", () => {

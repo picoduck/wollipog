@@ -115,6 +115,7 @@ async function readHeader(page: Page) {
       badges: header.querySelectorAll(".status").length,
       controlRight: box(control).right,
       controlCenter: box(control).y + box(control).height / 2,
+      controlHeight: box(control).height,
       shareCenter: box(share).y + box(share).height / 2,
       actionsLeft: box(header.querySelector(".detail-actions")!).left,
       headerHeight: box(header).height,
@@ -170,8 +171,9 @@ for (const width of WIDTHS) {
     await expect(control).toHaveAccessibleName("Session Status: Running");
     const running = await readHeader(page);
     expectMatchingBadges(background.badge, running.badge);
-    // The header is no taller for carrying background work than it is without it.
-    expect(background.headerHeight).toBeLessThanOrEqual(running.headerHeight + 24);
+    // Only wrapping the two readable labels may grow the phone header.
+    expect(background.headerHeight - running.headerHeight).toBeCloseTo(
+      Math.max(0, background.controlHeight - running.controlHeight), 1);
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
     await expect(control.locator(".status")).toHaveText(["Running", "Disconnected"]);
     await expect(control.locator(".pulse")).toHaveCount(0);
@@ -223,7 +225,7 @@ for (const width of [390, 1280] as const) {
     await applyStatuses(page, { status: "running", backgroundWorkState: "running", approval: false });
     await expect(row.locator(".status")).toHaveCount(2);
     const running = await read();
-    // The fixture's session has been silent for a while, so its one badge may also say it is stalled.
+    // Transcript silence never changes the lifecycle or its tone.
     expect(running.names).toHaveLength(2);
     expect(running.names[0]).toMatch(/^Status: Running$/);
     // While the session awaits its next prompt, the work is the one status, drawn like Running.

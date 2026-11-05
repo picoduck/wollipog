@@ -567,9 +567,9 @@ test("every destination is painted with no machine needing attention", async ({ 
  * The fixture hardcoded zero for both, so `.app-rail:has(.count-badge) { opacity: 0 }` —
  * any blocked session at all — erased the production navigation and matched nothing here.
  */
-test("every destination is painted with blocked and stalled sessions", async ({ page }) => {
+test("every destination is painted with blocked sessions", async ({ page }) => {
   await useHarness(page, { blocked: 3 });
-  // One badge for the destination: the total, red because a session is stalled (#1967).
+  // One badge for the destination: the concrete requests waiting on the person (#1967).
   await expect(page.locator(".app-rail .count-badge")).toHaveCount(1);
   await expect(page.locator(".app-rail .count-badge.on-icon")).toHaveText("3");
   await openKeyboard(page);
@@ -631,19 +631,19 @@ for (const theme of THEMES) {
       const rail = element.closest(".app-rail")!;
       const railBox = rail.getBoundingClientRect();
       const probe = document.createElement("span");
-      // `.t-danger`'s tone.
-      probe.style.color = "var(--red)";
+      // The warning tone for requests waiting on the person.
+      probe.style.color = "var(--amber)";
       document.body.append(probe);
-      const redColor = getComputedStyle(probe).color;
+      const warningColor = getComputedStyle(probe).color;
       probe.remove();
       return {
         // The ring is 2px outside the mark; the bar clips its overflow.
         inside: box.top - 2 >= railBox.top + parseFloat(getComputedStyle(rail).borderTopWidth) && box.right + 2 <= railBox.right,
         size: `${box.width}x${box.height}`,
-        danger: getComputedStyle(mark).borderTopColor === redColor,
+        warning: getComputedStyle(mark).borderTopColor === warningColor,
       };
     });
-    expect(placed).toEqual({ inside: true, size: "8x8", danger: true });
+    expect(placed).toEqual({ inside: true, size: "8x8", warning: true });
 
     // Standing on a destination behind More keeps its "…, <destination> selected" name.
     await page.locator(".rail-more-trigger").click();

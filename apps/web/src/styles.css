@@ -15402,10 +15402,8 @@ button.review-finding-location {
     padding-right: var(--mobile-session-trailing-inset);
     border-bottom: 1px solid var(--border);
   }
-  /* The status control leads the line at the actions' 36px and never pushes Share and More
-     Actions: it keeps the full badge and its "+N" in the leading track, and the badge clips there
-     rather than widening it (§15.1). The button itself does not clip, so its touch target does
-     not either. */
+  /* Lifecycle and secondary labels may wrap in the leading track; Share and More Actions keep
+     their targets and neither label clips at narrow phone widths. */
   .session-bar > .session-status-button {
     grid-column: 1;
     grid-row: 1;

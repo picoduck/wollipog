@@ -3981,10 +3981,10 @@ These trade-offs are deliberate. Keep them in mind when a screen seems to argue 
    readable width. §9.3 says a tooltip must never be the only carrier of needed information, so
    wherever only a dot shows, the Session Status popover is the visible label: the control is a
    button, and the popover lists every condition in words.
-3. **The phone session header's badge line.** The phone session header keeps one full badge and
-   "+N" at the start of its second line, beside Share and More Actions. §11.1 allows one pill per
-   attention kind, but the line cannot hold them, so the other kinds are counted in "+N" and listed
-   in the Session Status sheet; the control clips rather than pushing the two buttons.
+3. **The phone session header's badge line.** Lifecycle and at most one secondary badge stay
+   at the start of the second bar, beside Share and More Actions. Additional actionable conditions
+   use plain "+N" and remain in the Session Status sheet. The control may wrap its labels at narrow
+   widths, keeping both labels whole and the action buttons hittable.
 4. **Top-left empty states in tall panes.** This system top-aligns every state. In a 900px right
    panel a top-left state can read as part of the header, so inside panels use `.state.compact`
    (24px top).

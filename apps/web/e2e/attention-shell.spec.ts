@@ -78,7 +78,7 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   await expect(grid.locator(".inbox-row-shell", { hasText: "Snoozed Session" })).toHaveCount(0);
   await expect(grid.locator(".status-count")).toHaveCount(3);
   await expect(grid.locator(".status-count").first()).toHaveText("2");
-  // One rail badge for Sessions: 4 blocked plus 4 stalled, red because a session is stalled (#1967).
+  // One rail badge for Sessions: 4 concrete requests waiting on the person (#1967).
   const sessions = page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Sessions", exact: true });
   await expect(sessions.locator(".count-badge")).toHaveCount(1);
   await expect(sessions.locator(".count-badge.on-icon")).toHaveText("4");
@@ -243,7 +243,7 @@ for (const [label, device] of [
       await page.goto(fullShell("/projects"));
       const rail = page.getByRole("navigation", { name: "Primary Navigation" });
       const sessions = rail.getByRole("link", { name: "Sessions", exact: true });
-      // 4 blocked and 4 stalled: one red total, never two badges.
+      // Only concrete requests contribute to the warning count.
       await expect(sessions.locator(".count-badge")).toHaveCount(1);
       await expect(sessions.locator(".count-badge.on-icon")).toHaveText("4");
       await expect(sessions).toHaveAccessibleName("Sessions");
@@ -266,7 +266,7 @@ for (const [label, device] of [
 /**
  * A wide count stays inside the rail (#2110). Before it grew rightward from the icon's shoulder, and
  * "128" ended 5.4px past the rail, with even a two-digit ring notching its border. The fixture's 4
- * blocked and 4 stalled sessions make 8; `more-blocked` adds sessions waiting on the user.
+ * blocked sessions make 4; `more-blocked` adds sessions waiting on the user.
  */
 for (const [label, device] of [
   ["at 1440×900 with a mouse", { viewport: { width: 1440, height: 900 } }],

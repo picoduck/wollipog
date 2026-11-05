@@ -229,7 +229,7 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   // the agent's whole first word beside the icon. Asserted against the word's own rendered width, so
   // CI's wider fallback face cannot make it a pixel argument.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;
-  expect(three.pills).toBe(1);
+  expect(three.pills).toBe(2);
   expect(three.pillsOnLineOne).toBe(0);
   expect(three.firstWord).toBe("Claude");
   expect(three.firstWordWidth).toBeGreaterThan(0);
@@ -298,7 +298,7 @@ for (const viewport of [{ name: "desktop", width: 1280, height: 1700, step: 26 }
     expect(at("Review #602")).toBe(at("#602:") + 1);
     expect(at("#602:"), "the fixture's last child is #602").toBe(thread.length - 2);
     const parentLeft = thread[0]!.left;
-    if (width > 760) expect(new Set(rows.map((row) => row.height)).size, JSON.stringify(rows)).toBe(1);
+    if (viewport.width > 760) expect(new Set(rows.map((row) => row.height)).size, JSON.stringify(rows)).toBe(1);
     else expect(rows.every((row) => row.height >= 44)).toBe(true);
     const spineX = thread[1]!.spine!.x;
     for (const row of thread.slice(1)) {

@@ -206,7 +206,8 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await expect(resultBadge).toHaveText("Ready for Review");
     await parent.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
-    await expect(resultBadge).toHaveCount(0);
+    await expect(parent.locator(".status")).toHaveText("Awaiting Prompt");
+    await expect(parent.locator(".status.t-review")).toHaveCount(0);
   });
 }
 
