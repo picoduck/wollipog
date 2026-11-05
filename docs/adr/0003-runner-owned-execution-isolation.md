@@ -27,6 +27,9 @@ session-serving process and provider helper with:
 - a read-only bind of `/`;
 - a writable bind of the exact session or activated terminal root;
 - fresh `/proc`, `/dev`, and ephemeral `/tmp` mounts;
+- a `TMPDIR` (and `TMP`/`TEMP` when set) that the mounts above leave writable: an inherited value
+  outside every writable bind, such as a runner's own staging directory, becomes the ephemeral
+  `/tmp`, which is what an unset `TMPDIR` already means there (#4150);
 - a new PID/session boundary and parent-death cleanup;
 - separate IPC and UTS namespaces plus a private `/dev/shm` directory;
 - an optional unshared network namespace for `network: "deny"`.

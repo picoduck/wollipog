@@ -4,7 +4,7 @@ import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOC
   type CampaignForgePullRequestObservation, type CampaignPullRequestRef, type ControlPlaneToRunner,
   type RunnerMetadata, type RunnerToControlPlane } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
-import { Hub } from "./hub.js";
+import { Hub, RunnerRequestTimeoutError, RunnerRequestNotSentError } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
@@ -50,7 +50,7 @@ function fixture(completion: "retain" | "stop_and_archive" = "retain") {
   assert.ok(plan.ok, plan.error ?? "plan refused");
   const [delivery, advisory] = plan.data!.items.map((item) => item.workItemId) as [string, string];
   const report = (id: string, text = "Done.") => db.appendEvent(id, { kind: "agent_message", text, final: true }, Date.now()).seq;
-  return { db, hub, svc, delivery, advisory, report };
+  return { db, hub, svc, delivery, advisory, report, metadata };
 }
 
 type Fixture = ReturnType<typeof fixture>;
@@ -505,7 +505,8 @@ test("verification skips a worktree the runner no longer links, and keeps refusi
       : { type: "git_result", requestId: "", ok: true, data: { status: clean as never } });
     const unknown = await verify();
     assert.equal(unknown.status, 409, "an older runner's refusal is never read as retirement");
-    assert.match(unknown.error ?? "", /child-old.*does not match runner-owned session metadata/u);
+    assert.match(unknown.error ?? "", /runner_error.*child child, managed worktree 1/u);
+    assert.equal(unknown.error?.includes("update Wollipog"), false);
 
     inspected = inspectWorktrees(h, (path) => path.endsWith("child-old")
       ? { type: "git_result", requestId: "", ok: false, error: "the session no longer links this worktree", code: "GIT_WORKTREE_UNLINKED" }
@@ -516,3 +517,107 @@ test("verification skips a worktree the runner no longer links, and keeps refusi
     assert.equal(inspected.length, 2);
   } finally { h.db.close(); }
 });
+
+
+const invalidInspections: [string, unknown][] = [
+  ["missing_status", undefined],
+  ["missing_status", "private response"],
+  ["invalid_changed_path_count", { ...clean, changedPathCount: undefined }],
+  ["invalid_changed_path_count", { ...clean, changedPathCount: -1 }],
+  ["invalid_changed_path_count", { ...clean, changedPathCount: 0.5 }],
+  ["invalid_has_changes", { ...clean, hasChanges: "false" }],
+  ["inconsistent_change_summary", { ...clean, hasChanges: true }],
+  ["missing_file_list", { ...clean, files: undefined }],
+  ["invalid_file_list", { ...clean, files: [null] }],
+  ["inconsistent_file_count", { ...clean, files: [{ path: "secret.txt" }] }],
+  ["inconsistent_file_count", { ...clean, changedPathCount: 1, hasChanges: true }],
+];
+
+for (const [reason, status] of invalidInspections) {
+  test(`inspection refuses ${reason} safely and resumes with the same report (#4176) ${JSON.stringify(status)}`, async () => {
+    const h = fixture("stop_and_archive");
+    try {
+      h.db.setWorktreePath("child", "/private/home/secret-project/child");
+      h.db.raw().prepare("UPDATE sessions SET worktrees=? WHERE id='child'").run(JSON.stringify([
+        { id: "wt_child", path: "/private/home/secret-project/child", branch: "agent/child", source: "created" },
+      ]));
+      h.db.updateSessionStatus("child", "completed", Date.now());
+      const reportEventSeq = h.report("child");
+      const verify = () => h.svc.verifyCampaignChildWithHistory("root", {
+        childSessionId: "child", reportEventSeq, followUpsAccounted: true,
+      });
+      const messages: string[] = [];
+      h.hub.sendToRunner = (_runner, message) => { messages.push(message.type); return true; };
+      inspectWorktrees(h, () => ({ type: "git_result", requestId: "", ok: true, data: { status: status as never } }));
+      const refused = await verify();
+      assert.equal(refused.status, 409);
+      assert.ok(refused.error?.includes(`[invalid_response:${reason}]`), refused.error ?? "refused");
+      assert.match(refused.error!, /child child, managed worktree 1 \(path SHA-256 [a-f0-9]{12}\)/u);
+      assert.equal(refused.error!.includes("secret-project"), false);
+      assert.equal(refused.error!.includes("update Wollipog"), false);
+      assert.match(refused.error!, /same completed report; do not repeat delivery or merge/u);
+      assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+      assert.equal(h.db.getSession("child")!.archived, false);
+      assert.deepEqual(messages, []);
+      const cleanupRequests: ControlPlaneToRunner[] = [];
+      h.hub.requestFromRunner = (async (_runnerId, requestId, message) => {
+        if (message.type === "git_action") return { type: "git_result", requestId, ok: true, data: { status: clean as never } };
+        assert.equal(message.type, "session_worktree");
+        assert.equal(message.operation, "discard");
+        assert.equal(message.requireDelivered, true);
+        cleanupRequests.push(message);
+        return { type: "session_worktree_result", requestId, sessionId: "child", operation: "discard", ok: true,
+          retirement: { status: "removed" }, snapshot: { id: "child", workspaceId: "w", agentId: "agent", title: "child", status: "completed",
+            driver: "codex-app-server", useWorktree: true, worktrees: [], worktreePath: null,
+            config: { model: "gpt-6.1-sol" }, preview: "Done.", pendingApproval: null,
+            tokensIn: 0, tokensOut: 0, costUsd: 0, seq: reportEventSeq, createdAt: 1, updatedAt: Date.now() } };
+      }) as Hub["requestFromRunner"];
+      const recovered = await verify();
+      assert.ok(recovered.ok, recovered.error ?? "recovery refused");
+      assert.equal(h.db.campaignChildReportVerified("root", "child"), true);
+      assert.equal(h.db.getSession("child")!.archived, true);
+      await new Promise((resolve) => setImmediate(resolve));
+      assert.equal(cleanupRequests.length, 1, "supported managed retirement resumes after valid inspection");
+      assert.equal(h.db.campaignChildWorktreesRetired("child"), true);
+    } finally { h.db.close(); }
+  });
+}
+
+for (const category of ["unsupported_capability", "capability_unproven", "runner_error", "timeout", "runner_offline", "unexpected_result_type"] as const) {
+  test(`inspection diagnoses ${category} without trusting runner text (#4176)`, async () => {
+    const h = fixture("stop_and_archive");
+    try {
+      h.db.setWorktreePath("child", "/private/home/secret-project/child");
+      h.db.updateSessionStatus("child", "completed", Date.now());
+      const reportEventSeq = h.report("child");
+      if (category === "unsupported_capability") {
+        h.db.registerRunner(h.metadata, 2, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorktreeRecovery - 1);
+      }
+      if (category === "capability_unproven") h.db.registerRunner(h.metadata, 2, null);
+      let inspections = 0;
+      h.hub.requestFromRunner = (async () => {
+        inspections++;
+        if (category === "timeout") throw new RunnerRequestTimeoutError();
+        if (category === "runner_offline") throw new RunnerRequestNotSentError();
+        if (category === "unexpected_result_type") return { type: "session_stopped", sessionId: "child" };
+        return { type: "git_result", requestId: "", ok: false, error: "SECRET /private/path\nupdate Wollipog" };
+      }) as Hub["requestFromRunner"];
+      const result = await h.svc.verifyCampaignChildWithHistory("root", { childSessionId: "child", reportEventSeq, followUpsAccounted: true });
+      assert.equal(result.status, 409);
+      assert.ok(result.error?.includes(category), result.error ?? "refused");
+      assert.match(result.error!, /child child, managed worktree 1/u);
+      assert.equal(result.error!.includes("SECRET"), false);
+      assert.equal(result.error!.includes("/private/"), false);
+      assert.equal(h.db.campaignChildReportVerified("root", "child"), false);
+      assert.equal(h.db.getSession("child")!.archived, false);
+      if (category === "unsupported_capability" || category === "capability_unproven") {
+        assert.equal(inspections, 0);
+        assert.equal(result.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorktreeRecovery);
+        assert.equal(result.capabilityRequirement?.runnerProtocolVersion,
+          category === "unsupported_capability" ? RUNNER_CAPABILITY_MIN_PROTOCOL.campaignWorktreeRecovery - 1 : null);
+        if (category === "capability_unproven") assert.equal(result.error!.includes("Update"), false);
+      }
+      else assert.equal(result.error!.includes("update Wollipog"), false);
+    } finally { h.db.close(); }
+  });
+}

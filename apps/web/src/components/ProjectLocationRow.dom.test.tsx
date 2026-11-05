@@ -145,6 +145,7 @@ async function render(projects: ProjectView[], options: {
   runners?: RunnerView[];
   client?: Partial<ApiClient>;
   setupCapability?: boolean;
+  renameCapability?: boolean;
 } = {}) {
   toasts.length = 0;
   const setupCalls: string[] = [];
@@ -188,6 +189,7 @@ async function render(projects: ProjectView[], options: {
       capabilities: {
         sessionSubscriptions: false, boundedDelivery: false, paginatedSessionHistory: false, projects: true,
         worktreeSetupConfig: options.setupCapability ?? true,
+        renameProjectLocations: options.renameCapability ?? false,
       },
       runners: options.runners ?? [runner, offlineRunner],
       boxes: [], sessions: [], runs: [], pods: [], projects,
@@ -430,4 +432,104 @@ test("with no locations and no machine online, the row also offers Open Connecti
 test("a project with locations keeps Add Location… in the section head", async () => {
   const { body } = await render([project([location()])], { setup: { "location-1": { status: "valid", hash: "abc" } } });
   assert.equal(text(locationsSection(body).querySelector(".section-head .actions button")), "Add Location…");
+});
+
+async function typeInto(input: HTMLInputElement, value: string) {
+  await act(async () => {
+    input.focus();
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    // react-dom decided at import, before these globals existed, that input events are
+    // unsupported, so it reads value changes on keyup.
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+  });
+}
+
+const renameDialog = () => ([...domWindow.document.querySelectorAll('[role="dialog"]')] as unknown as HTMLElement[])
+  .find((dialog) => text(domWindow.document.getElementById(dialog.getAttribute("aria-labelledby") ?? "") as never) === "Rename Location")
+  ?? null;
+const dialogButton = (dialog: HTMLElement, label: string) =>
+  [...dialog.querySelectorAll<HTMLButtonElement>("button")].find((button) => text(button) === label)!;
+async function chooseRename(body: HTMLElement, name: string) {
+  const menu = await openMenu(locationRow(body, name), name);
+  const rename = [...menu.querySelectorAll<HTMLButtonElement>(".menu-item")].find((item) => text(item) === "Rename Location…")!;
+  await act(async () => rename.click());
+  const dialog = renameDialog();
+  assert.ok(dialog, "Rename Location opens");
+  return dialog!;
+}
+
+test("Rename Location… follows Copy Path for a manager, also while the machine is offline (#4151)", async () => {
+  const { body } = await render([project(threeLocations())], { renameCapability: true });
+  assert.deepEqual(menuItems(await openMenu(locationRow(body, "Remote"), "Remote")), [
+    { label: "Reveal in File Manager", reason: "The machine is offline.", disabled: true },
+    { label: "Copy Path", reason: null, disabled: false },
+    { label: "Rename Location…", reason: null, disabled: false },
+    { label: "Make Default", reason: "The machine is offline.", disabled: true },
+    { label: "Remove Location…", reason: null, disabled: false },
+  ]);
+});
+
+test("a viewer gets no Rename Location… (#4151)", async () => {
+  const { body } = await render([project(threeLocations(), { canManage: false })], { renameCapability: true });
+  assert.deepEqual(menuItems(await openMenu(locationRow(body, "Docs"), "Docs")).map((item) => item.label),
+    ["Reveal in File Manager", "Copy Path"]);
+});
+
+test("a server that can't rename locations offers no Rename Location… (#4151)", async () => {
+  const { body } = await render([project(threeLocations())], { renameCapability: false });
+  assert.equal(menuItems(await openMenu(locationRow(body, "Docs"), "Docs")).some((item) => item.label === "Rename Location…"), false);
+});
+
+test("Rename Location starts with the name, refuses a blank one, keeps a failed name for retry, then saves it (#4151)", async () => {
+  const calls: Array<{ projectId: string; locationId: string; name: string }> = [];
+  let failNext = true;
+  const { body } = await render([project(threeLocations())], {
+    renameCapability: true,
+    client: {
+      renameProjectLocation: async (projectId: string, locationId: string, name: string) => {
+        calls.push({ projectId, locationId, name });
+        if (failNext) {
+          failNext = false;
+          throw new Error("HTTP 500: database is locked");
+        }
+        const locations = threeLocations().map((item) =>
+          item.id === locationId ? { ...item, name, nameSource: "user" as const } : item);
+        return { project: project(locations, { updatedAt: 2 }) };
+      },
+    },
+  });
+
+  // Cancel changes nothing, even after an edit.
+  let dialog = await chooseRename(body, "Docs");
+  const field = () => dialog.querySelector<HTMLInputElement>("#rename-location-name")!;
+  assert.equal(text(dialog.querySelector(`label[for="rename-location-name"]`)), "Location Name");
+  assert.equal(field().value, "Docs");
+  await typeInto(field(), "Something Else");
+  await act(async () => dialogButton(dialog, "Cancel").click());
+  assertNoDomNode(renameDialog(), "Cancel closes the dialog");
+  assert.equal(calls.length, 0);
+  assert.ok(locationRow(body, "Docs"));
+
+  dialog = await chooseRename(body, "Docs");
+  await typeInto(field(), "   ");
+  await act(async () => dialogButton(dialog, "Save").click());
+  assert.equal(text(dialog.querySelector(".field-error")), "Enter a location name.");
+  assert.equal(field().getAttribute("aria-invalid"), "true");
+  assert.equal(calls.length, 0, "a blank name is never sent");
+
+  await typeInto(field(), "  Product   Docs ");
+  await act(async () => dialogButton(dialog, "Save").click());
+  await settle();
+  assert.deepEqual(calls, [{ projectId: "alpha", locationId: "location-2", name: "Product Docs" }]);
+  assert.ok(renameDialog(), "a failed save keeps the dialog open");
+  assert.equal(field().value, "  Product   Docs ", "with the name as typed");
+  assert.match(text(dialog.querySelector(".notice.t-danger")), /Couldn't Rename the Location.*database is locked/);
+
+  await act(async () => dialogButton(dialog, "Save").click());
+  await settle();
+  assert.equal(calls.length, 2, "Save tries again");
+  assertNoDomNode(renameDialog(), "a saved name closes the dialog");
+  assert.ok(locationRow(body, "Product Docs"), "the row shows the saved name");
+  assert.ok(locationRow(body, "Checkout"), "the other locations keep theirs");
 });

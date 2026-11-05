@@ -234,10 +234,10 @@ export class ProviderProfileGrants {
   }
 
   /** Whether an acquisition for this account would pass the worker's profile check now. Background
-   * passes skip accounts that fail it, so one refused HOME does not fail the whole pass. */
+   * passes, implicit selection and discovery skip accounts that fail it, including unverifiable
+   * ancestry. Explicit/default/bound choices retain their identity for the lease's refusal. */
   usable(account: RunnerProviderAccount): boolean {
     const read = this.safeRead(account);
-    if (read.state === "unverifiable" && read.cause === "ancestry") return true; // the lease refuses it as before
     return decideProviderProfileAccess(read, { ...(account.profileId ? { expectedId: account.profileId } : {}), ...this.access() },
       this.deps.controlPlaneInstanceId).allowed;
   }
