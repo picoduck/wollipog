@@ -67,6 +67,34 @@ for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390",
   });
 }
 
+// Tall enough that the panel shows every proposal whole, at the two widths.
+for (const [label, viewport] of [["1440", { width: 1440, height: 1500 }], ["390", { width: 390, height: 1800 }]] as const) {
+  test(`each selection proposal reads with its outcome, issues, rationale and reason (${label}px)`, async ({ page }, testInfo) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&selection=1");
+    const section = page.getByRole("region", { name: "Decision Model Checks" });
+    const items = section.locator("li");
+    await expect(items).toHaveCount(3);
+    await expect(items.nth(0)).toContainText("Selection Proposal");
+    await expect(items.nth(0)).toContainText("Admitted and added to the scope.");
+    await expect(items.nth(0)).toContainText("#130 Crash when a session restarts during a merge");
+    await expect(items.nth(0)).toContainText("The two oldest open issues labeled priority/high.");
+    await expect(items.nth(0)).toContainText("Fits Your Selection");
+    await expect(items.nth(1)).toContainText("Refused back to the Orchestrator.");
+    await expect(items.nth(1)).toContainText("Doesn't Fit Your Selection");
+    await expect(items.nth(1)).toContainText("Issue 140 is a wording change");
+    await expect(items.nth(2)).toContainText("Waiting for your approval of the scope change.");
+    await expect(items.nth(2)).toContainText("Uncertain");
+    await expect(items.nth(2)).toContainText("didn't say whether UI regressions count");
+    // A selection is decided on its scope request: nothing here classifies it.
+    await expect(section.getByRole("button")).toHaveCount(0);
+    await section.scrollIntoViewIfNeeded();
+    await section.screenshot({ path: testInfo.outputPath(`selection-proposals-${label}.png`) });
+    const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
+    expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
+  });
+}
+
 test("Campaign Status shows no Decision Model Checks before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
   await expect(page.locator(".campaign-status-summary")).toBeVisible();

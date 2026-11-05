@@ -7,8 +7,9 @@ import { BusyButton } from "./ui/BusyButton.js";
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
 
 /** The Full Control checks shown here (#4104): the question screen, follow-up relatedness and
- * closure-reason choice. Other kinds have their own place in Campaign Status. */
-const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason"]);
+ * closure-reason choice, and the review of each selection proposal (#4103). Other kinds have their
+ * own place in Campaign Status. */
+const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason", "scope_review"]);
 
 const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"], string> = {
   implementation_question: "Implementation Question",
@@ -26,7 +27,21 @@ const VERDICT_LABELS: Record<string, string> = {
   unrelated: "Unrelated",
   fits: "Reason Fits",
   does_not_fit: "Reason Doesn't Fit",
+  admit: "Fits Your Selection",
+  refuse: "Doesn't Fit Your Selection",
   uncertain: "Uncertain",
+};
+
+/** What a selection proposal's review led to (#4103). */
+const SELECTION_OUTCOMES: Record<NonNullable<CampaignDecision["selectionProposal"]>["outcome"], string> = {
+  reviewing: "It waits until the review finishes.",
+  admitted: "Admitted; the Orchestrator adds it to the scope.",
+  applied: "Admitted and added to the scope.",
+  refused: "Refused back to the Orchestrator.",
+  waiting_for_owner: "Waiting for your approval of the scope change.",
+  owner_approved: "You approved the scope change.",
+  owner_declined: "You declined the scope change.",
+  replaced: "A later proposal replaced it.",
 };
 
 export const DECISION_FAILURE_LABELS: Record<DecisionErrorClass, string> = {
@@ -58,6 +73,9 @@ function checkOutcomeText(decision: CampaignDecision): string {
 
 /** What the screen's outcome did to the request it affected, in the order it happened. */
 function outcomeText(decision: CampaignDecision): string {
+  if (decision.kind === "scope_review") {
+    return decision.selectionProposal ? SELECTION_OUTCOMES[decision.selectionProposal.outcome] : SELECTION_OUTCOMES.reviewing;
+  }
   if (decision.kind !== "credential_screen") return checkOutcomeText(decision);
   const classification = decision.subject?.classification;
   const ownerDecision = decision.subject?.surface === "owner_decision";
@@ -125,8 +143,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <h3 id={headingId} className="section-title">Decision Model Checks</h3>
       <p className="section-note">
         The Decision Model checks whether a question asks for a credential, sign-in or access, whether a follow-up
-        belongs to the work you asked for, and whether a closure's reason fits its issue. When it can't tell, the
-        request waits for you; nobody asks you for a value.
+        belongs to the work you asked for, whether a closure's reason fits its issue, and whether issues the
+        Orchestrator chose fit the selection you asked for. When it can't tell, the request waits for you; nobody asks
+        you for a value.
       </p>
       {loadError && <Notice tone="danger" compact role="alert" title="Couldn't Load Decision Model Checks">{loadError}</Notice>}
       {actionError && <Notice tone="danger" compact role="alert" title="Couldn't Classify the Question">{actionError}</Notice>}
@@ -139,7 +158,8 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
             !subject?.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
-          const label = subject ? SURFACE_LABELS[subject.surface] : "Request";
+          const proposal = decision.selectionProposal;
+          const label = decision.kind === "scope_review" ? "Selection Proposal" : subject ? SURFACE_LABELS[subject.surface] : "Request";
           return (
             <li key={decision.occurrenceId} className="campaign-screen-item">
               <dl className="facts">
@@ -147,6 +167,18 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                   <dt>{label}</dt>
                   <dd>{outcomeText(decision)}</dd>
                 </div>
+                {proposal && (
+                  <div>
+                    <dt>{proposal.issues.length === 1 ? "Issue" : "Issues"}</dt>
+                    <dd>{proposal.issues.map((issue) => `#${issue.number} ${issue.title}`).join("; ")}</dd>
+                  </div>
+                )}
+                {proposal && (
+                  <div>
+                    <dt>Rationale</dt>
+                    <dd>{proposal.explanation}</dd>
+                  </div>
+                )}
                 <div>
                   <dt>Verdict</dt>
                   <dd>{decision.verdict ? VERDICT_LABELS[decision.verdict] ?? decision.verdict : decision.state === "pending" ? "Checking" : "None"}</dd>

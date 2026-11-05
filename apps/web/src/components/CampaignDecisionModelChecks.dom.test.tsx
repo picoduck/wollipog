@@ -129,6 +129,41 @@ test("follow-up relatedness and closure-reason checks show their verdict beside 
   }
 });
 
+test("each selection proposal shows its outcome, issues, rationale and the Decision Model's reason in the same list (#4103)", async () => {
+  const read = api.campaignDecisions;
+  const proposal = (outcome: NonNullable<CampaignDecisionsResponse["decisions"][number]["selectionProposal"]>["outcome"], numbers: number[], explanation: string) =>
+    ({ outcome, explanation, issues: numbers.map((number) => ({ repository: "team/repo", number, title: `Issue ${number}` })) });
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+    decision("sel_admit", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "admit",
+      reason: "Both are labeled priority/high.", selectionProposal: proposal("applied", [30, 31], "The two highest-priority open issues.") }),
+    decision("sel_refuse", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, verdict: "refuse",
+      reason: "Issue 40 is a typo fix, not a priority.", selectionProposal: proposal("refused", [40], "Next in the backlog.") }),
+    decision("sel_unsure", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, state: "uncertain", verdict: "uncertain",
+      reason: "The owner didn't say whether UI work counts.", selectionProposal: proposal("waiting_for_owner", [41], "A UI regression users report.") }),
+    decision("sel_failed", { kind: "scope_review", promptVersion: "scope_review.v1", subject: undefined, state: "failed", failureClass: "authentication",
+      selectionProposal: proposal("owner_declined", [42], "An old crash report.") }),
+  ], usage: { ...usage, calls: 4, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li")];
+    assert.deepEqual(items.map(facts), [
+      { "Selection Proposal": "Admitted and added to the scope.", Issues: "#30 Issue 30; #31 Issue 31", Rationale: "The two highest-priority open issues.",
+        Verdict: "Fits Your Selection", Reason: "Both are labeled priority/high." },
+      { "Selection Proposal": "Refused back to the Orchestrator.", Issue: "#40 Issue 40", Rationale: "Next in the backlog.",
+        Verdict: "Doesn't Fit Your Selection", Reason: "Issue 40 is a typo fix, not a priority." },
+      { "Selection Proposal": "Waiting for your approval of the scope change.", Issue: "#41 Issue 41", Rationale: "A UI regression users report.",
+        Verdict: "Uncertain", Reason: "The owner didn't say whether UI work counts." },
+      { "Selection Proposal": "You declined the scope change.", Issue: "#42 Issue 42", Rationale: "An old crash report.", Verdict: "None",
+        Failure: "Sign-In Required" },
+    ]);
+    // A selection is decided on its scope request, never classified here.
+    assert.equal(view.container.querySelectorAll("button").length, 0);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
 test("a member session sees the checks but never the classification buttons", async () => {
   const read = api.campaignDecisions;
   api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],

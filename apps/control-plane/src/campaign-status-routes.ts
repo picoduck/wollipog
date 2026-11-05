@@ -25,6 +25,7 @@ import type {
 import { FORGE_NOT_AUTHORIZED } from "./campaign-forge-observations.js";
 import type { ControlPlaneDb } from "./db.js";
 import { decisionOccurrenceView } from "./decision-runtime.js";
+import { selectionProposalView } from "./scope-selection.js";
 import type { AuthPrincipal } from "./identity.js";
 
 /* ------------------------------ Cost visibility ------------------------------ */
@@ -206,8 +207,11 @@ export function registerCampaignStatusRoutes(
       decisions: db.listCampaignDecisionOccurrences(read.rootId).map((occurrence) => {
         // What the decision affected (#4104), so its verdict reads beside that request.
         const { campaignSessionId: _root, ...subject } = db.campaignDecisionSubject(occurrence.occurrenceId) ?? {};
+        // A selection proposal's review (#4103): the issues, the rationale and what it led to.
+        const selectionProposal = occurrence.kind === "scope_review" ? selectionProposalView(db, occurrence) : null;
         return { ...decisionOccurrenceView(occurrence, db.listDecisionAttempts(occurrence.occurrenceId)),
-          ...("sessionId" in subject ? { subject: subject as CampaignDecisionSubject } : {}) };
+          ...("sessionId" in subject ? { subject: subject as CampaignDecisionSubject } : {}),
+          ...(selectionProposal ? { selectionProposal } : {}) };
       }),
       usage: db.campaignDecisionUsage(read.rootId),
     };

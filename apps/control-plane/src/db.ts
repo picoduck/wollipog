@@ -3001,6 +3001,18 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
 );
 
+-- #4103: what each scope_review occurrence reviewed, for Campaign Status, and the one scope change
+-- an admit led to. The audit keeps only input digests; these are the proposal as the campaign shows it.
+CREATE TABLE IF NOT EXISTS campaign_selection_proposals (
+  occurrence_id          TEXT PRIMARY KEY,
+  campaign_session_id    TEXT NOT NULL,
+  issues                 TEXT NOT NULL,
+  explanation            TEXT NOT NULL,
+  workflow_occurrence_id TEXT,
+  created_at             INTEGER NOT NULL,
+  FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
 -- Every attempt of an occurrence, with its usage. Decision usage is never managed worker usage.
 CREATE TABLE IF NOT EXISTS decision_attempts (
   occurrence_id         TEXT NOT NULL,
@@ -12506,6 +12518,29 @@ export class ControlPlaneDb {
       `INSERT OR IGNORE INTO campaign_decision_subjects (occurrence_id, campaign_session_id, session_id, surface, request_id, created_at)
        VALUES (?, ?, ?, ?, ?, ?)`,
     ).run(input.occurrenceId, input.campaignSessionId, input.sessionId, input.surface, input.requestId, now);
+  }
+
+  /** Record what a `scope_review` occurrence reviewed (#4103). The first record wins: a duplicate
+   * proposal joining the same occurrence never rewrites it. */
+  recordSelectionProposal(input: { occurrenceId: string; campaignSessionId: string;
+    issues: Array<{ repository: string; number: number; title: string }>; explanation: string }, now: number): void {
+    this.stmt(`INSERT OR IGNORE INTO campaign_selection_proposals (occurrence_id, campaign_session_id, issues, explanation, created_at)
+      VALUES (?, ?, ?, ?, ?)`).run(input.occurrenceId, input.campaignSessionId, JSON.stringify(input.issues), input.explanation, now);
+  }
+
+  /** Link an admitted review to the one scope change it created, by compare-and-set: an occurrence
+   * admits at most one scope change. */
+  linkSelectionProposalDecision(occurrenceId: string, workflowOccurrenceId: string): boolean {
+    return Number(this.stmt(`UPDATE campaign_selection_proposals SET workflow_occurrence_id=?
+      WHERE occurrence_id=? AND workflow_occurrence_id IS NULL`).run(workflowOccurrenceId, occurrenceId).changes) > 0;
+  }
+
+  selectionProposal(occurrenceId: string): { campaignSessionId: string; issues: Array<{ repository: string; number: number; title: string }>;
+    explanation: string; workflowOccurrenceId: string | null } | null {
+    const row = this.stmt("SELECT * FROM campaign_selection_proposals WHERE occurrence_id=?").get(occurrenceId) as
+      { campaign_session_id: string; issues: string; explanation: string; workflow_occurrence_id: string | null } | undefined;
+    return row ? { campaignSessionId: row.campaign_session_id, issues: JSON.parse(row.issues) as Array<{ repository: string; number: number; title: string }>,
+      explanation: row.explanation, workflowOccurrenceId: row.workflow_occurrence_id } : null;
   }
 
   campaignDecisionSubject(occurrenceId: string): (CampaignDecisionSubject & { campaignSessionId: string }) | null {

@@ -558,6 +558,25 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
   { occurrenceId: "why_failed", kind: "closure_reason", promptVersion: "closure_reason.v1", state: "failed", failureClass: "timed_out",
     inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
     subject: { sessionId: "s_root", surface: "issue_closure", requestId: "team/repo#124" } },
+] : params.get("selection") === "1" ? [
+  // `selection=1`: the Decision Model's reviews of selection proposals (#4103): admitted, refused and
+  // waiting for the owner.
+  { occurrenceId: "sel_admitted", kind: "scope_review", promptVersion: "scope_review.v1", state: "decided", verdict: "admit",
+    reason: "Both are open, labeled priority/high, and are the oldest such issues.", inputDigests: {}, attempts: [], usage: decisionUsage,
+    createdAt: NOW - 300_000, selectionProposal: { outcome: "applied", requestOccurrenceId: "wd_sel_1",
+      explanation: "The two oldest open issues labeled priority/high.", issues: [
+        { repository: "team/repo", number: 130, title: "Crash when a session restarts during a merge" },
+        { repository: "team/repo", number: 131, title: "Campaign Status loses its scroll position" }] } },
+  { occurrenceId: "sel_refused", kind: "scope_review", promptVersion: "scope_review.v1", state: "decided", verdict: "refuse",
+    reason: "Issue 140 is a wording change, not one of the highest-priority issues the owner asked for.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 180_000, selectionProposal: { outcome: "refused",
+      explanation: "Next in the backlog after the priority/high issues.", issues: [
+        { repository: "team/repo", number: 140, title: "Reword the Settings footer" }] } },
+  { occurrenceId: "sel_uncertain", kind: "scope_review", promptVersion: "scope_review.v1", state: "uncertain", verdict: "uncertain",
+    reason: "The owner asked for the highest-priority issues but didn't say whether UI regressions count.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 60_000, humanRequestId: "wd_sel_3", selectionProposal: { outcome: "waiting_for_owner",
+      requestOccurrenceId: "wd_sel_3", explanation: "A UI regression three users reported this week.", issues: [
+        { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
 
 const client = {

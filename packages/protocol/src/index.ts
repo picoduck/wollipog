@@ -5304,6 +5304,18 @@ export interface CampaignIssueScopeSnapshot {
   /** Present when the Orchestrator's own proposal is the owner's to approve because of the first
    * message's scope grant (#4102). Server-derived; it changes who decides, never what is granted. */
   grantReview?: CampaignScopeGrantReview;
+  /** The Decision Model's `admit` of a selection proposal (#4103), which the server's
+   * `issueAdmission` evidence binds: the review occurrence, the grant it read and its reason. */
+  selectionReview?: CampaignSelectionReview;
+}
+
+export interface CampaignSelectionReview {
+  /** The `scope_review` Decision occurrence. One occurrence admits at most one scope change. */
+  occurrenceId: string;
+  /** SHA-256 of the stored scope grant the review read. */
+  grantDigest: string;
+  verdict: "admit";
+  reason: string;
 }
 
 /** Why an Orchestrator's scope proposal is the owner's one typed approval (#4102), with what the
@@ -5312,18 +5324,38 @@ export interface CampaignIssueScopeSnapshot {
  *
  * - `grant_failed` / `grant_uncertain`: the Decision Model failed or was uncertain on the first
  *   message, so there is no grant to review the proposal against.
- * - `selection`: the proposal fills the grant's selection. Until the Decision Model reviews
- *   selection proposals (#4103), the owner approves them. */
+ * - `selection_uncertain` / `selection_failed` (#4103): the proposal passed every deterministic
+ *   floor of the grant's selection, but the Decision Model's review of it was uncertain or failed.
+ * - `selection_unverified` (#4103): the runner could not report the issues' state and labels, so
+ *   the open and Human Required floors are unverified and nothing reviewed it.
+ * - `selection`: the interim before #4103, when the owner approved every selection proposal. Kept
+ *   so requests created then still read; nothing creates it now. */
 export interface CampaignScopeGrantReview {
-  cause: "grant_failed" | "grant_uncertain" | "selection";
+  cause: "grant_failed" | "grant_uncertain" | "selection" | "selection_uncertain" | "selection_failed" | "selection_unverified";
   /** The owner's first message as the boundary records it: one line, at most 4000 characters. */
   ownerMessage: string;
   messageDigest: string;
   grantOccurrenceId?: string;
+  /** The `scope_review` Decision occurrence that was uncertain or failed (#4103). */
+  reviewOccurrenceId?: string;
   failureClass?: DecisionErrorClass;
-  /** The model's uncertain reason, or for `selection` its reason for the grant. */
+  /** The model's uncertain reason, or for a selection its reason for the grant. */
   reason?: string;
   selection?: Pick<ScopeGrantSelection, "count" | "defaulted" | "criteria" | "constraints">;
+}
+
+/** One selection proposal the Decision Model reviewed (#4103), for Campaign Status. */
+export interface CampaignSelectionProposal {
+  issues: Array<{ repository: string; number: number; title: string }>;
+  /** The Orchestrator's rationale, as it proposed it. */
+  explanation: string;
+  /** `reviewing` until the review settles; `admitted` once an Orchestrator-owned scope change
+   * exists, `applied` once it is in scope; `refused` by the review; `waiting_for_owner` while the
+   * owner's one request is pending, then `owner_approved` or `owner_declined`; `replaced` when a
+   * later proposal superseded its scope change before it was applied. */
+  outcome: "reviewing" | "admitted" | "applied" | "refused" | "waiting_for_owner" | "owner_approved" | "owner_declined" | "replaced";
+  /** The scope change it led to, when there is one. */
+  requestOccurrenceId?: string;
 }
 
 /** The follow-up a `campaign_follow_up_admission` decision admits (#2940): a recommendation the
@@ -7319,7 +7351,7 @@ export interface SessionNamingConnectionTestResult {
  * `scope_grant` reads a Full Control owner's first message into a typed scope grant (#4102), and
  * `credential_screen` screens Full Control questions (#4104); the other Full Control callers add
  * their kinds here with their prompts. */
-export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason";
+export type DecisionKind = "probe" | "scope_grant" | "credential_screen" | "follow_up_relatedness" | "closure_reason" | "scope_review";
 
 /** Why one Decision attempt failed. The control plane, not the runner, decides what is transient:
  * see DECISION_TRANSIENT_ERROR_CLASSES. */
@@ -7480,7 +7512,7 @@ export interface ClassifyCampaignDecisionRequest {
 
 export interface CampaignDecisionsResponse {
   campaignSessionId: string;
-  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject }>;
+  decisions: Array<DecisionOccurrenceView & { subject?: CampaignDecisionSubject; selectionProposal?: CampaignSelectionProposal }>;
   usage: DecisionUsageView & { calls: number; unpricedCalls: number };
 }
 
