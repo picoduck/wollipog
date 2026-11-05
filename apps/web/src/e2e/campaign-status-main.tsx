@@ -424,10 +424,26 @@ const followUpCards: import("@wollipog/protocol").PendingApproval[] = params.get
     resourceDigest: "f".repeat(64), policyRevision: 1, authority: "human" as const, status: "pending" as const, createdAt: NOW - 5 * MINUTE },
 })) : [];
 
+/** `selection=1`: the owner's scope approval for the selection the Decision Model was uncertain about (#4103). */
+const selectionCard: import("@wollipog/protocol").PendingApproval | null = params.get("selection") === "1" ? {
+  requestId: "wd_sel_3", occurrenceId: "wd_sel_3", kind: "workflow_decision", title: "Scope Approval Required",
+  options: [{ optionId: "approve", name: "Approve", kind: "allow_once" }, { optionId: "deny", name: "Deny", kind: "reject_once" }],
+  workflowDecision: { requestId: "selection-141", occurrenceId: "wd_sel_3", sessionId: "s_root", controllingSessionId: "s_root",
+    category: "campaign_issue_scope", resourceKey: "campaign_issue_scope:s_root",
+    resourceSnapshot: { category: "campaign_issue_scope", repository: "team/repo", expectedRevision: 2, before: [130, 131], additions: [141], removals: [],
+      explanation: "A UI regression three users reported this week.", affectedAssignments: [], affectedDecisions: [], activeChildren: [],
+      lineage: { kind: "selection" }, grantReview: { cause: "selection_uncertain", ownerMessage: "Find the 3 highest-priority open issues and fix them",
+        messageDigest: "a".repeat(64), reviewOccurrenceId: "sel_uncertain",
+        reason: "The owner asked for the highest-priority issues but didn't say whether UI regressions count.",
+        selection: { count: 3, defaulted: false, criteria: "highest priority", constraints: ["open"] } } },
+    resourceDigest: "c".repeat(64), policyRevision: 1, authority: "human", status: "pending", createdAt: NOW - 60_000 },
+} : null;
+
 function sessionsFor(rev: number): SessionView[] {
   const root = baseSession({ orchestratorCampaign: projectionFor(rev),
     ...(followUpCards.length ? { pendingApproval: { ...followUpCards[0]!, additionalRequests: followUpCards.slice(1) } } : {}),
-    ...(ownerCard ? { pendingApproval: ownerCard } : {}) });
+    ...(ownerCard ? { pendingApproval: ownerCard } : {}),
+    ...(selectionCard ? { pendingApproval: selectionCard } : {}) });
   const child = baseSession({
     id: "s_child", title: "#2417 Slice 7: Campaign Status Panel", parentSessionId: "s_root",
     ...(scenario === "legacy" ? {} : { campaignMembership: { campaignSessionId: "s_root", currentWorkItemId: "cwi_2", currentAttemptId: "catt_2" } }),
@@ -569,6 +585,25 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
       failureClass: "provider_overloaded" as const, inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 30_000,
       subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:b", seed: "owner" as const } },
   ] : []),
+] : params.get("selection") === "1" ? [
+  // `selection=1`: the Decision Model's reviews of selection proposals (#4103): admitted, refused and
+  // waiting for the owner.
+  { occurrenceId: "sel_admitted", kind: "scope_review", promptVersion: "scope_review.v1", state: "decided", verdict: "admit",
+    reason: "Both are open, labeled priority/high, and are the oldest such issues.", inputDigests: {}, attempts: [], usage: decisionUsage,
+    createdAt: NOW - 300_000, selectionProposal: { outcome: "applied", requestOccurrenceId: "wd_sel_1",
+      explanation: "The two oldest open issues labeled priority/high.", issues: [
+        { repository: "team/repo", number: 130, title: "Crash when a session restarts during a merge" },
+        { repository: "team/repo", number: 131, title: "Campaign Status loses its scroll position" }] } },
+  { occurrenceId: "sel_refused", kind: "scope_review", promptVersion: "scope_review.v1", state: "decided", verdict: "refuse",
+    reason: "Issue 140 is a wording change, not one of the highest-priority issues the owner asked for.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 180_000, selectionProposal: { outcome: "refused",
+      explanation: "Next in the backlog after the priority/high issues.", issues: [
+        { repository: "team/repo", number: 140, title: "Reword the Settings footer" }] } },
+  { occurrenceId: "sel_uncertain", kind: "scope_review", promptVersion: "scope_review.v1", state: "uncertain", verdict: "uncertain",
+    reason: "The owner asked for the highest-priority issues but didn't say whether UI regressions count.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 60_000, humanRequestId: "wd_sel_3", selectionProposal: { outcome: "waiting_for_owner",
+      requestOccurrenceId: "wd_sel_3", explanation: "A UI regression three users reported this week.", issues: [
+        { repository: "team/repo", number: 141, title: "Sidebar badges overlap on narrow screens" }] } },
 ] : [];
 
 const client = {

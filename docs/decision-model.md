@@ -162,6 +162,34 @@ The occurrence is recorded with the `issue_scope_seed` subject, so Campaign Stat
 under Decision Model Checks as **Epic Seed**, with the seed's state. See
 `docs/campaign-issue-scope.md` for the states.
 
+## Scope Review (`scope_review`, #4103)
+
+When the owner's first message asked the campaign to choose issues, the Orchestrator proposes the
+issues it chose with selection lineage. Deterministic floors run first: a repository in the
+campaign's boundary, an open issue, not already in scope, held by no other active campaign, within
+the selection's count and Maximum Issues, and no Human Required label rule. Only a proposal that
+passes all of them is reviewed. `proposeSelectionScope` in `apps/control-plane/src/sessions.ts` calls
+the runtime; `apps/control-plane/src/scope-selection.ts` builds the inputs and the occurrence key.
+
+- **Inputs.** The owner's exact first message is the owner's words. The data fields are quoted and
+  untrusted: `grant` (the stored grant's repositories, named issues and selection), `issues` (each
+  issue's number, title, state, labels and a body excerpt that shrinks so any number of issues fits)
+  and `rationale` (the Orchestrator's `explanation`).
+- **Verdicts.** `admit`, `refuse` with a reason, or `uncertain`. Only `admit` can confirm, and only
+  the exact proposal the floors already admitted; fields outside the schema are ignored. No verdict
+  can raise the count, change a repository or grant an operation.
+- **Occurrence key.** The campaign, the boundary revision, the scope revision, the grant's digest and
+  the sorted additions. The rationale is left out on purpose: re-proposing the same issues returns the
+  recorded outcome, so a reworded rationale is never a second review, a second owner request or a
+  second admission. Any re-authorization, such as the owner changing the selection count, reviews
+  afresh, and a linked request retired without a decision is replaced rather than returned.
+- **Failure rule.** An uncertain or failed review creates the owner's one scope approval
+  (`grantReview.cause` `selection_uncertain` or `selection_failed`, with `reviewOccurrenceId`), and
+  the occurrence's `humanRequestId` names it.
+
+`campaign_selection_proposals` keeps each reviewed proposal's issues and rationale, and the scope
+change an admit created, for Campaign Status. The audit still keeps only input digests.
+
 ## Audit and Usage
 
 `decision_occurrences` records the kind, prompt version, resolved target (runner, harness, model and

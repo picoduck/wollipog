@@ -35,7 +35,7 @@ import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
 import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner } from "./campaign-authority.js";
 import { genericRequestScreenData, implementationQuestionScreenData, ownerDecisionScreenData, screenCredentialRequest, type CredentialScreenSurface } from "./credential-screen.js";
-import { DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
+import { DECISION_TOTAL_BOUND_MS, DecisionRuntime, hubDecisionTransport, type DecisionOutcome } from "./decision-runtime.js";
 import { DecisionModelSettings } from "./decision-model-settings.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
@@ -44,6 +44,7 @@ import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelec
   type ScopeGrantFields } from "./scope-grant.js";
 import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import { DecisionInputError } from "./decision-kinds.js";
+import { scopeGrantDigest, scopeReviewInputDigest, scopeReviewInputs, scopeReviewKey } from "./scope-selection.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
@@ -310,6 +311,7 @@ import {
   type SessionAutomationOrigin,
   type SessionStopConfirmation,
   type WorkflowDecisionResumeState,
+  type DecisionOccurrenceRecord,
 } from "./db.js";
 import { questionPolicyAnswers } from "./question-policy.js";
 import type { SessionEvent } from "@wollipog/protocol";
@@ -11815,13 +11817,181 @@ export class SessionsService {
     }
     const snapshot = scopeSnapshot(this.db, latest, repository, { ...request, removals: [], lineage: { kind: "selection" } });
     if (!snapshot) return malformed();
-    snapshot.grantReview = selection;
-    snapshot.affectedDecisions = everyOutstandingScopeDecision(this.db, sessionId);
-    this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "scope_proposal", sessionId, requestId: request.requestId,
-      boundaryRevision: boundary.revision, scopeRevision: request.expectedRevision, lineage: "selection", outcome: "owner_review",
-      factsVerified: facts !== null }));
-    return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
-      resourceSnapshot: snapshot }, canAccess, { trustedIssueScope: true });
+    const log = (outcome: string, extra: Record<string, unknown> = {}) => this.log.info(JSON.stringify({ event: "campaign_issue_admission",
+      entryPoint: "scope_proposal", sessionId, requestId: request.requestId, boundaryRevision: boundary.revision,
+      scopeRevision: request.expectedRevision, lineage: "selection", outcome, ...extra }));
+    // The owner's one typed approval: the proposal, its rationale (`explanation`), the grant and why
+    // nothing admitted it. It carries no admission, so it is the owner's, and approving it revokes
+    // every outstanding decision as any Full Control scope approval does (#3915).
+    const ownerRequest = (review: CampaignScopeGrantReview): ServiceResult<WorkflowDecisionView> => {
+      const current = this.db.getSession(sessionId);
+      if (!current || (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision ||
+          issueBoundary(current)?.revision !== boundary.revision) return fail("Campaign scope changed during review; refresh and propose again.", 409);
+      // One owner request per proposal and reason: a repeat while it is pending returns it.
+      const pending = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+        const s = d.resourceSnapshot;
+        return s.category === "campaign_issue_scope" && s.expectedRevision === request.expectedRevision &&
+          s.grantReview?.cause === review.cause && s.grantReview.reviewOccurrenceId === review.reviewOccurrenceId &&
+          JSON.stringify(s.additions) === JSON.stringify(snapshot.additions) && !s.removals.length;
+      });
+      if (pending) return ok(pending);
+      const owned = { ...snapshot, grantReview: review, affectedDecisions: everyOutstandingScopeDecision(this.db, sessionId) };
+      log("owner_review", { cause: review.cause, ...(review.failureClass ? { failureClass: review.failureClass } : {}) });
+      return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+        resourceSnapshot: owned }, canAccess, { trustedIssueScope: true });
+    };
+    // Without facts the open and label floors are unverified: nothing reviews the proposal.
+    if (!facts) return ownerRequest({ ...selection, cause: "selection_unverified" });
+    // Re-proposing the same additions while the owner's request for them is pending returns that
+    // request, whatever the rationale now says: it is never reviewed again behind the owner's back.
+    const awaitingOwner = this.db.pendingWorkflowDecisionsForController(sessionId).find((d) => {
+      const s = d.resourceSnapshot;
+      return s.category === "campaign_issue_scope" && s.lineage?.kind === "selection" && s.expectedRevision === request.expectedRevision &&
+        Boolean(s.grantReview) && !s.removals.length && JSON.stringify(s.additions) === JSON.stringify(snapshot.additions);
+    });
+    if (awaitingOwner) return ok(awaitingOwner);
+
+    // The Decision Model's review (#4103). It may only confirm or narrow: an admit admits exactly
+    // this proposal, whose floors already ran, and nothing it returns can move a ceiling.
+    const first = latest.orchestratorPolicy?.firstMessageScope;
+    const grant = first && first.state !== "pending" ? first.grant : undefined;
+    const organizationId = this.db.sessionScope(sessionId)?.organizationId;
+    // The owner's exact first message when the transcript still holds it, else the boundary's record.
+    const exact = this.db.initialUserMessageText(sessionId);
+    const ownerMessage = exact !== null && firstMessageDigest(exact) === selection.messageDigest ? exact : selection.ownerMessage;
+    // Inputs that cannot fit one Decision input as rendered, even without body excerpts, are never
+    // reviewed in part: the proposal is the owner's.
+    const inputs = grant ? scopeReviewInputs(ownerMessage, grant, facts, snapshot.explanation) : null;
+    const inputDigest = inputs ? scopeReviewInputDigest(inputs) : null;
+    if (!grant || !organizationId || !inputs || !inputDigest) {
+      return ownerRequest({ ...selection, cause: "selection_failed", failureClass: "configuration", reason: undefined });
+    }
+    const grantDigest = scopeGrantDigest(grant);
+    const titled = facts.map((fact) => ({ repository, number: fact.number, title: fact.title }));
+    const record = (occurrenceId: string) => this.db.recordSelectionProposal({ occurrenceId, campaignSessionId: sessionId, issues: titled,
+      explanation: snapshot.explanation }, Date.now());
+    // The one owner request of an uncertain or failed occurrence, idempotent per occurrence.
+    const routeOwner = (occurrence: DecisionOccurrenceRecord): string => {
+      record(occurrence.occurrenceId);
+      const existing = this.db.unconsumedWorkflowDecisionsForController(sessionId).find((d) =>
+        d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.grantReview?.reviewOccurrenceId === occurrence.occurrenceId);
+      const linkedRequest = this.db.selectionProposal(occurrence.occurrenceId)?.workflowOccurrenceId ?? null;
+      if (existing) {
+        if (linkedRequest !== existing.occurrenceId) this.db.linkSelectionProposalDecision(occurrence.occurrenceId, existing.occurrenceId, linkedRequest);
+        return existing.occurrenceId;
+      }
+      const created = ownerRequest({ ...selection, cause: occurrence.state === "uncertain" ? "selection_uncertain" : "selection_failed",
+        reviewOccurrenceId: occurrence.occurrenceId, reason: occurrence.state === "uncertain" ? occurrence.reason ?? undefined : undefined,
+        ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as DecisionErrorClass } : {}) });
+      if (!created.ok || !created.data) throw new Error(created.error ?? "the owner's scope approval could not be created");
+      // Campaign Status follows the proposal's current request through this link.
+      this.db.linkSelectionProposalDecision(occurrence.occurrenceId, created.data.occurrenceId, linkedRequest);
+      return created.data.occurrenceId;
+    };
+    const occurrenceKey = scopeReviewKey(sessionId, boundary.revision, request.expectedRevision, snapshot.additions, grantDigest);
+    // A repeat of the same issues at this revision reads the review's outcome rather than asking
+    // again: its rationale or facts may differ, and only the first proposal was reviewed. A review
+    // still running with other inputs is waited for, within the runtime's own bound; one past that
+    // bound can never settle (its process stopped), so it is settled as timed out here.
+    let settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+    if (settled?.state === "pending" && settled.inputDigest !== inputDigest) {
+      const deadline = settled.createdAt + DECISION_TOTAL_BOUND_MS + 5_000;
+      while (settled?.state === "pending" && Date.now() < deadline) {
+        await new Promise((resolve) => setTimeout(resolve, 250));
+        settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+      }
+      if (settled?.state === "pending") {
+        this.db.settleDecisionOccurrence(settled.occurrenceId, { state: "failed", failureClass: "timed_out", now: Date.now() });
+        settled = this.db.decisionOccurrenceByKey(occurrenceKey);
+      }
+    }
+    let recorded: DecisionOutcome | null = null;
+    try {
+      if (settled?.state === "decided") {
+        recorded = { outcome: "verdict", occurrenceId: settled.occurrenceId, verdict: settled.verdict!, reason: settled.reason!, fields: settled.fields };
+      } else if (settled && (settled.state === "uncertain" || settled.state === "failed")) {
+        let humanRequestId = settled.humanRequestId;
+        // Routed by nobody yet (a process stopped first, or it was settled above): route it once.
+        if (!humanRequestId && (this.db.claimDecisionHumanRoute(settled.occurrenceId, Date.now()) ||
+            settled.humanRouteClaimedAt !== null && settled.humanRoutedAt === null)) {
+          humanRequestId = routeOwner(this.db.getDecisionOccurrence(settled.occurrenceId)!);
+          this.db.completeDecisionHumanRoute(settled.occurrenceId, humanRequestId, Date.now());
+        }
+        if (!humanRequestId) return fail("The owner's scope approval for this selection is being created. Refresh Campaign Status and propose again.", 409);
+        recorded = { outcome: "human_required", occurrenceId: settled.occurrenceId, cause: settled.state, humanRequestId };
+      }
+    } catch (error) {
+      this.log.warn(JSON.stringify({ event: "campaign_selection_review_unavailable", sessionId, error: (error as Error).message.slice(0, 200) }));
+      return fail("The Decision Model's review of this selection could not finish. Refresh Campaign Status and propose again.", 409);
+    }
+    let outcome: DecisionOutcome;
+    try {
+      outcome = recorded ?? await this.decisionRuntime.decide({
+        organizationId,
+        kind: "scope_review",
+        campaignSessionId: sessionId,
+        occurrenceKey,
+        automaticHarness: latest.agentId ? { runnerId: latest.runnerId, agentId: latest.agentId, driver: latest.driver } : null,
+        inputs,
+        routeToHuman: routeOwner,
+      });
+    } catch (error) {
+      this.log.warn(JSON.stringify({ event: "campaign_selection_review_unavailable", sessionId, error: (error as Error).message.slice(0, 200) }));
+      return fail("The Decision Model's review of this selection could not finish. Refresh Campaign Status and propose again.", 409);
+    }
+    this.db.recordSelectionProposal({ occurrenceId: outcome.occurrenceId, campaignSessionId: sessionId, issues: titled,
+      explanation: snapshot.explanation }, Date.now());
+    // A request something else retired without deciding it (revoked, superseded or withdrawn) is
+    // never handed back: it can no longer be applied.
+    const live = (d: WorkflowDecisionView | null): d is WorkflowDecisionView => Boolean(d) && ["pending", "approved", "consumed", "denied"].includes(d!.status);
+    if (outcome.outcome === "human_required") {
+      // The proposal's link names its current owner request; the audit names the first one.
+      const current = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId ?? outcome.humanRequestId;
+      const owned = current ? this.db.workflowDecisionByOccurrence(current) : null;
+      if (live(owned)) return ok(owned);
+      // The owner's request for this occurrence was retired: ask them again, once, and move the
+      // proposal's link to the new request.
+      const occurrence = this.db.getDecisionOccurrence(outcome.occurrenceId);
+      let replacement: WorkflowDecisionView | null = null;
+      try {
+        replacement = occurrence ? this.db.workflowDecisionByOccurrence(routeOwner(occurrence)) : null;
+      } catch { /* refused below */ }
+      return replacement ? ok(replacement)
+        : fail("The owner's scope approval for this selection could not be created. Refresh Campaign Status and propose again.", 409);
+    }
+    if (outcome.verdict === "refuse") {
+      log("refused", { reason: "selection_refused", reviewOccurrenceId: outcome.occurrenceId });
+      return { ok: false, status: 409, error: "The Decision Model found that this proposal does not fit what the owner asked for. " +
+        "Propose a different issue; the reason says why.", errorDetails: { code: "selection_refused", reason: outcome.reason, occurrenceId: outcome.occurrenceId } };
+    }
+    // Admit: one live scope change per review occurrence, Orchestrator-owned through the server's
+    // admission evidence. A repeated proposal returns the change this occurrence already created; one
+    // retired before it was applied is replaced, which admits nothing twice.
+    const linked = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId ?? null;
+    const existingAdmission = linked ? this.db.workflowDecisionByOccurrence(linked) : null;
+    if (existingAdmission && live(existingAdmission)) return ok(existingAdmission);
+    const current = this.db.getSession(sessionId);
+    const currentBoundary = current && issueBoundary(current);
+    if (!current || !currentBoundary || currentBoundary.revision !== boundary.revision ||
+        (current.orchestratorPolicy?.issueScope?.revision ?? 0) !== request.expectedRevision) return fail("Campaign scope changed during review; refresh and propose again.", 409);
+    // Another campaign may have taken an issue while the review ran; neither revision shows that.
+    const taken = snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(sessionId, repository, n));
+    if (taken !== undefined) return refuse("other_campaign_scope", { issue: taken });
+    const selectionReview = { occurrenceId: outcome.occurrenceId, grantDigest, verdict: "admit" as const, reason: outcome.reason };
+    const admittedSnapshot = { ...snapshot, selectionReview,
+      issueAdmission: { boundaryRevision: boundary.revision, evidenceDigest: issueEvidenceDigest({ kind: "selection_review", ...selectionReview }) } };
+    const created = this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: `campaign_issue_scope:${sessionId}`,
+      resourceSnapshot: admittedSnapshot }, canAccess, { trustedIssueScope: true });
+    if (created.ok && created.data) {
+      if (!this.db.linkSelectionProposalDecision(outcome.occurrenceId, created.data.occurrenceId, linked)) {
+        // Another call of the same proposal linked first: its scope change is the one.
+        const winner = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId;
+        const existing = winner ? this.db.workflowDecisionByOccurrence(winner) : null;
+        if (existing) return ok(existing);
+      }
+      log("admitted", { reviewOccurrenceId: outcome.occurrenceId, authority: created.data.authority });
+    }
+    return created;
   }
 
   async synchronizeCampaignIssueScope(sessionId: string): Promise<boolean> {
@@ -13064,6 +13234,7 @@ export class SessionsService {
       if (latest && snapshot.issueAdmission) latest.issueAdmission = snapshot.issueAdmission;
       if (latest && snapshot.verifiedPublications) latest.verifiedPublications = snapshot.verifiedPublications;
       if (latest && snapshot.grantReview) latest.grantReview = snapshot.grantReview;
+      if (latest && snapshot.selectionReview) latest.selectionReview = snapshot.selectionReview;
       if (latest && authority === "human" && currentChild.orchestratorPolicy?.control?.mode === "full_control") {
         latest.affectedDecisions = everyOutstandingScopeDecision(this.db, childSessionId);
       }
@@ -13072,6 +13243,15 @@ export class SessionsService {
       const reserved = reservedPublicationSlots(this.db, currentChild, snapshot.lineage?.kind === "follow_up" ? snapshot.lineage.publicationOccurrenceId : undefined);
       if (authority === "orchestrator" && (!boundary || snapshot.before.length + snapshot.additions.length - snapshot.removals.length + reserved >
           this.db.campaignIssueLimit(childSessionId, boundary.issueAuthority!.maxIssues))) return fail("Scope capacity or its human boundary changed before resolution", 409);
+      // A selection the Orchestrator applies must still hold no issue another active campaign took
+      // since its review (#4103); nothing awaits between this check and the approval below.
+      const taken = authority === "orchestrator" && snapshot.lineage?.kind === "selection"
+        ? snapshot.additions.find((n) => this.db.issueHeldByOtherCampaign(childSessionId, snapshot.repository, n)) : undefined;
+      if (taken !== undefined) {
+        this.revokeWorkflowDecision(decision, { reason: "approval_refused_stale", triggeredBy: actor });
+        const refusal = CAMPAIGN_SCOPE_ADMISSION_REFUSALS.other_campaign_scope;
+        return { ok: false, status: refusal.status, error: refusal.message, errorDetails: { code: "other_campaign_scope", issue: taken } };
+      }
       // A Human approval re-mints the Full Control boundary around the scope it establishes (#2940),
       // within the scope limit that boundary names, counting the slots consumed publications still
       // hold other than those this change admits: only a fresh authorization can raise that limit.
