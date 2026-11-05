@@ -8,6 +8,7 @@ import {
   evaluateHookApprovalPolicies,
   evaluatePolicies,
   firstAsk,
+  humanRequiredIssueLabel,
   normalizeCostCheckpoints,
   networkPatternMatches,
   pathPatternMatches,
@@ -342,6 +343,28 @@ test("policy validation rejects typo-broadened scopes, unknown conditions, and b
   assert.match(validateGovernancePolicy({ ...input, effect: "allow", conditions: { humanRequired: true } })!, /Human Required/);
   assert.match(validateGovernancePolicy({ ...input, effect: "ask", askTimeout: 0 })!, /askTimeout/);
   assert.match(validateGovernancePolicy({ ...input, effect: "deny", askTimeout: 30 })!, /only valid/);
+});
+
+test("an issue label rule (#4103) is Human Required only, never matches a tool request, and names labels case-insensitively", () => {
+  const input = { policyId: "labels", name: "Security issues", effect: "ask" as const, priority: 1, enabled: true,
+    scope: { organizationId: "local", runnerId: "r1" }, conditions: { humanRequired: true, issueLabels: ["security"] } };
+  assert.equal(validateGovernancePolicy(input), null);
+  assert.match(validateGovernancePolicy({ ...input, conditions: { issueLabels: ["security"] } })!, /Human Required ask/);
+  assert.match(validateGovernancePolicy({ ...input, effect: "deny", conditions: { issueLabels: ["security"] } })!, /Human Required ask/);
+  assert.match(validateGovernancePolicy({ ...input, conditions: { humanRequired: true, issueLabels: [] } })!, /1 to 20 labels/);
+  assert.match(validateGovernancePolicy({ ...input, conditions: { humanRequired: true, issueLabels: [" "] } })!, /1 to 20 labels/);
+  assert.match(validateGovernancePolicy({ ...input, conditions: { humanRequired: true, issueLabels: ["security"], minCostUsd: 1 } })!, /combine only/);
+  assert.match(validateGovernancePolicy({ ...input, scope: { organizationId: "local", toolName: "Bash" } })!, /combine only/);
+
+  const rule = storedPolicy({ ...input, scope: { organizationId: "local", runnerId: "r*" } });
+  assert.deepEqual(evaluateApprovalPolicies(approvalInput(), [rule]).matchedPolicyIds, [], "a label rule never matches a tool call");
+  const where = { organizationId: "local", runnerId: "r1", workspaceId: "w1", agentId: "agent1" };
+  assert.equal(humanRequiredIssueLabel([rule], where, ["bug", "Security"]), "Security");
+  assert.equal(humanRequiredIssueLabel([rule], where, ["bug"]), null);
+  assert.equal(humanRequiredIssueLabel([rule], { ...where, runnerId: "elsewhere" }, ["security"]), null, "selectors still narrow it");
+  assert.equal(humanRequiredIssueLabel([{ ...rule, enabled: false }], where, ["security"]), null);
+  assert.equal(humanRequiredIssueLabel([{ ...rule, conditions: { issueLabels: ["security"] } }], where, ["security"]), null,
+    "only a Human Required rule applies");
 });
 
 test("v105 rules: daily budget first, unpriced fail-closed, then the next checkpoint, then the budget", () => {

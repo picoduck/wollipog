@@ -19705,7 +19705,7 @@ export class SessionManager {
       if (message.operation === "inspect") {
         if (message.epic !== undefined && (!Number.isSafeInteger(message.epic) || message.epic < 1) ||
             message.issues !== undefined && !boundedIssueNumbers(message.issues)) return { ...base, ok: false, error: "Invalid bounded issue selection" };
-        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication) };
+        return { ...base, ok: true, ...await inspectCampaignIssueScope(run, message.epic, message.issues, message.publication, message.facts === true) };
       }
       const live = this.active.get(message.sessionId)?.orchestratorLaunchPolicy;
       if (live && message.scope?.revision >= (live.issueScope?.revision ?? 0)) live.issueNumbers = [];
