@@ -134,7 +134,7 @@ function mount() {
   return { container, root: createRoot(container) };
 }
 
-test("the preview bar shows exactly one status, the one sessionStatusSummary() ranks first, for every seeded status", async () => {
+test("the preview bar shows lifecycle plus at most one ranked secondary for every seeded status", async () => {
   const { container, root } = mount();
   try {
     for (const seeded of SEEDED) {
@@ -146,7 +146,7 @@ test("the preview bar shows exactly one status, the one sessionStatusSummary() r
       const { primary, secondary, more } = sessionStatusSummary(seeded.session, { runnerOnline });
       const bar = container.querySelector("header.session-preview-bar")!;
       const badges = [...bar.querySelectorAll(".status")];
-      assert.equal(badges.length, secondary ? 2 : 1, `${seeded.name}: exactly one status badge`);
+      assert.equal(badges.length, secondary ? 2 : 1, `${seeded.name}: lifecycle plus at most one secondary badge`);
       const badge = badges[0]!;
       assert.equal(badge.firstChild?.textContent, primary.meta.label, `${seeded.name}: the ranked badge`);
       assert.ok(badge.classList.contains(`t-${primary.meta.tone}`), `${seeded.name}: the ranked tone`);
@@ -320,7 +320,7 @@ async function renderPreview(
   };
 }
 
-test("the preview keeps only the bar's one status and the facts: no chips, Detached Work, activity strip, context, cost or Updated", async () => {
+test("the preview keeps only the bar's status badges and the facts: no chips, Detached Work, activity strip, context, cost or Updated", async () => {
   const preview = await renderPreview(session({
     status: "running", activeTurnId: "turn-1", backgroundWorkTracking: "untracked",
     contextTokensUsed: 120_000, contextWindow: 200_000,
@@ -494,10 +494,7 @@ const firedReminder = {
 } as unknown as SessionReminderView;
 
 test("the selected row and the preview bar show the same status for every seeded status, but for the row's documented exceptions", async () => {
-  // Both rank with sessionStatusSummary() (#2182). The row adds three rules of its own (#2209), which
-  // the preview bar, holding exactly one badge, does not: Awaiting Prompt shows no row badge, a fired
-  // reminder shows Returned, and a stalled session's badge takes the danger tone, reading Stalled in
-  // place of a busy lifecycle (#2215).
+  // Both surfaces preserve lifecycle beside the same ranked secondary condition.
   for (const seeded of SEEDED) {
     const shown = await renderRowAndBar(seeded.session, { runnerOnline: seeded.runnerOnline ?? true });
     try {

@@ -98,7 +98,7 @@ export function ConditionBadge({ condition }: { condition: SessionCondition }) {
 
 /**
  * The Session Status control (docs/design-system.md §4.3, §9.2, #2182): one ghost button right
- * after the title holding the session's one status badge (`sessionStatusSummary()`) and, when other
+ * after the title holding the session's lifecycle and secondary badges (`sessionStatusSummary()`) and, when other
  * conditions need the person, a plain "+N". It opens the Session Status popover, which lists every
  * condition with one sentence and the action that resolves it; on a phone that is a bottom sheet.
  *

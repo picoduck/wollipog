@@ -15,10 +15,10 @@ export type PreviewSessionMenuOpener = (anchor: { x: number; y: number }, restor
 /**
  * The Sessions preview's detail bar and meta line (docs/design-system.md §4.3, §11.3; #2210).
  *
- * One 48px row: the one-line title, the session's one status badge (`sessionStatusSummary()`, the
+ * One 48px row: the one-line title, the session's lifecycle and secondary badges (`sessionStatusSummary()`, the
  * ranking the session bar uses, with its plain "+N"), then Snooze and Archive as icon buttons, ⋯ for
  * the session's context menu and Open Session last. The preview is a quick look, so there is no back
- * button and the badge is not a control: the session's own bar is where a condition is acted on.
+ * button and the badges are not controls: the session's own bar is where a condition is acted on.
  *
  * Where the full badge would leave the title truncated under `DETAIL_TITLE_READABLE_PX`, the badge
  * becomes its dot with the label in its tooltip, as `DetailBar` does in the compact tier. It is

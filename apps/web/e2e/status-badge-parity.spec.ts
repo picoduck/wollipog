@@ -260,7 +260,7 @@ test("a live status change and a resize keep focus on the status control", async
   await expect(control).toBeFocused();
 });
 
-for (const width of [390, 1280]) {
+for (const width of [390, 1024, 1280]) {
   test(`Board cards preserve lifecycle and a secondary condition at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/sessions-board-e2e.html?path=/board&threads=1");
@@ -271,6 +271,20 @@ for (const width of [390, 1280]) {
       [...card.querySelectorAll(".status")].map((badge) => badge.textContent)));
     expect(badges.every((labels) => labels.length >= 1 && labels.length <= 2)).toBe(true);
     expect(badges.some((labels) => labels.includes("Awaiting Input") && labels.includes("Approval Required"))).toBe(true);
+    const overflowing = await cards.evaluateAll((elements) => elements.flatMap((card) => {
+      const bounds = card.querySelector(".card-status")!.getBoundingClientRect();
+      return [...card.querySelectorAll<HTMLElement>(".status")].filter((badge) => {
+        const box = badge.getBoundingClientRect();
+        return badge.scrollWidth > badge.clientWidth + 1 || box.right > bounds.right + 1
+          || box.bottom > bounds.bottom + 1 || box.left < bounds.left - 1;
+      }).map((badge) => `${card.getAttribute("data-session-id")}: ${badge.textContent}`);
+    }));
+    expect(overflowing, "every lifecycle and secondary label fits its card status area").toEqual([]);
+    for (const card of await cards.all()) {
+      for (const badge of await card.locator(".status").all()) {
+        await expect(badge).toHaveAccessibleName(`Status: ${await badge.innerText()}`);
+      }
+    }
     await expect(page.locator(".board .card .status").filter({ hasText: /^Stalled$/ })).toHaveCount(0);
     expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
     await capture(page, "board");

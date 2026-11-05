@@ -1402,8 +1402,9 @@ behind Show Details. The tab is not shown at 760px and below (#2984).
   `sessionRowStatus()`, then the activity strip under the row's rule. A parent shows its family chip
   in place of the strip: an image named by the whole rollup, with that tooltip. It shows its words only
   while they fit beside the badge in the card, measured on the card's own width rather than the list
-  pane's, and otherwise keeps just its dots. The status line is one 20px line and the badge never
-  clips: a strip that does not fit beside the badge drops out of sight. Last, only while there is one,
+  pane's, and otherwise keeps just its dots. The status area is at least one 20px line and wraps
+  whole badges and activity/family signals onto additional lines instead of clipping their labels.
+  Last, only while there is one,
   is the request; a card never shows a transcript excerpt (#3175). The request is a warning inset notice (§13.2):
   the request in `--type-body` with a code line when it has one, then **Approve** and **Deny** as
   the equal pair (§3.1). Approve is the first one-time allow option and Deny the first one-time reject
