@@ -1197,6 +1197,12 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ count, expectedRevision }),
     }),
+  /** The campaign owner's Include in Campaign of a Project Location someone else added (#4117).
+   * The server inspects the Location first; a failing one is listed as excluded instead. */
+  includeCampaignLocation: (id: string, locationId: string) =>
+    req<{ joined: boolean; revision: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/locations/${encodeURIComponent(locationId)}/include`,
+      { method: "POST" }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",

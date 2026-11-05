@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
+import { BACKGROUND_JOB_STALL_MS, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION,
   type CampaignBudgetAuthority, type CampaignForgePullRequestObservation, type PendingApproval, type RunnerMetadata,
   type SessionSnapshot } from "@wollipog/protocol";
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
@@ -1399,6 +1399,73 @@ test("a wake is not re-sent while the parent is busy, a descendant works, or its
       }
       const record = h.db.campaignRecovery.projection("root").records.find(r => r.id === original.id)!;
       assert.deepEqual([record.state, record.attempts, recoveryEvents(h).length], ["dispatched", 1, events], hold);
+    } finally { h.db.close(); }
+  }
+});
+
+// The runner's individual job records, with no aggregate backgroundWorkState beside them.
+function registerBackgroundJob(h: ReturnType<typeof completedPrFixture>, sessionId: "root" | "child", registeredAt: number,
+  finishedAt?: number) {
+  h.svc.applySessionRuntimeUpdate("r", { ...childSnapshot({ status: "idle", updatedAt: finishedAt ?? registeredAt }), id: sessionId,
+    title: sessionId, backgroundJobs: [{ id: `job-${sessionId}`, parentTurnId: "turn-1", runnerId: "r", workspaceId: "w",
+      launchType: "shell", registeredAt, ...(finishedAt ? { terminalStatus: "completed" as const, terminalObservedAt: finishedAt } : {}) }] });
+  const session = h.db.getSession(sessionId)!;
+  assert.deepEqual([session.status, session.backgroundWorkState], ["idle", undefined], "only the job record says it is working");
+}
+/** A recovery sweep with the same failing check freshly observed, so only the job decides the re-wake. */
+function sweep(h: ReturnType<typeof completedPrFixture>, at: number) {
+  h.db.campaignForgeObservations.record("root", "r", [{ ref: h.ref, observation: h.observation }], at);
+  h.recovery.maintain(at);
+}
+
+test("a registered background job of the root or a live descendant holds the re-wake by its own record (#2938)", () => {
+  for (const holder of ["root", "child"] as const) {
+    const h = completedPrFixture();
+    try {
+      h.recovery.maintain(h.now);
+      const original = h.db.campaignRecovery.projection("root").records[0]!;
+      const first = completeLatestContinuation(h, h.now + 31_000);
+      if (holder === "child") h.db.setSessionArchived("child", false, h.now + 31_000);
+      registerBackgroundJob(h, holder, h.now + 31_000);
+      assert.equal(h.db.listManagedBackgroundJobs(holder, h.now + 31_000).length, 1);
+      const events = recoveryEvents(h).length;
+      const due = first.settledAt + stalledRecoveryWakeDelayMs(1);
+      for (const at of [due, due + STALLED_RECOVERY_WAKE_MAX_MS]) sweep(h, at);
+      let record = h.db.campaignRecovery.projection("root").records.find(r => r.id === original.id)!;
+      assert.deepEqual([record.state, record.attempts, recoveryEvents(h).length], ["dispatched", 1, events],
+        `${holder}: an unfinished job is not an unanswered wake, and spends no attempt`);
+      // The runner reports the job finished: nothing is still answering, so the owed wake is sent once.
+      registerBackgroundJob(h, holder, h.now + 31_000, due + STALLED_RECOVERY_WAKE_MAX_MS);
+      for (let i = 0; i < 2; i++) sweep(h, due + STALLED_RECOVERY_WAKE_MAX_MS + 1);
+      record = h.db.campaignRecovery.projection("root").records.find(r => r.id === original.id)!;
+      assert.deepEqual([record.state, record.attempts], ["dispatched", 2], holder);
+      assert.deepEqual(recoveryEvents(h).slice(events), [`${original.id}:2`], `${holder}: exactly one new wake`);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a job past the stall bound or an archived descendant's job does not hold the re-wake forever (#2938)", () => {
+  for (const holder of ["stalled_root_job", "archived_child_job"] as const) {
+    const h = completedPrFixture();
+    try {
+      h.recovery.maintain(h.now);
+      const original = h.db.campaignRecovery.projection("root").records[0]!;
+      const first = completeLatestContinuation(h, h.now + 31_000);
+      if (holder === "archived_child_job") h.db.setSessionArchived("child", false, h.now + 31_000);
+      registerBackgroundJob(h, holder === "stalled_root_job" ? "root" : "child", h.now + 31_000);
+      if (holder === "archived_child_job") h.db.setSessionArchived("child", true, h.now + 31_000);
+      // A job that never reports is reported as stalled once it passes the bound (listManagedBackgroundJobs),
+      // the same bound that ends a child's wait (campaignChildWait); it stops holding the record then.
+      const due = holder === "stalled_root_job" ? h.now + 31_000 + BACKGROUND_JOB_STALL_MS + 1
+        : first.settledAt + stalledRecoveryWakeDelayMs(1);
+      if (holder === "stalled_root_job") {
+        sweep(h, due - 2);
+        assert.equal(h.db.campaignRecovery.projection("root").records[0]!.attempts, 1, "held until the bound");
+        assert.ok(h.db.listManagedBackgroundJobs("root", due)[0]!.stalledSince, "the job itself reads as stalled");
+      }
+      for (let i = 0; i < 2; i++) sweep(h, due);
+      const record = h.db.campaignRecovery.projection("root").records.find(r => r.id === original.id)!;
+      assert.deepEqual([record.state, record.attempts], ["dispatched", 2], holder);
     } finally { h.db.close(); }
   }
 });
