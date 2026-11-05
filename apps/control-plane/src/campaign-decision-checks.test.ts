@@ -241,36 +241,44 @@ for (const [label, step, attempts] of [
   });
 }
 
-test("a subjects table from the question screen's release is widened in place, keeping its rows", () => {
-  const dir = mkdtempSync(join(tmpdir(), "decision-subjects-"));
-  const path = join(dir, "cp.db");
-  try {
-    const first = ControlPlaneDb.open(path);
-    const organizationId = first.localIdentityContext().organizationId;
-    const raw = first.raw();
-    raw.exec(`DROP TABLE campaign_decision_subjects;
-      CREATE TABLE campaign_decision_subjects (
-        occurrence_id TEXT PRIMARY KEY, campaign_session_id TEXT NOT NULL, session_id TEXT NOT NULL,
-        surface TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision')),
-        request_id TEXT NOT NULL, classification TEXT CHECK (classification IN ('decline','orchestrator')),
-        classified_by TEXT, classified_at INTEGER, created_at INTEGER NOT NULL,
-        FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE);`);
-    for (const id of ["dec_old", "dec_new"]) first.createDecisionOccurrence({ occurrenceId: id, organizationId, campaignSessionId: "root",
-      occurrenceKey: id, kind: "credential_screen", promptVersion: "v", inputDigests: {}, inputDigest: "d", now: 1 });
-    first.recordCampaignDecisionSubject({ occurrenceId: "dec_old", campaignSessionId: "root", sessionId: "child",
-      surface: "implementation_question", requestId: "q-1" }, 1);
-    assert.throws(() => raw.exec(`INSERT INTO campaign_decision_subjects (occurrence_id, campaign_session_id, session_id, surface, request_id,
-      created_at) VALUES ('dec_new', 'root', 'root', 'issue_closure', 'team/repo#1', 1)`), /CHECK constraint failed/u, "the fixture is the old table");
-    first.close();
-    const second = ControlPlaneDb.open(path);
+for (const [release, surfaces] of [
+  ["the question screen's release", "'implementation_question','provider_question','tool_request','owner_decision'"],
+  ["Slice B's release", "'implementation_question','provider_question','tool_request','owner_decision','follow_up_publication','issue_closure'"],
+] as const) {
+  test(`a subjects table from ${release} is widened in place, keeping its rows`, () => {
+    const dir = mkdtempSync(join(tmpdir(), "decision-subjects-"));
+    const path = join(dir, "cp.db");
     try {
-      assert.equal(second.campaignDecisionSubject("dec_old")?.requestId, "q-1", "every row survives");
-      second.recordCampaignDecisionSubject({ occurrenceId: "dec_new", campaignSessionId: "root", sessionId: "root",
-        surface: "issue_closure", requestId: "team/repo#1" }, 2);
-      assert.equal(second.campaignDecisionSubject("dec_new")?.surface, "issue_closure");
-    } finally { second.close(); }
-  } finally { rmSync(dir, { recursive: true, force: true }); }
-});
+      const first = ControlPlaneDb.open(path);
+      const organizationId = first.localIdentityContext().organizationId;
+      const raw = first.raw();
+      raw.exec(`DROP TABLE campaign_decision_subjects;
+        CREATE TABLE campaign_decision_subjects (
+          occurrence_id TEXT PRIMARY KEY, campaign_session_id TEXT NOT NULL, session_id TEXT NOT NULL,
+          surface TEXT NOT NULL CHECK (surface IN (${surfaces})),
+          request_id TEXT NOT NULL, classification TEXT CHECK (classification IN ('decline','orchestrator')),
+          classified_by TEXT, classified_at INTEGER, created_at INTEGER NOT NULL,
+          FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE);`);
+      for (const id of ["dec_old", "dec_closure", "dec_seed"]) first.createDecisionOccurrence({ occurrenceId: id, organizationId, campaignSessionId: "root",
+        occurrenceKey: id, kind: "credential_screen", promptVersion: "v", inputDigests: {}, inputDigest: "d", now: 1 });
+      first.recordCampaignDecisionSubject({ occurrenceId: "dec_old", campaignSessionId: "root", sessionId: "child",
+        surface: "implementation_question", requestId: "q-1" }, 1);
+      assert.throws(() => raw.exec(`INSERT INTO campaign_decision_subjects (occurrence_id, campaign_session_id, session_id, surface, request_id,
+        created_at) VALUES ('dec_seed', 'root', 'root', 'issue_scope_seed', 'issue_scope_seed:a', 1)`), /CHECK constraint failed/u, "the fixture is the old table");
+      first.close();
+      const second = ControlPlaneDb.open(path);
+      try {
+        assert.equal(second.campaignDecisionSubject("dec_old")?.requestId, "q-1", "every row survives");
+        second.recordCampaignDecisionSubject({ occurrenceId: "dec_closure", campaignSessionId: "root", sessionId: "root",
+          surface: "issue_closure", requestId: "team/repo#1" }, 2);
+        second.recordCampaignDecisionSubject({ occurrenceId: "dec_seed", campaignSessionId: "root", sessionId: "root",
+          surface: "issue_scope_seed", requestId: "issue_scope_seed:a" }, 2);
+        assert.equal(second.campaignDecisionSubject("dec_closure")?.surface, "issue_closure");
+        assert.equal(second.campaignDecisionSubject("dec_seed")?.surface, "issue_scope_seed");
+      } finally { second.close(); }
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+}
 
 test("rewording never buys a second verdict: a refusal or an owner route sticks to the recommendation or the issue and reason", async () => {
   const relatedness: Record<string, FakeDecisionStep> = { "Add a Dark-Mode Theme": { verdict: "unrelated", reason: "A separate feature." },

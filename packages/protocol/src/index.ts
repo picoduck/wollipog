@@ -896,6 +896,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      A pull request is reported there instead of failing the read. The control plane's
 //      selection floors read these facts; an older runner reports none, so its selection
 //      proposals take the owner's route. (290 is claimed by an open pull request.)
+// 295: closing patterns in GitLab merges (#3762). A GitLab `pr_merge` snapshot may declare
+//      `intendedClosures`, and requesting or arming it first asks the child's runner for
+//      `gitlab_merge_closures`, which reports every issue the merge would close: GitLab's default
+//      closing pattern on the description, and GitLab's own `closes_issues` list. The control plane
+//      refuses a closure that differs from the declaration and records the check on the decision.
+//      Under Full Control a checked GitLab merge whose closures are all in scope is then owned like a
+//      GitHub one. A pre-v295 child runner is not asked; its decisions carry no check and stay
+//      human-owned under Full Control. (292 to 294 are claimed by pull requests still open.)
 // 297: campaign activity status (#4146). Campaign Active means work is actually running: a turn, a
 //      child, a background job, a pending continuation, a parked pull request with a wake
 //      registered, or the server's own repair. Idle campaigns read `complete_needs_cleanup`
@@ -903,11 +911,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      (with the undelivered `stuck` items); the projection's `activity` lists what is live and the
 //      server's one automatic repair of idle leftovers. Dashboards below 297 receive
 //      `complete_needs_cleanup` as `complete_with_handoffs` (below 275 as `waiting_human`) and
-//      `stuck` as `blocked`. (292-296 are claimed by open pull requests.)
+//      `stuck` as `blocked`. (292-294 and 296 are claimed by open pull requests.)
 export const PROTOCOL_VERSION = 297;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
+export * from "./gitlab-closing-references.js";
 export * from "./issue-closure-refusal.js";
 import type { GithubIssueClosureRefusal, GithubIssueClosureRefusalReason } from "./issue-closure-refusal.js";
 export * from "./issue-closure-delivery-gap.js";
@@ -1307,6 +1316,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
   githubMergeClosingReferences: 242,
+  /** v295 runner answers `gitlab_merge_closures`, the closing-pattern check of a GitLab merge (#3762). */
+  gitlabMergeClosingReferences: 295,
   /** v244 runner binds a review session to a GitLab merge request, read with a trusted glab (#3539). */
   gitlabReviewSessions: 244,
   /** v249 runner inspects, closes and scopes GitLab issues with `glab` (#3539). */
@@ -3036,8 +3047,11 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
-  /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
+  /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
+   * seed, never authority. */
   issueScopeProposalEpic?: number;
+  /** A Custom campaign's epic seed, read from its first message by the Decision Model (#4104). */
+  issueScopeSeed?: CampaignIssueScopeSeed;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
@@ -5284,6 +5298,22 @@ export interface WorkflowDecisionOption {
 }
 
 /** Authority is independent of ledger membership. Revision zero denotes a legacy initial scope. */
+/**
+ * A Custom campaign's epic seed (#4104). A first message that writes a digit string but names no
+ * explicit issue list is read by the Decision Model's `scope_grant` kind after the session starts.
+ * `pending` holds delegation until that reading settles. `seeded`: the reading named exactly one
+ * issue that the runner verified has members, now `issueScopeProposalEpic`, and the person approves
+ * the scope as before. `none`: it named no epic, so nothing is held. `owner`: the reading failed or
+ * was uncertain, so the person approves the scope with no seed. Nothing is ever parsed from the
+ * text instead, and no state grants anything.
+ */
+export interface CampaignIssueScopeSeed {
+  state: "pending" | "seeded" | "none" | "owner";
+  /** SHA-256 of the exact first message the seed reads. */
+  messageDigest: string;
+  occurrenceId?: string;
+}
+
 export interface CampaignIssueScope {
   repository: string;
   issueNumbers: number[];
@@ -5647,9 +5677,10 @@ export type WorkflowDecisionResourceSnapshot =
       squash?: boolean;
       /** GitLab only: delete the source branch on merge; for a train, the merge request's own setting. */
       removeSourceBranch?: boolean;
-      /** GitHub only (v242, #3713): every issue this merge is meant to close, as sorted unique
-       * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
-       * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
+      /** Every issue this merge is meant to close (GitHub v242, #3713; GitLab v295, #3762), as sorted
+       * unique `owner/repo#N`, or `host/group/project#N` for GitLab. The control plane admits the
+       * merge only when these are exactly the issues the forge would close. Absent when it closes
+       * none, so earlier digests are unchanged. */
       intendedClosures?: string[];
     }
   | {
@@ -7505,11 +7536,17 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure" |
+    "issue_scope_seed";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
-  /** The owner's classification of an uncertain or failed screen. */
+  /** The owner's classification of an uncertain or failed screen. For an epic seed, `orchestrator`
+   * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
+  /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current
+   * reading, or `scoped` once the person approved a scope, which ends any hold the seed placed.
+   * Server-derived for Campaign Status; never stored on the subject. */
+  seed?: CampaignIssueScopeSeed["state"] | "scoped";
 }
 
 /** Owner classification of a question the Decision Model could not screen (#4104). It never
@@ -10252,9 +10289,11 @@ export interface GitLabMergePreflightResultMessage {
   reason?: string;
 }
 
-/** One issue a GitHub merge would close (#3713). `description` is the description's text, with
- * its line in `excerpt`; `linked` is GitHub's own `closingIssuesReferences`, which also covers an
- * issue linked by hand. Either alone closes the issue. */
+/** One issue a merge would close (#3713). `description` is the description's text, with its line in
+ * `excerpt`; `linked` is the forge's own list: GitHub's `closingIssuesReferences`, which also covers
+ * an issue linked by hand, or GitLab's `closes_issues` (#3762), which also covers the title, the
+ * commits and an instance's own closing pattern. Either alone closes the issue. A GitHub issue is
+ * `owner/repo#N`; a GitLab issue is `host/group/project#N`, lowercased. */
 export interface PullRequestClosure {
   issue: string;
   sources: Array<"description" | "linked">;
@@ -10283,6 +10322,32 @@ export interface GithubMergePreflightMessage {
  * proven). `reason` is a fixed sentence, never `gh` output. */
 export interface GithubMergePreflightResultMessage {
   type: "github_merge_preflight_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  refusal?: "stale_head" | "unavailable";
+  reason?: string;
+  check?: PullRequestClosingReferenceCheck;
+}
+
+/** v295 (#3762): before a GitLab `pr_merge` is requested or armed, the child's runner reads the open
+ * merge request through the session's own `glab` login: its head, its description and GitLab's own
+ * `closes_issues` list. Read-only; the control plane compares the closures with the snapshot's
+ * `intendedClosures`. */
+export interface GitLabMergeClosuresMessage {
+  type: "gitlab_merge_closures";
+  requestId: string;
+  sessionId: string;
+  repository: string;
+  pullRequest: number;
+  headSha: string;
+}
+
+/** As `GithubMergePreflightResultMessage`: `stale_head` (the merge request is not open at the
+ * snapshot's head) or `unavailable` (GitLab could not be read, so nothing was proven). `reason` is a
+ * fixed sentence, never `glab` output. */
+export interface GitLabMergeClosuresResultMessage {
+  type: "gitlab_merge_closures_result";
   requestId: string;
   sessionId: string;
   ok: boolean;
@@ -10937,6 +11002,7 @@ export type RunnerToControlPlane =
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
   | GithubMergePreflightResultMessage
+  | GitLabMergeClosuresResultMessage
   | import("./forge-decision-action.js").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | GithubIssueClosureResultMessage
@@ -13050,6 +13116,7 @@ export type ControlPlaneToRunner =
   | RecordWorkflowActionAdmissionMessage
   | GitLabMergePreflightMessage
   | GithubMergePreflightMessage
+  | GitLabMergeClosuresMessage
   | import("./forge-decision-action.js").ForgeDecisionActionMessage
   | ReconcileWorkflowActionMessage
   | GithubIssueClosureMessage

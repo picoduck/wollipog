@@ -319,7 +319,7 @@ function maskMarkdown(text: string): string {
 
 /** The line around a finding: up to 60 characters before its keyword and 40 after its reference,
  * never longer than CLOSING_REFERENCE_EXCERPT_MAX even when the reference is a long link. */
-function excerpt(text: string, start: number, end: number): string {
+export function closingReferenceExcerpt(text: string, start: number, end: number): string {
   const lineStart = text.lastIndexOf("\n", start - 1) + 1;
   const newline = text.indexOf("\n", end);
   const lineEnd = newline < 0 ? text.length : newline;
@@ -351,7 +351,7 @@ export function findClosingReferences(text: string, repository: string): Closing
         ? [reference(link[1]!.trim(), repository), reference(link[2]!, repository)]
         : [reference(token.replace(/^[\\<]/u, ""), repository)];
       const index = original(match.index);
-      const shown = excerpt(text, index, original(target.index + token.length - 1) + 1);
+      const shown = closingReferenceExcerpt(text, index, original(target.index + token.length - 1) + 1);
       for (const issue of new Set(issues)) {
         if (issue && !found.has(`${index}:${issue}`)) found.set(`${index}:${issue}`, { issue, keyword: match[1]!, index, excerpt: shown });
       }

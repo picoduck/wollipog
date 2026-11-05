@@ -39,10 +39,12 @@ function record(value: unknown): Record<string, unknown> | null {
   return value && typeof value === "object" && !Array.isArray(value) ? value as Record<string, unknown> : null;
 }
 
-/** The issues a description and GitHub's links would close, one entry per issue, in issue order. */
-export function pullRequestClosures(description: string, repository: string, linked: readonly string[]): PullRequestClosure[] {
+/** The issues a description and the forge's own list would close, one entry per issue, in issue
+ * order. `find` reads the description: GitHub's keywords, or GitLab's closing pattern (#3762). */
+export function pullRequestClosures(description: string, repository: string, linked: readonly string[],
+  find: typeof findClosingReferences = findClosingReferences): PullRequestClosure[] {
   const closures = new Map<string, PullRequestClosure>();
-  for (const found of findClosingReferences(description, repository)) {
+  for (const found of find(description, repository)) {
     if (!closures.has(found.issue)) closures.set(found.issue, { issue: found.issue, sources: ["description"], excerpt: found.excerpt });
   }
   for (const issue of linked) {

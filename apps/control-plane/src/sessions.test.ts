@@ -96,6 +96,15 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
+import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
+import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
+
+/** A Decision Model that reads a Custom campaign's first message as naming epic #123 (#4104). */
+function epicSeedReading(db: ControlPlaneDb) {
+  return fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
+    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: [{ repository: "", number: 123 }] } }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime;
+}
 
 /** A runner capability refusal: the exact sentence, with the versions beside it and never in it. */
 function assertRunnerRefusal(
@@ -368,6 +377,7 @@ class FakeHub {
   deliveryHandler?: (runnerId: string, msg: ControlPlaneToRunner) => boolean;
   requestHandler?: (msg: ControlPlaneToRunner) => RunnerRequestResult | Promise<RunnerRequestResult>;
   githubMergePreflight?: (msg: Extract<ControlPlaneToRunner, { type: "github_merge_preflight" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
+  gitlabMergeClosures?: (msg: Extract<ControlPlaneToRunner, { type: "gitlab_merge_closures" }>) => RunnerRequestResult | Promise<RunnerRequestResult>;
   activeTurnIds = new Map<string, string>();
   queuedPrompts = new Map<string, QueuedPromptView[]>();
 
@@ -421,6 +431,13 @@ class FakeHub {
       return this.githubMergePreflight
         ? await this.githubMergePreflight(msg)
         : { type: "github_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId,
+            ok: true, check: { checkedAt: 1, closures: [] } };
+    }
+    if (msg.type === "gitlab_merge_closures") {
+      // A merge request that closes no issue, unless a test answers otherwise (#3762).
+      return this.gitlabMergeClosures
+        ? await this.gitlabMergeClosures(msg)
+        : { type: "gitlab_merge_closures_result", requestId: msg.requestId, sessionId: msg.sessionId,
             ok: true, check: { checkedAt: 1, closures: [] } };
     }
     if (!this.requestHandler) throw new Error("runner did not respond in time");
@@ -5295,8 +5312,150 @@ test("a GitHub merge snapshot's intendedClosures normalize to sorted unique issu
   for (const intendedClosures of [["3713"], ["closes #1"], "#1", [1], Array.from({ length: 101 }, (_, i) => `#${i + 1}`)]) {
     assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITHUB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures).slice(0, 60));
   }
-  assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: ["#1"] }).status, 400,
-    "GitLab closes issues by its own rules, which this check does not read");
+  // A GitLab merge declares issues on its own instance (#3762).
+  const gitlab = normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: [
+    "#9", "sibling#2", "Platform/Other#3", "gitlab.example.com/platform/agents/wollipog#9",
+    "https://gitlab.example.com/platform/agents/wollipog/-/issues/1"] });
+  assert.deepEqual(gitlab.data && "intendedClosures" in gitlab.data && gitlab.data.intendedClosures, [
+    "gitlab.example.com/platform/agents/sibling#2", "gitlab.example.com/platform/agents/wollipog#1",
+    "gitlab.example.com/platform/agents/wollipog#9", "gitlab.example.com/platform/other#3"]);
+  assert.deepEqual(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures: [] }).data, GITLAB_MERGE);
+  for (const intendedClosures of [["https://github.com/picoduck/wollipog/issues/1"], ["https://other.example.com/a/b/-/issues/1"], ["3"]]) {
+    assert.equal(normalizeWorkflowDecisionSnapshot({ ...GITLAB_MERGE, intendedClosures }).status, 400, JSON.stringify(intendedClosures));
+  }
+});
+
+test("a GitLab merge is requested and armed only while GitLab would close exactly its intendedClosures (#3762)", async () => {
+  const { db, hub } = makeHarness();
+  const svc = new SessionsService(db, hub as unknown as Hub, NOOP_LOG);
+  try {
+    const meta = runnerMeta();
+    const orchestrator = meta.agents.find((agent) => agent.id === "test-orchestrator")!;
+    orchestrator.capabilities = {
+      models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true,
+      permissionModes: ["default", "orchestrator"],
+    };
+    db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    const parent = svc.createSession({
+      runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
+      config: { permissionMode: "orchestrator" }, parentControl: "off",
+    });
+    assert.ok(parent.ok && parent.data, parent.error);
+    db.updateSessionStatus(parent.data.id, "running", Date.now());
+    const request = { runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: AGENT_ID, title: "GitLab Child" };
+    let created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    if (created.status === 428) {
+      assert.ok(svc.approve(parent.data.id, db.getSession(parent.data.id)!.pendingApproval!.requestId, "allow").ok);
+      created = svc.createSession(request, undefined, undefined, false, false, false, { parentSessionId: parent.data.id });
+    }
+    assert.ok(created.ok && created.data, created.error);
+    const child = created.data;
+    db.updateSessionStatus(child.id, "running", Date.now());
+    assert.ok(svc.setParentControlPolicy(parent.data.id, {
+      implementation_question: "orchestrator", pr_merge: "orchestrator", merged_branch_deletion: "human",
+      follow_up_issue_publication: "human", ui_evidence_approval: "human", review_round_extension: "human",
+    }, 0).ok);
+
+    const reads: Array<Extract<ControlPlaneToRunner, { type: "gitlab_merge_closures" }>> = [];
+    let answer: Record<string, unknown> | Error = { ok: true, check: { checkedAt: 5, closures: [] } };
+    hub.gitlabMergeClosures = async (msg) => {
+      reads.push(msg);
+      if (answer instanceof Error) throw answer;
+      return { type: "gitlab_merge_closures_result", requestId: msg.requestId, sessionId: msg.sessionId, ...answer } as RunnerRequestResult;
+    };
+    const preflights: ControlPlaneToRunner[] = [];
+    hub.requestHandler = async (msg) => {
+      if (msg.type !== "gitlab_merge_preflight") throw new Error(`unexpected ${msg.type}`);
+      preflights.push(msg);
+      return { type: "gitlab_merge_preflight_result", requestId: msg.requestId, sessionId: msg.sessionId, ok: true } as RunnerRequestResult;
+    };
+    const issue = (n: number) => `gitlab.example.com/platform/agents/wollipog#${n}`;
+    const negated = { issue: issue(12), sources: ["description"], excerpt: "This MR is not closing #12 yet." };
+    const delivered = { issue: issue(3762), sources: ["description", "linked"], excerpt: "Implements #3762." };
+    const ask = (key: string, snapshot: Record<string, unknown> = GITLAB_MERGE) =>
+      svc.createWorkflowDecisionWithVideo(child.id, { requestId: key, resourceKey: key,
+        resourceSnapshot: snapshot as unknown as WorkflowDecisionResourceSnapshot });
+
+    // An undeclared closure, here an "-ing" form, never reaches review, and is named with its line.
+    answer = { ok: true, check: { checkedAt: 5, closures: [negated] } };
+    const refused = await ask("negated");
+    assert.equal(refused.status, 409);
+    assert.match(refused.error ?? "", new RegExp(`merge request would close an issue that intendedClosures does not list: ${issue(12)}, ` +
+      "from the description: “This MR is not closing #12 yet\\.”", "u"));
+    assert.match(refused.error ?? "", /GitLab closes an issue when close, fix, resolve or implement/u);
+    assert.deepEqual(reads[0], { type: "gitlab_merge_closures", requestId: reads[0]!.requestId, sessionId: child.id,
+      repository: GITLAB_MERGE.repository, pullRequest: 7, headSha: GITLAB_MERGE.headSha });
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "no decision was created");
+
+    // GitLab's own list (from the title, commits or an instance's own pattern) is a closure too.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: issue(9), sources: ["linked"] }] } };
+    assert.match((await ask("linked")).error ?? "", /wollipog#9, which GitLab reports the merge request closes/u);
+    // A declared closure GitLab would not make.
+    answer = { ok: true, check: { checkedAt: 5, closures: [] } };
+    assert.match((await ask("unmade", { ...GITLAB_MERGE, intendedClosures: ["#3762"] })).error ?? "",
+      /intendedClosures lists gitlab\.example\.com\/platform\/agents\/wollipog#3762, but merging this merge request would not close it/u);
+    for (const [refusal, pattern] of [["stale_head", /no longer matches the merge request: GitLab said stale_head/u],
+      ["unavailable", /GitLab could not be read .*GitLab said unavailable Try again/u]] as const) {
+      answer = { ok: false, refusal, reason: `GitLab said ${refusal}` };
+      assert.match((await ask(`refused-${refusal}`)).error ?? "", pattern);
+    }
+    answer = new Error("runner did not respond in time");
+    assert.match((await ask("silent")).error ?? "", /the runner did not answer/u);
+    // A GitHub-shaped issue is not a GitLab merge's closure.
+    answer = { ok: true, check: { checkedAt: 5, closures: [{ issue: "picoduck/wollipog#9", sources: ["linked"] }] } };
+    assert.match((await ask("malformed")).error ?? "", /the runner's answer was incomplete/u);
+    assert.deepEqual(svc.workflowDecisions(child.id, undefined, 10).data?.decisions, [], "nothing unread or mismatched was created");
+
+    // A merge that closes exactly what it declares is created, and records what was read.
+    answer = { ok: true, check: { checkedAt: 5, closures: [delivered] } };
+    const intended = await ask("intended", { ...GITLAB_MERGE, intendedClosures: ["#3762"] });
+    assert.ok(intended.ok && intended.data, intended.error);
+    assert.deepEqual(intended.data.resourceSnapshot, { ...GITLAB_MERGE, intendedClosures: [issue(3762)] });
+    assert.deepEqual(intended.data.closingReferenceCheck, { checkedAt: 5, closures: [delivered] });
+
+    // Arming reads GitLab again, alongside the merge preflight.
+    const snapshot = intended.data.resourceSnapshot as Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>;
+    const command = canonicalPrMergeEnqueueCommand(snapshot);
+    const approve = async (key: string) => {
+      const decision = await ask(key, snapshot);
+      assert.ok(decision.ok && decision.data, decision.error);
+      assert.ok(svc.resolveDescendantRequest(parent.data!.id, child.id, decision.data.occurrenceId,
+        { action: "resolve_workflow_decision", outcome: "approve" }, () => true).ok);
+      return decision.data.occurrenceId;
+    };
+    const consume = (occurrenceId: string) => svc.consumeWorkflowDecision(child.id, occurrenceId,
+      { resourceSnapshot: snapshot, action: { kind: "pr_merge_enqueue", command } });
+    const edited = await approve("edited-after-approval");
+    answer = { ok: true, check: { checkedAt: 6, closures: [negated, delivered] } };
+    const revoked = await consume(edited);
+    assert.equal(revoked.status, 409);
+    assert.match(revoked.error ?? "", /wollipog#12.*This approval was revoked, so nothing was armed/u);
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.status, "revoked");
+    assert.equal(db.workflowDecisionByOccurrence(edited)?.actionAdmission, undefined);
+    assert.equal(preflights.length, 1, "the merge preflight ran alongside the read");
+
+    answer = { ok: true, check: { checkedAt: 6, closures: [delivered] } };
+    const retried = await approve("unreadable-then-armed");
+    answer = { ok: false, refusal: "unavailable", reason: "gitlab.example.com could not be reached." };
+    const unreadable = await consume(retried);
+    assert.match(unreadable.error ?? "", /gitlab\.example\.com could not be reached\. Try again\./u);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.status, "approved", "an unreadable GitLab proves nothing; retry is allowed");
+    answer = { ok: true, check: { checkedAt: 7, closures: [delivered] } };
+    const armed = await consume(retried);
+    assert.ok(armed.ok, armed.error);
+    assert.equal(db.workflowDecisionByOccurrence(retried)?.actionAdmission?.command, command);
+
+    // A runner that predates the check is not asked; its decision says nothing was read.
+    db.registerRunner(meta, Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1);
+    const asked = reads.length;
+    answer = { ok: true, check: { checkedAt: 8, closures: [negated] } };
+    const legacy = await ask("legacy-runner");
+    assert.ok(legacy.ok && legacy.data, legacy.error);
+    assert.equal(legacy.data.closingReferenceCheck, undefined);
+    assert.equal(reads.length, asked, "a pre-v295 runner receives no gitlab_merge_closures");
+  } finally {
+    db.close();
+  }
 });
 
 test("a GitHub merge is requested and armed only while GitHub would close exactly its intendedClosures (#3713)", async () => {
@@ -30503,6 +30662,7 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30521,7 +30681,10 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       }
       throw new Error("unexpected fixture command");
     };
-    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123,"the proposal seed is stored before any runner echo");
+    // The seed is pending from creation, before any runner echo; the Decision Model's reading then names the epic (#4104).
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeSeed!.state,"pending","the seed is held before any runner echo");
+    await svc.campaignIssueScopeSeedSettled(id);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123);
     const beforeScopeChild = svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:AGENT_ID,prompt:"Fix issue 124.",config:{}},undefined,undefined,false,false,false,{parentSessionId:id});
     assert.equal(beforeScopeChild.ok,false,"epic delegation requires confirmed issue scope");
     assert.match(beforeScopeChild.error!,/Confirm the epic/);
@@ -30703,6 +30866,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
     meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
     db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
     const decisions={implementation_question:"human",pr_merge:"human",merged_branch_deletion:"human",follow_up_issue_publication:"human",ui_evidence_approval:"human"} as const;
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate epic #123.",orchestrator:{delegation:{parentControl:"off",decisions}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
     assert.ok(created.ok && created.data,created.error);
     const id=created.data.id;
@@ -30714,6 +30878,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
       if(m.type==="github_issue_closure") return {type:"github_issue_closure_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,inspection:{repository:"team/repo",issue:123,title:"Epic",url:"https://github.com/team/repo/issues/123",state:"OPEN",forgeDigest:"a".repeat(64),openPullRequests:[]}};
       throw new Error("unexpected command");
     };
+    await svc.campaignIssueScopeSeedSettled(id);
     const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"confirm",expectedRevision:0,additions:[{repository:"team/repo",number:123}],removals:[],explanation:"Include epic"});
     assert.ok(proposed.ok && proposed.data,proposed.error);
     assert.equal(proposed.data.authority,"human");
@@ -30796,6 +30961,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
     const register = (version: number) => db.registerRunner(meta, Date.now(), version);
     const previous = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabCampaignIssues - 1;
     register(PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30816,6 +30982,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       }
       throw new Error("unexpected fixture command");
     };
+    await svc.campaignIssueScopeSeedSettled(id);
     const current = await svc.campaignIssueScope(id);
     assert.ok(current.ok && current.data, current.error);
     assert.equal(current.data.repository, repository);

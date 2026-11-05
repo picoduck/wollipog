@@ -62,6 +62,7 @@ import type {
   WorkflowActionAdmissionRecordedMessage,
   GitLabMergePreflightResultMessage,
   GithubMergePreflightResultMessage,
+  GitLabMergeClosuresResultMessage,
   WorkflowActionReconciliationResultMessage,
   GithubIssueClosureResultMessage,
   CampaignForgeObserveResultMessage,
@@ -391,6 +392,7 @@ export type RunnerRequestResult =
   | WorkflowActionAdmissionRecordedMessage
   | GitLabMergePreflightResultMessage
   | GithubMergePreflightResultMessage
+  | GitLabMergeClosuresResultMessage
   | import("@wollipog/protocol").ForgeDecisionActionResultMessage
   | WorkflowActionReconciliationResultMessage
   | import("@wollipog/protocol").CampaignIssueScopeResultMessage

@@ -1607,6 +1607,7 @@ app.register(async (instance) => {
       case "campaign_launch_inspection_result":
       case "gitlab_merge_preflight_result":
       case "github_merge_preflight_result":
+      case "gitlab_merge_closures_result":
       case "forge_decision_action_result":
         if (runnerId) hub.resolveRunnerRequest(msg, runnerId);
         break;

@@ -363,6 +363,9 @@ test("PROTOCOL_VERSION is 297", () => {
   // Campaign activity statuses reach dashboards from v297 (#4146).
   assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
   assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
+  // A v294 runner cannot report the closing references of a GitLab merge (#3762).
+  assert.equal(runnerSupportsProtocol(294, "gitlabMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(295, "gitlabMergeClosingReferences"), true);
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
