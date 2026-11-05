@@ -30,6 +30,18 @@ for (const [label, viewport] of [["desktop", { width: 1280, height: 900 }], ["na
   });
 }
 
+test("an owner decision whose screen failed waits for its owner to decline it or answer it themselves", async ({ page }, testInfo) => {
+  await page.setViewportSize({ width: 1280, height: 900 });
+  await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=1&owner=1");
+  const section = page.getByRole("region", { name: "Question Screen" });
+  const owner = section.locator("li").nth(3);
+  await expect(owner).toContainText("Owner Decision");
+  await expect(owner).toContainText("Uncertain");
+  await expect(owner.getByRole("button")).toHaveText(["Open Session", "Decline", "Let Me Answer"]);
+  await section.scrollIntoViewIfNeeded();
+  await section.screenshot({ path: testInfo.outputPath("question-screen-owner-decision.png") });
+});
+
 test("Campaign Status shows no Question Screen before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");
   await expect(page.locator(".campaign-status-summary")).toBeVisible();

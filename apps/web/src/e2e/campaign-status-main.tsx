@@ -483,6 +483,9 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
   { occurrenceId: "dec_sessions", kind: "credential_screen", promptVersion: "credential_screen.v1", state: "failed", failureClass: "timed_out",
     inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
     subject: { sessionId: "s_child", surface: "implementation_question", requestId: "sessions" } },
+  ...(params.get("owner") === "1" ? [{ occurrenceId: "dec_owner", kind: "credential_screen" as const, promptVersion: "credential_screen.v1",
+    state: "uncertain" as const, verdict: "uncertain", reason: "It may ask the owner to sign in to the provider.", inputDigests: {}, attempts: [],
+    usage: decisionUsage, createdAt: NOW - 30_000, subject: { sessionId: "s_root", surface: "owner_decision" as const, requestId: "owner" } }] : []),
 ] : [];
 
 const client = {
