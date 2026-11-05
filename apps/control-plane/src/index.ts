@@ -1147,6 +1147,11 @@ hub.observeSessions({
   changed: (sessionId) => campaignWorkObservations.sessionChanged(sessionId),
   removed: (sessionId) => campaignWorkObservations.sessionRemoved(sessionId),
 });
+// A turn that ends takes its tracked waits along (#1280).
+hub.observeSessions({
+  changed: (sessionId) => svc.sessionWaitLifecycleChanged(sessionId),
+  removed: (sessionId) => { db.sessionWaits.clear(sessionId); },
+});
 
 registerPromptImageRoutes(app, {
   db,
@@ -4610,6 +4615,13 @@ app.post("/api/sessions/:id/pull-request-watch", async (req, reply) => {
   if (!principal) return reply;
   return respond(reply, svc.requestPullRequestWatch(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
 });
+// Tracked waits (#1280, #4249): only the session's own credential reports its wait calls.
+app.post("/api/sessions/:id/waits", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = sessionReviewRequester(req, reply, id);
+  if (!principal) return reply;
+  return respond(reply, svc.reportSessionWait(id, req.body, (sessionId) => db.canAccessSession(principal, sessionId)));
+});
 app.get("/api/sessions/:id/review-sessions", async (req, reply) => {
   const id = (req.params as { id: string }).id;
   if (!canReadSessionReviews(req, id)) return reply.code(404).send({ error: "session not found" });
@@ -7375,6 +7387,15 @@ const heldResultTimer = setInterval(() => {
   }
 }, 5_000);
 heldResultTimer.unref();
+// Tracked waits are classified on the control plane's clock and published when that changes (#1280).
+const sessionWaitTimer = setInterval(() => {
+  try {
+    svc.maintainSessionWaits(Date.now());
+  } catch (error) {
+    app.log.warn({ error: error instanceof Error ? error.message : String(error) }, "tracked wait sweep deferred");
+  }
+}, 5_000);
+sessionWaitTimer.unref();
 const sessionCommandRetryTimer = setInterval(() => {
   try {
     svc.retryDueSessionCommands(Date.now());
@@ -7489,6 +7510,7 @@ app.addHook("onClose", async () => {
   clearInterval(usagePricingTimer);
   clearInterval(sessionReminderTimer);
   clearInterval(heldResultTimer);
+  clearInterval(sessionWaitTimer);
   clearInterval(sessionCommandRetryTimer);
   clearInterval(sessionStopMaintenanceTimer);
   clearInterval(backgroundPushRetryTimer);

@@ -20,6 +20,7 @@ import {
   TOOLS,
   type McpDeps,
   type McpFetch,
+  waitProgressReporter,
 } from "./session-management-mcp.js";
 
 /* -------------------------------------------------------------------------- */
@@ -1053,6 +1054,89 @@ test("wait_session keeps a missing session and a control-plane failure as errors
     assert.doesNotMatch(resultText(result), /timeout/);
     assert.equal(calls.length, 1, `${status} ends the wait at the first read`);
   }
+});
+
+test("a long wait_session on a running child reports its progress and its end to the control plane (#1280)", async () => {
+  const { deps, calls } = makeDeps((call) => call.method === "POST"
+    ? { status: 200, body: { waits: [] } }
+    : { status: 200, body: { session: { id: "child", status: "running", runnerId: "r1" } } });
+  let now = 0;
+  deps.now = () => now;
+  deps.sleep = async (milliseconds) => { now += milliseconds; };
+
+  const result = await callTool(deps, "wait_session", { sessionId: "child", states: ["idle", "completed"], timeoutMs: 20 * 60_000 });
+
+  assert.equal(resultJson(result).outcome, "timeout");
+  const reads = calls.filter((call) => call.method === "GET");
+  const reports = calls.filter((call) => call.method === "POST");
+  assert.ok(reads.length > 100, "the wait itself polls exactly as before");
+  assert.ok(reports.every((call) => call.url === `${CP_URL}/api/sessions/${SELF_ID}/waits`));
+  assert.ok(reports.every((call) => call.headers[WOLLIPOG_AGENT_ACTOR_SESSION_HEADER] === SELF_ID), "the session's own credential");
+  const bodies = reports.map((call) => call.body as Record<string, unknown>);
+  const active = bodies.filter((body) => body.state === "active");
+  // At most one report per 15 seconds, after a successful poll: with polls backed off to 10 seconds
+  // that is every second poll, 60 in 20 minutes, well inside the 75-second progress bound.
+  assert.ok(active.length >= 55 && active.length <= 65, `${active.length} progress reports`);
+  assert.deepEqual(bodies.at(-1)!.state, "ended", "the end is reported last");
+  assert.ok(new Set(bodies.map((body) => body.waitId)).size === 1);
+  assert.match(String(bodies[0]!.waitId), /^wait_[a-f0-9]{32}$/u);
+  assert.deepEqual(bodies[0]!.target, { kind: "session", sessionId: "child", states: ["idle", "completed"] });
+  assert.equal(bodies[0]!.kind, "wait_session");
+  assert.equal(bodies[0]!.intervalMs, 10_000, "the bound covers polls backed off to 10 seconds");
+  assert.ok((bodies[0]!.elapsedMs as number) >= 15_000);
+  assert.equal((bodies[0]!.elapsedMs as number) + (bodies[0]!.remainingMs as number), 20 * 60_000, "durations, not timestamps");
+});
+
+test("wait progress reports are throttled, skip short waits, stop when refused, and survive the call's cancellation", async () => {
+  let now = 0;
+  const { deps, calls } = makeDeps(() => ({ status: 200, body: {} }));
+  deps.now = () => now;
+  const target = { kind: "pull_request" as const, repository: "picoduck/wollipog", number: 1280 };
+  const short = waitProgressReporter(deps, "wait_pull_request", target, 60_000, 30_000);
+  short.poll();
+  now = 14_999;
+  short.poll();
+  await short.end();
+  assert.equal(calls.length, 0, "a wait shorter than one report interval is never reported");
+
+  now = 0;
+  const controller = new AbortController();
+  const reporter = waitProgressReporter({ ...deps, signal: controller.signal }, "wait_pull_request", target, 3_600_000, 30_000);
+  now = 15_000;
+  reporter.poll();
+  now = 20_000;
+  reporter.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 30_000;
+  reporter.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.deepEqual(calls.map((call) => (call.body as { state: string }).state), ["active", "active"], "at most one report per 15 seconds");
+  controller.abort();
+  await reporter.end();
+  assert.deepEqual(calls.map((call) => (call.body as { state: string }).state), ["active", "active", "ended"]);
+  assert.equal(calls.at(-1)!.signal?.aborted, false, "the call's own cancellation never cancels the report of its end");
+
+  // An older control plane has no route: one refusal stops reports for that call, and no end is sent.
+  const old = makeDeps(() => ({ status: 404, body: { error: "Route POST:/api/sessions/s_self/waits not found" } }));
+  now = 0;
+  old.deps.now = () => now;
+  const refused = waitProgressReporter(old.deps, "wait_pull_request", target, 3_600_000, 30_000);
+  now = 15_000;
+  refused.poll();
+  await new Promise((resolve) => setImmediate(resolve));
+  now = 60_000;
+  refused.poll();
+  await refused.end();
+  assert.equal(old.calls.length, 1);
+
+  // A device-token CLI call has no session to show the wait on.
+  const cli = makeDeps();
+  now = 0;
+  const device = waitProgressReporter({ ...cli.deps, now: () => now, actorHeader: null }, "wait_pull_request", target, 3_600_000, 30_000);
+  now = 60_000;
+  device.poll();
+  await device.end();
+  assert.equal(cli.calls.length, 0);
 });
 
 test("wait_session never turns an unreadable or cancelled session read into a timeout result", async () => {

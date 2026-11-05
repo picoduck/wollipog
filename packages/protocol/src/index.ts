@@ -896,7 +896,13 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      A pull request is reported there instead of failing the read. The control plane's
 //      selection floors read these facts; an older runner reports none, so its selection
 //      proposals take the owner's route. (290 is claimed by an open pull request.)
-export const PROTOCOL_VERSION = 291;
+// 298: tracked waits (#1280, #4249). A runner's Wollipog MCP server reports each `wait_session`
+//      and `wait_pull_request` call through POST /api/sessions/:id/waits (start, successful polls,
+//      end), and the control plane projects `SessionView.waits`, classified under the liveness
+//      contract in session-waits.ts. An older control plane refuses the report and the runner
+//      stops reporting that call; an older dashboard ignores the field and shows the lifecycle.
+//      (292–297 are claimed by open pull requests.)
+export const PROTOCOL_VERSION = 298;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -912,6 +918,7 @@ export * from "./campaign-review-job.js";
 export * from "./session-review-job.js";
 export * from "./review-session.js";
 export * from "./pull-request-watch.js";
+export * from "./session-waits.js";
 export * from "./workspace-removal.js";
 export * from "./forge-decision-action.js";
 export * from "./review-retirement.js";
@@ -8011,7 +8018,9 @@ export interface ManagedBackgroundJobView {
   endedBy?: ManagedBackgroundJobEnd;
   /** Set once a job the runner still lists has gone `BACKGROUND_JOB_STALL_MS` without a terminal
    * status (#1651). It is a report, not proof that the job ended: Wollipog cannot tell a monitor
-   * that never fires from one still waiting. */
+   * that never fires from one still waiting. Past it the job no longer counts as a campaign child's
+   * wait; dashboards from #4249 on still show the job Running, since elapsed time breaks no
+   * liveness contract (older ones label it Stalled). */
   stalledSince?: number;
 }
 
@@ -8749,6 +8758,10 @@ export interface SessionView {
   /** v272: the merge-queue watch this session is parked on, or the latest one whose wake is still
    * owed or was lost (#4071). Omitted otherwise and by older control planes. */
   pullRequestWatch?: import("./pull-request-watch.js").PullRequestWatchView;
+  /** v298: the `wait_session` and `wait_pull_request` calls in progress on this session, oldest
+   * first, each classified Healthy or Stalled by the control plane (#1280, #4249). Omitted when
+   * there are none and by older control planes. */
+  waits?: import("./session-waits.js").SessionWaitView[];
   /** Submission stays fenced until the runner confirms the committed role. */
   roleConversion?: SessionRoleConversionView;
   /** Resolved campaign behavior and authority snapshot. Present only for Orchestrator sessions

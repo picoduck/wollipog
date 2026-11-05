@@ -26,6 +26,7 @@ import {
   type StopOperationView,
 } from "@wollipog/protocol";
 import { ACKNOWLEDGE_BLOCKED_RESULT_EFFECT, BACKGROUND_DELIVERY_STATUS, backgroundDeliveryNeedsYou, shownWatchdogDelivery } from "./background-delivery-status.js";
+import { sessionWaitConditions, type SessionWaitCondition } from "./session-wait-status.js";
 
 export type StatusTone = "info" | "success" | "warning" | "danger" | "neutral" | "review";
 
@@ -193,7 +194,6 @@ const VOCABULARY = {
     queued: neutral("Queued"),
     starting: info("Starting", { pulse: true }),
     running: info("Running", { pulse: true }),
-    stalled: warning("Stalled"),
     completed: success("Completed"),
     failed: danger("Failed"),
     canceled: neutral("Canceled"),
@@ -568,6 +568,9 @@ export type SessionConditionKind =
   | "queue_reason"
   /** The runner is relaunching the session in the worktree it switched to (#3810). */
   | "worktree_switch"
+  /** A wait the session is deliberately in (#1280, #4249): a wait_session or wait_pull_request
+   * call, healthy or Stalled by its liveness contract, or a parked merge-queue watch. */
+  | "session_wait"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
   | "follow_up"
   | "lifecycle";
@@ -621,7 +624,7 @@ export type SessionStatusSource = Pick<SessionView, "status" | "pendingApproval"
     "fullControlCampaignStatus" | "campaignRequests" | "pendingRequestOwners" | "archived" |
     "archiveStatus" | "archiveOperation" | "stopOperation" | "historyQuarantine" | "capacityWait" |
     "queueHold" | "holds" | "backgroundWorkState" | "backgroundFollowUp" | "backgroundDeliveries" |
-    "providerHomeWait" | "worktreeSwitch">>;
+    "providerHomeWait" | "worktreeSwitch" | "waits" | "pullRequestWatch">>;
 
 const FOLLOW_UP_BLOCKERS: Record<NonNullable<NonNullable<SessionView["backgroundFollowUp"]>["blocker"]>, string> = {
   governance: "The session is paused by a governance limit. Review the session's pending action to continue.",
@@ -740,6 +743,10 @@ function worktreeSwitchCondition(session: SessionStatusSource): SessionCondition
   };
 }
 
+function sessionWaitCondition(wait: SessionWaitCondition): SessionCondition {
+  return { kind: "session_wait", meta: wait.meta, description: wait.description, needsYou: false };
+}
+
 export function sessionStatusSummary(
   session: SessionStatusSource,
   context: SessionStatusContext = {},
@@ -818,14 +825,19 @@ export function sessionStatusSummary(
   const awaitingPrompt = lifecycle.label === statusMeta("session", "idle").label;
   const waiting = !lost && !background?.needsYou && awaitingPrompt ? background : null;
 
+  // A broken wait ranks with the other recovery conditions, ahead of passive context; a healthy one
+  // is the lifecycle's own context, ahead of background work (#1280, #4249).
+  const waits = sessionWaitConditions(session);
   const conditions: SessionCondition[] = [...needs];
   if (lost) conditions.push(lost);
   if (disconnected) conditions.push(disconnected);
+  for (const wait of waits) if (wait.broken) conditions.push(sessionWaitCondition(wait));
   if (waiting) conditions.push(waiting);
   const switching = worktreeSwitchCondition(session);
   if (switching) conditions.push(switching);
   // Listed even under a request, so the popover still says the agent is Running (#3073).
   conditions.push({ kind: "lifecycle", meta: lifecycle, description: session.stopOperation?.failure?.message ?? session.archiveOperation?.failure?.message ?? lifecycleDescription(lifecycle), needsYou: false });
+  for (const wait of waits) if (!wait.broken) conditions.push(sessionWaitCondition(wait));
   if (background && !background.needsYou && background !== lost && background !== waiting) conditions.push(background);
   if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;
