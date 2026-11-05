@@ -362,6 +362,39 @@ sent while another is still being checked waits and inherits its outcome, and a 
 outranks a refusal recorded for the same subject meanwhile. Each check's verdict, reason and failure class appear
 in Campaign Status under Decision Model Checks, beside the follow-up or closure it affected.
 
+### Closure Request Refusals
+
+`request_github_issue_closure` tells three refusals apart before it does anything else (#3382). Each
+returns a fixed sentence and an `errorDetails.code`, which the HTTP body carries as `code`:
+
+- `issue_closure_request_invalid` (400): the request is malformed. `fields` lists each missing or
+  invalid field (`requestId`, `issue`, `reason`, `explanation`, `evidence`, `comment`), whatever the
+  scope holds.
+- `campaign_issue_scope_missing` (403): the request is well formed, but the campaign has no
+  authorized issue scope, absent or empty.
+- `campaign_issue_outside_scope` (403): the request is well formed, but the issue is not in a
+  non-empty scope. The sentence names the scope's revision, repository and up to 20 of its issues.
+
+Both scope refusals carry `issue`, `scopeRevision` and `recovery`, and name the supported route to
+add the issue:
+
+- `owner_scope_review_or_proposal`: a campaign owner adds it in Campaign Status under Issue Scope,
+  or the root proposes it with `request_campaign_issue_scope_change` for a person to approve.
+- `owner_scope_review_or_lineage`: under Full Control issue authority, the root's proposal is
+  admitted only with the lineage that authority accepts (see
+  [Bounded Full Control Issue Authority](#bounded-full-control-issue-authority)); otherwise only a
+  campaign owner can add the issue.
+- `unavailable`: no one can change the scope right now, and the sentence says why: a participating
+  runner below the scope-change protocol, or an active Orchestrator participant in another
+  repository workspace. The root leaves the issue open and reports it.
+
+A scope refusal reads saved state only. It does not synchronize scope, inspect the issue, create a
+decision, post a comment or close anything, and it logs `campaign_issue_closure_refused` with the
+session, request, issue, reason, scope revision and recovery. Neither refusal grants or widens any
+authority. A scope change and the closure stay separate decisions. Once the issue is in scope, the
+closure is requested again and takes the existing closure decision under the owner current policy
+assigns, with every inspection, revision, synchronization, conflict and replay check unchanged.
+
 ### Closure Refusal Reasons
 
 A `refused` closure result always carries `refusal` (#4059): a `reason`, the related PRs it names,

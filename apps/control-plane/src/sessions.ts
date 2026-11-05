@@ -46,6 +46,7 @@ import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, 
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
+import { boundedDecisionString, issueClosureRequestInvalid, issueClosureRequestInvalidFields, issueClosureScopeRefusal } from "./issue-closure-request-refusal.js";
 import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
@@ -817,10 +818,6 @@ function failAs<T>(result: ServiceResult<unknown>, fallback?: string): ServiceRe
   };
 }
 
-function boundedDecisionString(value: unknown, max: number): value is string {
-  return typeof value === "string" && value.trim().length > 0 && value.length <= max &&
-    !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
-}
 
 /** The resource key and option ids come from the child's own request and may contain line breaks,
  * so they are quoted as single-line literals and can never forge an envelope's framing lines. */
@@ -11729,14 +11726,16 @@ export class SessionsService {
       const compatibility = scopeCompatibility(this.db, session);
       if (compatibility) return capabilityFail(compatibility);
     }
-    if (isTerminal(session.status) || !boundedDecisionString(request?.requestId, 256) ||
-        !session.orchestratorPolicy.issueNumbers?.includes(request?.issue) ||
-        !["completed", "not_planned"].includes(request?.reason) ||
-        !boundedDecisionString(request?.explanation, 4000) ||
-        !Array.isArray(request?.evidence) || request.evidence.length < 1 || request.evidence.length > 32 ||
-        request.evidence.some((item) => !boundedDecisionString(item, 4000)) ||
-        (request.comment !== undefined && !boundedDecisionString(request.comment, 65_536))) {
-      return fail("closure requires a campaign-scoped issue, requestId, reason, explanation, evidence, and optional exact comment", 400);
+    if (isTerminal(session.status)) return fail("Issue closure requires a running root campaign Orchestrator; this session has ended.", 409);
+    // A malformed request, a campaign without issue scope and an issue outside the scope are told
+    // apart (#3382), and a scope refusal stops here: no synchronization, inspection or decision.
+    const invalidFields = issueClosureRequestInvalidFields(request);
+    if (invalidFields.length) return issueClosureRequestInvalid(invalidFields);
+    const scopeRefusal = issueClosureScopeRefusal(this.db, session, request.issue);
+    if (scopeRefusal) {
+      this.log.info(JSON.stringify({ event: "campaign_issue_closure_refused", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+        issue: request.issue, reason: scopeRefusal.errorDetails.code, scopeRevision: scopeRefusal.errorDetails.scopeRevision, recovery: scopeRefusal.errorDetails.recovery }));
+      return scopeRefusal;
     }
     try {
       if (session.orchestratorPolicy.issueScope && !await this.synchronizeCampaignIssueScope(sessionId)) return fail("Campaign scope synchronization is pending; reconnect every participating runner and retry.", 409);
