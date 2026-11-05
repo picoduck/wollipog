@@ -520,7 +520,8 @@ const LAUNCH_OPERATIONS: import("@wollipog/protocol").CampaignAuthorityOperation
   "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question",
   "tool_approval", "policy_ask"];
 const launchCeilings = (maxIssues: number) => ({ repositories: ["team/repo"], maxIssues, maxIssuesSource: "derived" as const, operations: LAUNCH_OPERATIONS });
-const scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null = params.get("scope") === "grant" ? {
+// `let`: the owner's selection count change (#4102) replaces it, as the server would.
+let scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null = params.get("scope") === "grant" ? {
   version: 1, status: "granted", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET,
   reason: "The owner names #123 and #124, cites #126 as background, and asks for the 5 highest-priority open UI issues without merging.",
   namedIssues: [123, 124], dropped: [{ repository: "team/repo", number: 999, reason: "not_in_message" }],
@@ -625,11 +626,20 @@ const client = {
     // The first message's scope grant (#4102): named issues with a selection, a defaulted selection
     // count, and the failure route.
     ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
-      ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture } : {}),
+      ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture, policyRevision: revision } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
     } : {}) }),
+  // The owner's selection count (#4102): a derived Maximum Issues moves by the change, as the server does.
+  setScopeGrantSelectionCount: async (_id: string, count: number, expectedRevision: number) => {
+    (window as unknown as { __SELECTION_COUNT__: unknown }).__SELECTION_COUNT__ = { count, expectedRevision };
+    const grant = scopeGrantFixture!;
+    const delta = count - grant.selection!.count;
+    scopeGrantFixture = { ...grant, selection: { ...grant.selection!, count, defaulted: false, setByOwner: true },
+      ceilings: { ...grant.ceilings, maxIssues: grant.ceilings.maxIssuesSource === "derived" ? grant.ceilings.maxIssues + delta : grant.ceilings.maxIssues } };
+    return sessionsFor(revision)[0]!;
+  },
   includeCampaignLocation: async (_id: string, locationId: string) => {
     (window as unknown as { __INCLUDED_LOCATION__: unknown }).__INCLUDED_LOCATION__ = locationId;
     included = true;

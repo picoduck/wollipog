@@ -10,7 +10,7 @@ import { inspectionResource, invalidInspectionReason } from "./campaign-worktree
 import { worktreeDirtyPaths } from "@wollipog/protocol";
 import { formatCampaignAssignment } from "./campaign-assignment.js";
 import { campaignFollowUpAdmissionKey } from "./campaign-budget.js";
-import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
+import type { CampaignFollowUpAdmissionSnapshot, CampaignFollowUpSubject, SetCampaignFollowUpLimitRequest, SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
 import { campaignBehaviorSources, campaignBehaviorValues, changedCampaignBehavior, exactChildHarnessRow,
   parseCampaignBehaviorRequest } from "./campaign-behavior.js";
 import { agentHarnessIdentityKey } from "@wollipog/protocol";
@@ -10051,6 +10051,39 @@ export class SessionsService {
     }
     this.log.info(JSON.stringify({ event: "campaign_follow_up_limit_changed", sessionId, acceptedFollowUps: limit,
       policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
+    for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
+    // From the campaign as it read before the change, so the decisions it revoked are seen leaving.
+    this.publishCampaignAttentionTransition(session);
+    return ok(this.db.getSession(sessionId)!);
+  }
+
+  /** The campaign owner's change to its scope grant's selection count (#4102). Human-only,
+   * compare-and-set on the policy revision; the boundary is re-minted around it
+   * (`ControlPlaneDb.setScopeGrantSelectionCount`). */
+  setScopeGrantSelectionCount(sessionId: string, request: SetScopeGrantSelectionCountRequest, principal: HumanPrincipal): ServiceResult<SessionView> {
+    const session = this.db.getSession(sessionId);
+    if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
+    const root = this.orchestratorCampaignController(session);
+    if (!root || root === "refused" || root.id !== sessionId || isTerminal(session.status)) {
+      return fail("Only a live root campaign can change its selection count.", 409);
+    }
+    if (!request || typeof request !== "object" || Array.isArray(request) || !Number.isSafeInteger(request.expectedRevision) ||
+        Object.keys(request).some((key) => key !== "count" && key !== "expectedRevision") ||
+        !Number.isSafeInteger(request.count) || request.count < 0 || request.count > 100) {
+      return fail("Enter a whole number of issues from 0 to 100.", 400);
+    }
+    const now = Date.now();
+    const result = this.db.setScopeGrantSelectionCount(sessionId, request.count, principal.userId, request.expectedRevision, now);
+    if (!result.ok) return fail(result.error, result.status);
+    for (const decision of result.revoked) {
+      this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+      this.recordWorkflowDecisionRevocation(decision,
+        // The owner re-authorized the boundary, as any campaign control change does.
+        { reason: "campaign_control_changed", triggeredBy: { kind: "human", id: principal.userId } }, now);
+    }
+    this.log.info(JSON.stringify({ event: "scope_grant_selection_count_changed", sessionId, count: request.count,
+      policyRevision: request.expectedRevision + 1, authorizedByUserId: principal.userId, revokedDecisions: result.revoked.length }));
+    void this.synchronizeCampaignIssueScope(sessionId);
     for (const id of [sessionId, ...this.db.campaignDescendantIds(sessionId)]) this.hub.sessionChangedById(id);
     // From the campaign as it read before the change, so the decisions it revoked are seen leaving.
     this.publishCampaignAttentionTransition(session);

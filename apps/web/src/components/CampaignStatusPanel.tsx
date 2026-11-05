@@ -301,7 +301,8 @@ function AvailableCampaignStatus({
                   canInclude={availability.role === "campaign"}
                 />
               )}
-              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
+              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
+                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined} />
               <CampaignDecisions campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}

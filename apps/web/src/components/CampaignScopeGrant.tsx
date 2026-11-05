@@ -1,7 +1,9 @@
-import React, { useId } from "react";
+import React, { useId, useState } from "react";
 import type { CampaignAuthorityOperation, CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant, ScopeGrantDropReason } from "@wollipog/protocol";
+import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { StatusBadge } from "./StatusBadge.js";
+import { BusyButton } from "./ui/BusyButton.js";
 
 /** The operations a Full Control launch can grant, in Title Case. */
 const OPERATION_LABELS: Partial<Record<CampaignAuthorityOperation, string>> = {
@@ -53,8 +55,9 @@ export function scopeGrantFailureSentence(failureClass: DecisionErrorClass | und
 const refs = (repository: string, numbers: readonly number[]) => numbers.length ? numbers.map((n) => `${repository}#${n}`).join(", ") : "None";
 
 /** Campaign Status's Scope Grant section (#4102): what the owner's first message granted, the hard
- * ceilings around it, and the Decision Model that read it with its reason. */
-export function CampaignScopeGrantSection({ grant }: { grant: FullControlScopeGrant }) {
+ * ceilings around it, and the Decision Model that read it with its reason. With `edit`, the owner
+ * can change the selection count; the server checks the person and the policy revision. */
+export function CampaignScopeGrantSection({ grant, edit }: { grant: FullControlScopeGrant; edit?: SelectionCountEdit }) {
   const headingId = useId();
   const repository = grant.ceilings.repositories[0] ?? "";
   const selection = grant.selection;
@@ -72,11 +75,12 @@ export function CampaignScopeGrantSection({ grant }: { grant: FullControlScopeGr
       <div><dt>Selection Count</dt><dd>{selection ? <>
         {selection.count}
         {selection.defaulted && <> <StatusBadge noDot tone="info" label="Defaulted" title="Your message didn't give a count." /></>}
+        {selection.setByOwner && <> <StatusBadge noDot label="Set by You" /></>}
         {selection.capped && <> <StatusBadge noDot tone="warning" label="Capped by Maximum Issues" /></>}
       </> : "None"}</dd></div>
       {selection && <div><dt>Selection Criteria</dt><dd>{selection.criteria || "None Stated"}</dd></div>}
       {selection && <div><dt>Selection Constraints</dt><dd>{selection.constraints.length ? selection.constraints.join("; ") : "None Stated"}</dd></div>}
-      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set at Launch" : "Derived"} /></dd></div>
+      <div><dt>Maximum Issues</dt><dd>{grant.ceilings.maxIssues} <StatusBadge noDot label={grant.ceilings.maxIssuesSource === "explicit" ? "Set by You" : "Derived"} /></dd></div>
       <div><dt>Repository</dt><dd>{grant.ceilings.repositories.join(", ")}</dd></div>
       <div><dt>Operations</dt><dd>{grant.ceilings.operations.length ? grant.ceilings.operations.map(operationLabel).join(", ") : "None"}</dd></div>
       {grant.ceilings.removedOperations?.length ? <div><dt>Withheld by Your Message</dt><dd>{grant.ceilings.removedOperations.map(operationLabel).join(", ")}</dd></div> : null}
@@ -84,7 +88,61 @@ export function CampaignScopeGrantSection({ grant }: { grant: FullControlScopeGr
       <div><dt>Decision Model</dt><dd>{target ? `${target.model} (${target.effort}) · ${target.harnessName} on ${target.machineName}` : "None Available"}</dd></div>
       <div><dt>{grant.status === "failed" ? "Failure" : "Reason"}</dt><dd>{grant.status === "failed" ? scopeGrantFailureSentence(grant.failureClass) : grant.reason ?? "None Given"}</dd></div>
     </dl>
+    {edit && selection && grant.status === "granted" && <SelectionCountEditor grant={grant} count={selection.count} edit={edit} />}
   </section>;
+}
+
+/** What the owner's selection count control needs: the campaign, its policy revision for the
+ * compare-and-set, and a callback once the change is saved. */
+export interface SelectionCountEdit {
+  campaignId: string;
+  policyRevision: number;
+  onSaved: () => void;
+}
+
+function SelectionCountEditor({ grant, count, edit }: { grant: FullControlScopeGrant; count: number; edit: SelectionCountEdit }) {
+  const api = useApi();
+  const [editing, setEditing] = useState(false);
+  const [value, setValue] = useState(String(count));
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const explicit = grant.ceilings.maxIssuesSource === "explicit";
+  const save = async () => {
+    if (busy) return;
+    const next = Number(value.trim());
+    if (!/^[0-9]+$/u.test(value.trim()) || next > 100) {
+      setError("Enter a whole number from 0 to 100.");
+      return;
+    }
+    setBusy(true); setError(null);
+    try {
+      await api.setScopeGrantSelectionCount(edit.campaignId, next, edit.policyRevision);
+      setEditing(false);
+      edit.onSaved();
+    } catch (cause) {
+      setError(cause instanceof Error ? cause.message : "Could not change the selection count.");
+    } finally {
+      setBusy(false);
+    }
+  };
+  if (!editing) {
+    return <div><button className="btn sm" type="button" onClick={() => { setValue(String(count)); setError(null); setEditing(true); }}>Change Count</button></div>;
+  }
+  return <fieldset className="field">
+    <legend>Change Selection Count</legend>
+    <label className="field">
+      <span>Issues to Select</span>
+      <input type="text" inputMode="numeric" value={value} disabled={busy} onChange={(event) => setValue(event.target.value)} />
+    </label>
+    <p>{explicit
+      ? `The Maximum Issues you set (${grant.ceilings.maxIssues}) stays as it is, so the count must fit within it.`
+      : "Maximum Issues moves by the same amount."} Saving re-authorizes Full Control. Any request or approval the Orchestrator hasn't used yet is withdrawn, and it asks again.</p>
+    {error && <Notice tone="danger" role="alert" title="Couldn't Change the Selection Count">{error}</Notice>}
+    <div>
+      <BusyButton className="btn sm" busy={busy} progress="Saving count…" onClick={() => void save()}>Save Count</BusyButton>{" "}
+      <button className="btn ghost sm" type="button" disabled={busy} onClick={() => setEditing(false)}>Cancel</button>
+    </div>
+  </fieldset>;
 }
 
 /** The grant context on the owner's one typed scope approval (#4102): their own message and why the

@@ -162,16 +162,24 @@ export class CampaignForgeObservationStore {
   /** For the background pass: when each ref was last read, successfully or not (a failed read waits
    * the same interval as a successful one), and whether its last value is a finished pull request
    * (merged or closed) with no failure since. A merged pull request whose head branch is still on
-   * the remote is not finished: its cleanup is still owed (#4067). */
-  readState(campaignId: string, refs: readonly CampaignPullRequestRef[]): Map<string, { readAt: number; finished: boolean }> {
+   * the remote is not finished: its cleanup is still owed (#4067). `branchesReported` says the
+   * observing runner reports head branches (v284), so a merged observation stored before it did is
+   * not finished either until that runner reads it once (#4145). */
+  readState(
+    campaignId: string,
+    refs: readonly CampaignPullRequestRef[],
+    branchesReported: boolean,
+  ): Map<string, { readAt: number; finished: boolean }> {
     return new Map(refs.flatMap((ref) => {
       const row = this.row(campaignId, ref);
       if (!row) return [];
       const value = row.value_json ? JSON.parse(row.value_json) as CampaignForgeChangeRequestObservation : null;
       // A merged branch still on the remote, or a same-repository one the forge did not name usably,
-      // is cleanup still owed: keep reading it.
+      // is cleanup still owed: keep reading it. So is one read before branches were reported, which
+      // the campaign status counts as pending too, while the runner can now report it.
       const branchRemains = value?.forge === undefined && value?.state === "merged" &&
-        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch && value.crossRepository === false));
+        (typeof value.headBranch?.tipSha === "string" || (!value.headBranch &&
+          (value.crossRepository === false || (value.crossRepository === undefined && branchesReported))));
       return [[forgeRefKey(ref), {
         readAt: Math.max(row.observed_at ?? 0, row.failed_at ?? 0),
         finished: !row.failure_reason && (value?.state === "merged" || value?.state === "closed") && !branchRemains,
@@ -294,7 +302,8 @@ export class CampaignForgeObserver {
         return Boolean(runner?.online && runnerSupportsProtocol(runner.protocolVersion, "campaignForgeStatus"));
       };
       for (const { campaignId, refs } of this.deps.backgroundTargets(askable)) {
-        const state = this.deps.store.readState(campaignId, refs);
+        const branchesReported = runnerSupportsProtocol(this.deps.observingRunner(campaignId)?.protocolVersion ?? null, "forgeDecisionActions");
+        const state = this.deps.store.readState(campaignId, refs, branchesReported);
         for (const ref of refs) {
           const stored = state.get(forgeRefKey(ref));
           if (stored?.finished) continue;

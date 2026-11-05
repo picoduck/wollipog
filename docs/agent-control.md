@@ -2259,7 +2259,8 @@ finishes it as `complete_with_handoffs`. The forge observer keeps re-reading suc
 until it merges and its branch is gone, and `get_campaign` refreshes pending ones before answering.
 A merged pull request whose branch the forge does not name usably, including one read before branches
 were reported, stays `pending` with no branch name. A handoff can retain it, but a deletion cannot
-be pinned to it. A pull request closed without merging, a fork's branch (`crossRepository`), and
+be pinned to it. The background pass keeps re-reading it too, so a read stored before the upgrade
+settles after one read by the upgraded runner, without an on-demand read (#4145). A pull request closed without merging, a fork's branch (`crossRepository`), and
 every campaign observed by a runner older than v284 are not tracked, so those campaigns complete
 as before.
 
