@@ -111,9 +111,9 @@ test("a multi-repository scope is grouped under Repositories, and a proposal may
   const { host, proposals, unmount } = await mount(view({ repository: "owner/app", issueNumbers: [5], contextIssueNumbers: undefined,
     repositories: [{ repository: "owner/app", issueNumbers: [5], state: "verified" }, { repository: "owner/api", issueNumbers: [5, 40], state: "no_location_online" }] }));
   try {
-    assert.deepEqual(facts(host), { "Repositories": "owner/app: owner/app#5owner/api (No Location Online): owner/api#5, owner/api#40", "Scope Revision": "2" });
+    assert.deepEqual(facts(host), { "Repositories": "owner/app: #5owner/api (No Location Online): #5, #40", "Scope Revision": "2" });
     const items = [...host.querySelectorAll("dl.facts li")].map((item) => item.textContent);
-    assert.deepEqual(items, ["owner/app: owner/app#5", "owner/api (No Location Online): owner/api#5, owner/api#40"]);
+    assert.deepEqual(items, ["owner/app: #5", "owner/api (No Location Online): #5, #40"]);
     const field = (label: string) => [...host.querySelectorAll("label.field")].find((node) => node.textContent?.startsWith(label))!.querySelector("input")!;
     const type = async (input: HTMLInputElement, value: string) => act(async () => {
       input.focus();

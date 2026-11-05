@@ -131,7 +131,7 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
           <ul className="campaign-detail-list">{repositories.map((entry) => <li key={entry.repository}>
             {entry.repository}
             {entry.state === "no_location_online" && <> <span className="muted">(No Location Online)</span></>}
-            {": "}{entry.issueNumbers.length ? entry.issueNumbers.map((n) => `${entry.repository}#${n}`).join(", ") : "None"}
+            {": "}{entry.issueNumbers.length ? entry.issueNumbers.map((n) => `#${n}`).join(", ") : "None"}
           </li>)}</ul>
         </dd></div> : <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>}
         <div><dt>Scope Revision</dt><dd>{view.revision}</dd></div>
