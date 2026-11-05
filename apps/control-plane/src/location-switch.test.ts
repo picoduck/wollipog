@@ -44,8 +44,11 @@ function harness(options: { role?: "orchestrator"; parent?: boolean; project?: b
   const repositories = new Map<string, string | null>([[locations.app.id, "acme/app"], [locations.docs.id, "acme/docs"],
     [locations.laptop.id, "Acme/Docs"], [locations.broken.id, null]]);
   const inspected: string[] = [];
+  let held: Promise<void> | null = null;
+  let onHeld: (() => void) | null = null;
   const inspect = async (locationId: string): Promise<ProjectLocationInspection> => {
     inspected.push(locationId);
+    if (held) { onHeld?.(); await held; }
     const location = db.projectLocation(locationId)!;
     const repository = repositories.get(locationId);
     return repository
@@ -74,8 +77,15 @@ function harness(options: { role?: "orchestrator"; parent?: boolean; project?: b
   const resolve = (occurrenceId: string, selectedOptionId?: string, actor: { kind: "human" | "agent"; id: string } = { kind: "human", id: owner }) =>
     sessions.resolveWorkflowDecision("self", "self", occurrenceId,
       selectedOptionId ? { outcome: "approve", selectedOptionId } : { outcome: "deny" }, "human", actor, () => true);
+  /** Inspections wait until the returned release runs; `reached` settles once one is waiting. */
+  const holdInspections = () => {
+    let release!: () => void;
+    held = new Promise<void>((resolve) => { release = () => { held = null; resolve(); }; });
+    const reached = new Promise<void>((resolve) => { onHeld = resolve; });
+    return { release, reached };
+  };
   return { db, sessions, service, principal, owner, project, locations, repositories, inspected, created, request, resolve,
-    failCreation: (message: string | null) => { createFailure = message; } };
+    holdInspections, failCreation: (message: string | null) => { createFailure = message; } };
 }
 
 test("a regular session's request lists the verified Locations of the task's repository for its owner to choose", async () => {
@@ -194,6 +204,34 @@ test("an approver who can no longer start sessions can neither approve nor have 
     const second = (await h.request("switch-2")).data!;
     assert.equal(h.resolve(second.occurrenceId, `new_session:${h.locations.docs.id}`).status, 403, "a Viewer cannot approve");
   } finally { h.db.close(); }
+});
+
+test("authorization and the session's settings are read again after the Locations are inspected, before anything starts", async () => {
+  const changes: Array<[string, (h: ReturnType<typeof harness>) => void, RegExp]> = [
+    ["the approver is demoted to Viewer", (h) => { h.db.raw().prepare("UPDATE identity_memberships SET role='viewer' WHERE user_id=?").run(h.owner); },
+      /can no longer start sessions/u],
+    ["the session's model changes", (h) => { h.db.raw().prepare("UPDATE sessions SET model='other' WHERE id='self'").run(); },
+      /settings changed while the Locations were checked/u],
+    ["the session becomes an Orchestrator", (h) => { h.db.raw().prepare("UPDATE sessions SET session_role='orchestrator' WHERE id='self'").run(); },
+      /^Orchestrators do not switch Locations/u],
+  ];
+  for (const [label, change, refusal] of changes) {
+    const h = harness();
+    try {
+      const decision = (await h.request()).data!;
+      assert.equal(h.resolve(decision.occurrenceId, `new_session:${h.locations.docs.id}`).ok, true);
+      const hold = h.holdInspections();
+      const pending = h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+      await hold.reached;
+      change(h);
+      hold.release();
+      const result = await pending;
+      assert.equal(result.ok, false, label);
+      assert.match(result.error!, refusal, label);
+      assert.equal(h.created.length, 0, `${label}: no session starts`);
+      assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved", `${label}: nothing is claimed`);
+    } finally { h.db.close(); }
+  }
 });
 
 test("a Location that changed after approval is verified again and refused, and the approval stays retryable", async () => {

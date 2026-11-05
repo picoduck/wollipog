@@ -43,6 +43,13 @@ export const LOCATION_SWITCH_ACTION_LABELS: Record<LocationSwitchAction, string>
   new_session: "Start a New Session",
 };
 
+/** The requesting session's facts an approval is bound to: where it is and what the handoff inherits. */
+function sessionBinding(session: SessionView) {
+  return { id: session.id, runnerId: session.runnerId, workspaceId: session.workspaceId, projectId: session.projectId,
+    projectLocationId: session.projectLocationId, agentId: session.agentId, model: session.model, effort: session.effort,
+    permissionMode: session.permissionMode };
+}
+
 /** What the new session is told. The handoff is the requester's own words, shown to the person on
  * the card before they approved it; the frame around it is Wollipog's. */
 export function locationSwitchHandoffPrompt(source: SessionView, snapshot: LocationSwitchSnapshot, target: LocationSwitchCandidate): string {
@@ -167,12 +174,7 @@ export class LocationSwitchService {
     })));
     // Identity, not content: the Locations and the repositories they verified as. The runner's own
     // inspection digest also covers the checkout's HEAD, which may move between request and approval.
-    const targetDigest = auditDigest({
-      session: { id: session.id, runnerId: session.runnerId, workspaceId: session.workspaceId, projectLocationId: session.projectLocationId,
-        agentId: session.agentId, model: session.model, effort: session.effort, permissionMode: session.permissionMode },
-      current,
-      candidates,
-    })!;
+    const targetDigest = auditDigest({ session: sessionBinding(session), current, candidates })!;
     return ok({ projectId: project.id, projectName: project.name, current, candidates, unavailable, options, targetDigest });
   }
 
@@ -245,22 +247,25 @@ export class LocationSwitchService {
     const target = chosen && snapshot.candidates.find((candidate) => candidate.locationId === chosen.locationId);
     if (!chosen || !target || !target.actions.includes(chosen.action)) return fail("The approval does not name an offered Location");
     if (chosen.action !== "new_session") return fail("This control plane cannot switch a live session yet; ask again and start a new session instead");
-    const requester = this.requester(principal, sessionId);
-    if (!requester.ok) return fail(requester.error!, requester.status);
-    const session = requester.data!;
-    const scope = this.db.sessionScope(sessionId);
-    const approver = this.db.locationSwitchApprover(occurrenceId);
-    const human = scope && approver ? this.db.operatingHumanPrincipal(approver, scope.organizationId) : null;
-    if (!human || !this.db.isSessionOwner(human, sessionId)) return fail("The approver no longer owns this session or can no longer start sessions");
+    const before = this.authorizeExecution(principal, sessionId, occurrenceId, target);
+    if (!before.ok) return fail(before.error!, before.status);
     if (this.executing.has(occurrenceId)) return fail("This Location switch is already being carried out");
     this.executing.add(occurrenceId);
     try {
       // Project membership alone grants nothing: the approver's own access, the Location's identity
       // and the repository it verifies as are all read again now.
-      const prepared = await this.prepare(session, human, snapshot.repository);
+      const prepared = await this.prepare(before.data!.session, before.data!.human, snapshot.repository);
       if (!prepared.ok) return fail(prepared.error!, prepared.status);
       if (prepared.data!.targetDigest !== snapshot.targetDigest) {
         return fail("The Project's Locations, their repositories or this session's settings changed; ask again for a fresh approval");
+      }
+      // The inspections ran on other machines. Authorization and the session's settings are read
+      // again here, and nothing is awaited between this check and the claim below.
+      const after = this.authorizeExecution(principal, sessionId, occurrenceId, target);
+      if (!after.ok) return fail(after.error!, after.status);
+      const { session, human } = after.data!;
+      if (JSON.stringify(sessionBinding(session)) !== JSON.stringify(sessionBinding(before.data!.session))) {
+        return fail("This session's Location or settings changed while the Locations were checked; ask again for a fresh approval");
       }
       const result = this.startHandoffSession(occurrenceId, digest, session, snapshot, target, human, now);
       if (!result.ok) return fail(result.error!, result.status);
@@ -269,6 +274,24 @@ export class LocationSwitchService {
     } finally {
       this.executing.delete(occurrenceId);
     }
+  }
+
+  /** The requester is still a live regular session, and its approver still owns it, may still start
+   * sessions, and can still reach the Project and the chosen Location. Synchronous, from the database. */
+  private authorizeExecution(principal: AgentPrincipal, sessionId: string, occurrenceId: string, target: LocationSwitchCandidate):
+    ServiceResult<{ session: SessionView; human: HumanPrincipal }> {
+    const requester = this.requester(principal, sessionId);
+    if (!requester.ok) return fail(requester.error!, requester.status);
+    const session = requester.data!;
+    const scope = this.db.sessionScope(sessionId);
+    const approver = this.db.locationSwitchApprover(occurrenceId);
+    const human = scope && approver ? this.db.operatingHumanPrincipal(approver, scope.organizationId) : null;
+    if (!human || !this.db.isSessionOwner(human, sessionId)) return fail("The approver no longer owns this session or can no longer start sessions");
+    if (!session.projectId || !this.db.canAccessProject(human, session.projectId) ||
+        !this.db.canAccessRunner(human, target.runnerId) || !this.db.canAccessWorkspace(human, target.runnerId, target.workspaceId)) {
+      return fail("The approver can no longer reach that Location");
+    }
+    return ok({ session, human });
   }
 
   private startHandoffSession(occurrenceId: string, digest: string, session: SessionView, snapshot: LocationSwitchSnapshot,
