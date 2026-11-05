@@ -9,7 +9,7 @@ An absent control mode is Custom. A prompt saying “Full Control” does not es
 | Decision | Required Review and Execution |
 | --- | --- |
 | Implementation Question | Exact typed question/options; use the selected answer only after consumption. Authentication, secrets and unverified effects remain human-owned. |
-| PR Merge | Reviewed head, required checks on that head, dependencies and stacked children; arm and execute the exact canonical merge command. Wait for merge-group CI and actual MERGED state. |
+| PR Merge | Reviewed head, required checks on that head, dependencies and stacked children; arm and execute the exact canonical merge command. Wait for merge-group CI and actual MERGED state. When GitHub reports no required checks for the pull request, cite every check reported for the head with `checksBasis: "all_reported"`: each must pass and the merge state must be clean, which the runner verifies. A head with no checks at all is never green: list none, and the merge is the person's (`no_checks`). |
 | Merged-Branch Deletion | Separate typed approval after actual merge; protect and verify stacked dependents before deleting. |
 | Follow-Up Publication | Exact sanitized repository/title/body/labels, fresh duplicate search, accepted recommendation and authorized lineage where required. Review the public payload, consume once, publish, then read it back. |
 | Scope Change | Exact additions/removals and current revision. Custom retains human review. Full Control needs separate server-established issue authority and verified lineage/limits. Resolution applies and consumes scope atomically. Re-read scope. |

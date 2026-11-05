@@ -1150,10 +1150,15 @@ const WORKFLOW_DECISION_RESOURCE_SCHEMA: Json = {
         requiredChecks: { type: "object", properties: {
           headSha: { type: "string", pattern: "^[0-9a-f]{40}$" }, status: { const: "passed" },
           checkedAt: { type: "integer", minimum: 1 },
-          checks: { type: "array", minItems: 1, items: { type: "object", properties: {
+          checks: { type: "array", items: { type: "object", properties: {
             name: { type: "string" }, state: { const: "passed" }, url: { type: "string" },
           }, required: ["name", "state"], additionalProperties: false } },
         }, required: ["headSha", "status", "checkedAt", "checks"], additionalProperties: false },
+        // GitHub only (#4119): the repository requires no checks, so checks lists every reported check.
+        checksBasis: { const: "all_reported",
+          description: "GitHub only, when GitHub reports no required checks for the pull request: requiredChecks.checks then lists " +
+            "every check reported for the head, each passing, with the merge state clean; the runner verifies it. A head with no " +
+            "checks at all lists none, and its merge is the person's. Omit it whenever required checks exist." },
         // GitLab only, and then required (#3602): repository is <gitlab-host>/group/project, pullRequest the IID.
         mergeMethod: { type: "string", enum: ["merge_train", "merge"] },
         squash: { type: "boolean" },

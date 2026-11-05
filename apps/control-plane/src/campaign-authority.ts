@@ -172,6 +172,11 @@ export function evaluateCampaignAuthority(
     return { ...rest, owner: "human", basis: "human_required",
       reason: repositoryBound && closureProofIncomplete(controller, policy, protocol, controllerProtocol, snapshot) ? "closure_proof_incomplete" : "outside_boundary" };
   }
+  // #4119: nothing reported is never green, so a merge citing no checks is the person's in every mode.
+  if (snapshot?.category === "pr_merge" && snapshot.checksBasis === "all_reported" && !snapshot.requiredChecks.checks.length) {
+    const { requestClass: _requestClass, disposition: _disposition, ...rest } = evaluated;
+    return { ...rest, owner: "human", basis: "human_required", reason: "no_checks" };
+  }
   const closures = full && evaluated.owner === "orchestrator" && snapshot?.category === "pr_merge"
     ? mergeClosureScope(controller.orchestratorPolicy, protocol, snapshot) : null;
   if (closures) return { ...evaluated, owner: "human", basis: "human_required", ...closures };

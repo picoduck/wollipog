@@ -890,7 +890,11 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
 //      row only under a consumed switch naming exactly that Location.
-export const PROTOCOL_VERSION = 289;
+// 292: Merges in repositories without required checks (#4119). A GitHub merge preflight may ask
+//      for `checks`; the runner then also reads every check reported for the head, how many
+//      GitHub marks required, and whether its merge state is clean, so the control plane can
+//      verify a `pr_merge` snapshot whose `checksBasis` is `all_reported`.
+export const PROTOCOL_VERSION = 292;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1445,6 +1449,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
+  /** v292 reads a pull request's reported checks in the GitHub merge preflight (#4119). */
+  githubMergeChecksBasis: 292,
 } as const;
 
 /* ========================================================================== */
@@ -5551,6 +5557,11 @@ export type WorkflowDecisionResourceSnapshot =
        * `owner/repo#N`. The control plane admits the merge only when these are exactly the issues
        * GitHub would close. Absent when it closes none, so earlier digests are unchanged. */
       intendedClosures?: string[];
+      /** GitHub only (v292, #4119): the pull request's repository requires no checks, so
+       * `requiredChecks.checks` lists every check reported for the head instead, each passing,
+       * with GitHub's merge state clean. With no checks at all the merge stays a person's
+       * (`no_checks`). Absent for the required-checks basis, so earlier digests are unchanged. */
+      checksBasis?: "all_reported";
     }
   | {
       /** #3369: more review rounds for one epoch of the requester's review run on this pull
@@ -10170,6 +10181,19 @@ export interface GithubMergePreflightMessage {
   repository: string;
   pullRequest: number;
   headSha: string;
+  /** v292 (#4119): also read the head's checks, for a snapshot whose `checksBasis` is `all_reported`. */
+  checks?: true;
+}
+
+/** v292 (#4119): what GitHub reports for a pull request's head: every check, how many it marks
+ * required, and whether its merge state is clean. */
+export interface PullRequestChecksRead {
+  /** Reported checks GitHub marks required for this pull request. */
+  required: number;
+  /** Every check reported for the head, at most 100, by name. */
+  reported: Array<{ name: string; state: "passed" | "pending" | "failing" }>;
+  /** GitHub's `mergeStateStatus` is `CLEAN`. */
+  clean: boolean;
 }
 
 /** `refusal` is set when `ok` is false: `stale_head` (the pull request is not open at the snapshot's
@@ -10183,6 +10207,8 @@ export interface GithubMergePreflightResultMessage {
   refusal?: "stale_head" | "unavailable";
   reason?: string;
   check?: PullRequestClosingReferenceCheck;
+  /** v292: present when the request asked for `checks` and the read succeeded. */
+  checks?: PullRequestChecksRead;
 }
 
 /** Runner-authoritative coordinates for one successfully appended action-arm fence. */

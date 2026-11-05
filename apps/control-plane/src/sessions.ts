@@ -63,6 +63,7 @@ import { normalizeIssueClosureSnapshot, issueClosureActiveChildren, issueClosure
 import { normalizeAutomationCreationSnapshot } from "./automation-creation-snapshot.js";
 import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
+import { allReportedChecksRefusal, validPullRequestChecksRead } from "./merge-checks-basis.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
 import { issueClosureDeliveryFailure, issueClosureProofGapNotice } from "@wollipog/protocol";
@@ -1222,10 +1223,16 @@ export function normalizeWorkflowDecisionSnapshot(
       return [{ name: check.name, state: "passed" as const,
         ...(typeof check.url === "string" ? { url: check.url } : {}) }];
     }) : [];
+    // #4119: a GitHub repository without required checks cites every reported check instead; with
+    // none at all the merge is the person's, so an empty list is accepted only on that basis.
+    if (value.checksBasis !== undefined && (gitlab || value.checksBasis !== "all_reported")) {
+      return fail("checksBasis must be all_reported, and applies only to a GitHub merge decision");
+    }
+    const allReported = value.checksBasis === "all_reported";
     if (!repo || !pullRequest || !headSha ||
         (value.reviewResult !== "merge" && value.reviewResult !== "merge_with_acknowledged_risk") ||
         !checks || checks.status !== "passed" || checks.headSha !== headSha || !checked ||
-        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
+        !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || (checkRows.length < 1 && !allReported)) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
     // #3713: the issues a GitHub merge is meant to close; the runner's check compares them with
@@ -1243,6 +1250,7 @@ export function normalizeWorkflowDecisionSnapshot(
         headSha, status: "passed", checkedAt: checked, checks: checkRows,
       },
       ...(intendedClosures ? { intendedClosures } : {}),
+      ...(allReported ? { checksBasis: "all_reported" as const } : {}),
       ...(gitlab ? {
         mergeMethod: value.mergeMethod as "merge_train" | "merge",
         squash: value.squash as boolean,
@@ -11772,6 +11780,12 @@ export class SessionsService {
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
   ): Promise<{ ok: true; check?: PullRequestClosingReferenceCheck } | { ok: false; revoke: boolean; message: string }> {
     const runner = this.db.getRunner(child.runnerId);
+    // #4119: only a runner that reads the head's checks can support the all-reported basis.
+    const allReported = snapshot.checksBasis === "all_reported";
+    if (allReported && !runnerSupportsProtocol(runner?.protocolVersion, "githubMergeChecksBasis")) {
+      return { ok: false, revoke: false, message: runnerCapabilityRequirementError(runner?.protocolVersion, "githubMergeChecksBasis",
+        "merges in repositories without required checks").error };
+    }
     if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "githubMergeClosingReferences")) return { ok: true };
     const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
       message: `GitHub could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
@@ -11780,7 +11794,7 @@ export class SessionsService {
     try {
       answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
         type: "github_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
-        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
+        pullRequest: snapshot.pullRequest, headSha: snapshot.headSha, ...(allReported ? { checks: true as const } : {}),
       }, GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
     } catch {
       return unreadable("the runner did not answer.");
@@ -11796,7 +11810,14 @@ export class SessionsService {
     const check = validClosingReferenceCheck(result.check);
     if (!check) return unreadable("the runner's answer was incomplete.");
     const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures);
-    return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
+    if (mismatch) return { ok: false, revoke: true, message: mismatch };
+    if (allReported) {
+      const checks = validPullRequestChecksRead(result.checks);
+      if (!checks) return unreadable("the runner's answer was incomplete.");
+      const refused = allReportedChecksRefusal(snapshot, checks);
+      if (refused) return { ok: false, ...refused };
+    }
+    return { ok: true, check };
   }
 
   createWorkflowDecision(

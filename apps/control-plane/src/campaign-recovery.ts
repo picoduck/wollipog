@@ -18,7 +18,7 @@ export function requestReason(evaluation: CampaignAuthorityEvaluation): Campaign
     case "outside_boundary": case "outside_issue_scope": case "review_extension_cap_reached": return "boundary_enlargement";
     case "unsupported_provider": case "unverified_intent": case "evidence_review_unavailable":
     case "provider_delivery_unavailable": case "unverified_closures": return "unsupported_capability";
-    case "protected_request": case "human_required_rule": case "custom_owner": return "human_required_rule";
+    case "protected_request": case "human_required_rule": case "custom_owner": case "no_checks": return "human_required_rule";
     default: return "missing_human_information";
   }
 }

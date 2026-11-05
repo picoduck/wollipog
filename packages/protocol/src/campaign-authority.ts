@@ -109,6 +109,9 @@ export interface CampaignAuthorityEvaluation {
     /** #4062: a Full Control merge whose closures nothing reads (a GitLab merge, or a GitHub merge
      * from a runner older than the closing-reference check) and whose declared ones prove nothing. */
     "unverified_closures" |
+    /** #4119: a merge in a repository without required checks whose head reports no checks at
+     * all. Nothing reported is never green, so it stays the person's in every mode. */
+    "no_checks" |
     /** #4058: a Full Control closure of an issue inside the boundary that failed delegated proof.
      * It stays the person's; the closure snapshot's `deliveryGaps` name what a new request needs. */
     "closure_proof_incomplete" |
