@@ -352,7 +352,10 @@ function locationSwitchSession(): SessionView {
     { locationId: "loc-docs-laptop", name: "Docs Site (Laptop)", runnerId: "laptop", machineName: "Laptop", workspaceId: "docs",
       path: "/Users/dev/src/docs", repository: "acme/docs", sameRunner: false, actions: ["new_session" as const] },
   ].slice(0, locations);
+  // `live=1`: this machine's Location can take the live session itself (Switch and Continue).
+  if (query.get("live") === "1") candidates[0]!.actions = ["switch", "new_session"] as never;
   const snapshot: LocationSwitchSnapshot = { category: "location_switch", repository: "acme/docs",
+    ...(query.get("branch") === "1" ? { recoverBranch: "fix/install-link" } : {}),
     reason: "Issue acme/docs#12 is in the documentation repository, and this session runs in acme/app.",
     handoff: "Fix the broken install link reported in acme/docs#12.\nNothing has been changed yet; no branch or pull request exists.",
     trigger: query.get("trigger") === "review" ? "review" : "early", projectId: "acme", projectName: "Acme",
@@ -361,8 +364,9 @@ function locationSwitchSession(): SessionView {
     candidates,
     unavailable: query.get("unavailable") === "1"
       ? [{ locationId: "loc-mirror", name: "Docs Mirror", machineName: "Build Server", reason: "The Location's machine is offline." }] : [],
-    options: candidates.map((candidate) => ({ optionId: `new_session:${candidate.locationId}`, label: "Start a New Session",
-      description: `${candidate.name} on ${candidate.machineName}` })),
+    options: candidates.flatMap((candidate) => (candidate.actions as Array<"switch" | "new_session">).map((action) => ({
+      optionId: `${action}:${candidate.locationId}`, label: action === "switch" ? "Switch and Continue" : "Start a New Session",
+      description: `${candidate.name} on ${candidate.machineName}` }))),
     targetDigest: "a".repeat(64), expiresAt: Date.now() + 86_400_000 };
   return { ...base, title: "App Session", pendingApproval: { ...base.pendingApproval!, title: "Location Switch Approval Required",
     context: { toolName: "Typed Workflow Decision", input: JSON.stringify(snapshot) },

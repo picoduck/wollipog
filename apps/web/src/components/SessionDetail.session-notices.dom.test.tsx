@@ -411,6 +411,35 @@ test("Account Switch Failed offers Switch Account… and names a plain label", a
   }
 });
 
+test("a pending Location switch says where the session moves, and a failed one why it stayed (#4138)", async () => {
+  const base = { repository: "acme/docs", workspaceId: "docs", locationName: "Docs Site", at: 5 };
+  const pending = await mount(sessionView({ locationSwitch: { ...base, state: "pending" } }));
+  try {
+    const notice = pending.notices()[0]!;
+    assert.match(notice.textContent ?? "", /Location Switch Pending/u);
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "This session moves to Location “Docs Site” (acme/docs) when its current turn ends, then continues the task there.");
+    assertNoDomNode(notice.querySelector('button[aria-label="Dismiss Notice"]'), "a pending switch is not dismissed");
+  } finally {
+    await pending.unmount();
+  }
+  const failed = await mount(sessionView({ locationSwitch: { ...base, state: "failed",
+    reason: "the target worktree could not be prepared: branch fix/link is checked out in another worktree" } }));
+  try {
+    const notice = failed.notices()[0]!;
+    assert.ok(notice.classList.contains("t-warning"));
+    assert.match(notice.textContent ?? "", /Location Switch Failed/u);
+    assert.equal(notice.querySelector(".notice-body")?.textContent,
+      "This session stayed where it was instead of moving to Location “Docs Site” (acme/docs). " +
+      "The target worktree could not be prepared: branch fix/link is checked out in another worktree.");
+    const dismiss = notice.querySelector<HTMLButtonElement>('button[aria-label="Dismiss Notice"]')!;
+    await act(async () => { dismiss.click(); });
+    assert.equal(failed.notices().length, 0);
+  } finally {
+    await failed.unmount();
+  }
+});
+
 function launchRefusal(code: NonNullable<SessionView["providerHomeRefusal"]>["code"], account = true): NonNullable<SessionView["providerHomeRefusal"]> {
   return {
     code, provider: "codex", detectedAt: 9,
