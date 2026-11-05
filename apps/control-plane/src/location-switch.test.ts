@@ -2,7 +2,8 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   LOCATION_SWITCH_GUIDANCE, PROJECT_LOCATION_INSPECTION_FAILURES, PROTOCOL_VERSION, locationSwitchRole, withRepositoryMismatchGuidance,
-  type CreateSessionRequest, type LocationSwitchSnapshot, type ProjectLocationInspection, type RunnerMetadata, type SessionView,
+  type CreateSessionRequest, type LocationSwitchSnapshot, type ProjectLocationInspection, type RunnerMetadata,
+  type SessionLocationSwitchMessage, type SessionSnapshot, type SessionView,
 } from "@wollipog/protocol";
 import { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -19,7 +20,7 @@ const workstation: RunnerMetadata = { runnerId: "runner", hostname: "workstation
 const laptop: RunnerMetadata = { runnerId: "laptop", hostname: "laptop", os: "linux", version: "test", agents: [agent],
   workspaces: [{ id: "docs-copy", name: "Docs Copy", path: "/home/me/docs" }, { id: "broken", name: "Broken", path: "/home/me/broken" }] };
 
-function harness(options: { role?: "orchestrator"; parent?: boolean; project?: boolean } = {}) {
+function harness(options: { role?: "orchestrator"; parent?: boolean; project?: boolean; driver?: "acp" | "claude-code" } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const hub = { isRunnerOnline: () => true, sessionChangedById() {}, sessionEvent() {}, sessionChanged() {} } as unknown as Hub;
   const now = Date.now();
@@ -29,7 +30,7 @@ function harness(options: { role?: "orchestrator"; parent?: boolean; project?: b
     db.createSession({ id: "parent", runnerId: "runner", workspaceId: "app", agentId: "agent", title: "Parent", driver: "acp",
       useWorktree: false, config: {}, now });
   }
-  db.createSession({ id: "self", runnerId: "runner", workspaceId: "app", agentId: "agent", title: "App Session", driver: "acp",
+  db.createSession({ id: "self", runnerId: "runner", workspaceId: "app", agentId: "agent", title: "App Session", driver: options.driver ?? "acp",
     useWorktree: true, config: { model: "model", effort: "high" }, now, ...(options.parent ? { parentSessionId: "parent" } : {}) });
   db.updateSessionStatus("self", "running", now);
   if (options.role) db.raw().prepare("UPDATE sessions SET session_role='orchestrator' WHERE id='self'").run();
@@ -58,6 +59,8 @@ function harness(options: { role?: "orchestrator"; parent?: boolean; project?: b
   };
   const created: Array<{ human: HumanPrincipal; body: CreateSessionRequest }> = [];
   let createFailure: string | null = null;
+  const switches: Array<{ runnerId: string; message: SessionLocationSwitchMessage }> = [];
+  let switchReply: { ok: boolean; error?: string } | "silent" = { ok: true };
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} });
   const service = new LocationSwitchService(db, sessions, hub, {
     inspect,
@@ -65,6 +68,11 @@ function harness(options: { role?: "orchestrator"; parent?: boolean; project?: b
       created.push({ human, body });
       if (createFailure) return { ok: false, status: 409, error: createFailure };
       return { ok: true, status: 201, data: { id: `handoff-${created.length}` } as SessionView };
+    },
+    switchSession: async (runnerId, message) => {
+      switches.push({ runnerId, message });
+      if (switchReply === "silent") throw new Error("runner request timed out");
+      return switchReply;
     },
   });
   const scope = db.sessionScope("self")!;
@@ -85,7 +93,8 @@ function harness(options: { role?: "orchestrator"; parent?: boolean; project?: b
     return { release, reached };
   };
   return { db, sessions, service, principal, owner, project, locations, repositories, inspected, created, request, resolve,
-    holdInspections, failCreation: (message: string | null) => { createFailure = message; } };
+    holdInspections, failCreation: (message: string | null) => { createFailure = message; },
+    switches, replySwitch: (reply: typeof switchReply) => { switchReply = reply; } };
 }
 
 test("a regular session's request lists the verified Locations of the task's repository for its owner to choose", async () => {
@@ -155,6 +164,81 @@ test("approving a Location on another machine starts a session there with the ha
     // The requesting session keeps its own Location.
     assert.equal(h.db.getSession("self")!.projectLocationId, h.locations.app.id);
     assert.equal(h.db.getSession("self")!.workspaceId, "app");
+  } finally { h.db.close(); }
+});
+
+test("a live session on a supported harness can switch to a Location on its own machine, and only there", async () => {
+  const h = harness({ driver: "claude-code" });
+  try {
+    const decision = (await h.request("switch-live", { recoverBranch: "fix/install-link" })).data!;
+    const snapshot = decision.resourceSnapshot as LocationSwitchSnapshot;
+    const byLocation = new Map(snapshot.candidates.map((candidate) => [candidate.locationId, candidate.actions]));
+    assert.deepEqual(byLocation.get(h.locations.docs.id), ["switch", "new_session"], "same machine: Switch and Continue first");
+    assert.deepEqual(byLocation.get(h.locations.laptop.id), ["new_session"], "another machine: a new session only");
+    assert.equal(snapshot.recoverBranch, "fix/install-link");
+    assert.deepEqual(h.db.getSession("self")!.pendingApproval!.options.map((option) => option.name),
+      [...snapshot.options.map((option) => option.label), "Stay Here"]);
+    assert.ok(snapshot.options.some((option) => option.optionId === `switch:${h.locations.docs.id}` && option.label === "Switch and Continue"));
+    assert.equal(h.resolve(decision.occurrenceId, `switch:${h.locations.docs.id}`).ok, true);
+    const executed = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.status, 201, executed.error ?? "");
+    assert.equal(h.created.length, 0, "the live session moves; no new session starts");
+    assert.equal(h.switches.length, 1);
+    const { runnerId, message } = h.switches[0]!;
+    assert.equal(runnerId, "runner");
+    assert.deepEqual({ ...message, requestId: "", continuation: "" }, { type: "session_location_switch", requestId: "", sessionId: "self",
+      workspaceId: "docs", workspacePath: "/src/docs", repository: "acme/docs", locationName: "Docs", occurrenceId: decision.occurrenceId,
+      continuation: "", recoverBranch: "fix/install-link" });
+    const [frame, written] = message.continuation.split("[End Wollipog Location Switch]\n");
+    assert.match(frame!, /moving this session to Location "Docs" on "workstation", repository acme\/docs, from repository acme\/app\./u);
+    assert.match(frame!, /existing branch "fix\/install-link"/u);
+    assert.equal(written, "\nWhy it belongs here: Issue acme/docs#12 belongs to the documentation repository.\n\nFix the broken install link (acme/docs#12).");
+    assert.deepEqual({ ...executed.data!.locationSwitchResult!, completedAt: 0 }, { action: "switch", locationId: h.locations.docs.id,
+      sessionId: "self", navigationPath: `/sessions/~${Buffer.from("self", "utf16le").toString("base64url")}`, completedAt: 0 });
+    // A retry returns the receipt without asking the runner again.
+    await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(h.switches.length, 1);
+  } finally { h.db.close(); }
+});
+
+test("a refused switch gives its approval back, and an unconfirmed one is never sent twice", async () => {
+  const h = harness({ driver: "claude-code" });
+  try {
+    const decision = (await h.request()).data!;
+    assert.equal(h.resolve(decision.occurrenceId, `switch:${h.locations.docs.id}`).ok, true);
+    h.replySwitch({ ok: false, error: "The target Location's folder changed since it was approved; ask again." });
+    const refused = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.match(refused.error!, /refused the Location switch: The target Location's folder changed/u);
+    assert.equal(h.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    h.replySwitch("silent");
+    const silent = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(silent.status, 502);
+    h.replySwitch({ ok: true });
+    const again = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.match(again.error!, /may already have moved this session/u);
+    assert.equal(h.switches.length, 2, "after an unconfirmed attempt the runner is not asked again");
+  } finally { h.db.close(); }
+});
+
+test("the session row follows its runner into the new Location only under a consumed switch naming it", async () => {
+  const h = harness({ driver: "claude-code" });
+  try {
+    const moved = (workspaceId: string) => h.db.updateSessionFromSnapshot("self", {
+      id: "self", workspaceId, agentId: "agent", title: "App Session", status: "idle", driver: "claude-code",
+      useWorktree: true, worktreePath: `/worktrees/${workspaceId}`, config: { model: "model", effort: "high" }, preview: null, pendingApproval: null,
+      tokensIn: 0, tokensOut: 0, costUsd: 0, seq: 0, createdAt: 1000, updatedAt: 1000,
+    } satisfies SessionSnapshot, Date.now());
+    moved("docs");
+    assert.equal(h.db.getSession("self")!.workspaceId, "app", "a runner never moves the row by itself");
+    const decision = (await h.request()).data!;
+    assert.equal(h.resolve(decision.occurrenceId, `switch:${h.locations.docs.id}`).ok, true);
+    const executed = await h.service.execute("self", decision.occurrenceId, decision.resourceDigest, h.principal);
+    assert.equal(executed.ok, true, executed.error ?? "");
+    moved("app");
+    assert.equal(h.db.getSession("self")!.projectLocationId, h.locations.app.id);
+    moved("docs");
+    const session = h.db.getSession("self")!;
+    assert.deepEqual([session.workspaceId, session.projectId, session.projectLocationId], ["docs", h.project.id, h.locations.docs.id]);
   } finally { h.db.close(); }
 });
 

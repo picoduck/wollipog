@@ -345,6 +345,7 @@ export type UiSubscriptionApplyResult =
  * correlatable when it echoes a solicited sync's requestId; unsolicited ones never enter here. */
 export type RunnerRequestResult =
   | import("@wollipog/protocol").CampaignLaunchInspectionResult
+  | import("@wollipog/protocol").SessionLocationSwitchResultMessage
   | SkillSnapshotResultMessage
   | SkillAdoptionResultMessage
   | SkillAdoptionRecoveryResultMessage

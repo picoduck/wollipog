@@ -870,7 +870,14 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      Locations of the task's repository; only the session's owner decides it, and the requester
 //      executes the exact approved option. Orchestrators and child sessions are refused with their
 //      role's guidance. Older runners and control planes refuse the tool by name.
-export const PROTOCOL_VERSION = 285;
+// 286: Switch and Continue (#4138). A same-runner `location_switch` approval can name the action
+//      `switch`; the control plane sends `session_location_switch` to the session's runner, which
+//      re-verifies the target workspace, path and origin, records `pendingLocationSwitch` durably,
+//      and at the next turn boundary moves the live session into a new (or recovered-branch)
+//      worktree of the target repository, carries the provider conversation over and continues.
+//      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
+//      row only under a consumed switch naming exactly that Location.
+export const PROTOCOL_VERSION = 286;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1262,6 +1269,9 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   /** (#4138) A regular session's request_location_switch, checked against the requester's runner by
    * the control plane and against the control plane by the runner. */
   sessionLocationSwitch: 285,
+  /** (#4138) A same-runner Location switch of the live session: `session_location_switch` moves it
+   * at its next turn boundary and resumes the same conversation in the target repository. */
+  sessionLocationSwitchLive: 286,
   /** v239 runner answers `gitlab_merge_preflight`, which a GitLab `pr_merge` consume requires (#3602). */
   gitlabMergeDecisions: 239,
   /** v242 runner answers `github_merge_preflight`, the closing-reference check of a GitHub merge (#3713). */
@@ -8408,6 +8418,9 @@ export interface SessionView {
   /** True when the current binding was chosen by the Machine's opt-in automatic policy. */
   providerAccountAutomaticallySelected?: boolean;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** (#4138) An approved Location switch waiting for the provider's turn to end, or one that failed
+   * and left the session in its previous Location. */
+  locationSwitch?: import("./location-switch.js").LocationSwitchStateView;
   /** Protocol v233 (#3240): the lease refusal that stopped the session's last launch. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Protocol v248 (#3240): the busy provider account a starting session is waiting for. */
@@ -8631,6 +8644,8 @@ export interface SessionSnapshot {
   providerAccountAutomaticallySelected?: boolean;
   /** Three-valued: undefined is an older peer; null explicitly clears an earlier failure. */
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView | null;
+  /** (#4138) Three-valued like the account switch failure: null clears an earlier state. */
+  locationSwitch?: import("./location-switch.js").LocationSwitchStateView | null;
   /** Protocol v233 (#3240). Three-valued: undefined is an older peer; null clears an earlier
    * refusal. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView | null;
@@ -10541,6 +10556,7 @@ export type RunnerToControlPlane =
   | WorkspaceWorktreeSetupResultMessage
   | LogoutAgentResultMessage
   | SwitchSessionProviderAccountResultMessage
+  | import("./location-switch.js").SessionLocationSwitchResultMessage
   | SessionRoleResultMessage
   | InspectProviderAuthenticationResultMessage
   | SelectProviderAuthenticationAccountResultMessage
@@ -12601,6 +12617,7 @@ export type ControlPlaneToRunner =
   | TestSessionNamingCustomModelMessage
   | LogoutAgentMessage
   | SwitchSessionProviderAccountMessage
+  | import("./location-switch.js").SessionLocationSwitchMessage
   | PrepareSessionRoleMessage
   | CommitSessionRoleMessage
   | InspectProviderAuthenticationMessage

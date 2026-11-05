@@ -128,8 +128,12 @@ import {
 } from "@wollipog/protocol";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync } from "node:fs";
-import { mkdir, rm } from "node:fs/promises";
+import { mkdir, realpath, rm } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
+import { validLocationSwitchBranch, type SessionLocationSwitchMessage } from "@wollipog/protocol";
+import {
+  LOCATION_SWITCH_FAILURES, LocationSwitchRefusal, moveClaudeTranscriptToCwd, verifyLocationSwitchTarget,
+} from "./location-switch.js";
 import { ReviewWriterRegistry } from "./review-writers.js";
 import { join, parse as parsePath, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
@@ -264,6 +268,8 @@ import {
   type BackgroundJobEndActor,
   type BackgroundJobEndReason,
   type DurableBackgroundJob,
+  type LocationHistoryEntry,
+  type PendingLocationSwitch,
   type SessionMeta,
   type StoredEvent,
 } from "./session-store.js";
@@ -283,6 +289,8 @@ import {
 import {
   createWorktree,
   createRequestedWorktree,
+  createRecoveredBranchWorktree,
+  releaseRecoveredWorktree,
   attachRequestedWorktree,
   fetchRemoteDefaultBase,
   readRepositoryDefaultBranch,
@@ -867,6 +875,9 @@ interface ActiveSession {
   /** A validated provider account selected after this process launched. It is applied only after
    * the current turn settles, before any queued turn can reach a provider. */
   pendingProviderAccountSwitch?: BoundProviderAccount;
+  /** (#4138) The durable `pendingLocationSwitch` this process must carry out once its turn settles,
+   * by occurrence; the metadata stays the source of truth. */
+  pendingLocationSwitch?: string;
   /** Structured exhausted-window observation from this exact provider turn. */
   usageWindowRejection?: UsageWindowRejection;
   /** Exact canonical roots rendered into this live process's Seatbelt profile at launch. */
@@ -913,7 +924,8 @@ interface ApprovedProviderAuthentication {
 
 type ProviderReplacementResult =
   | { status: "launched"; entry: ActiveSession; queuedWork: boolean }
-  | { status: "not_resumable" | "lock_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" };
+  | { status: "not_resumable" | "lock_unavailable" | "retirement_failed" | "launch_failed" | "stopped" | "superseded" }
+  | { status: "prepare_failed"; error: string };
 
 /** Capability-derived resume gate. ACP must have proven stable resume or load in its last live
  * handshake; driver identity alone is never enough. */
@@ -7217,6 +7229,10 @@ export class SessionManager {
       pendingProviderCredentialHome: prior?.pendingProviderCredentialHome,
       pendingProviderProfileId: prior?.pendingProviderProfileId,
       providerAccountSwitchFailure: prior?.providerAccountSwitchFailure,
+      // (#4138) The Locations this session left keep their worktrees attributed across restarts.
+      locationHistory: prior?.locationHistory,
+      pendingLocationSwitch: priorMatchesWorkspace ? prior?.pendingLocationSwitch : undefined,
+      locationSwitchFailure: prior?.locationSwitchFailure,
       agentVersion: spec.agentVersion ?? prior?.agentVersion,
       capabilities: spec.capabilities ?? prior?.capabilities,
       sessionSlashCommands: carrySlashCommandCatalog ? prior?.sessionSlashCommands : undefined,
@@ -9752,6 +9768,8 @@ export class SessionManager {
       ...(meta.providerAuthBlock && !pendingProviderAccountSwitch ? { authenticationBlocked: true } : {}),
       ...(meta.providerHistoryBlock ? { historyQuarantined: true } : {}),
       ...(pendingProviderAccountSwitch ? { pendingProviderAccountSwitch } : {}),
+      // A Location switch accepted before a runner restart is carried out by the next process.
+      ...(meta.pendingLocationSwitch ? { pendingLocationSwitch: meta.pendingLocationSwitch.occurrenceId } : {}),
       steerFenceIds: new Set(
         [...retainedPromotions.values()]
           .filter((operation) => !operation.settled)
@@ -13038,6 +13056,18 @@ export class SessionManager {
         return;
       }
     }
+    // An approved Location switch (#4138) moves the session before any queued turn runs, so no
+    // turn reaches the provider in the Location its person just chose to leave.
+    if (entry.pendingLocationSwitch) {
+      if (this.worktreeRebindCanProceed(sessionId, entry)) {
+        await this.switchLocation(sessionId, entry);
+        return;
+      }
+      if (!this.promoteQueuedHandoffPrerequisite(sessionId, entry.queue)) {
+        this.syncQueueHold(sessionId);
+        return;
+      }
+    }
     if (this.requestRetiredWorktreeRebind(sessionId, entry)) {
       if (this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
@@ -13217,12 +13247,14 @@ export class SessionManager {
         entry.governanceTrip = undefined;
         this.emitStatus(sessionId, "idle");
         if (!entry.governanceTripped &&
-            (entry.queue.length || entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind)) {
+            (entry.queue.length || entry.pendingProviderAccountSwitch || entry.pendingWorktreeRebind || entry.pendingLocationSwitch)) {
           setImmediate(() => this.scheduleDrain(sessionId));
         }
       }
       if (entry.pendingProviderAccountSwitch && this.providerAccountSwitchCanProceed(sessionId, entry)) {
         await this.rebindSelectedProviderAccount(sessionId, entry);
+      } else if (entry.pendingLocationSwitch && this.worktreeRebindCanProceed(sessionId, entry)) {
+        await this.switchLocation(sessionId, entry);
       } else if (entry.pendingWorktreeRebind && this.worktreeRebindCanProceed(sessionId, entry)) {
         await this.rebindSelectedWorktree(sessionId, entry);
       } else if (this.active.get(sessionId) === entry && !entry.authenticationBlocked && this.projectMemoryChanged(sessionId, entry) &&
@@ -14081,6 +14113,9 @@ export class SessionManager {
       queueFailureReason: () => string;
       approvedAuthentication?: ApprovedProviderAuthentication;
       onLaunched?: (entry: ActiveSession) => void;
+      /** Runs once the old provider has exited and before replacementMeta. A throw ends the
+       * replacement with nothing relaunched and replacementMeta never called. */
+      prepareReplacement?: () => Promise<void>;
     },
   ): Promise<ProviderReplacementResult> {
     this.captureAgentSessionId(sessionId, entry.client);
@@ -14135,6 +14170,18 @@ export class SessionManager {
       if (!this.launchIsCurrent(sessionId, launchGeneration)) {
         result = { status: "superseded" };
         return result;
+      }
+      if (options.prepareReplacement) {
+        try {
+          await options.prepareReplacement();
+        } catch (error) {
+          result = { status: "prepare_failed", error: errText(error) };
+          return result;
+        }
+        if (!this.launchIsCurrent(sessionId, launchGeneration)) {
+          result = { status: "superseded" };
+          return result;
+        }
       }
       const fresh = options.replacementMeta();
       if (!fresh || !this.launchIsCurrent(sessionId, launchGeneration)) {
@@ -14279,9 +14326,210 @@ export class SessionManager {
     this.parkProviderAccountSwitchFailure(sessionId, target, reason);
   }
 
+  /** Accept an approved Location switch for a live session (#4138). Everything the control plane
+   * approved is verified again here, on this runner, and the switch is recorded durably before the
+   * reply, so it runs at the session's next turn boundary even across a runner restart. */
+  async requestLocationSwitch(msg: SessionLocationSwitchMessage): Promise<{ ok: boolean; error?: string }> {
+    const { sessionId } = msg;
+    try {
+      return await this.runWorktreeOperation(sessionId, async () => {
+        const meta = this.store.readMeta(sessionId);
+        const entry = this.active.get(sessionId);
+        if (!meta || meta.review || !this.sessionCanOpen(sessionId)) throw new Error("session is unavailable");
+        if (meta.pendingLocationSwitch) {
+          if (meta.pendingLocationSwitch.occurrenceId === msg.occurrenceId) return { ok: true };
+          throw new LocationSwitchRefusal("busy");
+        }
+        if (meta.driver !== "claude-code" && meta.driver !== "codex-app-server") throw new LocationSwitchRefusal("not_supported");
+        if (meta.context.kind !== "native" || (meta.executionTarget && meta.executionTarget.adapter !== "host")) {
+          throw new LocationSwitchRefusal("not_native");
+        }
+        if (!entry) throw new Error("the session is not running; send it a message and ask again");
+        if ((meta.seq ?? 0) > 0 && (!meta.agentSessionId || !canResumeSession(meta))) throw new LocationSwitchRefusal("not_resumable");
+        const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces, msg);
+        const current = await realpath(meta.repoPath).catch(() => meta.repoPath);
+        if (current === repoPath) throw new LocationSwitchRefusal("same_repository");
+        if (msg.recoverBranch !== undefined && !validLocationSwitchBranch(msg.recoverBranch)) {
+          throw new Error("the branch to recover is not a valid branch name");
+        }
+        const updated = this.store.patchMeta(sessionId, {
+          pendingLocationSwitch: {
+            requestId: msg.requestId, occurrenceId: msg.occurrenceId, workspaceId: msg.workspaceId, repoPath,
+            repository: msg.repository, locationName: msg.locationName, continuation: msg.continuation,
+            ...(msg.recoverBranch ? { recoverBranch: msg.recoverBranch } : {}), requestedAt: Date.now(),
+          },
+          locationSwitchFailure: undefined,
+        });
+        if (!updated) throw new Error("session is unavailable");
+        this.store.flush(sessionId);
+        entry.pendingLocationSwitch = msg.occurrenceId;
+        this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+        if (!entry.running) setImmediate(() => this.scheduleDrain(sessionId));
+        return { ok: true };
+      });
+    } catch (error) {
+      return { ok: false, error: error instanceof LocationSwitchRefusal ? error.message : `the Location switch was not accepted: ${errText(error)}` };
+    }
+  }
+
+  /** Provider replacements share one lane: a Location switch and an account switch never overlap. */
+  private switchLocation(sessionId: string, entry: ActiveSession): Promise<void> {
+    const current = this.providerAccountSwitches.get(sessionId);
+    if (current) return current.promise;
+    let promise: Promise<void>;
+    promise = this.performLocationSwitch(sessionId, entry).finally(() => {
+      if (this.providerAccountSwitches.get(sessionId)?.promise === promise) this.providerAccountSwitches.delete(sessionId);
+    });
+    this.providerAccountSwitches.set(sessionId, { entry, promise });
+    return promise;
+  }
+
+  /** The Claude projects roots this session's conversation may live in, most specific first. */
+  private claudeTranscriptRoots(meta: SessionMeta): string[] {
+    const homes = [meta.providerConversationHome, meta.providerCredentialHome, process.env.CLAUDE_CONFIG_DIR, join(homedir(), ".claude")]
+      .filter((home): home is string => typeof home === "string" && home.length > 0);
+    return [
+      join(this.stateDir, "provider-state", "claude", providerStateKey(meta.sessionId), "projects"),
+      ...homes.map((home) => join(home, "projects")),
+    ];
+  }
+
+  /**
+   * Move the live session into its approved Location (#4138), at a turn boundary:
+   *  1. verify the target again and check out its worktree, while the old provider idles;
+   *  2. retire the old provider, then copy its conversation where the new working directory's
+   *     provider will look for it;
+   *  3. switch every repository-bound field in one metadata write, archiving the old Location;
+   *  4. relaunch with the same conversation, which loads the target's instructions and sandbox,
+   *     and continue the task with one automatic turn.
+   * A failure before step 3 leaves the metadata in the old Location; nothing ever launches against
+   * a half-updated session.
+   */
+  private async performLocationSwitch(sessionId: string, entry: ActiveSession): Promise<void> {
+    const meta = this.store.readMeta(sessionId);
+    const pending = meta?.pendingLocationSwitch;
+    if (!meta || !pending || entry.pendingLocationSwitch !== pending.occurrenceId) {
+      entry.pendingLocationSwitch = undefined;
+      if (entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+      return;
+    }
+    if (!this.worktreeRebindCanProceed(sessionId, entry)) return;
+    const options = { context: meta.context, dataDir: this.dataDir, ownerHash: this.runnerOwnerHash,
+      allowedProjectPaths: this.configuredProjectPaths };
+    let worktree: SessionWorktreeView;
+    try {
+      const repoPath = await verifyLocationSwitchTarget(meta.context, this.sharedDirectoryWorkspaces,
+        { workspaceId: pending.workspaceId, workspacePath: pending.repoPath, repository: pending.repository });
+      if (repoPath !== pending.repoPath) throw new LocationSwitchRefusal("path_changed");
+      const created = pending.recoverBranch
+        ? await createRecoveredBranchWorktree(repoPath, sessionId, pending.recoverBranch, options)
+        : await createRequestedWorktree(repoPath, sessionId,
+          { baseRef: (await fetchRemoteDefaultBase(repoPath, options)).ref, branch: `agent/${sessionId}` }, options);
+      const defaultBranch = await readRepositoryDefaultBranch(repoPath, options);
+      worktree = {
+        id: created.path.split(/[\\/]/u).at(-1)!, path: created.path, branch: created.branch, baseRef: created.baseRef,
+        baseCommit: created.baseCommit, source: "created", ...(defaultBranch ? { defaultBranch } : {}),
+      };
+    } catch (error) {
+      this.failLocationSwitch(sessionId, entry, pending, error instanceof LocationSwitchRefusal ? error.message
+        : `the target worktree could not be prepared: ${errText(error)}`);
+      return;
+    }
+    const release = async () => {
+      await (pending.recoverBranch
+        ? releaseRecoveredWorktree(pending.repoPath, worktree.path, options)
+        : removeWorktree(pending.repoPath, { path: worktree.path, branch: worktree.branch }, options)).catch((error) =>
+        this.log(`session ${sessionId} could not release its unused Location switch worktree: ${errText(error)}`));
+    };
+    const result = await this.replaceProviderProcess(sessionId, entry, {
+      prepareReplacement: async () => {
+        const conversation = this.store.readMeta(sessionId)?.agentSessionId;
+        if (meta.driver === "claude-code" && conversation &&
+            !await moveClaudeTranscriptToCwd(this.claudeTranscriptRoots(meta), conversation, worktree.path)) {
+          throw new Error("the saved conversation was not found");
+        }
+      },
+      replacementMeta: () => {
+        const fresh = this.store.readMeta(sessionId);
+        if (!fresh || fresh.pendingLocationSwitch?.occurrenceId !== pending.occurrenceId) return undefined;
+        const left: LocationHistoryEntry = {
+          occurrenceId: pending.occurrenceId, workspaceId: fresh.workspaceId, repoPath: fresh.repoPath,
+          worktreePath: fresh.worktreePath, ...(fresh.worktreeBranch ? { worktreeBranch: fresh.worktreeBranch } : {}),
+          worktrees: fresh.worktrees ?? [], switchedAt: Date.now(), toWorkspaceId: pending.workspaceId,
+        };
+        const moved = this.store.patchMeta(sessionId, {
+          workspaceId: pending.workspaceId,
+          repoPath: pending.repoPath,
+          worktreePath: worktree.path,
+          worktreeBranch: worktree.branch,
+          worktrees: [worktree],
+          launchWorktreeProof: undefined,
+          // Hook snapshots and process markers are keyed by worktree id, so the earlier Location's
+          // stay for its worktrees' eventual teardown.
+          worktreeRecovery: undefined,
+          locationHistory: [...(fresh.locationHistory ?? []), left],
+          pendingLocationSwitch: undefined,
+          locationSwitchFailure: undefined,
+        });
+        if (moved) this.store.flush(sessionId);
+        return moved ?? undefined;
+      },
+      queueFailureReason: () => "the session could not resume in its new Location",
+      onLaunched: (replacementEntry) => {
+        this.emitEvent(sessionId, { kind: "stderr",
+          text: `Moved this session to Location "${pending.locationName}" (${pending.repository}), worktree ${worktree.branch}.` });
+        const latest = this.store.readMeta(sessionId);
+        if (latest) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(latest) });
+        this.insertQueuedPrompt(sessionId, replacementEntry.queue, {
+          id: `locationcont_${randomUUID()}`,
+          text: pending.continuation,
+          images: [],
+          providerRecovery: true,
+          worktreeContinuation: { path: worktree.path, branch: worktree.branch },
+          config: this.snapshotQueuedConfig(sessionId),
+        });
+        this.emitQueue(sessionId);
+      },
+    });
+    if (result.status === "launched") {
+      setImmediate(() => this.scheduleDrain(sessionId));
+      return;
+    }
+    if (result.status === "stopped" || result.status === "superseded") {
+      if (this.store.readMeta(sessionId)?.pendingLocationSwitch?.occurrenceId === pending.occurrenceId) await release();
+      return;
+    }
+    const moved = this.store.readMeta(sessionId)?.repoPath === pending.repoPath;
+    if (!moved) await release();
+    const reason = result.status === "prepare_failed" ? `the conversation could not be carried over: ${result.error}`
+      : result.status === "not_resumable" ? LOCATION_SWITCH_FAILURES.not_resumable
+      : result.status === "lock_unavailable" ? "this session is being driven by another runner process"
+      : result.status === "retirement_failed" ? "the previous provider could not be stopped"
+      : moved ? "the session moved, but its provider could not start in the new Location; send it a message to retry there"
+      : "the provider could not resume in the new Location";
+    this.failLocationSwitch(sessionId, entry, pending, reason);
+  }
+
+  /** Record a failed switch where people see it. The session stays where its metadata says it is,
+   * and the provider launches there on the next message. */
+  private failLocationSwitch(sessionId: string, entry: ActiveSession, pending: PendingLocationSwitch, reason: string): void {
+    entry.pendingLocationSwitch = undefined;
+    const updated = this.store.patchMeta(sessionId, {
+      pendingLocationSwitch: undefined,
+      locationSwitchFailure: { state: "failed", repository: pending.repository, workspaceId: pending.workspaceId,
+        locationName: pending.locationName, reason, at: Date.now() },
+    });
+    if (!updated) return;
+    this.store.flush(sessionId);
+    this.emitEvent(sessionId, { kind: "error", message: `The Location switch to "${pending.locationName}" failed: ${reason}` });
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    if (this.active.get(sessionId) === entry && entry.queue.length) setImmediate(() => this.scheduleDrain(sessionId));
+  }
+
   private resumeDeferredHandoff(sessionId: string): void {
     const entry = this.active.get(sessionId);
-    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
+    if ((entry?.pendingWorktreeRebind || entry?.pendingProviderAccountSwitch || entry?.pendingLocationSwitch ||
+        entry && this.projectMemoryChanged(sessionId, entry)) && !entry.running) {
       setImmediate(() => this.scheduleDrain(sessionId));
     }
   }
@@ -17020,6 +17268,18 @@ export class SessionManager {
           if (checkpointOwnerHash) cleanup.checkpointOwnerHash = checkpointOwnerHash;
           this.cleanupJournal.add(cleanup);
           worktreeCleanups.push(cleanup);
+        }
+        // (#4138) Worktrees the session owned in Locations it left are retired from their own
+        // repository, exactly as its current ones are.
+        for (const left of cleanupMeta.locationHistory ?? []) {
+          const leftMeta: SessionMeta = { ...cleanupMeta, repoPath: left.repoPath, workspaceId: left.workspaceId,
+            worktrees: left.worktrees, worktreePath: left.worktreePath, worktreeBranch: left.worktreeBranch };
+          for (const worktree of left.worktrees.filter((item) => item.source !== "attached")) {
+            const cleanup = this.cleanupRecordForWorktree(leftMeta, worktree, "session_delete", "force");
+            if (checkpointOwnerHash) cleanup.checkpointOwnerHash = checkpointOwnerHash;
+            this.cleanupJournal.add(cleanup);
+            worktreeCleanups.push(cleanup);
+          }
         }
       }
       if (meta) {
