@@ -51,7 +51,7 @@ test("a running Orchestrator in a healthy wait_session reads Running and Waiting
 
 test("each wait kind has its own Title Case label", () => {
   assert.equal(surfaces(session({ waits: [childWait({ target: { kind: "session", child: false } })] })).header[1], "Waiting on Session");
-  assert.equal(surfaces(session({ role: "worker", waits: [prWait()] } as Partial<SessionView>)).header[1], "Waiting on Pull Request");
+  assert.equal(surfaces(session({ role: undefined, waits: [prWait()] })).header[1], "Waiting on Pull Request");
 });
 
 test("a broken liveness contract reads Wait Stalled and names the part that broke", () => {
@@ -102,7 +102,7 @@ test("a healthy wait outranks background work, but not a request", () => {
 });
 
 test("a parked merge-queue watch reads Waiting on Merge Queue, then its wake or loss (#4071)", () => {
-  const parked = surfaces(session({ status: "idle", role: "worker", pullRequestWatch: watch() } as Partial<SessionView>));
+  const parked = surfaces(session({ status: "idle", role: undefined, pullRequestWatch: watch() }));
   assert.deepEqual(parked.header, ["Awaiting Prompt", "Waiting on Merge Queue"]);
   assert.deepEqual(parked.row, parked.header);
   const pending = surfaces(session({ status: "idle", pullRequestWatch: watch({ state: "fired", outcome: "merged", continuation: "held" }) }));
@@ -116,6 +116,14 @@ test("a parked merge-queue watch reads Waiting on Merge Queue, then its wake or 
   assert.equal(surfaces(session({ status: "idle", pullRequestWatch: watch({ state: "fired", continuation: "delivered" }) })).header[1], null);
   assert.equal(surfaces(session({ status: "idle", pullRequestWatch: watch({ state: "cancelled" }) })).header[1], null);
   assert.equal(sessionWaitConditions(session({ status: "completed", pullRequestWatch: watch() })).length, 0);
+});
+
+test("a parked session's header and row agree even with a result waiting for review", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const shown = surfaces(session({ status: "idle", attention, pullRequestWatch: watch() } as Partial<SessionView>));
+  assert.deepEqual(shown.header, ["Awaiting Prompt", "Waiting on Merge Queue"]);
+  assert.deepEqual(shown.row, shown.header, "like background work, a deliberate wait holds Ready for Review back on both");
 });
 
 test("a parent whose children are working still shows its own deliberate wait", () => {

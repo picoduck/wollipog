@@ -118,7 +118,7 @@ for (const width of [1280, 390]) {
 
       await page.evaluate(() => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", {
-          status: "idle", waits: undefined, role: "worker",
+          status: "idle", waits: undefined, role: undefined,
           pullRequestWatch: { watchId: "prw_alpha", repository: "picoduck/wollipog", number: 4071, headSha: "a".repeat(40),
             state: "watching", since: Date.now() - 600_000, continuation: "none" },
         } as never);

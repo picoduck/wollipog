@@ -880,7 +880,7 @@ export function sessionStatusSummary(
       fact: true,
     });
   }
-  if (session.attention && !switching && !session.stopOperation && lifecycle.tone !== "danger" && runnerOnline && !background && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking || (context.activeWorkers ?? 0) > 0 }).group === "ready_for_review") {
+  if (session.attention && !switching && !session.stopOperation && lifecycle.tone !== "danger" && runnerOnline && !background && waits.length === 0 && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking || (context.activeWorkers ?? 0) > 0 }).group === "ready_for_review") {
     conditions.push({ kind: "follow_up", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true });
   }
