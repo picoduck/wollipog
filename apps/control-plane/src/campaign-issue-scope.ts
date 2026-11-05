@@ -118,11 +118,21 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
   const context = first && first.state !== "pending" ? (first.contextIssueNumbers ?? []).filter((n) => !numbers.includes(n)) : [];
   // The scope grant the first message established (#4102), for Campaign Status's Scope Grant section.
   const grant = first && first.state !== "pending" ? first.grant : undefined;
+  // Its ceilings as the current authorization holds them: a later reauthorization can set Maximum
+  // Issues explicitly, and only a limit both the grant and that authorization derived moves.
+  const control = root.orchestratorPolicy?.control;
+  const authority = control?.mode === "full_control" ? control.boundary.issueAuthority : undefined;
+  const derivedNow = Boolean(grant && first && first.state !== "pending" && first.derivedLimits?.maxIssues === true &&
+    grant.ceilings.maxIssuesSource === "derived");
+  const scopeGrant = grant && authority
+    ? { ...grant, ceilings: { ...grant.ceilings, maxIssues: authority.maxIssues, maxIssuesSource: derivedNow ? "derived" as const : "explicit" as const } }
+    : grant;
   return { campaignSessionId: root.id, repository, issueNumbers: numbers, ...(repositories.length ? { repositories } : {}),
     revision: root.orchestratorPolicy?.issueScope?.revision ?? 0,
     ...(root.orchestratorPolicy?.issueScope ? { authorization: root.orchestratorPolicy.issueScope } : {}),
     supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false,
-    ...(context.length ? { contextIssueNumbers: context } : {}), ...(grant ? { scopeGrant: grant } : {}),
+    ...(context.length ? { contextIssueNumbers: context } : {}),
+    ...(scopeGrant ? { scopeGrant, policyRevision: root.parentControlPolicy?.revision ?? 0 } : {}),
     ...(unverifiedWork.length ? { unverifiedWork } : {}), outsideScope };
 }
 

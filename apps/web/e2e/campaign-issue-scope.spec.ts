@@ -188,6 +188,41 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   }
 }
 
+for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
+  test(`the owner changes a defaulted selection count from the Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
+    await page.setViewportSize(viewport);
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=grant-default");
+    const grant = page.getByRole("region", { name: "Scope Grant" });
+    const row = (term: string) => grant.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+    await expect(row("Selection Count")).toHaveText("3 Defaulted");
+    await expect(row("Maximum Issues")).toHaveText("4 Derived");
+    const change = grant.getByRole("button", { name: "Change Count", exact: true });
+    await change.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`selection-count-defaulted-${viewport.width}.png`), fullPage: true });
+
+    await change.click();
+    const editor = grant.getByRole("group", { name: "Change Selection Count" });
+    const input = editor.getByLabel("Issues to Select", { exact: true });
+    await expect(input).toHaveValue("3");
+    await expect(editor).toContainText("Maximum Issues moves by the same amount.");
+    await input.fill("5");
+    await editor.scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`selection-count-editing-${viewport.width}.png`), fullPage: true });
+
+    await editor.getByRole("button", { name: "Save Count", exact: true }).click();
+    await expect(row("Selection Count")).toHaveText("5 Set by You");
+    await expect(row("Maximum Issues")).toHaveText("6 Derived");
+    await expect(grant.getByRole("group", { name: "Change Selection Count" })).toHaveCount(0);
+    const sent = await page.evaluate(() => (window as unknown as { __SELECTION_COUNT__: { count: number; expectedRevision: number } }).__SELECTION_COUNT__);
+    expect(sent.count).toBe(5);
+    expect(Number.isSafeInteger(sent.expectedRevision)).toBe(true);
+    const geometry = await grant.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+    await row("Selection Count").scrollIntoViewIfNeeded();
+    await page.screenshot({ path: info.outputPath(`selection-count-saved-${viewport.width}.png`), fullPage: true });
+  });
+}
+
 for (const [scope, requirement] of [
   ["outdated-runner", campaignIssueScopeChangesRequirement(207)],
   ["issue-limits", campaignIssueLimitsRequirement(216)],
