@@ -1,32 +1,49 @@
 # Campaign Issue Scope
 
-Campaign issue authority is independent of the campaign work ledger. Initial explicit issue lists retain
-their existing finite authorization. An epic a Custom campaign's first message names seeds membership
+Campaign issue authority is independent of the campaign work ledger. The issues a Custom campaign's
+first message names keep their finite authorization (`issueNumbers`), but only the Decision Model's
+reading grants them (#4259). An epic a Custom campaign's first message names seeds membership
 proposals, never automatic authorization. An epic campaign cannot create delegated sessions until
 its issue scope is authorized. Custom campaigns require the existing human approval.
 
-The epic seed comes from the Decision Model, not from a regular expression (#4104, see
+Both come from the Decision Model, not from a regular expression or grammar (#4104, #4259, see
 [Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first message that
-writes a digit string but names no explicit issue list gets a pending seed (`issueScopeSeed`), and
-delegation waits while it is pending. The first message is the launch prompt or, for a campaign
-launched without one, the person's first prompt; any other first message is recorded as `none`, so no
-later message counts as the first. One `scope_grant` reading then decides it:
+writes a digit string gets a pending seed (`issueScopeSeed`), and delegation waits while it is
+pending. The first message is the launch prompt or, for a campaign launched without one, the
+person's first prompt; any other first message is recorded as `none`, so no later message counts as
+the first. One `scope_grant` reading then decides it:
 
-| Reading | Seed | Delegation |
-|---|---|---|
-| Exactly one named issue, no range or selection, and the runner reads members for it | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | Waits for the person's scope approval |
-| No issue named, several, a range or a selection, or a named issue without members | `none` | Proceeds |
-| Failed, uncertain, a floor dropped the named issue, or the runner couldn't read it | `owner`: no seed | Waits for the person's scope approval |
+| Reading | Seed | Issue Numbers | Delegation |
+|---|---|---|---|
+| Exactly one named issue, no range or selection, and the runner reads members for it | `seeded`: the issue is `issueScopeProposalEpic`, and the scope inspection starts from its members | None | Waits for the person's scope approval |
+| Named issues or ranges (one issue without members included) that every floor keeps and the runner reads as issues of the campaign repository | `none` | The named issues | Proceeds |
+| No issue named to work on: only context references, or a selection without numbers | `none` | None | Proceeds |
+| Failed, uncertain, a floor dropped anything named, the runner couldn't read a named issue, or the runner can't hold an issue scope | `owner`: no seed | None | Waits for the person's scope approval |
+
+The model may only narrow or confirm: the floors are the scope grant's (`scopeGrantCandidates`), so a
+number the message doesn't write, a reference to a repository outside the campaign's boundary, or a
+range the message doesn't write as one is dropped, and any drop leaves the whole reading with the
+owner rather than granting part of it.
+
+`createSession` is synchronous and the reading isn't, so a campaign is created with no issue numbers.
+Until the reading settles, delegation waits and every GitHub write on an issue takes the person's
+ordinary approval path. The runner's Orchestrator receives the issue numbers at its next provider
+launch, so its routine writes on them keep that approval path until then. Enabling Full Control waits
+for a pending reading. Only issues granted from the person's own create request carry the launch
+provenance (`issueNumbersSource: "human_launch_request"`) that Full Control enable trusts; a reading of
+a first prompt after an empty launch, or of a recorded transcript message, grants them without it.
 
 A seed left pending with no reading in flight (a control-plane restart) settles as `owner`, with its
-reading recorded as failed. A message without digits makes no Decision call.
+reading recorded as failed. A message without digits makes no Decision call and grants nothing.
+Existing campaigns keep the issue numbers they already hold.
 
 A Custom campaign whose first message was recorded before the seed existed has no seed: the build
 before #4216 held it by matching that message against a regular expression on every check, and stored
 nothing. So that it doesn't lose its hold on upgrade (#4258), its recorded first message gets the seed
-it would get now. That happens the first time it tries to delegate or its issue scope is read, through
-the same `scope_grant` reading and the same table. Nothing is matched against the text. A later
-message never counts as the first.
+it would get now. That happens the first time it tries to delegate, its issue scope is read, or it is
+restarted (#4259, in place of the restart's old issue-list backfill), through the same `scope_grant`
+reading and the same table. Nothing is matched against the text. A later message never counts as the
+first.
 
 Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
 wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its

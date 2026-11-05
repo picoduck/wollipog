@@ -28,6 +28,7 @@ import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, uncertainVerdict, type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
+import { fakeDecisionRuntime, type FakeDecisionStep } from "./credential-screen-test-fixture.js";
 import { createHash } from "node:crypto";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
@@ -2102,7 +2103,7 @@ test("a follow-up limit the person sets before the first message survives it: 0 
   } finally { await server.close(); f.db.close(); }
 });
 
-test("enable never trusts issue numbers a restart backfilled from an automation's first message (CR-1.2)", async () => {
+test("enable never trusts issue numbers a restart's reading granted from an automation's first message (CR-1.2, #4259)", async () => {
   const f = fixture();
   const { server } = await app(f);
   try {
@@ -2112,9 +2113,16 @@ test("enable never trusts issue numbers a restart backfilled from an automation'
     delete policy.issueScope; delete policy.issueNumbers;
     f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
     f.db.appendEvent(id, { kind: "user_message", text: "Orchestrate issues 12 and 13" }, Date.now());
+    // The model's reading is scripted: it names both issues.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13) });
     f.sessions.restart(id);
+    // The restart grants nothing from the transcript's text: it starts the Decision Model's reading.
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.issueNumbers, undefined, "no grammar grants the restart its issues");
+    assert.equal(f.db.getSession(id)!.orchestratorPolicy!.issueScopeSeed?.state, "pending");
+    await f.sessions.campaignIssueScopeSeedSettled(id);
+    assert.equal(f.decision.calls.length, 1, "one scripted reading");
     const backfilled = f.db.getSession(id)!.orchestratorPolicy!;
-    assert.deepEqual(backfilled.issueNumbers, [12, 13], "the restart backfill read the transcript");
+    assert.deepEqual(backfilled.issueNumbers, [12, 13], "the restart's reading granted the issues it named");
     assert.equal(backfilled.issueNumbersSource, undefined, "and recorded no Human launch provenance");
     f.db.updateSessionStatus(id, "running", Date.now());
 
@@ -2133,19 +2141,67 @@ test("enable never trusts issue numbers a restart backfilled from an automation'
   } finally { await server.close(); f.db.close(); }
 });
 
-test("a Human create request marks its parsed issues as launch provenance; an agent-created root's never are (CR-1.2)", () => {
+test("a Human create request's issues come from the reading and carry launch provenance; an agent-created root's never do (CR-1.2, #4259)", async () => {
   const f = fixture();
   try {
+    // The model's reading is scripted: it names both issues.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 7) });
     const human = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
       prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope, false, false, false, { defaultOwnerUserId: f.human.userId });
     assert.equal(human.ok, true, human.error ?? "the Human root was created");
-    assert.deepEqual(human.data!.orchestratorPolicy!.issueNumbers, [12, 7]);
-    assert.equal(human.data!.orchestratorPolicy!.issueNumbersSource, "human_launch_request");
+    // `createSession` can't wait for the Decision Model: no issue is granted until the reading settles.
+    assert.equal(human.data!.orchestratorPolicy!.issueNumbers, undefined);
+    assert.equal(human.data!.orchestratorPolicy!.issueNumbersSource, undefined);
+    assert.equal(human.data!.orchestratorPolicy!.issueScopeSeed?.state, "pending");
+    await f.sessions.campaignIssueScopeSeedSettled(human.data!.id);
+    const granted = f.db.getSession(human.data!.id)!.orchestratorPolicy!;
+    assert.deepEqual(granted.issueNumbers, [7, 12], "the scripted reading named both, and the runner read each as an issue");
+    assert.equal(granted.issueNumbersSource, "human_launch_request");
+    assert.equal(granted.issueScopeSeed?.state, "none", "nothing held: the reading granted the issues and seeded no epic");
     const system = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
       prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope);
     assert.equal(system.ok, true, system.error ?? "the system root was created");
+    assert.equal(system.data!.orchestratorPolicy!.issueScopeSeed, undefined, "an agent-created root gets no reading");
+    assert.equal(system.data!.orchestratorPolicy!.issueNumbers, undefined);
     assert.equal(system.data!.orchestratorPolicy!.issueNumbersSource, undefined);
+    assert.equal(f.decision.calls.length, 1, "only the Human root's message was read");
   } finally { f.db.close(); }
+});
+
+test("enable waits for a pending first-message reading, and a failed reading grants no issue (#4259)", async () => {
+  for (const outcome of ["failed", "uncertain"] as const) {
+    const f = fixture();
+    const { server } = await app(f);
+    let release: (step: FakeDecisionStep) => void = () => {};
+    const held = new Promise<FakeDecisionStep>((resolve) => { release = resolve; });
+    f.sessions.setDecisionRuntime(fakeDecisionRuntime(f.db, () => held).runtime);
+    try {
+      const created = f.sessions.createSession({ ...request, config: { model: "claude-opus-5-5", permissionMode: "orchestrator" },
+        prompt: "Orchestrate issues 12 and 7" }, undefined, f.scope, false, false, false, { defaultOwnerUserId: f.human.userId });
+      assert.ok(created.ok && created.data, created.error ?? "created");
+      const id = created.data.id;
+      f.db.updateSessionStatus(id, "running", Date.now());
+      const url = `/api/sessions/${id}/orchestrator-campaign/full-control`;
+      const waiting = await server.inject({ method: "POST", url: `${url}/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+      assert.equal(waiting.statusCode, 409, `${outcome}: ${waiting.body}`);
+      assert.match(waiting.body, /still reading this campaign's first message/u);
+      const enabling = await server.inject({ method: "POST", url, headers: { authorization: "Bearer human" },
+        payload: { expectedRevision: 0, preflightDigest: "d".repeat(64) } });
+      assert.equal(enabling.statusCode, 409, outcome);
+      assert.equal(f.db.getSession(id)!.orchestratorPolicy!.control?.mode, undefined, `${outcome}: nothing enabled while reading`);
+      release(outcome === "failed" ? { errorClass: "authentication" }
+        : { verdict: "uncertain", reason: "It is unclear which issues to work on.", fields: {} });
+      await f.sessions.campaignIssueScopeSeedSettled(id);
+      const policy = f.db.getSession(id)!.orchestratorPolicy!;
+      assert.equal(policy.issueScopeSeed?.state, "owner", `${outcome}: the reading is the owner's`);
+      assert.equal(policy.issueNumbers, undefined, `${outcome}: nothing parsed from the text instead`);
+      const checked = await server.inject({ method: "POST", url: `${url}/preflight`, headers: { authorization: "Bearer human" }, payload: {} });
+      assert.equal(checked.statusCode, 200, checked.body);
+      const { preflight: reviewed } = checked.json() as { preflight: CampaignLaunchPreflight };
+      assert.doesNotMatch(reviewed.capabilities.find((item) => item.id === "repository_scope")!.reason, /#12|#7/u,
+        `${outcome}: enable derives no issue from a reading that failed or was uncertain`);
+    } finally { await server.close(); f.db.close(); }
+  }
 });
 
 test("provider commands and direct steering wait for the owner's first message, including while it is being delivered (CR-1.3)", async () => {

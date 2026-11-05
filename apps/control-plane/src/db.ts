@@ -17291,25 +17291,6 @@ export class ControlPlaneDb {
       .run(sessionId, randomUUID(), payloadSha256, now);
   }
 
-  /** One-time upgrade path for human-created root campaigns that predate protocol v158. A stored
-   * non-empty scope is immutable, and ambiguous provenance or prompts remain unscoped. */
-  backfillSessionOrchestratorIssueNumbers(id: string, issueNumbers: readonly number[], now: number): number[] | null {
-    const unique = [...new Set(issueNumbers)].filter((number) => Number.isSafeInteger(number) && number > 0);
-    if (unique.length === 0 || unique.length > 100 || !this.sessionWasHumanCreatedOrchestrator(id)) return null;
-    const policy = this.sessionOrchestratorPolicy(id);
-    if (!policy) return null;
-    if (policy.issueScope || policy.issueNumbers?.length) return [...(policy.issueNumbers ?? [])];
-    const previous = JSON.stringify(policy);
-    policy.issueNumbers = unique;
-    // Transcript-derived: never the Human launch request provenance Full Control enable trusts (#2940).
-    delete policy.issueNumbersSource;
-    const result = this.stmt(
-      "UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?",
-    ).run(JSON.stringify(policy), now, id, previous);
-    if (Number(result.changes) === 1) return unique;
-    return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
-  }
-
   /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
    * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
    * scope and no seeded epic gets one, so only its first message ever does. */
@@ -17325,15 +17306,32 @@ export class ControlPlaneDb {
   /** Settle a Custom campaign's epic seed (#4104), compare-and-set on the policy: only a seed still in
    * `from` (pending, unless the owner releases an `owner` seed) for this exact message changes, and
    * only `seeded` names the epic. A scope a person approved meanwhile leaves the seed as it was; it
-   * holds nothing once a scope exists. */
+   * holds nothing once a scope exists.
+   *
+   * A `none` settlement may carry the issues a healthy reading of the first message named and the
+   * runner verified (#4259): they become the campaign's `issueNumbers` in the same write, only from a
+   * pending seed of a Custom campaign that holds no issue numbers yet. `launchRequest` marks them as
+   * the person's own launch request, the provenance Full Control enable trusts (#2940); a reading of
+   * a recorded transcript message is never marked. */
   settleCampaignIssueScopeSeed(id: string, messageDigest: string,
-    next: { state: "seeded"; epic: number; occurrenceId: string } | { state: "none" | "owner"; occurrenceId?: string }, now: number,
+    next: { state: "seeded"; epic: number; occurrenceId: string }
+      | { state: "none"; occurrenceId?: string; grant?: { issueNumbers: readonly number[]; launchRequest: boolean } }
+      | { state: "owner"; occurrenceId?: string }, now: number,
     from: "pending" | "owner" = "pending"): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
     if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== from || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
+    const grant = next.state === "none" ? next.grant : undefined;
+    if (grant && (from !== "pending" || policy.control?.mode === "full_control" || policy.issueNumbers?.length ||
+        grant.issueNumbers.length < 1 || grant.issueNumbers.length > 100 || new Set(grant.issueNumbers).size !== grant.issueNumbers.length ||
+        grant.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1))) return false;
     const previous = JSON.stringify(policy);
     policy.issueScopeSeed = { state: next.state, messageDigest, ...(next.occurrenceId ? { occurrenceId: next.occurrenceId } : {}) };
     if (next.state === "seeded") policy.issueScopeProposalEpic = next.epic;
+    if (grant) {
+      policy.issueNumbers = [...grant.issueNumbers];
+      if (grant.launchRequest) policy.issueNumbersSource = "human_launch_request";
+      else delete policy.issueNumbersSource;
+    }
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
       .run(JSON.stringify(policy), now, id, previous).changes) === 1;
   }

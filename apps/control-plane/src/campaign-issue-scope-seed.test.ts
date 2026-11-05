@@ -11,7 +11,6 @@ import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS, type FakeDecis
 import { ControlPlaneDb } from "./db.js";
 import { DECISION_MAX_ATTEMPTS } from "./decision-runtime.js";
 import { Hub } from "./hub.js";
-import { orchestratorIssueNumbersFromInitialPrompt } from "./orchestrator-issue-scope.js";
 import { EMPTY_GRANT, issues } from "./scope-grant-test-fixture.js";
 import { SessionsService } from "./sessions.js";
 
@@ -24,7 +23,8 @@ const named = (...numbers: number[]): FakeDecisionStep => ({ verdict: "grant", r
   fields: { ...EMPTY_GRANT, explicit: issues(...numbers) } });
 
 /** A Custom Orchestrator created from `prompt` by its person, on a runner whose issue #40 has members. */
-function harness(prompt: string, reading: Reading, members: Record<number, CampaignIssueScopeCandidate["source"][]> = { 40: ["sub_issue", "member_checklist"] }) {
+function harness(prompt: string, reading: Reading, members: Record<number, CampaignIssueScopeCandidate["source"][]> = { 40: ["sub_issue", "member_checklist"] },
+  notIssues: ReadonlySet<number> = new Set()) {
   const db = ControlPlaneDb.open(":memory:");
   const metadata: RunnerMetadata = { runnerId: "r", hostname: "test", os: "linux", version: "test",
     workspaces: [{ id: "w", name: "Repo", path: "/repos/test" }], agents: [{ id: "planner", name: "Planner", command: "claude", args: [], env: {},
@@ -39,6 +39,8 @@ function harness(prompt: string, reading: Reading, members: Record<number, Campa
     if (message.operation === "synchronize") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
       repository: "team/repo", revision: message.scope.revision };
     if (message.operation !== "inspect") throw new Error("Unexpected runner command");
+    // One number that is not an issue (a pull request, a missing issue) refuses the whole read, as the runner does.
+    if (message.issues?.some((number) => notIssues.has(number))) return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false };
     if (message.issues?.length) return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
       candidates: message.issues.map((number) => ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })) };
     if (message.epic !== undefined) inspections.push(message.epic);
@@ -64,14 +66,14 @@ function harness(prompt: string, reading: Reading, members: Record<number, Campa
   return { db, svc, id, fake, inspections, policy, occurrences, delegate, settled: () => svc.campaignIssueScopeSeedSettled(id) };
 }
 
-test("only a first message that writes a digit string and names no explicit issue list gets a seed", () => {
-  for (const prompt of ["Orchestrate epic #2225.", "Please coordinate GitHub epic 2225", "Work through everything under 2225 and its children"]) {
-    assert.equal(needsCampaignIssueScopeSeed(prompt, orchestratorIssueNumbersFromInitialPrompt(prompt)), true, prompt);
+test("every first message that writes a digit string gets a reading, an explicit issue list included (#4259)", () => {
+  for (const prompt of ["Orchestrate epic #2225.", "Please coordinate GitHub epic 2225", "Work through everything under 2225 and its children",
+    "Orchestrate issues #12 and #13.", "Claim and delegate issue 1201 through 1207."]) {
+    assert.equal(needsCampaignIssueScopeSeed(prompt), true, prompt);
   }
-  // No digits: nothing to read, so no Decision call. An explicit list keeps its own path.
-  assert.equal(needsCampaignIssueScopeSeed("Coordinate the release work.", []), false);
-  assert.equal(needsCampaignIssueScopeSeed("Orchestrate issues #12 and #13.", orchestratorIssueNumbersFromInitialPrompt("Orchestrate issues #12 and #13.")), false);
-  assert.equal(needsCampaignIssueScopeSeed("Release 0 changes.", []), false, "0 names no issue");
+  // No digits: nothing to read, so no Decision call and nothing granted.
+  assert.equal(needsCampaignIssueScopeSeed("Coordinate the release work."), false);
+  assert.equal(needsCampaignIssueScopeSeed("Release 0 changes."), false, "0 names no issue");
 });
 
 test("a reading seeds an epic only when it names exactly one issue and nothing else to work on", () => {
@@ -118,16 +120,18 @@ test("a healthy reading naming an issue with members seeds it as the epic, and d
 });
 
 test("a reading that names no epic seeds nothing and holds nothing: no issue, an issue without members, a context reference", async () => {
-  for (const [prompt, reading] of [
-    ["Do not orchestrate epic #40; coordinate the release checklist.", { verdict: "grant", fields: { ...EMPTY_GRANT, context: issues(40) } }],
-    ["Coordinate the fix for #50.", named(50)],
-    ["Coordinate #40 and #50 together.", named(40, 50)],
-  ] as Array<[string, FakeDecisionStep]>) {
+  for (const [prompt, reading, granted] of [
+    ["Do not orchestrate epic #40; coordinate the release checklist.", { verdict: "grant", fields: { ...EMPTY_GRANT, context: issues(40) } }, undefined],
+    ["Coordinate the fix for #50.", named(50), [50]],
+    ["Coordinate #40 and #50 together.", named(40, 50), [40, 50]],
+  ] as Array<[string, FakeDecisionStep, number[] | undefined]>) {
     const h = harness(prompt, () => reading);
     try {
       await h.settled();
       assert.equal(h.policy().issueScopeSeed!.state, "none", prompt);
       assert.equal(h.policy().issueScopeProposalEpic, undefined, prompt);
+      // The issues the reading names to work on are the campaign's (#4259); a context reference is not.
+      assert.deepEqual(h.policy().issueNumbers, granted, prompt);
       assert.equal(h.delegate().ok, true, prompt);
     } finally { h.db.close(); }
   }
@@ -419,5 +423,153 @@ test("a pre-upgrade campaign is read once, a first message that needs no reading
     await h.settled();
     assert.equal(h.fake.calls.length, 1);
     assert.equal(h.occurrences().length, 1);
+  } finally { h.db.close(); }
+});
+
+/**
+ * The initial-prompt issue list on the scope grant (#4259), replacing `orchestratorIssueNumbersFromInitialPrompt`.
+ * Every reading is scripted on the fake harness; no grammar reads the prompt.
+ */
+test("a launch prompt's issues come only from the reading: none at creation, held until it settles, then the issues it names (#4259)", async () => {
+  let release: (step: FakeDecisionStep) => void = () => {};
+  const held = new Promise<FakeDecisionStep>((resolve) => { release = resolve; });
+  const h = harness("Orchestrate issues #12 and #13.", () => held);
+  try {
+    assert.equal(h.policy().issueNumbers, undefined, "createSession grants nothing while the reading is unsettled");
+    assert.equal(h.policy().issueNumbersSource, undefined);
+    assert.equal(h.policy().issueScopeSeed!.state, "pending");
+    const waiting = h.delegate();
+    assert.equal(waiting.ok, false, "delegation waits for the reading");
+    assert.match(waiting.error!, /still reading this campaign's first message/u);
+    release(named(12, 13));
+    await h.settled();
+    assert.deepEqual(h.policy().issueNumbers, [12, 13]);
+    assert.equal(h.policy().issueNumbersSource, "human_launch_request", "the person's own create request");
+    assert.equal(h.policy().issueScopeSeed!.state, "none");
+    assert.equal(h.delegate().ok, true);
+    assert.equal(h.occurrences().length, 1);
+  } finally { h.db.close(); }
+});
+
+test("the reading, not a grammar, decides: it narrows a prompt the old grammar matched and grants one it missed (#4259)", async () => {
+  for (const [prompt, reading, granted] of [
+    // The old grammar granted both; the model names only #12, and only #12 is granted.
+    ["Orchestrate issues #12 and #13.", named(12), [12]],
+    // The old grammar granted nothing here.
+    ["Please work through #12 and #13 for me, one child each.", named(12, 13), [12, 13]],
+    ["Claim and delegate issue 1201 through 1203.", { verdict: "grant", fields: { ...EMPTY_GRANT, ranges: [{ repository: "", first: 1201, last: 1203 }] } }, [1201, 1202, 1203]],
+    // An explicit request the model reads as background grants nothing.
+    ["Orchestrate issues #12 and #13.", { verdict: "grant", fields: { ...EMPTY_GRANT, context: issues(12, 13) } }, undefined],
+  ] as Array<[string, FakeDecisionStep, number[] | undefined]>) {
+    const h = harness(prompt, () => reading);
+    try {
+      await h.settled();
+      assert.deepEqual(h.policy().issueNumbers, granted, prompt);
+      assert.equal(h.policy().issueScopeSeed!.state, "none", prompt);
+      assert.equal(h.fake.calls.length, 1, prompt);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a transient failure that succeeds on retry grants the issues with nobody asked (#4259)", async () => {
+  const h = harness("Orchestrate issues #12 and #13.", (_message, attempt) => attempt === 1 ? { errorClass: "rate_limited", retryAfterMs: 1_000 } : named(12, 13));
+  try {
+    await h.settled();
+    assert.equal(h.fake.calls.length, 2);
+    assert.equal(h.occurrences().length, 1, "one occurrence across both attempts");
+    assert.deepEqual(h.policy().issueNumbers, [12, 13]);
+    assert.equal(h.policy().issueScopeSeed!.state, "none");
+  } finally { h.db.close(); }
+});
+
+test("a failed or uncertain reading of a launch prompt's issues creates exactly one person-owned request and grants nothing (#4259)", async () => {
+  const cases: Array<[string, Reading, number]> = [
+    ["retries exhausted", () => ({ errorClass: "provider_overloaded" }), DECISION_MAX_ATTEMPTS],
+    ["a non-transient failure", () => ({ errorClass: "authentication" }), 1],
+    ["an uncertain verdict", () => ({ verdict: "uncertain", reason: "It is unclear which issues to work on.", fields: EMPTY_FIELDS }), 1],
+  ];
+  for (const [name, reading, attempts] of cases) {
+    const h = harness("Orchestrate issues #12 and #13.", reading);
+    try {
+      await h.settled();
+      assert.equal(h.fake.calls.length, attempts, name);
+      assert.equal(h.policy().issueNumbers, undefined, `${name}: nothing parsed from the text instead`);
+      assert.equal(h.policy().issueNumbersSource, undefined, name);
+      const seed = h.policy().issueScopeSeed!;
+      assert.equal(seed.state, "owner", name);
+      assert.equal(h.occurrences().length, 1, `${name}: one audited occurrence`);
+      // The one typed, person-owned request: the seed's Campaign Status row, which only the owner settles.
+      assert.equal(h.db.campaignDecisionSubject(seed.occurrenceId!)?.surface, "issue_scope_seed", name);
+      assert.equal(h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "orchestrator" }, { kind: "human", id: "someone-else" }).status, 403, name);
+      const held = h.delegate();
+      assert.equal(held.ok, false, `${name}: delegation waits for the person`);
+      assert.match(held.error!, /Confirm the epic's authorized issue scope/u, name);
+      // Repeated checks never start a second reading or a second request.
+      assert.equal(h.delegate().ok, false, name);
+      await h.svc.campaignIssueScope(h.id);
+      assert.equal(h.fake.calls.length, attempts, name);
+      assert.equal(h.occurrences().length, 1, name);
+    } finally { h.db.close(); }
+  }
+});
+
+test("the model may only narrow: a floor-dropped number, another repository's issue, or an unreadable issue leaves the reading with the owner (#4259)", async () => {
+  const cases: Array<[string, string, FakeDecisionStep, ReadonlySet<number>]> = [
+    ["an invented number", "Orchestrate issues #12 and #13.", named(12, 13, 99), new Set()],
+    ["another repository's issue", "Orchestrate #12 and other/repo#13.", named(12, 13), new Set()],
+    ["a range the message never writes", "Orchestrate #12 and #15.", { verdict: "grant", fields: { ...EMPTY_GRANT, ranges: [{ repository: "", first: 12, last: 15 }] } }, new Set()],
+    ["a pull request the runner can't read as an issue", "Orchestrate issues #12 and #13.", named(12, 13), new Set([13])],
+  ];
+  for (const [name, prompt, reading, notIssues] of cases) {
+    const h = harness(prompt, () => reading, undefined, notIssues);
+    try {
+      await h.settled();
+      assert.equal(h.policy().issueScopeSeed!.state, "owner", name);
+      assert.equal(h.policy().issueNumbers, undefined, `${name}: no part of the reading is granted`);
+      assert.equal(h.occurrences().length, 1, name);
+    } finally { h.db.close(); }
+  }
+});
+
+test("a duplicate reading of a launch prompt joins its occurrence and never grants twice (#4259)", async () => {
+  const h = harness("Orchestrate issues #12 and #13.", () => named(12, 13));
+  try {
+    await h.settled();
+    assert.deepEqual(h.policy().issueNumbers, [12, 13]);
+    const digest = h.policy().issueScopeSeed!.messageDigest;
+    const calls = h.fake.calls.length;
+    const replay = await h.fake.runtime.decide({ organizationId: h.db.sessionScope(h.id)!.organizationId, kind: "scope_grant",
+      campaignSessionId: h.id, occurrenceKey: `scope_grant:issue_scope_seed:${h.id}:${digest}`, automaticHarness: null,
+      inputs: { ownerMessage: "Orchestrate issues #12 and #13.", data: {} }, routeToHuman: () => null });
+    assert.equal(replay.occurrenceId, h.occurrences()[0]!.occurrenceId);
+    assert.equal(h.fake.calls.length, calls, "the replay joins the settled verdict");
+    assert.equal(h.db.settleCampaignIssueScopeSeed(h.id, digest, { state: "none", grant: { issueNumbers: [14], launchRequest: true } }, Date.now()), false,
+      "a settled reading never grants again");
+    assert.deepEqual(h.policy().issueNumbers, [12, 13]);
+  } finally { h.db.close(); }
+});
+
+test("a runner that can't hold an issue scope takes the person-owned route (#4259)", async () => {
+  const h = harness("Orchestrate issues #12 and #13.", () => named(12, 13));
+  try {
+    const runner = h.db.getRunner("r")!;
+    h.db.registerRunner({ runnerId: "r", hostname: runner.hostname, os: runner.os, version: runner.version, workspaces: runner.workspaces, agents: runner.agents },
+      2, 157);
+    await h.settled();
+    assert.equal(h.policy().issueScopeSeed!.state, "owner");
+    assert.equal(h.policy().issueNumbers, undefined);
+  } finally { h.db.close(); }
+});
+
+test("a first message after an empty launch is read the same way, without launch-request provenance (#4259)", async () => {
+  const h = harness("", () => named(12, 13));
+  try {
+    const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: h.db.localIdentityContext().userId };
+    h.db.updateSessionStatus(h.id, "idle", Date.now());
+    assert.ok((await h.svc.promptFromHuman(principal, h.id, "Orchestrate issues #12 and #13.")).ok);
+    assert.equal(h.policy().issueNumbers, undefined, "nothing granted before the reading settles");
+    await h.settled();
+    assert.deepEqual(h.policy().issueNumbers, [12, 13]);
+    assert.equal(h.policy().issueNumbersSource, undefined, "only the create request is the launch request Full Control enable trusts");
   } finally { h.db.close(); }
 });

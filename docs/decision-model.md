@@ -147,13 +147,22 @@ A Custom campaign's epic seed uses the same `scope_grant` reading in place of th
 `initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
 person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
 A campaign whose first message was recorded before the seed existed gets the same reading of that
-message the first time it tries to delegate or its issue scope is read (#4258).
+message the first time it tries to delegate, its issue scope is read (#4258), or it is restarted
+(#4259).
 
 Its outcome:
 
 - Only a reading that names exactly one issue can seed it.
 - The same floors apply (`scopeGrantCandidates`, against the repository the runner reports).
 - The runner must read members for that issue: sub-issues or checklist members.
+
+The same reading also grants the issues the first message names (#4259), in place of the
+`orchestratorIssueNumbersFromInitialPrompt` grammar, which is removed. When the reading names issues
+or ranges and no epic is seeded, every one must survive the floors and the runner must read each as an
+issue of the campaign repository; they then become the campaign's `issueNumbers`. A drop of any of
+them, or a runner older than the issue scope protocol, grants none and leaves the reading with the
+owner. Nothing is granted at creation: the reading settles after `createSession` returns, and the
+campaign holds no issue numbers until then.
 
 A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
 Custom human scope approval with no seed. It never falls back to parsing the text. That is the
