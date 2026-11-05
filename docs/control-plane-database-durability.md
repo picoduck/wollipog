@@ -49,14 +49,20 @@ recovers it.
   transaction (`updateSessionsFromRuntimeSnapshots`). Nothing about the run is broadcast or sent
   to a runner until that commit returns, and a failed commit rolls back the whole run. A snapshot
   with stop, decision, hook, policy, media or cost-repair work keeps its own commit, in order. The
-  event loop still yields between runs. Protocol-270 runners pace only their regenerable reconnect
-  runtime republish in windows of at most 128 frames / 2 MiB (a single larger legal snapshot uses
-  the existing receive-pressure backstop). A FIFO processing barrier is acknowledged after earlier
-  frames have been applied, keeping routine republish below socket read-pressure thresholds so
-  WebSocket pings remain readable. This does not change the commit's `FULL` flush or order. Live
-  state, shell output, skill reporting and outbox sends keep their existing transport behavior.
-  Unsent republish snapshots are read afresh when written and discarded on reconnect; the next
-  registration starts a new inventory, without adding them to the capped live outbox.
+  event loop still yields between runs. With a control plane supporting processing barriers
+  (protocol 270+), current runners pace regenerable reconnect runtime snapshots and `session_queue`
+  projections through shared windows of at most 128 frames / 2 MiB. Bounded chunks of runtime
+  snapshots and queue projections alternate so both inventories advance, while consecutive runtime
+  frames can still share commits. A single larger legal frame uses the existing receive-pressure
+  backstop. A FIFO processing barrier is acknowledged after earlier frames have been applied,
+  keeping routine republish below socket read-pressure thresholds so WebSocket pings remain
+  readable. This does not change the commit's `FULL` flush or order. Live state, including live
+  queue changes, shell output, skill reporting and other outbox frames keep their existing
+  transport behavior. Reconnect outbox `session_queue` copies are regenerated through the paced
+  inventory instead of replayed; authoritative empty queue projections also clear stale overlays.
+  Older control planes retain immediate queue inventory and full outbox FIFO replay. Unsent
+  runtime snapshots and queue projections are read afresh when written and discarded on reconnect;
+  the next registration starts new inventories without adding them to the capped live outbox.
   A crash before a run commits loses only frames that nothing
   has acknowledged yet, and the runner republishes them when it next registers.
 - `secure_delete=ON`: SQLite overwrites deleted ordinary-table content with zeros rather than
