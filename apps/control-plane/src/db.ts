@@ -38,6 +38,7 @@ import { sessionCommandPermissions, withHoldAdviceFor } from "./session-command-
 import { evaluateCampaignAuthority, boundaryWithScopedEpics, campaignDispatchScopeRefusal, campaignBoundaryCurrent, remintCampaignBoundary } from "./campaign-authority.js";
 import { genericRequestScreenData, storedCredentialScreenFact } from "./credential-screen.js";
 import { scopeSettlements } from "./campaign-issue-authority.js";
+import { grantReviewMaxIssues } from "./scope-grant.js";
 import { evaluateApprovalPolicies, evaluatePolicies, firstAsk, rulesFromSession, sessionSpawnSafetyPolicy } from "./policy-engine.js";
 import { validCampaignControl, validOrchestratorCampaignBudgetDefault, fullControlStandingHumanRequired, humanRequiredRulesExist, controlledReviewCapabilityKey, campaignWorkflowOwner, campaignAuthorityPreflight, type CampaignControl, type CampaignAuthorityEvaluation } from "@wollipog/protocol";
 import { CLAUDE_RECONCILIATION_SCHEMA, normalizeReconciledSnapshot } from "./claude-cost-reconciliation.js";
@@ -12357,6 +12358,16 @@ export class ControlPlaneDb {
     ).run(occurrenceId);
   }
 
+  /** Record the person-owned request a routed occurrence's caller created later (#4102): a scope
+   * grant routes when it fails, but its one typed request exists only once the Orchestrator proposes
+   * a scope. Only the first request is recorded, so the audit names the one that was created. */
+  linkDecisionHumanRequest(occurrenceId: string, requestId: string): boolean {
+    return Number(this.stmt(
+      `UPDATE decision_occurrences SET human_request_id=? WHERE occurrence_id=? AND human_request_id IS NULL
+       AND human_routed_at IS NOT NULL AND state IN ('uncertain','failed')`,
+    ).run(requestId, occurrenceId).changes) === 1;
+  }
+
   /** Return the organization to Automatic. */
   clearDecisionModelTarget(organizationId: string): boolean {
     return Number(this.stmt("DELETE FROM decision_model_targets WHERE organization_id=?").run(organizationId).changes) > 0;
@@ -17462,6 +17473,10 @@ export class ControlPlaneDb {
       // scope its boundary does not name. A boundary stale for any other reason is not extended.
       const reminted = !agentSessionId && boundary && this.boundaryTrailsHumanScope(root.id, policy)
         ? remintCampaignBoundary(boundaryWithScopedEpics(boundary, scope.issueNumbers), scope, userId, now) : null;
+      // The owner approving the proposal a failed or uncertain scope grant routed to them (#4102)
+      // also sets the derived issue limit that grant could not.
+      const grown = reminted?.mode === "full_control" ? grantReviewMaxIssues(policy, snapshot, reminted.boundary, scope.issueNumbers.length) : undefined;
+      if (grown !== undefined && reminted?.mode === "full_control") reminted.boundary.issueAuthority!.maxIssues = grown;
       // The re-minted boundary's issue limit holds the scope and every slot a consumed publication
       // still reserves, as an explicit authorization's does.
       if (reminted?.mode === "full_control" && reminted.boundary.issueAuthority && scope.issueNumbers.length +
@@ -20620,6 +20635,11 @@ export class ControlPlaneDb {
     if (control.mode === "full_control" && (waiting?.state === "pending" || waiting?.state === "delivering")) {
       const { derivedLimits: _stale, ...rest } = waiting;
       campaign.firstMessageScope = { ...rest, ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) } as typeof waiting;
+    } else if (waiting?.state === "established") {
+      // An established first message keeps its grant, but only the current authorization says
+      // whether Maximum Issues is still derived (#4102): a reauthorization, or a revoke, replaces it.
+      const { derivedLimits: _stale, ...rest } = waiting;
+      campaign.firstMessageScope = { ...rest, ...(control.mode === "full_control" && derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
@@ -20647,7 +20667,8 @@ export class ControlPlaneDb {
    * never lets another message reach it first. Only the service's authenticated Human
    * first-message path calls this; the boundary's own author is the only accepted Human. */
   establishFirstMessageScope(id: string, input: { control: CampaignControl; scope: import("@wollipog/protocol").CampaignIssueScope; messageDigest: string;
-    deliveryId: string; expectedRevision: number; now: number; contextIssueNumbers?: number[] }): boolean {
+    deliveryId: string; expectedRevision: number; now: number; contextIssueNumbers?: number[];
+    grant?: import("@wollipog/protocol").FullControlScopeGrant }): boolean {
     const policy = this.sessionOrchestratorPolicy(id);
     const previous = policy?.control?.mode === "full_control" ? policy.control.boundary : null;
     const { control, scope } = input;
@@ -20663,12 +20684,21 @@ export class ControlPlaneDb {
     // Context-only references (#3920) are disjoint from the scope and grant nothing.
     const context = input.contextIssueNumbers ?? [];
     if (!validContextIssueNumbers(context) || context.some((n) => scope.issueNumbers.includes(n))) return false;
+    // A scope grant (#4102) names exactly the scope it established, within the boundary it set.
+    const grant = input.grant;
+    if (grant && (JSON.stringify(grant.namedIssues) !== JSON.stringify(scope.issueNumbers) ||
+        grant.status !== "granted" && (scope.issueNumbers.length || context.length) ||
+        !grant.ceilings.repositories.includes(boundary.repository.toLowerCase()) ||
+        grant.ceilings.operations.some((operation) => !previous.operations.includes(operation)) ||
+        JSON.stringify(grant.ceilings.operations) !== JSON.stringify(boundary.operations) ||
+        grant.ceilings.maxIssues !== (boundary.issueAuthority?.maxIssues ?? grant.ceilings.maxIssues))) return false;
     policy.control = structuredClone(control);
     policy.issueScope = structuredClone(scope);
     policy.issueNumbers = [...scope.issueNumbers];
     const derivedLimits = policy.firstMessageScope.derivedLimits;
     policy.firstMessageScope = { state: "delivering", messageDigest: input.messageDigest, deliveryId: input.deliveryId,
-      ...(derivedLimits ? { derivedLimits } : {}), ...(context.length ? { contextIssueNumbers: [...context] } : {}) };
+      ...(derivedLimits ? { derivedLimits } : {}), ...(context.length ? { contextIssueNumbers: [...context] } : {}),
+      ...(grant ? { grant: structuredClone(grant) } : {}) };
     return this.atomic(() => {
       const changed = this.stmt(`UPDATE sessions SET orchestrator_policy=?, parent_control_policy_revision=parent_control_policy_revision+1,
         updated_at=? WHERE id=? AND parent_control_policy_revision=?`).run(JSON.stringify(policy), input.now, id, input.expectedRevision);
@@ -20686,7 +20716,8 @@ export class ControlPlaneDb {
     const first = policy?.firstMessageScope;
     if (!policy || first?.state !== "delivering" || first.messageDigest !== messageDigest) return false;
     policy.firstMessageScope = delivered ? { state: "established", messageDigest, establishedAt: now,
-      ...(first.contextIssueNumbers?.length ? { contextIssueNumbers: first.contextIssueNumbers } : {}) }
+      ...(first.contextIssueNumbers?.length ? { contextIssueNumbers: first.contextIssueNumbers } : {}),
+      ...(first.grant ? { grant: first.grant, ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) } : {}) }
       : { state: "pending", ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
       .run(JSON.stringify(policy), now, id).changes) === 1;
