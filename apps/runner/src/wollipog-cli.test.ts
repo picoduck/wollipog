@@ -1408,10 +1408,15 @@ test("CLI typed-decision help is discoverable and malformed or cross-session com
     "get_workflow_decision", "consume_workflow_decision", "reconcile_workflow_decision",
     "decision withdraw", "withdraw_workflow_decision", "protocol v269",
     "decision ask-owner", "decision hand-to-owner", "request_owner_decision", "hand_workflow_decision_to_owner", "protocol v281",
+    "--owner-rule-source", "--owner-rule-quote", "protocol v295", "only in prose",
     "protocol v153", "cannot resolve its own decision",
   ]) assert.ok(topic.stdout.includes(text), `decision help omits ${text}`);
 
   for (const malformed of [
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "{}", "--owner-rule-source", "AGENTS.md"],
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "{}", "--owner-rule-quote", "Ask first."],
+    ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "{}", "--owner-rule-source",
+      "--owner-rule-quote", "Ask first."],
     ["decision", "request", "--resource-key", "key", "--snapshot", "{}"],
     ["decision", "request", "--request-id", "id", "--resource-key", "key", "--snapshot", "not-json"],
     ["decision", "get"],
@@ -1470,6 +1475,37 @@ test("CLI typed decisions fail closed before their protocol capability", async (
     `requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.typedWorkflowDecisionDelegation}`, "u",
   ));
   assert.equal(calls, 1, "an old control plane receives only the compatibility probe");
+});
+
+test("CLI forwards an owner rule on a decision request and refuses it before protocol v295 (#4137)", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  let version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule;
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: version } : { occurrenceId: "workflow_1", status: "pending", authority: "human" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "child" };
+  const snapshot = { category: "implementation_question", question: "Which?", options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
+  const rule = { source: "~/.claude/skills/issue-workflow/SKILL.md", quote: "Ask the user before merging." };
+  let stdout = "";
+  const invoke = (extra: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", "decision", "request", "--request-id", "r",
+    "--resource-key", "k", "--snapshot", JSON.stringify(snapshot), ...extra, "--json"],
+  env, { stdout: (text) => { stdout += text; }, stderr: () => {} }, fetch);
+  assert.equal(await invoke(["--owner-rule-source", rule.source, "--owner-rule-quote", rule.quote]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/child/workflow-decisions");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { requestId: "r", resourceKey: "k", resourceSnapshot: snapshot, ownerRule: rule });
+  // An older control plane would drop the rule and leave the policy owner: nothing is requested.
+  version = RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule - 1;
+  calls.length = 0;
+  stdout = "";
+  assert.equal(await invoke(["--owner-rule-source", rule.source, "--owner-rule-quote", rule.quote]), 1);
+  assert.match(JSON.parse(stdout).error, new RegExp(`requires v${RUNNER_CAPABILITY_MIN_PROTOCOL.workflowDecisionOwnerRule}`, "u"));
+  assert.deepEqual(calls.map((call) => call.url), ["http://cp/api/compatibility"]);
+  // Without a rule the same control plane still takes the request.
+  calls.length = 0;
+  assert.equal(await invoke([]), 0);
+  assert.equal(JSON.parse(calls.at(-1)!.body!).ownerRule, undefined);
 });
 
 test("CLI reconciliation requires protocol v153 before calling the endpoint", async () => {

@@ -32,6 +32,21 @@ through its normal review and merge gates. A committed policy change does not ch
 session's higher-priority instructions or installed skills. Continue independent work while a
 required decision is pending.
 
+When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
+only as prose:
+
+- The requester, usually a child, still files the exact typed decision, such as `pr_merge`, with
+  `request_workflow_decision`, and names the rule in `ownerRule`: `source` is the file and `quote`
+  the requirement, on one line (CLI `--owner-rule-source` and `--owner-rule-quote`; control plane
+  v295). The occurrence is created human-owned (`owner_kept`) under any mode, grant or category. It
+  reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and every later
+  request for the same resource stays the owner's. `ownerRule` only narrows authority.
+- A Full Control root hands an occurrence already filed without the rule to the owner with
+  `hand_workflow_decision_to_owner`.
+- For a gate with no typed category, a Full Control root asks the owner with
+  `request_owner_decision`.
+- Nobody, child or root, ends a turn with such a gate only in prose.
+
 No campaign grants authentication/sign-in, secret disclosure, persistent grants or provider access
 expansion. Under Custom they come to the human. Under Full Control the server declines each one
 automatically and records content-safe blocked work in Campaign Status: continue without it and

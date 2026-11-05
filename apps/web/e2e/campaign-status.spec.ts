@@ -357,3 +357,24 @@ test("decisions the owner kept wait for them in Campaign Status, and each opens 
   await expect(detail.getByRole("button", { name: "Do Not Proceed" })).toBeVisible();
   await assertNoHorizontalOverflow(page, ".request-panel-detail");
 });
+
+for (const viewport of [{ name: "desktop", width: 1280, height: 900 }, { name: "phone", width: 390, height: 844 }]) {
+  test(`a merge an installed rule keeps for the owner waits for them with the rule's source and quote, ${viewport.name} (#4137)`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&owners=rule");
+    const waiting = page.locator(".campaign-status section", { has: page.getByRole("heading", { name: "Waiting for You" }) });
+    await expect(waiting).toContainText("Kept by Rule");
+    await expect(waiting).toContainText("Merge picoduck/wollipog#4141");
+    await expect(waiting).toContainText("~/.codex/skills/issue-workflow/SKILL.md");
+    await expect(waiting).toContainText("Never merge a pull request without per-PR user authorization");
+    await assertNoHorizontalOverflow(page, ".campaign-status");
+    await waiting.getByRole("button", { name: "Open Request: Merge picoduck/wollipog#4141" }).click();
+    const detail = page.locator(".request-panel-detail");
+    await expect(detail).toContainText("PR Merge Approval Required");
+    await expect(detail).toContainText("An installed or user-authored rule keeps this decision for a person, so no agent can make it.");
+    await expect(detail).toContainText("Rule Source");
+    await expect(detail).toContainText("~/.codex/skills/issue-workflow/SKILL.md");
+    await expect(detail.getByRole("button", { name: "Approve" })).toBeVisible();
+    await assertNoHorizontalOverflow(page, ".request-panel-detail");
+  });
+}

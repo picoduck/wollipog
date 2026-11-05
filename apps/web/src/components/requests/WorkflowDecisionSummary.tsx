@@ -1,6 +1,6 @@
 import React from "react";
 import { CampaignIssueScopeSummary } from "../CampaignIssueScopePanel.js";
-import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
+import type { PullRequestClosingReferenceCheck, WorkflowDecisionOwnerRule, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
 import { IssueClosureSummary } from "../IssueClosureSummary.js";
 import { AutomationCreationSummary } from "../AutomationCreationSummary.js";
 import { LocationSwitchSummary } from "./LocationSwitchSummary.js";
@@ -18,6 +18,23 @@ function MergeClosures({ declared, check }: { declared: string[]; check?: PullRe
   return <ul>{check.closures.map((closure) => <li key={closure.issue}>
     {closure.issue}{closure.excerpt ? <>: <q>{closure.excerpt}</q></> : " (linked on GitHub)"}
   </li>)}</ul>;
+}
+
+/** The installed or user-authored rule that keeps a decision for its owner (#4137), as facts rows
+ * for a `.facts` list. The requester supplied both values, so they render only as plain text. */
+export function OwnerRuleFactRows({ rule }: { rule: WorkflowDecisionOwnerRule }) {
+  return <>
+    <div><dt>Rule Source</dt><dd><code>{rule.source}</code></dd></div>
+    <div><dt>Rule</dt><dd><q>{rule.quote}</q></dd></div>
+  </>;
+}
+
+/** Why only the owner can make a decision a rule kept for them (#4137), and which rule it is. */
+export function OwnerRuleSummary({ rule }: { rule: WorkflowDecisionOwnerRule }) {
+  return <>
+    <p>An installed or user-authored rule keeps this decision for a person, so no agent can make it.</p>
+    <dl className="facts"><OwnerRuleFactRows rule={rule} /></dl>
+  </>;
 }
 
 /** What a workflow decision decides, as facts (§5.4): the Request Card's body for the kinds without

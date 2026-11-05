@@ -7425,6 +7425,8 @@ export class ControlPlaneDb {
       "superseded_by TEXT",
       // #4064: the root handed this Orchestrator-owned occurrence to the campaign's owner.
       "owner_handoff TEXT",
+      // #4137: the installed or user-authored rule that kept this occurrence for a person.
+      "owner_rule TEXT",
       // #4067: what Wollipog did when it performed this approved forge action itself.
       "forge_action TEXT",
       // #4138: the session owner who approved a Location switch, and its claim, then its receipt.
@@ -22634,15 +22636,17 @@ export class ControlPlaneDb {
         `INSERT INTO workflow_decisions
          (request_id, occurrence_id, session_id, controlling_session_id, category, resource_key,
           resource_snapshot, resource_digest, policy_revision, authority, status, human_fallback, authority_evaluation,
-          closing_reference_check, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?)`,
+          closing_reference_check, owner_rule, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?, ?, ?, ?, ?)`,
       ).run(
         input.requestId, input.occurrenceId, input.sessionId, input.controllingSessionId,
         input.category, input.resourceKey, JSON.stringify(input.resourceSnapshot), input.resourceDigest,
-        input.policyRevision, input.authority,
+        // A rule keeps the occurrence for a person whatever the caller computed (#4137).
+        input.policyRevision, input.ownerRule ? "human" : input.authority,
         input.humanFallback ? JSON.stringify(input.humanFallback) : null,
         input.authorityEvaluation ? JSON.stringify(input.authorityEvaluation) : null,
-        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null, input.createdAt,
+        input.closingReferenceCheck ? JSON.stringify(input.closingReferenceCheck) : null,
+        input.ownerRule ? JSON.stringify(input.ownerRule) : null, input.createdAt,
       );
       this.db.exec("COMMIT");
     } catch (error) {
@@ -22879,7 +22883,7 @@ export class ControlPlaneDb {
       const changed = Number(this.stmt(
         `UPDATE workflow_decisions SET authority='human', owner_handoff=?, authority_evaluation=?
          WHERE occurrence_id=? AND status='pending' AND authority='orchestrator' AND owner_handoff IS NULL
-           AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
+           AND owner_rule IS NULL AND consumed_at IS NULL AND action_kind IS NULL AND action_armed_at IS NULL`,
       ).run(JSON.stringify(handoff), JSON.stringify(authorityEvaluation), occurrenceId).changes) === 1;
       if (!changed) return null;
       // Receipts back only an Orchestrator's approval, which this occurrence can no longer have.
@@ -22891,26 +22895,29 @@ export class ControlPlaneDb {
   /** The owner's classification releasing a question held for it (#4104): an implementation
    * question moves to the Orchestrator, and an owner decision stays the owner's but may now be
    * answered. Only a pending, unconsumed occurrence held for that reason changes; nothing else can
-   * be released this way, and an owner decision can never move to an agent. */
+   * be released this way, and an owner decision can never move to an agent. Nor can a question an
+   * owner rule kept (#4137): it stays the person's, who may now answer it. */
   releaseCredentialScreenReview(
     occurrenceId: string,
     authority: "human" | "orchestrator",
     authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
   ): WorkflowDecisionView | null {
-    const category = authority === "orchestrator" ? "implementation_question" : "owner_decision";
     const changed = Number(this.stmt(
       `UPDATE workflow_decisions SET authority=?, authority_evaluation=?
-       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category=?
+       WHERE occurrence_id=? AND status='pending' AND authority='human'
+         AND (?='human' AND (category='owner_decision' OR (category='implementation_question' AND owner_rule IS NOT NULL))
+           OR ?='orchestrator' AND category='implementation_question' AND owner_rule IS NULL)
          AND owner_handoff IS NULL AND consumed_at IS NULL
          AND json_extract(authority_evaluation, '$.reason')='credential_screen_review'`,
-    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, category).changes) === 1;
+    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, authority, authority).changes) === 1;
     return changed ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 
-  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status. */
+  /** The pending decisions a campaign's owner kept (#4064), oldest first, for Campaign Status: the
+   * root's owner decisions, the occurrences it handed over, and those an owner rule kept (#4137). */
   campaignOwnerDecisions(controllingSessionId: string): NonNullable<OrchestratorCampaignProjection["ownerDecisions"]> | null {
     const where = `controlling_session_id=? AND status='pending' AND authority='human'
-      AND (category='owner_decision' OR owner_handoff IS NOT NULL)`;
+      AND (category='owner_decision' OR owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)`;
     const total = Number((this.stmt(`SELECT COUNT(*) AS count FROM workflow_decisions WHERE ${where}`)
       .get(controllingSessionId) as { count: number }).count);
     if (!total) return null;
@@ -22918,14 +22925,17 @@ export class ControlPlaneDb {
       ORDER BY created_at ASC, occurrence_id ASC LIMIT ${CAMPAIGN_OWNER_DECISIONS_LIMIT}`).all(controllingSessionId) as unknown[])
       .map(workflowDecisionFromRow).filter((decision): decision is WorkflowDecisionView => decision !== null)
       .map((decision) => ({ occurrenceId: decision.occurrenceId, sessionId: decision.sessionId, category: decision.category,
-        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined, createdAt: decision.createdAt }));
+        summary: ownerDecisionSummary(decision.resourceSnapshot), handedOff: decision.ownerHandoff !== undefined,
+        ...(decision.ownerRule ? { ownerRule: decision.ownerRule } : {}), createdAt: decision.createdAt }));
     return { total, items };
   }
 
-  /** Every occurrence a campaign's root handed to its owner, in any state (#4064). */
-  ownerHandedWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
+  /** Every occurrence a campaign's root handed to its owner (#4064) or an owner rule kept for a
+   * person (#4137), in any state. */
+  ownerKeptWorkflowDecisions(controllingSessionId: string): WorkflowDecisionView[] {
     return (this.stmt(
-      `SELECT * FROM workflow_decisions WHERE controlling_session_id=? AND owner_handoff IS NOT NULL
+      `SELECT * FROM workflow_decisions WHERE controlling_session_id=?
+         AND (owner_handoff IS NOT NULL OR owner_rule IS NOT NULL)
        ORDER BY created_at ASC, occurrence_id ASC`,
     ).all(controllingSessionId) as unknown[]).map(workflowDecisionFromRow).filter(
       (decision): decision is WorkflowDecisionView => decision !== null,
@@ -34286,6 +34296,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     withdrawal?: string | null;
     superseded_by?: string | null;
     owner_handoff?: string | null;
+    owner_rule?: string | null;
     issue_closure_result?: string | null;
     automation_creation_result?: string | null;
     location_switch_result?: string | null;
@@ -34354,6 +34365,7 @@ function workflowDecisionFromRow(raw: unknown): WorkflowDecisionView | null {
     ...(row.withdrawal ? { withdrawal: parseJson<NonNullable<WorkflowDecisionView["withdrawal"]>>(row.withdrawal) ?? undefined } : {}),
     ...(row.status === "superseded" && row.superseded_by ? { supersededBy: row.superseded_by } : {}),
     ...(row.owner_handoff ? { ownerHandoff: parseJson<NonNullable<WorkflowDecisionView["ownerHandoff"]>>(row.owner_handoff) ?? undefined } : {}),
+    ...(row.owner_rule ? { ownerRule: parseJson<NonNullable<WorkflowDecisionView["ownerRule"]>>(row.owner_rule) ?? undefined } : {}),
   };
 }
 

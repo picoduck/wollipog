@@ -3,7 +3,7 @@ import test from "node:test";
 import React from "react";
 import { renderToStaticMarkup } from "react-dom/server";
 import type { PullRequestClosingReferenceCheck, WorkflowDecisionResourceSnapshot } from "@wollipog/protocol";
-import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
+import { OwnerRuleSummary, WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 
 Object.defineProperty(globalThis, "React", { configurable: true, writable: true, value: React });
 
@@ -42,4 +42,14 @@ test("an owner decision shows the question, its material and its options, and sa
   assert.equal(rendered, "Which credential design should the provider bridge use? PR #7 at head abc1234; both designs pass CI. " +
     "Short-Lived Lease (Recommended) Broker Process: Adds a helper process. " +
     "You kept this decision, so only you can make it. The Orchestrator keeps working while it waits.");
+});
+
+test("an owner rule shows its source and quote as plain text, whoever reads the card (#4137)", () => {
+  const markup = renderToStaticMarkup(<OwnerRuleSummary rule={{ source: "~/.claude/skills/issue-workflow/SKILL.md",
+    quote: "Ask <script>alert(1)</script> & wait for \"yes\"." }} />);
+  assert.doesNotMatch(markup, /<script>/u, "the quote is never rendered as markup");
+  assert.match(markup, /&lt;script&gt;alert\(1\)&lt;\/script&gt; &amp; wait/u);
+  assert.equal(markup.replace(/<[^>]+>/gu, " ").replace(/\s+/gu, " ").trim(),
+    "An installed or user-authored rule keeps this decision for a person, so no agent can make it. " +
+    "Rule Source ~/.claude/skills/issue-workflow/SKILL.md Rule Ask &lt;script&gt;alert(1)&lt;/script&gt; &amp; wait for &quot;yes&quot;.");
 });

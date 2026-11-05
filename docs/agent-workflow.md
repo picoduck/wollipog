@@ -31,6 +31,20 @@ policy. Do not edit installed skills or live provider configuration to remove th
 Explicitly authorized repository policy alignment must itself pass normal review and merge gates.
 Committed wording never overrides the current session's higher-priority instructions.
 
+When such a rule keeps a gate for a person, the gate reaches the owner as a typed request, never
+only as prose (#4137):
+
+- The child still files the exact typed decision, such as `pr_merge`, with
+  `request_workflow_decision` and names the rule in `ownerRule` (`source`: the file; `quote`: the
+  requirement, on one line), or with `wollipog decision request ... --owner-rule-source <path>
+  --owner-rule-quote <text>`. The occurrence is created human-owned (`owner_kept`) under any mode
+  or grant, reaches the owner's Inbox and Campaign Status under Waiting for You with the rule, and
+  later requests for the same resource stay the owner's. The rule only narrows authority.
+- The root hands any occurrence already filed without the rule to the owner with
+  `hand_workflow_decision_to_owner`.
+- For a gate with no typed category, the root uses `request_owner_decision`.
+- Nobody ends a turn with such a gate only in prose.
+
 ## Worktree Bases and Checkout Maintenance
 
 Create new issue worktrees with `wollipog worktree create --branch <branch>` and omit `--base`.

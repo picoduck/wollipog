@@ -779,6 +779,16 @@ Neither tool exists for a child or under Custom, where a person already sees the
 requests, and an older runner or control plane refuses them by name. Never decide an owner-kept
 decision yourself, and never ask the owner to approve one in chat.
 
+When an installed skill or user-authored instruction keeps a typed gate for a person (a per-PR
+merge approval, say), any requester, child or root and in any mode, files the exact typed decision
+anyway and names the rule in `ownerRule` on `request_workflow_decision`: `source` is the file and
+`quote` the requirement, on one line (CLI `wollipog decision request ... --owner-rule-source <path>
+--owner-rule-quote <text>`; control plane v295). The occurrence is created owner-kept and reaches
+the owner's Inbox and Campaign Status with the rule; later requests for the same resource stay the
+owner's. It can never give the Orchestrator a decision. See
+[references/campaign-authority.md](references/campaign-authority.md). Never end a turn with such a
+gate only in prose.
+
 ## Inspecting and Changing Campaign Issue Scope
 
 Before delegating an epic, use `get_campaign_issue_scope` (CLI: `wollipog issue-scope get --epic <number>`).
