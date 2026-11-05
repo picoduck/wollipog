@@ -88,6 +88,7 @@ export function requestTypeLabel(request: PendingApproval): string {
     if (category === "merged_branch_deletion") return "Branch Deletion";
     if (category === "issue_closure") return "Issue Closure";
     if (category === "automation_creation") return "Create Automation";
+    if (category === "location_switch") return "Location Switch";
     if (category === "campaign_issue_scope") return "Campaign Issue Scope";
     if (category === "campaign_follow_up_admission") return "Follow-Up Approval";
     if (category === "follow_up_issue_publication") return "Issue Publication";

@@ -5,6 +5,9 @@ import { MEDIA_SESSION_PURPOSE_ERROR } from "./prepared-media-session-runtime.js
 import { DELEGATED_IMAGE_REVIEWER_ERROR, delegatedImageReviewerMutationAllowed } from "./delegated-image-reviews.js";
 import { registerCampaignIssueScopeRoutes } from "./campaign-issue-scope-routes.js";
 import { registerAutomationCreationRoutes } from "./automation-creation-routes.js";
+import { registerLocationSwitchRoutes } from "./location-switch-routes.js";
+import { LocationSwitchService } from "./location-switch.js";
+import { inspectProjectLocation } from "./project-location-inspection.js";
 import { AutomationCreationService } from "./automation-creation.js";
 /**
  * Control plane: routes UI commands to runners, ingests runner events, persists
@@ -12,7 +15,7 @@ import { AutomationCreationService } from "./automation-creation.js";
  */
 
 import os from "node:os";
-import { handoffDestinationError, sessionRole, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
+import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -4654,6 +4657,16 @@ app.post("/api/sessions/:id/orchestrator-campaign/recommendations/:recommendatio
 
 registerCampaignIssueScopeRoutes(app, {db,svc,requestPrincipal});
 registerAutomationCreationRoutes(app, { service: new AutomationCreationService(db, svc, hub), requestPrincipal });
+registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitchService(db, svc, hub, {
+  // The shared verified-Location inspection (#4117): by Location id, in the Location's own path.
+  inspect: (locationId, options) => inspectProjectLocation({ db, hub }, locationId, options),
+  // The approving owner creates the session, under the ordinary creation route's ownership rules.
+  createSession: (human, body) => {
+    const ownership = resolveSessionCreationOwnership(db, human, body);
+    if (!ownership.ok) return { ok: false, status: ownership.status, error: ownership.error };
+    return svc.createSession(ownership.body, undefined, ownership.scope, false, false, false, { defaultOwnerUserId: human.userId });
+  },
+}) });
 
 app.post("/api/sessions/:id/github-issue-closures", async (req, reply) => {
   const { id } = req.params as { id: string };
@@ -5959,7 +5972,14 @@ async function runSessionWorktreeRequest(
       const legacy = request.operation === "discard"
         ? legacyPeerWorktreeRetirement(db.getRunner(session.runnerId)?.protocolVersion, error)
         : null;
-      return reply.code(409).send(legacy ?? { error });
+      // The session's own attach into another repository learns how to recover (#4138). A regular
+      // session is pointed at request_location_switch only when its runner has that tool.
+      const role = locationSwitchRole({ role: sessionRole(session), parentSessionId: session.parentSessionId });
+      const explained = request.operation === "attach" && worktreeRequestedBySession(principal, sessionId) &&
+          (role !== "offer" || runnerSupportsProtocol(db.getRunner(session.runnerId)?.protocolVersion, "sessionLocationSwitch"))
+        ? withRepositoryMismatchGuidance(role, "worktree_attach", error)
+        : error;
+      return reply.code(409).send(legacy ?? { error: explained });
     }
     db.updateSessionFromSnapshot(sessionId, res.snapshot, Date.now());
     if (request.operation !== "create" && request.operation !== "delete_refs") worktreeCreates.invalidateSession(sessionId);

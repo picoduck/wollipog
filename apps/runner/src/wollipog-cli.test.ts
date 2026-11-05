@@ -1544,6 +1544,31 @@ test("CLI issue closure preserves the exact proposal and refuses other sessions 
   assert.ok(calls.every((call) => call.url.endsWith("/api/compatibility")));
 });
 
+test("CLI Location switch requests act only on the injected session and expose no approval command", async () => {
+  const calls: Array<{ url: string; body?: string }> = [];
+  const fetch: McpFetch = async (url, init) => {
+    calls.push({ url, body: init?.body });
+    return { ok: true, status: 200, text: async () => JSON.stringify(url.endsWith("/api/compatibility")
+      ? { protocolVersion: PROTOCOL_VERSION } : { authority: "human", status: "pending" }) };
+  };
+  const env = { WOLLIPOG_CONTROL_PLANE_URL: "http://cp", WOLLIPOG_TOKEN: "test-token", WOLLIPOG_SESSION_ID: "self" };
+  const invoke = (args: string[]) => runWollipogCli(["node", "cli.js", "--wollipog-cli", ...args, "--json"], env,
+    { stdout() {}, stderr() {} }, fetch);
+  const request = { requestId: "switch-1", repository: "acme/docs", reason: "The issue is in acme/docs.", handoff: "Fix\nacme/docs#12." };
+  assert.equal(await invoke(["location-switch", "request", "--request", JSON.stringify(request)]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/self/location-switch-requests");
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), request);
+  assert.equal(await invoke(["location-switch", "get", "switch_1"]), 0);
+  assert.equal(calls.at(-1)!.url, "http://cp/api/sessions/self/location-switch-requests/switch_1");
+  assert.equal(await invoke(["location-switch", "execute", "switch_1", "--digest", "a".repeat(64)]), 0);
+  assert.deepEqual(JSON.parse(calls.at(-1)!.body!), { resourceDigest: "a".repeat(64) });
+  calls.length = 0;
+  assert.equal(await invoke(["location-switch", "get", "switch_1", "--session", "other"]), 2);
+  assert.equal(await invoke(["location-switch", "approve", "switch_1"]), 2);
+  assert.equal(calls.length, 0);
+  assert.match(resolveHelp(["help", "location-switch"])!.text, /Only the person approves/);
+});
+
 test("CLI automation proposals preserve configuration and expose read/execute without approval commands", async () => {
   const calls: Array<{ url: string; body?: string }> = [];
   let version = PROTOCOL_VERSION;
