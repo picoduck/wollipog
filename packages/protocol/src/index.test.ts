@@ -360,6 +360,9 @@ test("session restart capability overlays controls without freezing the agent ca
 
 test("PROTOCOL_VERSION is 298", () => {
   assert.equal(PROTOCOL_VERSION, 298);
+  // A v294 runner cannot report the closing references of a GitLab merge (#3762).
+  assert.equal(runnerSupportsProtocol(294, "gitlabMergeClosingReferences"), false);
+  assert.equal(runnerSupportsProtocol(295, "gitlabMergeClosingReferences"), true);
   // Selection floors read issue facts from a v291 runner (#4103).
   assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
   assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);

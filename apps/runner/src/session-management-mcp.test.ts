@@ -679,6 +679,18 @@ test("declared merge closures fail closed against a control plane that would dro
   assert.equal(calls.length, 0, "an old control plane never receives a declaration it would drop");
   await callTool(deps, "request_workflow_decision", { requestId: "m", resourceKey: "m", resourceSnapshot: snapshot });
   assert.equal(calls.length, 1, "a merge that declares no closure is still requested");
+
+  // A GitLab declaration needs a control plane that reads GitLab's closures (#3762).
+  const gitlab = { ...snapshot, repository: "gitlab.example.com/group/project", mergeMethod: "merge_train", squash: false, removeSourceBranch: false };
+  const current = makeDeps();
+  current.deps.controlPlaneProtocolVersion = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences - 1;
+  const refused = await callTool(current.deps, "request_workflow_decision", { requestId: "g", resourceKey: "g",
+    resourceSnapshot: { ...gitlab, intendedClosures: ["#7"] } });
+  assert.equal(refused.isError, true);
+  assert.equal(resultJson(refused).requiredControlPlaneProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabMergeClosingReferences);
+  assert.equal(current.calls.length, 0);
+  await callTool(current.deps, "request_workflow_decision", { requestId: "g", resourceKey: "g", resourceSnapshot: gitlab });
+  assert.equal(current.calls.length, 1, "a GitLab merge that declares no closure is still requested");
 });
 
 test("merge review citations are refused before submission to an older or unknown control plane", async () => {

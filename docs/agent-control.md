@@ -1651,7 +1651,7 @@ verb before a reference that must stay open (#3713).
 Protocol v242 checks this before a GitHub merge is reviewed and again before it is armed. A GitHub
 `pr_merge` snapshot may carry `intendedClosures`: every issue the merge is meant to close, as `#N`,
 `owner/repo#N`, or an issue URL, normalized to sorted unique `owner/repo#N`. It is omitted when the
-merge must close nothing, so earlier digests are unchanged; GitLab snapshots refuse it. When the
+merge must close nothing, so earlier digests are unchanged. When the
 child's runner is v242, the control plane asks it for `github_merge_preflight` before creating the
 decision. The runner reads the open pull request through the child's own `gh` login: its head, its
 description and GitHub's `closingIssuesReferences`. It reports every issue either would close, with
@@ -1677,6 +1677,35 @@ HTML parser would hide, and indented code are all read as visible text. The
 title and commit messages are not read: GitHub never links from the title, and a merge-queue squash
 commit headed "(Closes #3705)" left #3705 open. `wollipog pr closures` runs the same read locally for
 an open pull request, or for a draft description with `--file`, compared with `--intended`.
+
+Protocol v295 applies the same contract to GitLab merges (#3762). A GitLab `pr_merge` snapshot may
+carry `intendedClosures` as `#N`, `group/project#N`, `<host>/group/project#N`, or an issue URL on the
+project's instance, normalized to sorted unique `<host>/group/project#N`, lowercased. When the
+child's runner is v295, the control plane asks it for `gitlab_merge_closures` before creating the
+decision, and again when arming, alongside the GitLab merge preflight. The runner reads the open merge
+request through the child's own `glab` login with two read-only GETs naming the host: the merge
+request (state, head and description) and `closes_issues?per_page=100`. It reports every issue either
+source would close; the comparison, refusal, recorded `closingReferenceCheck`, revocation and
+retry rules are the GitHub ones above. A pre-v295 child runner is not asked, and its card says
+**Not checked**. Unlike GitHub, a GitLab merge whose closures cannot be read on a current runner is
+refused rather than created: a current runner's GitLab decision always carries its check, which is
+what Full Control's ownership of it rests on (see campaign-issue-scope.md).
+
+GitLab closes an issue when a merge request lands on the default branch and its title, description
+or a commit message matches the instance's closing pattern, and scans the raw text, so code spans,
+code blocks and HTML comments hide nothing. The description matcher reads GitLab's documented default
+pattern generously, never more narrowly: close, fix, resolve and implement in every form, including
+"-ing" forms and "Implements", in any letter case (GitLab requires only an initial capital), an
+optional colon, then one or more references, each optionally after "issue" or "issues", joined by
+commas, spaces or "and", so "Closes #1, #2 and group/project#3" closes all three. An external
+tracker's key (`ABC-12`) continues the list but names no GitLab issue. `#N` is this project,
+`project#N` a project in its namespace, `group/project#N` a full path, and an `http(s)` issue or work
+item URL on the same instance counts; a URL on another host does not. An instance may configure a
+different closing pattern, which no client can read, so GitLab's own `closes_issues` list, which also
+covers the title, the commits and such a pattern, is authoritative: every issue it reports is a
+closure whether or not the description matcher found it. A description match it does not report is
+still reported, because a false report costs a reworded sentence. A list that fills GitLab's largest
+page (100), or that names an external tracker's issue, is not checked and is refused as unreadable.
 
 Other categories retain immediate consumption. Consumption records that the external action may
 have started. A UI-evidence approval gates a later action rather than authorizing one, so campaign

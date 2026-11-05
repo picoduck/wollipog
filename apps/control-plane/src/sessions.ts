@@ -201,6 +201,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type RecordWorkflowActionAdmissionMessage,
   type GitLabMergePreflightResultMessage,
   type GithubMergePreflightResultMessage,
+  type GitLabMergeClosuresResultMessage,
   type PullRequestClosingReferenceCheck,
   type ReconcileWorkflowActionMessage,
   type PodContextEntry,
@@ -448,6 +449,9 @@ export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
 /** The child runner's GitHub read for a merge's closing references (#3713): one `gh` call of at
  * most 30 seconds. The session tools wait 75 seconds for a merge request or consume. */
 export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
+/** The child runner's GitLab read for a merge's closing references (#3762): two `glab` calls of at
+ * most 15 seconds each. Arming runs it alongside the GitLab merge preflight, inside that 75. */
+export const GITLAB_MERGE_CLOSURES_TIMEOUT_MS = 40_000;
 /** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
 export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
 
@@ -1247,14 +1251,14 @@ export function normalizeWorkflowDecisionSnapshot(
         !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
-    // #3713: the issues a GitHub merge is meant to close; the runner's check compares them with
-    // what GitHub would close. Omitted when none are declared, so earlier digests are unchanged.
-    if (gitlab && value.intendedClosures !== undefined) {
-      return fail("intendedClosures applies only to a GitHub merge decision");
-    }
-    const intendedClosures = gitlab ? undefined : normalizeIntendedClosures(value.intendedClosures, repo);
+    // #3713: the issues a merge is meant to close; the runner's check compares them with what the
+    // forge would close (GitLab too since #3762). Omitted when none are declared, so earlier
+    // digests are unchanged.
+    const intendedClosures = normalizeIntendedClosures(value.intendedClosures, repo);
     if (intendedClosures === null) {
-      return fail(`intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
+      return fail(gitlab
+        ? `intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, group/project#N, host/group/project#N, or an issue URL on the project's GitLab instance`
+        : `intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
     }
     return ok({ category, repository: repo, pullRequest, headSha,
       ...(typeof value.reviewSessionId === "string" ? { reviewSessionId: value.reviewSessionId } : {}),
@@ -11202,8 +11206,8 @@ export class SessionsService {
       return this.createWorkflowDecision(sessionId, request, canAccess,
         "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
     }
-    if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
-      return this.createGithubMergeDecision(sessionId, request, normalized.data, canAccess);
+    if (normalized.ok && normalized.data?.category === "pr_merge") {
+      return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
     }
     if (normalized.ok && normalized.data?.category === "implementation_question") {
       const credentialScreen = await this.screenImplementationQuestion(sessionId, request, normalized.data);
@@ -12169,10 +12173,11 @@ export class SessionsService {
     return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
   }
 
-  /** #3713: a GitHub merge is requested only after the child's runner reports the issues it would
-   * close, so a closure the snapshot does not declare is refused before anyone reviews it. A
-   * request the ordinary path refuses anyway, or one from a pre-v242 runner, is not checked. */
-  private async createGithubMergeDecision(
+  /** #3713: a merge is requested only after the child's runner reports the issues it would close,
+   * so a closure the snapshot does not declare is refused before anyone reviews it. A request the
+   * ordinary path refuses anyway, or one from a runner that predates the check (v242 for GitHub,
+   * v295 for GitLab, #3762), is not checked. */
+  private async createMergeDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
@@ -12183,45 +12188,51 @@ export class SessionsService {
         !boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return this.createWorkflowDecision(sessionId, request, canAccess);
     }
-    const checked = await this.githubMergeClosures(child, snapshot);
+    const checked = await this.mergeClosures(child, snapshot);
     if (!checked.ok) return fail(checked.message, 409);
     return this.createWorkflowDecision(sessionId, request, canAccess,
       checked.check ? { closingReferenceCheck: checked.check } : undefined);
   }
 
-  /** What merging would close, read from GitHub through the child's runner and compared with the
-   * snapshot's `intendedClosures` (#3713). Without a check when the runner predates v242. `revoke`
-   * says the snapshot itself is wrong (a stale head or a different set of closures); otherwise
-   * GitHub could not be read and the same snapshot may be tried again. */
-  private async githubMergeClosures(
+  /** What merging would close, read from the forge through the child's runner and compared with the
+   * snapshot's `intendedClosures` (#3713; GitLab since #3762). Without a check when the runner
+   * predates it (v242 for GitHub, v295 for GitLab). `revoke` says the snapshot itself is wrong (a
+   * stale head or a different set of closures); otherwise the forge could not be read and the same
+   * snapshot may be tried again. An unread GitLab merge is refused like an unread GitHub one: a
+   * current runner's decision carries a check, which is what Full Control's ownership rests on. */
+  private async mergeClosures(
     child: { id: string; runnerId: string },
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
   ): Promise<{ ok: true; check?: PullRequestClosingReferenceCheck } | { ok: false; revoke: boolean; message: string }> {
+    const gitlab = snapshot.mergeMethod !== undefined;
+    const forge = gitlab ? "GitLab" : "GitHub";
     const runner = this.db.getRunner(child.runnerId);
-    if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "githubMergeClosingReferences")) return { ok: true };
+    if (!runner || !runnerSupportsProtocol(runner.protocolVersion,
+      gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences")) return { ok: true };
     const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
-      message: `GitHub could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
-    const requestId = `github_merge_preflight_${randomUUID()}`;
+      message: `${forge} could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
+    const type = gitlab ? "gitlab_merge_closures" : "github_merge_preflight";
+    const requestId = `${type}_${randomUUID()}`;
     let answer: unknown;
     try {
       answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
-        type: "github_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+        type, requestId, sessionId: child.id, repository: snapshot.repository,
         pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
-      }, GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
+      }, gitlab ? GITLAB_MERGE_CLOSURES_TIMEOUT_MS : GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
     } catch {
       return unreadable("the runner did not answer.");
     }
-    const result = answer as Partial<GithubMergePreflightResultMessage> | null;
-    const reason = typeof result?.reason === "string" && result.reason.length <= 300 ? result.reason : "GitHub could not be checked.";
-    if (result?.type !== "github_merge_preflight_result" || result.sessionId !== child.id) return unreadable("GitHub could not be checked.");
+    const result = answer as Partial<GithubMergePreflightResultMessage | GitLabMergeClosuresResultMessage> | null;
+    const reason = typeof result?.reason === "string" && result.reason.length <= 300 ? result.reason : `${forge} could not be checked.`;
+    if (result?.type !== `${type}_result` || result.sessionId !== child.id) return unreadable(`${forge} could not be checked.`);
     if (result.ok !== true) {
       return result.refusal === "stale_head"
-        ? { ok: false, revoke: true, message: `This merge no longer matches the pull request: ${reason}` }
+        ? { ok: false, revoke: true, message: `This merge no longer matches the ${gitlab ? "merge request" : "pull request"}: ${reason}` }
         : unreadable(reason);
     }
-    const check = validClosingReferenceCheck(result.check);
+    const check = validClosingReferenceCheck(result.check, gitlab ? snapshot.repository : undefined);
     if (!check) return unreadable("the runner's answer was incomplete.");
-    const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures);
+    const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures, gitlab ? "gitlab" : "github");
     return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
   }
 
@@ -12343,7 +12354,8 @@ export class SessionsService {
     if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
       this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request_refused",
         sessionId, controllingSessionId: controller.session.id, requestId: request.requestId, ...authorityEvaluation }));
-      return fail(unscopedClosureRefusal(authorityEvaluation.unscopedClosures), 409);
+      return fail(unscopedClosureRefusal(authorityEvaluation.unscopedClosures,
+        normalized.data.category === "pr_merge" && normalized.data.mergeMethod !== undefined ? "gitlab" : "github"), 409);
     }
     // Full Control cannot supply credentials or sign-in, so it declines such a question once,
     // records it as blocked work, and creates no decision for anyone to answer (#2940).
@@ -13279,6 +13291,9 @@ export class SessionsService {
         }
       }
     }
+    // #3713: the description can change after approval, so the forge is read again before arming
+    // (GitLab too since #3762, alongside its merge preflight so both fit the consume's wait).
+    const closuresRead = action.data && normalized.data.category === "pr_merge" ? this.mergeClosures(child, normalized.data) : null;
     if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod) {
       // #3602: GitLab is read before arming, through the child's own glab login. A stale head or a
       // snapshot that does not fit the project (a direct merge around an enabled train, among
@@ -13310,11 +13325,10 @@ export class SessionsService {
         return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
       }
     }
-    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
-      // #3713: the description can change after approval, so GitHub is read again before arming.
-      // A closure the approval does not describe revokes it; GitHub being unreadable proves
+    if (closuresRead) {
+      // A closure the approval does not describe revokes it; the forge being unreadable proves
       // nothing either way, so nothing is armed and the child may try again.
-      const checked = await this.githubMergeClosures(child, normalized.data);
+      const checked = await closuresRead;
       if (!checked.ok) {
         if (checked.revoke) this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(checked.revoke
@@ -13554,7 +13568,7 @@ export class SessionsService {
       };
       if (snapshot.category === "pr_merge") {
         // The description can change after arming, so GitHub is read again, as arming did (#3713).
-        const checked = await this.githubMergeClosures(child, snapshot);
+        const checked = await this.mergeClosures(child, snapshot);
         if (!checked.ok) {
           const reason: ForgeDecisionActionRefusalReason = checked.revoke ? "closure_mismatch" : "forge_unavailable";
           finish("refused", { reason, summary: boundedForgeSummary(checked.message) });
