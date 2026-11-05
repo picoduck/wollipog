@@ -101,6 +101,8 @@ test("a verified-complete Full Control root's hub snapshot row carries its campa
     db.updateSessionStatus("child","idle",3);
     const report=db.appendEvent("child",{ kind: "agent_message",text: "Report",final: true },4);
     db.verifyCampaignChildReport("campaign","child",report.seq,5);
+    // A queued or running root is live work (#4146); the campaign is complete once it is idle.
+    db.updateSessionStatus("campaign","idle",6);
     const frames: string[]=[];
     let complete=false;
     new Hub(db).addUiClient({ send(data) { frames.push(data); if (JSON.parse(data).complete) complete=true; } },{

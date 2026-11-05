@@ -58,6 +58,8 @@ import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
+import { CampaignCleanup, CampaignStuck } from "./CampaignCleanup.js";
+import { useStoreSelector } from "../store.js";
 import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { CampaignRepositories } from "./CampaignRepositories.js";
@@ -220,6 +222,8 @@ function AvailableCampaignStatus({
   }, [memory.selectedItemId, shownRows, listSettled]);
 
   const heldChildren = data.summary.campaign?.heldChildren ?? [];
+  // A child named by Cleanup or Campaign Stuck, as a link to its session.
+  const sessionLink = (sessionId: string) => <CampaignChildLink sessionId={sessionId} onOpen={onOpenSession} />;
   return (
     <div className="campaign-status" ref={scrollRef}>
       {memory.selectedItemId ? (
@@ -265,6 +269,21 @@ function AvailableCampaignStatus({
                 refreshKey={data.summary.campaign}
                 onOpenSession={onOpenSession}
               />
+              {data.summary.campaign?.status === "stuck" && data.summary.campaign.stuck && (
+                <CampaignStuck
+                  stuck={data.summary.campaign.stuck}
+                  repair={data.summary.campaign.activity?.repair}
+                  onOpenSession={sessionLink}
+                />
+              )}
+              {data.summary.campaign?.cleanup && (
+                <CampaignCleanup
+                  campaignId={availability.campaignSessionId}
+                  cleanup={data.summary.campaign.cleanup}
+                  canAct={availability.role === "campaign"}
+                  onOpenSession={sessionLink}
+                />
+              )}
               {data.summary.campaign?.handoffs && (
                 <CampaignHandoffs
                   handoffs={data.summary.campaign.handoffs}
@@ -723,6 +742,12 @@ function SessionLink({ sessionId, onOpen, children }: { sessionId: string; onOpe
       {children}
     </a>
   );
+}
+
+/** A campaign child by its title from the store, as a link to its session (#4146). */
+function CampaignChildLink({ sessionId, onOpen }: { sessionId: string; onOpen: (sessionId: string) => void }) {
+  const title = useStoreSelector((s) => s.sessions.get(sessionId)?.title ?? "");
+  return <SessionLink sessionId={sessionId} onOpen={onOpen}>{title || "Open Child Session"}</SessionLink>;
 }
 
 function RecordedTime({ at, now, prefix }: { at: number | null; now: number; prefix?: string }) {

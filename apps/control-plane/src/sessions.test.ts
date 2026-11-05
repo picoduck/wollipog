@@ -1433,8 +1433,10 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
       "a stopped child with a retained worktree is not campaign-complete");
     db.raw().prepare("UPDATE sessions SET archived=1, worktree_path=NULL, worktrees='[]' WHERE id=?")
       .run(child.data.id);
-    // #4067: the grandchild's merged pull request still owes its branch until the forge reports it gone.
-    assert.equal(db.campaignProjection(parent.id)?.status, "active");
+    // #4067, #4146: the grandchild's merged pull request still owes its branch until the forge reports it
+    // gone; once the root is idle that is Complete, Needs Cleanup, never Active.
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    assert.equal(db.campaignProjection(parent.id)?.status, "complete_needs_cleanup");
     assert.equal(db.campaignProjection(parent.id)?.mergedBranches?.pending, 1);
     db.campaignForgeObservations.record(parent.id, RUNNER_ID, [{ ref: { repository: "picoduck/wollipog", number: 1091 }, observation: {
       state: "merged", draft: false, headSha: "b".repeat(40), baseRef: "main", reviewDecision: "approved",
@@ -1445,6 +1447,7 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     assert.deepEqual(db.campaignProjection(parent.id)?.followUps, {
       unique: 2, duplicates: 2,
     });
+    db.updateSessionStatus(parent.id, "running", Date.now()); // The root dispatches more work.
     let failedChild = svc.createSession(childRequest, undefined, undefined, false, false, false, {
       parentSessionId: parent.id,
     });
@@ -1457,8 +1460,14 @@ test("Orchestrator campaign policy resolves precedence, isolates active sessions
     }
     assert.ok(failedChild.ok && failedChild.data, failedChild.error);
     svc.onSessionStatus(failedChild.data.id, "failed");
-    assert.equal(db.campaignProjection(parent.id)?.status, "blocked",
+    db.updateSessionStatus(parent.id, "idle", Date.now());
+    // #4146: the failed child's turn end owes the root a continuation, which is live work; the
+    // failed child alone would leave the campaign stuck, never complete.
+    const afterFailure = db.campaignProjection(parent.id)!;
+    assert.equal(afterFailure.status, "active",
       "an unverified failed child blocks campaign completion without stalling unrelated work");
+    assert.deepEqual(afterFailure.activity?.live, ["continuation"]);
+    db.updateSessionStatus(parent.id, "running", Date.now());
     const emptyChildRequest = {
       runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: CODEX_APP_AGENT_ID,
     };
@@ -1853,6 +1862,7 @@ test("Stop and Archive leaves old runners pending and retries an undelivered arc
     svc.reconcileArchivedCampaignWorktrees(RUNNER_ID);
     await new Promise<void>((resolve) => setImmediate(resolve));
     assert.equal(hub.sentOfType("session_worktree").length, 1);
+    db.updateSessionStatus(parent.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
   } finally {
     db.close();
@@ -3423,8 +3433,8 @@ test("campaign continuation recovery holds for humans and never replays an ambig
       error: "provider accepted the turn but no terminal result was persisted",
     }), true);
     assert.equal(db.campaignProjection(root.id)?.continuation?.state, "missing_result");
-    assert.equal(svc.campaignProjection(root.id).data?.status, "blocked",
-      "get_campaign no longer reports an accepted-without-result campaign as active (#1352)");
+    assert.equal(svc.campaignProjection(root.id).data?.status, "active",
+      "its children's queued turns are live work, so it is Active beside the stall (#1352, #4146)");
     assert.equal(svc.campaignProjection(root.id).data?.stalled, "continuation_missing_result");
     db.raw().prepare("UPDATE session_prompt_commands SET expires_at=0 WHERE command_id=?").run(first.commandId);
     svc.maintainPrompts(Date.now());
@@ -3581,8 +3591,8 @@ test("campaign continuation failures back off finitely and stopped campaigns rej
       }), true);
       assert.equal(db.campaignProjection(root.id)?.continuation?.attemptCount, attempt);
       assert.equal(db.campaignProjection(root.id)?.continuation?.state, "failed");
-      // The next iteration's retry proves a blocked status does not starve the scheduler (#1352).
-      assert.equal(db.campaignProjection(root.id)?.status, "blocked");
+      // The next iteration's retry proves a stuck status does not starve the scheduler (#1352, #4146).
+      assert.equal(db.campaignProjection(root.id)?.status, "stuck");
       assert.equal(db.campaignProjection(root.id)?.stalled, "continuation_failed");
       clock += 60_000;
     }
@@ -5476,6 +5486,7 @@ test("a nested Orchestrator's verification counts toward the root campaign (#146
       hub.sessionChangedByIdCalls.includes(nested.id),
     "both campaign views embed the root projection, so both refresh");
 
+    db.updateSessionStatus(root.data.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     const rootVerification = svc.verifyCampaignChild(root.data.id, {
       childSessionId: nested.id, reportEventSeq: report(nested.id, "Nested campaign report"),
       followUpsAccounted: true,
@@ -30179,10 +30190,12 @@ test("the campaign projection records completion when it first reaches verified_
     const child = spawn(parent.id, "Only child");
     svc.onSessionStatus(child, "idle");
     assert.ok(verify(child, report(child, "done")).ok);
+    db.updateSessionStatus(parent.id, "idle", Date.now()); // The root's own turn is live work (#4146).
     assert.equal(db.campaignProjection(parent.id)?.status, "verified_complete");
     const completedAt = db.campaignWorkLedger.accounting.completedAt(parent.id);
     assert.ok(completedAt !== null);
     assert.equal(svc.campaignWorkItems(parent.id, {}).data?.summary.elapsed.endedAt, completedAt);
+    db.updateSessionStatus(parent.id, "running", Date.now());
     spawn(parent.id, "More work");
     assert.notEqual(db.campaignProjection(parent.id)?.status, "verified_complete");
     assert.equal(db.campaignWorkLedger.accounting.completedAt(parent.id), null);

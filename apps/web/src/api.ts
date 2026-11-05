@@ -1190,6 +1190,13 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
+  /** Campaign Status's Delete Merged Branches (#4146): Wollipog performs the campaign's approved
+   * merged-branch deletions it still can, through the existing forge action. It approves nothing. */
+  deleteCampaignMergedBranches: (id: string) =>
+    req<{ performed: number; refused: number }>(
+      `/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/cleanup/delete-merged-branches`,
+      { method: "POST", body: "{}" },
+    ),
   /** Authenticated Human-only change to a Full Control scope grant's selection count (#4102).
    * Compare-and-set on the campaign's policy revision. */
   setScopeGrantSelectionCount: (id: string, count: number, expectedRevision: number) =>

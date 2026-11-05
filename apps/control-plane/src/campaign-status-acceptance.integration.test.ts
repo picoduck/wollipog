@@ -703,12 +703,20 @@ test("AC14 (#1352): a stalled continuation is reported at the root beside an unc
       runnerId: RUNNER_ID, eventFromSeq: event!.seq, eventThroughSeq: event!.seq, payloadJson: "{}",
       payloadSha256: "a".repeat(64), expiresAt: Date.now() + 60_000, attemptCount: 1, now: Date.now(),
     }));
+    // #4146: a running child is live work, so the campaign would read Active beside the stall; with
+    // nothing live, an unfinished campaign whose continuation stalled reads Campaign Stuck.
+    svc.onSessionStatus(worker, "idle");
+    svc.onSessionStatus(nested, "idle");
     const before = owner.work(root);
     db.updateCampaignContinuationForCommand("acceptance-continuation-cmd", "failed", Date.now(), "provider refused the turn");
     hub.sessionChangedById(root);
     const campaign = owner.session(root)!.orchestratorCampaign!;
-    assert.deepEqual([campaign.status, campaign.stalled], ["blocked", "continuation_failed"],
-      "the dashboard sees the stalled continuation at the root");
+    // This dashboard declares no protocol version, so it reads Campaign Stuck as the older `blocked`.
+    assert.deepEqual([campaign.status, campaign.stalled], ["blocked", "continuation_failed"]);
+    const projection = db.campaignProjection(root)!;
+    assert.equal(projection.status, "stuck");
+    assert.ok(projection.stuck?.items.some((item) => item.kind === "continuation" && item.state === "failed"),
+      "Campaign Status names the stalled continuation among what is stuck");
     assert.deepEqual([campaign.work?.counts, campaign.work?.revision], [before.counts, before.revision],
       "the stall is a campaign fact; it moves no work item");
     assert.equal(owner.session(nested)?.orchestratorCampaign?.stalled, undefined, "only the root's view carries the stall");

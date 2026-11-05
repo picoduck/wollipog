@@ -407,6 +407,11 @@ test("PROTOCOL_VERSION is 291", () => {
   assert.equal(campaignStatusTerminal("verified_complete"), true);
   assert.equal(campaignStatusTerminal("complete_with_handoffs"), true);
   for (const status of ["waiting_human", "active", "blocked", null, undefined] as const) assert.equal(campaignStatusTerminal(status), false);
+  // #4146: Complete, Needs Cleanup ends Campaign Elapsed and automatic turns; Campaign Stuck does not.
+  assert.equal(runnerSupportsProtocol(296, "campaignActivityStatus"), false);
+  assert.equal(runnerSupportsProtocol(297, "campaignActivityStatus"), true);
+  assert.equal(campaignStatusTerminal("complete_needs_cleanup"), true);
+  assert.equal(campaignStatusTerminal("stuck"), false);
   assert.equal(runnerSupportsProtocol(271, "pullRequestWatch"), false);
   assert.equal(runnerSupportsProtocol(272, "pullRequestWatch"), true);
   assert.equal(runnerSupportsProtocol(269, "runnerProcessingBarriers"), false);

@@ -75,6 +75,35 @@ test("a verified-complete Full Control root shows an informational Campaign Comp
   assert.equal(label(sessionRowStatus(complete, { reminder: fired })), label(sessionRowStatus(session(), { reminder: fired })), "a fired reminder");
 });
 
+test("an idle Full Control root reads Complete, Needs Cleanup or Campaign Stuck, never Campaign Active (#4146)", () => {
+  const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
+    result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };
+  const fullControl = { mode: "full_control", boundary: { version: 1, revision: 3, issueScopeRevision: 1, repository: "owner/repo",
+    objective: "Deliver", authorizedByUserId: "user", authorizedAt: 1, operations: [], delegatablePolicyIds: [] } };
+  const campaign = (status: string) =>
+    ({ status, policyRevision: 3, control: fullControl }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
+
+  const cleanup = sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("complete_needs_cleanup") }));
+  assert.equal(label(cleanup), "Complete, Needs Cleanup");
+  assert.equal(cleanup.badge?.meta.tone, "info", "it reads as complete, with an informational tone");
+  assert.equal(cleanup.badge?.ariaLabel, "Status: Complete, Needs Cleanup");
+  assert.match(cleanup.badge?.title ?? "", /Campaign Status lists each item/u);
+  assert.equal(label(sessionRowStatus(session({ status: "idle", attention: undefined,
+    fullControlCampaignStatus: "complete_needs_cleanup", orchestratorPolicy: { control: fullControl } as unknown as SessionView["orchestratorPolicy"] }))),
+  "Complete, Needs Cleanup", "a summary row carries the status without a projection");
+
+  const stuck = sessionRowStatus(session({ status: "idle", attention, orchestratorCampaign: campaign("stuck") }));
+  assert.equal(label(stuck), "Campaign Stuck", "the warning wins over Ready for Review");
+  assert.equal(stuck.badge?.meta.tone, "warning");
+  assert.equal(stuck.badge?.ariaLabel, "Status: Campaign Stuck");
+  assert.notEqual(label(sessionRowStatus(session({ status: "running", attention, orchestratorCampaign: campaign("stuck") }))), "Campaign Stuck",
+    "a running root is working, whatever the last status said");
+  const question = { requestId: "q", kind: "question" as const, title: "Choose", options: [] };
+  assert.equal(label(sessionRowStatus(session({ status: "idle", pendingApproval: question, orchestratorCampaign: campaign("stuck"),
+    attention: { ...attention, humanActions: [{ requestId: "q", rank: 3, requestedAt: 1 }] } }))), "Answer Required",
+  "a request for the person still comes first");
+});
+
 test("an at-rest root of an active Full Control campaign shows an informational Campaign Active (#2938)", () => {
   const attention = { version: 1 as const, humanActions: [], meaningfulAt: 1,
     result: { revision: "r1", at: 1, owner: "human" as const }, acknowledgedRevision: null };

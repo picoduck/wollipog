@@ -1,5 +1,5 @@
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
-import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
+import { projectCampaignStatusForUi } from "./campaign-status-compatibility.js";
 /**
  * Connection hub. Two responsibilities:
  *  1. Track live runner websockets so the control plane can ROUTE commands
@@ -923,7 +923,7 @@ export class Hub {
       .filter((reminder) => reminder.scheduleKind === "someday" && reminder.state === "pending")
       .map((reminder) => reminder.sessionId));
     const sessions = allSessions.filter((session) => !info.hiddenIndefiniteReminderSessionIds!.has(session.id))
-      .map((session) => projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(session, info.uiProtocolVersion), info.uiProtocolVersion));
+      .map((session) => projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(session, info.uiProtocolVersion), info.uiProtocolVersion));
     const reminders = supportsIndefiniteReminders
       ? allReminders
       : allReminders.filter((reminder) => reminder.scheduleKind !== "someday");
@@ -1774,7 +1774,7 @@ export class Hub {
       if (!(predicate ? predicate(info.principal, info) : this.canReceive(info.principal, msg, info))) continue;
       const projectedMessages = this.compatibilityProjection(info, msg);
       for (const compatible of projectedMessages) {
-        const projected = projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion), info.uiProtocolVersion);
+        const projected = projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(compatible, info.uiProtocolVersion), info.uiProtocolVersion);
         let clientData = projected === msg ? data : JSON.stringify(projected);
         if (projected.type === "runner_upsert" && info.principal !== undefined) {
           const runner = this.db.listRunnersForPrincipal(info.principal)
@@ -1868,7 +1868,7 @@ export class Hub {
 
   private safeSend(client: Socket, msg: ControlPlaneToUi): void {
     const uiProtocolVersion = this.uiClients.get(client)?.uiProtocolVersion;
-    const projected = projectCampaignHandoffsForUi(projectBackgroundRetryExhaustionForUi(msg, uiProtocolVersion), uiProtocolVersion);
+    const projected = projectCampaignStatusForUi(projectBackgroundRetryExhaustionForUi(msg, uiProtocolVersion), uiProtocolVersion);
     this.sendRaw(client, JSON.stringify(projected), this.coalesceKey(projected));
   }
 

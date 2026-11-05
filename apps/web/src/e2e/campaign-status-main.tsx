@@ -302,6 +302,42 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
   };
 }
 
+/** `activity=active|cleanup|complete|stuck` (#4146): the same delivered-or-idle campaign in each
+ * activity state, as a v297 control plane reports it; `legacy=1` is what an older one reported for
+ * the same facts (Active for owed cleanup, Blocked for stuck work, and no lists). */
+const activityScenario = (["active", "cleanup", "complete", "stuck"] as const).find((value) => params.get("activity") === value) ?? null;
+const activityLegacy = params.get("legacy") === "1";
+function activityProjection(state: "active" | "cleanup" | "complete" | "stuck"): Partial<import("@wollipog/protocol").OrchestratorCampaignProjection> {
+  const status = state === "active" ? "active" : state === "cleanup" ? (activityLegacy ? "active" : "complete_needs_cleanup")
+    : state === "complete" ? "verified_complete" : activityLegacy ? "blocked" : "stuck";
+  const repair = { state: "attempted" as const, startedAt: NOW - 9 * MINUTE, finishedAt: NOW - 8 * MINUTE, continuation: true };
+  return {
+    status: status as import("@wollipog/protocol").OrchestratorCampaignStatus,
+    children: state === "stuck"
+      ? { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 2, cleanupPending: 0 }
+      : { total: 3, active: 0, waitingHuman: 0, blocked: 0, verified: 3, cleanupPending: 0 },
+    limits: { maximumConcurrentChildren: 4, occupied: 0, remaining: 4, costBudgetUsd: 40, maxToolCalls: null },
+    heldChildren: [],
+    ...(activityLegacy ? {} : { activity: state === "active" ? { live: ["merge_queue_wait" as const] } : { live: [], ...(state === "complete" ? {} : { repair }) } }),
+    ...(state === "cleanup" && !activityLegacy ? { cleanup: { total: 3, items: [
+      { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4217, branch: "agent/s_9d2f41c07a11",
+        state: "pending" as const, reason: "The merged branch is still on the remote.",
+        action: { kind: "command" as const, command: "gh api -X DELETE 'repos/picoduck/wollipog/git/refs/heads/agent/s_9d2f41c07a11'" } },
+      { kind: "merged_branch" as const, sessionId: "s_child", repository: "picoduck/wollipog", pullRequest: 4223, branch: "agent/s_b845cb95d6be",
+        state: "pending" as const, reason: "The last deletion was refused: The forge could not be reached.",
+        action: { kind: "delete_merged_branches" as const, occurrenceId: "workflow_delete_4223" } },
+      { kind: "worktree" as const, sessionId: "s_child", path: "/home/dev/worktrees/wollipog/s_079714ea231c", status: "refused" as const,
+        reason: "the worktree has uncommitted changes",
+        action: { kind: "command" as const, command: "git worktree remove '/home/dev/worktrees/wollipog/s_079714ea231c'" } },
+    ] } } : {}),
+    ...(state === "stuck" && !activityLegacy ? { stuck: { total: 2, items: [
+      { kind: "unverified_child" as const, sessionId: "s_child", status: "idle", reason: "The child's latest report has not been verified." },
+      { kind: "orchestrator_request" as const, sessionId: "s_child", occurrenceId: "workflow_merge_4234",
+        reason: "An Orchestrator-owned decision is waiting for the Orchestrator." },
+    ] } } : {}),
+  };
+}
+
 let revision = 1;
 /** Whether the owner included the waiting Location (`repositories=1`). */
 let included = false;
@@ -319,7 +355,7 @@ const projectionFor = (rev: number) => campaignProjection(
       obligations: { verification: 0, adjudication: 0, publication: 0, cleanup: 0 },
       cost: undefined,
     })
-      : handoffScenario ? handoffWork(rev) : recordedWork(rev),
+      : handoffScenario || activityScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
     // `repositories=1`: a multi-repository boundary with an exclusion, a removed Location and a
@@ -384,6 +420,7 @@ const projectionFor = (rev: number) => campaignProjection(
       }],
     }],
     ...(handoffScenario ? handoffProjection(handoffScenario) : {}),
+    ...(activityScenario ? activityProjection(activityScenario) : {}),
     ...ownerProjection,
   },
 );
@@ -614,6 +651,10 @@ const client = {
   setCampaignFollowUpLimit: async (_id: string, limit: number | null, expectedRevision: number) => {
     (window as unknown as { __FOLLOW_UP_LIMIT__: unknown }).__FOLLOW_UP_LIMIT__ = { limit, expectedRevision };
     return sessionsFor(revision)[0]!;
+  },
+  deleteCampaignMergedBranches: async (id: string) => {
+    (window as unknown as { __DELETE_MERGED_BRANCHES__: unknown }).__DELETE_MERGED_BRANCHES__ = id;
+    return { performed: 1, refused: 0 };
   },
   proposeCampaignIssueScope: async (_id: string, proposal: import("@wollipog/protocol").CampaignIssueScopeRequest) => {
     (window as unknown as { __SCOPE_PROPOSAL__: unknown }).__SCOPE_PROPOSAL__ = proposal;
