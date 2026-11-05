@@ -85,7 +85,7 @@ for (const parentTurnId of ["unknown", "known-parent"]) for (const width of [390
     await confirmation.getByRole("button", { name: "Cancel", exact: true }).click();
     await expect(confirmation).toHaveCount(0);
     await expect(page.locator(".session-bar .session-status-button")).toHaveAccessibleName(
-      `Session Status: ${parentTurnId === "unknown" ? "Awaiting Prompt, Result Blocked" : "Awaiting Prompt"}`,
+      `Session Status: Awaiting Prompt, ${parentTurnId === "unknown" ? "Result Blocked" : "Result Pending"}`,
     );
     await hold(4_000);
   });
