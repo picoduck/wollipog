@@ -11212,7 +11212,7 @@ export class SessionsService {
     const stored = root.orchestratorPolicy.issueScope;
     if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, ...compatibilityFields(compatibility) });
     if (!this.hub.isRunnerOnline(root.runnerId)) return ok({
-      ...scopeView(this.db, root, stored?.repository ?? ""), supported: false,
+      ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, runnerDisconnected: true,
       compatibilityMessage: "The campaign runner is disconnected. Saved issue scope is shown; reconnect the runner to verify the repository and request changes.",
     });
     try {
