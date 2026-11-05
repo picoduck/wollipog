@@ -146,6 +146,8 @@ and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.te
 A Custom campaign's epic seed uses the same `scope_grant` reading in place of the
 `initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
 person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
+A campaign whose first message was recorded before the seed existed gets the same reading of that
+message the first time it tries to delegate or its issue scope is read (#4258).
 
 Its outcome:
 
