@@ -3,6 +3,7 @@ import { readFileSync } from "node:fs";
 import test from "node:test";
 import { collectCertification, forgeReader, fullTestStepsPassed, main } from "./release-certification.mjs";
 import { REQUIRED, WORKER } from "./main-rolling-validation.mjs";
+import { BROWSER_SHARDS } from "./browser-shard-count.mjs";
 
 const repository = "example/project";
 const A = "a".repeat(40), B = "b".repeat(40), C = "c".repeat(40), D = "d".repeat(40);
@@ -119,6 +120,21 @@ test("release certification requires delegated recovery execution even when its 
     if (conclusion === null) delegated.steps = delegated.steps.filter((step) => step.name !== "Verify Recorded-Boundary Pipeline Recovery");
     else delegated.steps.find((step) => step.name === "Verify Recorded-Boundary Pipeline Recovery").conclusion = conclusion;
     assert.equal(fullTestStepsPassed(inventory), false, `test step ${conclusion} cannot satisfy the release proof`);
+  }
+});
+
+test("every browser shard needs its executed test step, including the high-numbered projects", () => {
+  assert.equal(fullTestStepsPassed(jobs()), true);
+  for (const shard of BROWSER_SHARDS) {
+    const name = `Full Validation / Browser End-to-End Tests (${shard})`;
+    for (const conclusion of [null, "skipped", "failure"]) {
+      const inventory = jobs();
+      const browser = inventory.find((job) => job.name === name);
+      if (conclusion === null) browser.steps = browser.steps.filter((step) => step.name !== "Remote-Instance Browser End-to-End Tests");
+      else browser.steps.find((step) => step.name === "Remote-Instance Browser End-to-End Tests").conclusion = conclusion;
+      assert.equal(fullTestStepsPassed(inventory), false, `${name}: ${conclusion}`);
+    }
+    assert.equal(fullTestStepsPassed(jobs().filter((job) => job.name !== name)), false, `missing ${name}`);
   }
 });
 
