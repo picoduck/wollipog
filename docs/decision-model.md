@@ -118,6 +118,21 @@ digest of that text, so a replay joins the recorded outcome.
   `orchestrator`), once. `campaign_decision_subjects` records what each occurrence affected and the
   classification, so `GET /api/sessions/:id/campaign/decisions` lists each verdict beside its request.
 
+## Follow-Up Relatedness and Closure-Reason Choice (#4104)
+
+`apps/control-plane/src/campaign-decision-checks.ts` runs both checks through `runCampaignCheck`:
+- one occurrence per request and inputs, so a replay or a concurrent request joins its outcome;
+- the subject (`follow_up_publication` or `issue_closure`) recorded for Campaign Status;
+- inputs too large for one call, or a runtime that cannot finish, recorded as a failed occurrence
+  rather than judged in part.
+
+The confirming verdict (`related`, `fits`) leaves the request as its floor admitted it. The refusing
+one (`unrelated`, `does_not_fit`) returns it to the Orchestrator with the model's reason. An uncertain
+or failed check makes the affected publication or closure the person's: that request is the one
+typed, person-owned request, so no second one is created. `follow_up_relatedness` is the only kind
+besides `scope_grant` that reads the owner's message (the boundary objective). See
+`docs/campaign-issue-scope.md` for where each check sits.
+
 ## Audit and Usage
 
 `decision_occurrences` records the kind, prompt version, resolved target (runner, harness, model and

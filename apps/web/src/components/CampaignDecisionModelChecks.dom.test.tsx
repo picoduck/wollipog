@@ -55,7 +55,7 @@ test("Campaign Status shows each screen's verdict, reason and failure beside the
   const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={(id) => opened.push(id)} />);
   try {
     const { container } = view;
-    assert.equal(container.querySelector("h3")?.textContent, "Question Screen");
+    assert.equal(container.querySelector("h3")?.textContent, "Decision Model Checks");
     const items = [...container.querySelectorAll("li")];
     assert.equal(items.length, 3, "only the question screen's checks");
     assert.ok(items.every((item) => item.classList.contains("campaign-screen-item")), "each screened request is its own group");
@@ -92,6 +92,37 @@ test("an owner decision whose screen failed stays the owner's: they decline it o
     const item = view.container.querySelector("li")!;
     assert.equal(facts(item)["Owner Decision"], "Waiting for you to classify it.");
     assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Decline", "Let Me Answer", "Open Session"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
+test("follow-up relatedness and closure-reason checks show their verdict beside the request, and never offer classification (#4104)", async () => {
+  const read = api.campaignDecisions;
+  const followUp = { sessionId: "child-1", surface: "follow_up_publication" as const, requestId: "rec_1" };
+  const closure = { sessionId: "root-1", surface: "issue_closure" as const, requestId: "team/repo#7" };
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+    decision("rel_ok", { kind: "follow_up_relatedness", verdict: "related", reason: "It fixes a defect the work exposed.", subject: followUp }),
+    decision("rel_no", { kind: "follow_up_relatedness", verdict: "unrelated", reason: "It starts a different feature.", subject: followUp }),
+    decision("rel_failed", { kind: "follow_up_relatedness", state: "failed", failureClass: "timed_out", subject: followUp }),
+    decision("why_fits", { kind: "closure_reason", verdict: "fits", reason: "The work was cancelled as a duplicate.", subject: closure }),
+    decision("why_not", { kind: "closure_reason", verdict: "does_not_fit", reason: "The work was only paused.", subject: closure }),
+    decision("why_unsure", { kind: "closure_reason", state: "uncertain", verdict: "uncertain", reason: "Unclear.", subject: closure }),
+  ], usage: { ...usage, calls: 6, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li")];
+    assert.deepEqual(items.map((item) => [Object.keys(facts(item))[0], facts(item)[Object.keys(facts(item))[0]!], facts(item).Verdict]), [
+      ["Follow-Up Publication", "The Orchestrator may publish it.", "Related"],
+      ["Follow-Up Publication", "Refused back to the Orchestrator.", "Unrelated"],
+      ["Follow-Up Publication", "Waiting for you to decide the publication.", "None"],
+      ["Issue Closure", "The Orchestrator may close it.", "Reason Fits"],
+      ["Issue Closure", "Refused back to the Orchestrator.", "Reason Doesn't Fit"],
+      ["Issue Closure", "Waiting for you to decide the closure.", "Uncertain"],
+    ]);
+    assert.equal(facts(items[2]!).Failure, "Timed Out");
+    for (const item of items) assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Open Session"]);
   } finally {
     view.unmount();
     api.campaignDecisions = read;
