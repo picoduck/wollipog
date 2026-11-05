@@ -6,6 +6,7 @@ import { DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOC
 import { ControlPlaneDb, RUNNER_REPORTED_STOP } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
+import { fakeScreenRuntime, settleScreens } from "./credential-screen-test-fixture.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { STALLED_RECOVERY_WAKE_MAX_MS, stalledRecoveryWakeDelayMs } from "./campaign-recovery-store.js";
@@ -50,6 +51,8 @@ function fixture(budgetAuthority?: CampaignBudgetAuthority, completion?: "retain
   const logs: string[] = [];
   const log = { info(message: string) { logs.push(message); }, warn() {}, error() {} };
   const svc = new SessionsService(db, hub, log);
+  // A healthy Decision Model (#4104) on a fake harness: it screens every question as a design subject.
+  svc.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime);
   const enabled = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #2938",
     operations: ["implementation_question", "question", "tool_approval"], delegatablePolicyIds: [],
     ...(budgetAuthority ? { budgetAuthority } : {}) }, 1,
@@ -370,7 +373,7 @@ test("a delivered decline is recorded once per session and class, and revocation
     h.db.updateSessionStatus("child", "running", 3);
     for (const occurrenceId of ["first", "first", "second"]) {
       h.svc.onSessionEvent("child", { kind: "question_request", requestId: occurrenceId, occurrenceId, requestSource: "provider_question",
-        questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] });
+        questions: [{ id: "value", question: "Which password should I use?", secret: true, options: [{ label: "A" }, { label: "B" }] }] });
     }
     const revision = h.db.getSession("root")!.parentControlPolicy!.revision;
     assert.deepEqual(h.db.campaignRecovery.declines("root", revision).map((decline) => [decline.sessionId, decline.requestClass, decline.count]),
@@ -400,7 +403,7 @@ test("a request a reconnecting runner restores gets the same standing decline as
     h.hub.sendToRunner = () => false;
     const pending: PendingApproval = { requestId: "restored", occurrenceId: "restored", kind: "question", title: "Credential",
       options: [], requestSource: "provider_question",
-      questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] };
+      questions: [{ id: "value", question: "Which password should I use?", secret: true, options: [{ label: "A" }, { label: "B" }] }] };
     h.svc.onSessionEvent("child", { kind: "question_request", requestId: pending.requestId, occurrenceId: pending.occurrenceId,
       requestSource: "provider_question", questions: pending.questions! });
     assert.ok(h.db.getSession("child")!.pendingApproval, "undeliverable while the runner is away");
@@ -416,7 +419,7 @@ test("a request a reconnecting runner restores gets the same standing decline as
 
 const credentialQuestion: PendingApproval = { requestId: "secret-q", occurrenceId: "secret-q", kind: "question", title: "Credential",
   options: [], requestSource: "provider_question",
-  questions: [{ id: "value", question: "Which password should I use?", options: [{ label: "A" }, { label: "B" }] }] };
+  questions: [{ id: "value", question: "Which password should I use?", secret: true, options: [{ label: "A" }, { label: "B" }] }] };
 const sentOf = (sent: unknown[], type: string) => sent.filter((message) => (message as { type: string }).type === type) as
   Array<{ sessionId: string; requestId: string; action?: string; optionId?: string | null }>;
 
@@ -435,7 +438,7 @@ test("a card restored only by runner registration gets its standing decline, onc
   } finally { h.db.close(); }
 });
 
-test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)", () => {
+test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)", async () => {
   // A credential decline, a root question dismissal, and a sign-in dismissal whose runner resolution
   // is still pending: each restored card is answered exactly once across repeated snapshots.
   const rootQuestion: PendingApproval = { requestId: "root-q", occurrenceId: "root-q", kind: "question", title: "Placement",
@@ -449,6 +452,8 @@ test("a repeated snapshot never answers the same occurrence twice (#2940 CR-2.3)
     try {
       for (let index = 0; index < 3; index += 1) {
         h.svc.applySessionRuntimeUpdate("r", childSnapshot({ id: sessionId, title: sessionId, pendingApproval: pending, updatedAt: 10 + index }));
+        // A root question is dismissed once its Decision Model screen settles (#4104).
+        await settleScreens();
       }
       const answered = sentOf(h.sent, type).filter((message) => message.requestId === pending.requestId);
       assert.equal(answered.length, 1, `${pending.requestId}: answered exactly once`);
@@ -648,10 +653,10 @@ test("stop, archive and authority revocation fence old recovery work", () => {
   }
 });
 
-test("hard denied typed occurrences stay blocked without asking for an override", () => {
+test("hard denied typed occurrences stay blocked without asking for an override", async () => {
   const h = fixture();
   try {
-    const created = h.svc.createWorkflowDecision("child", { requestId: "choice", resourceKey: "choice",
+    const created = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "choice", resourceKey: "choice",
       resourceSnapshot: { category: "implementation_question", question: "Which test fixture should we implement?",
         options: [{ optionId: "a", label: "Fixture A" }, { optionId: "b", label: "Fixture B" }] } });
     assert.ok(created.ok, created.error ?? "decision creation failed");
@@ -667,12 +672,12 @@ test("hard denied typed occurrences stay blocked without asking for an override"
   } finally { h.db.close(); }
 });
 
-test("a settled denial retires when its child report is verified and archived", () => {
+test("a settled denial retires when its child report is verified and archived", async () => {
   const h = fixture();
   try {
-    const decision = h.svc.createWorkflowDecision("child", { requestId: "denied-choice", resourceKey: "choice",
+    const decision = (await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "denied-choice", resourceKey: "choice",
       resourceSnapshot: { category: "implementation_question", question: "Which approach should we use?",
-        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } })).data!;
     assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
     h.recovery.maintain(100);
@@ -700,9 +705,9 @@ test("a settled denial retires when its child report is verified and archived", 
     assert.equal(h.db.campaignChildReportVerified("root", "child"), false, "new work needs its own verification");
     h.recovery.maintain(209);
     assert.equal(h.db.campaignProjection("root")!.recovery!.blocked, 0, "historical denial does not reappear for new work");
-    const next = h.svc.createWorkflowDecision("child", { requestId: "next-choice", resourceKey: "choice",
+    const next = (await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "next-choice", resourceKey: "choice",
       resourceSnapshot: { category: "implementation_question", question: "Which new approach should we use?",
-        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } })).data!;
     assert.ok(h.svc.resolveDescendantRequest("root", "child", next.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
     h.recovery.maintain(210);
@@ -710,15 +715,15 @@ test("a settled denial retires when its child report is verified and archived", 
   } finally { h.db.close(); }
 });
 
-test("a report verified before a fresh denial cannot settle that new occurrence", () => {
+test("a report verified before a fresh denial cannot settle that new occurrence", async () => {
   const h = fixture();
   try {
     h.db.updateSessionStatus("child", "idle", 10);
     const report = h.db.appendEvent("child", { kind: "agent_message", text: "Earlier work completed.", final: true }, 11);
     h.db.verifyCampaignChildReport("root", "child", report.seq, 12);
-    const decision = h.svc.createWorkflowDecision("child", { requestId: "fresh-denial", resourceKey: "new-choice",
+    const decision = (await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "fresh-denial", resourceKey: "new-choice",
       resourceSnapshot: { category: "implementation_question", question: "May I use this new approach?",
-        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+        options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } })).data!;
     assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
     h.db.updateSessionStatus("child", "idle", 20);
@@ -845,15 +850,15 @@ test("derived recovery metadata is stripped from stored and runner-originated re
   } finally { h.db.close(); }
 });
 
-test("same-millisecond replacement decisions supersede stale denied recovery", () => {
+test("same-millisecond replacement decisions supersede stale denied recovery", async () => {
   const h = fixture();
   try {
     const snapshot = { category: "implementation_question" as const, question: "Which test fixture should we implement?",
       options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] };
-    const first = h.svc.createWorkflowDecision("child", { requestId: "old", resourceKey: "same", resourceSnapshot: snapshot }).data!;
+    const first = (await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "old", resourceKey: "same", resourceSnapshot: snapshot })).data!;
     assert.ok(h.svc.resolveDescendantRequest("root", "child", first.occurrenceId,
       { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
-    const second = h.svc.createWorkflowDecision("child", { requestId: "new", resourceKey: "same", resourceSnapshot: snapshot }).data!;
+    const second = (await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "new", resourceKey: "same", resourceSnapshot: snapshot })).data!;
     assert.ok(second);
     h.db.raw().prepare("UPDATE workflow_decisions SET created_at=100 WHERE occurrence_id IN (?,?)")
       .run(first.occurrenceId, second.occurrenceId);
@@ -1648,16 +1653,16 @@ test("a stored hard denial is never relabeled, and a stop label only escalates a
   } finally { escalated.db.close(); }
 });
 
-test("pause, archive, revocation and denial still prevent replacing a stopped worker (#3362)", () => {
+test("pause, archive, revocation and denial still prevent replacing a stopped worker (#3362)", async () => {
   for (const fence of ["pause", "archive_child", "archive_root", "revoke", "deny"] as const) {
     const h = fixture();
     try {
       assignChild(h);
       h.db.updateSessionStatus("root", "idle", 3);
       if (fence === "deny") {
-        const decision = h.svc.createWorkflowDecision("child", { requestId: "stop-deny", resourceKey: "choice",
+        const decision = (await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "stop-deny", resourceKey: "choice",
           resourceSnapshot: { category: "implementation_question", question: "Which fixture should we implement?",
-            options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } }).data!;
+            options: [{ optionId: "a", label: "A" }, { optionId: "b", label: "B" }] } })).data!;
         assert.ok(h.svc.resolveDescendantRequest("root", "child", decision.occurrenceId,
           { action: "resolve_workflow_decision", outcome: "deny" }, () => true).ok);
       }

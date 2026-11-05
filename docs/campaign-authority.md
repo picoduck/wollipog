@@ -225,43 +225,43 @@ notices. ACP and other drivers ignore the field likewise. A Full Control decline
 policy hook ask still returns the hook's own reason ("Denied by a manager approval."), which names
 no person.
 
-A design question about credential handling is not a credential question (#3844). A typed
-implementation question's approval selects one offered option id, so it can carry no value back;
-there a question such as whether importing a provider sign-in should copy an API key, move an OAuth
-sign-in or be unsupported is decided like any other, for a child or the root. The same screen
-classifies a root's own question, which is dismissed without applying any answer: a design question
-becomes `root_questions`, whose notice names the typed route, rather than credential blocked work.
-A design form is declined when any of three screens declines it:
-- the ordinary question screen, unchanged;
-- the round-1 design screen of #3844, which declines asking for a credential, an identity, a
-  sign-in or access;
-- a stricter disclosure and destination screen.
+### The Question and Credential Screen (#4104)
 
-The stricter screen declines:
-- disclosing, collecting or transferring any credential, a bare token, key or sign-in included
-  (tell, give, reveal, show, print, display, read out, dictate, send, upload, post, publish,
-  forward, share, export, leak, dump, hand over, ask for, prompt for, sync and others);
-- a qualified credential (my, our, your, their, real, prod, company, team, shared, admin, live,
-  personal, the maintainer's or user's, and others);
-- handling any credential near a destination:
-  - a URL, a `www.` host, any dotted host or IP with or without a port, `localhost` or a name:port,
-    or an email;
-  - a public or shared sink: third-party, external, remote, server, endpoint, webhook, collector,
-    log, PR, issue, comment, chat, transcript, public, upload, gist, paste, Slack, Discord, email,
-    vendor, someone, cloud, ticket, wiki, README, commit, bug report, screenshot, repository, SSH,
-    another device, plain text and others;
-- an email value, and signing in;
-- an option granting access, wider provider access or a lasting permission;
-- a credential-store path named in the form.
+Whether a question asks for a credential or only discusses one is decided by the Decision Model
+(`docs/decision-model.md`), not by word lists. A deterministic floor runs first, never calls a
+model and never depends on one. It declines:
+- `authentication` requests;
+- `secret` or `email` fields;
+- credential-shaped literals (`sk-…`, `ghp_…`, `github_pat_…`, `glpat-…`, `xox…-`, `AKIA…`, a PEM
+  private-key header);
+- credential-store paths named in any field (quotes, backticks and wrappers such as `(.netrc)` or
+  `«.netrc»` never hide one) and in a tool's runner-resolved targets;
+- network, provider access expansion and permission-grant envelope facts;
+- runner guardrails, which stay human-only.
 
-The only excusal is an ordinary-screen match whose sole verb is a local "copy" or "use", and only
-when neither of the other two screens matches and no destination is named. A decline that proves
-unnecessary is acceptable; an admission that should have been declined is not.
+Text the floor leaves open is screened once per request occurrence with one fixed question: "Does
+this ask whoever answers to supply, disclose or grant a credential, sign-in or access?" That covers
+a typed implementation question (screened at admission), a child's or the root's provider question
+and a child's tool text that is not verified repository code, and a root's owner decision. A root's
+unverified tool effect is declined whatever it names, so it is not screened.
+- `ask` declines the request exactly as before: one-time decline, `secrets_and_sign_in` blocked work.
+- `discusses` leaves it to the Orchestrator. "Should importing copy the API key?" (#3844), a CI
+  workflow's declared permissions or a quoted decline notice (#3913), and keyboard, cache or React
+  keys and Wollipog sessions (#4126) are design subjects.
+- Until the screen settles (`credential_screen_pending`) nobody may answer the request; the
+  Orchestrator may only decline it.
+- When retries are exhausted, the failure is not transient or the verdict is `uncertain`, the
+  request becomes the owner's (`credential_screen_review`) and asks them only to classify it in
+  Campaign Status: **Decline** or **Let the Orchestrator Answer**. It never asks for a value, and
+  answering or approving it is refused until it is classified. Nothing falls back to text parsing.
+- A root's own question is dismissed as before whatever the screen says; only the class its
+  dismissal reports depends on the verdict, and a failed screen is reported as `root_questions`.
+- A root's owner decision is refused on `ask`. When its screen fails it still goes to the owner,
+  who can only choose one of its options.
 
-Quotes and backticks are removed before these checks. For paths, every character that cannot be
-part of a path separates words, so `(.netrc)`, `«.netrc»` or a quoted `.netrc` is still seen. A secret
-or email field always fails closed. A child's provider question can be answered with free text, so
-it keeps the ordinary screen without the excusal.
+Each verdict, its reason and failure class appear in Campaign Status under Question Screen, beside
+the request it affected. The evaluation carries only the content-safe `credentialScreen` fact
+(state, verdict, failure class, occurrence); the reason stays in the Decision audit.
 
 The worktree allowlist decides whether a tool effect can be approved at all. No denylist can name
 every credential store, and no runner isolation mode hides those stores from a child: bwrap binds
@@ -291,8 +291,8 @@ exactly, so a case-insensitive alias on macOS can only fail. Each target records
 the pre-approval recheck re-runs the same resolver, so a swapped inode, a new hard link or a new
 mount cannot reuse the evidence; the window between that recheck and execution remains.
 
-Credential screens remain as defense in depth: a hit is `secrets_and_sign_in` blocked work rather
-than a plain decline. They match the command text and the runner-resolved real paths by name
+The credential-store floor remains as defense in depth: a hit is `secrets_and_sign_in` blocked work rather
+than a plain decline. It matches the command text and the runner-resolved real paths by name
 (`.codex`, `.claude`, `.claude.json`, `.ssh`, `.aws`, `.azure`, `.env*`, `.config/gh`,
 `.config/gcloud`, `.config/op`, `.kube`, `.pgpass`, `.gnupg`, `.password-store`,
 `.terraform.d/credentials*`, `.git-credentials`, `.netrc`, `.docker`, keychains, keyrings,

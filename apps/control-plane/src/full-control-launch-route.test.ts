@@ -10,6 +10,7 @@ import {
 import { ControlPlaneDb } from "./db.js";
 import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
+import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
@@ -112,6 +113,8 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
   const video = options.hostingVideo ? composeHostingVideoEvidence(db) : undefined;
   const sessions = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, undefined, undefined, undefined, undefined,
     undefined, undefined, false, undefined, undefined, video?.workflowVideoApprovals, disclosures, undefined, video?.preparedMediaActiveStops);
+  // A healthy Decision Model (#4104) on a fake harness screens every question as a design subject.
+  sessions.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime);
   receipts = (message) => { sessions.onDurablePromptReceipt("r", message); };
   const scope = { organizationId: human.organizationId, owner: { kind: "user" as const, userId: human.userId } };
   const settings = new OrchestratorSettings(db);
@@ -1422,13 +1425,13 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
   const { server } = await app(f);
   const FIVE = ["implementation_question", "pr_merge", "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval"] as const;
   const humanToggles = Object.fromEntries(FIVE.map((category) => [category, "human" as const]));
-  const assertOrchestratorOwnsFive = (id: string) => {
+  const assertOrchestratorOwnsFive = async (id: string) => {
     const root = f.db.getSession(id)!;
     for (const category of FIVE) {
       assert.equal(root.parentControlPolicy!.decisions[category], "human", `${category}'s Custom toggle is Human`);
       assert.equal(f.db.campaignProjection(id)!.decisionOwners[category], "orchestrator", `${category} is the boundary's`);
     }
-    const asked = f.sessions.createWorkflowDecision(id, { requestId: `q-${id}`, resourceKey: `q-${id}`, resourceSnapshot: {
+    const asked = await f.sessions.createWorkflowDecisionWithVideo(id, { requestId: `q-${id}`, resourceKey: `q-${id}`, resourceSnapshot: {
       category: "implementation_question", question: "Which parser should the campaign use?",
       options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
     assert.equal(asked.ok, true, asked.error ?? "the decision was requested");
@@ -1447,7 +1450,7 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
     const launched = admitted.json().id as string;
     f.db.updateSessionStatus(launched, "idle", Date.now());
     assert.equal((await f.sessions.promptFromHuman(f.human, launched, "Deliver #12")).ok, true);
-    assertOrchestratorOwnsFive(launched);
+    await assertOrchestratorOwnsFive(launched);
 
     // Enable: a Custom campaign whose saved owners are all Human.
     const custom = customCampaign(f, "human-toggle-root");
@@ -1457,7 +1460,7 @@ test("Full Control never inherits Custom per-decision owners: with every toggle 
     const enabled = await server.inject({ method: "POST", url: `/api/sessions/${custom}/orchestrator-campaign/full-control`,
       headers: { authorization: "Bearer human" }, payload: { expectedRevision, preflightDigest: reviewed.digest } });
     assert.equal(enabled.statusCode, 200, enabled.body);
-    assertOrchestratorOwnsFive(custom);
+    await assertOrchestratorOwnsFive(custom);
   } finally { await server.close(); f.db.close(); }
 });
 
