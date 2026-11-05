@@ -7,6 +7,7 @@ import type { LocationSwitchSnapshot, PendingApproval, SessionView } from "@woll
 import { api, type ApiClient } from "../../api.js";
 import { ApiProvider } from "../../api-context.js";
 import { installDomTestCleanup } from "../../dom-test-cleanup.js";
+import { assertNoDomNode } from "../../dom-test-assertions.js";
 import { RequestCard, type RequestIntentHandler } from "./RequestCard.js";
 import { WorkflowDecisionSummary } from "./WorkflowDecisionSummary.js";
 import { locationSwitchOptions } from "./LocationSwitchSummary.js";
@@ -146,7 +147,7 @@ test("the card's options for a Location are its own actions and Stay Here, never
 test("the read-only summary shows the same facts without a chooser", async () => {
   const view = await render(<WorkflowDecisionSummary snapshot={snapshot(2)} />);
   try {
-    assert.equal(view.container.querySelector("[role=radiogroup]"), null);
+    assertNoDomNode(view.container.querySelector("[role=radiogroup]"), "a read-only summary offers no Location choice");
     assert.match(view.container.textContent ?? "", /Proposed Location.*Docs Site/su);
   } finally {
     await view.unmount();
