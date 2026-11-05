@@ -8630,7 +8630,11 @@ export class SessionManager {
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
         !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
-    return continuationPending && !backgroundContinuationsAllLaunchHeld(meta) &&
+    // A continuation held after bounded launch failures (#3542) waits for a person and keeps no
+    // permit, unless detached work is running beside it: an owed result keeps the aggregate state at
+    // continuation_pending, so a live job's pending id is what still holds the permit then.
+    const onlyHeldResults = backgroundContinuationsAllLaunchHeld(meta) && !meta.pendingBackgroundTaskIds?.length;
+    return continuationPending && !onlyHeldResults &&
       automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 

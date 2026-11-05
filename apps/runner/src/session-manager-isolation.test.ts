@@ -2063,6 +2063,16 @@ test("a continuation that keeps failing before provider acceptance is held after
     assert.equal(agent()?.continuationSubmittedAt, undefined);
     assert.equal(agent()?.assistantResultPersistedAt, undefined);
     assert.equal(f.internals.hasAuthoritativeBackgroundWork(held), false, "a held continuation keeps no active-work slot");
+    // A job that runs beside the held result still holds the slot, until it ends.
+    const monitor: DriverBackgroundJob = { id: "monitor-2", launchType: "monitor", startedAt: Date.now() };
+    f.drivers[0]!.cb.onBackgroundWork?.({ state: "running", pendingTaskIds: ["monitor-2"], jobs: [monitor],
+      observedTaskIds: ["monitor-2"] });
+    assert.equal(f.store.readMeta("s1")?.backgroundWorkState, "continuation_pending");
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(f.store.readMeta("s1")), true,
+      "live detached work keeps its active-work slot beside a held result");
+    f.drivers[0]!.cb.onBackgroundWork?.({ state: null, pendingTaskIds: [],
+      terminalJobs: [{ ...monitor, status: "killed", terminalAt: Date.now(), continuationRequired: false }] });
+    assert.equal(f.internals.hasAuthoritativeBackgroundWork(f.store.readMeta("s1")), false);
     assert.equal(f.internals.backgroundFollowUp(held), null, "it is not presented as queued");
     await f.settle();
     assert.equal(attempts(), 3, "nothing retries on its own");
