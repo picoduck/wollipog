@@ -10972,6 +10972,9 @@ export class SessionsService {
     }
     const video = normalized.data.evidence.filter((item) => item.mediaType?.startsWith("video/"));
     if (!video.length) return this.createWorkflowDecision(sessionId, request, canAccess);
+    // A video an owner rule keeps for a person (#4137) is theirs to review: no delegated frame
+    // review applies, and the ordinary route compares the rule before any replay can return.
+    if (ownerRule.rule) return this.createWorkflowDecision(sessionId, request, canAccess);
     if (!this.videoFrameReviewCandidateEnabled) {
       return this.createWorkflowDecision(sessionId, request, canAccess, {
         videoFallbackReason: "Delegated video-frame review awaits live App Server delivery and model-cost validation.",

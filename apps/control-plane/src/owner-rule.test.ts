@@ -8,7 +8,7 @@ import { Hub } from "./hub.js";
 import type { HumanPrincipal } from "./identity.js";
 import { resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
 import { pushDecision } from "./push-decision.js";
-import { SessionsService } from "./sessions.js";
+import { auditDigest, SessionsService } from "./sessions.js";
 import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 
 /** Owner rules (#4137): a gate that an installed skill or user-authored instruction keeps for a
@@ -19,7 +19,7 @@ const RULE: WorkflowDecisionOwnerRule = {
 };
 const HEAD = "a".repeat(40);
 
-function harness(options: { mode?: "full_control" | "custom" } = {}) {
+function harness(options: { mode?: "full_control" | "custom"; videoFrameReviewCandidate?: boolean } = {}) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -49,7 +49,8 @@ function harness(options: { mode?: "full_control" | "custom" } = {}) {
     const message = pushDecision(prev, view);
     if (message) pushes.push({ sessionId: view.id, title: message.title });
   };
-  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, notify);
+  const svc = new SessionsService(db, hub, { info() {}, warn() {}, error() {} }, notify, undefined, undefined, undefined, undefined, undefined,
+    options.videoFrameReviewCandidate === true);
   svc.setDecisionRuntime(fakeScreenRuntime(db, () => ({ verdict: "discusses" })).runtime);
   if (options.mode !== "custom") {
     const enabled = svc.setCampaignControl("root", { mode: "full_control", objective: "Implement #100",
@@ -218,6 +219,32 @@ test("an ownerRule outside its bounds is refused whole and creates nothing (#413
     const atLimit = h.merge("at-limit", { ownerRule: { source: `/${"s".repeat(255)}`, quote: "q".repeat(1000) } });
     assert.ok(atLimit.ok && atLimit.data, atLimit.error ?? "accepted");
     assert.equal(atLimit.data.authority, "human");
+  } finally { h.db.close(); }
+});
+
+test("a video request's rule is compared before an earlier occurrence is replayed (#4137 review)", async () => {
+  const h = harness({ videoFrameReviewCandidate: true });
+  try {
+    const snapshot = { category: "ui_evidence_approval" as const, evidence: [{ evidenceId: "clip", sha256: "c".repeat(64),
+      uri: "https://evidence.example/clip.mp4", mediaType: "video/mp4" }] };
+    // An unruled occurrence the delegated video route stored earlier under the same requestId.
+    const earlier = h.db.createWorkflowDecision({ requestId: "video-1", occurrenceId: "workflow_video_1", sessionId: "child",
+      controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "evidence", resourceSnapshot: snapshot,
+      resourceDigest: auditDigest(snapshot)!, policyRevision: h.db.getSession("root")!.parentControlPolicy!.revision, authority: "orchestrator",
+      createdAt: 5 });
+    assert.equal(earlier?.decision.authority, "orchestrator");
+    const replay = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "video-1", resourceKey: "evidence",
+      resourceSnapshot: snapshot, ownerRule: RULE });
+    assert.equal(replay.status, 409, "the rule is never silently dropped by returning the unruled occurrence");
+    // A new ruled video request is the owner's, without any delegated frame review.
+    const ruled = await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "video-2", resourceKey: "evidence-2",
+      resourceSnapshot: { ...snapshot, evidence: [{ ...snapshot.evidence[0]!, evidenceId: "clip-2", sha256: "d".repeat(64) }] },
+      ownerRule: RULE });
+    assert.ok(ruled.ok && ruled.data, ruled.error ?? "requested");
+    assert.deepEqual([ruled.data.authority, ruled.data.ownerRule], ["human", RULE]);
+    // Replaying it with a different rule is refused too.
+    assert.equal((await h.svc.createWorkflowDecisionWithVideo("child", { requestId: "video-2", resourceKey: "evidence-2",
+      resourceSnapshot: ruled.data.resourceSnapshot, ownerRule: { ...RULE, quote: "Another rule." } })).status, 409);
   } finally { h.db.close(); }
 });
 
