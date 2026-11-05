@@ -17685,6 +17685,76 @@ export class ControlPlaneDb {
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
+  /** The owner's new count for the selection a Full Control first message's scope grant asked for
+   * (#4102). Only the Human who authorized the current boundary changes it, compare-and-set on the
+   * policy revision, and the boundary is re-minted around it in the same transaction, as the
+   * follow-up limit is. While the current authorization derived Maximum Issues, it moves by exactly
+   * the change in the count, up to the 100-issue ceiling, and never below the issues the campaign
+   * already holds; an explicit Maximum Issues never moves, so the count must fit what it leaves after
+   * the named issues. Like any boundary change, it revokes every unconsumed decision, which it returns. */
+  setScopeGrantSelectionCount(rootId: string, count: number, userId: string, expectedRevision: number, now: number):
+    { ok: true; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      const first = policy?.firstMessageScope;
+      const grant = first?.state === "established" ? first.grant : undefined;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.issueAuthority || first?.state !== "established" ||
+          grant?.status !== "granted" || !grant.selection) {
+        return refuse(409, "This campaign's first message asked it to choose no issues, so there is no selection count to change.");
+      }
+      const boundary = control.boundary;
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (parentControlPolicy?.revision !== expectedRevision) return refuse(409, "Campaign authority changed; refresh and try again.");
+      if (!campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date. Revoke Full Control in Orchestrator Controls, then Enable Full Control.");
+      }
+      if (boundary.authorizedByUserId !== userId) return refuse(403, "Only the person who authorized this campaign's Full Control can change its selection count.");
+      const issues = boundary.issueAuthority!;
+      const previous = grant.selection.count;
+      // Only a limit both the grant and the current authorization derived moves; anything a person set stays.
+      const derived = first.derivedLimits?.maxIssues === true && grant.ceilings.maxIssuesSource === "derived";
+      let maxIssues = issues.maxIssues;
+      if (derived) {
+        const most = previous + (100 - issues.maxIssues);
+        if (count > most) return refuse(400, `Enter a count from 0 to ${most}: a campaign holds at most 100 issues.`);
+        const held = (policy.issueNumbers?.length ?? 0) + this.unsettledPublicationSlots(rootId, []);
+        maxIssues = Math.max(1, held, issues.maxIssues + count - previous);
+      } else {
+        const most = Math.max(0, issues.maxIssues - grant.namedIssues.length);
+        if (count > most) {
+          return refuse(400, `Enter a count from 0 to ${most}: the Maximum Issues you set (${issues.maxIssues}) never grows.`);
+        }
+      }
+      const reminted = remintCampaignBoundary({ ...boundary, issueAuthority: { ...issues, maxIssues } },
+        { revision: boundary.issueScopeRevision }, userId, now);
+      if (reminted?.mode !== "full_control") return refuse(400, "Enter a whole number of issues.");
+      const { capped: _capped, ...selection } = grant.selection;
+      first.grant = { ...grant, selection: { ...selection, count, defaulted: false, setByOwner: true },
+        ceilings: { ...grant.ceilings, maxIssues } };
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = id === rootId ? policy : this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
+        return refuse(409, "Campaign authority changed; refresh and try again.");
+      }
+      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return { ok: true, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
   /** Approval, authority update, and consumption share a transaction: a replay cannot widen scope.
    * It revokes the outstanding decisions the exact approved snapshot names as affected (#3915). A
    * Human's approval under Full Control re-authorizes the boundary every decision was evaluated

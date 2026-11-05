@@ -3080,6 +3080,8 @@ export interface ScopeGrantSelection {
   /** The count the message stated, when it stated one. */
   requestedCount?: number;
   capped?: true;
+  /** The owner set `count` in Campaign Status (#4102), replacing the extracted or defaulted one. */
+  setByOwner?: true;
   criteria: string;
   constraints: string[];
 }
@@ -5367,6 +5369,14 @@ export interface SetCampaignFollowUpLimitRequest {
   expectedRevision: number;
 }
 
+/** The owner's change to how many issues a Full Control scope grant's selection may admit (#4102).
+ * Compare-and-set on the campaign's policy revision. A derived Maximum Issues moves with it; an
+ * explicit Maximum Issues never grows, so the count stays within what it leaves after the named issues. */
+export interface SetScopeGrantSelectionCountRequest {
+  count: number;
+  expectedRevision: number;
+}
+
 export interface CampaignIssueScopeView {
   campaignSessionId: string;
   repository: string;
@@ -5383,8 +5393,13 @@ export interface CampaignIssueScopeView {
   /** Issues a Full Control first message referenced only as context (#3920), less the current
    * scope. They carry no authority; adding one goes through scope review. */
   contextIssueNumbers?: number[];
-  /** The scope grant the owner's first message established (#4102), for Campaign Status. */
+  /** The scope grant the owner's first message established (#4102), for Campaign Status. Its
+   * ceilings are the current authorization's: `maxIssuesSource` is `derived` only while that
+   * authorization still derives Maximum Issues. */
   scopeGrant?: FullControlScopeGrant;
+  /** With `scopeGrant`: the policy revision this view was read at. A selection count change is
+   * compare-and-set against it, so a change made from a stale view is refused. */
+  policyRevision?: number;
   /** True when the view is the saved scope because the campaign runner is disconnected (#2664).
    * Campaign Status polls while it is set, so a mounted panel recovers after reconnection. */
   runnerDisconnected?: boolean;
