@@ -1594,6 +1594,26 @@ test("a runner or harness that cannot host Decision calls takes the failure rout
   } finally { await server.close(); f.db.close(); }
 });
 
+test("lowering a selection count keeps Maximum Issues above the whole repository-qualified scope (#4118, #4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
+    // The scope holds one launch-repository issue and two in another repository.
+    const policy = f.db.sessionOrchestratorPolicy(id)!;
+    policy.issueScope = { ...policy.issueScope!, issueNumbers: [12],
+      issues: [{ repository: "other/repo", number: 40 }, { repository: "other/repo", number: 41 }, { repository: "owner/repo", number: 12 }] };
+    policy.issueNumbers = [12];
+    f.db.raw().prepare("UPDATE sessions SET orchestrator_policy=? WHERE id=?").run(JSON.stringify(policy), id);
+    const revision = f.db.getSession(id)!.parentControlPolicy!.revision;
+    const lowered = f.sessions.setScopeGrantSelectionCount(id, { count: 0, expectedRevision: revision }, f.human);
+    assert.equal(lowered.ok, true, lowered.error ?? "");
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 3, "every repository's issue counts, not only the launch repository's");
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("the owner changes a defaulted selection count in Campaign Status: compare-and-set, re-minting a derived Maximum Issues by the change (#4102)", async () => {
   const f = fixture();
   const { server } = await app(f);

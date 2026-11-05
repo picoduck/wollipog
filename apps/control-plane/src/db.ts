@@ -17741,7 +17741,9 @@ export class ControlPlaneDb {
       if (derived) {
         const most = previous + (100 - issues.maxIssues);
         if (count > most) return refuse(400, `Enter a count from 0 to ${most}: a campaign holds at most 100 issues.`);
-        const held = (policy.issueNumbers?.length ?? 0) + this.unsettledPublicationSlots(rootId, []);
+        // The whole repository-qualified scope (#4118), not only the launch repository's numbers.
+        const held = (policy.issueScope ? campaignScopeIssues(policy.issueScope).length : policy.issueNumbers?.length ?? 0) +
+          this.unsettledPublicationSlots(rootId, []);
         maxIssues = Math.max(1, held, issues.maxIssues + count - previous);
       } else {
         const most = Math.max(0, issues.maxIssues - grant.namedIssues.length);
