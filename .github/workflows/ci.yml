@@ -531,15 +531,15 @@ jobs:
     needs: [suite_plan, merge_group_gate]
     name: Browser End-to-End Tests
     runs-on: ubuntu-24.04
-    # #3628: ten-shard PR run 42054331358 measured all ten coherent browser jobs.
-    # Job 127342213238: maximum non-install remainder 1112s; round upward to 1120s.
+    # #3628: runs 42054331358 and 42063471740 each measured all ten coherent browser jobs.
+    # Job 127371354382: maximum non-install remainder 1147s; round upward to 1150s.
     # Includes setup, development, shard-1 production and cleanup; queue wait excluded.
     # Cache-hit OR cache-miss: two six-minute install attempts, not both exclusive paths.
-    # 720s attempts + 1120s remainder + 480s cache/verify + 180s enforcement
-    # + 480s failure diagnostics + 180s reserve = 3160s; 53m cap = 3180s.
-    # Residual reserve: 200s. This is measured sizing, not a hosted duration guarantee.
+    # 720s attempts + 1150s remainder + 480s cache/verify + 180s enforcement
+    # + 480s failure diagnostics + 180s reserve = 3190s; 54m cap = 3240s.
+    # Residual reserve: 230s. This is measured sizing, not a hosted duration guarantee.
     # scripts/workflow-browser-budget.test.mjs derives the bound; see the dated ten-shard report.
-    timeout-minutes: 53
+    timeout-minutes: 54
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be

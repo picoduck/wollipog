@@ -3,7 +3,8 @@
 The ten-project candidate and refreshed November 4 source profile are described in
 [the November 5 evaluation](ci-browser-ten-shards-2026-11-05.md). The five-project
 numbers below describe the historical implementation and its October 22 profile.
-Ten-shard observed performance and a new measured budget remain pending.
+Two premerge measurements and the current phase budget are recorded there.
+Final-head and natural merge-group performance remain pending.
 
 Refs #3628 and tracker #3625. The [October 22 baseline](ci-baseline-2026-10-22.md)
 found shard-5 execution p50/p90 of 35.1/38.2 minutes against shard-3's 25.9/27.6.

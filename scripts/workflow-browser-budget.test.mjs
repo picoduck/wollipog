@@ -164,10 +164,10 @@ test("browser budget covers either bounded install path, measured remainder, enf
   assert.equal(run.shardCount, BROWSER_SHARD_COUNT);
   assert.deepEqual(currentEvidence.samples.filter((row) => row.runId === run.runId)
     .map((row) => row.shard).sort((a, b) => a - b), Array.from({ length: BROWSER_SHARD_COUNT }, (_, i) => i + 1));
-  assert.equal(measuredRemainder(currentEvidence.samples), 1112);
+  assert.equal(measuredRemainder(currentEvidence.samples), 1147);
   assert.ok(currentEvidence.samples.some((row) => row.shard === 1 && row.productionSeconds > 0));
   const result = budgetAccounting(workflow);
-  assert.deepEqual(result, { budget: 3180, install: 720, cache: 480, remainder: 1120, enforcement: 180, diagnostics: 480, required: 3160 });
+  assert.deepEqual(result, { budget: 3240, install: 720, cache: 480, remainder: 1150, enforcement: 180, diagnostics: 480, required: 3190 });
   const timedOut = evidence.samples.find((row) => row.firstAttemptTimedOut);
   assert.ok(timedOut);
   assert.ok(timedOut.firstInstallSeconds - 360 <= enforcementSecondsPerAttempt,
@@ -185,8 +185,8 @@ test("redistributed sizing retains the measured floor and accounts for the bound
     assert.equal(phases.activeSeconds, phases.installSeconds + phases.otherSetupSeconds
       + phases.suiteSeconds + phases.productionSeconds + phases.cleanupSeconds);
   }
-  const production = profile.sources.reduce((sum, source) => sum + source.phases.productionSeconds, 0);
-  assert.equal(production * 1000, profile.productionDurationMs);
+  const production = profile.sources.reduce((sum, source) => sum + source.phases.productionSeconds, 0) / profile.sourceRuns.length;
+  assert.equal(Math.ceil(production * 1000), profile.productionDurationMs);
   const projected = Math.ceil((Math.max(...browserShards().map((group) => group.durationMs)) / 1000
     + Math.max(...profile.sources.map((source) => source.phases.otherSetupSeconds))
     + Math.max(...profile.sources.map((source) => source.phases.cleanupSeconds))) / 10) * 10;
@@ -197,7 +197,7 @@ test("redistributed sizing retains the measured floor and accounts for the bound
 });
 
 test("lost margin is detected for reduced job budgets or longer first and retry limits on either path", () => {
-  for (const minutes of [25, 40, 48, 49, 50, 51, 52]) {
+  for (const minutes of [25, 40, 48, 49, 50, 51, 52, 53]) {
     assert.throws(() => budgetAccounting(withBudget(minutes)), /must cover/, `${minutes}m is insufficient`);
   }
   for (const name of [...paths.flatMap((name) => [name, `Retry ${name}`]), ...systemCacheSteps]) {

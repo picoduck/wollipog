@@ -1,10 +1,12 @@
 # Ten-Shard Chromium Evaluation
 
-Refs #3628. First candidate measurement and phase budget are recorded below;
+Refs #3628. Two candidate measurements and a phase budget are recorded below;
 passing exact-head CI and natural merge-group validation remain pending. This does not activate a merge-group fast gate
 or change repository settings.
 
-## Refreshed Profile
+## Initial Profile: November 4 Source
+
+This historical starting profile was replaced by the two-run refresh below.
 
 Source: passing natural full PR run
 [41920725615](https://github.com/picoduck/wollipog/actions/runs/41920725615),
@@ -52,7 +54,7 @@ conditional Windows routes. Reduced PRs must still select exactly one browser
 job; full PRs, merge groups, dispatch and rolling validation need all ten.
 
 The first measurement used the historical 75-minute cap. The candidate now uses
-53 minutes, derived below from actual ten-shard phases including production,
+54 minutes, derived below from actual ten-shard phases including production,
 setup, cleanup, both bounded install attempts on the exclusive path, cache
 phases, timeout enforcement, failure diagnostics and reserve.
 
@@ -163,7 +165,7 @@ queue benefit. Splitting production adds another setup/allocation to remove only
 supported as better. Revisit if repeated natural queue evidence misses the target.
 Extra dispatches used: **0/3**.
 
-## Measured Phase Budget
+## First-Sample Phase Budget (Superseded)
 
 All ten coherent phases are in the
 [sizing fixture](../scripts/fixtures/browser-ci-ten-shard-timings.json).
@@ -178,6 +180,86 @@ Queue wait is excluded. Observed cache-hit installs were 5–9s without retry;
 cold-path bounds are allowances, not new cold-cache measurements. One passing
 browser set supplies sizing evidence; later coherent workload/setup changes can
 require recalculation. #2700's separate natural margin streak remains incomplete.
+
+## Successful Repeat and One-Time Weight Refresh
+
+Source [42063471740](https://github.com/picoduck/wollipog/actions/runs/42063471740),
+attempt 1, head `09accc26210f98eb975774e971ee721b6b3d457a`, tested merge
+`8979d3695f440a3dd5854e687a4de50e55b28722`. UTC half-open window
+**[2026-11-05T16:20:52Z, 2026-11-05T16:44:55Z)**. Denominator: one passing
+natural full PR, all ten Chromium jobs, WebKit, all Node jobs and the required
+aggregate successful. Windows comparison skipped through the retained diff
+detector. Optional Platform Isolation has no sample here; no platform speedup
+or runtime coverage is inferred from absence. The safe export contains both runs.
+
+| Shard | Job ID | Active Seconds | Runner Wait | Suite | Production | Non-Install |
+| --- | --- | ---: | ---: | ---: | ---: | ---: |
+| 1 | 127371354431 | 881 | 286 | 749 | 85 | 875 |
+| 2 | 127371354565 | 1003 | 237 | 960 | 0 | 997 |
+| 3 | 127371354382 | 1153 | 257 | 1104 | 0 | 1147 |
+| 4 | 127371354386 | 979 | 267 | 927 | 0 | 971 |
+| 5 | 127371354308 | 1031 | 129 | 988 | 0 | 1025 |
+| 6 | 127371354153 | 1110 | 109 | 1058 | 0 | 1105 |
+| 7 | 127371354283 | 1034 | 163 | 995 | 0 | 1029 |
+| 8 | 127371354345 | 1142 | 220 | 1094 | 0 | 1136 |
+| 9 | 127371354276 | 975 | 158 | 858 | 0 | 955 |
+| 10 | 127371354169 | 1045 | 145 | 1002 | 0 | 1039 |
+
+Each table cell is seconds from one API job/step in the same window. No missing
+execution or timestamp-conflict allocation. Safe browser projections again total
+**4124 attempts / 151 skips / zero failed or retry-only**, including 55 production
+attempts; no install retry. One passing workflow out of the two observed PRs
+does not estimate population reliability; the first failed on corrected fixtures.
+
+Maximum active **19.2167m**, longest/median **1.1183**, longest/shortest **1.3087**,
+Chromium **172.55 runner-minutes**, Chromium plus WebKit **174.45**;
+complete browser path **23.90m**. Required result **127385965491** passed at
+**24.00m**, with **19.4833m execution / 4.5167m residual delay** on the inferred
+routing → shard 3 → aggregate chain. Maximum individual runner wait **4.7667m**;
+routing **127371098999** waited 11s and ran 13s. Total elapsed runner usage
+**211.4833m**; setup/install/cleanup in Chromium **533s**, versus first sample
+489s and five-shard profile source 252s. Against the November 2 passing-group
+median, execution is 16.76m shorter, complete browser path 12.87m shorter and
+Chromium consumption 12.87 runner-minutes (+8.06%) higher. Different workloads,
+setup and demand prevent a causal or billing claim. Neither PR proves the
+15–20m end-to-end queue target. Node job 127371354430 took 13.2m; Chromium still
+bounds execution here. Wait dominated sample one but not this repeat.
+
+Shard 3 is slowest twice, with shard 8 also near the tail; other shards vary
+substantially (for example shard 10 moves from 12.08m to 17.42m). To improve
+the evidence rather than tune individual anomalies, the final candidate refreshes
+all weights once from **both** complete samples. Their e2e trees have no diff.
+The top 20 safe file timings per shard yield **202 unique measured files** and
+20 source jobs (two run attempts, not 20 independent workloads). For each file,
+use the upward-rounded mean of its observed durations. Four files appear in just
+one top-20 projection, so their weights have one observation; no missing duration
+is imputed as zero. For 109 remaining files, residual estimate is
+`ceil((mean complete suite milliseconds - sum measured file weights) / 109)`
+= **9347ms**. Reporter censoring and runner overhead remain limitations.
+Production's mean build/smoke is **95s**, preloaded once on shard 1.
+
+The model's complete suite-plus-production mean is **9548.062s** after residual
+rounding. New per-shard loads are **950.891 / 950.998 / 958.313 / 958.349 /
+958.205 / 950.954 / 950.895 / 960.002 / 958.421 / 951.034 seconds**.
+Longest/median forecast **1.0094**, maximum **16.0000m**, excluding setup.
+This does not claim an observed 16-minute run or a guaranteed queue result.
+Final-head CI and the natural merge group must validate this redistribution.
+All whole-file isolation, live discovery and coverage contracts stay intact.
+No extra dispatch is used; two natural PR runs have consumed **416.95 elapsed
+runner-minutes** total, including the failed first attempt. No dollar cost is
+available. Review rounds 1–2 cost **$1.6764212**; further review is pending.
+
+## Current Measured Budget
+
+Across 20 coherent Chromium jobs, maximum non-install **1147s** is job
+**127371354382**. Retain that observed floor after refreshing assignments, rather
+than shrinking it to the forecast. Upward rounding gives **1150s**:
+`720 + 1150 + 480 + 180 + 480 + 180 = 3190s <= 3240s`.
+The current cap is **54 minutes**, with **230s** residual reserve. This supersedes
+the first sample's 53m proposal. It retains all configured setup, timeout,
+diagnostic and reserve allowances, and includes production/setup/cleanup.
+It excludes queue wait and unmeasured allocation. Cold paths and #2700's margin
+streak remain unproven; subsequent actual phases may require reconciliation.
 
 ## Rollback
 

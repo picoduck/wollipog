@@ -56,23 +56,35 @@ test("duration grouping covers live and newly added files exactly once and accou
 test("profile weights reconcile the safe reporter projection and measured phase residual", () => {
   const profile = JSON.parse(read("./fixtures/browser-shard-profile.json"));
   const measured = new Map();
+  const jobs = new Set();
+  const runFiles = new Set();
   for (const source of profile.sources) {
-    assert.equal(source.context.testedSha, profile.testedSha);
+    const run = profile.sourceRuns.find((run) => run.runId === source.runId && run.attempt === source.attempt);
+    assert.ok(run, "every source must bind to one identified attempt");
+    assert.equal(source.context.testedSha, run.testedSha);
     assert.equal(source.context.attempt, source.attempt);
     assert.equal(source.context.runId, String(source.runId));
+    assert.ok(!jobs.has(source.jobId), "copied jobs cannot become fresh measurements");
+    jobs.add(source.jobId);
     assert.equal(source.failed, 0);
     assert.equal(source.retryOnly, 0);
     for (const row of source.slowestFiles) {
-      assert.ok(!measured.has(row.fileId), "copied attempts cannot become fresh measurements");
-      measured.set(row.fileId, row.durationMs);
+      const identity = `${source.runId}/${source.attempt}/${row.fileId}`;
+      assert.ok(!runFiles.has(identity), "each whole file occurs once per attempt");
+      runFiles.add(identity);
+      measured.set(row.fileId, [...(measured.get(row.fileId) ?? []), row.durationMs]);
     }
   }
+  for (const run of profile.sourceRuns) assert.deepEqual(profile.sources
+    .filter((source) => source.runId === run.runId && source.attempt === run.attempt)
+    .map((source) => source.shard).sort((a, b) => a - b), Array.from({ length: run.shardCount }, (_, i) => i + 1));
   assert.equal(measured.size, Object.keys(profile.files).length);
   for (const [file, duration] of Object.entries(profile.files)) {
     const id = createHash("sha256").update(`apps/web/e2e/${file}`).digest("hex");
-    assert.equal(measured.get(id), duration);
+    const observations = measured.get(id);
+    assert.equal(Math.ceil(observations.reduce((sum, value) => sum + value, 0) / observations.length), duration);
   }
-  const residual = profile.sources.reduce((sum, source) => sum + source.suiteSeconds * 1000, 0)
+  const residual = profile.sources.reduce((sum, source) => sum + source.suiteSeconds * 1000, 0) / profile.sourceRuns.length
     - Object.values(profile.files).reduce((sum, duration) => sum + duration, 0);
   assert.equal(profile.fallbackDurationMs,
     Math.ceil(residual / (profile.inventoryFiles - measured.size)));
