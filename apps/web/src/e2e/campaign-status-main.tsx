@@ -303,6 +303,8 @@ function handoffProjection(state: "before" | "after"): Partial<import("@wollipog
 }
 
 let revision = 1;
+/** Whether the owner included the waiting Location (`repositories=1`). */
+let included = false;
 const projectionFor = (rev: number) => campaignProjection(
   scenario === "legacy" ? null
     : scenario === "planless" ? workSummary(NOW, {
@@ -320,6 +322,36 @@ const projectionFor = (rev: number) => campaignProjection(
       : handoffScenario ? handoffWork(rev) : recordedWork(rev),
   {
     limits: { maximumConcurrentChildren: 4, occupied: 3, remaining: 1, costBudgetUsd: 40, maxToolCalls: null },
+    // `repositories=1`: a multi-repository boundary with an exclusion, a removed Location and a
+    // Location someone else added (#4117). Static rendering data only.
+    ...(params.get("repositories") === "1" ? { repositoryBoundary: {
+      revision: included ? 7 : 6,
+      repositories: [
+        { repository: "picoduck/wollipog", locations: [
+          { locationId: "loc_laptop", name: "Wollipog on Laptop", availability: "available" as const, isDefault: true },
+          { locationId: "loc_desk", name: "Wollipog on Desk", availability: "runner_offline" as const, isDefault: false },
+        ] },
+        { repository: "picoduck/dev-box-setup", locations: [
+          { locationId: "loc_setup", name: "Dev Box Setup", availability: "available" as const, isDefault: false },
+        ] },
+        { repository: "picoduck/notes-site", locations: [
+          { locationId: "loc_site", name: "Notes Site", availability: "removed" as const, isDefault: false },
+        ] },
+        ...(included ? [{ repository: "picoduck/shared-docs", locations: [
+          { locationId: "loc_shared", name: "Shared Docs", availability: "available" as const, isDefault: false }] }] : []),
+      ],
+      excludedLocations: [
+        { locationId: "loc_scratch", name: "Scratch Folder", failure: "not_repository" as const,
+          reason: "The Location's folder is not a git repository with a valid HEAD." },
+        { locationId: "loc_old", name: "Wollipog on Old Mac", failure: "runner_too_old" as const,
+          reason: "The Location's runner is too old to verify it; update the runner." },
+      ],
+      pendingLocations: included ? [] : [{ locationId: "loc_shared", name: "Shared Docs", reason: "added_by_other" as const }],
+      joins: [
+        { locationId: "loc_setup", name: "Dev Box Setup", repository: "picoduck/dev-box-setup", revision: 6, at: NOW - 60_000, source: "owner_added" as const },
+        ...(included ? [{ locationId: "loc_shared", name: "Shared Docs", repository: "picoduck/shared-docs", revision: 7, at: NOW, source: "owner_included" as const }] : []),
+      ],
+    } } : {}),
     ...(params.get("budget") === "1" ? { budget: {
       authority: { version: 1 as const, costUsd: 100, toolCalls: 2000, concurrency: 4, acceptedFollowUps: 3, accounting: "managed_workers_only" as const, unpriced: "stop" as const },
       // `estimate=1`: recorded spend includes running Claude turns' live estimates (#3196).
@@ -563,6 +595,12 @@ const client = {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
     } : {}) }),
+  includeCampaignLocation: async (_id: string, locationId: string) => {
+    (window as unknown as { __INCLUDED_LOCATION__: unknown }).__INCLUDED_LOCATION__ = locationId;
+    included = true;
+    window.__WOLLIPOG_CAMPAIGN_STATUS_E2E__.bumpRevision();
+    return { joined: true, revision: 7 };
+  },
   setCampaignFollowUpLimit: async (_id: string, limit: number | null, expectedRevision: number) => {
     (window as unknown as { __FOLLOW_UP_LIMIT__: unknown }).__FOLLOW_UP_LIMIT__ = { limit, expectedRevision };
     return sessionsFor(revision)[0]!;
