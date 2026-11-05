@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useId } from "react";
 import { parseLocationSwitchOption, type LocationSwitchCandidate, type LocationSwitchPlace, type LocationSwitchSnapshot,
   type PermissionOption } from "@wollipog/protocol";
 import { ChevronRightIcon } from "../Icons.js";
@@ -6,7 +6,6 @@ import { ChoiceRows } from "../ui/ChoiceControls.js";
 
 export const LOCATION_SWITCH_COPY = {
   details: "Location Switch Details",
-  chooseLocation: "Choose a Location",
   currentLocation: "Current Location",
   proposedLocation: "Proposed Location",
   repository: "Repository",
@@ -52,6 +51,7 @@ export function LocationSwitchSummary({ snapshot, chosenLocationId, onChoose }: 
   chosenLocationId?: string | null;
   onChoose?: (locationId: string) => void;
 }) {
+  const proposedId = `${useId().replace(/:/gu, "")}-proposed`;
   const choices = locationSwitchChoices(snapshot);
   const chosen = choices.find((candidate) => candidate.locationId === chosenLocationId) ?? choices[0];
   const blocked = snapshot.candidates.filter((candidate) => candidate.actions.length === 0);
@@ -70,20 +70,24 @@ export function LocationSwitchSummary({ snapshot, chosenLocationId, onChoose }: 
     <dl className="facts">
       {placeRows(LOCATION_SWITCH_COPY.currentLocation, snapshot.current)}
       {chosen && !(onChoose && choices.length > 1) ? placeRows(LOCATION_SWITCH_COPY.proposedLocation, chosen) : null}
+      {onChoose && choices.length > 1 ? (
+        // The same visible term as a single proposal, which also names the choice for assistive technology.
+        <div><dt id={proposedId}>{LOCATION_SWITCH_COPY.proposedLocation}</dt><dd>
+          <ChoiceRows
+            label={LOCATION_SWITCH_COPY.proposedLocation}
+            labelledBy={proposedId}
+            value={chosen?.locationId ?? null}
+            onChange={onChoose}
+            options={choices.map((candidate) => ({
+              value: candidate.locationId,
+              title: candidate.name,
+              status: candidate.sameRunner ? LOCATION_SWITCH_COPY.sameMachine : LOCATION_SWITCH_COPY.otherMachine,
+              description: <>{candidate.repository} · {candidate.machineName} · <code>{candidate.path}</code></>,
+            }))}
+          />
+        </dd></div>
+      ) : null}
     </dl>
-    {onChoose && choices.length > 1 ? (
-      <ChoiceRows
-        label={LOCATION_SWITCH_COPY.chooseLocation}
-        value={chosen?.locationId ?? null}
-        onChange={onChoose}
-        options={choices.map((candidate) => ({
-          value: candidate.locationId,
-          title: candidate.name,
-          status: candidate.sameRunner ? LOCATION_SWITCH_COPY.sameMachine : LOCATION_SWITCH_COPY.otherMachine,
-          description: <>{candidate.machineName} · <code>{candidate.path}</code></>,
-        }))}
-      />
-    ) : null}
     {chosen && !chosen.actions.includes("switch") && <p>
       {chosen.sameRunner
         ? "Start a New Session continues this task in that Location with the handoff below. This session stays where it is."

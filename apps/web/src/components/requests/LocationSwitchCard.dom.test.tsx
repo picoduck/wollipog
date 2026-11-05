@@ -120,7 +120,11 @@ test("several matching Locations need a choice, and every control, including A, 
   const view = await render(<Harness />, { approve: async (_id, body) => { decisions.push(body); return session(null); } });
   try {
     const group = view.container.querySelector("[role=radiogroup]")!;
-    assert.equal(group.getAttribute("aria-label"), "Choose a Location");
+    // The visible "Proposed Location" term names the choice, as it does a single proposal.
+    const label = view.container.querySelector(`[id="${group.getAttribute("aria-labelledby")}"]`);
+    assert.equal(label?.tagName, "DT");
+    assert.equal(label?.textContent, "Proposed Location");
+    assert.equal(group.getAttribute("aria-label"), null);
     const radios = [...group.querySelectorAll<HTMLInputElement>("input[type=radio]")];
     assert.equal(radios.length, 2);
     assert.equal(radios[0]!.checked, true, "the Project's first matching Location is chosen until the person picks another");

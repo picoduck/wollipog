@@ -31,7 +31,7 @@ for (const width of [1440, 390]) {
   test(`several matching Locations are chosen from, and Start a New Session uses the chosen one at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/request-surfaces-e2e.html?scenario=location-switch&locations=2");
-    const choices = page.getByRole("radiogroup", { name: "Choose a Location" });
+    const choices = page.getByRole("radiogroup", { name: "Proposed Location" });
     await expect(choices.getByRole("radio")).toHaveCount(2);
     await expect(choices.getByRole("radio", { name: /Docs Site This Machine/ })).toBeChecked();
     await choices.getByText("Docs Site (Laptop)").click();
