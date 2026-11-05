@@ -888,6 +888,7 @@ export * from "./review-contract.js";
 export * from "./review-run.js";
 export * from "./rate-priced-usage.js";
 export * from "./campaign-recovery.js";
+export * from "./project-location-inspection.js";
 import type { CampaignControl, CampaignRequestSource, CampaignAuthorityEvaluation } from "./campaign-authority.js";
 export { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "./campaign-control-launch.js";
 export type { CampaignLaunchInspectionFailure } from "./campaign-control-launch.js";
