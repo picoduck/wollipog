@@ -1163,6 +1163,41 @@ const ORPHAN_RECOVERY_PROMPT =
 const BACKGROUND_CONTINUATION_PROMPT =
   "Managed background jobs reached their terminal barrier. Consume every queued task notification and deliver the parent workflow's final user-visible result without waiting for another user message.";
 const MAX_RETAINED_DELIVERED_BACKGROUND_JOBS = 128;
+/** Attempts a background continuation gets when each fails before the provider accepts it (#3542),
+ * such as a provider process that cannot start. Then its automatic retries stop and the session
+ * says so; the result stays owed. */
+const MAX_CONTINUATION_LAUNCH_ATTEMPTS = 3;
+
+/** A finished job whose result its continuation still owes this conversation. */
+function owesBackgroundContinuation(job: DurableBackgroundJob): boolean {
+  return Boolean(job.continuationRequired && job.terminalStatus && !job.assistantResultPersistedAt &&
+    !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+}
+
+/** The owed continuations whose automatic attempts stopped after bounded launch failures (#3542). */
+function launchHeldBackgroundJobs(meta: Pick<SessionMeta, "backgroundJobs">): DurableBackgroundJob[] {
+  return (meta.backgroundJobs ?? []).filter((job) =>
+    job.continuationLaunchHeldAt !== undefined && owesBackgroundContinuation(job));
+}
+
+/** Every owed continuation is held (#3542): nothing runs or retries until a person acts, so the
+ * session holds no active-work permit for it. */
+function backgroundContinuationsAllLaunchHeld(meta: Pick<SessionMeta, "backgroundJobs">): boolean {
+  const owed = (meta.backgroundJobs ?? []).filter(owesBackgroundContinuation);
+  return owed.length > 0 && owed.every((job) => job.continuationLaunchHeldAt !== undefined);
+}
+
+/** Why a held continuation waits and how a person recovers it (#3542). */
+function backgroundContinuationHoldBlocker(jobCount: number, attempts: number, providerError?: string): string {
+  const results = jobCount === 1 ? "the result of 1 finished background job" : `the results of ${jobCount} finished background jobs`;
+  const error = providerError?.trim().replace(/[.\s]+$/u, "");
+  const quoted = error && error.length > PROVIDER_REJECTION_QUOTE_CHARS
+    ? `${error.slice(0, PROVIDER_REJECTION_QUOTE_CHARS)}…` : error;
+  return `The automatic turn that returns ${results} failed to start ${attempts} times in a row, ` +
+    `before the provider accepted it${quoted ? `: ${quoted}` : ""}. Wollipog stopped retrying it and kept ` +
+    `${jobCount === 1 ? "the result" : "the results"}. Restart the session to deliver ${jobCount === 1 ? "it" : "them"}` +
+    " in a fresh provider process; a message the provider accepts also retries it.";
+}
 
 /** Recompute the live aggregate after a delivery receipt changes only part of the inventory. */
 function managedBackgroundWorkState(
@@ -1232,8 +1267,10 @@ function carryBackgroundWorkAcrossRestart(
         job.continuationRetryExhaustedAt !== undefined) return job;
     if (job.continuationSubmittedAt !== undefined) return { ...job, continuationMissingResultAt: now };
     if (!deliver) return { ...markRestart(job), continuationMissingResultAt: now };
+    // A fresh process is the recovery a held continuation named (#3542): it gets a fresh bound.
+    const { continuationLaunchFailures: _failures, continuationLaunchHeldAt: _held, ...carried } = markRestart(job);
     return {
-      ...markRestart(job),
+      ...carried,
       continuationId: job.continuationId ?? continuationId,
       continuationQueuedAt: job.continuationQueuedAt ?? now,
     };
@@ -5980,9 +6017,12 @@ export class SessionManager {
   /** Project execution evidence, never infer it from the session lifecycle alone. */
   private backgroundFollowUp(meta: SessionMeta): BackgroundFollowUpView | null {
     if (meta.backgroundWorkState !== "continuation_pending") return null;
+    // A continuation held after bounded launch failures (#3542) is neither queued nor retrying; the
+    // session's own status names that hold and its recovery.
     const jobs = (meta.backgroundJobs ?? []).filter((job) => job.continuationQueuedAt != null &&
       job.continuationRequired && !job.assistantResultPersistedAt &&
-      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
+      !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt &&
+      job.continuationLaunchHeldAt === undefined);
     if (!jobs.length) return null;
     const queuedAt = Math.min(...jobs.map((job) => job.continuationQueuedAt!));
     const entry = this.active.get(meta.sessionId);
@@ -8590,7 +8630,16 @@ export class SessionManager {
     const continuationPending = meta.backgroundWorkState === "continuation_pending" ||
       !!meta.backgroundJobs?.some((job) => job.continuationRequired &&
         !job.assistantResultPersistedAt && !job.continuationMissingResultAt && !job.continuationRetryExhaustedAt);
-    return continuationPending && automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
+    // A continuation held after bounded launch failures (#3542) waits for a person and keeps no
+    // permit, unless detached work is running beside it: an owed result keeps the aggregate state at
+    // continuation_pending, so a live job's pending id is what still holds the permit then. An
+    // orphaned job's id is a diagnostic, not execution, until its recovery observes it live again.
+    const orphan = meta.orphanedWork;
+    const livePendingTaskIds = (meta.pendingBackgroundTaskIds ?? []).filter((id) => !orphan ||
+      !orphan.pendingTaskIds.includes(id) || !!orphan.recoveryObservedTaskIds?.includes(id));
+    const onlyHeldResults = backgroundContinuationsAllLaunchHeld(meta) && livePendingTaskIds.length === 0;
+    return continuationPending && !onlyHeldResults &&
+      automaticClaudeRecoveryAllowed(meta) && !this.backgroundRecoveryHeld(meta);
   }
 
   private settleActiveWorkPermit(sessionId: string, entry: ActiveSession): void {
@@ -13048,6 +13097,37 @@ export class SessionManager {
     return !!entry.retiredWorktreeRebind && entry.retiredWorktreeRebind === entry.pendingWorktreeRebind;
   }
 
+  /**
+   * Whether a retirement rebind may run ahead of the background continuation that holds it (#3542).
+   * The rebind waits on background work so that retiring the provider never ends work it still
+   * owns. Once every job has finished and only a continuation that was never submitted remains,
+   * the provider owns nothing the rebind could end, provided no provider process is running: then
+   * the continuation would launch a new process from this generation's stored isolation, whose bind
+   * list still names the retired worktree, and that launch fails. The rebind launches the same
+   * conversation with the current bind list, and the continuation runs there first, ahead of the
+   * prompts that waited behind it. A running process, or a driver that cannot tell, keeps the
+   * established order: the continuation reaches the live process without a launch.
+   */
+  private backgroundContinuationCanCrossRetirementRebind(meta: SessionMeta, entry: ActiveSession): boolean {
+    if (entry.currentBackgroundJobIds?.length || !this.onlyUnsubmittedContinuationOwed(meta, entry)) return false;
+    // A continuation not yet queued would run after the prompts the rebind carries; wait for it.
+    // One whose attempts are held has no queued turn to wait for (a person's turn retries it).
+    return entry.queue.some((prompt) => prompt.syntheticRecovery && !!prompt.backgroundJobIds?.length) ||
+      backgroundContinuationsAllLaunchHeld(meta);
+  }
+
+  /** No provider process runs, every job has finished, and the only background debt is a
+   * continuation that never reached the provider (#3542). */
+  private onlyUnsubmittedContinuationOwed(meta: SessionMeta, entry: ActiveSession): boolean {
+    if (meta.backgroundWorkState !== "continuation_pending" || meta.pendingBackgroundTaskIds?.length ||
+        meta.orphanedWork || entry.client.providerProcessLive?.() !== false) return false;
+    const jobs = meta.backgroundJobs ?? [];
+    if (jobs.some((job) => !job.terminalStatus)) return false;
+    const owed = jobs.filter(owesBackgroundContinuation);
+    return owed.length > 0 && owed.every((job) => job.continuationSubmittedAt === undefined &&
+      job.continuationAcceptedAt === undefined);
+  }
+
   /** A retirement rebind that cannot run stops here, so later drains do not request it again. */
   private failRetirementRebind(entry: ActiveSession): void {
     if (!this.retirementRebindPending(entry)) return;
@@ -13325,7 +13405,9 @@ export class SessionManager {
     // diagnostic metadata visible, but do not turn it into a permanent worktree/queue barrier.
     const backgroundWorkBlocksRebind =
       (!!meta?.backgroundWorkState || !!meta?.pendingBackgroundTaskIds?.length) &&
-      !meta?.orphanedWork?.recoveryAttemptedAt;
+      !meta?.orphanedWork?.recoveryAttemptedAt &&
+      !(meta && !entry.pendingLocationSwitch && this.retirementRebindPending(entry) &&
+        this.backgroundContinuationCanCrossRetirementRebind(meta, entry));
     return !entry.running &&
       !entry.providerInitiatedTurnActive &&
       this.active.get(sessionId) === entry &&
@@ -14723,6 +14805,19 @@ export class SessionManager {
 
     const launchGeneration = this.beginLaunchGeneration(sessionId);
     this.preLaunchAdmissionGenerations.set(sessionId, launchGeneration);
+    // A background continuation crossing a retirement rebind (#3542) still runs before the prompts
+    // that waited behind the rebind, as it would have had it gone first. The replacement queue is
+    // ordered by ordinal (ordinals are positive; at 1 an equal ordinal keeps this insertion order).
+    if (this.retirementRebindPending(entry)) {
+      const index = entry.queue.findIndex((prompt) => prompt.syntheticRecovery && !!prompt.backgroundJobIds?.length);
+      if (index >= 0 && entry.queue.length > 1) {
+        const [continuation] = entry.queue.splice(index, 1);
+        const own = this.ensureQueueOrdinal(sessionId, continuation!);
+        const first = Math.min(...entry.queue.map((prompt) => this.ensureQueueOrdinal(sessionId, prompt)));
+        if (own >= first) continuation!.ordinal = Math.max(1, first - 1);
+        entry.queue.unshift(continuation!);
+      }
+    }
     const queued = entry.queue.splice(0);
     if (queued.length) this.preLaunchQueues.set(sessionId, queued);
     // The session's own switch into exactly this worktree continues once the relaunch has run
@@ -15565,14 +15660,19 @@ export class SessionManager {
       if (entry.historyIntegrityFailure) return;
       const rejectionHoldBlocker = this.trackProviderRejection(sessionId, entry, queued, stop, inputMayHaveBeenDelivered);
       this.captureAgentSessionId(sessionId, entry.client); // codex threadId becomes known after turn 1
+      let continuationHoldBlocker: string | undefined;
       if (backgroundJobIds?.length && stop === "refusal" && !entry.backgroundPromptAccepted) {
         if (capacityRetriesExhausted) {
           // Keep the terminal result for inspection with separate pre-acceptance exhaustion evidence.
           // Exhaustion must not strand a pending submission or create another automatic retry burst.
           this.markBackgroundContinuationRetryExhausted(sessionId, backgroundJobIds);
-        } else {
+        } else if (entry.providerCapacityFailure || entry.authenticationBlocked) {
+          // Capacity and authentication keep their own bounds and recovery.
           this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
           this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        } else {
+          continuationHoldBlocker = this.retryUnacceptedBackgroundContinuation(
+            sessionId, entry, queued, backgroundJobIds, entry.client.lastTurnError?.() ?? undefined);
         }
       }
       if (syntheticRecovery) {
@@ -15641,6 +15741,7 @@ export class SessionManager {
         const scopeId = this.store.readMeta(sessionId)?.providerCredentialScopeId;
         if (scopeId) this.providerAuthAutomaticAttempted.delete(scopeId);
         if (!entry.governanceTripped) this.clearProviderAccountSwitchFailureAfterTurn(sessionId);
+        if (!automaticTurn(queued) && this.active.get(sessionId) === entry) this.rearmLaunchHeldBackgroundContinuation(sessionId);
       }
       if (stop === "refusal" && !interrupted && !entry.governanceTripped) {
         this.scheduleAutomaticProviderAccountSwitch(sessionId, entry);
@@ -15659,6 +15760,8 @@ export class SessionManager {
         this.emitStatus(sessionId, "input_required", rejectedAnswerBlocker);
       } else if (rejectionHoldBlocker && this.providerRejectionHolds.has(sessionId)) {
         this.emitStatus(sessionId, "input_required", rejectionHoldBlocker);
+      } else if (continuationHoldBlocker) {
+        this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
       } else {
         // The provider completed before the interrupt took effect. Do not fabricate Interrupted
         // or strand the existing FIFO: this was a normal completed turn, not a cancelled one.
@@ -15676,9 +15779,10 @@ export class SessionManager {
       // retired generation's late settle must not touch the replacement's streak.
       if (this.active.get(sessionId) === entry) this.lastProviderRejections.delete(sessionId);
       this.settleModelStoppedJobs(sessionId, queued.id, false);
+      let continuationHoldBlocker: string | undefined;
       if (backgroundJobIds?.length && !entry.backgroundPromptAccepted) {
-        this.resetBackgroundContinuationSubmission(sessionId, backgroundJobIds);
-        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+        continuationHoldBlocker = this.retryUnacceptedBackgroundContinuation(
+          sessionId, entry, queued, backgroundJobIds, errText(err));
       } else if (backgroundJobIds?.length) {
         this.markBackgroundContinuationMissingResult(sessionId, backgroundJobIds);
       }
@@ -15712,7 +15816,8 @@ export class SessionManager {
       }
       this.emitEvent(sessionId, { kind: "error", message: `prompt failed: ${errText(err)}` }, durable);
       if (entry.historyIntegrityFailure) return;
-      this.emitStatus(sessionId, "failed", errText(err));
+      if (continuationHoldBlocker) this.emitStatus(sessionId, "input_required", continuationHoldBlocker);
+      else this.emitStatus(sessionId, "failed", errText(err));
       durable?.failed(`prompt failed: ${errText(err)}`);
     }
   }
@@ -19172,6 +19277,14 @@ export class SessionManager {
       status = "input_required";
       detail = this.providerRejectionBlocker(sessionId, rejectionHold);
     }
+    // So does a background continuation held after bounded launch failures (#3542), until Restart
+    // or a person's accepted turn retries it.
+    const launchHeld = status === "idle" && authMeta ? launchHeldBackgroundJobs(authMeta) : [];
+    if (launchHeld.length > 0) {
+      status = "input_required";
+      detail = backgroundContinuationHoldBlocker(launchHeld.length,
+        Math.max(...launchHeld.map((job) => job.continuationLaunchFailures ?? MAX_CONTINUATION_LAUNCH_ATTEMPTS)));
+    }
     const entry = this.active.get(sessionId);
     const terminal = status === "completed" || status === "failed" || status === "stopped";
     if (terminal) {
@@ -20509,7 +20622,8 @@ export class SessionManager {
   private queuedBackgroundJobIds(meta: SessionMeta | null): string[] {
     const queued = (meta?.backgroundJobs ?? [])
       .filter((job) => job.continuationQueuedAt && !job.continuationSubmittedAt &&
-        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt)
+        !job.assistantResultPersistedAt && !job.continuationRetryExhaustedAt &&
+        job.continuationLaunchHeldAt === undefined)
       .sort((left, right) => left.continuationQueuedAt! - right.continuationQueuedAt!);
     const continuationId = queued[0]?.continuationId;
     if (!continuationId) return [];
@@ -20677,6 +20791,90 @@ export class SessionManager {
       backgroundWorkState: "continuation_pending",
     });
     if (updated) this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+  }
+
+  /**
+   * A runner-owned continuation ended before the provider accepted it (#3542). It never reached the
+   * conversation, so its result stays owed and another attempt is safe, but not an unbounded one:
+   * a provider process that cannot start fails the same way every time.
+   *
+   * | After this failure                                  | Next step                                   |
+   * | --------------------------------------------------- | ------------------------------------------- |
+   * | It holds a retirement rebind, and no process runs   | Back at the queue head; the rebind carries  |
+   * |                                                     | it into a launch with the current binds     |
+   * | Fewer than MAX_CONTINUATION_LAUNCH_ATTEMPTS failed  | Retried after ORPHAN_RECOVERY_RETRY_MS      |
+   * | The bound is reached                                | Held: no timer re-arms it, the session says |
+   * |                                                     | why, and Restart or a person's accepted turn|
+   * |                                                     | retries it                                  |
+   *
+   * Returns the session blocker once held.
+   */
+  private retryUnacceptedBackgroundContinuation(
+    sessionId: string,
+    entry: ActiveSession,
+    prompt: QueuedPrompt,
+    jobIds: string[],
+    providerError: string | undefined,
+  ): string | undefined {
+    this.resetBackgroundContinuationSubmission(sessionId, jobIds);
+    const current = this.store.readMeta(sessionId);
+    const selected = new Set(jobIds);
+    const failed = (current?.backgroundJobs ?? []).filter((job) => selected.has(job.id) &&
+      !job.continuationAcceptedAt && !job.assistantResultPersistedAt);
+    // A generation that Restart or Stop replaced settles late; the replacement owns the count.
+    if (!current || this.active.get(sessionId) !== entry || failed.length === 0) {
+      this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      return undefined;
+    }
+    const attempts = Math.max(...failed.map((job) => (job.continuationLaunchFailures ?? 0) + 1));
+    const held = attempts >= MAX_CONTINUATION_LAUNCH_ATTEMPTS;
+    const heldAt = Date.now();
+    const failedIds = new Set(failed.map((job) => job.id));
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs: current.backgroundJobs!.map((job) => failedIds.has(job.id)
+        ? { ...job, continuationLaunchFailures: attempts, ...(held ? { continuationLaunchHeldAt: heldAt } : {}) }
+        : job),
+    });
+    if (!updated) return undefined;
+    this.store.flush(sessionId);
+    this.log(JSON.stringify({ event: held ? "background_continuation_launch_held" : "background_continuation_launch_failed",
+      sessionId, jobCount: failed.length, attempts }));
+    if (!held) {
+      if (!entry.pendingLocationSwitch && this.requestRetiredWorktreeRebind(sessionId, entry) &&
+          this.onlyUnsubmittedContinuationOwed(updated, entry)) {
+        // The failed launch rendered this generation's stored binds; the rebind renders current ones.
+        entry.queue.unshift(prompt);
+        this.emitQueue(sessionId);
+      } else {
+        this.scheduleBackgroundContinuation(sessionId, ORPHAN_RECOVERY_RETRY_MS);
+      }
+      return undefined;
+    }
+    this.cancelBackgroundContinuationTimer(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    const blocker = backgroundContinuationHoldBlocker(failed.length, attempts, providerError);
+    // An error row stays visible in the transcript, where an Agent Log line would be hidden.
+    this.emitEvent(sessionId, { kind: "error", message: blocker });
+    return blocker;
+  }
+
+  /** A person's turn the provider accepted proves a provider process starts again (#3542): a held
+   * continuation gets a fresh bound and runs next. */
+  private rearmLaunchHeldBackgroundContinuation(sessionId: string): void {
+    const current = this.store.readMeta(sessionId);
+    if (!current || launchHeldBackgroundJobs(current).length === 0) return;
+    const updated = this.store.patchMeta(sessionId, {
+      backgroundJobs: current.backgroundJobs!.map((job) => {
+        if (job.continuationLaunchHeldAt === undefined && job.continuationLaunchFailures === undefined) return job;
+        const { continuationLaunchFailures: _failures, continuationLaunchHeldAt: _held, ...rearmed } = job;
+        return rearmed;
+      }),
+    });
+    if (!updated) return;
+    this.store.flush(sessionId);
+    this.send({ type: "session_runtime_updated", snapshot: this.snapshot(updated) });
+    this.cancelBackgroundContinuationTimer(sessionId);
+    this.scheduleBackgroundContinuation(sessionId);
   }
 
   /** Provider acceptance is the at-most-once fence. Once that exact turn has ended without a

@@ -359,6 +359,11 @@ export interface Driver {
    * with `endedByRunner`. Drivers that cannot end a single job omit it. */
   stopBackgroundJob?(jobId: string): Promise<DriverBackgroundJobStopResult>;
 
+  /** Whether a provider process is running that takes the next prompt without a new spawn (#3542).
+   * False means the next turn launches a process from this instance's stored launch settings, such
+   * as its isolation bind list. Drivers that cannot tell omit it, and callers treat that as live. */
+  providerProcessLive?(): boolean;
+
   /** Answer a pending permission/approval request surfaced via onEvent. Returns true iff a
    * live ask was answered (the response reached the agent); false = nothing was waiting
    * (unknown id / process gone) — the caller must surface that instead of pretending the
