@@ -11666,11 +11666,17 @@ export class SessionsService {
       record(occurrence.occurrenceId);
       const existing = this.db.unconsumedWorkflowDecisionsForController(sessionId).find((d) =>
         d.resourceSnapshot.category === "campaign_issue_scope" && d.resourceSnapshot.grantReview?.reviewOccurrenceId === occurrence.occurrenceId);
-      if (existing) return existing.occurrenceId;
+      const linkedRequest = this.db.selectionProposal(occurrence.occurrenceId)?.workflowOccurrenceId ?? null;
+      if (existing) {
+        if (linkedRequest !== existing.occurrenceId) this.db.linkSelectionProposalDecision(occurrence.occurrenceId, existing.occurrenceId, linkedRequest);
+        return existing.occurrenceId;
+      }
       const created = ownerRequest({ ...selection, cause: occurrence.state === "uncertain" ? "selection_uncertain" : "selection_failed",
         reviewOccurrenceId: occurrence.occurrenceId, reason: occurrence.state === "uncertain" ? occurrence.reason ?? undefined : undefined,
         ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as DecisionErrorClass } : {}) });
       if (!created.ok || !created.data) throw new Error(created.error ?? "the owner's scope approval could not be created");
+      // Campaign Status follows the proposal's current request through this link.
+      this.db.linkSelectionProposalDecision(occurrence.occurrenceId, created.data.occurrenceId, linkedRequest);
       return created.data.occurrenceId;
     };
     const occurrenceKey = scopeReviewKey(sessionId, boundary.revision, request.expectedRevision, snapshot.additions, grantDigest);
@@ -11730,14 +11736,19 @@ export class SessionsService {
     // never handed back: it can no longer be applied.
     const live = (d: WorkflowDecisionView | null): d is WorkflowDecisionView => Boolean(d) && ["pending", "approved", "consumed", "denied"].includes(d!.status);
     if (outcome.outcome === "human_required") {
-      const owned = outcome.humanRequestId ? this.db.workflowDecisionByOccurrence(outcome.humanRequestId) : null;
+      // The proposal's link names its current owner request; the audit names the first one.
+      const current = this.db.selectionProposal(outcome.occurrenceId)?.workflowOccurrenceId ?? outcome.humanRequestId;
+      const owned = current ? this.db.workflowDecisionByOccurrence(current) : null;
       if (live(owned)) return ok(owned);
-      // The owner's request for this occurrence was retired: ask them again, once.
+      // The owner's request for this occurrence was retired: ask them again, once, and move the
+      // proposal's link to the new request.
       const occurrence = this.db.getDecisionOccurrence(outcome.occurrenceId);
-      if (!occurrence) return fail("The owner's scope approval for this selection could not be created. Refresh Campaign Status and propose again.", 409);
-      return ownerRequest({ ...selection, cause: occurrence.state === "uncertain" ? "selection_uncertain" : "selection_failed",
-        reviewOccurrenceId: occurrence.occurrenceId, reason: occurrence.state === "uncertain" ? occurrence.reason ?? undefined : undefined,
-        ...(occurrence.failureClass ? { failureClass: occurrence.failureClass as DecisionErrorClass } : {}) });
+      let replacement: WorkflowDecisionView | null = null;
+      try {
+        replacement = occurrence ? this.db.workflowDecisionByOccurrence(routeOwner(occurrence)) : null;
+      } catch { /* refused below */ }
+      return replacement ? ok(replacement)
+        : fail("The owner's scope approval for this selection could not be created. Refresh Campaign Status and propose again.", 409);
     }
     if (outcome.verdict === "refuse") {
       log("refused", { reason: "selection_refused", reviewOccurrenceId: outcome.occurrenceId });

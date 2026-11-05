@@ -28,7 +28,7 @@ import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 import { fakeScopeGrantRuntime, grantVerdict, issues, ownerMessageOf, reviewVerdict, uncertainVerdict, type ScopeGrantAnswer } from "./scope-grant-test-fixture.js";
-import { scopeGrantDigest, scopeReviewKey } from "./scope-selection.js";
+import { scopeGrantDigest, scopeReviewKey, selectionProposalView } from "./scope-selection.js";
 import { createHash } from "node:crypto";
 
 const proposal: CampaignLaunchProposal = { repository: "owner/repo", issueNumbers: [12], objective: "Deliver #12",
@@ -2025,6 +2025,31 @@ test("after the owner changes the selection count and back, a re-proposal gets a
     assert.notEqual(asked.data!.occurrenceId, owner.data!.occurrenceId);
     assert.equal(asked.data!.status, "pending");
     assert.deepEqual(c.ownerRequests().map((d) => d.occurrenceId), [asked.data!.occurrenceId]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an owner request another proposal superseded is asked again on a re-proposal, and Campaign Status follows the new one (#4238 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const c = await selectionCampaign(f, server, 3);
+    // The issue facts are quoted JSON inside the input, so their quotes arrive escaped.
+    f.decision.state.review = (message) => message.input.includes('\\"number\\":40') ? reviewVerdict("uncertain", "Unclear.") : reviewVerdict("admit");
+    const first = await c.propose([40]);
+    assert.equal(first.data!.authority, "human");
+    const reviewId = (first.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.reviewOccurrenceId!;
+    // Another proposal at the same revision supersedes the owner's request.
+    const other = await c.propose([41]);
+    assert.equal(other.data!.authority, "orchestrator");
+    assert.equal(f.db.workflowDecisionByOccurrence(first.data!.occurrenceId)!.status, "superseded");
+    const again = await c.propose([40]);
+    assert.equal(again.ok, true, again.error ?? "");
+    assert.notEqual(again.data!.occurrenceId, first.data!.occurrenceId);
+    assert.equal(again.data!.status, "pending");
+    const view = selectionProposalView(f.db, f.db.getDecisionOccurrence(reviewId)!)!;
+    assert.deepEqual({ outcome: view.outcome, request: view.requestOccurrenceId }, { outcome: "waiting_for_owner", request: again.data!.occurrenceId });
+    // A repeat returns that same request.
+    assert.equal((await c.propose([40], "Again.")).data!.occurrenceId, again.data!.occurrenceId);
   } finally { await server.close(); f.db.close(); }
 });
 
