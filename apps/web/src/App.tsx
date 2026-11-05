@@ -134,6 +134,7 @@ const UsageView = lazy(() => import("./components/UsageView.js").then((module) =
 const ShellDock = lazy(() => import("./components/ShellDock.js").then((module) => ({ default: module.ShellDock })));
 const ProjectsView = lazy(() => import("./components/ProjectsView.js").then((module) => ({ default: module.ProjectsView })));
 const OrchestratorSettingsPanel = lazy(() => import("./components/OrchestratorSettingsPanel.js").then((module) => ({ default: module.OrchestratorSettingsPanel })));
+const DecisionModelPanel = lazy(() => import("./components/DecisionModelPanel.js").then((module) => ({ default: module.DecisionModelPanel })));
 const ReviewSettingsPanel = lazy(() => import("./components/ReviewSettingsPanel.js").then((module) => ({ default: module.ReviewSettingsPanel })));
 const ShortcutReference = lazy(() => import("./components/ShortcutReference.js").then((module) => ({ default: module.ShortcutReference })));
 const CommandPalette = lazy(() => import("./components/CommandPalette.js").then((module) => ({ default: module.CommandPalette })));
@@ -963,7 +964,7 @@ export function Shell() {
                   />
                 ),
                 approvals: <ApprovalsPanel policyId={view.policyId} />,
-                orchestrator: <OrchestratorSettingsPanel discoveryRevision={runners} />,
+                orchestrator: <><OrchestratorSettingsPanel discoveryRevision={runners} /><DecisionModelPanel /></>,
                 reviews: <ReviewSettingsPanel />,
                 network: <NetworkPanel tailnet={tailnet} onNavigate={navigate} />,
                 storage: <><ArchivedHistoryRetentionPanel /><WorkflowEventRetentionPanel /></>,

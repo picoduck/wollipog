@@ -137,6 +137,8 @@ function fakeClient(
     ...api,
     campaignIssueScope: async (id: string) => ({ campaignSessionId: id, repository: "team/repo", issueNumbers: [], revision: 0,
       supported: true, canPropose: false, outsideScope: [] }),
+    campaignDecisions: async (id: string) => ({ campaignSessionId: id, decisions: [],
+      usage: { calls: 0, inputTokens: 0, outputTokens: 0, cacheReadInputTokens: 0, cacheCreationInputTokens: 0, costUsd: 0, unpricedCalls: 0 } }),
     childSessions: () => Promise.reject(new ApiError("No registry in this fixture.", 404)),
     campaignWorkItems: async (id: string, query: string) => {
       calls.list.push(`${id}?${query}`);

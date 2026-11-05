@@ -412,6 +412,28 @@ export function createApiClient(transport: ApiTransport) {
   testSessionNamingCustomModel: () =>
     req<SessionNamingConnectionTestResult>("/api/session-naming/custom-model/test", { method: "POST" }),
 
+  /** The organization's Decision Model (#4101). Every member reads it; administrators change it. */
+  decisionModelSettings: () => req<import("@wollipog/protocol").DecisionModelSettingsView>("/api/decision-model"),
+
+  configureDecisionModel: (input: import("@wollipog/protocol").ConfigureDecisionModelRequest) =>
+    req<import("@wollipog/protocol").DecisionModelSettingsView>("/api/decision-model", {
+      method: "PUT",
+      body: JSON.stringify(input),
+    }),
+
+  useAutomaticDecisionModel: () =>
+    req<import("@wollipog/protocol").DecisionModelSettingsView>("/api/decision-model", { method: "DELETE" }),
+
+  /** One fixed probe decision through the full runtime: its verdict, attempts and latency. */
+  testDecisionModel: () =>
+    req<import("@wollipog/protocol").DecisionModelTestResult>("/api/decision-model/test", { method: "POST" }),
+
+  /** Decision calls that served a campaign, with their own usage, apart from worker cost. */
+  campaignDecisions: (sessionId: string) =>
+    req<import("@wollipog/protocol").CampaignDecisionsResponse>(
+      `/api/sessions/${encodeURIComponent(sessionId)}/campaign/decisions`,
+    ),
+
   /** Refetches the model rate table ahead of its daily TTL so newly released models get priced. */
   refreshUsagePricing: () => req<{ pricing: UsagePricingStatus }>("/api/usage/pricing/refresh", { method: "POST" }),
   subscriptionUsage: () => req<SubscriptionUsageResponse>("/api/usage/subscriptions"),
