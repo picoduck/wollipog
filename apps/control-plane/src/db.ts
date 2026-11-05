@@ -20536,6 +20536,11 @@ export class ControlPlaneDb {
     if (control.mode === "full_control" && (waiting?.state === "pending" || waiting?.state === "delivering")) {
       const { derivedLimits: _stale, ...rest } = waiting;
       campaign.firstMessageScope = { ...rest, ...(derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) } as typeof waiting;
+    } else if (waiting?.state === "established") {
+      // An established first message keeps its grant, but only the current authorization says
+      // whether Maximum Issues is still derived (#4102): a reauthorization, or a revoke, replaces it.
+      const { derivedLimits: _stale, ...rest } = waiting;
+      campaign.firstMessageScope = { ...rest, ...(control.mode === "full_control" && derivedLimits ? { derivedLimits: { ...derivedLimits } } : {}) };
     }
     campaign.control = structuredClone(control);
     this.db.exec("BEGIN");
@@ -20613,7 +20618,7 @@ export class ControlPlaneDb {
     if (!policy || first?.state !== "delivering" || first.messageDigest !== messageDigest) return false;
     policy.firstMessageScope = delivered ? { state: "established", messageDigest, establishedAt: now,
       ...(first.contextIssueNumbers?.length ? { contextIssueNumbers: first.contextIssueNumbers } : {}),
-      ...(first.grant ? { grant: first.grant } : {}) }
+      ...(first.grant ? { grant: first.grant, ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) } : {}) }
       : { state: "pending", ...(first.derivedLimits ? { derivedLimits: first.derivedLimits } : {}) };
     return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?")
       .run(JSON.stringify(policy), now, id).changes) === 1;

@@ -115,7 +115,8 @@ test("operations are only ever intersected with the launch's", () => {
 });
 
 test("an owner's approval of a failed grant's proposal grows only a derived limit, within the 100-issue ceiling", () => {
-  const failed = { firstMessageScope: { state: "established" as const, messageDigest: "d".repeat(64), establishedAt: 1, grant: {
+  const failed = { firstMessageScope: { state: "established" as const, messageDigest: "d".repeat(64), establishedAt: 1,
+    derivedLimits: { acceptedFollowUps: true, maxIssues: true }, grant: {
     version: 1 as const, status: "failed" as const, failureClass: "timed_out" as const, namedIssues: [],
     ceilings: { repositories: ["owner/repo"], maxIssues: 2, maxIssuesSource: "derived" as const, operations: [] } } } };
   const review = { grantReview: { cause: "grant_failed" as const, ownerMessage: "Fix things", messageDigest: "d".repeat(64) } };
@@ -125,6 +126,12 @@ test("an owner's approval of a failed grant's proposal grows only a derived limi
   const explicit = structuredClone(failed);
   explicit.firstMessageScope.grant.ceilings.maxIssuesSource = "explicit" as never;
   assert.equal(grantReviewMaxIssues(explicit, review, boundary(2, 1), 5), undefined);
+  // A later authorization that set Maximum Issues explicitly ends the growth, whatever the grant recorded.
+  const reauthorized = structuredClone(failed);
+  reauthorized.firstMessageScope.derivedLimits.maxIssues = false;
+  assert.equal(grantReviewMaxIssues(reauthorized, review, boundary(2, 1), 5), undefined);
+  const { derivedLimits: _none, ...unrecorded } = failed.firstMessageScope;
+  assert.equal(grantReviewMaxIssues({ firstMessageScope: unrecorded }, review, boundary(2, 1), 5), undefined);
   assert.equal(grantReviewMaxIssues(failed, { grantReview: { ...review.grantReview, cause: "selection" } }, boundary(2, 1), 5), undefined);
   assert.equal(grantReviewMaxIssues(failed, {}, boundary(2, 1), 5), undefined);
 });

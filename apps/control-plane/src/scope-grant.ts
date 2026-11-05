@@ -191,10 +191,13 @@ export function grantReviewMaxIssues(
   scopeSize: number,
 ): number | undefined {
   const first = policy?.firstMessageScope;
-  const grant = first && first.state !== "pending" ? first.grant : undefined;
+  const grant = first?.state === "established" ? first.grant : undefined;
   const issues = boundary.issueAuthority;
+  // Both the grant's own boundary and the current authorization must have derived the limit: one a
+  // person set since, by reauthorizing with an explicit Maximum Issues, never grows.
   if (!issues || !snapshot.grantReview || snapshot.grantReview.cause === "selection" || !grant ||
-      grant.status === "granted" || grant.ceilings.maxIssuesSource !== "derived") return undefined;
+      grant.status === "granted" || grant.ceilings.maxIssuesSource !== "derived" || first?.state !== "established" ||
+      first.derivedLimits?.maxIssues !== true) return undefined;
   const followUps = boundary.budgetAuthority?.acceptedFollowUps;
   return Math.min(MAX_MESSAGE_ISSUES, Math.max(issues.maxIssues, followUps === undefined ? MAX_MESSAGE_ISSUES : scopeSize + followUps));
 }

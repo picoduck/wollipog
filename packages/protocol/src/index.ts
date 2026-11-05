@@ -3005,7 +3005,10 @@ export type FullControlFirstMessageScope =
    * admission: only that exact command, carrying the digest, can settle this delivery. */
   | { state: "delivering"; messageDigest: string; deliveryId: string; derivedLimits?: FullControlDerivedLimits; contextIssueNumbers?: number[];
       grant?: FullControlScopeGrant }
-  | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[]; grant?: FullControlScopeGrant };
+  /** `derivedLimits` beside a grant (#4102) is the current authorization's: every later
+   * authorization or revoke replaces it, so a limit a person has since set is never treated as derived. */
+  | { state: "established"; messageDigest: string; establishedAt: number; contextIssueNumbers?: number[]; grant?: FullControlScopeGrant;
+      derivedLimits?: FullControlDerivedLimits };
 
 /** A selection without a stated count gets this many issues, capped by an explicit Maximum Issues (#4102). */
 export const SCOPE_GRANT_DEFAULT_SELECTION_COUNT = 3;

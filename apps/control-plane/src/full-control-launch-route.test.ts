@@ -1172,7 +1172,7 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
     assert.deepEqual(policy.issueNumbers, [7, 9, 12]);
     const { grant, ...established } = policy.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>;
     assert.deepEqual(established, { state: "established", messageDigest: firstMessageDigest(text),
-      establishedAt: established.establishedAt, contextIssueNumbers: [20, 21] });
+      establishedAt: established.establishedAt, contextIssueNumbers: [20, 21], derivedLimits: { acceptedFollowUps: true, maxIssues: true } });
     // The grant the Decision Model's answer left after the floors (#4102), with the model that read it.
     assert.equal(grant!.status, "granted");
     assert.deepEqual(grant!.namedIssues, [7, 9, 12]);
@@ -1517,6 +1517,44 @@ for (const [name, answer, attempts, expected] of [
     } finally { await server.close(); f.db.close(); }
   });
 }
+
+test("after a failed grant, reauthorizing with an explicit Maximum Issues ends the owner's approval growing the limit (#4102 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => ({ ok: false, errorClass: "authentication" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the five worst bugs")).ok, true);
+    assert.equal(grantOf(f, id).status, "failed");
+    const first = () => f.db.getSession(id)!.orchestratorPolicy!.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>;
+    assert.deepEqual(first().derivedLimits, { acceptedFollowUps: true, maxIssues: true });
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    const payload = { overrides: { issues: { maxIssues: 2 } } };
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { ...payload, expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 2);
+    assert.deepEqual(first().derivedLimits, { acceptedFollowUps: true, maxIssues: false }, "the current authorization's provenance");
+    assert.equal(first().grant!.status, "failed", "the grant itself is kept");
+    // The proposal still goes to the owner, but within the explicit limit: it never grows.
+    const revision = f.db.getSession(id)!.orchestratorPolicy!.issueScope!.revision;
+    const five = await f.sessions.proposeCampaignIssueScope(id, { requestId: "five-after-explicit", expectedRevision: revision,
+      additions: [21, 22, 23, 24, 25].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "The five worst bugs" });
+    assert.equal(five.ok, false);
+    assert.deepEqual(five.errorDetails, { code: "capacity_exhausted", limit: 2, requested: 5 });
+    const two = await f.sessions.proposeCampaignIssueScope(id, { requestId: "two-after-explicit", expectedRevision: revision,
+      additions: [21, 22].map((number) => ({ repository: "owner/repo", number })), removals: [], explanation: "The two worst bugs" });
+    assert.equal(two.ok, true, two.error ?? "");
+    assert.equal((two.data!.resourceSnapshot as CampaignIssueScopeSnapshot).grantReview!.cause, "grant_failed");
+    assert.equal(f.sessions.resolveWorkflowDecision(id, id, two.data!.occurrenceId, { outcome: "approve" }, "human",
+      { kind: "human", id: f.human.userId }, () => true).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 2, "an explicit Maximum Issues never grows");
+  } finally { await server.close(); f.db.close(); }
+});
 
 test("a runner or harness that cannot host Decision calls takes the failure route, and an explicit Maximum Issues still never grows (#4102)", async () => {
   const f = fixture();
@@ -2264,7 +2302,7 @@ test("context-only references stay disjoint from the scope, survive delivery, an
     assert.deepEqual(boundaryOf(f, id).issueAuthority!.epics, [12]);
     const { grant, ...established } = policy.firstMessageScope as Extract<FullControlFirstMessageScope, { state: "established" }>;
     assert.deepEqual(established, { state: "established", messageDigest: firstMessageDigest(next),
-      establishedAt: established.establishedAt, contextIssueNumbers: [13, 14] });
+      establishedAt: established.establishedAt, contextIssueNumbers: [13, 14], derivedLimits: { acceptedFollowUps: true, maxIssues: false } });
     // The grant names what the explicit limit kept, and records #13 as over the ceiling (#4102).
     assert.deepEqual(grant!.namedIssues, [12]);
     assert.deepEqual(grant!.dropped, [{ repository: "owner/repo", number: 13, reason: "over_ceiling" }]);
