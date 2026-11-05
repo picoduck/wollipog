@@ -3,44 +3,44 @@ import { expect, test } from "@playwright/test";
 /** Campaign Status's Question Screen (#4104): each Decision Model verdict beside the request it
  * affected, and the owner's classification of one the model could not screen. */
 
-for (const [label, viewport] of [["desktop", { width: 1280, height: 900 }], ["narrow", { width: 420, height: 900 }]] as const) {
-  test(`the owner classifies a question the Decision Model could not screen (${label})`, async ({ page }, testInfo) => {
+for (const [label, viewport] of [["1440", { width: 1440, height: 900 }], ["390", { width: 390, height: 844 }]] as const) {
+  test(`the owner classifies a question the Decision Model could not screen (${label}px)`, async ({ page }, testInfo) => {
     await page.setViewportSize(viewport);
-    await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=1");
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=1&owner=1");
     const section = page.getByRole("region", { name: "Question Screen" });
     await expect(section).toBeVisible();
     const items = section.locator("li");
-    await expect(items).toHaveCount(3);
+    await expect(items).toHaveCount(4);
+    // Each screened request is its own group, ruled off from the next.
+    for (let index = 0; index < 4; index += 1) {
+      await expect(items.nth(index)).toHaveCSS("border-top-style", "solid");
+    }
     await expect(items.nth(0)).toContainText("Only Discusses");
     await expect(items.nth(0)).toContainText("The Orchestrator decides it.");
     await expect(items.nth(1)).toContainText("Asks for Access");
     await expect(items.nth(1)).toContainText("Declined and recorded as blocked work.");
     await expect(items.nth(2)).toContainText("Timed Out");
-    await expect(items.nth(2).getByRole("button")).toHaveText(["Open Session", "Decline", "Let the Orchestrator Answer"]);
+    await expect(items.nth(2).getByRole("button")).toHaveText(["Decline", "Let the Orchestrator Answer", "Open Session"]);
+    await expect(items.nth(3)).toContainText("Owner Decision");
+    await expect(items.nth(3).getByRole("button")).toHaveText(["Decline", "Let Me Answer", "Open Session"]);
+    // Every group's first button starts on the same edge as the facts above it.
+    for (const index of [0, 2]) {
+      const factsLeft = await items.nth(index).locator("dl").evaluate((element) => element.getBoundingClientRect().left);
+      const buttonLeft = await items.nth(index).getByRole("button").first().evaluate((element) => element.getBoundingClientRect().left);
+      expect(Math.abs(buttonLeft - factsLeft)).toBeLessThanOrEqual(1);
+    }
     await section.scrollIntoViewIfNeeded();
-    await section.screenshot({ path: testInfo.outputPath(`question-screen-${label}-before.png`) });
+    await page.screenshot({ path: testInfo.outputPath(`question-screen-${label}-before.png`) });
     await items.nth(2).getByRole("button", { name: "Let the Orchestrator Answer" }).click();
     await expect(items.nth(2)).toContainText("You let the Orchestrator answer it.");
     await expect(items.nth(2).getByRole("button")).toHaveText(["Open Session"]);
     expect(await page.evaluate(() => (window as unknown as { __CLASSIFIED__: unknown }).__CLASSIFIED__))
       .toEqual({ occurrenceId: "dec_sessions", classification: "orchestrator" });
-    await section.screenshot({ path: testInfo.outputPath(`question-screen-${label}-after.png`) });
+    await page.screenshot({ path: testInfo.outputPath(`question-screen-${label}-after.png`) });
     const geometry = await section.evaluate((element) => ({ clientWidth: element.clientWidth, scrollWidth: element.scrollWidth }));
     expect(geometry.scrollWidth).toBeLessThanOrEqual(geometry.clientWidth + 1);
   });
 }
-
-test("an owner decision whose screen failed waits for its owner to decline it or answer it themselves", async ({ page }, testInfo) => {
-  await page.setViewportSize({ width: 1280, height: 900 });
-  await page.goto("/campaign-status-e2e.html?scenario=campaign&screen=1&owner=1");
-  const section = page.getByRole("region", { name: "Question Screen" });
-  const owner = section.locator("li").nth(3);
-  await expect(owner).toContainText("Owner Decision");
-  await expect(owner).toContainText("Uncertain");
-  await expect(owner.getByRole("button")).toHaveText(["Open Session", "Decline", "Let Me Answer"]);
-  await section.scrollIntoViewIfNeeded();
-  await section.screenshot({ path: testInfo.outputPath("question-screen-owner-decision.png") });
-});
 
 test("Campaign Status shows no Question Screen before the Decision Model screens anything", async ({ page }) => {
   await page.goto("/campaign-status-e2e.html?scenario=campaign");

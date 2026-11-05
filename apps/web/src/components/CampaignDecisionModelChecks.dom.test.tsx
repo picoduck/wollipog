@@ -58,19 +58,20 @@ test("Campaign Status shows each screen's verdict, reason and failure beside the
     assert.equal(container.querySelector("h3")?.textContent, "Question Screen");
     const items = [...container.querySelectorAll("li")];
     assert.equal(items.length, 3, "only the question screen's checks");
-    assert.deepEqual(facts(items[0]!), { "Implementation Question": "Open SessionThe Orchestrator decides it.", Verdict: "Only Discusses",
+    assert.ok(items.every((item) => item.classList.contains("campaign-screen-item")), "each screened request is its own group");
+    assert.deepEqual(facts(items[0]!), { "Implementation Question": "The Orchestrator decides it.", Verdict: "Only Discusses",
       Reason: "It asks which keyboard keys to show." });
-    assert.deepEqual(facts(items[1]!), { "Provider Question": "Open SessionDeclined and recorded as blocked work.", Verdict: "Asks for Access",
+    assert.deepEqual(facts(items[1]!), { "Provider Question": "Declined and recorded as blocked work.", Verdict: "Asks for Access",
       Reason: "It asks for the token's value." });
-    assert.deepEqual(facts(items[2]!), { "Implementation Question": "Open SessionWaiting for you to classify it.", Verdict: "None", Failure: "Timed Out" });
+    assert.deepEqual(facts(items[2]!), { "Implementation Question": "Waiting for you to classify it.", Verdict: "None", Failure: "Timed Out" });
     const buttons = (item: Element) => [...item.querySelectorAll("button")].map((node) => node.textContent);
     assert.deepEqual(buttons(items[0]!), ["Open Session"], "a settled check offers no classification");
-    assert.deepEqual(buttons(items[2]!), ["Open Session", "Decline", "Let the Orchestrator Answer"]);
+    assert.deepEqual(buttons(items[2]!), ["Decline", "Let the Orchestrator Answer", "Open Session"]);
     await act(async () => { [...items[2]!.querySelectorAll("button")].find((node) => node.textContent === "Let the Orchestrator Answer")!.click(); });
     await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });
     assert.deepEqual(classified, [["root-1", "dec_failed", "orchestrator"]]);
     const after = [...container.querySelectorAll("li")][2]!;
-    assert.equal(facts(after)["Implementation Question"], "Open SessionYou let the Orchestrator answer it.");
+    assert.equal(facts(after)["Implementation Question"], "You let the Orchestrator answer it.");
     assert.deepEqual(buttons(after), ["Open Session"]);
     await act(async () => { (after.querySelector("button") as HTMLButtonElement).click(); });
     assert.deepEqual(opened, ["child-1"]);
@@ -89,8 +90,8 @@ test("an owner decision whose screen failed stays the owner's: they decline it o
   const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
   try {
     const item = view.container.querySelector("li")!;
-    assert.equal(facts(item)["Owner Decision"], "Open SessionWaiting for you to classify it.");
-    assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Open Session", "Decline", "Let Me Answer"]);
+    assert.equal(facts(item)["Owner Decision"], "Waiting for you to classify it.");
+    assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Decline", "Let Me Answer", "Open Session"]);
   } finally {
     view.unmount();
     api.campaignDecisions = read;

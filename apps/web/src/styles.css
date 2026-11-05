@@ -5645,6 +5645,27 @@ body.shell-dock-dragging * {
   padding: 0;
   list-style: none;
 }
+/* The question screen's checks (#4104): one group per screened request with a rule above it, so a
+   request's verdict and its classification buttons never read as the next request's. */
+.campaign-screen-list {
+  display: grid;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+.campaign-screen-item {
+  display: grid;
+  gap: var(--space-3);
+  padding: var(--space-3) 0;
+  border-top: 1px solid var(--border);
+}
+.campaign-screen-item:last-child { border-bottom: 1px solid var(--border); }
+.campaign-screen-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: var(--space-2);
+}
 @media (hover: hover) {
   .campaign-work-row:hover {
     background: var(--bg-elev-2);

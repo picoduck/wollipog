@@ -105,23 +105,19 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       </p>
       {loadError && <Notice tone="danger" compact role="alert" title="Couldn't Load Question Screen">{loadError}</Notice>}
       {actionError && <Notice tone="danger" compact role="alert" title="Couldn't Classify the Question">{actionError}</Notice>}
-      <ul className="campaign-detail-list">
+      <ul className="campaign-screen-list">
         {(decisions ?? []).map((decision) => {
           const subject = decision.subject;
           const awaiting = (decision.state === "uncertain" || decision.state === "failed") && !subject?.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
+          const label = subject ? SURFACE_LABELS[subject.surface] : "Request";
           return (
-            <li key={decision.occurrenceId}>
+            <li key={decision.occurrenceId} className="campaign-screen-item">
               <dl className="facts">
                 <div>
-                  <dt>{subject ? SURFACE_LABELS[subject.surface] : "Request"}</dt>
-                  <dd>
-                    {subject ? (
-                      <button type="button" className="btn ghost sm" onClick={() => onOpenSession(subject.sessionId)}>Open Session</button>
-                    ) : "Unknown"}
-                    <span className="campaign-status-meta">{outcomeText(decision)}</span>
-                  </dd>
+                  <dt>{label}</dt>
+                  <dd>{outcomeText(decision)}</dd>
                 </div>
                 <div>
                   <dt>Verdict</dt>
@@ -140,15 +136,20 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                   </div>
                 )}
               </dl>
-              {awaiting && canClassify && (
-                <div className="actions">
-                  <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:decline`} progress="Declining the question…" disabled={busy !== null}
-                    onClick={() => void classify(decision.occurrenceId, "decline")}>Decline</BusyButton>
-                  <BusyButton className="btn primary sm" busy={busy === `${decision.occurrenceId}:orchestrator`}
-                    progress={ownerDecision ? "Opening the decision to you…" : "Handing the question to the Orchestrator…"} disabled={busy !== null}
-                    onClick={() => void classify(decision.occurrenceId, "orchestrator")}>
-                    {ownerDecision ? "Let Me Answer" : "Let the Orchestrator Answer"}
-                  </BusyButton>
+              {(subject || (awaiting && canClassify)) && (
+                <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>
+                  {awaiting && canClassify && <>
+                    <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:decline`} progress="Declining the question…" disabled={busy !== null}
+                      onClick={() => void classify(decision.occurrenceId, "decline")}>Decline</BusyButton>
+                    <BusyButton className="btn primary sm" busy={busy === `${decision.occurrenceId}:orchestrator`}
+                      progress={ownerDecision ? "Opening the decision to you…" : "Handing the question to the Orchestrator…"} disabled={busy !== null}
+                      onClick={() => void classify(decision.occurrenceId, "orchestrator")}>
+                      {ownerDecision ? "Let Me Answer" : "Let the Orchestrator Answer"}
+                    </BusyButton>
+                  </>}
+                  {subject && (
+                    <button type="button" className="btn sm" onClick={() => onOpenSession(subject.sessionId)}>Open Session</button>
+                  )}
                 </div>
               )}
             </li>
