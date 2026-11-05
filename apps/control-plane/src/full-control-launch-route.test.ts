@@ -2851,6 +2851,74 @@ test("a declined addition changes nothing and is not asked again for the same wo
     assert.match(repeated.error!, /declined/);
     const newWork = await c.request("add-third-new-work", { work: { kind: "follow_up", id: "fu_other" } });
     assert.equal(newWork.status, 201, newWork.error ?? "");
+    // A later decline for other work doesn't reopen the first: every decline counts, not only the latest.
+    assert.equal(c.resolve(newWork.data!.occurrenceId, "deny", { kind: "human", id: f.human.userId }).ok, true);
+    const decisions = () => f.db.raw().prepare("SELECT COUNT(*) AS n FROM workflow_decisions WHERE category='campaign_repository_addition'").get() as { n: number };
+    const count = decisions().n;
+    const firstAgain = await c.request("add-third-first-again");
+    assert.equal(firstAgain.ok, false);
+    assert.match(firstAgain.error!, /declined/);
+    assert.equal(decisions().n, count, "no new decision was created");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+/** Holds the next inspection of `path` until the test resolves it, as a slow runner would. */
+function holdInspection(f: ReturnType<typeof fixture>, path: string) {
+  const inspect = f.state.inspect;
+  let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+  f.state.inspect = (message) => message.workspacePath === path && !held ? (held = message, null) : inspect(message);
+  return {
+    async taken() {
+      for (let tick = 0; tick < 100 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+      assert.ok(held, `the inspection of ${path} is being held`);
+    },
+    release(repository: string, runnerId: string) {
+      f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: held!.requestId, workspaceId: held!.workspaceId,
+        ok: true, repository, issueNumbers: [], digest: "d".repeat(64) }, runnerId);
+    },
+  };
+}
+
+test("an approved addition whose Location moves during a Custom campaign's own-Location inspection is refused and stays approved (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    assert.equal(f.sessions.setCampaignControl(c.rootId, { mode: "custom" }, f.db.getSession(c.rootId)!.parentControlPolicy!.revision, f.human).ok, true);
+    const decision = (await c.request("custom-move")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const own = holdInspection(f, "/fixture/repository");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await own.taken();
+    // The target inspection already passed; it now leaves the Project before the own-Location one ends.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    f.db.moveProjectLocation(c.third.id, elsewhere.id, Date.now(), f.human.userId);
+    own.release("owner/repo", "r");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.match(executed.error!, /changed while it was being inspected/);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved", "the approval is not consumed");
+    assert.equal(f.db.getSession(c.rootId)!.orchestratorPolicy!.repositories, undefined, "no repository was recorded");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an approved addition is refused when the owner loses access to the Location while it is inspected (#4117)", async () => {
+  const f = fixture();
+  const c = await repositoryAdditionCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const decision = (await c.request("revoked-access")).data!;
+    assert.equal(c.resolve(decision.occurrenceId, "approve", { kind: "human", id: f.human.userId }).ok, true);
+    const target = holdInspection(f, "/fixture/two/third");
+    const executing = c.additions.execute(c.rootId, decision.occurrenceId, decision.resourceDigest, c.orchestrator);
+    await target.taken();
+    const access = f.db.canAccessWorkspace.bind(f.db);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => !(runnerId === "r2" && workspaceId === "c") && access(principal, runnerId, workspaceId);
+    target.release("third/repo", "r2");
+    const executed = await executing;
+    assert.equal(executed.ok, false);
+    assert.equal(f.db.workflowDecisionByOccurrence(decision.occurrenceId)!.status, "approved");
+    assert.equal(c.boundary().revision, before);
+    assert.equal(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"), false);
   } finally { await c.server.close(); f.db.close(); }
 });
 

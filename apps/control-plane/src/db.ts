@@ -22716,6 +22716,14 @@ export class ControlPlaneDb {
       AND category='campaign_repository_addition' AND resource_key=? ORDER BY created_at DESC, rowid DESC LIMIT 1`).get(rootId, resourceKey));
   }
 
+  /** Whether the owner ever declined adding this repository for this exact work, however many
+   * requests came after (#4117). */
+  campaignRepositoryAdditionDeclined(rootId: string, resourceKey: string, kind: "follow_up" | "work_item", id: string): boolean {
+    return this.stmt(`SELECT 1 FROM workflow_decisions WHERE session_id=? AND category='campaign_repository_addition'
+      AND resource_key=? AND status='denied' AND json_extract(resource_snapshot, '$.work.kind')=?
+      AND json_extract(resource_snapshot, '$.work.id')=? LIMIT 1`).get(rootId, resourceKey, kind, id) !== undefined;
+  }
+
   /** The title of a follow-up this campaign recorded or of one of its work items, or null when
    * the campaign has no such record (#4117). Agent-supplied ids resolve only within the campaign. */
   campaignRepositoryAdditionWork(rootId: string, kind: "follow_up" | "work_item", id: string): string | null {

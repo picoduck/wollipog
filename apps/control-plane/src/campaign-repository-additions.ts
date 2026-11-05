@@ -2,7 +2,7 @@ import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   CAMPAIGN_REPOSITORY_ADDITION_LIMITS, campaignBoundaryRepositories, isTerminal, runnerSupportsProtocol, sessionRole,
   type CampaignBoundaryRepository, type CampaignRepositoryAdditionRequest, type CampaignRepositoryAdditionSnapshot,
-  type ProjectLocationInspection, type SessionView, type WorkflowDecisionView,
+  type ProjectLocationInspection, type ProjectLocationView, type SessionView, type WorkflowDecisionView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -64,6 +64,17 @@ export class CampaignRepositoryAdditions {
     return ok({ root, owner });
   }
 
+  /** The Location, if it is still the same active Location of the campaign's Project (same runner,
+   * workspace and path as when it was read) and the owner can still reach it. Inspections run on
+   * another machine, so this is checked again after each one. */
+  private stillBound(before: ProjectLocationView, projectId: string, owner: HumanPrincipal): ProjectLocationView | null {
+    const { db } = this.deps;
+    const now = db.getProjectLocation(before.id);
+    return now && now.projectId === projectId && now.availability !== "runner_removed" && now.runnerId === before.runnerId &&
+      now.workspaceId === before.workspaceId && now.path === before.path && db.canAccessProject(owner, projectId) &&
+      db.canAccessWorkspace(owner, now.runnerId, now.workspaceId) ? now : null;
+  }
+
   async request(rootId: string, input: CampaignRepositoryAdditionRequest, principal: AgentPrincipal): Promise<ServiceResult<WorkflowDecisionView>> {
     const { db } = this.deps;
     const checked = this.root(principal, rootId);
@@ -109,15 +120,17 @@ export class CampaignRepositoryAdditions {
     if (covered?.some((entry) => entry.repository.toLowerCase() === repository)) {
       return fail(`${repository} is already one of this campaign's repositories; that Location joins it through its owner, not an addition`);
     }
-    // The inspection ran on another machine; the campaign may have ended or changed meanwhile.
+    // The inspection ran on another machine; the campaign or the Location may have changed meanwhile.
     const still = this.root(principal, rootId);
     if (!still.ok) return fail(still.error!, still.status);
+    if (still.data!.owner.userId !== owner.userId || !this.stillBound(location, root.projectId!, owner)) {
+      return fail("That Location changed while it was being inspected; ask again");
+    }
     const resourceKey = `campaign_repository_addition:${repository}`;
     const latest = db.latestCampaignRepositoryAddition(rootId, resourceKey);
     // One request per repository: a pending one is reused, and a declined one isn't asked again for the same work.
     if (latest?.status === "pending") return ok(latest);
-    if (latest?.status === "denied" && latest.resourceSnapshot.category === "campaign_repository_addition" &&
-        latest.resourceSnapshot.work.kind === workKind && latest.resourceSnapshot.work.id === workId) {
+    if (db.campaignRepositoryAdditionDeclined(rootId, resourceKey, workKind, workId)) {
       return fail("The campaign's owner declined adding this repository for this work. Record the work as blocked on the owner; " +
         "ask again only for new work that needs it");
     }
@@ -167,10 +180,26 @@ export class CampaignRepositoryAdditions {
       }
       // A Custom campaign's list starts from its own Location's repository.
       let customBase: CampaignBoundaryRepository | undefined;
+      let ownBefore: ProjectLocationView | null = null;
       if (root.orchestratorPolicy?.control?.mode !== "full_control" && !root.orchestratorPolicy?.repositories) {
-        const own = root.projectLocationId ? await this.deps.inspect(root.projectLocationId, { projectId: root.projectId! }) : null;
+        ownBefore = root.projectLocationId ? db.getProjectLocation(root.projectLocationId) : null;
+        const own = ownBefore ? await this.deps.inspect(ownBefore.id, { projectId: root.projectId! }) : null;
         if (!own?.ok) return fail("This campaign's own Location could not be verified, so its repositories can't be extended yet");
         customBase = { repository: own.location.repository.toLowerCase(), locationIds: [own.location.locationId] };
+      }
+      // Every inspection ran on another machine: record only if the campaign, its owner, the
+      // approved Location and the owner's access are all still what was checked.
+      const still = this.root(principal, rootId);
+      if (!still.ok) return fail(still.error!, still.status);
+      const current = still.data!.root;
+      const fullControl = (session: SessionView) => session.orchestratorPolicy?.control?.mode === "full_control";
+      if (still.data!.owner.userId !== owner.userId || !this.stillBound(location, root.projectId!, owner) ||
+          (ownBefore && !this.stillBound(ownBefore, root.projectId!, owner))) {
+        return fail("That Location or the campaign's access to it changed while it was being inspected; ask again for a fresh approval");
+      }
+      if (fullControl(current) !== fullControl(root) || current.projectLocationId !== root.projectLocationId ||
+          !current.orchestratorPolicy?.repositories !== !root.orchestratorPolicy?.repositories) {
+        return fail("The campaign's control changed while the Location was being inspected; carry out the addition again");
       }
       const now = Date.now();
       const recorded = db.recordCampaignLocations(rootId, owner.userId, {
@@ -178,9 +207,9 @@ export class CampaignRepositoryAdditions {
         excluded: [], pending: [],
       }, now, { consume: { occurrenceId, resourceDigest: digest }, ...(customBase ? { customBase } : {}) });
       if (!recorded.ok) return fail(recorded.error, recorded.status);
-      if (recorded.joined && root.orchestratorPolicy?.control?.mode === "full_control") {
+      if (recorded.joined && fullControl(current)) {
         // Like any join, what the new revision revoked leaves its pauses before members re-sync.
-        this.deps.sessions.settleCampaignBoundaryChange(root, recorded.revoked, owner.userId, now);
+        this.deps.sessions.settleCampaignBoundaryChange(current, recorded.revoked, owner.userId, now);
         await this.deps.synchronize(rootId);
       }
       this.deps.hub.sessionChangedById(rootId);
