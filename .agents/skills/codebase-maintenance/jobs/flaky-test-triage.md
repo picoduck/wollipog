@@ -96,6 +96,19 @@ surfaces only in Main Rolling Validation (see `docs/fast-gate-activation-proposa
   constantly. Before reporting one, verify the file is byte-identical to `main` and check the
   launching process's working directory and sandbox policy; one run nearly reported an
   environmental hang as a repository flake.
+- A test that fails in every local run but passes in CI may be reading this session's environment
+  rather than reporting a broken test. Before classifying it, rerun it in isolation twice: once
+  under `env -u CLAUDE_CONFIG_DIR -u CODEX_HOME <command>`, and once under `umask 022`. Only a
+  failure that survives both reruns may be reported as a broken test. A failure that disappears is
+  a test-isolation finding: name the variable or umask, and record which rerun cleared it. Never
+  print the process environment to find this out (the shared skill's rule 7 already forbids `env`
+  and `printenv`); test for a variable's presence with `[ -n "${NAME+x}" ]`, or remove it with
+  `env -u NAME <command>`. CI sets neither variable and uses umask 022. This is the third
+  inherited-provider-environment false positive, after #3548 and #3739: in the 2026-11-03 sweep,
+  `apps/runner/src/session-manager-provider-home.test.ts` failed 3/3 because it inherited
+  `CLAUDE_CONFIG_DIR` from the agent session (#4179), and
+  `apps/runner/src/provider-login-retention-packaged.test.ts` failed 3/3 under this machine's umask
+  002 and passed under 022 (#4180). Those two reruns are what diagnosed both.
 - A reproduced failure is exempt from the shared recent-work exclusion. That rule guards against
   inferring abandonment from code age; a live nondeterministic failure on the default branch is
   direct evidence, not an inference, and suppressing it for a week because its lines are young
