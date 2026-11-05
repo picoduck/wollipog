@@ -66,6 +66,30 @@ export interface CampaignCheckInput {
  * an uncertain or failed check is the affected request itself, which the caller keeps the owner's. */
 export async function runCampaignCheck(db: ControlPlaneDb, runtime: DecisionRuntime, input: CampaignCheckInput,
   now: () => number = Date.now): Promise<CampaignCheckOutcome> {
+  // One check per subject at a time: a request for a subject whose check is still running waits for
+  // it, then inherits a refusal or an owner route instead of asking for a verdict of its own.
+  return serializedBySubject(db, `${input.kind}\u0000${input.root.id}\u0000${input.surface}\u0000${input.requestId}`,
+    () => checkSubject(db, runtime, input, now));
+}
+
+const subjectChains = new WeakMap<ControlPlaneDb, Map<string, Promise<unknown>>>();
+
+/** Run `work` after every earlier call for the same subject on this database has settled. */
+async function serializedBySubject<T>(db: ControlPlaneDb, subject: string, work: () => Promise<T>): Promise<T> {
+  let chains = subjectChains.get(db);
+  if (!chains) subjectChains.set(db, chains = new Map());
+  const current = (chains.get(subject) ?? Promise.resolve()).then(work, work);
+  const settled = current.then(() => undefined, () => undefined);
+  chains.set(subject, settled);
+  try {
+    return await current;
+  } finally {
+    if (chains.get(subject) === settled) chains.delete(subject);
+  }
+}
+
+async function checkSubject(db: ControlPlaneDb, runtime: DecisionRuntime, input: CampaignCheckInput,
+  now: () => number): Promise<CampaignCheckOutcome> {
   const occurrenceKey = campaignCheckKey(input.kind, input.root.id, input.requestId, input.inputs);
   const automaticHarness: DecisionAutomaticHarness | null = input.root.agentId
     ? { runnerId: input.root.runnerId, agentId: input.root.agentId, driver: input.root.driver } : null;
@@ -75,8 +99,12 @@ export async function runCampaignCheck(db: ControlPlaneDb, runtime: DecisionRunt
   // recommendation, or the issue and reason): a request whose text differs inherits it without a
   // new call, so rewording never buys a second verdict. The person deciding the affected request
   // is the only way past it.
-  const earlier = db.latestUnconfirmedCampaignCheck(input.root.id, input.surface, input.requestId, input.kind, input.refuse);
-  if (earlier && earlier.occurrenceKey !== occurrenceKey) return outcomeOf(earlier, input);
+  const unconfirmedSibling = () => {
+    const earlier = db.latestUnconfirmedCampaignCheck(input.root.id, input.surface, input.requestId, input.kind, input.refuse);
+    return earlier && earlier.occurrenceKey !== occurrenceKey ? earlier : null;
+  };
+  const earlier = unconfirmedSibling();
+  if (earlier) return outcomeOf(earlier, input);
   let occurrenceId: string;
   try {
     occurrenceId = (await runtime.decide({
@@ -92,7 +120,11 @@ export async function runCampaignCheck(db: ControlPlaneDb, runtime: DecisionRunt
     error instanceof DecisionInputError ? "configuration" : "provider_failed", now());
   }
   subject(occurrenceId);
-  return outcomeOf(db.getDecisionOccurrence(occurrenceId)!, input);
+  const outcome = outcomeOf(db.getDecisionOccurrence(occurrenceId)!, input);
+  // A sibling that settled meanwhile (another control plane on the same database) wins over a
+  // confirmation: the check fails closed.
+  const sibling = outcome.outcome === "confirmed" ? unconfirmedSibling() : null;
+  return sibling ? outcomeOf(sibling, input) : outcome;
 }
 
 function outcomeOf(occurrence: DecisionOccurrenceRecord, input: Pick<CampaignCheckInput, "confirm" | "refuse">): CampaignCheckOutcome {

@@ -311,6 +311,36 @@ test("rewording never buys a second verdict: a refusal or an owner route sticks 
   } finally { h.db.close(); }
 });
 
+test("a reworded request sent while the first check is still running waits for it and inherits its refusal (review round 2)", async () => {
+  let refuse!: () => void;
+  const firstCall = new Promise<void>((resolve) => { refuse = resolve; });
+  let calls = 0;
+  const h = harness(async (kind) => {
+    if (kind !== "follow_up_relatedness" && kind !== "closure_reason") return { verdict: HEALTHY_VERDICTS[kind]! };
+    calls += 1;
+    // The first call for each subject is held open and refuses; any second call would confirm.
+    if (calls === 1 || calls === 3) {
+      await firstCall;
+      return kind === "closure_reason" ? { verdict: "does_not_fit", reason: "Only paused." } : { verdict: "unrelated", reason: "A separate feature." };
+    }
+    return { verdict: HEALTHY_VERDICTS[kind]! };
+  });
+  try {
+    const recommendation = recommend(h, "Add a Dark-Mode Theme");
+    const first = publish(h, "first", recommendation);
+    await new Promise((resolve) => setImmediate(resolve));
+    const reworded = h.svc.createWorkflowDecisionWithVideo("child", { requestId: "reworded", resourceKey: "reworded",
+      resourceSnapshot: { category: "follow_up_issue_publication", repository: "team/repo", sanitizedTitle: recommendation.title,
+        sanitizedBody: body.replace("temp file", "theme setting"), labels: [], recommendationId: recommendation.id } });
+    await new Promise((resolve) => setImmediate(resolve));
+    refuse();
+    const [a, b] = await Promise.all([first, reworded]);
+    assert.deepEqual([a.errorDetails?.code, b.errorDetails?.code], ["unrelated_follow_up", "unrelated_follow_up"]);
+    assert.equal(h.calls("follow_up_relatedness").length, 1, "the reworded request never got a verdict of its own");
+    assert.equal(h.db.workflowDecisionByRequestId("child", "reworded"), null, "no Orchestrator-owned grant");
+  } finally { h.db.close(); }
+});
+
 test("closure reason: concurrent requests record one verdict", async () => {
   let release!: () => void;
   const gate = new Promise<void>((resolve) => { release = resolve; });

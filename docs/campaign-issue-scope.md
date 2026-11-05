@@ -323,7 +323,9 @@ admitted the request, never reads its text any other way, and may only refuse.
 A refusal, an uncertain verdict or a failure sticks to the server-owned subject: the recommendation,
 or the issue and the stated reason. A later request for the same subject with reworded text inherits
 that outcome without a new model call, so rewording never buys a second verdict; the person deciding
-the affected request is the only way past it. Each check's verdict, reason and failure class appear
+the affected request is the only way past it. Checks of one subject run one at a time, so a request
+sent while another is still being checked waits and inherits its outcome, and a confirmation never
+outranks a refusal recorded for the same subject meanwhile. Each check's verdict, reason and failure class appear
 in Campaign Status under Decision Model Checks, beside the follow-up or closure it affected.
 
 ### Closure Refusal Reasons
