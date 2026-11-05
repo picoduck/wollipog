@@ -22367,6 +22367,9 @@ export class ControlPlaneDb {
         reason: "Issues are in scope, but no child session has been started for them." });
       return result("stuck");
     }
+    // A request or decision the root itself still has pending (a Custom root's question, say) waits
+    // on a person: the campaign is never complete while its own Orchestrator is asking.
+    if (facts.rootPending && !(fullControl && agentWork.length > 0)) return result("waiting_human");
     // #4067: a merged campaign branch still on the remote, pending or retained with a reason, is
     // housekeeping the campaign owes, as is a verified child's worktree retirement.
     const branches = this.campaignMergedBranchCounts(campaignId);
@@ -22422,6 +22425,9 @@ export class ControlPlaneDb {
           : { kind: "command", command: mergedBranchDeletionCommand(row.repository, row.branch, row.pullRequest) } });
       }
     }
+    // Branches Wollipog can delete come first, so the bounded list always shows what its
+    // Delete Merged Branches performs.
+    items.sort((a, b) => Number(b.action.kind === "delete_merged_branches") - Number(a.action.kind === "delete_merged_branches"));
     for (const worktree of worktrees) {
       items.push({ kind: "worktree", sessionId: worktree.sessionId, path: worktree.path, status: worktree.status, reason: worktree.reason,
         action: worktree.status === "refused" ? { kind: "command", command: worktreeRemovalCommand(worktree.path) }

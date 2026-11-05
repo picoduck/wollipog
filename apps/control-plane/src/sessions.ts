@@ -6809,7 +6809,8 @@ export class SessionsService {
   async deleteApprovedMergedBranches(campaignId: string, canAccess: (sessionId: string) => boolean):
     Promise<ServiceResult<{ performed: number; refused: number; projection: OrchestratorCampaignProjection | null }>> {
     if (!canAccess(campaignId) || this.db.resolvedCampaignSessionId(campaignId) !== campaignId) return fail("campaign not found", 404);
-    const items = this.db.campaignProjection(campaignId)?.cleanup?.items ?? [];
+    // The whole cleanup list, never the projection's bounded one: every approved deletion counts.
+    const items = this.db.campaignLeftovers(campaignId)?.cleanup ?? [];
     let performed = 0;
     let refused = 0;
     for (const item of items) {

@@ -294,6 +294,48 @@ test("a Custom campaign gets the same projection (#4146)", async () => {
   } finally { stuck.db.close(); }
 });
 
+test("a Custom root asking its owner a question is Waiting for You, never complete (#4146)", async () => {
+  const h = await fixture({ mode: "custom" });
+  try {
+    observe(h, observed(null), 100);
+    assert.equal(h.db.campaignProjection("root")!.status, "verified_complete");
+    h.svc.onSessionEvent("root", { kind: "question_request", requestId: "ask-owner", occurrenceId: "request_ask_owner",
+      questions: [{ id: "q", header: "Scope", question: "Should the follow-up ship too?", options: [{ label: "Yes" }, { label: "No" }] }] });
+    h.db.updateSessionStatus("root", "input_required", Date.now());
+    assert.equal(h.db.campaignProjection("root")!.status, "waiting_human");
+    assert.equal(h.db.campaignStatusOnly("root"), "waiting_human");
+    assert.equal(h.db.campaignWorkLedger.accounting.completedAt("root"), null, "Campaign Elapsed keeps running");
+  } finally { h.db.close(); }
+});
+
+test("Delete Merged Branches reaches an approved deletion past the bounded cleanup list (#4146)", async () => {
+  const h = await fixture({ approveDeletion: true });
+  try {
+    // Fifty-one more merged branches still on the remote, none with an approved deletion.
+    const insert = h.db.raw().prepare(`INSERT INTO workflow_decisions(request_id,occurrence_id,session_id,controlling_session_id,
+      category,resource_key,resource_snapshot,resource_digest,policy_revision,authority,status,created_at,resolved_at,consumed_at)
+      VALUES (?,?,'child','root','pr_merge',?,?,'digest',1,'orchestrator','consumed',3,4,6)`);
+    const refs = [];
+    for (let number = 5000; number < 5051; number += 1) {
+      insert.run(`merge-${number}`, `merge-${number}`, `picoduck/wollipog#${number}`, JSON.stringify({ category: "pr_merge",
+        repository: "picoduck/wollipog", pullRequest: number, headSha: "c".repeat(40), reviewResult: "merge",
+        requiredChecks: { headSha: "c".repeat(40), status: "passed", checkedAt: 2, checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" }] } }));
+      refs.push({ ref: { repository: "picoduck/wollipog", number }, observation: observed("c".repeat(40), { headSha: "c".repeat(40),
+        headBranch: { name: `agent/extra-${number}`, tipSha: "c".repeat(40) } }) });
+    }
+    h.db.campaignForgeObservations.record("root", "r", refs, 100);
+    observe(h, observed("a".repeat(40)), 100);
+    const projection = h.db.campaignProjection("root")!;
+    assert.equal(projection.status, "complete_needs_cleanup");
+    assert.equal(projection.cleanup?.total, 52);
+    assert.equal(projection.cleanup?.items.length, 50, "the projection stays bounded");
+    assert.equal(projection.cleanup?.items[0]?.action.kind, "delete_merged_branches", "what Wollipog can delete is listed first");
+    const pressed = await h.svc.deleteApprovedMergedBranches("root", () => true);
+    assert.ok(pressed.ok, pressed.error ?? "deletion refused");
+    assert.deepEqual([pressed.data?.performed, pressed.data?.refused], [1, 0]);
+  } finally { h.db.close(); }
+});
+
 test("older dashboards receive an existing status for the new ones, never active work (#4146)", async () => {
   const cases: Array<[OrchestratorCampaignStatus, number | null, OrchestratorCampaignStatus]> = [
     ["complete_needs_cleanup", PROTOCOL_VERSION, "complete_needs_cleanup"],
