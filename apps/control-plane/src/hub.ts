@@ -383,6 +383,7 @@ export type RunnerRequestResult =
   | SteerSessionResultMessage
   | GenerateSessionTitleResultMessage
   | SessionNamingCustomModelResultMessage
+  | import("@wollipog/protocol").RunDecisionResultMessage
   | SessionWorktreeResultMessage
   | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage

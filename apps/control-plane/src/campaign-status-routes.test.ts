@@ -9,6 +9,7 @@ import {
   CAMPAIGN_WORK_REVISION_CHANGED,
   PROTOCOL_VERSION,
   type CampaignCostValue,
+  type CampaignDecisionsResponse,
   type CampaignMetric,
   type CampaignWorkItemDetail,
   type CampaignWorkItemDetailResponse,
@@ -28,6 +29,8 @@ import {
 } from "./campaign-status-routes.js";
 import { CampaignWorkObservations } from "./campaign-work-observation.js";
 import { ControlPlaneDb } from "./db.js";
+import { DECISION_PROBE_INPUTS } from "./decision-kinds.js";
+import { DecisionRuntime } from "./decision-runtime.js";
 import { Hub } from "./hub.js";
 import type { AgentPrincipal, AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { withCampaignWorkForResponse, withSessionCommandPermissions } from "./session-command-permissions.js";
@@ -509,7 +512,7 @@ test("Campaign Status routes authorize humans by the root and Orchestrators by t
       assert.ok(campaign, "the projection itself is still served");
       assert.equal(campaign.work, undefined, "no other agent reads the ledger through a session view");
     }
-    for (const path of ["summary", "work-items", "work-items/:itemId", "recommendations"]) {
+    for (const path of ["summary", "work-items", "work-items/:itemId", "recommendations", "decisions"]) {
       const route = `/api/sessions/:id/campaign/${path}`;
       assert.equal(isAgentControlApiRouteAllowed("GET", route, "orchestrator"), true, route);
       assert.equal(isAgentControlApiRouteAllowed("GET", route, "default"), false, route);
@@ -856,5 +859,58 @@ test("bare campaign projections sent to an agent, such as get_campaign and verif
   } finally {
     await app.close();
     db.close();
+  }
+});
+
+test("Campaign Status shows the campaign's Decision verdicts, reasons and their separate usage (#4101)", async () => {
+  const { db, root, child, ownBy } = campaignFixture();
+  const member = child(root, "Member");
+  const other = campaignFixture();
+  ownBy(root, "alice");
+  ownBy(member, "alice");
+  const runtime = new DecisionRuntime({
+    db,
+    settings: { resolve: () => ({ ok: true, target: {
+      source: "automatic", runnerId: RUNNER_ID, machineName: "host", agentId: "test-orchestrator",
+      harnessName: "Claude Code", driver: "claude-code", provider: "claude", model: "haiku", effort: "low",
+    } }) },
+    transport: async (_runnerId, message) => ({
+      type: "run_decision_result", requestId: message.requestId, ok: true, provider: "claude", model: "unpriced-model",
+      outputText: JSON.stringify({ verdict: "confirm", reason: "Listed in the boundary." }),
+      usage: { inputTokens: 3, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0 },
+    }),
+    sleep: async () => {},
+  });
+  await runtime.decide({
+    organizationId: ORG, kind: "probe", campaignSessionId: root, inputs: DECISION_PROBE_INPUTS, routeToHuman: () => null,
+  });
+  const { app, get } = await routes(db, {
+    alice: human("alice"),
+    bob: human("bob"),
+    orchestrator: agent(root, true),
+    stranger: agent(other.root, true),
+  });
+  try {
+    const read = await get<CampaignDecisionsResponse>("alice", `/api/sessions/${member}/campaign/decisions`);
+    assert.equal(read.status, 200);
+    assert.equal(read.body.campaignSessionId, root);
+    assert.equal(read.body.decisions.length, 1);
+    assert.equal(read.body.decisions[0]!.verdict, "confirm");
+    assert.equal(read.body.decisions[0]!.reason, "Listed in the boundary.");
+    assert.equal(read.body.decisions[0]!.target?.model, "haiku");
+    assert.deepEqual(read.body.usage, {
+      calls: 1, inputTokens: 3, outputTokens: 4, cacheReadInputTokens: 0, cacheCreationInputTokens: 0,
+      costUsd: null, unpricedCalls: 1,
+    });
+    assert.equal((await get("orchestrator", `/api/sessions/${root}/campaign/decisions`)).status, 200);
+    assert.equal((await get("stranger", `/api/sessions/${root}/campaign/decisions`)).status, 403);
+    assert.equal((await get("bob", `/api/sessions/${root}/campaign/decisions`)).status, 404);
+    // Decision usage never enters the managed worker cost the summary reports.
+    const summary = await get<CampaignWorkSummaryResponse>("alice", `/api/sessions/${root}/campaign/summary`);
+    assert.equal(JSON.stringify(summary.body).includes("unpriced-model"), false);
+  } finally {
+    await app.close();
+    db.close();
+    other.db.close();
   }
 });

@@ -170,15 +170,15 @@ export function codexSessionNamingArgs(baseArgs: readonly string[]): string[] {
   ];
 }
 
-interface NeutralDirectory {
+export interface NeutralDirectory {
   cwd: string;
   cleanup(): Promise<void>;
 }
 
-async function prepareNeutralDirectory(agent: AgentDefinition): Promise<NeutralDirectory> {
+export async function prepareNeutralDirectory(agent: AgentDefinition, prefix = "wollipog-session-naming-"): Promise<NeutralDirectory> {
   if (agent.context?.kind === "wsl") {
     const distro = agent.context.distro;
-    const cwd = `/tmp/wollipog-session-naming-${randomUUID()}`;
+    const cwd = `/tmp/${prefix}${randomUUID()}`;
     const made = await run("wsl.exe", ["-d", distro, "--exec", "mkdir", "-m", "700", "--", cwd], {
       timeoutMs: 5_000,
       maxBuffer: 4 * 1024,
@@ -194,7 +194,7 @@ async function prepareNeutralDirectory(agent: AgentDefinition): Promise<NeutralD
       },
     };
   }
-  const cwd = await mkdtemp(join(tmpdir(), "wollipog-session-naming-"));
+  const cwd = await mkdtemp(join(tmpdir(), prefix));
   return { cwd, cleanup: () => rm(cwd, { recursive: true, force: true }) };
 }
 
