@@ -1,12 +1,12 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import {
   supportsPacedVideoReviewPeer, humanRequiredRulesExist,
-  type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch, type RunnerView,
+  type CampaignLaunchInspectionResult, type CampaignIssueScope, type PreparedCampaignLaunch,
 } from "@wollipog/protocol";
-import { randomUUID } from "node:crypto";
 import type { AuthPrincipal } from "./identity.js";
 import type { ControlPlaneDb } from "./db.js";
-import { RunnerRequestTimeoutError, type Hub } from "./hub.js";
+import type { Hub } from "./hub.js";
+import { inspectCampaignWorkspace } from "./project-location-inspection.js";
 import type { SessionsService } from "./sessions.js";
 import type { OrchestratorSettings } from "./orchestrator-settings.js";
 import type { EvidenceAuthorityDisclosures } from "./evidence-authority.js";
@@ -15,38 +15,6 @@ import { authorizeFullControl } from "./campaign-authority.js";
 import { evaluateUiEvidenceReviewClient } from "./ui-evidence-review.js";
 import { campaignLaunchDigest, campaignLaunchPreflight, derivedLaunchLimits, firstMessageLaunch, launchSessionRequest, parseFullControlEnableRequest,
   parseFullControlLaunchRequest, type VideoLaunchCertification } from "./campaign-launch-admission.js";
-
-export const CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS = 60_000;
-
-/** Ask the runner to inspect the workspace origin and issues. Expiry or cancellation of the caller
- * drops the pending request (so a late result is discarded, never admitted) and, on a version-2
- * runner, stops that one inspection. Older runners stay bounded by their per-command timeouts. */
-export async function inspectCampaignWorkspace(hub: Hub, runner: RunnerView, workspaceId: string, issueNumbers: number[],
-  signal: AbortSignal, timeoutMs = CAMPAIGN_LAUNCH_INSPECTION_TIMEOUT_MS, workspacePath?: string): Promise<CampaignLaunchInspectionResult | undefined> {
-  const version = runner.runtime?.campaignLaunchInspection?.version ?? 0;
-  if (version < 3 || !workspacePath || signal.aborted) return undefined;
-  const requestId = `campaign_launch_${randomUUID()}`;
-  const stopRunner = () => {
-    if (version >= 2) hub.sendToRunner(runner.runnerId, { type: "campaign_launch_inspect_cancel", requestId });
-  };
-  const onAbort = () => {
-    if (hub.cancelRunnerRequest(runner.runnerId, requestId, new Error("campaign launch inspection was cancelled"))) stopRunner();
-  };
-  signal.addEventListener("abort", onAbort, { once: true });
-  try {
-    const result = await hub.requestFromRunner(runner.runnerId, requestId, {
-      type: "campaign_launch_inspect", requestId, workspaceId, workspacePath, issueNumbers,
-    }, timeoutMs);
-    if (signal.aborted || result.type !== "campaign_launch_inspection_result" || result.requestId !== requestId) return undefined;
-    return result;
-  } catch (error) {
-    if (error instanceof RunnerRequestTimeoutError) stopRunner();
-    // No credential-bearing runner error escapes the preflight.
-    return undefined;
-  } finally {
-    signal.removeEventListener("abort", onAbort);
-  }
-}
 
 /** Human-only Full Control launch. Preflight is read-only; admission needs the exact reviewed
  * digest and creates the root, its scope, authority and allowance in one atomic step. There is no
