@@ -15,7 +15,7 @@ import { AutomationCreationService } from "./automation-creation.js";
  */
 
 import os from "node:os";
-import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest } from "@wollipog/protocol";
+import { handoffDestinationError, locationSwitchRole, sessionRole, withRepositoryMismatchGuidance, type SessionConfig, type ReviewSessionRequest, type SessionReviewJobRequest, type SetCampaignFollowUpLimitRequest, type SetScopeGrantSelectionCountRequest } from "@wollipog/protocol";
 import { writeSync } from "node:fs";
 import { join } from "node:path";
 import { randomUUID } from "node:crypto";
@@ -4633,6 +4633,15 @@ app.post("/api/sessions/:id/orchestrator-campaign/follow-up-limit", async (req, 
   const principal = requestPrincipal(req);
   if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
   return respond(reply, svc.setCampaignFollowUpLimit(id, req.body as SetCampaignFollowUpLimitRequest, principal));
+});
+
+// The scope grant's selection count (#4102): the same human-only compare-and-set, re-minting the
+// boundary. No agent allowlist entry exists for this endpoint.
+app.post("/api/sessions/:id/orchestrator-campaign/scope-grant/selection-count", async (req, reply) => {
+  const id = (req.params as { id: string }).id;
+  const principal = requestPrincipal(req);
+  if (principal?.kind !== "human") return reply.code(403).send({ error: "authenticated human authorization is required" });
+  return respond(reply, svc.setScopeGrantSelectionCount(id, req.body as SetScopeGrantSelectionCountRequest, principal));
 });
 
 app.post("/api/sessions/:id/orchestrator-campaign/plan", async (req, reply) => {

@@ -1584,6 +1584,84 @@ test("a runner or harness that cannot host Decision calls takes the failure rout
   } finally { await server.close(); f.db.close(); }
 });
 
+test("the owner changes a defaulted selection count in Campaign Status: compare-and-set, re-minting a derived Maximum Issues by the change (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 4, "three defaulted plus one derived follow-up");
+    const revision = () => f.db.getSession(id)!.parentControlPolicy!.revision;
+    // An outstanding decision is withdrawn by the re-authorization, as any boundary change does.
+    const asked = f.sessions.createWorkflowDecision(id, { requestId: "count-question", resourceKey: "count-question", resourceSnapshot: {
+      category: "implementation_question", question: "Which parser should the campaign use?",
+      options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
+    assert.equal(asked.ok, true, asked.error ?? "");
+
+    const raised = f.sessions.setScopeGrantSelectionCount(id, { count: 5, expectedRevision: revision() }, f.human);
+    assert.equal(raised.ok, true, raised.error ?? "");
+    assert.deepEqual(grantOf(f, id).selection, { repository: "owner/repo", count: 5, defaulted: false, setByOwner: true,
+      criteria: "highest priority", constraints: [] });
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 6, "the derived limit moves by exactly the change");
+    assert.equal(grantOf(f, id).ceilings.maxIssues, 6);
+    assert.equal(boundaryOf(f, id).authorizedByUserId, f.human.userId);
+    assert.equal(campaignBoundaryCurrent(f.db.getSession(id)!), true);
+    assert.equal(f.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.status, "revoked");
+    assert.equal((await f.sessions.campaignIssueScope(id)).data!.scopeGrant!.selection!.count, 5, "Campaign Status reads the new count");
+
+    // Compare-and-set: a stale revision changes nothing.
+    const stale = f.sessions.setScopeGrantSelectionCount(id, { count: 7, expectedRevision: revision() - 1 }, f.human);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.status, 409);
+    assert.equal(grantOf(f, id).selection!.count, 5);
+
+    // Lowering narrows the derived limit too, never below 1.
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 1, expectedRevision: revision() }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 2);
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 0, expectedRevision: revision() }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 1);
+
+    // Bounded: no more than the 100-issue ceiling leaves, no malformed request, and only the owner.
+    const tooMany = f.sessions.setScopeGrantSelectionCount(id, { count: 100, expectedRevision: revision() }, f.human);
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.error ?? "", /from 0 to 99/u);
+    for (const body of [{ count: -1 }, { count: 2.5 }, { count: 101 }, { count: 2, extra: true }] as const) {
+      assert.equal(f.sessions.setScopeGrantSelectionCount(id, { ...body, expectedRevision: revision() } as never, f.human).status, 400);
+    }
+    const other: HumanPrincipal = { ...f.human, userId: "someone-else", actorId: "someone-else" };
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 3, expectedRevision: revision() }, other).status, 404);
+    assert.equal(grantOf(f, id).selection!.count, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an explicit Maximum Issues never grows when the owner changes the selection count, and a grant without a selection has no count (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13), selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server, { issues: { maxIssues: 4 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13 and the highest-priority issues.")).ok, true);
+    assert.equal(grantOf(f, id).selection!.count, 2, "capped by the explicit limit");
+    const revision = () => f.db.getSession(id)!.parentControlPolicy!.revision;
+    const over = f.sessions.setScopeGrantSelectionCount(id, { count: 3, expectedRevision: revision() }, f.human);
+    assert.equal(over.status, 400);
+    assert.match(over.error ?? "", /from 0 to 2: the Maximum Issues set at launch \(4\) never grows/u);
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 1, expectedRevision: revision() }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 4, "an explicit limit never moves");
+    assert.deepEqual(grantOf(f, id).selection, { repository: "owner/repo", count: 1, defaulted: false, setByOwner: true,
+      criteria: "highest priority", constraints: [] });
+
+    // Named issues only, or a failed grant: there is no selection count to change.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12) });
+    const { id: named } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
+    const none = f.sessions.setScopeGrantSelectionCount(named, { count: 3, expectedRevision: f.db.getSession(named)!.parentControlPolicy!.revision }, f.human);
+    assert.equal(none.status, 409);
+    assert.match(none.error ?? "", /no selection count to change/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("a selection grant's Orchestrator proposal goes to the owner until the Decision Model reviews selections (#4103), within the selection ceiling (#4102)", async () => {
   const f = fixture();
   const { server } = await app(f);

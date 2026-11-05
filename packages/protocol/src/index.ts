@@ -3058,6 +3058,8 @@ export interface ScopeGrantSelection {
   /** The count the message stated, when it stated one. */
   requestedCount?: number;
   capped?: true;
+  /** The owner set `count` in Campaign Status (#4102), replacing the extracted or defaulted one. */
+  setByOwner?: true;
   criteria: string;
   constraints: string[];
 }
@@ -5337,6 +5339,14 @@ export interface CampaignFollowUpAdmissionSnapshot {
  * `null` clears the limit. Compare-and-set on the campaign's policy revision. */
 export interface SetCampaignFollowUpLimitRequest {
   acceptedFollowUps: number | null;
+  expectedRevision: number;
+}
+
+/** The owner's change to how many issues a Full Control scope grant's selection may admit (#4102).
+ * Compare-and-set on the campaign's policy revision. A derived Maximum Issues moves with it; an
+ * explicit Maximum Issues never grows, so the count stays within what it leaves after the named issues. */
+export interface SetScopeGrantSelectionCountRequest {
+  count: number;
   expectedRevision: number;
 }
 

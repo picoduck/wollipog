@@ -290,7 +290,8 @@ function AvailableCampaignStatus({
                   onOpenRequest={onOpenRequest}
                 />
               )}
-              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
+              <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId}
+                policyRevision={availability.role === "campaign" ? data.summary.campaign?.policyRevision : undefined} />
               <CampaignWorkList
                 data={data}
                 filters={memory.filters}

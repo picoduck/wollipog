@@ -17,8 +17,11 @@ for (const [name, value] of Object.entries({
   document: domWindow.document,
   navigator: domWindow.navigator,
   HTMLElement: domWindow.HTMLElement,
+  HTMLInputElement: domWindow.HTMLInputElement,
   Node: domWindow.Node,
   Event: domWindow.Event,
+  MouseEvent: domWindow.MouseEvent,
+  KeyboardEvent: domWindow.KeyboardEvent,
   getComputedStyle: domWindow.getComputedStyle.bind(domWindow),
   React,
   IS_REACT_ACT_ENVIRONMENT: true,
@@ -41,18 +44,34 @@ const granted: FullControlScopeGrant = {
     removedOperations: ["issue_closure"] },
 };
 
-async function mount(scopeGrant: FullControlScopeGrant | undefined) {
-  const scope: CampaignIssueScopeView = { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: scopeGrant?.namedIssues ?? [],
-    revision: 2, supported: true, canPropose: false, outsideScope: [], ...(scopeGrant ? { scopeGrant } : {}) };
-  const client = { ...api, campaignIssueScope: async () => scope } as ApiClient;
+async function mount(scopeGrant: FullControlScopeGrant | undefined, options: { owner?: boolean; policyRevision?: number } = {}) {
+  let current = scopeGrant;
+  const loads: number[] = [];
+  const counts: Array<{ id: string; count: number; expectedRevision: number }> = [];
+  const client = {
+    ...api,
+    campaignIssueScope: async () => {
+      loads.push(loads.length);
+      return { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: current?.namedIssues ?? [], revision: 2, supported: true,
+        canPropose: options.owner ?? false, outsideScope: [], ...(current ? { scopeGrant: current } : {}) } satisfies CampaignIssueScopeView;
+    },
+    setScopeGrantSelectionCount: async (id: string, count: number, expectedRevision: number) => {
+      counts.push({ id, count, expectedRevision });
+      current = { ...current!, selection: { ...current!.selection!, count, defaulted: false, setByOwner: true } };
+      return {} as SessionView;
+    },
+  } as ApiClient;
   const session = { id: "s_root", orchestratorPolicy: { issueScope: { revision: 2 } } } as unknown as SessionView;
   const host = document.createElement("div");
   document.body.append(host);
   const root = createRoot(host);
-  await act(async () => { root.render(<ApiProvider client={client}><CampaignIssueScopePanel session={session} campaignId="s_root" /></ApiProvider>); });
+  await act(async () => { root.render(<ApiProvider client={client}><CampaignIssueScopePanel session={session} campaignId="s_root"
+    {...(options.policyRevision === undefined ? {} : { policyRevision: options.policyRevision })} /></ApiProvider>); });
   await settle();
-  return { host, unmount: () => act(async () => root.unmount()) };
+  return { host, loads, counts, unmount: () => act(async () => root.unmount()) };
 }
+
+const button = (host: HTMLElement, name: string) => [...host.querySelectorAll("button")].find((b) => b.textContent === name) as HTMLButtonElement | undefined;
 
 const section = (host: HTMLElement, title: string) => [...host.querySelectorAll("section")].find((s) =>
   s.querySelector("h3")?.textContent === title) as HTMLElement | undefined;
@@ -124,4 +143,59 @@ test("the owner's scope approval shows their first message, the proposal's ratio
     assert.match(host.textContent!, /no grant to check this proposal against/u);
     assert.match(host.textContent!, /The two oldest open UI bugs\./u);
   } finally { await act(async () => root.unmount()); }
+});
+
+const typeInto = async (input: HTMLInputElement, value: string) => {
+  await act(async () => {
+    input.focus();
+    Object.getOwnPropertyDescriptor(domWindow.HTMLInputElement.prototype, "value")!.set!.call(input, value);
+    input.dispatchEvent(new domWindow.InputEvent("input", { bubbles: true }) as unknown as Event);
+    input.dispatchEvent(new domWindow.KeyboardEvent("keyup", { bubbles: true }) as unknown as Event);
+  });
+};
+
+test("the owner changes the defaulted selection count from the Scope Grant section, against the campaign's policy revision (#4102)", async () => {
+  const { host, loads, counts, unmount } = await mount(granted, { owner: true, policyRevision: 7 });
+  try {
+    const grant = section(host, "Scope Grant")!;
+    await act(async () => { button(grant, "Change Count")!.click(); });
+    const input = grant.querySelector("input") as unknown as HTMLInputElement;
+    assert.equal(input.value, "3");
+    assert.match(grant.textContent!, /Maximum Issues moves by the same amount\./u);
+    await typeInto(input, "twelve");
+    await act(async () => { button(grant, "Save Count")!.click(); });
+    assert.equal(counts.length, 0, "an invalid count is never sent");
+    assert.match(grant.querySelector("[role=alert]")!.textContent!, /whole number from 0 to 100/u);
+    await typeInto(input, "5");
+    const before = loads.length;
+    await act(async () => { button(grant, "Save Count")!.click(); });
+    await settle();
+    assert.deepEqual(counts, [{ id: "s_root", count: 5, expectedRevision: 7 }]);
+    assert.ok(loads.length > before, "the scope reloads after saving");
+    const saved = section(host, "Scope Grant")!;
+    assert.equal(facts(saved)["Selection Count"], "5 Set by You");
+    assert.ok(button(saved, "Change Count") !== undefined, "the editor closes after saving");
+  } finally { await unmount(); }
+});
+
+test("only the owner on the campaign's own session sees Change Count, and only for a granted selection (#4102)", async () => {
+  for (const [label, grant, options] of [
+    ["someone who can't propose scope", granted, { owner: false, policyRevision: 7 }],
+    ["another session's Campaign Status", granted, { owner: true }],
+    ["a grant without a selection", { ...granted, selection: undefined }, { owner: true, policyRevision: 7 }],
+    ["a failed grant", { ...granted, status: "failed", selection: undefined, namedIssues: [] }, { owner: true, policyRevision: 7 }],
+  ] as Array<[string, FullControlScopeGrant, { owner?: boolean; policyRevision?: number }]>) {
+    const { host, unmount } = await mount(grant, options);
+    try { assert.ok(button(section(host, "Scope Grant")!, "Change Count") === undefined, label); } finally { await unmount(); }
+  }
+});
+
+test("under an explicit Maximum Issues the editor says the limit stays as it is (#4102)", async () => {
+  const explicit: FullControlScopeGrant = { ...granted, ceilings: { ...granted.ceilings, maxIssues: 4, maxIssuesSource: "explicit" } };
+  const { host, unmount } = await mount(explicit, { owner: true, policyRevision: 7 });
+  try {
+    const grant = section(host, "Scope Grant")!;
+    await act(async () => { button(grant, "Change Count")!.click(); });
+    assert.match(grant.textContent!, /The Maximum Issues you set at launch \(4\) stays as it is, so the count must fit within it\./u);
+  } finally { await unmount(); }
 });

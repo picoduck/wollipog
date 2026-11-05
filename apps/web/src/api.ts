@@ -1173,6 +1173,13 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
+  /** Authenticated Human-only change to a Full Control scope grant's selection count (#4102).
+   * Compare-and-set on the campaign's policy revision. */
+  setScopeGrantSelectionCount: (id: string, count: number, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/scope-grant/selection-count`, {
+      method: "POST",
+      body: JSON.stringify({ count, expectedRevision }),
+    }),
   setParentControl: (id: string, mode: ParentControlMode) =>
     req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/parent-control`, {
       method: "POST",
