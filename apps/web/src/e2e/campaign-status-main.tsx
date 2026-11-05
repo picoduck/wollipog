@@ -559,6 +559,16 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
   { occurrenceId: "why_failed", kind: "closure_reason", promptVersion: "closure_reason.v1", state: "failed", failureClass: "timed_out",
     inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
     subject: { sessionId: "s_root", surface: "issue_closure", requestId: "team/repo#124" } },
+  // `seed=1`: a Custom campaign's epic seed (#4104 Slice C): one that seeded an epic, and one whose
+  // reading failed, waiting for the owner to approve a scope or continue without an epic.
+  ...(params.get("seed") === "1" ? [
+    { occurrenceId: "seed_read", kind: "scope_grant" as const, promptVersion: "scope_grant.v1", state: "decided" as const, verdict: "grant",
+      reason: "The person names epic #123 and its child issues to orchestrate.", inputDigests: {}, attempts: [], usage: decisionUsage,
+      createdAt: NOW - 420_000, subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:a", seed: "seeded" as const } },
+    { occurrenceId: "seed_failed", kind: "scope_grant" as const, promptVersion: "scope_grant.v1", state: "failed" as const,
+      failureClass: "provider_overloaded" as const, inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 30_000,
+      subject: { sessionId: "s_root", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:b", seed: "owner" as const } },
+  ] : []),
 ] : [];
 
 const client = {

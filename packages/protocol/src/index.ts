@@ -3024,8 +3024,11 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
   /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
   locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
-  /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
+  /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
+   * seed, never authority. */
   issueScopeProposalEpic?: number;
+  /** A Custom campaign's epic seed, read from its first message by the Decision Model (#4104). */
+  issueScopeSeed?: CampaignIssueScopeSeed;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
@@ -5259,6 +5262,22 @@ export interface WorkflowDecisionOption {
 }
 
 /** Authority is independent of ledger membership. Revision zero denotes a legacy initial scope. */
+/**
+ * A Custom campaign's epic seed (#4104). A first message that writes a digit string but names no
+ * explicit issue list is read by the Decision Model's `scope_grant` kind after the session starts.
+ * `pending` holds delegation until that reading settles. `seeded`: the reading named exactly one
+ * issue that the runner verified has members, now `issueScopeProposalEpic`, and the person approves
+ * the scope as before. `none`: it named no epic, so nothing is held. `owner`: the reading failed or
+ * was uncertain, so the person approves the scope with no seed. Nothing is ever parsed from the
+ * text instead, and no state grants anything.
+ */
+export interface CampaignIssueScopeSeed {
+  state: "pending" | "seeded" | "none" | "owner";
+  /** SHA-256 of the exact first message the seed reads. */
+  messageDigest: string;
+  occurrenceId?: string;
+}
+
 export interface CampaignIssueScope {
   repository: string;
   issueNumbers: number[];
@@ -7480,11 +7499,17 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure" |
+    "issue_scope_seed";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
-  /** The owner's classification of an uncertain or failed screen. */
+  /** The owner's classification of an uncertain or failed screen. For an epic seed, `orchestrator`
+   * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
+  /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current
+   * reading, or `scoped` once the person approved a scope, which ends any hold the seed placed.
+   * Server-derived for Campaign Status; never stored on the subject. */
+  seed?: CampaignIssueScopeSeed["state"] | "scoped";
 }
 
 /** Owner classification of a question the Decision Model could not screen (#4104). It never
