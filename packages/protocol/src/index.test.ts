@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 289);
+  assert.equal(PROTOCOL_VERSION, 290);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,8 +358,11 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 289", () => {
-  assert.equal(PROTOCOL_VERSION, 289);
+test("PROTOCOL_VERSION is 290", () => {
+  assert.equal(PROTOCOL_VERSION, 290);
+  // Selection floors read issue facts from a v290 runner (#4103).
+  assert.equal(runnerSupportsProtocol(289, "campaignIssueFacts"), false);
+  assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);

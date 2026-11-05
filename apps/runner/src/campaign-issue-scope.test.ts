@@ -156,3 +156,32 @@ test("large explicit scope validation bounds concurrent GitHub reads and preserv
   assert.deepEqual(result.candidates.map((candidate)=>candidate.issue.number),issues);
   assert.equal(maximum,4,"avoid both serial timeout amplification and unbounded subprocess fanout");
 });
+
+test("a facts read (#4103) reports each issue's state, labels and assignees, and a pull request instead of failing", async () => {
+  const body = "x".repeat(3000);
+  const rows: Record<number, unknown> = {
+    5: { number: 5, title: "Open", body, state: "open", html_url: "https://github.com/owner/repo/issues/5",
+      labels: [{ name: "bug" }, { name: "Security" }], assignees: [{ login: "octo" }] },
+    6: { number: 6, title: "Closed", body: null, state: "closed", html_url: "https://github.com/owner/repo/issues/6", labels: [], assignees: [] },
+    7: { number: 7, title: "A pull request", body: "", state: "open", html_url: "https://github.com/owner/repo/pull/7",
+      pull_request: { url: "https://api.github.com/repos/owner/repo/pulls/7" }, labels: [], assignees: [] },
+  };
+  const run = async (command: string, args: string[]) => {
+    if (command === "git") return "git@github.com:owner/repo.git";
+    const number = Number(/issues\/(\d+)$/u.exec(args.at(-1)!)?.[1]);
+    return JSON.stringify(rows[number]);
+  };
+  const result = await inspectCampaignIssueScope(run, undefined, [5, 6, 7], undefined, true);
+  assert.deepEqual(result.candidates.map((c) => c.issue.number), [5, 6], "a pull request is never a candidate");
+  assert.deepEqual(result.issueFacts!.map(({ bodyExcerpt, ...fact }) => ({ ...fact, excerpt: bodyExcerpt.length })).sort((a, b) => a.number - b.number), [
+    { number: 5, kind: "issue", state: "open", labels: ["bug", "Security"], assignees: ["octo"], title: "Open", excerpt: 2000 },
+    { number: 6, kind: "issue", state: "closed", labels: [], assignees: [], title: "Closed", excerpt: 0 },
+    { number: 7, kind: "pull_request", state: "open", labels: [], assignees: [], title: "A pull request", excerpt: 0 },
+  ]);
+  // Without facts a pull request still fails the whole read, as before.
+  await assert.rejects(inspectCampaignIssueScope(run, undefined, [5, 7]), /could not verify/);
+  assert.equal((await inspectCampaignIssueScope(run, undefined, [5])).issueFacts, undefined);
+  // GitLab reports facts from the same read.
+  const gitlab = await inspectCampaignIssueScope(gitlabScope({ 3: { title: "Three" } }).run, undefined, [3], undefined, true);
+  assert.deepEqual(gitlab.issueFacts, [{ number: 3, kind: "issue", state: "open", labels: [], assignees: [], title: "Three", bodyExcerpt: "" }]);
+});
