@@ -49,11 +49,13 @@ test("compatible verified Codex reports supported stdio and separately gated opt
     verification: "help-and-version",
     contractFingerprint: CODEX_APP_SERVER_CONTRACT_FINGERPRINT,
     sessionNaming: true,
+    decisionCalls: true,
     orchestratorApproval: { status: "supported" },
   });
   const prior = interpretCodexAppServerProbe("0.147.0", { code: 0, stdout: compatibleHelp, stderr: "" });
   assert.equal(prior.status, "supported");
   assert.equal(prior.sessionNaming, false);
+  assert.equal(prior.decisionCalls, false);
   assert.equal(prior.orchestratorApproval?.status, "unsupported");
   assert.match(prior.orchestratorApproval?.failure ?? "", /upgrade to 0\.154\.0 or newer/i);
   assert.equal(MIN_VERIFIED_CODEX_SESSION_NAMING_VERSION, "0.149.1");

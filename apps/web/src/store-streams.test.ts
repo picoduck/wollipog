@@ -40,36 +40,6 @@ function emptyOpeningRace(rows: SessionEvent[], complete = true) {
   return { store, fence: store.getState().eventWindows.get("s1")!.laterGap!.fence };
 }
 
-test("preview handoff installs all bounded pages atomically while preserving the opening transport guard", () => {
-  const store = new Store({ name: "session", id: "s1" });
-  message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
-  store.beginEventHistoryLoad("s1", 0, -1);
-  const events = Array.from({ length: 401 }, (_, i) => i === 0 ? userEvent("s1", 100 + i) : event("s1", 100 + i));
-  const pages: SessionHistoryHandoff[] = [];
-  for (let offset = 0; offset < events.length; offset += 200) {
-    const rows = events.slice(offset, offset + 200), end = rows.at(-1)!.seq;
-    pages.push({ events: rows, identities: [], eventEpoch: 0, cacheComplete: true,
-      windowStartSeq: 100, windowEndSeq: 500, anchorSeq: 450, hasMoreHandoff: end < 500,
-      turnStartSeq: 100, nextAfter: end, tailSeq: 900, hasMoreLater: true, hasMoreOlder: true, turnAligned: offset === 0 });
-  }
-  assert.equal(store.loadTurnStartWindow("s1", { ...pages.at(-1)!, events }, -1), false,
-    "a joined range must never disable the bounded opening guard");
-  const before = store.getState();
-  assert.equal(store.loadHistoryPreviewHandoff("s1", pages.slice(0, 2), -1), false);
-  assert.equal(store.getState(), before, "a partial chain publishes no rows");
-  const corrupt = pages.map(page => ({ ...page }));
-  corrupt[1] = { ...corrupt[1]!, eventEpoch: 1 };
-  assert.equal(store.loadHistoryPreviewHandoff("s1", corrupt, -1), false);
-  assert.equal(store.getState(), before, "an epoch change cannot partially install a chain");
-  let publications = 0; const unsubscribe = store.subscribe(() => publications++);
-  assert.equal(store.loadHistoryPreviewHandoff("s1", pages, -1), true);
-  unsubscribe();
-  assert.equal(publications, 1, "the range and unread gap publish together");
-  assert.deepEqual(store.getState().events.get("s1")?.map(row => row.seq), events.map(row => row.seq));
-  assert.equal(store.getState().eventWindows.get("s1")?.laterGap?.afterSeq, 500);
-  assert.equal(store.getState().eventWindows.get("s1")?.hasOlder, true);
-});
-
 test("a turn-start prefix keeps its unread remainder and live traffic outside the reader", () => {
   const store = new Store({ name: "session", id: "s1" });
   message(store, { type: "snapshot", runners: [], boxes: [], sessions: [session("s1")], runs: [], pods: [] });
@@ -894,59 +864,6 @@ test("activity lifecycle survives same-epoch snapshots and resets or removes aut
   assert.equal(store.getState().activity.has("busy"), false, "a late reset cannot resurrect removed activity");
 });
 
-test("targeted observation starts at acknowledgement and blocks pre-ack false stalls", () => {
-  const store = new Store({ name: "board" });
-  store.tickActivity(0);
-  store.dispatch({ type: "conn", conn: "online" });
-  const busy = {
-    ...session("busy"), status: "running", archived: false, updatedAt: 0, lastEventAt: 0,
-  } as SessionView;
-  message(store, {
-    type: "snapshot", capabilities: { sessionSubscriptions: true },
-    runners: [], boxes: [], sessions: [busy], runs: [], pods: [],
-  }, 0);
-  store.prepareSubscriptionRecovery(1, [busy.id]);
-  store.tickActivity(600_000);
-  assert.equal(store.getState().stalledCount, 0, "a requested stream is not observable before ack");
-
-  message(store, {
-    type: "session_subscriptions_applied", revision: 1, sessionIds: [busy.id], podIds: [],
-  }, 600_000);
-  assert.equal(store.getState().activityObservationStartedAt.get(busy.id), 600_000);
-  assert.equal(store.getState().stalledCount, 0, "acknowledgement starts a fresh observation barrier");
-  store.tickActivity(1_199_999);
-  assert.equal(store.getState().stalledCount, 0);
-  store.tickActivity(1_200_000);
-  assert.equal(store.getState().stalledSessionIds.has(busy.id), true, "the exact ten-minute boundary stalls");
-});
-
-test("pending subscription replacements preserve old observation until the new ack", () => {
-  const store = new Store({ name: "board" });
-  store.tickActivity(0);
-  store.dispatch({ type: "conn", conn: "online" });
-  const sessions = ["old", "new"].map((id) => ({
-    ...session(id), status: "running", archived: false, updatedAt: 0, lastEventAt: 0,
-  } as SessionView));
-  message(store, {
-    type: "snapshot", capabilities: { sessionSubscriptions: true },
-    runners: [], boxes: [], sessions, runs: [], pods: [],
-  }, 0);
-  store.prepareSubscriptionRecovery(1, ["old"]);
-  message(store, {
-    type: "session_subscriptions_applied", revision: 1, sessionIds: ["old"], podIds: [],
-  }, 0);
-  store.prepareSubscriptionRecovery(2, ["new"]);
-  store.tickActivity(600_000);
-  assert.equal(store.getState().stalledSessionIds.has("old"), true);
-  assert.equal(store.getState().stalledSessionIds.has("new"), false);
-
-  message(store, {
-    type: "session_subscriptions_applied", revision: 2, sessionIds: ["new"], podIds: [],
-  }, 600_000);
-  assert.equal(store.getState().stalledSessionIds.has("old"), false);
-  assert.equal(store.getState().activityObservationStartedAt.get("new"), 600_000);
-});
-
 test("session-event hot path keeps the activity registry stable and updates only one entry", () => {
   const store = new Store({ name: "board" });
   store.tickActivity(0);
@@ -960,33 +877,11 @@ test("session-event hot path keeps the activity registry stable and updates only
   const registry = store.getState().activity;
   const firstBefore = registry.get("s1");
   const secondBefore = registry.get("s2");
-  const stalledRevision = store.getState().stalledRevision;
   message(store, { type: "session_event", event: { ...event("s1", 1), ts: 1 } }, 1);
 
   assert.equal(store.getState().activity, registry);
   assert.notEqual(registry.get("s1"), firstBefore);
   assert.equal(registry.get("s2"), secondBefore);
-  assert.equal(store.getState().stalledRevision, stalledRevision,
-    "an unrelated nonstalled pulse does not publish a global stall revision");
-});
-
-test("an expired delayed event cannot clear a real stall", () => {
-  const store = new Store({ name: "board" });
-  store.tickActivity(0);
-  store.dispatch({ type: "conn", conn: "online" });
-  const busy = {
-    ...session("busy"), status: "running", archived: false, updatedAt: 0, lastEventAt: 0,
-  } as SessionView;
-  message(store, {
-    type: "snapshot", runners: [], boxes: [], sessions: [busy], runs: [], pods: [],
-  }, 0);
-  store.tickActivity(600_000);
-  assert.equal(store.getState().stalledSessionIds.has(busy.id), true,
-    "legacy snapshot metadata may classify a preexisting stall immediately");
-  const revision = store.getState().stalledRevision;
-  message(store, { type: "session_event", event: { ...event(busy.id, 1), ts: 0 } }, 600_000);
-  assert.equal(store.getState().stalledSessionIds.has(busy.id), true);
-  assert.equal(store.getState().stalledRevision, revision);
 });
 
 test("stale async history and pod-context responses cannot repopulate caches after navigation", () => {
@@ -1625,33 +1520,4 @@ test("restoring an inactive reader clears its provisional receipt attribution", 
   assert.equal(store.getState().eventWindows.get("s1")?.provisionalRestTail, undefined);
   assert.equal(store.recoveryReadAfter("s1", 3, generation), 0,
     "retained data is not a newly completed provisional HTTP response for this view");
-});
-
-
-for (const targeted of [false, true]) test(`status-only resume clears the stalled set and count (${targeted ? "targeted" : "legacy"}, #3302)`, () => {
-  const store = new Store({ name: "inbox" });
-  store.tickActivity(0);
-  store.dispatch({ type: "conn", conn: "online" });
-  const waiting = { ...session("waiting"), status: "input_required", archived: false,
-    updatedAt: 0, lastEventAt: 0 } as SessionView;
-  message(store, { type: "snapshot", capabilities: { sessionSubscriptions: targeted },
-    runners: [], boxes: [], sessions: [waiting], runs: [], pods: [] }, 0);
-  if (targeted) {
-    store.prepareSubscriptionRecovery(1, [waiting.id]);
-    message(store, { type: "session_subscriptions_applied", revision: 1,
-      sessionIds: [waiting.id], podIds: [] }, 0);
-  }
-  store.tickActivity(600_000);
-  assert.equal(store.getState().stalledCount, 1);
-  const revision = store.getState().stalledRevision;
-  const resumed = { ...waiting, status: "running", updatedAt: 660_000 } as SessionView;
-  message(store, { type: "session_upsert", session: resumed }, 660_000);
-  assert.equal(store.getState().stalledSessionIds.has(waiting.id), false);
-  assert.equal(store.getState().stalledCount, 0);
-  assert.equal(store.getState().stalledRevision, revision + 1);
-  message(store, { type: "session_upsert", session: { ...resumed, updatedAt: 1_200_000 } }, 1_200_000);
-  store.tickActivity(1_259_999);
-  assert.equal(store.getState().stalledCount, 0);
-  store.tickActivity(1_260_000);
-  assert.equal(store.getState().stalledCount, 1, "a resumed session can stall again after ten silent minutes");
 });

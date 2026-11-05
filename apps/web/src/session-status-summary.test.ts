@@ -24,23 +24,23 @@ test("follow-ups distinguish queued work from an executing turn and known blocke
   const queued = session({ backgroundWorkState: "continuation_pending",
     backgroundFollowUp: { state: "queued", queuedAt: 1_000, retryScheduled: true } });
   const summary = sessionStatusSummary(queued);
-  assert.equal(summary.primary.meta.label, "Follow-Up Queued");
-  assert.equal(summary.primary.meta.tone, "neutral");
-  assert.equal(summary.primary.meta.pulse, false);
-  assert.match(summary.primary.description, /automatic retry is scheduled/);
+  assert.equal(summary.conditions[0]!.meta.label, "Follow-Up Queued");
+  assert.equal(summary.conditions[0]!.meta.tone, "neutral");
+  assert.equal(summary.conditions[0]!.meta.pulse, false);
+  assert.match(summary.conditions[0]!.description, /automatic retry is scheduled/);
   const unrelatedTurn = sessionStatusSummary({ ...queued, status: "running" });
-  assert.equal(unrelatedTurn.primary.meta.label, "Running");
+  assert.equal(unrelatedTurn.conditions[0]!.meta.label, "Running");
   assert.equal(unrelatedTurn.conditions.find((c) => c.kind === "background_work")?.meta.label, "Follow-Up Queued");
   const running = sessionStatusSummary({ ...queued, status: "running", backgroundFollowUp: { state: "running" } });
   assert.match(running.conditions.find((c) => c.kind === "background_work")!.description, /agent is processing/);
   const blocked = sessionStatusSummary({ ...queued, backgroundFollowUp: { state: "blocked", blocker: "budget" } });
-  assert.equal(blocked.primary.meta.label, "Follow-Up Blocked");
-  assert.equal(blocked.primary.meta.tone, "warning");
-  assert.match(blocked.primary.description, /cost budget/);
+  assert.equal(blocked.conditions[0]!.meta.label, "Follow-Up Blocked");
+  assert.equal(blocked.conditions[0]!.meta.tone, "warning");
+  assert.match(blocked.conditions[0]!.description, /cost budget/);
   assert.equal(blocked.conditions.filter((c) => c.kind === "background_work").length, 1);
   const withApproval = sessionStatusSummary({ ...queued, pendingApproval: approval,
     backgroundFollowUp: { state: "blocked", blocker: "input" } });
-  assert.equal(withApproval.primary.meta.label, "Approval Required");
+  assert.equal(withApproval.conditions[0]!.meta.label, "Approval Required");
   assert.ok(withApproval.conditions.some((c) => c.meta.label === "Follow-Up Blocked"));
 });
 
@@ -64,8 +64,8 @@ test("offline, mixed-version and inconsistent follow-up facts never claim execut
 test("rule 1: the first attention kind in the breakdown's order leads, and +N counts the other kinds", () => {
   const source = session({ status: "input_required", pendingApproval: { ...question, additionalRequests: [approval] } });
   const summary = sessionStatusSummary(source);
-  assert.equal(summary.primary.meta.label, sessionAttentionBreakdown(source)[0]!.label);
-  assert.equal(summary.primary.kind, "attention");
+  assert.equal(summary.conditions[0]!.meta.label, sessionAttentionBreakdown(source)[0]!.label);
+  assert.equal(summary.conditions[0]!.kind, "attention");
   assert.equal(summary.more, 1);
   // The lifecycle is listed after what needs the person, never counted in +N (#3073).
   assert.deepEqual(labels(source), [...sessionAttentionBreakdown(source).map((group) => group.label), "Awaiting Input"]);
@@ -76,8 +76,8 @@ test("rule 1: two requests of one kind are one condition with a count, not +1", 
     status: "input_required",
     pendingApproval: { ...approval, additionalRequests: [{ ...approval, requestId: "approval-2" }] },
   }));
-  assert.equal(summary.primary.meta.label, "Approval Required");
-  assert.equal(summary.primary.count, 2);
+  assert.equal(summary.conditions[0]!.meta.label, "Approval Required");
+  assert.equal(summary.conditions[0]!.count, 2);
   assert.equal(summary.more, 0);
 });
 
@@ -88,19 +88,19 @@ test("rule 1: a worker's request keeps the kind as its badge and names the worke
     pendingApproval: owned,
     attentionOwners: [{ requestId: owned.requestId, toolCallId: "tool-audit", resolved: true, name: "Audit", role: "reviewer" }],
   }));
-  assert.equal(resolved.primary.meta.label, "Approval Required");
-  assert.match(resolved.primary.description, /^Audit · Reviewer owns this request\./);
+  assert.equal(resolved.conditions[0]!.meta.label, "Approval Required");
+  assert.match(resolved.conditions[0]!.description, /^Audit · Reviewer owns this request\./);
   // A child whose identity is unavailable is still named as a child, in the sentence.
   const unresolved = sessionStatusSummary(session({ status: "input_required", pendingApproval: owned }));
-  assert.equal(unresolved.primary.meta.label, "Approval Required");
-  assert.match(unresolved.primary.description, /^A child agent owns this request\./);
+  assert.equal(unresolved.conditions[0]!.meta.label, "Approval Required");
+  assert.match(unresolved.conditions[0]!.description, /^A child agent owns this request\./);
 });
 
 test("rule 1: authentication needs the person like any other request", () => {
   const summary = sessionStatusSummary(session({ status: "input_required", pendingApproval: signIn }));
-  assert.equal(summary.primary.meta.label, "Authentication Required");
-  assert.equal(summary.primary.attentionKind, "authentication_required");
-  assert.equal(summary.primary.needsYou, true);
+  assert.equal(summary.conditions[0]!.meta.label, "Authentication Required");
+  assert.equal(summary.conditions[0]!.attentionKind, "authentication_required");
+  assert.equal(summary.conditions[0]!.needsYou, true);
 });
 
 test("rule 1: child requests follow the session's own requests as one condition, N Child Requests (#2206)", () => {
@@ -117,8 +117,8 @@ test("rule 1: child requests follow the session's own requests as one condition,
 
   // With no request of its own, the child requests are the badge.
   const campaignOnly = sessionStatusSummary(session({ orchestratorCampaign: campaign }));
-  assert.equal(campaignOnly.primary.kind, "child_requests");
-  assert.equal(campaignOnly.primary.meta.label, "2 Child Requests");
+  assert.equal(campaignOnly.conditions[0]!.kind, "child_requests");
+  assert.equal(campaignOnly.conditions[0]!.meta.label, "2 Child Requests");
   assert.equal(campaignOnly.more, 0);
 
   // Without a campaign, the descendant poll's human-owned requests are the count.
@@ -141,7 +141,7 @@ test("rule 1: child requests follow the session's own requests as one condition,
 
 test("rule 2: an idle session with lost background work and no attention shows Background Work Lost", () => {
   const summary = sessionStatusSummary(session({ backgroundWorkState: "orphaned" }), { runnerOnline: false });
-  assert.equal(summary.primary.meta.label, "Background Work Lost");
+  assert.equal(summary.conditions[0]!.meta.label, "Background Work Lost");
   assert.equal(summary.more, 0, "a passive state is never counted in +N");
   assert.deepEqual(labels(session({ backgroundWorkState: "orphaned" }), { runnerOnline: false }),
     ["Background Work Lost", "Disconnected", "Awaiting Prompt"]);
@@ -149,32 +149,32 @@ test("rule 2: an idle session with lost background work and no attention shows B
 
 test("rule 3: an offline machine with no attention shows Disconnected", () => {
   const summary = sessionStatusSummary(session({ status: "running" }), { runnerOnline: false });
-  assert.equal(summary.primary.meta.label, "Disconnected");
+  assert.equal(summary.conditions[0]!.meta.label, "Disconnected");
   assert.equal(summary.more, 0);
   // An unknown runner is not offline.
-  assert.equal(sessionStatusSummary(session({ status: "running" })).primary.meta.label, "Running");
+  assert.equal(sessionStatusSummary(session({ status: "running" })).conditions[0]!.meta.label, "Running");
 });
 
 test("rule 4: an idle session with running background work shows Waiting on External Job", () => {
   const summary = sessionStatusSummary(session({ backgroundWorkState: "running" }));
-  assert.equal(summary.primary.meta.label, "Waiting on External Job");
+  assert.equal(summary.conditions[0]!.meta.label, "Waiting on External Job");
   assert.deepEqual(labels(session({ backgroundWorkState: "running" })), ["Waiting on External Job", "Awaiting Prompt"]);
-  assert.equal(sessionStatusSummary(session({ backgroundWorkState: "continuation_pending" })).primary.meta.label,
+  assert.equal(sessionStatusSummary(session({ backgroundWorkState: "continuation_pending" })).conditions[0]!.meta.label,
     "Follow-Up Pending");
   // While the agent is busy its lifecycle leads, and background work is a row in the popover.
   assert.deepEqual(labels(session({ status: "running", backgroundWorkState: "running" })),
     ["Running", "Waiting on External Job"]);
   // A retired terminal sentinel from an older control plane is not background work.
-  assert.equal(sessionStatusSummary(session({ backgroundWorkState: "resumed" })).primary.meta.label, "Awaiting Prompt");
+  assert.equal(sessionStatusSummary(session({ backgroundWorkState: "resumed" })).conditions[0]!.meta.label, "Awaiting Prompt");
 });
 
 test("rule 5: with nothing else, the lifecycle shows, including the Stop states", () => {
-  assert.equal(sessionStatusSummary(session()).primary.meta.label, "Awaiting Prompt");
-  assert.equal(sessionStatusSummary(session({ status: "running" })).primary.meta.label, "Running");
+  assert.equal(sessionStatusSummary(session()).conditions[0]!.meta.label, "Awaiting Prompt");
+  assert.equal(sessionStatusSummary(session({ status: "running" })).conditions[0]!.meta.label, "Running");
   const stopPending = { stopOperation: { status: "stop_pending" } } as Partial<SessionStatusSource>;
-  assert.equal(sessionStatusSummary(session({ status: "running", ...stopPending })).primary.meta.label, "Stop Pending");
+  assert.equal(sessionStatusSummary(session({ status: "running", ...stopPending })).conditions[0]!.meta.label, "Stop Pending");
   const stopFailed = { stopOperation: { status: "stop_failed" } } as Partial<SessionStatusSource>;
-  assert.equal(sessionStatusSummary(session({ status: "running", ...stopFailed })).primary.meta.label, "Stop Failed");
+  assert.equal(sessionStatusSummary(session({ status: "running", ...stopFailed })).conditions[0]!.meta.label, "Stop Failed");
   // A Stop on an offline machine is Disconnected first; the popover still lists what the Stop is doing.
   assert.deepEqual(labels(session({ status: "running", ...stopPending }), { runnerOnline: false }),
     ["Disconnected", "Stop Waiting for Runner"]);
@@ -183,9 +183,9 @@ test("rule 5: with nothing else, the lifecycle shows, including the Stop states"
 test("rule 5: an archived session that has stopped reads Archived, never Stopped (#2202)", () => {
   for (const status of ["stopped", "completed", "failed"] as const) {
     const summary = sessionStatusSummary(session({ status, archived: true }));
-    assert.equal(summary.primary.meta.label, "Archived");
-    assert.equal(summary.primary.kind, "lifecycle");
-    assert.equal(summary.primary.description, "This session is archived and stopped.");
+    assert.equal(summary.conditions[0]!.meta.label, "Archived");
+    assert.equal(summary.conditions[0]!.kind, "lifecycle");
+    assert.equal(summary.conditions[0]!.description, "This session is archived and stopped.");
   }
   assert.equal(sessionArchivedAtRest({ status: "stopped", archived: true }), true);
   // A Stop in progress, or one that failed, keeps its own status and recovery.
@@ -195,15 +195,15 @@ test("rule 5: an archived session that has stopped reads Archived, never Stopped
     { stopOperation: { status: "stop_pending" } },
     { archiveOperation: { status: "stop_failed" } },
   ] as Partial<SessionStatusSource>[]) {
-    assert.notEqual(sessionStatusSummary(session({ status: "running", archived: true, ...stop })).primary.meta.label, "Archived");
+    assert.notEqual(sessionStatusSummary(session({ status: "running", archived: true, ...stop })).conditions[0]!.meta.label, "Archived");
     assert.equal(sessionArchivedAtRest({ status: "stopped", archived: true, ...stop } as Parameters<typeof sessionArchivedAtRest>[0]), false);
   }
   // A running session an older control plane archived without stopping keeps showing that it runs.
-  assert.equal(sessionStatusSummary(session({ status: "running", archived: true })).primary.meta.label, "Running");
-  assert.equal(sessionStatusSummary(session({ status: "stopped", archived: false })).primary.meta.label, "Stopped");
+  assert.equal(sessionStatusSummary(session({ status: "running", archived: true })).conditions[0]!.meta.label, "Running");
+  assert.equal(sessionStatusSummary(session({ status: "stopped", archived: false })).conditions[0]!.meta.label, "Stopped");
   // What needs the person still comes first; Archived is the lifecycle, behind it.
   const asking = session({ status: "stopped", archived: true, pendingApproval: approval });
-  assert.notEqual(sessionStatusSummary(asking).primary.meta.label, "Archived");
+  assert.notEqual(sessionStatusSummary(asking).conditions[0]!.meta.label, "Archived");
 });
 
 test("passive conditions are popover rows after the badge, never counted in +N", () => {
@@ -214,7 +214,7 @@ test("passive conditions are popover rows after the badge, never counted in +N",
     backgroundDeliveries: [{ watchdogState: "terminal_without_continuation" }],
   } as Partial<SessionStatusSource>);
   const summary = sessionStatusSummary(source, { activeWorkers: 2 });
-  assert.equal(summary.primary.meta.label, "Queued");
+  assert.equal(summary.conditions[0]!.meta.label, "Queued");
   assert.equal(summary.more, 0);
   assert.deepEqual(summary.conditions.map((condition) => condition.kind),
     ["lifecycle", "background_delivery", "workers", "queue_reason"]);
@@ -240,24 +240,24 @@ test("every condition says what it means in one sentence", () => {
 test("a session relaunching in the worktree it switched to reads Switching Worktree (#3810)", () => {
   const pending = { phase: "pending" as const, branch: "fix/issue-3810", since: 1_000 };
   const idle = sessionStatusSummary(session({ status: "idle", worktreeSwitch: pending }));
-  assert.equal(idle.primary.meta.label, "Switching Worktree");
-  assert.equal(idle.primary.meta.tone, "info");
-  assert.equal(idle.primary.meta.pulse, true);
-  assert.equal(idle.primary.needsYou, false);
+  assert.equal(idle.conditions[0]!.meta.label, "Switching Worktree");
+  assert.equal(idle.conditions[0]!.meta.tone, "info");
+  assert.equal(idle.conditions[0]!.meta.pulse, true);
+  assert.equal(idle.conditions[0]!.needsYou, false);
   assert.equal(idle.more, 0);
-  assert.equal(idle.primary.description, "The session is about to relaunch in worktree fix/issue-3810.");
+  assert.equal(idle.conditions[0]!.description, "The session is about to relaunch in worktree fix/issue-3810.");
   assert.deepEqual(idle.conditions.map((condition) => condition.kind), ["worktree_switch", "lifecycle"],
     "the lifecycle is still listed behind it");
 
   const relaunching = sessionStatusSummary(session({ status: "starting", worktreeSwitch: { ...pending, phase: "relaunching" } }));
-  assert.equal(relaunching.primary.meta.label, "Switching Worktree");
-  assert.equal(relaunching.primary.description, "The session is relaunching in worktree fix/issue-3810.");
+  assert.equal(relaunching.conditions[0]!.meta.label, "Switching Worktree");
+  assert.equal(relaunching.conditions[0]!.description, "The session is relaunching in worktree fix/issue-3810.");
 
   // The turn that made the switch is still the session's news while it runs.
-  assert.equal(sessionStatusSummary(session({ status: "running", worktreeSwitch: pending })).primary.meta.label, "Running");
+  assert.equal(sessionStatusSummary(session({ status: "running", worktreeSwitch: pending })).conditions[0]!.meta.label, "Running");
   // A request still comes first, with the switch behind it.
   const asking = sessionStatusSummary(session({ status: "input_required", pendingApproval: question, worktreeSwitch: pending }));
-  assert.equal(asking.primary.kind, "attention");
+  assert.equal(asking.conditions[0]!.kind, "attention");
   assert.ok(asking.conditions.some((condition) => condition.meta.label === "Switching Worktree"));
   // A prompt held behind the handoff already says why it waits.
   const held = session({ status: "queued", worktreeSwitch: pending,

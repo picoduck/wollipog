@@ -19,7 +19,7 @@ async function expectButtonUnclipped(control: Locator) {
   })).toBe(true);
 }
 
-/** A Sessions row's one status badge (#2209): its whole label shows, inside every clipping ancestor. */
+/** Every Sessions row badge keeps its whole label inside every clipping ancestor. */
 async function expectRowBadgeWhole(badge: Locator) {
   await expect(badge).toBeVisible();
   expect(await badge.evaluate((element) => {
@@ -60,11 +60,10 @@ for (const width of [320, 390, 700, 1280]) {
     const row = page.locator(".inbox-row").filter({ hasText: "Alpha Session" });
     // Measured in the widest face CI renders, so a line that only just fits here cannot clip there.
     await pinWidestFace(page, row);
-    // #2209: a row shows one status on the bar's ranking. The approval needs the person, so it is the
-    // badge, and the background work is left to the Session Status popover.
-    await expect(row.locator(".status")).toHaveCount(1);
+    // Lifecycle stays visible beside the approval; background work remains in status details.
+    await expect(row.locator(".status")).toHaveCount(2);
     await expectRowBadgeWhole(row.getByLabel("Status: Approval Required"));
-    // Without the request, the background work is the row's one status, whole at every width.
+    // Without the request, background work is the secondary, whole at every width.
     await page.evaluate(() => {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null });
     });
@@ -77,7 +76,7 @@ for (const width of [320, 390, 700, 1280]) {
       await page.evaluate((backgroundWorkState) => {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState });
       }, state);
-      if (label === null) await expect(row.locator(".status")).toHaveCount(0);
+      if (label === null) await expect(row.locator(".status")).toHaveText("Awaiting Prompt");
       else await expectRowBadgeWhole(row.getByLabel(`Status: ${label}`));
     }
     await expect(row).toHaveAccessibleName(/Waiting on External Job/);
@@ -105,8 +104,8 @@ for (const width of [320, 390, 700, 1280]) {
         window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState });
       }, state);
       await expect(live).toHaveText(`Background Work: ${announced}`);
-      await expect(status).toHaveAccessibleName("Session Status: Approval Required");
-      await expect(header.locator(".status")).toHaveCount(1);
+      await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Approval Required");
+      await expect(header.locator(".status")).toHaveCount(2);
       await expectButtonUnclipped(status);
       await status.click();
       const row = dialog.locator(".session-status-row").filter({ hasText: label });
@@ -126,7 +125,7 @@ for (const width of [320, 390, 700, 1280]) {
         backgroundWorkState: "running", pendingApproval: null,
       });
     });
-    await expect(status).toHaveAccessibleName("Session Status: Waiting on External Job");
+    await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Waiting on External Job");
     await expectButtonUnclipped(status);
     await status.focus();
     await status.press("Enter");
@@ -214,7 +213,7 @@ for (const width of [320, 1280]) {
         // #2275: Result Missing needs the person, so it is the bar's status, and its row takes the step
         // itself. On a phone that step is taken here; on desktop the panel's own button is checked.
         const status = header.locator(".session-status-button");
-        await expect(status).toHaveAccessibleName("Session Status: Result Missing");
+        await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Result Missing");
         const step = row.getByRole("button", { name: "Acknowledge Missing Result" });
         await expect(step).toBeVisible();
         if (width === 320) {
@@ -425,7 +424,7 @@ for (const width of [390, 1440]) {
     await page.evaluate((version) => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerProtocolVersion(version), PROTOCOL_VERSION);
     await resultBlocked(page);
     const status = page.locator(".session-bar .session-status-button");
-    await expect(status).toHaveAccessibleName("Session Status: Result Blocked");
+    await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Result Blocked");
     await expectButtonUnclipped(status);
     await status.click();
     // The session's own status stays listed beneath it (#3073).
@@ -591,7 +590,7 @@ for (const width of [390, 1440]) {
       });
     });
     const status = page.locator(".session-bar .session-status-button");
-    await expect(status).toHaveAccessibleName("Session Status: Retry Exhausted");
+    await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Retry Exhausted");
     await expectButtonUnclipped(status);
     await status.click();
     const popover = page.getByRole("dialog", { name: "Session Status" });
@@ -611,6 +610,6 @@ for (const width of [390, 1440]) {
     await notice.getByRole("button", { name: "Acknowledge", exact: true }).click();
     await expect(notice).toHaveCount(0);
     await expect(panel).toContainText("Retry Exhaustion Acknowledged");
-    await expect(status).not.toHaveAccessibleName("Session Status: Retry Exhausted");
+    await expect(status).not.toHaveAccessibleName("Session Status: Awaiting Prompt, Retry Exhausted");
   });
 }

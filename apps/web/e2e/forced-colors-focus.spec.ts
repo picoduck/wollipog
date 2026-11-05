@@ -37,7 +37,9 @@ async function keyboardFocus(page: Page, separator: Locator) {
   await expect(separator).toBeFocused();
   expect(await separator.evaluate((element) => element.matches(":focus-visible"))).toBe(true);
   // The focus line fades in (§2.9); capture it settled.
-  await page.evaluate(() => Promise.all(document.getAnimations().map((animation) => animation.finished)));
+  await page.evaluate(() => Promise.all(document.getAnimations()
+    .filter((animation) => animation.effect?.getComputedTiming().iterations !== Infinity)
+    .map((animation) => animation.finished.catch(() => {}))));
 }
 
 /**

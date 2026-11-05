@@ -9,17 +9,20 @@ function ActivityStripInner({
   activity,
   now,
   compact = false,
+  animate = true,
   className,
 }: {
   activity?: SessionActivity;
   now: number;
   /** The 48×12px strip on a Sessions row's status line (#2209): a named image with a tooltip. */
   compact?: boolean;
+  /** Historical activity remains visible when its source is disconnected, without a live pulse. */
+  animate?: boolean;
   className?: string;
 }) {
   const series = activitySeries(activity, now);
   const peak = Math.max(1, ...series);
-  const latestActive = (series.at(-1) ?? 0) > 0;
+  const latestActive = animate && (series.at(-1) ?? 0) > 0;
 
   return (
     <span

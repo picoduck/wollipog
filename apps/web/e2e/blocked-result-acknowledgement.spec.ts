@@ -44,7 +44,7 @@ for (const width of [390, 1440]) for (const theme of ["dark", "light"] as const)
       if (await expand.isVisible()) await expand.click();
       await blockResult(page, "first");
       const status = page.locator(".session-bar .session-status-button");
-      await expect(status).toHaveAccessibleName("Session Status: Result Blocked");
+      await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Result Blocked");
       await status.click();
       const popover = page.getByRole("dialog", { name: "Session Status" });
       await expect(popover).toContainText("Background jobs and held results are kept.");
@@ -67,7 +67,7 @@ for (const width of [390, 1440]) for (const theme of ["dark", "light"] as const)
 
       // A new result in the same launching turn must appear as a new alert.
       await blockResult(page, "second");
-      await expect(status).toHaveAccessibleName("Session Status: Result Blocked");
+      await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Result Blocked");
       await expect(notice.getByRole("button", { name: /^Stop Monitor Job/ })).toBeVisible();
       const acknowledge = notice.getByRole("button", { name: "Acknowledge", exact: true });
       await acknowledge.focus();

@@ -328,6 +328,7 @@ import {
   type SubscriptionUsageManagerOptions,
 } from "./subscription-usage.js";
 import { SessionNamingExecutor } from "./session-naming.js";
+import { DecisionExecutor } from "./decision-calls.js";
 import { RunnerSessionNamingCustomModel } from "./session-naming-custom-model.js";
 
 const INITIAL_BACKOFF_MS = 1_000;
@@ -1025,6 +1026,11 @@ const sessionCommandReceipts = new SessionCommandReceiptStore(
 );
 sessionCommandReceipts.prune();
 const sessionNaming = new SessionNamingExecutor({
+  preflight: (agent) => sessions.preflightSessionNamingExecution(agent),
+  authorize: (agent, env, cwd) => sessions.prepareSessionNamingExecution(agent, env, cwd),
+});
+// Decision calls run under the same provider-HOME boundary as naming.
+const decisionCalls = new DecisionExecutor({
   preflight: (agent) => sessions.preflightSessionNamingExecution(agent),
   authorize: (agent, env, cwd) => sessions.prepareSessionNamingExecution(agent, env, cwd),
 });
@@ -3483,6 +3489,43 @@ function handleCommand(msg: ControlPlaneToRunner): void {
         env,
         controlPlaneProtocolVersion,
       ).then((result) => sendUp(result)));
+      break;
+    }
+    case "run_decision": {
+      const refuse = (errorClass: "runner_incapable" | "authentication") => sendUp({
+        type: "run_decision_result",
+        requestId: msg.requestId,
+        ok: false,
+        errorClass,
+        phase: "preflight",
+      });
+      if (!runnerSupportsProtocol(controlPlaneProtocolVersion, "decisionModel")) {
+        refuse("runner_incapable");
+        break;
+      }
+      const agent = metadata.agents.find((candidate) => candidate.id === msg.target.agentId &&
+        (candidate.driver ?? "acp") === msg.target.driver);
+      const env = agent
+        ? runnerLocalAgentEnv(agent.id, agent.driver ?? "acp", agent.context ?? { kind: "native" })
+        : {};
+      if (agent) {
+        let account: ReturnType<typeof selectProviderAccount>;
+        try {
+          account = selectProviderAccount(
+            config.providerAccounts,
+            agent,
+            agent.driver ?? "acp",
+            undefined,
+            process.platform,
+            (candidate) => providerProfileGrants.usable(candidate),
+          );
+        } catch {
+          refuse("authentication");
+          break;
+        }
+        if (account) Object.assign(env, providerAccountEnvironment(account));
+      }
+      runCommandTask("run_decision", decisionCalls.execute(msg, agent, env).then((result) => sendUp(result)));
       break;
     }
     case "configure_session_naming_custom_model": {

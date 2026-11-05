@@ -170,16 +170,16 @@ class FakeSocket implements UiSocket {
 
 const navigation: ViewNavigation = { current: () => ({ name: "board" }), push() {}, listen: () => () => {} };
 
-function Harness({ onSessionMenu, stalledSessionIds }: { onSessionMenu: (sessionId: string) => void; stalledSessionIds: ReadonlySet<string> }) {
+function Harness({ onSessionMenu }: { onSessionMenu: (sessionId: string) => void; }) {
   const all = useStoreSelector((s) => s.sessions);
   const scoped = React.useMemo(() => [...all.values()], [all]);
-  return <Board sessions={scoped} stalledSessionIds={stalledSessionIds} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={onSessionMenu} />;
+  return <Board sessions={scoped} searchActive={false} onShowAll={() => {}} onNewSession={() => {}} onSessionMenu={onSessionMenu} />;
 }
 
 let sequence = 0;
 async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESSIONS, detailSessions = sessions,
-  stalledSessionIds = new Set<string>() }: {
-  runners?: RunnerView[]; sessions?: SessionView[]; detailSessions?: SessionView[]; stalledSessionIds?: ReadonlySet<string>;
+ }: {
+  runners?: RunnerView[]; sessions?: SessionView[]; detailSessions?: SessionView[];
 } = {}) {
   const mountPoint = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(mountPoint as never);
@@ -213,7 +213,7 @@ async function mount({ runners = [runner("runner-1", "Studio")], sessions = SESS
         <StoreProvider connection={connection} navigation={{ ...navigation, push: (view) => {
           if (view.name === "session") opened.push(view.id);
         } }}>
-          <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} stalledSessionIds={stalledSessionIds} />
+          <Harness onSessionMenu={(sessionId) => menus.push(sessionId)} />
         </StoreProvider>
       </ApiProvider>,
     );
@@ -264,7 +264,7 @@ test("summary Board requests hydrate visible permission and sign-in controls bef
 const EMOJI = /\p{Extended_Pictographic}/u;
 const MARKDOWN = /\]\(|\[ \]|\*\*|`|^#|\n#|- \[/u;
 
-test("no card renders markdown, a tag, an emoji or more than one status badge", async () => {
+test("no card renders markdown, a tag, an emoji or more than two status badges", async () => {
   const board = await mount();
   try {
     const cards = board.cards();
@@ -275,10 +275,10 @@ test("no card renders markdown, a tag, an emoji or more than one status badge", 
       assert.doesNotMatch(text, MARKDOWN, `${id} renders no markdown syntax`);
       assert.doesNotMatch(text, EMOJI, `${id} renders no emoji`);
       assertNoDomNode(card.querySelector(".tag, .tag-machine, .tag-agent, .tag-wt, .tag-run"), `${id} renders no tag`);
-      assert.ok(card.querySelectorAll(".status").length <= 1, `${id} renders at most one status badge`);
+      assert.ok(card.querySelectorAll(".status").length <= 2, `${id} renders at most two status badges`);
       assert.equal(card.tagName, "ARTICLE");
     }
-    assertNoDomNode(board.card("idle").querySelector(".status"), "an idle card shows no badge");
+    assert.equal(board.card("idle").querySelector(".status")?.textContent, "Awaiting Prompt");
     assert.equal(board.card("running").querySelectorAll(".status").length, 1);
   } finally {
     await board.unmount();
@@ -293,7 +293,7 @@ test("a returned result keeps one review badge and meaningful time despite newer
     session("working", { status: "running", lastEventAt: Date.now(), attention })] });
   try {
     const card = board.card("result");
-    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Ready for Review"]);
+    assert.deepEqual([...card.querySelectorAll(".status")].map((badge) => badge.textContent), ["Awaiting Prompt", "Ready for Review"]);
     assert.ok(card.querySelector(".status.t-review"));
     // A session still working shows its working status, not its earlier result (#3074).
     assert.deepEqual([...board.card("working").querySelectorAll(".status")].map((badge) => badge.textContent), ["Running"]);
@@ -530,7 +530,7 @@ test("Board holds family review while the parent runs and prioritizes input in e
       assert.equal(chip.classList.contains("t-review"), false);
       assert.equal(chip.classList.contains("waiting"), children.length > 1);
       assert.equal(chip.getAttribute("aria-label"), children.length === 1 ? "1 Child" : "2 Children · 1 Awaiting Input");
-      assert.equal(board.card("parent").querySelector(".status")?.textContent, children.length === 1 ? "Running" : "Needs Your Input");
+      assert.equal(board.card("parent").querySelector(".row-status > .status:nth-child(2), .row-status > .status:only-child")?.textContent, children.length === 1 ? "Running" : "Needs Your Input");
     } finally {
       await board.unmount();
     }
@@ -565,12 +565,12 @@ test("a card's ⋯ opens the session's shared context menu", async () => {
 });
 
 
-test("Board family summaries do not call a stalled child working beside a waiting one", async () => {
-  const board = await mount({ stalledSessionIds: new Set(["child-a"]) });
+test("Board family summaries preserve a quiet child as working beside a waiting one", async () => {
+  const board = await mount({ });
   try {
     const chip = board.card("parent").querySelector(".inbox-thread-family")!;
-    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input");
-    assert.doesNotMatch(chip.textContent ?? "", /Working/);
+    assert.equal(chip.getAttribute("aria-label"), "2 Children · 1 Awaiting Input · 1 Working");
+    assert.match(chip.textContent ?? "", /Working/);
   } finally {
     await board.unmount();
   }
@@ -585,7 +585,7 @@ test("Board defers an idle parent's result until background descendants finish (
       session("child", { parentSessionId: "parent", backgroundWorkState })] });
     try {
       const card = board.card("parent");
-      assert.equal(card.querySelector(".status")?.textContent,
+      assert.equal(card.querySelector(".row-status > .status:nth-child(2), .row-status > .status:only-child")?.textContent,
         backgroundWorkState === "resumed" ? "Ready for Review" : "Children Working");
       assert.equal(card.querySelectorAll(".inbox-thread-dot.running").length, backgroundWorkState === "resumed" ? 0 : 1);
       if (backgroundWorkState !== "resumed") {
@@ -602,7 +602,7 @@ test("an at-rest Board family rolls up its available result with the review tone
     result: { revision: "r1", at: 10, owner: "human" as const }, acknowledgedRevision: null };
   const board = await mount({ sessions: [session("parent"), session("child", { parentSessionId: "parent", attention })] });
   try {
-    assert.equal(board.card("parent").querySelector(".status")!.textContent, "Ready for Review");
+    assert.equal(board.card("parent").querySelector(".row-status > .status:nth-child(2), .row-status > .status:only-child")!.textContent, "Ready for Review");
     assert.ok(board.card("parent").querySelector(".inbox-thread-family.t-review"));
   } finally { await board.unmount(); }
 });

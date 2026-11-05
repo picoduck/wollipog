@@ -83,8 +83,8 @@ test("at 1440×900 six rows of different statuses line up their badges' left edg
   const rows = await visibleRows(page);
   expect(rows).toHaveLength(6);
   const labels = rows.map((row) => row.badge?.label ?? "No Badge");
-  expect(new Set(labels).size, labels.join(" | ")).toBe(6);
-  expect(labels).toContain("No Badge");
+  expect(new Set(labels).size, labels.join(" | ")).toBe(5);
+  expect(labels).toContain("Status: Awaiting Prompt");
   for (const row of rows) expect(row.trailDisplay, row.title).toBe("grid");
 
   const badges = rows.filter((row) => row.badge);
@@ -118,8 +118,8 @@ test("the activity column sits directly after the status column: a Running row's
   await open(page, 1440);
   const rows = await visibleRows(page);
   const statusLeft = rows.find((row) => row.badge)!.badge!.left;
-  // The status column is 184px and the columns are 12px apart (--space-3).
-  const activityLeft = statusLeft + 184 + 12;
+  const statusWidth = await page.evaluate(() => Number.parseFloat(getComputedStyle(document.documentElement).getPropertyValue("--inbox-row-col-status")));
+  const activityLeft = statusLeft + statusWidth + 12;
 
   const running = rows.find((row) => row.badge?.label === "Status: Running")!;
   expect(running.strip).not.toBeNull();
@@ -130,7 +130,7 @@ test("the activity column sits directly after the status column: a Running row's
   }
 
   const idle = rows.find((row) => row.title === "Draft the Quarterly Report")!;
-  expect(idle.badge).toBeNull();
+  expect(idle.badge?.label).toBe("Status: Awaiting Prompt");
   expect(idle.strip).toBeNull();
   // An empty cell keeps its width: the idle row's time still ends with everyone else's.
   expect(idle.time.right).toBeCloseTo(running.time.right, 2);

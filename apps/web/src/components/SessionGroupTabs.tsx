@@ -32,7 +32,7 @@ export function SessionGroupName({ label }: { label: SessionGroupLabel }) {
 }
 
 /**
- * Attention counts as count badges (§10.1, §11.4): amber for blocked, red for stalled. The badges
+ * Attention counts as count badges (§10.1, §11.4): amber for blocked. The badges
  * are aria-hidden, so the owner says them in words. The Snoozed view draws none.
  */
 function GroupBadges({ split, snoozed }: { split: InboxSplit; snoozed: boolean }) {
@@ -40,7 +40,6 @@ function GroupBadges({ split, snoozed }: { split: InboxSplit; snoozed: boolean }
   return (
     <>
       <CountBadge count={split.blockedCount} />
-      <CountBadge count={split.stalledCount} tone="danger" />
     </>
   );
 }

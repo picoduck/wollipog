@@ -1,6 +1,6 @@
 import { useEffect, useId, useRef, useState } from "react";
 import { useStoreSelector } from "../store.js";
-import { statusMeta, sessionStatusSummary } from "../status-meta.js";
+import { statusMeta, sessionStatusSignal } from "../status-meta.js";
 import { matchesShortcut } from "../shortcuts.js";
 import {
   followUpAvailability,
@@ -183,7 +183,7 @@ export function RunFollowUpDialog({ members, preselect, send, onSent, onClose }:
                 ? {
                   value: member.sessionId,
                   title: member.label,
-                  description: session ? sessionStatusSummary(session, { runnerOnline }).primary.meta.label : undefined,
+                  description: session ? sessionStatusSignal(session, { runnerOnline }).meta.label : undefined,
                 }
                 : { value: member.sessionId, title: member.label, disabled: true, disabledReason: "reason" in available ? available.reason : undefined };
             })}

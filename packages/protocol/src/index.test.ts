@@ -360,6 +360,8 @@ test("session restart capability overlays controls without freezing the agent ca
 
 test("PROTOCOL_VERSION is 286", () => {
   assert.equal(PROTOCOL_VERSION, 286);
+  assert.equal(runnerSupportsProtocol(284, "decisionModel"), false);
+  assert.equal(runnerSupportsProtocol(285, "decisionModel"), true);
   assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), false);
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   assert.equal(runnerSupportsProtocol(285, "campaignRepositoryBoundary"), false);

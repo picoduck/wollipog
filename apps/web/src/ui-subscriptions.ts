@@ -72,17 +72,6 @@ export function uiStreamSubscriptions(state: UiSubscriptionSource): { sessionIds
   };
 }
 
-/** Whether the current delivery mode can observe live activity for this session. */
-export function isSessionActivityObservable(
-  delivery: UiSubscriptionDeliveryState,
-  sessionId: string,
-): boolean {
-  if (delivery.mode === "legacy") return true;
-  return delivery.mode === "targeted" &&
-    delivery.appliedRevision > 0 &&
-    delivery.sessionIds.includes(sessionId);
-}
-
 /** Cache subscription derivation on the references that can affect it. Event/shell/store
  * deltas leave those references unchanged, so the hot listener path is O(1). */
 export class UiSubscriptionSynchronizer {

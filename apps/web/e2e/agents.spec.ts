@@ -20,8 +20,9 @@ for (const viewport of [
     const origin = surface === "inbox" ? page.getByRole("grid", { name: "Fixture Inbox" }) : page.locator(".board");
     // The list and the board say WHAT is pending on the card itself (#896), with its count, and no
     // disclosure to open. The exact request is reached through the session. A list row and a Board
-    // card show the same one status (#2209, #2222).
-    const pill = origin.locator(".status.t-warning").first();
+    // card keep lifecycle beside the same counted secondary condition.
+    const pill = origin.getByLabel("Status: Approval Required, 2 Requests", { exact: true });
+    await expect(origin.getByLabel("Status: Awaiting Input", { exact: true })).toBeVisible();
     await pill.scrollIntoViewIfNeeded();
     await expect(pill).toHaveAttribute("aria-label", "Status: Approval Required, 2 Requests");
     await expect(pill.locator(".status-count")).toHaveText("2");
