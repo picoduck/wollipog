@@ -54,6 +54,24 @@ for (const width of [1440, 390]) {
     ]);
   });
 
+  test(`Session Detail says where a pending switch moves the session, and why a failed one stayed, at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    for (const state of ["pending", "failed"] as const) {
+      await page.goto(`/command-inbox-projects-e2e.html?scenario=location-switch-notice&state=${state}`);
+      await page.getByRole("button", { name: /Alpha Session/ }).click();
+      const open = page.getByRole("button", { name: "Open Session", exact: true });
+      if (await open.isVisible()) await open.click();
+      const label = state === "pending" ? "Location Switch Pending" : "Location Switch Failed";
+      const notice = page.locator(`[aria-label="${label}"]`);
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText(state === "pending"
+        ? "This session moves to Location “Docs Site” (acme/docs) when its current turn ends, then continues the task there."
+        : "The switch to Location “Docs Site” (acme/docs) didn’t finish. The target worktree could not be prepared");
+      await expect(notice.getByRole("button", { name: "Dismiss Notice", exact: true })).toHaveCount(state === "failed" ? 1 : 0);
+      if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `location-switch-notice-${state}-${width}.png`), fullPage: true });
+    }
+  });
+
   test(`several matching Locations are chosen from, and Start a New Session uses the chosen one at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/request-surfaces-e2e.html?scenario=location-switch&locations=2");
