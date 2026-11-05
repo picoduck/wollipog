@@ -77,7 +77,7 @@ test("profile weights reconcile the safe reporter projection and measured phase 
     Math.ceil(residual / (profile.inventoryFiles - measured.size)));
 });
 
-test("all five CI projects cover every configured development test once with intact file fixtures", () => {
+test("all ten CI projects cover every configured development test once with intact file fixtures", () => {
   const full = identities(inventory("playwright.config.ts"));
   const report = inventory("playwright.ci.config.ts");
   const grouped = identities(report);
@@ -96,7 +96,7 @@ test("all five CI projects cover every configured development test once with int
     assert.equal(config.webServer.reuseExistingServer, false);
     assert.match(config.webServer.command, /--strictPort/);
   }
-  assert.match(workflow, /shard: .*?\|\| '\[1, 2, 3, 4, 5\]'/);
+  assert.match(workflow, /shard: .*?\|\| '\[1, 2, 3, 4, 5, 6, 7, 8, 9, 10\]'/);
   assert.match(workflow, /pnpm test:e2e --config playwright\.ci\.config\.ts --project=shard-\$\{\{ matrix\.shard \}\}/);
 });
 

@@ -542,20 +542,22 @@ jobs:
     # non-install work. Latest complete group 41465192009 remeasures all five shards.
     # 720s attempts + 2460s rounded remainder + 480s cache/verify + 180s enforcement
     # + 480s failure diagnostics + 180s reserve = 4500s, rounded to 75m (4500s).
-    # Residual reserve is 180s. Same five jobs; this changes only the finite cap.
+    # Residual reserve is 180s in that historical five-job model. Ten whole-file projects
+    # are under evaluation; retain this cap only until their first coherent phase measurement.
+    # Before delivery recalculate against actual ten-shard phases, not a divided old maximum.
     # scripts/workflow-browser-budget.test.mjs derives this from bounded phases and evidence.
     # docs/ci-browser-shards-2026-11-02.md records natural-run comparison and uncertainty.
     timeout-minutes: 75
     strategy:
       # Every shard reports. With fail-fast the first real failure cancels its siblings, and the
       # aggregator below reads a cancelled job as a budget hit — so one broken test would be
-      # announced as four timeouts, which is the opposite of a useful signal.
+      # announced as nine timeouts, which is the opposite of a useful signal.
       fail-fast: false
       matrix:
         # Projects partition the live file inventory by measured duration, keeping files intact.
-        # The inventory contract pins these five jobs to all five projects and compares every
+        # The inventory contract pins these ten jobs to all ten projects and compares every
         # configured test identity with the unpartitioned development inventory.
-        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}
+        shard: ${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

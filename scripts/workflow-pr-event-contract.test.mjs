@@ -290,7 +290,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   // workflow-ci-routing.test.mjs executes these same expressions and both actual shell branches.
   const fastExpression = "${{ github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' && 'true' || 'false' }}";
   const groupFastExpression = "${{ github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast' && 'true' || 'false' }}";
-  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5]') }}";
+  const matrixExpression = "${{ fromJSON((github.event_name == 'pull_request' && vars.CI_PR_BROWSER_ROUTING == 'enabled' && needs.suite_plan.result == 'success' && needs.suite_plan.outputs.mode == 'fast' || github.event_name == 'workflow_dispatch' && inputs.browser_benchmark || github.event_name == 'merge_group' && vars.CI_MERGE_GROUP_GATE == 'enabled' && needs.merge_group_gate.result == 'success' && needs.merge_group_gate.outputs.mode == 'fast') && '[1]' || '[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]') }}";
   const critical = "            pnpm test:e2e authentication-recovery.spec.ts new-session-choices.spec.ts request-surfaces.spec.ts issue-closure.spec.ts conversation-handoff.spec.ts";
   const routedRun = [
     "          ROUTING_SWITCH: ${{ vars.CI_PR_BROWSER_ROUTING }}",
@@ -314,7 +314,7 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   assert.ok(byId.browser.includes(routedRun));
   const structural = byId.browser
     .replace("    needs: [suite_plan, merge_group_gate]\n", "")
-    .replace(matrixExpression, "[1, 2, 3, 4, 5]")
+    .replace(matrixExpression, "[1, 2, 3, 4, 5, 6, 7, 8, 9, 10]")
     .replace(routedRun, "        run: pnpm test:e2e --config playwright.ci.config.ts --project=shard-${{ matrix.shard }}")
     .split("\n")
     .filter((line) => line.trim().length > 0 && !line.trim().startsWith("#"))
@@ -364,8 +364,8 @@ test("the required CI check aggregates parallel jobs that each own a time budget
   const shards = header[1].split(",").map((value) => Number(value.trim()));
   assert.deepEqual(shards, shards.map((_, index) => index + 1),
     "browser: shard projects must be numbered consecutively with no gaps");
-  assert.deepEqual(shards, [1, 2, 3, 4, 5],
-    "browser: retain the five-job envelope; browser-shards.test.mjs compares all project test identities");
+  assert.deepEqual(shards, [1, 2, 3, 4, 5, 6, 7, 8, 9, 10],
+    "browser: retain the ten-job envelope; browser-shards.test.mjs compares all project test identities");
 
   for (const id of ["checks", "unit"]) assert.doesNotMatch(byId[id], /Remote-Instance Browser End-to-End Tests|Rendered Production Browser Smoke/,
     "the browser suites must not share the unit-test jobs' budgets");

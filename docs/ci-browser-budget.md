@@ -1,5 +1,10 @@
 # Browser CI Budget
 
+The [ten-project evaluation](ci-browser-ten-shards-2026-11-05.md) provisionally
+retains the current 75-minute cap from the November 2 reconciliation. Historical
+five-shard models below cannot establish a ten-shard budget; actual candidate
+phases must replace the sizing floor before delivery.
+
 The [November 2 natural-run reconciliation](ci-browser-shards-2026-11-02.md)
 extends evidence through 2026-11-02T15:00:00Z (1012 first attempts, 44 reruns).
 The maximum coherent measured non-install remainder is 2453s, rounded
