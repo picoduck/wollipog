@@ -7395,6 +7395,10 @@ export class SessionManager {
         }
         meta.seq = latest.seq;
         meta.logEpoch = latest.logEpoch;
+        // An exit proof can lift the fence while this write waits its turn (#3788).
+        meta.retiringProviderGeneration = latest.retiringProviderGeneration !== undefined &&
+          latest.retiringProviderGeneration === meta.campaignBudgetDispatch?.generation
+          ? latest.retiringProviderGeneration : undefined;
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&

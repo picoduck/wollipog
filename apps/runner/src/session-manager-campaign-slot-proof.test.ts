@@ -297,3 +297,50 @@ test("a fence an earlier runner process left is never lifted by a later process'
     assert.equal(h.manager().snapshotForControlPlane(meta).campaignBudgetCheckpoint, undefined);
   } finally { restarted?.shutdownAll(); h.cleanup(); }
 });
+
+test("an exit proof that lands while a same-generation relaunch waits to write its metadata stays lifted (#3788)", async () => {
+  const h = harness();
+  const runner = h.manager();
+  try {
+    const first = await h.launch(runner);
+    first.callbacks.onExit(3);
+    // Worktree operations hold the session. The relaunch queues a workspace check before it builds
+    // its metadata and the metadata write after it, so a second hold lets the check through and
+    // stops the write.
+    const operations = () => (runner as any).worktreeOperations.get("worker");
+    const hold = () => {
+      let release!: () => void;
+      const gate = new Promise<void>((resolve) => { release = resolve; });
+      const done = (runner as any).runWorktreeOperation("worker", () => gate);
+      return { done, release, queued: operations() };
+    };
+    const queuedBehind = async (queued: unknown, what: string) => {
+      for (let turn = 0; operations() === queued; turn++) {
+        assert.ok(turn < 1_000, what);
+        await new Promise((resolve) => setTimeout(resolve, 1));
+      }
+    };
+    const check = hold();
+    const relaunch = h.launch(runner);
+    await queuedBehind(check.queued, "the relaunch queues its workspace check");
+    const write = hold();
+    check.release();
+    await check.done;
+    // The relaunch has built its metadata, with the fence still in place, and queued the write.
+    await queuedBehind(write.queued, "the relaunch queues its metadata write");
+    first.treeGone(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, undefined, "the first provider is proven gone");
+    write.release();
+    await write.done;
+    const second = await relaunch;
+    assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, undefined, "the relaunch does not restore the fence");
+
+    second.callbacks.onExit(3);
+    second.treeGone(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.ok(h.statuses.at(-1)!.campaignBudgetCheckpoint, "the relaunched provider's proof is not mistaken for an inherited fence");
+    assert.equal(new SessionStore(h.dir).readMeta("worker")!.retiringProviderGeneration, undefined);
+    assert.equal(h.occupied(), 0);
+  } finally { runner.shutdownAll(); h.cleanup(); }
+});
