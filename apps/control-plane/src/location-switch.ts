@@ -31,6 +31,12 @@ const navigationPath = (sessionId: string) => `/sessions/~${Buffer.from(sessionI
 const LINE_SEPARATOR_CHARACTERS = String.fromCharCode(0x2028, 0x2029);
 const LINE_SEPARATORS = new RegExp(`[${LINE_SEPARATOR_CHARACTERS}]`, "gu");
 const hasLineSeparator = (value: string) => [...LINE_SEPARATOR_CHARACTERS].some((separator) => value.includes(separator));
+/** Whether any line of `text` could read as a Wollipog frame marker once compatibility forms,
+ * invisible format characters, extra spacing and leading Markdown punctuation are set aside. */
+export function imitatesWollipogFrame(text: string): boolean {
+  const visible = text.normalize("NFKC").replace(/\p{Cf}/gu, "").replace(LINE_SEPARATORS, "\n");
+  return /^[\s>*_`#~-]*\[\s*(end\s+)?wollipog/imu.test(visible);
+}
 
 export const LOCATION_SWITCH_ACTION_LABELS: Record<LocationSwitchAction, string> = {
   switch: "Switch and Continue",
@@ -192,7 +198,7 @@ export class LocationSwitchService {
         `and a task handoff of at most ${LOCATION_SWITCH_LIMITS.handoff} characters are required`, 400);
     }
     // The handoff reaches a new session under Wollipog's frame, so it may not imitate one.
-    if (/^\s*\[(End )?Wollipog\b/imu.test(input.handoff) || /^\s*\[(End )?Wollipog\b/iu.test(input.reason)) {
+    if (imitatesWollipogFrame(input.handoff) || imitatesWollipogFrame(input.reason)) {
       return fail("The reason and handoff may not contain lines that look like Wollipog's own framing", 400);
     }
     const trigger = input.trigger ?? "early";
