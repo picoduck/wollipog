@@ -879,3 +879,9 @@ export function sessionStatusSummary(
   const secondary = conditions.find((condition) => condition !== primary && !equivalent(condition)) ?? null;
   return { primary, secondary, more: conditions.filter((condition) => condition.needsYou && condition !== secondary && !equivalent(condition)).length, conditions };
 }
+
+/** A compact signal (member tab dot or action description) keeps requests and health visible. */
+export function sessionStatusSignal(session: SessionStatusSource, context: SessionStatusContext = {}): SessionCondition {
+  const summary = sessionStatusSummary(session, context);
+  return summary.secondary ?? summary.primary;
+}

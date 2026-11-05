@@ -104,10 +104,11 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
-  if (familyLabel && secondary?.meta.label !== familyLabel && needs.length === 0 &&
+  if (familyLabel && secondary?.meta.label !== familyLabel && needs.every((condition) => condition.kind === "follow_up") &&
       (familyLabel === "Needs Your Input" || (!context.familyWorking && !sessionWorking(session as SessionView))) &&
       (familyLabel === "Needs Your Input" ? 3 : 2) >= sessionFollowUp(session as SessionView).priority) {
     const previous = secondary;
+    if (previous?.needsYou && previous.meta.label !== familyLabel) others.push(conditionName(previous));
     const keepPrevious = previous && previous.meta.label !== familyLabel &&
       (previous.kind !== "lifecycle" || previous.meta.tone === "danger" || previous.needsYou || session.stopOperation ||
         reminder?.state === "fired");

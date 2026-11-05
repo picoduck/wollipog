@@ -1678,7 +1678,7 @@ master-detail pages stay side by side.
   badge, at one x down the list, and a long rollup runs on over the empty cells after it. The title
   takes the whole line, or the line up to the chip. Line 1's trailing cluster becomes fixed
   columns, 12px apart and the same on every row, so the badges start and the times end at one x
-  down the list: **status** (184px: the lifecycle and secondary badges and "+N"; a longer label clips), **activity**
+  down the list: **status** (300px: the lifecycle and secondary badges and "+N"; a longer label clips), **activity**
   (48px: the strip, only under #2209's rule, so an idle row leaves it empty and the strip never
   moves to the title line), **flags** (32px: pin and unread), **time** (96px, right-aligned,
   tabular; the issue's 64px could not hold a snoozed row's return time after its alarm clock, up to

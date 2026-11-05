@@ -471,13 +471,12 @@ interface HarnessOptions {
   keyboard?: number;
   /** Session counts, which render a badge on Sessions as production's live counts do. */
   blocked?: number;
-  stalled?: number;
 }
 
 async function useHarness(page: Page, options: HarnessOptions = {}) {
-  const { theme = "dark", machines = 1, view = "inbox", keyboard = 0, blocked = 0, stalled = 0 } = options;
+  const { theme = "dark", machines = 1, view = "inbox", keyboard = 0, blocked = 0 } = options;
   await page.goto(`/mobile-viewport-e2e.html?theme=${theme}&machines=${machines}&view=${view}`
-    + `&keyboard=${keyboard}&blocked=${blocked}&stalled=${stalled}`);
+    + `&keyboard=${keyboard}&blocked=${blocked}`);
   await expect(page.locator("html")).toHaveAttribute("data-theme", theme);
   await expect(page.locator(".app-rail")).toBeVisible();
   // The controller is assigned in an effect, which can flush after the DOM commit — waiting on the
@@ -569,10 +568,10 @@ test("every destination is painted with no machine needing attention", async ({ 
  * any blocked session at all — erased the production navigation and matched nothing here.
  */
 test("every destination is painted with blocked and stalled sessions", async ({ page }) => {
-  await useHarness(page, { blocked: 3, stalled: 2 });
+  await useHarness(page, { blocked: 3 });
   // One badge for the destination: the total, red because a session is stalled (#1967).
   await expect(page.locator(".app-rail .count-badge")).toHaveCount(1);
-  await expect(page.locator(".app-rail .count-badge.danger.on-icon")).toHaveText("5");
+  await expect(page.locator(".app-rail .count-badge.on-icon")).toHaveText("3");
   await openKeyboard(page);
   await expectEveryPrimaryDestinationUsable(page);
 });
@@ -583,12 +582,12 @@ test("every destination is painted with blocked and stalled sessions", async ({ 
  */
 for (const theme of THEMES) {
   test(`a tab's badge and dot sit on its icon, clear of the glyph and inside the bar, in ${theme}`, async ({ page }) => {
-    await useHarness(page, { theme, blocked: 12, stalled: 3, machines: 1 });
+    await useHarness(page, { theme, blocked: 12, machines: 1 });
     const bar = page.getByRole("navigation", { name: "Primary Navigation" });
     const sessions = bar.getByRole("link", { name: "Sessions", exact: true });
     const connections = bar.getByRole("link", { name: "Connections", exact: true });
-    await expect(sessions.locator(".rail-tab-pill .count-badge.danger.on-icon")).toHaveText("15");
-    await expect(sessions).toHaveAccessibleDescription("12 waiting on you, 3 stalled");
+    await expect(sessions.locator(".rail-tab-pill .count-badge.on-icon")).toHaveText("12");
+    await expect(sessions).toHaveAccessibleDescription("12 waiting on you");
     await expect(connections.locator(".rail-tab-pill .rail-attention-dot.on-icon")).toHaveCount(1);
     await expect(connections).toHaveAccessibleDescription("1 machine needs an update");
     for (const tab of [sessions, connections]) {
@@ -616,15 +615,15 @@ for (const theme of THEMES) {
     await page.addInitScript((key) => {
       localStorage.setItem(key, JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["projects", "automations", "skills", "usage"] }));
     }, instanceStorageKey(RAIL_PREFERENCES_STORAGE_KEY));
-    await useHarness(page, { theme, view: "projects", blocked: 12, stalled: 3, machines: 1 });
+    await useHarness(page, { theme, view: "projects", blocked: 12, machines: 1 });
     const bar = page.getByRole("navigation", { name: "Primary Navigation" });
     await expect(bar.getByRole("link", { name: "Sessions", exact: true })).toHaveCount(0);
     const more = page.locator(".rail-more-trigger");
     const marks = more.locator(".rail-attention-dot, .count-badge");
     await expect(marks).toHaveCount(1);
-    await expect(more.locator(".rail-tab-pill > .rail-icon > .rail-attention-dot.t-danger.on-icon")).toHaveCount(1);
+    await expect(more.locator(".rail-tab-pill > .rail-icon > .rail-attention-dot.t-warning.on-icon")).toHaveCount(1);
     await expect(more).toHaveAccessibleName("More Destinations");
-    await expect(more).toHaveAccessibleDescription("Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+    await expect(more).toHaveAccessibleDescription("Sessions: 12 waiting on you. Connections: 1 machine needs an update");
     expect(await glyphUnderMark(page, more), "the dot and its ring cover none of More's glyph").toBe(0);
     const placed = await more.evaluate((element) => {
       const mark = element.querySelector(".rail-attention-dot")!;
@@ -650,7 +649,7 @@ for (const theme of THEMES) {
     await page.locator(".rail-more-trigger").click();
     await page.locator('.menu[aria-label="More Destinations"] .menu-item', { hasText: "Archived Sessions" }).click();
     await expect(more).toHaveAccessibleName("More Destinations, Archived Sessions selected");
-    await expect(more).toHaveAccessibleDescription("Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+    await expect(more).toHaveAccessibleDescription("Sessions: 12 waiting on you. Connections: 1 machine needs an update");
   });
 }
 
@@ -686,8 +685,8 @@ test("More's mark is amber for a machine alone and absent when nothing behind it
 
   // Sessions waiting on the bar: its own tab carries the badge, and More carries nothing.
   await phoneBar(["inbox", "projects", "automations", "usage"]);
-  await useHarness(page, { view: "projects", blocked: 12, stalled: 3, machines: 0 });
-  await expect(page.getByRole("link", { name: "Sessions", exact: true }).locator(".count-badge")).toHaveText("15");
+  await useHarness(page, { view: "projects", blocked: 12, machines: 0 });
+  await expect(page.getByRole("link", { name: "Sessions", exact: true }).locator(".count-badge")).toHaveText("12");
   await expect(marks).toHaveCount(0);
   await expect(more).not.toHaveAttribute("aria-describedby", /./);
 });

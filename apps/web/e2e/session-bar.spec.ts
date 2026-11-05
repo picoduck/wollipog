@@ -345,7 +345,7 @@ for (const width of [761, 834, 940, 1099]) {
     expect(geometry.overflow).toBe(false);
     // The badge gives up its label before the title drops under its readable width (§15.2).
     expect(geometry.title.width).toBeGreaterThanOrEqual(200);
-    if (geometry.dot) expect(geometry.tooltip).toBe("1 Child Request");
+    if (geometry.dot) expect(geometry.tooltip).toBe("Awaiting Prompt, 1 Child Request");
     expect(geometry.title.right).toBeLessThanOrEqual(geometry.statuses.left + 0.5);
     expect(geometry.statuses.right).toBeLessThanOrEqual(geometry.actions.left + 0.5);
     expect(geometry.actions.right).toBeLessThanOrEqual(geometry.bar.right);
@@ -391,7 +391,7 @@ test("at 940px a long title keeps 200px: the badge keeps its label only while it
   expect(geometry.title).toBeGreaterThanOrEqual(200);
   // Whichever form the font leaves room for, a dot always carries its label as the tooltip.
   if (await control.getAttribute("data-dot") !== null) {
-    await expect(control).toHaveAttribute("title", "Authentication Required");
+    await expect(control).toHaveAttribute("title", "Awaiting Input, Authentication Required");
   } else {
     await expect(control.locator(".status").last()).toHaveText("Authentication Required");
   }
@@ -413,7 +413,7 @@ test("in the compact tier a long title collapses the status badge to its dot bef
 
   await setTitle(page, LONG_TITLE);
   await expect(control).toHaveAttribute("data-dot", "");
-  await expect(control).toHaveAttribute("title", "Authentication Required");
+  await expect(control).toHaveAttribute("title", "Awaiting Input, Authentication Required");
   await expect(control).toHaveAccessibleName("Session Status: Awaiting Input, Authentication Required");
   const geometry = await statusGeometry(page);
   expect(geometry.title).toBeGreaterThanOrEqual(200);

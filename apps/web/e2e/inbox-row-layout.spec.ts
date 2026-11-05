@@ -169,7 +169,7 @@ test.describe("on the Sessions page", () => {
         senderWhole: label.scrollWidth <= label.clientWidth + 0.5,
       };
     }));
-    expect(new Set(cards.map((card) => card.height)).size, JSON.stringify(cards)).toBe(1);
+    expect(cards.every((card) => card.height >= 44), "dense status lines may grow without shrinking touch targets").toBe(true);
     for (const card of cards) {
       expect(card.lines).toBe(3);
       expect(card.sender).toMatch(/ · Alpha$/);

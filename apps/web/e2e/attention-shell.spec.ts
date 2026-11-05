@@ -81,8 +81,8 @@ test("real shell preserves global shortcuts from the grid and F2 opens the selec
   // One rail badge for Sessions: 4 blocked plus 4 stalled, red because a session is stalled (#1967).
   const sessions = page.getByRole("navigation", { name: "Primary Navigation" }).getByRole("link", { name: "Sessions", exact: true });
   await expect(sessions.locator(".count-badge")).toHaveCount(1);
-  await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText("8");
-  await expect(sessions).toHaveAccessibleDescription("4 waiting on you, 4 stalled");
+  await expect(sessions.locator(".count-badge.on-icon")).toHaveText("4");
+  await expect(sessions).toHaveAccessibleDescription("4 waiting on you");
   await grid.focus();
   // The primary requests in this fixture offer no options, so one-key approval has nothing safe to pick.
   await grid.press("a");
@@ -245,9 +245,9 @@ for (const [label, device] of [
       const sessions = rail.getByRole("link", { name: "Sessions", exact: true });
       // 4 blocked and 4 stalled: one red total, never two badges.
       await expect(sessions.locator(".count-badge")).toHaveCount(1);
-      await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText("8");
+      await expect(sessions.locator(".count-badge.on-icon")).toHaveText("4");
       await expect(sessions).toHaveAccessibleName("Sessions");
-      await expect(sessions).toHaveAccessibleDescription("4 waiting on you, 4 stalled");
+      await expect(sessions).toHaveAccessibleDescription("4 waiting on you");
       expect(await glyphUnderMark(page, sessions), "the badge and its ring cover none of the glyph").toBe(0);
       const rest = await ringAndFill(sessions);
       expect(rest.ring).toBe(`${rest.fill} 0px 0px 0px 2px`);
@@ -302,12 +302,12 @@ for (const [label, device] of [
       return placed;
     };
 
-    for (const [extra, count] of [[0, "8"], [7, "15"], [120, "128"]] as const) {
+    for (const [extra, count] of [[0, "4"], [7, "11"], [120, "124"]] as const) {
       test(`a Sessions badge of ${count} and its ring stay inside the rail, clear of the glyph (#2110)`, async ({ page }) => {
         const sessions = sessionsItem(page);
         for (const path of ["/projects", undefined]) {
           await page.goto(`${fullShell(path)}&more-blocked=${extra}`);
-          await expect(sessions.locator(".count-badge.danger.on-icon")).toHaveText(count);
+          await expect(sessions.locator(".count-badge.on-icon")).toHaveText(count);
           // At rest on Projects, then on the current item, whose ring follows the selected fill.
           if (path) await expect(sessions).not.toHaveAttribute("aria-current", "page");
           else await expect(sessions).toHaveAttribute("aria-current", "page");
@@ -330,7 +330,7 @@ for (const [label, device] of [
     test("a badge of any width stays inside the rail and clear of the glyph (#2110)", async ({ page }) => {
       await page.goto(fullShell("/projects"));
       const badge = sessionsItem(page).locator(".count-badge");
-      await expect(badge).toHaveText("8");
+      await expect(badge).toHaveText("4");
       for (let width = 16; width <= 36; width += 0.5) {
         await badge.evaluate((element, px) => {
           (element as HTMLElement).style.padding = "0";
@@ -351,7 +351,7 @@ test.describe("the rail tooltip at 1440×900", () => {
     await sessions.hover();
     const tooltip = page.locator(".rail-tooltip");
     await expect(tooltip).toBeVisible();
-    await expect(tooltip.locator(".rail-tooltip-note")).toHaveText("4 waiting on you, 4 stalled");
+    await expect(tooltip.locator(".rail-tooltip-note")).toHaveText("4 waiting on you");
     const lines = await tooltip.evaluate((element) => {
       const note = element.querySelector(".rail-tooltip-note")!.getBoundingClientRect();
       const keys = element.querySelector("kbd")!.getBoundingClientRect();

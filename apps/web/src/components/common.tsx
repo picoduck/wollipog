@@ -297,7 +297,6 @@ export function SessionStatusIndicators({
   disconnected = false,
   onOpenAttention,
   onOpenChildRequests,
-  attention = "badge",
 }: {
   session: Pick<SessionView, "status" | "pendingApproval" | "archiveStatus" | "archiveOperation" |
     "stopOperation" | "historyQuarantine" | "attentionOwners" | "capacityWait" | "queueHold" | "holds" |
@@ -307,8 +306,6 @@ export function SessionStatusIndicators({
   onOpenAttention?: () => void;
   /** Opens the Requests panel's list of child requests; the attention target by default. */
   onOpenChildRequests?: () => void;
-  /** Board cards show the per-kind pills; headers keep the single badge that opens the panel. */
-  attention?: "badge" | "pills";
 }) {
   // A Stop waits for its runner only when the runner is known to be offline. A runner this client
   // has no record of is unknown, not offline, so the Stop keeps its delivery wording (the Inbox row
@@ -317,15 +314,24 @@ export function SessionStatusIndicators({
     session.runnerId === undefined ? undefined : state.runners.get(session.runnerId)?.status ?? "unknown");
   const runnerOnline = storedRunnerStatus === undefined ? !disconnected : storedRunnerStatus !== "offline";
   const summary = sessionStatusSummary(session, { runnerOnline, disconnected: disconnected || !runnerOnline });
+  const extras = summary.conditions.filter((condition) => condition.needsYou && condition !== summary.secondary);
+  const extraNames = extras.map((condition) => condition.meta.label).join("; ");
+  const openExtras = extras.some((condition) => condition.kind === "child_requests")
+    ? onOpenChildRequests ?? onOpenAttention : onOpenAttention;
   return <span className="session-status-indicators" role="group" aria-label="Session Status">
     {[summary.primary, ...(summary.secondary ? [summary.secondary] : [])].map((condition, index) =>
       <StatusBadge key={index} meta={condition.meta} title={condition.description}
         ariaLabel={condition.kind === "lifecycle" ? "Activity: " + condition.meta.label :
-          condition.kind === "attention" ? "Attention: " + condition.meta.label :
+          condition.kind === "attention" ? "Attention: " + condition.meta.label + (condition.count ? `, ${condition.count} Requests` : "") :
           condition.kind === "disconnected" ? "Health: Disconnected" :
           condition.kind === "queue_reason" ? "Queue Reason: " + condition.description : condition.meta.label}
-        onClick={condition.kind === "child_requests" ? onOpenChildRequests ?? onOpenAttention : condition.needsYou ? onOpenAttention : undefined} />)}
-    {summary.more > 0 && <span title={summary.conditions.filter((condition) => condition.needsYou && condition !== summary.secondary).map((condition) => condition.meta.label).join("; ")}>+{summary.more}</span>}
+        onClick={condition.kind === "child_requests" ? onOpenChildRequests ?? onOpenAttention : condition.needsYou ? onOpenAttention : undefined}>
+        {condition.count !== undefined && <StatusCount>{condition.count}</StatusCount>}
+      </StatusBadge>)}
+    {summary.more > 0 && (openExtras
+      ? <button type="button" className="btn sm ghost" title={extraNames}
+        aria-label={`${summary.more} More: ${extraNames}`} onClick={openExtras}>+{summary.more}</button>
+      : <span title={extraNames} aria-label={`${summary.more} More: ${extraNames}`}>+{summary.more}</span>)}
   </span>;
 }
 

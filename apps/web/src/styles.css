@@ -377,7 +377,7 @@
   --inbox-row-pad-x: 11px;
   /* A wide Sessions list's fixed trailing columns (#2218, §6.3), the same in either density. The
      time column holds a snoozed row's longest return time after its alarm clock ("Wed 12:34 PM"). */
-  --inbox-row-col-status: 184px;
+  --inbox-row-col-status: 300px;
   --inbox-row-col-activity: 48px;
   --inbox-row-col-flags: 32px;
   --inbox-row-col-time: 96px;
@@ -15412,12 +15412,14 @@ button.review-finding-location {
     justify-self: start;
     min-width: 0;
     max-width: 100%;
-    height: 36px;
+    min-height: 36px;
+    height: auto;
+    flex-wrap: wrap;
+    padding-block: var(--space-1);
   }
   .session-bar > .session-status-button > .status {
-    flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
+    flex: none;
+    padding-inline: var(--space-1);
   }
   .session-bar .session-header-action { width: 36px; height: 36px; }
   .session-bar .session-header-action svg { width: var(--icon); height: var(--icon); }

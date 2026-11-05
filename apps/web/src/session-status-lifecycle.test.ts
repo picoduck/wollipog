@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 import type { SessionView } from "@wollipog/protocol";
-import { sessionStatusSummary } from "./status-meta.js";
+import { sessionStatusSignal, sessionStatusSummary } from "./status-meta.js";
 import { sessionRowStatus } from "./session-row-status.js";
 import { Store } from "./store.js";
 
@@ -54,6 +54,26 @@ test("Awaiting Prompt is always visible and equivalent generic input is not repe
   assert.equal(summary.primary.meta.label, "Awaiting Input");
   assert.equal(summary.secondary, null);
   assert.equal(summary.more, 0);
+});
+
+test("compact member signals preserve requests and disconnected staleness", () => {
+  const offline = sessionStatusSignal(session(), { runnerOnline: false });
+  assert.equal(offline.meta.label, "Disconnected");
+  assert.equal(offline.meta.tone, "danger");
+  assert.match(offline.description, /status may not be current/);
+  assert.equal(sessionStatusSignal(session({ pendingApproval: {
+    requestId: "approval", title: "Run?", options: [],
+  } })).meta.label, "Approval Required");
+});
+
+test("family input outranks the parent's own review result and keeps that result discoverable", () => {
+  const row = sessionRowStatus(session({ status: "idle", attention: {
+    version: 1, humanActions: [], meaningfulAt: 1,
+    result: { revision: "result", at: 1, owner: "human" }, acknowledgedRevision: null,
+  } }), { familyFollowUpLabel: "Needs Your Input", familyWorking: false });
+  assert.equal(row.lifecycle.meta.label, "Awaiting Prompt");
+  assert.equal(row.badge?.meta.label, "Needs Your Input");
+  assert.deepEqual(row.others, ["Ready for Review"]);
 });
 
 test("arbitrarily long healthy waits never create a session stall or an attention count", () => {

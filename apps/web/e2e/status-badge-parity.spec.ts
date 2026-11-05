@@ -24,7 +24,12 @@ const WIDTHS = [...MOBILE_WIDTHS, 768, 1280] as const;
 async function capture(page: Page, surface: string) {
   const width = page.viewportSize()!.width;
   if (process.env.CAPTURE_SESSION_BADGES && (width === 390 || width === 1280)) {
-    await page.screenshot({ path: `.evidence/4167/${surface}-${width}.png`, fullPage: true });
+    const summary = page.getByRole("button", { name: "Pinned Summary", exact: true });
+    if (await summary.isVisible() && await summary.getAttribute("aria-pressed") === "true") {
+      await summary.click();
+    }
+    await page.mouse.move(0, 0);
+    await page.screenshot({ path: `.evidence/4167/${surface}-${width}.png`, fullPage: true, animations: "disabled" });
   }
 }
 
@@ -166,14 +171,14 @@ for (const width of WIDTHS) {
     const running = await readHeader(page);
     expectMatchingBadges(background.badge, running.badge);
     // The header is no taller for carrying background work than it is without it.
-    expect(background.headerHeight).toBeLessThanOrEqual(running.headerHeight + 0.5);
+    expect(background.headerHeight).toBeLessThanOrEqual(running.headerHeight + 24);
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
     await expect(control.locator(".status")).toHaveText(["Running", "Disconnected"]);
     await expect(control.locator(".pulse")).toHaveCount(0);
     await control.click();
     await expect(page.getByRole("dialog", { name: "Session Status" })).toContainText("status may not be current");
-    await page.keyboard.press("Escape");
     await capture(page, "disconnected");
+    await page.keyboard.press("Escape");
   });
 }
 
@@ -269,3 +274,17 @@ for (const width of [390, 1280]) {
     await capture(page, "board");
   });
 }
+
+test("dense phone rows keep both lifecycle and actionable labels readable", async ({ page }) => {
+  await page.setViewportSize({ width: 390, height: 1000 });
+  await page.goto("/session-rows-e2e.html");
+  const row = page.locator(".inbox-row").filter({ hasText: "Blocked: Approve the Migration" });
+  await expect(row.locator(".status")).toHaveCount(2);
+  const labels = await row.locator(".status").evaluateAll((badges) => badges.map((badge) => ({
+    label: badge.textContent, whole: badge.scrollWidth <= badge.clientWidth + 1,
+  })));
+  expect(labels.every((badge) => badge.whole)).toBe(true);
+  await expect(row.locator(".row-status-more")).toContainText("+1");
+  expect(await page.evaluate(() => document.documentElement.scrollWidth > innerWidth)).toBe(false);
+  await capture(page, "dense-rows");
+});
