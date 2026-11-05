@@ -910,6 +910,8 @@ interface ProviderRetirement {
   unconfirmed: boolean;
   /** Temporary launch generation that accepts prompts while a pressure park is retiring. */
   parkingGeneration?: number;
+  /** The campaign generation whose final checkpoint this retirement fences until it is proven (#3788). */
+  campaignGeneration?: string;
 }
 
 type ProviderAuthenticationInspectionResult =
@@ -1563,6 +1565,15 @@ export class SessionManager {
   private readonly loggingOut = new Set<string>();
   /** Explicit stop waits for ACP session/close before this session may launch again. */
   private readonly closing = new Map<string, ProviderRetirement>();
+  /** Campaign generations of this process's providers that runner shutdown disposed mid-retirement
+   * or that exited unproven, awaiting the process-tree reaping that proves them gone (#3788). */
+  private readonly shutdownRetirements = new Map<string, Set<string>>();
+  /** Each provider instance that exited by itself, with its campaign generation, awaiting proof that
+   * its whole process tree is gone (#3788). A resumed provider of the same generation adds its own. */
+  private readonly exitRetirements = new Map<string, Map<Driver, string>>();
+  /** Fences an earlier runner process left for a generation this process has providers of again
+   * (#3788). Nothing this process proves covers that earlier provider, so they are never lifted. */
+  private readonly inheritedFences = new Map<string, string>();
   /** A turn-boundary worktree move owns a retiring provider even after it leaves `active`.
    * Unlike an ordinary close, prompts may join its pre-launch FIFO while the conversation reopens. */
   private readonly worktreeRebindings = new Map<string, {
@@ -7287,6 +7298,10 @@ export class SessionManager {
       config: spec.config ?? {},
       campaignBudgetDispatch: spec.campaignBudgetDispatch,
       campaignBudgetCheckpoint: undefined,
+      // A relaunch under the same generation does not prove an earlier provider of it gone (#3788).
+      ...(prior?.retiringProviderGeneration !== undefined &&
+          prior.retiringProviderGeneration === spec.campaignBudgetDispatch?.generation
+        ? { retiringProviderGeneration: prior.retiringProviderGeneration } : {}),
       projectMemory: spec.projectMemory ?? prior?.projectMemory,
       artifactUploads: spec.artifactUploads ?? prior?.artifactUploads ?? "manual",
       orchestrator: (prior?.orchestrator?.issueScope?.revision ?? 0) > (spec.orchestrator?.issueScope?.revision ?? 0) ? prior?.orchestrator : spec.orchestrator ?? prior?.orchestrator,
@@ -7380,6 +7395,10 @@ export class SessionManager {
         }
         meta.seq = latest.seq;
         meta.logEpoch = latest.logEpoch;
+        // An exit proof can lift the fence while this write waits its turn (#3788).
+        meta.retiringProviderGeneration = latest.retiringProviderGeneration !== undefined &&
+          latest.retiringProviderGeneration === meta.campaignBudgetDispatch?.generation
+          ? latest.retiringProviderGeneration : undefined;
         const latestMatchesWorkspace = latest.repoPath === repoPath &&
           agentContextKey(latest.context) === agentContextKey(context);
         shouldUseWorktree = spec.useWorktree || latestMatchesWorkspace && !!latest.worktreePath &&
@@ -17173,7 +17192,10 @@ export class SessionManager {
       }
       return existing;
     }
-    const retirement = {
+    // Until this exact provider is proven gone, no final checkpoint may name its generation, even
+    // from a restarted runner that no longer holds it (#3788).
+    const campaignGeneration = this.fenceRetiringProvider(sessionId);
+    const retirement: ProviderRetirement = {
       client: entry.client,
       entry,
       promise: Promise.resolve(),
@@ -17183,6 +17205,7 @@ export class SessionManager {
       parking: options.parking ?? false,
       unconfirmed: false,
       ...(options.parkingGeneration === undefined ? {} : { parkingGeneration: options.parkingGeneration }),
+      ...(campaignGeneration === undefined ? {} : { campaignGeneration }),
     };
     this.closing.set(sessionId, retirement);
     if (!entry.client.close) {
@@ -17229,7 +17252,13 @@ export class SessionManager {
       this.resumePromptsQueuedDuringParking(sessionId, retirement);
       this.reportCapacity();
     }
-    if (this.shuttingDown) return;
+    // Shutdown only begins disposing the provider here; recordShutdownRetirementCheckpoints proves
+    // it gone once the process trees are reaped.
+    if (this.shuttingDown) {
+      this.awaitShutdownProof(sessionId, retirement.campaignGeneration);
+      return;
+    }
+    this.clearRetiringProvider(sessionId, retirement.campaignGeneration);
     const settledMeta=this.store.readMeta(sessionId);
     // The exact provider has retired, even if Stop interrupted a running turn. Its last usage
     // callbacks have been persisted; stale in-memory turn flags cannot keep the reservation live.
@@ -18654,6 +18683,7 @@ export class SessionManager {
         }
       } else if (code && code !== 0) {
         this.rejectQueued(queued, "agent exited before queued command started");
+        this.fenceExitedProvider(sessionId, expectedClient);
         this.emitStatus(sessionId, "failed", `agent exited ${code}`);
       } else {
         this.rejectQueued(queued, "agent exited before queued command started");
@@ -18863,6 +18893,11 @@ export class SessionManager {
       }
     }
     this.active.clear();
+    // An exited provider still awaiting its tree proof is covered by shutdown's reaping too (#3788).
+    for (const [sessionId, providers] of this.exitRetirements) {
+      for (const generation of providers.values()) this.awaitShutdownProof(sessionId, generation);
+    }
+    this.exitRetirements.clear();
     const shutdownRetirementClients = new Set<Driver>();
     for (const retirement of [...this.closing.values()]) {
       shutdownRetirementClients.add(retirement.client);
@@ -18994,6 +19029,120 @@ export class SessionManager {
     return this.providerHomeLeases ? this.providerHomeLeases.close() : true;
   }
 
+  /** The final campaign budget checkpoint of a retired provider, in local history coordinates. */
+  private finalBudgetCheckpoint(
+    meta: SessionMeta,
+    dispatch: import("@wollipog/protocol").CampaignBudgetDispatch,
+  ): import("@wollipog/protocol").CampaignBudgetUsageCheckpoint {
+    return { generation: dispatch.generation, historyEpoch: this.snapshot(meta).historyEpoch ?? 0,
+      throughSeq: meta.seq, costUsd: meta.costUsd };
+  }
+
+  /**
+   * A provider that exits by itself has retired only once every process it started, descendants
+   * included, is proven gone (#3788): an ACP terminal or a detached helper can outlive the root.
+   * Fence its generation until the driver proves that, then attest the final checkpoint. A driver
+   * that cannot prove it, or a false proof, keeps the fence until a shutdown reaps every tree.
+   */
+  private fenceExitedProvider(sessionId: string, client: Driver): void {
+    const generation = this.fenceRetiringProvider(sessionId);
+    if (generation === undefined) return;
+    const providers = this.exitRetirements.get(sessionId) ?? new Map<Driver, string>();
+    providers.set(client, generation);
+    this.exitRetirements.set(sessionId, providers);
+    const proof = client.proveProcessTreeExit ? client.proveProcessTreeExit({ terminate: false }) : Promise.resolve(false);
+    void proof.catch(() => false).then((proven) => {
+      // Shutdown took this fence over; its reaping proof decides it.
+      if (this.shuttingDown || this.exitRetirements.get(sessionId)?.get(client) !== generation) return;
+      if (!proven) {
+        this.log(`session ${sessionId} keeps its campaign slot: its exited provider's process tree was not proven gone`);
+        return;
+      }
+      providers.delete(client);
+      if (providers.size === 0) this.exitRetirements.delete(sessionId);
+      try {
+        this.clearRetiringProvider(sessionId, generation);
+        const meta = this.store.readMeta(sessionId);
+        if (meta && !this.active.has(sessionId) && isTerminal(meta.status)) {
+          this.emitStatus(sessionId, meta.status, undefined, undefined, undefined, true);
+        }
+      } catch (error) {
+        this.log(`exited provider retirement proof failed for ${sessionId}: ${errText(error)}`);
+      }
+    });
+  }
+
+  /** Whether another of this process's providers of `generation` is still retiring or awaiting its
+   * exit proof (#3788). */
+  private retirementOutstanding(sessionId: string, generation: string): boolean {
+    return this.closing.get(sessionId)?.campaignGeneration === generation ||
+      [...this.exitRetirements.get(sessionId)?.values() ?? []].includes(generation);
+  }
+
+  /** Fence the current campaign generation's final checkpoint while one of its providers retires
+   * (#3788). A fence already present with nothing of this process outstanding was left by an earlier
+   * runner process, whose provider this process can never prove gone. */
+  private fenceRetiringProvider(sessionId: string): string | undefined {
+    const meta = this.store.readMeta(sessionId);
+    const generation = meta?.campaignBudgetDispatch?.generation;
+    if (generation === undefined) return undefined;
+    if (meta!.retiringProviderGeneration === generation) {
+      if (!this.retirementOutstanding(sessionId, generation)) this.inheritedFences.set(sessionId, generation);
+    } else {
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: generation });
+    }
+    return generation;
+  }
+
+  /** Lift a proven retirement's fence on its generation's final checkpoint (#3788), unless another
+   * provider of that generation is still retiring or awaiting its exit proof, which lifts it later,
+   * or the fence came from an earlier runner process. */
+  private clearRetiringProvider(sessionId: string, generation: string | undefined): void {
+    if (generation === undefined || this.retirementOutstanding(sessionId, generation) ||
+        this.inheritedFences.get(sessionId) === generation) return;
+    if (this.store.readMeta(sessionId)?.retiringProviderGeneration === generation) {
+      this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined });
+    }
+  }
+
+  private awaitShutdownProof(sessionId: string, generation: string | undefined): void {
+    if (generation === undefined) return;
+    const generations = this.shutdownRetirements.get(sessionId) ?? new Set<string>();
+    generations.add(generation);
+    this.shutdownRetirements.set(sessionId, generations);
+  }
+
+  /**
+   * Prove the retirements runner shutdown interrupted (#3788). Shutdown disposes each retiring
+   * provider without proof that it exited, and the runner can no longer report it. Once every spawned
+   * process tree is reaped, store each such session's final campaign checkpoint, so the restarted
+   * runner's negotiated session snapshots prove that no provider of the current generation remains.
+   * Without that proof the fence stays, and the session keeps its campaign slot.
+   */
+  recordShutdownRetirementCheckpoints(processTreesReaped: boolean): void {
+    if (!this.shuttingDown) throw new Error("shutdown retirement proof requires shutdown");
+    const retired = [...this.shutdownRetirements];
+    this.shutdownRetirements.clear();
+    if (!processTreesReaped) return;
+    for (const [sessionId, generations] of retired) {
+      try {
+        const meta = this.store.readMeta(sessionId);
+        const generation = meta?.retiringProviderGeneration;
+        // Reaping proves only the providers this process disposed or saw exit: never one whose
+        // disposal failed, nor an earlier runner process's.
+        if (!meta || generation === undefined || !generations.has(generation) ||
+            this.retirementOutstanding(sessionId, generation) || this.inheritedFences.get(sessionId) === generation) continue;
+        const dispatch = meta.campaignBudgetDispatch;
+        this.store.patchMeta(sessionId, { retiringProviderGeneration: undefined,
+          ...(dispatch?.generation === generation && isTerminal(meta.status)
+            ? { campaignBudgetCheckpoint: this.finalBudgetCheckpoint(meta, dispatch) } : {}) });
+        this.store.flush(sessionId);
+      } catch (error) {
+        this.log(`shutdown retirement proof failed for ${sessionId}: ${errText(error)}`);
+      }
+    }
+  }
+
   private emitStatus(
     sessionId: string,
     status: SessionStatus,
@@ -19052,10 +19201,10 @@ export class SessionManager {
     const finalMeta=this.store.readMeta(sessionId)!;
     const checkpoint=terminal && finalMeta.campaignBudgetDispatch && !this.closing.has(sessionId) &&
       !this.worktreeRebindings.has(sessionId) && !this.providerAccountSwitches.has(sessionId) &&
+      finalMeta.retiringProviderGeneration!==finalMeta.campaignBudgetDispatch.generation &&
       (finalProviderUsage || entry && !entry.running && !entry.providerInitiatedTurnActive) &&
       runnerSupportsProtocol(this.controlPlaneProtocolVersion(),"campaignBudgetAdmission")
-      ? {generation:finalMeta.campaignBudgetDispatch.generation,historyEpoch:this.snapshot(finalMeta).historyEpoch??0,
-        throughSeq:finalMeta.seq,costUsd:finalMeta.costUsd}:undefined;
+      ? this.finalBudgetCheckpoint(finalMeta, finalMeta.campaignBudgetDispatch):undefined;
     if(checkpoint) this.store.patchMeta(sessionId,{campaignBudgetCheckpoint:checkpoint});
     this.send({
       type: "session_status",
@@ -19390,10 +19539,14 @@ export class SessionManager {
       : active.running ? active.activeTurnId : undefined;
     const providerTurnId = active.client.agentTurnId?.();
     const providerThreadId = active.client.agentSessionId();
-    if (!sessionTurnId || sessionTurnId !== raw.sessionTurnId ||
-        typeof providerTurnId !== "string" || !bounded(providerTurnId, 512) ||
-        typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
-      return fail(occurrenceId, "App Server provider coordinates changed before action arming");
+    // Each refusal names its own cause (#4054); the control plane relays it with the recovery.
+    if (!sessionTurnId) return fail(occurrenceId, "the session has no active runner turn");
+    if (sessionTurnId !== raw.sessionTurnId) return fail(occurrenceId, "the session's runner turn changed before action arming");
+    if (typeof providerThreadId !== "string" || !bounded(providerThreadId, 512)) {
+      return fail(occurrenceId, "the Codex thread is not established");
+    }
+    if (typeof providerTurnId !== "string" || !bounded(providerTurnId, 512)) {
+      return fail(occurrenceId, "Codex has not confirmed a provider turn for the current turn");
     }
     const payload: WorkflowActionAdmissionArmedEvent = {
       kind: "workflow_action_admission_armed",

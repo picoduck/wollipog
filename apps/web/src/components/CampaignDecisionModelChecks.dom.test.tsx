@@ -175,6 +175,40 @@ test("each selection proposal shows its outcome, issues, rationale and the Decis
   }
 });
 
+test("a Custom campaign's epic seed shows its reading beside the scope it affects; Full Control's scope grant stays in its own section (#4104)", async () => {
+  const read = api.campaignDecisions;
+  const seed = { sessionId: "root-1", surface: "issue_scope_seed" as const, requestId: "issue_scope_seed:abc" };
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [
+    decision("seed_read", { kind: "scope_grant", verdict: "grant", reason: "The person names epic #40 to orchestrate.", subject: { ...seed, seed: "seeded" } }),
+    decision("seed_none", { kind: "scope_grant", verdict: "grant", reason: "No issue is named.", subject: { ...seed, seed: "none" } }),
+    decision("seed_pending", { kind: "scope_grant", state: "pending", subject: { ...seed, seed: "pending" } }),
+    decision("seed_failed", { kind: "scope_grant", state: "failed", failureClass: "authentication", subject: { ...seed, seed: "owner" } }),
+    decision("seed_released", { kind: "scope_grant", state: "uncertain", verdict: "uncertain", reason: "Unclear.",
+      subject: { ...seed, seed: "none", classification: "orchestrator" } }),
+    decision("seed_scoped", { kind: "scope_grant", state: "failed", failureClass: "timed_out", subject: { ...seed, seed: "scoped" } }),
+    decision("grant_full_control", { kind: "scope_grant", verdict: "grant", reason: "Named issues." }),
+  ], usage: { ...usage, calls: 7, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const items = [...view.container.querySelectorAll("li")];
+    assert.deepEqual(items.map((item) => [Object.keys(facts(item))[0], facts(item)["Epic Seed"], facts(item).Verdict]), [
+      ["Epic Seed", "It seeded the epic's issues; approve the issue scope before work is delegated.", "Message Read"],
+      ["Epic Seed", "It named no epic, so nothing waits.", "Message Read"],
+      ["Epic Seed", "Work waits to be delegated until the check finishes.", "Checking"],
+      ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "None"],
+      ["Epic Seed", "You let the Orchestrator delegate without an epic.", "Uncertain"],
+      ["Epic Seed", "You approved the campaign's issue scope, so nothing waits.", "None"],
+    ]);
+    assert.equal(facts(items[3]!).Failure, "Sign-In Required");
+    assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)), [
+      ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Open Session"], ["Open Session"],
+    ], "only a seed still left to the owner offers to continue without an epic");
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
 test("a member session sees the checks but never the classification buttons", async () => {
   const read = api.campaignDecisions;
   api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],

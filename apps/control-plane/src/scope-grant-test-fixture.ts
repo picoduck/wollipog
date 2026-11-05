@@ -7,7 +7,7 @@ import type { DecisionErrorClass, DecisionModelResolvedTarget, RunDecisionMessag
 import type { ControlPlaneDb } from "./db.js";
 import { DECISION_KINDS } from "./decision-kinds.js";
 import { DecisionRuntime } from "./decision-runtime.js";
-import { firstMessageIssueIntent, issueReferenceSpans } from "./first-message-issue-intent.js";
+import { issueReferenceSpans } from "./first-message-issue-intent.js";
 import type { ScopeGrantFields } from "./scope-grant.js";
 
 export const FAKE_DECISION_TARGET: DecisionModelResolvedTarget = {
@@ -40,24 +40,23 @@ export function ownerMessageOf(message: RunDecisionMessage): string {
   return JSON.parse(quoted) as string;
 }
 
-/** A stand-in for a healthy model in the tests that predate the Decision Model: it answers what the
- * retired first-message classifier read, so those tests keep exercising the floors and ceilings.
- * Test-only; production never derives a grant from text. */
-export function classifierAnswer(text: string, repository = "owner/repo"): ScopeGrantAnswer {
-  const intent = firstMessageIssueIntent(text, repository);
+/** The default healthy model of these tests: it asks for every exact reference the message writes,
+ * and a test whose message also mentions issues as background scripts the model's reading itself.
+ * Ranges are named as ranges; the ends of a range that names nothing are context. Test-only:
+ * production never derives a grant from text (#4104). */
+export function exactReferenceAnswer(text: string, repository = "owner/repo"): ScopeGrantAnswer {
+  const explicit = new Set<number>();
+  const context = new Set<number>();
   // Each expanded range is one reference: its members share the span's start.
   const members = new Map<number, number[]>();
   for (const span of issueReferenceSpans(text, repository)) {
-    if (span.range && !span.context) members.set(span.start, [...members.get(span.start) ?? [], span.number]);
+    if (span.context) context.add(span.number);
+    else if (span.range) members.set(span.start, [...members.get(span.start) ?? [], span.number]);
+    else explicit.add(span.number);
   }
-  const ranges: ScopeGrantFields["ranges"] = [];
-  const ranged = new Set<number>();
-  for (const numbers of members.values()) {
-    if (!numbers.every((n) => intent.scope.includes(n))) continue;
-    ranges.push({ repository: "", first: Math.min(...numbers), last: Math.max(...numbers) });
-    for (const n of numbers) ranged.add(n);
-  }
-  return grantVerdict({ explicit: issues(...intent.scope.filter((n) => !ranged.has(n))), ranges, context: issues(...intent.context) });
+  const ranges = [...members.values()].map((numbers) => ({ repository: "", first: Math.min(...numbers), last: Math.max(...numbers) }));
+  return grantVerdict({ explicit: issues(...[...explicit].filter((n) => !context.has(n))), ranges,
+    context: issues(...[...context].filter((n) => !explicit.has(n))) });
 }
 
 /** A `scope_review` verdict (#4103). */
@@ -77,7 +76,7 @@ export function fakeScopeGrantRuntime(db: ControlPlaneDb, options: {
 } = {}) {
   const calls: RunDecisionMessage[] = [];
   const reviewCalls: RunDecisionMessage[] = [];
-  const state = { answer: options.answer ?? ((text: string) => classifierAnswer(text)), resolution: options.resolution,
+  const state = { answer: options.answer ?? ((text: string) => exactReferenceAnswer(text)), resolution: options.resolution,
     review: ((_message: RunDecisionMessage, _attempt: number) => reviewVerdict("admit")) as (message: RunDecisionMessage, attempt: number) => ScopeGrantAnswer | Promise<ScopeGrantAnswer> };
   const other = options.other ??
     (() => ({ ok: true as const, outputText: JSON.stringify({ verdict: "discusses", reason: "The request discusses access as a design subject." }) }));

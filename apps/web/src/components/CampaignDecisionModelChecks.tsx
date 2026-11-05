@@ -7,10 +7,12 @@ import type { CampaignRequestTarget } from "./CampaignStatusPanel.js";
 
 type CampaignDecision = CampaignDecisionsResponse["decisions"][number];
 
-/** The Full Control checks shown here (#4104): the question screen, follow-up relatedness and
- * closure-reason choice, and the review of each selection proposal (#4103). Other kinds have their
- * own place in Campaign Status. */
+/** The checks shown here (#4104): the question screen, follow-up relatedness, closure-reason choice,
+ * a Custom campaign's epic seed, and the review of each selection proposal (#4103). Other kinds, such
+ * as Full Control's scope grant, have their own place in Campaign Status. */
 const SHOWN_KINDS: ReadonlySet<DecisionKind> = new Set<DecisionKind>(["credential_screen", "follow_up_relatedness", "closure_reason", "scope_review"]);
+const shown = (decision: CampaignDecision) => SHOWN_KINDS.has(decision.kind) ||
+  decision.kind === "scope_grant" && decision.subject?.surface === "issue_scope_seed";
 
 const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"], string> = {
   implementation_question: "Implementation Question",
@@ -19,6 +21,7 @@ const SURFACE_LABELS: Record<NonNullable<CampaignDecision["subject"]>["surface"]
   owner_decision: "Owner Decision",
   follow_up_publication: "Follow-Up Publication",
   issue_closure: "Issue Closure",
+  issue_scope_seed: "Epic Seed",
 };
 
 const VERDICT_LABELS: Record<string, string> = {
@@ -28,6 +31,7 @@ const VERDICT_LABELS: Record<string, string> = {
   unrelated: "Unrelated",
   fits: "Reason Fits",
   does_not_fit: "Reason Doesn't Fit",
+  grant: "Message Read",
   admit: "Fits Your Selection",
   refuse: "Doesn't Fit Your Selection",
   uncertain: "Uncertain",
@@ -72,11 +76,25 @@ function checkOutcomeText(decision: CampaignDecision): string {
   return closure ? "Waiting for you to decide the closure." : "Waiting for you to decide the publication.";
 }
 
+/** What a Custom campaign's epic seed did: a named epic seeds the scope the owner approves, and a
+ * reading that could not settle it leaves that scope to them with no seed. */
+function seedOutcomeText(decision: CampaignDecision): string {
+  if (decision.subject?.classification === "orchestrator") return "You let the Orchestrator delegate without an epic.";
+  switch (decision.subject?.seed) {
+    case "seeded": return "It seeded the epic's issues; approve the issue scope before work is delegated.";
+    case "none": return "It named no epic, so nothing waits.";
+    case "owner": return "Waiting for you: approve the campaign's issue scope, or continue without an epic.";
+    case "scoped": return "You approved the campaign's issue scope, so nothing waits.";
+    default: return decision.state === "pending" ? "Work waits to be delegated until the check finishes." : "A later reading replaced it.";
+  }
+}
+
 /** What the screen's outcome did to the request it affected, in the order it happened. */
 function outcomeText(decision: CampaignDecision): string {
   if (decision.kind === "scope_review") {
     return decision.selectionProposal ? SELECTION_OUTCOMES[decision.selectionProposal.outcome] : SELECTION_OUTCOMES.reviewing;
   }
+  if (decision.kind === "scope_grant") return seedOutcomeText(decision);
   if (decision.kind !== "credential_screen") return checkOutcomeText(decision);
   const classification = decision.subject?.classification;
   const ownerDecision = decision.subject?.surface === "owner_decision";
@@ -120,7 +138,7 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
   useEffect(() => {
     const controller = new AbortController();
     api.campaignDecisions(sessionId, controller.signal).then((response) => {
-      setDecisions(response.decisions.filter((decision) => SHOWN_KINDS.has(decision.kind)));
+      setDecisions(response.decisions.filter(shown));
       setCampaignSessionId(response.campaignSessionId);
       setLoadError(null);
     }).catch((cause: unknown) => {
@@ -150,9 +168,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <h3 id={headingId} className="section-title">Decision Model Checks</h3>
       <p className="section-note">
         The Decision Model checks whether a question asks for a credential, sign-in or access, whether a follow-up
-        belongs to the work you asked for, whether a closure's reason fits its issue, and whether issues the
-        Orchestrator chose fit the selection you asked for. When it can't tell, the request waits for you; nobody asks
-        you for a value.
+        belongs to the work you asked for, whether a closure's reason fits its issue, which epic a campaign's first
+        message names, and whether issues the Orchestrator chose fit the selection you asked for. When it can't tell,
+        the request waits for you; nobody asks you for a value.
       </p>
       {loadError && <Notice tone="danger" compact role="alert" title="Couldn't Load Decision Model Checks">{loadError}</Notice>}
       {actionError && <Notice tone="danger" compact role="alert" title="Couldn't Classify the Question">{actionError}</Notice>}
@@ -163,6 +181,8 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
           // the model could not check is decided on its own request.
           const awaiting = decision.kind === "credential_screen" && (decision.state === "uncertain" || decision.state === "failed") &&
             !subject?.classification;
+          // An epic seed the model could not settle waits for the owner, who may continue without one.
+          const seedAwaiting = decision.kind === "scope_grant" && subject?.seed === "owner" && !subject.classification;
           // An owner decision stays the owner's: classifying it only lets them choose an option.
           const ownerDecision = subject?.surface === "owner_decision";
           const proposal = decision.selectionProposal;
@@ -209,6 +229,11 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
               </dl>
               {(subject || (awaiting && canClassify)) && (
                 <div className="campaign-screen-actions" role="group" aria-label={`${label} Actions`}>
+                  {seedAwaiting && canClassify && (
+                    <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:orchestrator`}
+                      progress="Letting the Orchestrator delegate…" disabled={busy !== null}
+                      onClick={() => void classify(decision.occurrenceId, "orchestrator")}>Continue Without an Epic</BusyButton>
+                  )}
                   {awaiting && canClassify && <>
                     <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:decline`} progress="Declining the question…" disabled={busy !== null}
                       onClick={() => void classify(decision.occurrenceId, "decline")}>Decline</BusyButton>
