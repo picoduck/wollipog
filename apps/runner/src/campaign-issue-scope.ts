@@ -12,12 +12,16 @@ export class CampaignIssueScopeRefusal extends Error {}
 
 export const GITLAB_PUBLICATION_REFUSAL = "Campaign issue publication supports GitHub repositories only";
 
-/** One requested number's facts (#4103), bounded. Every string is the forge's untrusted text. */
+/** One requested number's facts (#4103), bounded. Every string is the forge's untrusted text.
+ * Labels are never truncated, because the Human Required label floor reads every one: an issue
+ * whose labels exceed the bounds fails the read instead. */
 function issueFacts(number: number, kind: CampaignIssueFacts["kind"], open: boolean, title: string, body: string,
   labels: string[], assignees: string[]): CampaignIssueFacts {
   const limits = CAMPAIGN_ISSUE_FACT_LIMITS;
-  return { number, kind, state: open ? "open" : "closed",
-    labels: labels.slice(0, limits.labels).map((label) => label.slice(0, limits.labelChars)),
+  if (labels.length > limits.labels || labels.some((label) => label.length > limits.labelChars)) {
+    throw new Error("Issue labels exceed the bounded inspection; the issue's labels could not be reported in full");
+  }
+  return { number, kind, state: open ? "open" : "closed", labels: [...labels],
     assignees: assignees.slice(0, limits.assignees).map((login) => login.slice(0, 100)),
     title: title.slice(0, limits.titleChars), bodyExcerpt: body.slice(0, limits.bodyExcerptChars) };
 }

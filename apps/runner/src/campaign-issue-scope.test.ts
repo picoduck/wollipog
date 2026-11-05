@@ -178,6 +178,16 @@ test("a facts read (#4103) reports each issue's state, labels and assignees, and
     { number: 6, kind: "issue", state: "closed", labels: [], assignees: [], title: "Closed", excerpt: 0 },
     { number: 7, kind: "pull_request", state: "open", labels: [], assignees: [], title: "A pull request", excerpt: 0 },
   ]);
+  // Labels are never truncated: the Human Required floor reads every one, and an issue whose labels
+  // exceed the bounds fails the read instead of reporting a partial list.
+  const many = Array.from({ length: 60 }, (_, i) => ({ name: `area-${i}` })).concat({ name: "security" });
+  rows[8] = { number: 8, title: "Many labels", body: "", state: "open", html_url: "https://github.com/owner/repo/issues/8", labels: many, assignees: [] };
+  assert.deepEqual((await inspectCampaignIssueScope(run, undefined, [8], undefined, true)).issueFacts![0]!.labels.at(-1), "security");
+  rows[9] = { ...rows[8] as object, number: 9, html_url: "https://github.com/owner/repo/issues/9",
+    labels: Array.from({ length: 101 }, (_, i) => ({ name: `area-${i}` })) };
+  await assert.rejects(inspectCampaignIssueScope(run, undefined, [9], undefined, true), /could not be reported in full/);
+  rows[10] = { ...rows[8] as object, number: 10, html_url: "https://github.com/owner/repo/issues/10", labels: [{ name: "x".repeat(256) }] };
+  await assert.rejects(inspectCampaignIssueScope(run, undefined, [10], undefined, true), /could not be reported in full/);
   // Without facts a pull request still fails the whole read, as before.
   await assert.rejects(inspectCampaignIssueScope(run, undefined, [5, 7]), /could not verify/);
   assert.equal((await inspectCampaignIssueScope(run, undefined, [5])).issueFacts, undefined);

@@ -41,7 +41,7 @@ import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
-import { boundedIssueNumbers, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
+import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision } from "./campaign-issue-scope.js";
@@ -11440,7 +11440,9 @@ export class SessionsService {
       if (response.type !== "campaign_issue_scope_result" || !response.ok || response.sessionId !== sessionId ||
           response.repository?.toLowerCase() !== repository.toLowerCase()) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
       if (withFacts && Array.isArray(response.issueFacts)) {
-        facts = additions.map((n) => response.issueFacts!.find((fact) => fact?.number === n)).filter((fact): fact is CampaignIssueFacts => Boolean(fact));
+        // A fact out of its bounds, or with labels the runner could not report in full, verifies nothing.
+        facts = additions.map((n) => response.issueFacts!.find((fact) => validCampaignIssueFacts(fact) && fact.number === n))
+          .filter((fact): fact is CampaignIssueFacts => Boolean(fact));
         if (facts.length !== additions.length) return fail("The forge could not verify every proposed addition in the campaign repository.", 409);
       }
       // Floor 2: an open issue. Without facts every addition must at least read as an issue.

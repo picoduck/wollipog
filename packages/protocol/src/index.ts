@@ -5437,7 +5437,9 @@ export interface CampaignIssueFacts {
   number: number;
   kind: "issue" | "pull_request";
   state: "open" | "closed";
-  /** At most `CAMPAIGN_ISSUE_FACT_LIMITS.labels` names, each at most `labelChars` characters. */
+  /** Every label, never truncated: the Human Required label floor reads them all. An issue with
+   * more than `CAMPAIGN_ISSUE_FACT_LIMITS.labels` labels, or a longer name than `labelChars`, fails
+   * the read instead. */
   labels: string[];
   assignees: string[];
   title: string;
@@ -5445,7 +5447,20 @@ export interface CampaignIssueFacts {
   bodyExcerpt: string;
 }
 
-export const CAMPAIGN_ISSUE_FACT_LIMITS = { labels: 50, labelChars: 100, assignees: 20, titleChars: 512, bodyExcerptChars: 2000 } as const;
+export const CAMPAIGN_ISSUE_FACT_LIMITS = { labels: 100, labelChars: 255, assignees: 20, titleChars: 512, bodyExcerptChars: 2000 } as const;
+
+/** Whether one reported fact is within its bounds, with every label complete (#4103). */
+export function validCampaignIssueFacts(value: unknown): value is CampaignIssueFacts {
+  const limits = CAMPAIGN_ISSUE_FACT_LIMITS;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const strings = (list: unknown, max: number, chars: number) => Array.isArray(list) && list.length <= max &&
+    list.every((item) => typeof item === "string" && item.length <= chars);
+  return Number.isSafeInteger(v.number) && (v.number as number) > 0 && (v.kind === "issue" || v.kind === "pull_request") &&
+    (v.state === "open" || v.state === "closed") && strings(v.labels, limits.labels, limits.labelChars) &&
+    strings(v.assignees, limits.assignees, 100) && typeof v.title === "string" && v.title.length <= limits.titleChars &&
+    typeof v.bodyExcerpt === "string" && v.bodyExcerpt.length <= limits.bodyExcerptChars;
+}
 
 export interface GithubIssueClosureInspection {
   repository: string;

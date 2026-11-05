@@ -1660,6 +1660,14 @@ test("a selection proposal's deterministic floors refuse in order, each with its
     await refusedWith([43], { code: "other_campaign_scope", issue: 43 });
     await refusedWith([45, 46, 47], { code: "selection_count_exhausted", count: 2, admitted: 0, requested: 3 });
     await refusedWith([44], { code: "human_required_label", issue: 44 });
+    // Every label counts, not only the first fifty (#4215 review).
+    f.issues.facts.set(48, { labels: [...Array.from({ length: 50 }, (_, i) => `area-${i}`), "security"] });
+    await refusedWith([48], { code: "human_required_label", issue: 48 });
+    // A fact out of its bounds verifies nothing: the proposal is not admitted on a partial label list.
+    f.issues.facts.set(49, { labels: Array.from({ length: 101 }, (_, i) => `area-${i}`) });
+    const partial = await propose([49]);
+    assert.equal(partial.ok, false);
+    assert.equal(partial.status, 409);
     assert.equal(occurrences(), before, "no floor calls the Decision Model");
     assert.equal(pending().length, 0, "no floor refusal creates a request");
 
