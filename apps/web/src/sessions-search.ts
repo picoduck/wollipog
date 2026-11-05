@@ -43,7 +43,6 @@ export function searchInboxSplits(
   splits: readonly InboxSplit[],
   normalizedQuery: string,
   projectName: (session: SessionView) => string,
-  stalledSessionIds: ReadonlySet<string>,
 ): readonly InboxSplit[] {
   if (!normalizedQuery) return splits;
   return splits.map((split) => {
@@ -53,7 +52,6 @@ export function searchInboxSplits(
       sessions,
       count: sessions.length,
       blockedCount: sessions.reduce((total, session) => total + Number(isInboxBlocked(session)), 0),
-      stalledCount: sessions.reduce((total, session) => total + Number(stalledSessionIds.has(session.id)), 0),
     };
   });
 }

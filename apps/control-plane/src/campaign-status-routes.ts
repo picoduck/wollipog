@@ -9,6 +9,7 @@ import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import type {
   CampaignCostSummary,
   CampaignCostValue,
+  CampaignDecisionsResponse,
   CampaignForgeRefreshResponse,
   CampaignMetric,
   CampaignPullRequestRef,
@@ -22,6 +23,7 @@ import type {
 } from "@wollipog/protocol";
 import { FORGE_NOT_AUTHORIZED } from "./campaign-forge-observations.js";
 import type { ControlPlaneDb } from "./db.js";
+import { decisionOccurrenceView } from "./decision-runtime.js";
 import type { AuthPrincipal } from "./identity.js";
 
 /* ------------------------------ Cost visibility ------------------------------ */
@@ -188,6 +190,21 @@ export function registerCampaignStatusRoutes(
     const response: CampaignWorkSummaryResponse = {
       campaignSessionId: read.rootId,
       summary: campaignSummaryForPrincipal(summary, !summary.cost || everySessionVisible(read)),
+    };
+    return reply.send(response);
+  });
+
+  // Decision calls that served this campaign, with their verdicts, reasons and their own usage.
+  // Kept apart from the managed worker cost above, so an unpriced call never reads as campaign spend.
+  app.get("/api/sessions/:id/campaign/decisions", async (req, reply) => {
+    const { id } = req.params as { id: string };
+    const read = reader(req, reply, id);
+    if (!read) return reply;
+    const response: CampaignDecisionsResponse = {
+      campaignSessionId: read.rootId,
+      decisions: db.listCampaignDecisionOccurrences(read.rootId).map((occurrence) =>
+        decisionOccurrenceView(occurrence, db.listDecisionAttempts(occurrence.occurrenceId))),
+      usage: db.campaignDecisionUsage(read.rootId),
     };
     return reply.send(response);
   });

@@ -222,6 +222,7 @@ import {
   type PromptSessionMessage,
   type AnswerRecoveredQuestionCommand,
   type ProjectLocationAvailability,
+  type ProjectLocationNameSource,
   type ProjectLocationSource,
   type ProjectLocationView,
   type ProjectView,
@@ -266,6 +267,7 @@ import {
   type SessionSnapshot,
   type SessionStatus,
   type SessionNamingAccountBoundary,
+  type DecisionModelResolvedTarget,
   type SessionNamingHarnessOption,
   type SessionReminderView,
   type SessionReminderWakePolicy,
@@ -727,6 +729,8 @@ CREATE TABLE IF NOT EXISTS project_locations (
   runner_id    TEXT NOT NULL,
   workspace_id TEXT NOT NULL,
   name         TEXT NOT NULL,
+  -- 'user' once someone renames the Location in this Project (#4151): discovery keeps that name.
+  name_source  TEXT NOT NULL DEFAULT 'workspace' CHECK (name_source IN ('workspace','user')),
   path         TEXT NOT NULL,
   source       TEXT NOT NULL CHECK (source IN ('reported','managed','legacy')),
   last_seen_at INTEGER,
@@ -2932,6 +2936,71 @@ CREATE TABLE IF NOT EXISTS session_naming_harness_targets (
   FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
 );
 
+-- Decision Model (#4101): an organization's explicit target. No row means Automatic.
+CREATE TABLE IF NOT EXISTS decision_model_targets (
+  organization_id TEXT PRIMARY KEY,
+  runner_id       TEXT NOT NULL,
+  agent_id        TEXT NOT NULL,
+  driver          TEXT NOT NULL CHECK (driver IN ('codex-app-server','claude-code')),
+  context_kind    TEXT NOT NULL CHECK (context_kind IN ('native','wsl')),
+  context_distro  TEXT,
+  provider        TEXT NOT NULL CHECK (provider IN ('codex','claude')),
+  billing_source  TEXT NOT NULL CHECK (billing_source IN ('subscription','api','bedrock','vertex','gateway','provider_account','unknown')),
+  model           TEXT NOT NULL,
+  effort          TEXT NOT NULL,
+  updated_at      INTEGER NOT NULL,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+
+-- One audited Decision occurrence. It is created before the first attempt and accepts exactly one
+-- outcome by compare-and-set on state='pending'. Inputs are kept only as SHA-256 digests.
+CREATE TABLE IF NOT EXISTS decision_occurrences (
+  occurrence_id          TEXT PRIMARY KEY,
+  organization_id        TEXT NOT NULL,
+  campaign_session_id    TEXT,
+  occurrence_key         TEXT,
+  kind                   TEXT NOT NULL,
+  prompt_version         TEXT NOT NULL,
+  input_digests          TEXT NOT NULL,
+  input_digest           TEXT NOT NULL,
+  state                  TEXT NOT NULL CHECK (state IN ('pending','decided','uncertain','failed')),
+  verdict                TEXT,
+  reason                 TEXT,
+  failure_class          TEXT,
+  fields                 TEXT,
+  target                 TEXT,
+  human_route_claimed_at INTEGER,
+  human_routed_at        INTEGER,
+  human_request_id       TEXT,
+  created_at             INTEGER NOT NULL,
+  decided_at             INTEGER,
+  FOREIGN KEY (organization_id) REFERENCES identity_organizations(organization_id) ON DELETE CASCADE
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_decision_occurrences_key
+  ON decision_occurrences(organization_id, occurrence_key) WHERE occurrence_key IS NOT NULL;
+CREATE INDEX IF NOT EXISTS idx_decision_occurrences_campaign
+  ON decision_occurrences(campaign_session_id, created_at) WHERE campaign_session_id IS NOT NULL;
+
+-- Every attempt of an occurrence, with its usage. Decision usage is never managed worker usage.
+CREATE TABLE IF NOT EXISTS decision_attempts (
+  occurrence_id         TEXT NOT NULL,
+  attempt               INTEGER NOT NULL,
+  request_id            TEXT NOT NULL,
+  started_at            INTEGER NOT NULL,
+  latency_ms            INTEGER,
+  error_class           TEXT,
+  provider              TEXT,
+  model                 TEXT,
+  input_tokens          INTEGER NOT NULL DEFAULT 0,
+  output_tokens         INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens     INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  has_usage             INTEGER NOT NULL DEFAULT 0,
+  cost_usd              REAL,
+  PRIMARY KEY (occurrence_id, attempt),
+  FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+);
+
 -- Per-user ordinary-session defaults. Harness identity is deliberately runner-independent so the
 -- same preference follows a user across their devices and Machines. Empty context_distro avoids
 -- SQLite's nullable-composite-key duplicate semantics for native harnesses.
@@ -4029,6 +4098,7 @@ interface ProjectLocationRow {
   runner_id: string;
   workspace_id: string;
   name: string;
+  name_source: ProjectLocationNameSource;
   path: string;
   source: ProjectLocationSource;
   last_seen_at: number | null;
@@ -5194,6 +5264,82 @@ export interface SessionNamingHarnessTargetRecord {
   model: string;
   effort: string;
   updatedAt: number;
+}
+
+export interface DecisionModelTargetRecord {
+  runnerId: string;
+  agentId: string;
+  driver: "codex-app-server" | "claude-code";
+  context: AgentContext;
+  provider: SessionNamingAccountBoundary["provider"];
+  billingSource: SessionNamingAccountBoundary["billingSource"];
+  model: string;
+  effort: string;
+  updatedAt: number;
+}
+
+interface DecisionOccurrenceRow {
+  occurrence_id: string;
+  organization_id: string;
+  campaign_session_id: string | null;
+  occurrence_key: string | null;
+  kind: string;
+  prompt_version: string;
+  input_digests: string;
+  input_digest: string;
+  state: "pending" | "decided" | "uncertain" | "failed";
+  verdict: string | null;
+  reason: string | null;
+  failure_class: string | null;
+  fields: string | null;
+  target: string | null;
+  human_route_claimed_at: number | null;
+  human_routed_at: number | null;
+  human_request_id: string | null;
+  created_at: number;
+  decided_at: number | null;
+}
+
+export interface DecisionOccurrenceRecord {
+  occurrenceId: string;
+  organizationId: string;
+  campaignSessionId: string | null;
+  occurrenceKey: string | null;
+  kind: string;
+  promptVersion: string;
+  inputDigests: Record<string, string>;
+  inputDigest: string;
+  state: DecisionOccurrenceRow["state"];
+  verdict: string | null;
+  reason: string | null;
+  failureClass: string | null;
+  /** The kind's extra output fields, validated and projected to its schema. */
+  fields: Record<string, unknown>;
+  target: DecisionModelResolvedTarget | null;
+  humanRouteClaimedAt: number | null;
+  /** Set once the caller's routing finished, with or without a request. A claim without it was
+   * interrupted and is routed again. */
+  humanRoutedAt: number | null;
+  humanRequestId: string | null;
+  createdAt: number;
+  decidedAt: number | null;
+}
+
+export interface DecisionAttemptRecord {
+  attempt: number;
+  requestId: string;
+  startedAt: number;
+  /** Null while the attempt is still in flight. */
+  latencyMs: number | null;
+  errorClass: string | null;
+  provider: string | null;
+  model: string | null;
+  inputTokens: number;
+  outputTokens: number;
+  cacheReadInputTokens: number;
+  cacheCreationInputTokens: number;
+  hasUsage: boolean;
+  costUsd: number | null;
 }
 
 export interface AgentHarnessDefaultRecord extends AgentHarnessIdentity {
@@ -6718,6 +6864,14 @@ export class ControlPlaneDb {
         ON project_locations(project_id, runner_id, workspace_id)
         WHERE detached_at IS NULL AND removed_at IS NULL;
     `);
+    // A Location's own name in its Project (#4151). Existing rows keep their runner-provided name.
+    const projectLocationColumns = db.prepare("PRAGMA table_info(project_locations)")
+      .all() as unknown as Array<{ name: string }>;
+    if (!projectLocationColumns.some((column) => column.name === "name_source")) {
+      db.exec(
+        "ALTER TABLE project_locations ADD COLUMN name_source TEXT NOT NULL DEFAULT 'workspace' CHECK (name_source IN ('workspace','user'))",
+      );
+    }
     // The installation identity belongs to the database, not the process or network endpoint.
     // INSERT OR IGNORE makes first-open initialization idempotent; a moved/reopened database
     // remains the same control plane while independent databases always receive distinct ids.
@@ -8942,7 +9096,7 @@ export class ControlPlaneDb {
   private projectView(row: ProjectRow, principal?: AuthPrincipal): ProjectView {
     const projectScope = this.projectScope(row.id);
     const locationRows = this.stmt(
-      `SELECT id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
+      `SELECT id, project_id, runner_id, workspace_id, name, name_source, path, source, last_seen_at,
               detached_at, removed_at, created_at, updated_at
        FROM project_locations WHERE project_id=? AND removed_at IS NULL
        ORDER BY CASE WHEN id=? THEN 0 ELSE 1 END, created_at, id`,
@@ -8992,6 +9146,7 @@ export class ControlPlaneDb {
         runnerId: location.runner_id,
         workspaceId: location.workspace_id,
         name: location.name,
+        nameSource: location.name_source,
         path: location.path,
         source: location.source,
         availability: this.projectLocationAvailability(location),
@@ -9270,7 +9425,8 @@ export class ControlPlaneDb {
     if (active.length > 0) {
       const override = this.workspaceOverride(runnerId, workspace.id);
       this.stmt(
-        `UPDATE project_locations SET name=?, path=?, source=?, last_seen_at=?, updated_at=?
+        `UPDATE project_locations SET name=CASE WHEN name_source='user' THEN name ELSE ? END,
+           path=?, source=?, last_seen_at=?, updated_at=?
          WHERE runner_id=? AND workspace_id=? AND detached_at IS NULL AND removed_at IS NULL`,
       ).run(workspace.name, workspace.path, source, now, now, runnerId, workspace.id);
       for (const link of active) {
@@ -9324,7 +9480,7 @@ export class ControlPlaneDb {
 
   projectLocation(locationId: string, includeRemoved = false): ProjectLocationView | null {
     const row = this.stmt(
-      `SELECT id, project_id, runner_id, workspace_id, name, path, source, last_seen_at,
+      `SELECT id, project_id, runner_id, workspace_id, name, name_source, path, source, last_seen_at,
               detached_at, removed_at, created_at, updated_at
        FROM project_locations WHERE id=? AND (removed_at IS NULL OR ?=1)`,
     ).get(locationId, includeRemoved ? 1 : 0) as unknown as ProjectLocationRow | undefined;
@@ -9338,6 +9494,7 @@ export class ControlPlaneDb {
       runnerId: row.runner_id,
       workspaceId: row.workspace_id,
       name: row.name,
+      nameSource: row.name_source,
       path: row.path,
       source: row.source,
       availability: this.projectLocationAvailability(row),
@@ -9444,7 +9601,8 @@ export class ControlPlaneDb {
       if (detached) {
         this.stmt(
           `UPDATE project_locations
-           SET name=?, path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
+           SET name=CASE WHEN name_source='user' THEN name ELSE ? END,
+             path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
            WHERE id=? AND detached_at IS NOT NULL AND removed_at IS NULL`,
         ).run(workspace.name, workspace.path, workspace.source, now, now, locationId);
       } else {
@@ -9515,7 +9673,8 @@ export class ControlPlaneDb {
           .run(location.runnerId, location.workspaceId);
         this.stmt(
           `UPDATE project_locations
-           SET project_id=?, name=?, path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
+           SET project_id=?, name=CASE WHEN name_source='user' THEN name ELSE ? END,
+             path=?, source=?, last_seen_at=?, detached_at=NULL, updated_at=?
            WHERE id=? AND removed_at IS NULL`,
         ).run(
           targetProjectId,
@@ -9567,6 +9726,31 @@ export class ControlPlaneDb {
       ).run(location.projectId, now, location.projectId);
     });
     return this.projectLocation(locationId, true);
+  }
+
+  /**
+   * Name one Location within its Project (#4151). The name is this Project's label only: the
+   * workspace, its folder and the same workspace's Locations in other Projects keep theirs, and
+   * runner discovery no longer replaces it. Null when the Location is not an active one of this Project.
+   */
+  renameProjectLocation(
+    projectId: string,
+    locationId: string,
+    name: string,
+    now = Date.now(),
+  ): ProjectLocationView | null {
+    const trimmed = name.trim();
+    if (!trimmed) throw new Error("Enter a name for the location.");
+    const location = this.projectLocation(locationId);
+    if (!location || location.projectId !== projectId) return null;
+    this.atomic(() => {
+      this.stmt(
+        `UPDATE project_locations SET name=?, name_source='user', updated_at=?
+         WHERE id=? AND project_id=? AND removed_at IS NULL`,
+      ).run(trimmed, now, locationId, projectId);
+      this.stmt("UPDATE projects SET updated_at=? WHERE id=?").run(now, projectId);
+    });
+    return this.projectLocation(locationId);
   }
 
   setProjectDefaultLocation(
@@ -12086,6 +12270,327 @@ export class ControlPlaneDb {
       this.setSessionNamingPreference(organizationId, "session_agent_account", revision);
       return revision;
     });
+  }
+
+  getDecisionModelTarget(organizationId: string): DecisionModelTargetRecord | null {
+    const row = this.stmt(
+      `SELECT runner_id, agent_id, driver, context_kind, context_distro, provider, billing_source,
+              model, effort, updated_at
+       FROM decision_model_targets WHERE organization_id=?`,
+    ).get(organizationId) as {
+      runner_id: string;
+      agent_id: string;
+      driver: DecisionModelTargetRecord["driver"];
+      context_kind: "native" | "wsl";
+      context_distro: string | null;
+      provider: DecisionModelTargetRecord["provider"];
+      billing_source: DecisionModelTargetRecord["billingSource"];
+      model: string;
+      effort: string;
+      updated_at: number;
+    } | undefined;
+    return row ? {
+      runnerId: row.runner_id,
+      agentId: row.agent_id,
+      driver: row.driver,
+      context: row.context_kind === "wsl" && row.context_distro
+        ? { kind: "wsl", distro: row.context_distro }
+        : { kind: "native" },
+      provider: row.provider,
+      billingSource: row.billing_source,
+      model: row.model,
+      effort: row.effort,
+      updatedAt: row.updated_at,
+    } : null;
+  }
+
+  setDecisionModelTarget(organizationId: string, target: Omit<DecisionModelTargetRecord, "updatedAt">, now: number): void {
+    if (target.context.kind === "wsl" && (
+      !target.context.distro || target.context.distro !== target.context.distro.trim() ||
+      target.context.distro.length > 256 || /[\p{Cc}\p{Cf}]/u.test(target.context.distro)
+    )) throw new Error("a valid WSL distribution is required");
+    this.stmt(
+      `INSERT INTO decision_model_targets
+         (organization_id, runner_id, agent_id, driver, context_kind, context_distro,
+          provider, billing_source, model, effort, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+       ON CONFLICT(organization_id) DO UPDATE SET
+         runner_id=excluded.runner_id, agent_id=excluded.agent_id, driver=excluded.driver,
+         context_kind=excluded.context_kind, context_distro=excluded.context_distro,
+         provider=excluded.provider, billing_source=excluded.billing_source,
+         model=excluded.model, effort=excluded.effort, updated_at=excluded.updated_at`,
+    ).run(
+      organizationId,
+      target.runnerId,
+      target.agentId,
+      target.driver,
+      target.context.kind,
+      target.context.kind === "wsl" ? target.context.distro : null,
+      target.provider,
+      target.billingSource,
+      target.model,
+      target.effort,
+      now,
+    );
+  }
+
+  /** Release an unfulfilled claim after the caller failed to create its request, so a later call
+   * can create the one request instead of the occurrence being left with none. */
+  releaseDecisionHumanRoute(occurrenceId: string): void {
+    this.stmt(
+      "UPDATE decision_occurrences SET human_route_claimed_at=NULL WHERE occurrence_id=? AND human_routed_at IS NULL",
+    ).run(occurrenceId);
+  }
+
+  /** Return the organization to Automatic. */
+  clearDecisionModelTarget(organizationId: string): boolean {
+    return Number(this.stmt("DELETE FROM decision_model_targets WHERE organization_id=?").run(organizationId).changes) > 0;
+  }
+
+  /** Create an occurrence before its first attempt. With an occurrence key the call is idempotent:
+   * an existing occurrence for that key is returned unchanged instead of a second one. */
+  createDecisionOccurrence(input: {
+    occurrenceId: string;
+    organizationId: string;
+    campaignSessionId: string | null;
+    occurrenceKey: string | null;
+    kind: string;
+    promptVersion: string;
+    inputDigests: Record<string, string>;
+    inputDigest: string;
+    now: number;
+  }): { occurrence: DecisionOccurrenceRecord; created: boolean } {
+    return this.atomic(() => {
+      if (input.occurrenceKey !== null) {
+        const existing = this.stmt(
+          "SELECT occurrence_id FROM decision_occurrences WHERE organization_id=? AND occurrence_key=?",
+        ).get(input.organizationId, input.occurrenceKey) as { occurrence_id: string } | undefined;
+        if (existing) return { occurrence: this.getDecisionOccurrence(existing.occurrence_id)!, created: false };
+      }
+      this.stmt(
+        `INSERT INTO decision_occurrences
+           (occurrence_id, organization_id, campaign_session_id, occurrence_key, kind, prompt_version,
+            input_digests, input_digest, state, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, 'pending', ?)`,
+      ).run(
+        input.occurrenceId,
+        input.organizationId,
+        input.campaignSessionId,
+        input.occurrenceKey,
+        input.kind,
+        input.promptVersion,
+        JSON.stringify(input.inputDigests),
+        input.inputDigest,
+        input.now,
+      );
+      return { occurrence: this.getDecisionOccurrence(input.occurrenceId)!, created: true };
+    });
+  }
+
+  getDecisionOccurrence(occurrenceId: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt("SELECT * FROM decision_occurrences WHERE occurrence_id=?").get(occurrenceId) as
+      DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
+  }
+
+  listCampaignDecisionOccurrences(campaignSessionId: string, limit = 200): DecisionOccurrenceRecord[] {
+    return (this.stmt(
+      `SELECT * FROM decision_occurrences WHERE campaign_session_id=?
+       ORDER BY created_at DESC, occurrence_id DESC LIMIT ?`,
+    ).all(campaignSessionId, Math.max(1, Math.min(500, Math.floor(limit)))) as unknown as DecisionOccurrenceRow[])
+      .map((row) => this.decisionOccurrenceFromRow(row));
+  }
+
+  /** Every attempt of every occurrence that served the campaign, for its separate usage total. */
+  campaignDecisionUsage(campaignSessionId: string): {
+    calls: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadInputTokens: number;
+    cacheCreationInputTokens: number;
+    costUsd: number | null;
+    unpricedCalls: number;
+  } {
+    const row = this.stmt(
+      `SELECT COUNT(*) AS calls,
+              COALESCE(SUM(a.input_tokens), 0) AS input_tokens,
+              COALESCE(SUM(a.output_tokens), 0) AS output_tokens,
+              COALESCE(SUM(a.cache_read_tokens), 0) AS cache_read_tokens,
+              COALESCE(SUM(a.cache_creation_tokens), 0) AS cache_creation_tokens,
+              SUM(a.cost_usd) AS cost_usd,
+              COALESCE(SUM(CASE WHEN a.has_usage=1 AND a.cost_usd IS NULL THEN 1 ELSE 0 END), 0) AS unpriced
+       FROM decision_attempts a
+       JOIN decision_occurrences o ON o.occurrence_id=a.occurrence_id
+       WHERE o.campaign_session_id=?`,
+    ).get(campaignSessionId) as {
+      calls: number;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+      cost_usd: number | null;
+      unpriced: number;
+    };
+    return {
+      calls: Number(row.calls),
+      inputTokens: Number(row.input_tokens),
+      outputTokens: Number(row.output_tokens),
+      cacheReadInputTokens: Number(row.cache_read_tokens),
+      cacheCreationInputTokens: Number(row.cache_creation_tokens),
+      // One unpriced call makes the total unknown: a partial sum is never reported as the cost.
+      costUsd: Number(row.unpriced) > 0 ? null : Number(row.cost_usd ?? 0),
+      unpricedCalls: Number(row.unpriced),
+    };
+  }
+
+  recordDecisionTarget(occurrenceId: string, target: DecisionModelResolvedTarget): void {
+    this.stmt("UPDATE decision_occurrences SET target=? WHERE occurrence_id=? AND state='pending'")
+      .run(JSON.stringify(target), occurrenceId);
+  }
+
+  startDecisionAttempt(occurrenceId: string, attempt: number, requestId: string, now: number): void {
+    this.stmt(
+      "INSERT INTO decision_attempts (occurrence_id, attempt, request_id, started_at) VALUES (?, ?, ?, ?)",
+    ).run(occurrenceId, attempt, requestId, now);
+  }
+
+  finishDecisionAttempt(occurrenceId: string, attempt: number, result: {
+    latencyMs: number;
+    errorClass: string | null;
+    provider?: string;
+    model?: string;
+    usage?: { inputTokens: number; outputTokens: number; cacheReadInputTokens: number; cacheCreationInputTokens: number };
+    costUsd: number | null;
+  }): void {
+    this.stmt(
+      `UPDATE decision_attempts SET latency_ms=?, error_class=?, provider=?, model=?,
+         input_tokens=?, output_tokens=?, cache_read_tokens=?, cache_creation_tokens=?, has_usage=?, cost_usd=?
+       WHERE occurrence_id=? AND attempt=? AND latency_ms IS NULL`,
+    ).run(
+      Math.max(0, Math.round(result.latencyMs)),
+      result.errorClass,
+      result.provider ?? null,
+      result.model ?? null,
+      result.usage?.inputTokens ?? 0,
+      result.usage?.outputTokens ?? 0,
+      result.usage?.cacheReadInputTokens ?? 0,
+      result.usage?.cacheCreationInputTokens ?? 0,
+      result.usage ? 1 : 0,
+      result.costUsd,
+      occurrenceId,
+      attempt,
+    );
+  }
+
+  listDecisionAttempts(occurrenceId: string): DecisionAttemptRecord[] {
+    return (this.stmt(
+      "SELECT * FROM decision_attempts WHERE occurrence_id=? ORDER BY attempt",
+    ).all(occurrenceId) as unknown as Array<{
+      attempt: number;
+      request_id: string;
+      started_at: number;
+      latency_ms: number | null;
+      error_class: string | null;
+      provider: string | null;
+      model: string | null;
+      input_tokens: number;
+      output_tokens: number;
+      cache_read_tokens: number;
+      cache_creation_tokens: number;
+      has_usage: number;
+      cost_usd: number | null;
+    }>).map((row) => ({
+      attempt: Number(row.attempt),
+      requestId: row.request_id,
+      startedAt: Number(row.started_at),
+      latencyMs: row.latency_ms === null ? null : Number(row.latency_ms),
+      errorClass: row.error_class,
+      provider: row.provider,
+      model: row.model,
+      inputTokens: Number(row.input_tokens),
+      outputTokens: Number(row.output_tokens),
+      cacheReadInputTokens: Number(row.cache_read_tokens),
+      cacheCreationInputTokens: Number(row.cache_creation_tokens),
+      hasUsage: Number(row.has_usage) === 1,
+      costUsd: row.cost_usd === null ? null : Number(row.cost_usd),
+    }));
+  }
+
+  /** Compare-and-set the occurrence's single outcome. False when another attempt already won, so a
+   * late or duplicate answer is discarded rather than recorded as a second verdict. */
+  settleDecisionOccurrence(occurrenceId: string, outcome: {
+    state: "decided" | "uncertain" | "failed";
+    verdict?: string;
+    reason?: string;
+    failureClass?: string;
+    fields?: Record<string, unknown>;
+    now: number;
+  }): boolean {
+    return Number(this.stmt(
+      `UPDATE decision_occurrences SET state=?, verdict=?, reason=?, failure_class=?, fields=?, decided_at=?
+       WHERE occurrence_id=? AND state='pending'`,
+    ).run(
+      outcome.state,
+      outcome.verdict ?? null,
+      outcome.reason ?? null,
+      outcome.failureClass ?? null,
+      outcome.fields ? JSON.stringify(outcome.fields) : null,
+      outcome.now,
+      occurrenceId,
+    ).changes) === 1;
+  }
+
+  /** Claim the one person-owned request for an uncertain or failed occurrence. Only the first
+   * claim succeeds, so a caller can never create two requests for one occurrence. */
+  claimDecisionHumanRoute(occurrenceId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE decision_occurrences SET human_route_claimed_at=?
+       WHERE occurrence_id=? AND state IN ('uncertain','failed') AND human_route_claimed_at IS NULL`,
+    ).run(now, occurrenceId).changes) === 1;
+  }
+
+  /** Record that the caller's routing finished, linking its request when it created one. */
+  completeDecisionHumanRoute(occurrenceId: string, requestId: string | null, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE decision_occurrences SET human_request_id=COALESCE(human_request_id, ?), human_routed_at=?
+       WHERE occurrence_id=? AND human_route_claimed_at IS NOT NULL AND human_routed_at IS NULL`,
+    ).run(requestId, now, occurrenceId).changes) === 1;
+  }
+
+  private decisionOccurrenceFromRow(row: DecisionOccurrenceRow): DecisionOccurrenceRecord {
+    let target: DecisionModelResolvedTarget | null = null;
+    let inputDigests: Record<string, string> = {};
+    let fields: Record<string, unknown> = {};
+    try {
+      fields = row.fields ? JSON.parse(row.fields) as Record<string, unknown> : {};
+    } catch { /* unreadable fields read as none */ }
+    try {
+      target = row.target ? JSON.parse(row.target) as DecisionModelResolvedTarget : null;
+    } catch { /* an unreadable target reads as absent */ }
+    try {
+      inputDigests = JSON.parse(row.input_digests) as Record<string, string>;
+    } catch { /* an unreadable digest map reads as empty */ }
+    return {
+      occurrenceId: row.occurrence_id,
+      organizationId: row.organization_id,
+      campaignSessionId: row.campaign_session_id,
+      occurrenceKey: row.occurrence_key,
+      kind: row.kind,
+      promptVersion: row.prompt_version,
+      inputDigests,
+      inputDigest: row.input_digest,
+      state: row.state,
+      verdict: row.verdict,
+      reason: row.reason,
+      failureClass: row.failure_class,
+      fields,
+      target,
+      humanRouteClaimedAt: row.human_route_claimed_at,
+      humanRoutedAt: row.human_routed_at,
+      humanRequestId: row.human_request_id,
+      createdAt: Number(row.created_at),
+      decidedAt: row.decided_at === null ? null : Number(row.decided_at),
+    };
   }
 
   getSessionNamingCustomModel(organizationId: string): {

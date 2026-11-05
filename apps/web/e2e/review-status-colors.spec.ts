@@ -12,10 +12,13 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) for (con
     await expect(family).toBeVisible();
     await expect(family).toHaveAttribute("aria-label", /Ready for Review/);
     await expect(family).toHaveClass(/t-review/);
+    await expect(parent.locator(".status")).toHaveText(["Awaiting Prompt", "Ready for Review"]);
+    await expect(parent.getByLabel("Status: Awaiting Prompt", { exact: true })).toHaveClass(/t-neutral/);
+    await expect(parent.getByLabel("Status: Ready for Review", { exact: true })).toHaveClass(/t-review/);
     if (mode === "list") {
-      await expect(parent.locator(".status")).toHaveClass(/t-review/);
-      await expect(parent.locator(".status")).toHaveAccessibleName("Status: Ready for Review");
-      const answer = page.locator(".inbox-row-shell", { hasText: "Approval Session" }).locator(".status");
+      const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
+      await expect(approval.locator(".status")).toHaveText(["Awaiting Prompt", "Answer Required"]);
+      const answer = approval.getByLabel("Status: Answer Required", { exact: true });
       await expect(answer).toHaveClass(/t-warning/);
       await expect(answer).toHaveAccessibleName("Status: Answer Required");
     }
@@ -61,7 +64,8 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) for (con
     await expect(family).toHaveAttribute("aria-label", /Working/);
     await expect(family).not.toHaveAttribute("aria-label", /Ready for Review/);
     await expect(family).not.toHaveClass(/t-review/);
-    await expect(parent.locator(".status")).toHaveClass(/t-info/);
-    await expect(parent.locator(".status")).toHaveAccessibleName("Status: Children Working");
+    await expect(parent.locator(".status")).toHaveText(["Awaiting Prompt", "Children Working"]);
+    await expect(parent.getByLabel("Status: Awaiting Prompt", { exact: true })).toHaveClass(/t-neutral/);
+    await expect(parent.getByLabel("Status: Children Working", { exact: true })).toHaveClass(/t-info/);
   });
 }

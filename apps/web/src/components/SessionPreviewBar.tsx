@@ -15,10 +15,10 @@ export type PreviewSessionMenuOpener = (anchor: { x: number; y: number }, restor
 /**
  * The Sessions preview's detail bar and meta line (docs/design-system.md §4.3, §11.3; #2210).
  *
- * One 48px row: the one-line title, the session's one status badge (`sessionStatusSummary()`, the
+ * One 48px row: the one-line title, the session's lifecycle and secondary badges (`sessionStatusSummary()`, the
  * ranking the session bar uses, with its plain "+N"), then Snooze and Archive as icon buttons, ⋯ for
  * the session's context menu and Open Session last. The preview is a quick look, so there is no back
- * button and the badge is not a control: the session's own bar is where a condition is acted on.
+ * button and the badges are not controls: the session's own bar is where a condition is acted on.
  *
  * Where the full badge would leave the title truncated under `DETAIL_TITLE_READABLE_PX`, the badge
  * becomes its dot with the label in its tooltip, as `DetailBar` does in the compact tier. It is
@@ -81,7 +81,7 @@ export function SessionPreviewBar({
     };
   });
   // The row's context: only what a Sessions row also knows, so the two badges agree.
-  const { primary, more } = sessionStatusSummary(session, { runnerOnline });
+  const { primary, secondary, more } = sessionStatusSummary(session, { runnerOnline });
   const title = sessionDisplayTitle(session.title);
   const branchState = sessionBranchState(session);
   const branch = branchState.kind === "branch" ? branchState.worktree.branch : null;
@@ -90,8 +90,9 @@ export function SessionPreviewBar({
       <header className="detail-bar session-preview-bar">
         <div ref={headingRef} className="detail-bar-heading">
           <h2 className="detail-bar-title" title={title}><SessionTypeIcon session={session} />{title}</h2>
-          <span className="detail-bar-status" title={`${primary.meta.label}${more > 0 ? ` and ${more} more` : ""}`}>
+          <span className="detail-bar-status" title={`${primary.meta.label}${secondary ? `, ${secondary.meta.label}` : ""}${more > 0 ? ` and ${more} more` : ""}`}>
             <ConditionBadge condition={primary} />
+            {secondary && <ConditionBadge condition={secondary} />}
             {more > 0 && (
               <>
                 <span className="session-status-more" aria-hidden="true">+{more}</span>

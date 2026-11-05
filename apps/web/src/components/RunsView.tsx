@@ -2,7 +2,7 @@ import { BotIcon, CompareIcon, ProjectsIcon, ReplyIcon, RunsIcon } from "./Icons
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge, statusToneClass } from "./StatusBadge.js";
-import { sessionStatusSummary, statusMeta } from "../status-meta.js";
+import { sessionStatusSignal, statusMeta } from "../status-meta.js";
 import { useCallback, useEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type { RunView, SessionView, WorkflowArtifactView, WorkflowInstanceDetail } from "@wollipog/protocol";
@@ -193,10 +193,12 @@ function MemberTab({ sessionId, label, index, selected, onSelect, onKeyDown }: {
     ? state.runners.get(session.runnerId)?.status !== "offline"
     : true);
   if (!session) return null;
-  const status = sessionStatusSummary(session, { runnerOnline }).primary.meta;
+  const signal = sessionStatusSignal(session, { runnerOnline });
+  const status = signal.meta;
   return (
     <button
       id={memberTabId(index)}
+      title={signal.description}
       type="button"
       role="tab"
       aria-selected={selected}
@@ -632,7 +634,7 @@ function RunDetailContent({ runId, member }: { runId: string; member?: string })
     const runner = runners.get(session.runnerId);
     return {
       session,
-      meta: sessionStatusSummary(session, { runnerOnline: runner?.status !== "offline" }).primary.meta,
+      meta: sessionStatusSignal(session, { runnerOnline: runner?.status !== "offline" }).meta,
       stopReason: stopAgentUnavailableReason(session, { online: runner?.status !== "offline", protocolVersion: runner?.protocolVersion }),
     };
   };

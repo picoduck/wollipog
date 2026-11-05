@@ -74,7 +74,7 @@ function resultJson(result: any): any {
   return JSON.parse(result.content[0].text);
 }
 
-test("only regular sessions have the Location switch tools, which act on the session itself and need a v285 control plane", async () => {
+test("only regular sessions have the Location switch tools, which act on the session itself and need a v287 control plane", async () => {
   const { deps, calls } = makeDeps(() => ({ status: 201, body: { status: "pending", authority: "human" } }));
   deps.controlPlaneProtocolVersion = PROTOCOL_VERSION;
   const ask = { requestId: "switch-1", repository: "acme/docs", reason: "The issue is in acme/docs.", handoff: "Fix acme/docs#12.", trigger: "early" };

@@ -120,7 +120,7 @@ import {
 
 test("private media compatibility stays unadvertised and cannot borrow public221,222 or223", () => {
   const metadata = { id: PACED_VIDEO_REVIEW_CONTRACT_ID, revision: 1 };
-  assert.equal(PROTOCOL_VERSION, 286);
+  assert.equal(PROTOCOL_VERSION, 288);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.backgroundRetryExhaustion, 221);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.boundedSessionEventReads, 222);
   assert.equal(RUNNER_CAPABILITY_MIN_PROTOCOL.sessionReviewJob, 223);
@@ -358,14 +358,16 @@ test("session restart capability overlays controls without freezing the agent ca
     "a session lifecycle fact cannot turn a catalog-only ACP marker into negotiated controls");
 });
 
-test("PROTOCOL_VERSION is 286", () => {
-  assert.equal(PROTOCOL_VERSION, 286);
-  // A regular session's Location switch needs a v285 runner and control plane (#4138), and
-  // Switch and Continue of the live session a v286 runner.
-  assert.equal(runnerSupportsProtocol(284, "sessionLocationSwitch"), false);
-  assert.equal(runnerSupportsProtocol(285, "sessionLocationSwitch"), true);
-  assert.equal(runnerSupportsProtocol(285, "sessionLocationSwitchLive"), false);
-  assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitchLive"), true);
+test("PROTOCOL_VERSION is 288", () => {
+  assert.equal(PROTOCOL_VERSION, 288);
+  // A regular session's Location switch needs a v287 runner and control plane (#4138), and
+  // Switch and Continue of the live session a v288 runner.
+  assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);
+  assert.equal(runnerSupportsProtocol(287, "sessionLocationSwitch"), true);
+  assert.equal(runnerSupportsProtocol(287, "sessionLocationSwitchLive"), false);
+  assert.equal(runnerSupportsProtocol(288, "sessionLocationSwitchLive"), true);
+  assert.equal(runnerSupportsProtocol(284, "decisionModel"), false);
+  assert.equal(runnerSupportsProtocol(285, "decisionModel"), true);
   assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), false);
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).

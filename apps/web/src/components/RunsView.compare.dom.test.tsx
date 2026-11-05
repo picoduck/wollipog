@@ -95,6 +95,7 @@ function RunRoute() {
 interface Fixture {
   container: HTMLDivElement;
   root: Root;
+  publish: (snapshot: UiSnapshotMessage) => Promise<void>;
   /** Views the page replaced its history entry with. */
   replaced: View[];
 }
@@ -148,8 +149,32 @@ async function mount(client: Partial<ApiClient>, opening: View = { name: "run", 
     runners: [], boxes: [], projects: [], sessions: [claude, codex, gemini], runs: [run], pods: [],
   } as UiSnapshotMessage));
   await settle();
-  return { container, root, replaced };
+  return { container, root, replaced, publish: async (snapshot) => {
+    await act(async () => socket.push(snapshot));
+  } };
 }
+
+test("member tabs retain disconnected and request signals beside the comparison", async () => {
+  await setViewport(390, 844);
+  const fixture = await mount({});
+  try {
+    await fixture.publish({ type: "snapshot", runners: [{ runnerId: "runner-1", status: "offline" }],
+      boxes: [], projects: [], pods: [], runs: [run], sessions: [
+        { ...claude, status: "running" },
+        { ...codex, runnerId: "other", pendingApproval: { requestId: "approval", title: "Run?", options: [] } },
+        gemini,
+      ],
+    } as unknown as UiSnapshotMessage);
+    const tabs = [...fixture.container.querySelectorAll<HTMLElement>('[role="tablist"] [role="tab"]')];
+    assert.equal(tabs[0]!.textContent, "Claude Code, Disconnected");
+    assert.ok(tabs[0]!.querySelector(".compare-tab-dot.t-danger"));
+    assert.match(tabs[0]!.title, /status may not be current/);
+    assert.equal(tabs[1]!.textContent, "Codex App Server, Approval Required");
+    assert.ok(tabs[1]!.querySelector(".compare-tab-dot.t-warning"));
+  } finally {
+    await unmount(fixture);
+  }
+});
 
 async function settle() {
   for (let i = 0; i < 3; i += 1) await act(async () => { await new Promise((resolve) => setTimeout(resolve, 0)); });

@@ -99,7 +99,7 @@ test.describe("at 834px", () => {
     await alpha.getByRole("button", { name: "alpha Actions" }).click();
     const menu = page.getByRole("menu", { name: "alpha Actions" });
     await expect(menu.getByRole("menuitem")).toHaveText([
-      "New Session Here", "Reveal in File Manager", "Copy Path", "Make Default", "Remove Location…",
+      "New Session Here", "Reveal in File Manager", "Copy Path", "Rename Location…", "Make Default", "Remove Location…",
     ]);
     await menu.getByRole("menuitem", { name: "New Session Here" }).click();
     await expect(page.getByRole("dialog", { name: "New Session" })).toBeVisible();
@@ -129,11 +129,58 @@ test.describe("on a phone", () => {
     expect(setup.right).toBeLessThanOrEqual(setup.bodyRight + 0.5);
     await alpha.getByRole("button", { name: "alpha Actions" }).click();
     const menu = page.getByRole("menu", { name: "alpha Actions" });
-    await expect(menu.getByRole("menuitem")).toHaveText(["New Session Here", "Copy Path", "Make Default", "Remove Location…"]);
+    await expect(menu.getByRole("menuitem")).toHaveText([
+      "New Session Here", "Copy Path", "Rename Location…", "Make Default", "Remove Location…",
+    ]);
     const box = await menu.boundingBox();
     expect(box!.y + box!.height, "docked to the bottom").toBeGreaterThan(844 - 2);
   });
 });
+
+/** Rename Location… on the long-named default, whose machine is offline (#4151). */
+async function renameBilling(page: Page) {
+  await locationRow(page, LONG_NAME).getByRole("button", { name: `${LONG_NAME} Actions` }).click();
+  await page.getByRole("menuitem", { name: "Rename Location…" }).click();
+  const dialog = page.getByRole("dialog", { name: "Rename Location" });
+  await expect(dialog).toBeVisible();
+  return dialog;
+}
+
+for (const [label, viewport] of [
+  ["on a desktop", { width: 1440, height: 1000 }],
+  ["on a phone", { width: 390, height: 844 }],
+] as const) {
+  test.describe(`Rename Location ${label}`, () => {
+    test.use({ viewport, ...(viewport.width < 600 ? { hasTouch: true, isMobile: true } : {}) });
+
+    test("starts with the current name, refuses a blank one, and saves while the machine is offline", async ({ page }) => {
+      await open(page);
+      let dialog = await renameBilling(page);
+      const field = dialog.getByRole("textbox", { name: "Location Name" });
+      await expect(field).toHaveValue(LONG_NAME);
+      await field.fill("Ignored");
+      await dialog.getByRole("button", { name: "Cancel" }).click();
+      await expect(dialog).toHaveCount(0);
+      await expect(locationRow(page, LONG_NAME)).toHaveCount(1);
+
+      dialog = await renameBilling(page);
+      await dialog.getByRole("textbox", { name: "Location Name" }).fill("   ");
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await expect(dialog.getByText("Enter a location name.")).toBeVisible();
+      await expect(dialog.getByRole("textbox", { name: "Location Name" })).toHaveAttribute("aria-invalid", "true");
+
+      await dialog.getByRole("textbox", { name: "Location Name" }).fill("  Billing Checkout  ");
+      await dialog.getByRole("button", { name: "Save" }).click();
+      await expect(dialog).toHaveCount(0);
+      const renamed = locationRow(page, "Billing Checkout");
+      await expect(renamed).toHaveCount(1);
+      await expect(renamed.locator(".row-line .status")).toHaveText("Runner Offline");
+      await expect(renamed.locator(".project-location-default")).toHaveText("Default");
+      await page.reload();
+      await expect(locationRow(page, "Billing Checkout")).toHaveCount(1);
+    });
+  });
+}
 
 test.describe("setup and No Locations", () => {
   test.use({ viewport: { width: 1440, height: 1000 } });

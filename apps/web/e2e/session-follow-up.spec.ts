@@ -69,11 +69,11 @@ test("All and Project lists share priorities; new results defer reordering while
       result: { revision: "work-result", at: Date.now(), owner: "human" } } });
   });
   // Still working, so its result is not ready for review and it keeps its place (#3074).
-  await expect(row(page, work).locator(".status")).toHaveText("Running");
+  await expect(row(page, work).locator(".status").last()).toHaveText("Running");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
   await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "idle" }));
   await page.clock.runFor(32);
-  await expect(row(page, work).locator(".status")).toHaveText("Ready for Review");
+  await expect(row(page, work).locator(".status").last()).toHaveText("Ready for Review");
   await expect(row(page, work)).toHaveAttribute("aria-selected", "true");
   await expect.poll(() => titles(page)).toEqual([input, result, work, quiet]);
   await expect(page.locator(".inbox-order-line")).toHaveCount(0);
@@ -170,8 +170,8 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
       window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { parentSessionId: "session-review" });
     }, theme);
     const parent = row(page, result);
-    const resultBadge = parent.locator(".status");
-    const answerBadge = row(page, input).locator(".status");
+    const resultBadge = parent.locator(".status").last();
+    const answerBadge = row(page, input).locator(".status").last();
     await expect(resultBadge).toHaveText("Children Working");
     await expect(resultBadge).toHaveClass(/t-info/);
     await expect(answerBadge).toHaveText("Answer Required");
@@ -206,12 +206,13 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await expect(resultBadge).toHaveText("Ready for Review");
     await parent.click({ button: "right" });
     await page.getByRole("menuitem", { name: "Mark Reviewed", exact: true }).click();
-    await expect(resultBadge).toHaveCount(0);
+    await expect(parent.locator(".status")).toHaveText("Awaiting Prompt");
+    await expect(parent.locator(".status.t-review")).toHaveCount(0);
   });
 }
 
 
-for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row update without refresh at ${width}px (#3301, #3302)`, async ({ page }) => {
+for (const width of [1440, 390]) test(`idle priorities and a resumed quiet row update without refresh at ${width}px (#3301, #3302)`, async ({ page }) => {
   await page.setViewportSize({ width, height: 900 });
   await open(page);
   await page.mouse.move(0, 0);
@@ -222,16 +223,15 @@ for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row
       result: { revision: "new-result", at: Date.now(), owner: "human" } } });
   });
   await expect.poll(() => titles(page)).toEqual([input, work, result, quiet]);
-  await expect(row(page, work).locator(".status")).toHaveText("Ready for Review");
+  await expect(row(page, work).locator(".status").last()).toHaveText("Ready for Review");
   await page.evaluate(() => {
     const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
     const old = Date.now() - 700_000;
     fixture.replaceSessionSnapshot("session-working", { status: "input_required", updatedAt: old, lastEventAt: old });
   });
-  // The prior Running observation has a recent anchor. Use a fresh snapshot to reproduce a
-  // session that was already waiting when this client connected, without waiting ten minutes.
+  // A fresh snapshot of an old wait must not infer a failure from transcript silence.
   await page.reload();
-  await expect(row(page, work)).toHaveClass(/stalled/);
+  await expect(row(page, work)).not.toHaveClass(/stalled/);
   await page.evaluate(() => {
     const fixture = window.__WOLLIPOG_PROJECT_INBOX_E2E__;
     const facts = fixture.model().sessions.find((s) => s.id === "session-working")!.attention!;
@@ -239,7 +239,7 @@ for (const width of [1440, 390]) test(`idle priorities and a resumed stalled row
       attention: { ...facts, humanActions: [] }, pendingApproval: null });
   });
   await expect(row(page, work)).not.toHaveClass(/stalled/);
-  await expect(row(page, work).locator(".status")).toHaveText("Running");
+  await expect(row(page, work).locator(".status").last()).toHaveText("Running");
 });
 for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
   test(`background children stay visibly active until their work returns at ${width}px in ${theme} (#3328)`, async ({ page }) => {
@@ -252,7 +252,7 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
       fixture.replaceSessionSnapshot("session-quiet", { parentSessionId: "session-review", status: "completed" });
     }, theme);
     const parent = row(page, result);
-    await expect(parent.locator(".status")).toHaveText("Children Working");
+    await expect(parent.locator(".status").last()).toHaveText("Children Working");
     await expect(parent.locator(".inbox-thread-dot.running")).toHaveCount(1);
     await expect(parent.locator('.inbox-thread-dot[title$="Waiting on External Job"]')).toHaveCount(1);
     await expect(parent.locator(".inbox-thread-family")).toHaveAccessibleName("2 Children · 1 Working");
@@ -260,14 +260,14 @@ for (const width of [1440, 390]) for (const theme of ["dark", "light"]) {
     await expect(row(page, work)).toHaveCount(0);
     await expect(parent.locator(".inbox-thread-working")).toHaveText("1 Working");
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { backgroundWorkState: "continuation_pending" }));
-    await expect(parent.locator(".status")).toHaveText("Children Working");
+    await expect(parent.locator(".status").last()).toHaveText("Children Working");
     await expect(parent.locator('.inbox-thread-dot[title$="Follow-Up Pending"]')).toHaveCount(1);
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { backgroundWorkState: "resumed" }));
-    await expect(parent.locator(".status")).toHaveText("Ready for Review");
+    await expect(parent.locator(".status").last()).toHaveText("Ready for Review");
     await expect(parent.locator(".inbox-thread-working")).toHaveCount(0);
     await expect(parent.locator(".inbox-thread-dot.running")).toHaveCount(0);
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-working", { status: "running" }));
-    await expect(parent.locator(".status")).toHaveText("Children Working");
-    await expect(row(page, input).locator(".status")).toHaveText("Answer Required");
+    await expect(parent.locator(".status").last()).toHaveText("Children Working");
+    await expect(row(page, input).locator(".status").last()).toHaveText("Answer Required");
   });
 }

@@ -189,6 +189,21 @@ jobs:
           echo "the bubblewrap enforcement test must run rather than skip on this job" >&2
           exit 1
 
+      # A provider's TMPDIR must be writable under its real bwrap boundary (#4150), or Codex's inner
+      # sandbox panics on its mount registry lock. The real-Codex variant needs a Codex install, so
+      # this job leaves it out by name rather than skipping it.
+      - name: Verify Provider TMPDIR Inside the Bubblewrap Boundary
+        if: startsWith(matrix.os, 'ubuntu-')
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/configure-ci-bubblewrap.sh
+          output=$(node --import tsx --test --test-reporter=tap --test-skip-pattern='real codex sandbox' apps/runner/src/bwrap-temporary-directory.integration.test.ts < /dev/null)
+          printf '%s\n' "$output"
+          if printf '%s' "$output" | grep -q '^# skipped 0$' && printf '%s' "$output" | grep -q '^# pass 2$'; then exit 0; fi
+          echo "the bubblewrap TMPDIR test must run both cases rather than skip on this job" >&2
+          exit 1
+
       # The injected CLI from inside a sandbox built like Codex's network-off worker sandbox (#3270):
       # real bubblewrap with --unshare-net and an equivalent seccomp filter, in workspace-write and
       # read-only shapes, with proof in the same sandbox that no socket reaches out. The real-Codex

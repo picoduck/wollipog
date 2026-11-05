@@ -177,7 +177,6 @@ function Shell({ connection }: { connection: ActiveInstanceConnection | null }) 
         <Rail
           view={{ name: "inbox" }}
           blockedCount={0}
-          stalledCount={0}
           onNavigate={() => undefined}
           instanceControl={<InstanceSelector labelled={labels} />}
           // The shell's own Settings item and page container, so captures show what production draws.

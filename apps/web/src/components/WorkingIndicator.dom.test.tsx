@@ -44,6 +44,18 @@ const running: ActiveTurnProgress = {
   failedTools: 0,
 };
 
+test("a disconnected turn keeps its last reported progress without live dots", async () => {
+  const view = await mount();
+  try {
+    await act(async () => view.root.render(<WorkingIndicator progress={running} now={62_000} connected={false} />));
+    assertNoDomNode(view.container.querySelector(".working-dots"));
+    assert.equal(view.container.querySelector(".tl-working-state")?.textContent, "Last Reported: Working");
+    assert.match(view.container.querySelector(".tl-working-state")?.getAttribute("title") ?? "", /may be stale/);
+  } finally {
+    await view.unmount();
+  }
+});
+
 async function mount(): Promise<{ container: HTMLDivElement; root: Root; unmount: () => Promise<void> }> {
   const happyContainer = domWindow.document.createElement("div");
   domWindow.document.body.append(happyContainer);

@@ -42,7 +42,23 @@ test("parseClaudeHelp gates flags and enumerated values from the resolved CLI", 
   assert.equal(parsed.forkSession, true);
   assert.equal(parsed.replayUserMessages, true);
   assert.equal(parsed.sessionNaming, true);
+  // Decision calls also need an enforced schema; naming alone does not qualify.
+  assert.equal(parsed.decisionCalls, false);
   assert.equal(parseClaudeHelp("--permission-mode (choices: plan)\n--output-format text").sessionNaming, false);
+});
+
+test("parseClaudeHelp advertises Decision calls only with the naming lockdown and --json-schema", () => {
+  const naming = [
+    "  --output-format <format> text, json, stream-json",
+    "  --permission-mode <mode> (choices: \"plan\")",
+    "  --tools <tools>", "  --safe-mode", "  --strict-mcp-config", "  --mcp-config <config>",
+    "  --setting-sources <sources>", "  --no-session-persistence", "  --disable-slash-commands",
+    "  --no-chrome", "  --system-prompt <prompt>",
+  ];
+  assert.equal(parseClaudeHelp([...naming, "  --json-schema <schema>  JSON Schema"].join("\n")).decisionCalls, true);
+  assert.equal(parseClaudeHelp(naming.join("\n")).decisionCalls, false);
+  assert.equal(parseClaudeHelp([...naming.filter((line) => !line.includes("--tools")), "  --json-schema <schema>"]
+    .join("\n")).decisionCalls, false);
 });
 
 test("same-conversation instruction rebuilding requires an advertised off switch", () => {

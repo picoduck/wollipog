@@ -384,6 +384,7 @@ export type RunnerRequestResult =
   | SteerSessionResultMessage
   | GenerateSessionTitleResultMessage
   | SessionNamingCustomModelResultMessage
+  | import("@wollipog/protocol").RunDecisionResultMessage
   | SessionWorktreeResultMessage
   | WorkspaceWorktreeSetupResultMessage
   | PolicyHookDecisionRecordedMessage
@@ -948,6 +949,7 @@ export class Hub {
         sessionReminders: true,
         indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
+        renameProjectLocations: true,
         orchestratorRole: true,
         sessionRoleConversion: true,
       },

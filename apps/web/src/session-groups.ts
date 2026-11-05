@@ -45,11 +45,10 @@ export function sessionGroupFullName(label: SessionGroupLabel): string {
 }
 
 /**
- * The group's counts in sentence case, for its tooltip: "9 sessions: 1 needs you, 1 stalled,
- * 2 running". Zero parts are left out. The Snoozed view counts snoozed sessions and nothing else.
+ * The group's counts in sentence case, for its tooltip: "9 sessions: 1 needs you, 2 running". Zero parts are left out. The Snoozed view counts snoozed sessions and nothing else.
  */
 export function sessionGroupSummary(
-  split: Pick<InboxSplit, "count" | "blockedCount" | "stalledCount" | "sessions">,
+  split: Pick<InboxSplit, "count" | "blockedCount" | "sessions">,
   snoozed = false,
 ): string {
   const noun = split.count === 1 ? "session" : "sessions";
@@ -58,18 +57,16 @@ export function sessionGroupSummary(
   const running = split.sessions.filter(isInboxRunning).length;
   const parts = [
     split.blockedCount > 0 ? `${split.blockedCount} ${split.blockedCount === 1 ? "needs" : "need"} you` : "",
-    split.stalledCount > 0 ? `${split.stalledCount} stalled` : "",
     running > 0 ? `${running} running` : "",
   ].filter(Boolean);
   return parts.length > 0 ? `${total}: ${parts.join(", ")}` : total;
 }
 
-/** A tab's attention counts in words ("2 Blocked, 1 Stalled"), naming only the nonzero ones. */
+/** A tab's attention counts in words ("2 Blocked"), naming only the nonzero ones. */
 export function sessionGroupAttentionWords(
-  { blockedCount, stalledCount }: Pick<InboxSplit, "blockedCount" | "stalledCount">,
+  { blockedCount }: Pick<InboxSplit, "blockedCount">,
 ): string {
   return [
     blockedCount > 0 ? `${blockedCount} Blocked` : "",
-    stalledCount > 0 ? `${stalledCount} Stalled` : "",
   ].filter(Boolean).join(", ");
 }

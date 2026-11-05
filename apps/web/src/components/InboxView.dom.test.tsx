@@ -269,23 +269,20 @@ test("reminder-filtered Project splits keep Active and Snoozed counts mutually e
     sessions: [blocked, snoozed, ordinary],
     count: 3,
     blockedCount: 1,
-    stalledCount: 2,
   } satisfies InboxSplit;
   const [activeSplit] = filterInboxSplitsForReminderMode(
-    [baseSplit], reminders, "ordinary", new Set([snoozed.id, ordinary.id]),
+    [baseSplit], reminders, "ordinary",
   );
   const [snoozedSplit] = filterInboxSplitsForReminderMode(
-    [baseSplit], reminders, "snoozed", new Set([snoozed.id, ordinary.id]),
+    [baseSplit], reminders, "snoozed",
   );
 
   assert.deepEqual(activeSplit?.sessions.map((candidate) => candidate.id), [ordinary.id]);
   assert.equal(activeSplit?.count, 1);
   assert.equal(activeSplit?.blockedCount, 0, "snoozed attention must not remain in Active aggregates");
-  assert.equal(activeSplit?.stalledCount, 1, "a snoozed stalled row must not remain in Active aggregates");
   assert.deepEqual(snoozedSplit?.sessions.map((candidate) => candidate.id), [blocked.id, snoozed.id]);
   assert.equal(snoozedSplit?.count, 2);
   assert.equal(snoozedSplit?.blockedCount, 1);
-  assert.equal(snoozedSplit?.stalledCount, 1);
 });
 
 function selectedRowTitle(container: HTMLDivElement): string | null {
@@ -671,9 +668,8 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
   }));
   assert.deepEqual(badges, [
     { classes: "count-badge", text: "2", hidden: "true", label: null },
-    { classes: "count-badge danger", text: "1", hidden: "true", label: null },
   ]);
-  assert.equal(accessibleText(alphaTab), "Alpha3, 2 Blocked, 1 Stalled");
+  assert.equal(accessibleText(alphaTab), "Alpha3, 2 Blocked");
 
   const betaTab = tab("Beta");
   assertNoDomNode(betaTab.querySelector(".count-badge"), "a tab with nothing blocked or stalled draws no badge");
@@ -683,7 +679,7 @@ test("group tabs draw blocked and stalled counts as aria-hidden badges and name 
   // #2180: the tablist names what it holds, and the tooltip gives the full name, the breakdown in
   // sentence case and the shortcut. The stalled session is also running.
   assert.equal(alphaTab.closest('[role="tablist"]')?.getAttribute("aria-label"), "Session Groups");
-  assert.equal(alphaTab.title, "Alpha\n3 sessions: 2 need you, 1 stalled, 1 running\nSwitch group (Tab / Shift+Tab)");
+  assert.equal(alphaTab.title, "Alpha\n3 sessions: 2 need you, 1 running\nSwitch group (Tab / Shift+Tab)");
   assert.equal(betaTab.title, "Beta\n1 session\nSwitch group (Tab / Shift+Tab)");
 });
 
@@ -1088,7 +1084,7 @@ for (const mobile of [false, true]) test(`idle ${mobile ? "mobile" : "desktop"} 
   const { container, socket } = await mountOrderingTest();
   await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
   assert.deepEqual(rowTitles(container), ["Session B", "Session A"]);
-  assert.match(container.textContent ?? "", /Input Required/);
+  assert.match(container.textContent ?? "", /Awaiting Input/);
   assert.match(container.querySelector('.inbox-row-shell[aria-selected="true"]')?.textContent ?? "", /Session A/);
   const attention = { version: 1 as const, meaningfulAt: 20, humanActions: [],
     result: { revision: "result-1", at: 50, owner: "human" as const }, acknowledgedRevision: null };
@@ -1114,7 +1110,7 @@ for (const pointerType of ["mouse", "touch"]) test(`an active ${pointerType} pre
   await act(async () => socket.push({ type: "session_upsert", session: session("B", 40, { status: "input_required" }) }));
   await act(async () => tick(5_000));
   assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
-  assert.match(container.textContent ?? "", /Input Required/, "row content still updates during a gesture");
+  assert.match(container.textContent ?? "", /Awaiting Input/, "row content still updates during a gesture");
   await act(async () => pointer("pointerup", pointerType));
   await act(async () => tick(499));
   assert.deepEqual(rowTitles(container), ["Session A", "Session B"]);
@@ -1169,7 +1165,7 @@ test("a resumed session clears the visible stalled badge without a transcript ev
   const { container, socket } = await mountOrderingTest();
   const now = Date.now(), old = now - 700_000;
   await act(async () => socket.push(snapshot([session("A", old, { status: "input_required" })])));
-  assert.ok(container.querySelector('.inbox-row-shell.stalled'));
+  assertNoDomNode(container.querySelector('.inbox-row-shell.stalled'));
   await act(async () => socket.push({ type: "session_upsert", session: session("A", old, { status: "running", updatedAt: now }) }));
   assertNoDomNode(container.querySelector('.inbox-row-shell.stalled'));
   assert.match(container.textContent ?? "", /Running/);
@@ -3455,16 +3451,16 @@ test("on a phone one 48px app bar replaces the page header, its action row and t
   assert.equal(title.getAttribute("tabindex"), "-1");
 
   // The picker is the bar's title: the group, a caret and the attention badges, said in words.
-  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked, 1 Stalled");
+  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked");
   assert.equal(picker().getAttribute("aria-haspopup"), "menu");
   assert.deepEqual([...picker().querySelectorAll(".count-badge")].map((badge) => [badge.textContent, badge.getAttribute("aria-hidden")]),
-    [["2", "true"], ["1", "true"]]);
+    [["2", "true"]]);
 
   await act(async () => { picker().click(); });
   const groups = sheet("Session Groups")!;
   assert.equal(groups.querySelector(".menu-head")?.textContent, "Session Groups");
   assert.deepEqual([...groups.querySelectorAll('[role="menuitemradio"]')].map((row) => row.getAttribute("aria-label")),
-    ["All, 4, 2 Blocked, 1 Stalled", "Alpha, 3, 2 Blocked, 1 Stalled", "Beta, 1", "No Project, 0"]);
+    ["All, 4, 2 Blocked", "Alpha, 3, 2 Blocked", "Beta, 1", "No Project, 0"]);
   await act(async () => { [...groups.querySelectorAll<HTMLButtonElement>('[role="menuitemradio"]')][2]!.click(); });
   assertNoDomNode(sheet("Session Groups"), "choosing a group closes the sheet");
   assert.equal(picker().getAttribute("aria-label"), "Beta", "a group with nothing waiting adds no words");
@@ -3477,7 +3473,7 @@ test("on a phone one 48px app bar replaces the page header, its action row and t
   await act(async () => { create.click(); });
   assert.deepEqual(presets.at(-1), { projectId: "beta" });
   await chooseGroup("Alpha");
-  assert.equal(picker().getAttribute("aria-label"), "Alpha, 2 Blocked, 1 Stalled");
+  assert.equal(picker().getAttribute("aria-label"), "Alpha, 2 Blocked");
 });
 
 test("the phone ⋯ sheet lists View, Show, New Project… and the current project's actions in that order (#2211)", async () => {
@@ -3522,7 +3518,7 @@ test("the phone ⋯ sheet lists View, Show, New Project… and the current proje
   assert.deepEqual(rowTitles(container), ["Plan the offsite"]);
   await act(async () => { [...strip.querySelectorAll<HTMLButtonElement>("button")].find((button) => button.textContent === "Show Active")!.click(); });
   assertNoDomNode(bar().querySelector(".sessions-snoozed-strip"), "Show Active removes the strip");
-  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked, 1 Stalled");
+  assert.equal(picker().getAttribute("aria-label"), "All, 2 Blocked");
   assert.equal(domWindow.document.activeElement, picker());
   assert.equal(rowTitles(container).length, 4);
 });
