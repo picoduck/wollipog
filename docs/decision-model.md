@@ -133,6 +133,33 @@ typed, person-owned request, so no second one is created. `follow_up_relatedness
 besides `scope_grant` that reads the owner's message (the boundary objective). See
 `docs/campaign-issue-scope.md` for where each check sits.
 
+## First-Message Intent (#4104)
+
+No verb list decides what a first message asks for. The `DIRECTIVE`, `BACKGROUND` and `NEGATION`
+classification (#3920) is removed. Under Full Control, the scope grant above is the only source of
+scope and context references. `issueReferenceSpans` remains only as the exact-reference fast path
+and the reference bounds; the digit-string floor is `writtenAsDigits` in `scope-grant.ts`. The #3920
+and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.test.ts`.
+
+### Custom Epic Seed (`issue_scope_seed`, #4104)
+
+A Custom campaign's epic seed uses the same `scope_grant` reading in place of the
+`initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
+person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
+
+Its outcome:
+
+- Only a reading that names exactly one issue can seed it.
+- The same floors apply (`scopeGrantCandidates`, against the repository the runner reports).
+- The runner must read members for that issue: sub-issues or checklist members.
+
+A failed or uncertain reading, or one the floors or the runner cannot confirm, falls back to today's
+Custom human scope approval with no seed. It never falls back to parsing the text. That is the
+typed, person-owned request: the owner approves a scope, or chooses **Continue Without an Epic**.
+The occurrence is recorded with the `issue_scope_seed` subject, so Campaign Status shows the reading
+under Decision Model Checks as **Epic Seed**, with the seed's state. See
+`docs/campaign-issue-scope.md` for the states.
+
 ## Audit and Usage
 
 `decision_occurrences` records the kind, prompt version, resolved target (runner, harness, model and

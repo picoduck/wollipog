@@ -416,7 +416,10 @@ test("the background pass reads only unfinished items' pull requests that are du
     const runner = fakeRunner((message) => ({
       ok: true,
       results: message.pullRequests.map((ref) => ({ ref, ok: true as const,
-        observation: ref.number === 1 ? observation({ state: "merged", mergeQueue: null }) : observation() })),
+        // A current runner's merged answer reports its head branch, here already deleted (#4145).
+        observation: ref.number === 1
+          ? observation({ state: "merged", mergeQueue: null, headBranch: { name: "agent/done", tipSha: null }, crossRepository: false })
+          : observation() })),
     }));
     const forge = observer(fixture, runner, { now: () => now });
     await forge.backgroundPass();

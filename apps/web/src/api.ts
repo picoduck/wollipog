@@ -1190,6 +1190,13 @@ export function createApiClient(transport: ApiTransport) {
       method: "POST",
       body: JSON.stringify({ acceptedFollowUps, expectedRevision }),
     }),
+  /** Authenticated Human-only change to a Full Control scope grant's selection count (#4102).
+   * Compare-and-set on the campaign's policy revision. */
+  setScopeGrantSelectionCount: (id: string, count: number, expectedRevision: number) =>
+    req<SessionView>(`/api/sessions/${encodeURIComponent(id)}/orchestrator-campaign/scope-grant/selection-count`, {
+      method: "POST",
+      body: JSON.stringify({ count, expectedRevision }),
+    }),
   /** The campaign owner's Include in Campaign of a Project Location someone else added (#4117).
    * The server inspects the Location first; a failing one is listed as excluded instead. */
   includeCampaignLocation: (id: string, locationId: string) =>
@@ -1632,15 +1639,25 @@ export function createApiClient(transport: ApiTransport) {
       `/api/sessions/${encodeURIComponent(sessionId)}/file?${new URLSearchParams({ path }).toString()}`,
     ),
 
-  /** `match` is echoed only when the runner and control plane applied it (#1263). */
-  searchWorkspaceReferences: (sessionId: string, query: string, match?: WorkspaceReferenceSearchMatch) =>
+  /** `match` is echoed only when the runner and control plane applied it (#1263). The composer's
+   * `"fuzzy_with_directories"` (#4129) asks for folders too and is echoed as `match: "fuzzy"` with
+   * `fuzzyWithDirectories`; older components answer it with substring results. */
+  searchWorkspaceReferences: (
+    sessionId: string,
+    query: string,
+    mode?: WorkspaceReferenceSearchMatch | "fuzzy_with_directories",
+  ) =>
     req<{
       results: WorkspaceReferenceCandidate[];
       truncated: boolean;
       match?: WorkspaceReferenceSearchMatch;
+      fuzzyWithDirectories?: boolean;
       limit?: WorkspaceReferenceSearchLimit;
     }>(
-      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({ q: query, ...(match ? { match } : {}) }).toString()}`,
+      `/api/sessions/${encodeURIComponent(sessionId)}/workspace-references/search?${new URLSearchParams({
+        q: query,
+        ...(mode === "fuzzy_with_directories" ? { fuzzyWithDirectories: "true" } : mode ? { match: mode } : {}),
+      }).toString()}`,
     ),
 
   createWorkspaceReference: (sessionId: string, target: CreateWorkspaceReferenceRequest) =>

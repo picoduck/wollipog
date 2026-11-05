@@ -113,9 +113,9 @@ export function firstMessageLaunch(request: Pick<FullControlLaunchRequest, "task
 }
 
 /** Issue references in the owner's first message that name the campaign's own repository (see
- * `issueReferenceSpans`), distinct and bounded. These are candidates only: since #3920 only those
- * `firstMessageIssueIntent` finds the message asking to act on become scope, and the runner still
- * verifies each one is an issue of the repository before it enters the scope. */
+ * `issueReferenceSpans`), distinct and bounded. These are the scope grant's fast path only: only
+ * what the Decision Model's grant names becomes scope (#4102, #4104), and the runner still verifies
+ * each one is an issue of the repository before it enters the scope. */
 export function issueReferencesInMessage(text: string, repository: string): number[] {
   return [...new Set(issueReferenceSpans(text, repository).map((r) => r.number))].sort((a, b) => a - b).slice(0, MAX_MESSAGE_ISSUES);
 }

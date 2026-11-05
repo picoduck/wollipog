@@ -12,6 +12,7 @@ import {
   lineCountLabel,
   markSegments,
   parentPath,
+  rankFuzzyWorkspacePaths,
   rankGoToFileResults,
   resolveSourceTarget,
   sourceLines,
@@ -269,4 +270,17 @@ test("Go to File adds matching priority files only when the runner's answer was 
     "deep/nested/session-store.ts",
     "src/session-list.ts",
   ], "a cut answer gains the changed or recent file that matches, first; folders and non-matches stay out");
+});
+
+test("the @ picker ranks a fuzzy answer's files and folders by the Go to File scorer (#4129)", () => {
+  const results = [
+    { path: "apps/web/src/components/CheckBadge.tsx", isDirectory: false },
+    { path: "docs/unrelated.md", isDirectory: false },
+    { path: "apps/web/src/components/SessionDetail.tsx", isDirectory: false },
+    { path: "docs/sdtsx-notes", isDirectory: true },
+  ];
+  assert.deepEqual(rankFuzzyWorkspacePaths(results, "sdtsx"), [results[3], results[2], results[0]],
+    "folders stay in; a scattered match ranks last and a path without the letters drops out");
+  const ties = [{ path: "src/b-item", isDirectory: true }, { path: "src/a-item", isDirectory: false }];
+  assert.deepEqual(rankFuzzyWorkspacePaths(ties, "item"), ties, "equal matches keep the runner's order");
 });

@@ -43,6 +43,21 @@ test("@ rows show an icon, the name before its folder, and the match underlined,
   await expect(long.locator(".picker-name mark")).toHaveText("session");
 });
 
+test("fuzzy @ rows list folders, best first, with every matched character underlined (#4129)", async ({ page }) => {
+  await page.goto("/workspace-references-e2e.html?state=after&theme=dark&q=sdtsx");
+  const best = page.getByRole("option").first();
+  await expect(best).toHaveAccessibleName("apps/web/src/components/SessionDetail.tsx");
+  await expect(best.locator(".picker-name mark")).toHaveText(["S", "D", "tsx"]);
+  await expect(page.getByRole("option", { name: "apps/web/src/components/CheckBadge.tsx" })).toBeVisible();
+
+  await page.goto("/workspace-references-e2e.html?state=after&theme=dark&q=webcomp&cap=entries");
+  const folder = page.getByRole("option").first();
+  await expect(folder).toHaveAccessibleName("apps/web/src/components");
+  await expect(folder.locator(".picker-name mark")).toHaveText("comp");
+  await expect(page.locator(".picker-foot .picker-note"))
+    .toHaveText("The workspace is too large to search in full, so some matches may be missing.");
+});
+
 test("the @ picker's states each say one plain thing", async ({ page }) => {
   const open = async (state: string) => {
     await page.goto(`/workspace-references-e2e.html?state=after&theme=dark&picker=${state}`);

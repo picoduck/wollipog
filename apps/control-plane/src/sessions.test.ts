@@ -96,6 +96,15 @@ import {
   type PreStagedDeliveryPlan,
 } from "./sessions.js";
 import { RunnerFrameQueue } from "./runner-frame-queue.js";
+import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS } from "./credential-screen-test-fixture.js";
+import { EMPTY_GRANT } from "./scope-grant-test-fixture.js";
+
+/** A Decision Model that reads a Custom campaign's first message as naming epic #123 (#4104). */
+function epicSeedReading(db: ControlPlaneDb) {
+  return fakeDecisionRuntime(db, (message) => fakeDecisionKind(message) === "scope_grant"
+    ? { verdict: "grant", fields: { ...EMPTY_GRANT, explicit: [{ repository: "", number: 123 }] } }
+    : { verdict: HEALTHY_VERDICTS[fakeDecisionKind(message)]! }).runtime;
+}
 
 /** A runner capability refusal: the exact sentence, with the versions beside it and never in it. */
 function assertRunnerRefusal(
@@ -6855,6 +6864,51 @@ test("Guardian-direct merge receipts consume once and fail closed across every c
       assert.equal(svc.governanceAudit(child.id).filter((entry) =>
         entry.requestId === requested.decision.occurrenceId && entry.outcome === "consumed").length, 1,
       "a later Guardian event cannot double-consume the existing requestApproval path");
+    } finally { db.close(); }
+  });
+
+  await t.test("a refused runner admission names its cause and leaves the approval consumable (#4054)", async () => {
+    const { db, hub, svc, child, arm } = setup();
+    try {
+      const accept = hub.requestHandler!;
+      hub.requestHandler = (message) => {
+        assert.equal(message.type, "record_workflow_action_admission");
+        const request = message as Extract<ControlPlaneToRunner, { type: "record_workflow_action_admission" }>;
+        return {
+          type: "workflow_action_admission_recorded",
+          requestId: request.requestId,
+          sessionId: request.sessionId,
+          occurrenceId: request.occurrenceId,
+          accepted: false,
+          error: "Codex has not confirmed a provider turn for the current turn",
+        };
+      };
+      const refused = await arm(1150, 409);
+      assert.equal(refused.armed.error, "The runner could not arm this App Server action: Codex has not " +
+        "confirmed a provider turn for the current turn. Nothing was armed and the approval is still approved, " +
+        "so consume it again. If the refusal repeats, finish this turn and consume the approval in the " +
+        "session's next turn; stopping the session would revoke it.");
+      const held = db.workflowDecisionByOccurrence(refused.decision.occurrenceId);
+      assert.equal(held?.status, "approved", "a refused admission revokes nothing");
+      assert.equal(held?.actionAdmission, undefined, "a refused admission arms nothing");
+
+      hub.requestHandler = () => { throw new Error("runner did not respond in time"); };
+      const offline = await svc.consumeWorkflowDecision(child.id, refused.decision.occurrenceId, {
+        resourceSnapshot: refused.snapshot,
+        action: { kind: "pr_merge_enqueue", command: refused.command },
+      });
+      assert.equal(offline.status, 409);
+      assert.match(offline.error ?? "", /^The runner could not arm this App Server action\. Nothing was armed/u,
+        "an unclassified transport failure still names the recovery without inventing a cause");
+
+      hub.requestHandler = accept;
+      const retried = await svc.consumeWorkflowDecision(child.id, refused.decision.occurrenceId, {
+        resourceSnapshot: refused.snapshot,
+        action: { kind: "pr_merge_enqueue", command: refused.command },
+      });
+      assert.equal(retried.status, 200, retried.error);
+      assert.equal(db.workflowDecisionByOccurrence(refused.decision.occurrenceId)?.actionAdmission?.providerTurnId,
+        "provider-session-turn-1", "the same approval arms once the runner confirms the provider turn");
     } finally { db.close(); }
   });
 
@@ -30439,6 +30493,7 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       models: [], effortLevels: [], slashCommands: [], supportsImages: false, supportsApprovals: true, permissionModes: ["default", "orchestrator"],
     };
     db.registerRunner(meta, Date.now(), PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30457,7 +30512,10 @@ test("human campaign scope recovery, additions, denial, removal and closure use 
       }
       throw new Error("unexpected fixture command");
     };
-    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123,"the proposal seed is stored before any runner echo");
+    // The seed is pending from creation, before any runner echo; the Decision Model's reading then names the epic (#4104).
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeSeed!.state,"pending","the seed is held before any runner echo");
+    await svc.campaignIssueScopeSeedSettled(id);
+    assert.equal(db.getSession(id)!.orchestratorPolicy!.issueScopeProposalEpic,123);
     const beforeScopeChild = svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:AGENT_ID,prompt:"Fix issue 124.",config:{}},undefined,undefined,false,false,false,{parentSessionId:id});
     assert.equal(beforeScopeChild.ok,false,"epic delegation requires confirmed issue scope");
     assert.match(beforeScopeChild.error!,/Confirm the epic/);
@@ -30639,6 +30697,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
     meta.agents.find((a)=>a.id==="test-orchestrator")!.capabilities={models:[],effortLevels:[],slashCommands:[],supportsImages:false,supportsApprovals:true,permissionModes:["default","orchestrator"]};
     db.registerRunner(meta,Date.now(),PROTOCOL_VERSION);
     const decisions={implementation_question:"human",pr_merge:"human",merged_branch_deletion:"human",follow_up_issue_publication:"human",ui_evidence_approval:"human"} as const;
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created=svc.createSession({runnerId:RUNNER_ID,workspaceId:WORKSPACE_ID,agentId:"test-orchestrator",config:{permissionMode:"orchestrator"},prompt:"Orchestrate epic #123.",orchestrator:{delegation:{parentControl:"off",decisions}}},undefined,undefined,false,false,false,{defaultOwnerUserId:"owner"});
     assert.ok(created.ok && created.data,created.error);
     const id=created.data.id;
@@ -30650,6 +30709,7 @@ test("human-only campaigns can confirm scope and separately approve closure with
       if(m.type==="github_issue_closure") return {type:"github_issue_closure_result",requestId:m.requestId,sessionId:m.sessionId,ok:true,inspection:{repository:"team/repo",issue:123,title:"Epic",url:"https://github.com/team/repo/issues/123",state:"OPEN",forgeDigest:"a".repeat(64),openPullRequests:[]}};
       throw new Error("unexpected command");
     };
+    await svc.campaignIssueScopeSeedSettled(id);
     const proposed=await svc.proposeCampaignIssueScope(id,{requestId:"confirm",expectedRevision:0,additions:[{repository:"team/repo",number:123}],removals:[],explanation:"Include epic"});
     assert.ok(proposed.ok && proposed.data,proposed.error);
     assert.equal(proposed.data.authority,"human");
@@ -30732,6 +30792,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
     const register = (version: number) => db.registerRunner(meta, Date.now(), version);
     const previous = RUNNER_CAPABILITY_MIN_PROTOCOL.gitlabCampaignIssues - 1;
     register(PROTOCOL_VERSION);
+    svc.setDecisionRuntime(epicSeedReading(db));
     const created = svc.createSession({ runnerId: RUNNER_ID, workspaceId: WORKSPACE_ID, agentId: "test-orchestrator",
       config: { permissionMode: "orchestrator" }, prompt: "Orchestrate epic #123." }, undefined, undefined, false, false, false, { defaultOwnerUserId: "owner" });
     assert.ok(created.ok && created.data, created.error);
@@ -30752,6 +30813,7 @@ test("GitLab campaign scope and issue closure require a v249 runner and then rea
       }
       throw new Error("unexpected fixture command");
     };
+    await svc.campaignIssueScopeSeedSettled(id);
     const current = await svc.campaignIssueScope(id);
     assert.ok(current.ok && current.data, current.error);
     assert.equal(current.data.repository, repository);

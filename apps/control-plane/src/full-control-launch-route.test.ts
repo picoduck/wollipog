@@ -1173,10 +1173,13 @@ test("a Full Control launch with no task starts idle, and its owner's first mess
 
     f.issues.notIssues.add(3); // A pull request: GitHub does not read it as an issue.
     // Only references the message asks the campaign to act on become scope (#3920): background and
-    // negated ones are verified the same way and kept as context, with no authority.
+    // negated ones are verified the same way and kept as context, with no authority. The Decision
+    // Model reads which is which (#4104); this is the reading a healthy model gives.
     const text = "Ship #12 and owner/repo#7.\nAlso fix https://github.com/owner/repo/issues/9, but not other/repo#5,\n" +
       "https://github.com/owner/repo/pull/8 or https://github.com/other/repo/issues/6; #3 was the earlier pull request.\n" +
       "See #20 for background, and don't touch #21 (another campaign has it).";
+    f.decision.state.answer = () => grantVerdict({ explicit: [...issues(12, 9), { repository: "owner/repo", number: 7 }],
+      context: [...issues(3, 20, 21), { repository: "other/repo", number: 5 }] });
     const before = f.sent.length;
     const result = await f.sessions.promptFromHuman(f.human, id, text);
     assert.equal(result.ok, true, result.error ?? "the first message was delivered");
@@ -1239,6 +1242,8 @@ test("a first message's background reference gets no scope or epic; Campaign Sta
     const text = "Use the orchestrate-issues skill to fix the decision-lifecycle findings in owner/repo: #31, #32 and #33. " +
       "Each issue specifies its acceptance criteria. Commands: the command guard refuses heredocs and pipelines that name " +
       "the state directory (#90). The acceptance test for #91 is handled elsewhere.";
+    // The Decision Model reads which references the message asks for (#4104); the test scripts that reading.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(31, 32, 33), context: issues(90, 91) });
     assert.equal((await f.sessions.promptFromHuman(f.human, id, text)).ok, true);
     let root = f.db.getSession(id)!;
     assert.deepEqual(root.orchestratorPolicy!.issueScope!.issueNumbers, [31, 32, 33]);
@@ -1321,6 +1326,7 @@ test("a first message's range scopes each verified issue, and a derived limit le
 
     // An issue in a range that is not an issue of the repository drops out like any unverified reference.
     f.issues.notIssues.add(52);
+    f.decision.state.answer = () => grantVerdict({ ranges: [{ repository: "", first: 51, last: 54 }], context: issues(55, 56) });
     const { id: ranged } = await firstMessageLaunch(f, server);
     assert.equal((await f.sessions.promptFromHuman(f.human, ranged, "Fix #51 through #54. See #55..#56.")).ok, true);
     assert.deepEqual(f.db.getSession(ranged)!.orchestratorPolicy!.issueScope!.issueNumbers, [51, 53, 54]);
@@ -1533,6 +1539,38 @@ for (const [name, answer, attempts, expected] of [
   });
 }
 
+test("a transient Decision failure that succeeds on retry grants the first message's scope with no owner request (#4104)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = (_text, attempt) => attempt === 1 ? { ok: false, errorClass: "rate_limited" } : grantVerdict({ explicit: issues(12) });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12. See #20.")).ok, true);
+    assert.equal(f.decision.calls.length, 2, "one retry");
+    const grant = grantOf(f, id);
+    assert.equal(grant.status, "granted");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+    assert.equal(f.db.getDecisionOccurrence(grant.occurrenceId!)!.humanRequestId, null, "nobody is asked");
+    assert.equal(f.db.unconsumedWorkflowDecisionsForController(id).length, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("the same first message sent twice at once is read once: one occurrence and one verdict (#4104)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    const { id } = await firstMessageLaunch(f, server);
+    const text = "Fix #12.";
+    const results = await Promise.all([f.sessions.promptFromHuman(f.human, id, text), f.sessions.promptFromHuman(f.human, id, text)]);
+    assert.ok(results.some((result) => result.ok), results.map((result) => result.error).join("; "));
+    const occurrences = f.db.listCampaignDecisionOccurrences(id).filter((occurrence) => occurrence.kind === "scope_grant");
+    assert.equal(occurrences.length, 1, "a duplicate joins the same occurrence");
+    assert.equal(occurrences[0]!.state, "decided");
+    assert.equal(f.decision.calls.length, 1, "one verdict is recorded, never two");
+    assert.deepEqual(f.db.getSession(id)!.orchestratorPolicy!.issueScope!.issueNumbers, [12]);
+  } finally { await server.close(); f.db.close(); }
+});
+
 test("after a failed grant, reauthorizing with an explicit Maximum Issues ends the owner's approval growing the limit (#4102 review)", async () => {
   const f = fixture();
   const { server } = await app(f);
@@ -1593,6 +1631,118 @@ test("a runner or harness that cannot host Decision calls takes the failure rout
     assert.equal((await f.sessions.promptFromHuman(f.human, bare, "Fix #12")).ok, true);
     assert.deepEqual(f.db.getSession(bare)!.orchestratorPolicy!.issueScope!.issueNumbers, []);
     assert.deepEqual({ status: grantOf(f, bare).status, failureClass: grantOf(f, bare).failureClass }, { status: "failed", failureClass: "configuration" });
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("the owner changes a defaulted selection count in Campaign Status: compare-and-set, re-minting a derived Maximum Issues by the change (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 4, "three defaulted plus one derived follow-up");
+    const revision = () => f.db.getSession(id)!.parentControlPolicy!.revision;
+    // An outstanding decision is withdrawn by the re-authorization, as any boundary change does.
+    const asked = f.sessions.createWorkflowDecision(id, { requestId: "count-question", resourceKey: "count-question", resourceSnapshot: {
+      category: "implementation_question", question: "Which parser should the campaign use?",
+      options: [{ optionId: "a", label: "The existing one" }, { optionId: "b", label: "A new one" }] } });
+    assert.equal(asked.ok, true, asked.error ?? "");
+
+    const raised = f.sessions.setScopeGrantSelectionCount(id, { count: 5, expectedRevision: revision() }, f.human);
+    assert.equal(raised.ok, true, raised.error ?? "");
+    assert.deepEqual(grantOf(f, id).selection, { repository: "owner/repo", count: 5, defaulted: false, setByOwner: true,
+      criteria: "highest priority", constraints: [] });
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 6, "the derived limit moves by exactly the change");
+    assert.equal(grantOf(f, id).ceilings.maxIssues, 6);
+    assert.equal(boundaryOf(f, id).authorizedByUserId, f.human.userId);
+    assert.equal(campaignBoundaryCurrent(f.db.getSession(id)!), true);
+    assert.equal(f.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.status, "revoked");
+    assert.equal((await f.sessions.campaignIssueScope(id)).data!.scopeGrant!.selection!.count, 5, "Campaign Status reads the new count");
+
+    // Compare-and-set: a stale revision changes nothing.
+    const stale = f.sessions.setScopeGrantSelectionCount(id, { count: 7, expectedRevision: revision() - 1 }, f.human);
+    assert.equal(stale.ok, false);
+    assert.equal(stale.status, 409);
+    assert.equal(grantOf(f, id).selection!.count, 5);
+
+    // Lowering narrows the derived limit too, never below 1.
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 1, expectedRevision: revision() }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 2);
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 0, expectedRevision: revision() }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 1);
+
+    // Bounded: no more than the 100-issue ceiling leaves, no malformed request, and only the owner.
+    const tooMany = f.sessions.setScopeGrantSelectionCount(id, { count: 100, expectedRevision: revision() }, f.human);
+    assert.equal(tooMany.status, 400);
+    assert.match(tooMany.error ?? "", /from 0 to 99/u);
+    for (const body of [{ count: -1 }, { count: 2.5 }, { count: 101 }, { count: 2, extra: true }] as const) {
+      assert.equal(f.sessions.setScopeGrantSelectionCount(id, { ...body, expectedRevision: revision() } as never, f.human).status, 400);
+    }
+    const other: HumanPrincipal = { ...f.human, userId: "someone-else", actorId: "someone-else" };
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 3, expectedRevision: revision() }, other).status, 404);
+    assert.equal(grantOf(f, id).selection!.count, 0);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("an explicit Maximum Issues never grows when the owner changes the selection count, and a grant without a selection has no count (#4102)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13), selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server, { issues: { maxIssues: 4 } });
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix #12 and #13 and the highest-priority issues.")).ok, true);
+    assert.equal(grantOf(f, id).selection!.count, 2, "capped by the explicit limit");
+    const revision = () => f.db.getSession(id)!.parentControlPolicy!.revision;
+    const over = f.sessions.setScopeGrantSelectionCount(id, { count: 3, expectedRevision: revision() }, f.human);
+    assert.equal(over.status, 400);
+    assert.match(over.error ?? "", /from 0 to 2: the Maximum Issues you set \(4\) never grows/u);
+    // Campaign Status reads the ceiling the current authorization holds.
+    assert.deepEqual((({ maxIssues, maxIssuesSource }) => ({ maxIssues, maxIssuesSource }))((await f.sessions.campaignIssueScope(id)).data!.scopeGrant!.ceilings),
+      { maxIssues: 4, maxIssuesSource: "explicit" });
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 1, expectedRevision: revision() }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 4, "an explicit limit never moves");
+    assert.deepEqual(grantOf(f, id).selection, { repository: "owner/repo", count: 1, defaulted: false, setByOwner: true,
+      criteria: "highest priority", constraints: [] });
+
+    // Named issues only, or a failed grant: there is no selection count to change.
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12) });
+    const { id: named } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, named, "Fix #12")).ok, true);
+    const none = f.sessions.setScopeGrantSelectionCount(named, { count: 3, expectedRevision: f.db.getSession(named)!.parentControlPolicy!.revision }, f.human);
+    assert.equal(none.status, 409);
+    assert.match(none.error ?? "", /no selection count to change/u);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("after a reauthorization sets Maximum Issues explicitly, Campaign Status shows it as set and the selection count no longer moves it (#4102 review)", async () => {
+  const f = fixture();
+  const { server } = await app(f);
+  try {
+    f.decision.state.answer = () => grantVerdict({ selectionRequested: true, selectionCriteria: "highest priority" });
+    const { id } = await firstMessageLaunch(f, server);
+    assert.equal((await f.sessions.promptFromHuman(f.human, id, "Fix the highest-priority issues")).ok, true);
+    let view = (await f.sessions.campaignIssueScope(id)).data!;
+    assert.equal(view.scopeGrant!.ceilings.maxIssuesSource, "derived");
+    assert.equal(view.policyRevision, f.db.getSession(id)!.parentControlPolicy!.revision, "the view names the revision it was read at");
+    f.db.updateSessionStatus(id, "idle", Date.now());
+    const payload = { overrides: { issues: { maxIssues: 5 } } };
+    const checked = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control/preflight`,
+      headers: { authorization: "Bearer human" }, payload });
+    assert.equal(checked.statusCode, 200, checked.body);
+    const { preflight: reviewed, expectedRevision } = checked.json() as { preflight: CampaignLaunchPreflight; expectedRevision: number };
+    const reauthorized = await server.inject({ method: "POST", url: `/api/sessions/${id}/orchestrator-campaign/full-control`,
+      headers: { authorization: "Bearer human" }, payload: { ...payload, expectedRevision, preflightDigest: reviewed.digest } });
+    assert.equal(reauthorized.statusCode, 200, reauthorized.body);
+    view = (await f.sessions.campaignIssueScope(id)).data!;
+    assert.deepEqual((({ maxIssues, maxIssuesSource }) => ({ maxIssues, maxIssuesSource }))(view.scopeGrant!.ceilings),
+      { maxIssues: 5, maxIssuesSource: "explicit" }, "the current authorization's ceiling, as set");
+    assert.equal(view.policyRevision, f.db.getSession(id)!.parentControlPolicy!.revision);
+    const over = f.sessions.setScopeGrantSelectionCount(id, { count: 6, expectedRevision: view.policyRevision! }, f.human);
+    assert.equal(over.status, 400);
+    assert.match(over.error ?? "", /from 0 to 5: the Maximum Issues you set \(5\) never grows/u);
+    assert.equal(f.sessions.setScopeGrantSelectionCount(id, { count: 4, expectedRevision: view.policyRevision! }, f.human).ok, true);
+    assert.equal(boundaryOf(f, id).issueAuthority!.maxIssues, 5, "an explicit limit never moves");
   } finally { await server.close(); f.db.close(); }
 });
 
@@ -2432,6 +2582,7 @@ test("context-only references stay disjoint from the scope, survive delivery, an
 
     // Through the real path: the explicit limit of one keeps #13 out of scope, so it is context with #14.
     const next = "Fix #12 and #13. See #14.";
+    f.decision.state.answer = () => grantVerdict({ explicit: issues(12, 13), context: issues(14) });
     assert.equal((await f.sessions.promptFromHuman(f.human, id, next)).ok, true);
     const policy = f.db.getSession(id)!.orchestratorPolicy!;
     assert.deepEqual(policy.issueScope!.issueNumbers, [12]);

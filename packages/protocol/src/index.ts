@@ -3040,8 +3040,11 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** A Custom campaign's repositories (#4117): its own Location's repository first, then those its
    * owner approved adding. Full Control keeps them in its authority boundary instead. */
   repositories?: import("./campaign-authority.js").CampaignBoundaryRepository[];
-  /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
+  /** The epic a Custom campaign's first message names, once its seed (below) found one; a proposal
+   * seed, never authority. */
   issueScopeProposalEpic?: number;
+  /** A Custom campaign's epic seed, read from its first message by the Decision Model (#4104). */
+  issueScopeSeed?: CampaignIssueScopeSeed;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
   issueNumbers?: number[];
   issueScope?: CampaignIssueScope;
@@ -3096,6 +3099,8 @@ export interface ScopeGrantSelection {
   /** The count the message stated, when it stated one. */
   requestedCount?: number;
   capped?: true;
+  /** The owner set `count` in Campaign Status (#4102), replacing the extracted or defaulted one. */
+  setByOwner?: true;
   criteria: string;
   constraints: string[];
 }
@@ -5273,6 +5278,22 @@ export interface WorkflowDecisionOption {
 }
 
 /** Authority is independent of ledger membership. Revision zero denotes a legacy initial scope. */
+/**
+ * A Custom campaign's epic seed (#4104). A first message that writes a digit string but names no
+ * explicit issue list is read by the Decision Model's `scope_grant` kind after the session starts.
+ * `pending` holds delegation until that reading settles. `seeded`: the reading named exactly one
+ * issue that the runner verified has members, now `issueScopeProposalEpic`, and the person approves
+ * the scope as before. `none`: it named no epic, so nothing is held. `owner`: the reading failed or
+ * was uncertain, so the person approves the scope with no seed. Nothing is ever parsed from the
+ * text instead, and no state grants anything.
+ */
+export interface CampaignIssueScopeSeed {
+  state: "pending" | "seeded" | "none" | "owner";
+  /** SHA-256 of the exact first message the seed reads. */
+  messageDigest: string;
+  occurrenceId?: string;
+}
+
 export interface CampaignIssueScope {
   repository: string;
   issueNumbers: number[];
@@ -5383,6 +5404,14 @@ export interface SetCampaignFollowUpLimitRequest {
   expectedRevision: number;
 }
 
+/** The owner's change to how many issues a Full Control scope grant's selection may admit (#4102).
+ * Compare-and-set on the campaign's policy revision. A derived Maximum Issues moves with it; an
+ * explicit Maximum Issues never grows, so the count stays within what it leaves after the named issues. */
+export interface SetScopeGrantSelectionCountRequest {
+  count: number;
+  expectedRevision: number;
+}
+
 export interface CampaignIssueScopeView {
   campaignSessionId: string;
   repository: string;
@@ -5399,8 +5428,13 @@ export interface CampaignIssueScopeView {
   /** Issues a Full Control first message referenced only as context (#3920), less the current
    * scope. They carry no authority; adding one goes through scope review. */
   contextIssueNumbers?: number[];
-  /** The scope grant the owner's first message established (#4102), for Campaign Status. */
+  /** The scope grant the owner's first message established (#4102), for Campaign Status. Its
+   * ceilings are the current authorization's: `maxIssuesSource` is `derived` only while that
+   * authorization still derives Maximum Issues. */
   scopeGrant?: FullControlScopeGrant;
+  /** With `scopeGrant`: the policy revision this view was read at. A selection count change is
+   * compare-and-set against it, so a change made from a stale view is refused. */
+  policyRevision?: number;
   /** True when the view is the saved scope because the campaign runner is disconnected (#2664).
    * Campaign Status polls while it is set, so a mounted panel recovers after reconnection. */
   runnerDisconnected?: boolean;
@@ -7484,11 +7518,17 @@ export interface DecisionModelTestResult {
 export interface CampaignDecisionSubject {
   /** The session whose request was screened. */
   sessionId: string;
-  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure";
+  surface: "implementation_question" | "provider_question" | "tool_request" | "owner_decision" | "follow_up_publication" | "issue_closure" |
+    "issue_scope_seed";
   /** The affected request: a workflow decision request id, or a provider request occurrence id. */
   requestId: string;
-  /** The owner's classification of an uncertain or failed screen. */
+  /** The owner's classification of an uncertain or failed screen. For an epic seed, `orchestrator`
+   * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
+  /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current
+   * reading, or `scoped` once the person approved a scope, which ends any hold the seed placed.
+   * Server-derived for Campaign Status; never stored on the subject. */
+  seed?: CampaignIssueScopeSeed["state"] | "scoped";
 }
 
 /** Owner classification of a question the Decision Model could not screen (#4104). It never
@@ -12470,6 +12510,11 @@ export interface SearchWorkspaceReferencesRequestMessage {
    * contain the query, files and folders, in traversal order. A runner that predates the field
    * ignores it and answers without echoing it. */
   match?: WorkspaceReferenceSearchMatch;
+  /** The composer's picker (#4129): matched like `match: "fuzzy"`, folders as well as files, ranked
+   * by the same scorer within the same caps. Sent instead of `match`, so a runner or control plane
+   * that predates it answers with substring results, which still include folders, rather than with
+   * fuzzy files only. Takes precedence over `match`. */
+  fuzzyWithDirectories?: boolean;
 }
 
 export type WorkspaceReferenceSearchMatch = "fuzzy";
@@ -12484,8 +12529,11 @@ export interface SearchWorkspaceReferencesResultMessage {
   error?: string;
   results?: WorkspaceReferenceCandidate[];
   truncated?: boolean;
-  /** Echoes the request's `match` when the runner applied it. */
+  /** Echoes the request's `match` when the runner applied it; `"fuzzy"` too for an applied
+   * `fuzzyWithDirectories`. */
   match?: WorkspaceReferenceSearchMatch;
+  /** Echoes the request's `fuzzyWithDirectories` when the runner applied it (#4129). */
+  fuzzyWithDirectories?: boolean;
   /** Set on a truncated fuzzy search. */
   limit?: WorkspaceReferenceSearchLimit;
 }

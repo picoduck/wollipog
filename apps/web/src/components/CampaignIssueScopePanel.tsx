@@ -27,7 +27,13 @@ export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssu
 /** How often a panel showing a disconnected runner's saved scope checks for reconnection. */
 export const SCOPE_RECONNECT_POLL_MS = 10_000;
 
-export function CampaignIssueScopePanel({ session, campaignId }: { session: SessionView; campaignId: string }) {
+export function CampaignIssueScopePanel({ session, campaignId, policyRevision }: {
+  session: SessionView;
+  campaignId: string;
+  /** The campaign's policy revision, given only on the campaign's own session: the owner can then
+   * change the scope grant's selection count there (#4102), and a new revision reloads the scope. */
+  policyRevision?: number;
+}) {
   const api = useApi();
   const headingId = useId();
   const [view, setView] = useState<CampaignIssueScopeView | null>(null);
@@ -54,7 +60,8 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
       if (!controller.signal.aborted) { reading.current = false; setView(next); setPending(false); setSelected([]); }
     }).catch((e: unknown) => { if (!controller.signal.aborted) { reading.current = false; setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); } });
     return () => controller.abort();
-  }, [api, campaignId, revision, reload]);
+    // A change to the campaign's authority (such as another tab's selection count) reloads it too.
+  }, [api, campaignId, revision, policyRevision, reload]);
   // A disconnected runner leaves the revision unchanged when it returns, so poll the saved scope
   // (no runner call) until the view verifies again (#2664). A returning tab refreshes at once. A
   // poll never replaces a read still in flight: a reconnected runner's inspection can outlast it.
@@ -103,7 +110,13 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
     } catch (e) { setError(e instanceof Error ? e.message : "Could not resolve epic members."); }
     finally { setBusy(false); }
   };
-  return <>{view?.scopeGrant && <CampaignScopeGrantSection grant={view.scopeGrant} />}
+  // Only the owner, who can propose scope here, can change the count; the server checks again.
+  // The change is compare-and-set against the revision this view was read at, never a newer one, so
+  // a change made from a stale view is refused instead of overwriting another one.
+  const grantEdit = view?.canPropose && policyRevision !== undefined && view.policyRevision !== undefined
+    ? { campaignId, policyRevision: view.policyRevision, onSaved: () => setReload((n) => n + 1) } : undefined;
+  // A new revision remounts the section, closing an editor opened on the older one.
+  return <>{view?.scopeGrant && <CampaignScopeGrantSection key={view.policyRevision} grant={view.scopeGrant} edit={grantEdit} />}
   <section className="campaign-detail-section" aria-labelledby={headingId}>
     <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"

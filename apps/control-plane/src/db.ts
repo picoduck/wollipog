@@ -2993,7 +2993,7 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   campaign_session_id TEXT NOT NULL,
   session_id          TEXT NOT NULL,
   surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
-                        'follow_up_publication','issue_closure')),
+                        'follow_up_publication','issue_closure','issue_scope_seed')),
   request_id          TEXT NOT NULL,
   classification      TEXT CHECK (classification IN ('decline','orchestrator')),
   classified_by       TEXT,
@@ -5810,15 +5810,16 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
 }
 
 /**
- * Admit the follow-up relatedness and closure-reason subjects (#4104 Slice B). A table written by
- * the question screen's release checked its surface against the four question surfaces; SQLite
- * cannot alter a CHECK, so that table is rebuilt with the wider check. Every row is preserved.
+ * Admit every current subject surface (#4104): the follow-up relatedness and closure-reason subjects
+ * (Slice B) and the Custom epic seed (Slice C). A table written by an earlier release checked its
+ * surface against fewer surfaces; SQLite cannot alter a CHECK, so that table is rebuilt with the
+ * wider check. Every row is preserved.
  */
 function widenCampaignDecisionSubjects(db: DatabaseSync): void {
   const schema = db.prepare(
     "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaign_decision_subjects'",
   ).get() as { sql?: string } | undefined;
-  if (!schema?.sql || schema.sql.includes("'issue_closure'")) return;
+  if (!schema?.sql || schema.sql.includes("'issue_scope_seed'")) return;
   db.exec("PRAGMA foreign_keys = OFF;");
   try {
     db.exec("BEGIN;");
@@ -5828,7 +5829,7 @@ function widenCampaignDecisionSubjects(db: DatabaseSync): void {
         campaign_session_id TEXT NOT NULL,
         session_id          TEXT NOT NULL,
         surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
-                              'follow_up_publication','issue_closure')),
+                              'follow_up_publication','issue_closure','issue_scope_seed')),
         request_id          TEXT NOT NULL,
         classification      TEXT CHECK (classification IN ('decline','orchestrator')),
         classified_by       TEXT,
@@ -12536,6 +12537,15 @@ export class ControlPlaneDb {
 
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an
    * occurrence that routed to a person and has no classification yet accepts one. */
+  /** Record the owner's Continue Without an Epic on an epic seed's reading (#4104), once. The seed's
+   * own `owner` state, not the occurrence's, is what lets the owner release it. */
+  releaseCampaignIssueScopeSeedSubject(occurrenceId: string, userId: string, now: number): boolean {
+    return Number(this.stmt(
+      `UPDATE campaign_decision_subjects SET classification='orchestrator', classified_by=?, classified_at=?
+       WHERE occurrence_id=? AND surface='issue_scope_seed' AND classification IS NULL`,
+    ).run(userId, now, occurrenceId).changes) > 0;
+  }
+
   classifyCampaignDecision(occurrenceId: string, classification: "decline" | "orchestrator", userId: string, now: number): boolean {
     return Number(this.stmt(
       `UPDATE campaign_decision_subjects SET classification=?, classified_by=?, classified_at=?
@@ -17304,6 +17314,34 @@ export class ControlPlaneDb {
     return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
   }
 
+  /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
+   * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
+   * scope and no seeded epic gets one, so only its first message ever does. */
+  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string }, now: number): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy || policy.issueScopeSeed || policy.issueScope || policy.issueScopeProposalEpic !== undefined) return false;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest };
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
+  /** Settle a Custom campaign's epic seed (#4104), compare-and-set on the policy: only a seed still in
+   * `from` (pending, unless the owner releases an `owner` seed) for this exact message changes, and
+   * only `seeded` names the epic. A scope a person approved meanwhile leaves the seed as it was; it
+   * holds nothing once a scope exists. */
+  settleCampaignIssueScopeSeed(id: string, messageDigest: string,
+    next: { state: "seeded"; epic: number; occurrenceId: string } | { state: "none" | "owner"; occurrenceId?: string }, now: number,
+    from: "pending" | "owner" = "pending"): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy || policy.issueScope || policy.issueScopeSeed?.state !== from || policy.issueScopeSeed.messageDigest !== messageDigest) return false;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { state: next.state, messageDigest, ...(next.occurrenceId ? { occurrenceId: next.occurrenceId } : {}) };
+    if (next.state === "seeded") policy.issueScopeProposalEpic = next.epic;
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
   campaignIssueScopeRootsForRunner(runnerId: string): SessionView[] {
     const rows = this.stmt(`SELECT id FROM sessions WHERE runner_id=?
       AND CASE WHEN json_valid(orchestrator_policy) THEN json_type(orchestrator_policy, '$.issueScope') ELSE NULL END='object'`)
@@ -17736,6 +17774,76 @@ export class ControlPlaneDb {
       this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(policy), now, rootId);
       this.db.exec("COMMIT");
       return { ok: true, revision, joined: joins.length > 0, revoked };
+    } catch (error) { this.db.exec("ROLLBACK"); throw error; }
+  }
+
+  /** The owner's new count for the selection a Full Control first message's scope grant asked for
+   * (#4102). Only the Human who authorized the current boundary changes it, compare-and-set on the
+   * policy revision, and the boundary is re-minted around it in the same transaction, as the
+   * follow-up limit is. While the current authorization derived Maximum Issues, it moves by exactly
+   * the change in the count, up to the 100-issue ceiling, and never below the issues the campaign
+   * already holds; an explicit Maximum Issues never moves, so the count must fit what it leaves after
+   * the named issues. Like any boundary change, it revokes every unconsumed decision, which it returns. */
+  setScopeGrantSelectionCount(rootId: string, count: number, userId: string, expectedRevision: number, now: number):
+    { ok: true; revoked: WorkflowDecisionView[] } | { ok: false; status: number; error: string } {
+    this.db.exec("BEGIN IMMEDIATE");
+    const refuse = (status: number, error: string) => { this.db.exec("ROLLBACK"); return { ok: false as const, status, error }; };
+    try {
+      const policy = this.sessionOrchestratorPolicy(rootId);
+      const control = policy?.control;
+      const first = policy?.firstMessageScope;
+      const grant = first?.state === "established" ? first.grant : undefined;
+      if (!policy || control?.mode !== "full_control" || !control.boundary.issueAuthority || first?.state !== "established" ||
+          grant?.status !== "granted" || !grant.selection) {
+        return refuse(409, "This campaign's first message asked it to choose no issues, so there is no selection count to change.");
+      }
+      const boundary = control.boundary;
+      const parentControlPolicy = this.parentControlPolicy(rootId) ?? undefined;
+      if (parentControlPolicy?.revision !== expectedRevision) return refuse(409, "Campaign authority changed; refresh and try again.");
+      if (!campaignBoundaryCurrent({ orchestratorPolicy: policy, parentControlPolicy })) {
+        return refuse(409, "This campaign's Full Control authority is out of date. Revoke Full Control in Orchestrator Controls, then Enable Full Control.");
+      }
+      if (boundary.authorizedByUserId !== userId) return refuse(403, "Only the person who authorized this campaign's Full Control can change its selection count.");
+      const issues = boundary.issueAuthority!;
+      const previous = grant.selection.count;
+      // Only a limit both the grant and the current authorization derived moves; anything a person set stays.
+      const derived = first.derivedLimits?.maxIssues === true && grant.ceilings.maxIssuesSource === "derived";
+      let maxIssues = issues.maxIssues;
+      if (derived) {
+        const most = previous + (100 - issues.maxIssues);
+        if (count > most) return refuse(400, `Enter a count from 0 to ${most}: a campaign holds at most 100 issues.`);
+        const held = (policy.issueNumbers?.length ?? 0) + this.unsettledPublicationSlots(rootId, []);
+        maxIssues = Math.max(1, held, issues.maxIssues + count - previous);
+      } else {
+        const most = Math.max(0, issues.maxIssues - grant.namedIssues.length);
+        if (count > most) {
+          return refuse(400, `Enter a count from 0 to ${most}: the Maximum Issues you set (${issues.maxIssues}) never grows.`);
+        }
+      }
+      const reminted = remintCampaignBoundary({ ...boundary, issueAuthority: { ...issues, maxIssues } },
+        { revision: boundary.issueScopeRevision }, userId, now);
+      if (reminted?.mode !== "full_control") return refuse(400, "Enter a whole number of issues.");
+      const { capped: _capped, ...selection } = grant.selection;
+      first.grant = { ...grant, selection: { ...selection, count, defaulted: false, setByOwner: true },
+        ceilings: { ...grant.ceilings, maxIssues } };
+      for (const id of [rootId, ...this.campaignDescendantIds(rootId)]) {
+        const memberPolicy = id === rootId ? policy : this.sessionOrchestratorPolicy(id);
+        if (memberPolicy?.control?.mode !== "full_control") continue;
+        memberPolicy.control = structuredClone(reminted);
+        this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=?").run(JSON.stringify(memberPolicy), now, id);
+      }
+      if (Number(this.stmt(`UPDATE sessions SET parent_control_policy_revision=parent_control_policy_revision+1
+          WHERE id=? AND parent_control_policy_revision=?`).run(rootId, expectedRevision).changes) !== 1) {
+        return refuse(409, "Campaign authority changed; refresh and try again.");
+      }
+      const revoked = this.unconsumedWorkflowDecisionsForController(rootId);
+      for (const stale of revoked) {
+        this.stmt("UPDATE workflow_decisions SET status='revoked', resolved_at=COALESCE(resolved_at, ?) WHERE occurrence_id=? AND status IN ('pending','approved')").run(now, stale.occurrenceId);
+        this.retireWorkflowDecisionResume(stale.occurrenceId, now);
+        this.revokeUiEvidenceReviewReceipts(stale.occurrenceId, now);
+      }
+      this.db.exec("COMMIT");
+      return { ok: true, revoked };
     } catch (error) { this.db.exec("ROLLBACK"); throw error; }
   }
 
@@ -34330,6 +34438,11 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
   value.delegation.decisions = decisions;
   behavior.childHarness = childHarness;
   if (value.issueScopeProposalEpic !== undefined && (!Number.isSafeInteger(value.issueScopeProposalEpic) || value.issueScopeProposalEpic < 1)) return null;
+  const seed = value.issueScopeSeed as unknown as Record<string, unknown> | undefined;
+  if (seed !== undefined && !(seed && ["pending", "seeded", "none", "owner"].includes(seed.state as string) &&
+      typeof seed.messageDigest === "string" && /^[a-f0-9]{64}$/.test(seed.messageDigest) &&
+      (seed.occurrenceId === undefined || typeof seed.occurrenceId === "string") &&
+      (seed.state === "seeded") === (value.issueScopeProposalEpic !== undefined))) return null;
   if (value.issueScope && (typeof value.issueScope.repository !== "string" || !campaignRepositoryLocation(value.issueScope.repository) ||
       !Array.isArray(value.issueScope.issueNumbers) || value.issueScope.issueNumbers.length > 100 ||
       value.issueScope.issueNumbers.some((n) => !Number.isSafeInteger(n) || n < 1) ||
