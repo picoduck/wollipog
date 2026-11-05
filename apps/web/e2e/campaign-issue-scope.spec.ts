@@ -28,6 +28,50 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
     });
   }
 
+  test(`a disconnected legacy scope shows unverified membership and recovers after reconnection at ${viewport.width}px (#2664)`, async ({ page }, info) => {
+    await page.setViewportSize(viewport);
+    await page.clock.install();
+    let reconnected = false;
+    let reads = 0;
+    const work = (workItemId: string, title: string, number: number) => ({ workItemId, title, issue: { repository: "team/repo", number }, sessionId: null });
+    await page.route("**/api/sessions/*/campaign/issue-scope", async (route) => {
+      reads += 1;
+      await route.fulfill({ status: 200, contentType: "application/json", body: JSON.stringify(reconnected
+        ? { campaignSessionId: "s_root", repository: "team/repo", issueNumbers: [12], revision: 0, supported: true, canPropose: true,
+          outsideScope: [work("w_stray", "Stray Work", 99)], candidates: [] }
+        : { campaignSessionId: "s_root", repository: "", issueNumbers: [12], revision: 0, supported: false, canPropose: false, runnerDisconnected: true,
+          compatibilityMessage: "The campaign runner is disconnected. Saved issue scope is shown; reconnect the runner to verify the repository and request changes.",
+          unverifiedWork: [work("w_member", "Member Work", 12)], outsideScope: [work("w_stray", "Stray Work", 99)] }) });
+    });
+    await page.goto("/campaign-status-e2e.html?scenario=campaign&scope=unsupported-target");
+    const scope = page.getByRole("region", { name: "Authorized Issue Scope" });
+    const fact = (term: string) => scope.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd");
+    await expect(fact("Repository")).toHaveText("Not Verified");
+    await expect(fact("Authorized Issues")).toHaveText("#12");
+    await expect(scope.locator(".notice").filter({ hasText: "Repository Not Verified" })).toBeVisible();
+    await expect(scope.locator(".notice").filter({ hasText: "Work Awaiting Repository Verification" })).toContainText("team/repo#12: Member Work");
+    const outside = scope.locator(".notice").filter({ hasText: "Work Outside Authorized Scope" });
+    await expect(outside).toContainText("team/repo#99: Stray Work");
+    await expect(outside).not.toContainText("#12");
+    const unavailable = scope.locator(".notice").filter({ hasText: "Scope Changes Unavailable" });
+    await expect(unavailable.getByRole("button", { name: "Refresh Scope", exact: true })).toBeVisible();
+    const geometry = await scope.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+    expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+    await scope.scrollIntoViewIfNeeded();
+    await scope.screenshot({ path: info.outputPath(`scope-legacy-offline-${viewport.width}.png`) });
+    // The runner reconnects at the same revision; the mounted panel finds out on its own.
+    reconnected = true;
+    const before = reads;
+    await page.clock.runFor(10_000);
+    await expect.poll(() => reads).toBeGreaterThan(before);
+    await expect(fact("Repository")).toHaveText("team/repo");
+    await expect(fact("Authorized Issues")).toHaveText("team/repo#12");
+    await expect(unavailable).toHaveCount(0);
+    await expect(scope.locator(".notice").filter({ hasText: "Work Awaiting Repository Verification" })).toHaveCount(0);
+    await expect(scope.getByRole("button", { name: "Request Scope Approval", exact: true })).toBeVisible();
+    await scope.screenshot({ path: info.outputPath(`scope-reconnected-${viewport.width}.png`) });
+  });
+
   test(`human scope recovery and epic selection at ${viewport.width}px`, async ({ page }) => {
     await page.setViewportSize(viewport);
     await page.goto("/campaign-status-e2e.html?scenario=campaign");
