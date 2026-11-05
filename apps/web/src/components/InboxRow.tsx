@@ -2,7 +2,7 @@ import type { SessionReminderView, SessionView } from "@wollipog/protocol";
 import { memo, type MouseEvent } from "react";
 import { useLongPress } from "./interactions.js";
 import { sessionArchiveControlLabel } from "../archive-actions.js";
-import { STALL_THRESHOLD_MS, showsActivityStrip, type SessionActivity } from "../activity.js";
+import { showsActivityStrip, type SessionActivity } from "../activity.js";
 import { relativeTime } from "../format.js";
 import { formatReminderReturn, reminderDisplayZone } from "../reminder-schedule.js";
 import { reminderBadgeDescription } from "../session-reminders.js";
@@ -48,7 +48,6 @@ export interface InboxRowProps {
    */
   threeRow: boolean;
   activity?: SessionActivity;
-  stalled: boolean;
   /** The row clock. Rows that cannot change with time get 0, so they do not re-render every minute. */
   activityNow: number;
   reminder?: SessionReminderView;
@@ -83,12 +82,6 @@ export interface InboxRowProps {
 export function inboxRowTimestamp(session: Pick<SessionView, "lastEventAt" | "updatedAt" | "createdAt">,
   activity?: Pick<SessionActivity, "lastEventAt">): number | null {
   return Math.max(session.lastEventAt ?? 0, activity?.lastEventAt ?? 0) || session.updatedAt || session.createdAt || null;
-}
-
-/** How long a stalled row has been silent, for its badge's tooltip; undefined while it is not stalled. */
-export function sessionStalledForMs(stalled: boolean, now: number, lastActivityAt: number | null): number | undefined {
-  if (!stalled) return undefined;
-  return now > 0 && lastActivityAt !== null ? Math.max(STALL_THRESHOLD_MS, now - lastActivityAt) : STALL_THRESHOLD_MS;
 }
 
 /**
@@ -134,7 +127,6 @@ function InboxRowInner({
   rowIndex,
   threeRow,
   activity,
-  stalled,
   activityNow,
   reminder,
   threadDepth = 0,
@@ -163,7 +155,6 @@ function InboxRowInner({
     familyFollowUpLabel: children?.followUpLabel,
     familyWorking: children?.hasActiveWork,
     familyProgressing: (children?.working ?? 0) > 0,
-    stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);
@@ -318,7 +309,7 @@ function InboxRowInner({
       // Phones never show a selected row (§5.2): opening one pushes a route, so on return the last
       // opened row is not highlighted. The grid still knows which row is active.
       className={`inbox-row-shell${threeRow ? " stacked" : ""}${selected && !threeRow ? " selected" : ""}${
-        unread ? " unread" : ""}${stalled ? " stalled" : ""}${children ? " thread-parent" : ""}${
+        unread ? " unread" : ""}${children ? " thread-parent" : ""}${
         threadDepth > 0 ? " thread-child" : ""}${threadDepth > 1 ? " thread-depth-2" : ""}${
         threadLast ? " thread-last" : ""}${threadOuterSpine ? " thread-outer" : ""}`}
       onContextMenu={(event) => {

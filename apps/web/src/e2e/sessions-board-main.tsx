@@ -689,7 +689,6 @@ function HarnessShell() {
       <Rail
         view={view}
         blockedCount={0}
-        stalledCount={0}
         onNavigate={navigate}
       />
       <main className="main">

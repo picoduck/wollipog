@@ -182,7 +182,7 @@ test("the Requests panel follows descendant polling, and says Nothing Waiting on
 
   // The child request is the bar's one status (#2182, #2206); its popover row opens the Requests panel.
   const trigger = page.locator(".session-bar .session-status-button");
-  await expect(trigger).toHaveAccessibleName("Session Status: 1 Child Request");
+  await expect(trigger).toHaveAccessibleName("Session Status: Running, 1 Child Request");
   await trigger.click();
   await page.getByRole("dialog", { name: "Session Status" }).getByRole("button", { name: "Open Requests" }).click();
   const panel = page.locator('#right-panel[data-mode="requests"]');
@@ -425,8 +425,8 @@ test("desktop Session actions stay contained with concurrent status indicators",
   // One status (#2182): with nothing needing the person, running background work leads while the
   // session awaits its next prompt, and the rest are rows of the Session Status popover.
   const status = header.locator(".session-status-button");
-  await expect(status).toHaveAccessibleName("Session Status: Waiting on External Job");
-  await expect(header.locator(".status")).toHaveCount(1);
+  await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Waiting on External Job");
+  await expect(header.locator(".status")).toHaveCount(2);
   // Changes are a Git fact in the Pinned Summary (#2160), never a status in the bar.
   await expect(header.getByText(/Ready for Review|Uncommitted Changes|Changes Present/)).toHaveCount(0);
   await expect(header.locator('[data-live="background-work"]')).toHaveText("Background Work: Waiting on External Job");
@@ -672,8 +672,8 @@ for (const viewport of [
       // The campaign request needs the person, so it is the one badge; background work, the worker
       // and the Orchestrator's request are rows of the popover, never "+N".
       const status = header.locator(".session-status-button");
-      await expect(status).toHaveAccessibleName("Session Status: 1 Child Request");
-      await expect(header.locator(".status")).toHaveCount(1);
+      await expect(status).toHaveAccessibleName("Session Status: Running, 1 Child Request");
+      await expect(header.locator(".status")).toHaveCount(2);
       await expect(status.locator(".session-status-more")).toHaveCount(0);
       await expect(header.locator('[data-live="background-work"]'))
         .toHaveText("Background Work: Waiting on External Job");
@@ -908,18 +908,18 @@ test("the phone status follows live Session changes, attention first, at every w
   const header = page.locator(".session-bar");
   const status = header.locator(".session-status-button");
   // Two kinds need the person: the first is the badge, the other is "+1", whatever the width.
-  await expect(status).toHaveAccessibleName(/^Session Status: (Answer|Approval) Required and 1 More$/);
+  await expect(status).toHaveAccessibleName(/^Session Status: Awaiting Input, (Answer|Approval) Required and 1 More$/);
   await expect(status.locator(".session-status-more")).toHaveText("+1");
   for (const width of [390, 800, 320]) {
     await page.setViewportSize({ width, height: 800 });
     await expect(status.locator(".session-status-more")).toHaveText("+1");
-    await expect(header.locator(".status")).toHaveCount(1);
+    await expect(header.locator(".status")).toHaveCount(2);
   }
   // Answered, the session awaits its next prompt with a job still running (#784).
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { pendingApproval: null } as never);
   });
-  await expect(status).toHaveAccessibleName("Session Status: Waiting on External Job");
+  await expect(status).toHaveAccessibleName("Session Status: Awaiting Prompt, Waiting on External Job");
   await expect(status.locator(".session-status-more")).toHaveCount(0);
   await page.evaluate(() => {
     window.__WOLLIPOG_PROJECT_INBOX_E2E__.replaceSessionSnapshot("session-alpha", { backgroundWorkState: "resumed" });
@@ -943,7 +943,7 @@ test("background work as the phone status leaves the actions hittable", async ({
 
   const header = page.locator(".session-bar");
   await expect(header.locator(".change-status-indicators")).toHaveCount(0);
-  await expect(header.locator(".session-status-button")).toHaveAccessibleName("Session Status: Waiting on External Job");
+  await expect(header.locator(".session-status-button")).toHaveAccessibleName("Session Status: Awaiting Prompt, Waiting on External Job");
   await expect(header.getByRole("status").filter({ hasText: "Background Work: Waiting on External Job" })).toHaveCount(1);
   const metrics = await header.evaluate((element) => {
     const control = element.querySelector(".session-status-button")!.getBoundingClientRect();
@@ -978,8 +978,8 @@ for (const width of [1440, 320]) {
       } as never);
     });
     const status = page.locator(".session-bar .session-status-button");
-    await expect(status).toHaveAccessibleName("Session Status: Approval Required");
-    await expect(status.locator(".status")).toHaveText("Approval Required");
+    await expect(status).toHaveAccessibleName("Session Status: Awaiting Input, Approval Required");
+    await expect(status.locator(".status").last()).toHaveText("Approval Required");
     await status.click();
     const dialog = page.getByRole("dialog", { name: "Session Status" });
     const row = dialog.locator(".session-status-row").first();

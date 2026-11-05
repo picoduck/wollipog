@@ -81,7 +81,7 @@ export function SessionPreviewBar({
     };
   });
   // The row's context: only what a Sessions row also knows, so the two badges agree.
-  const { primary, more } = sessionStatusSummary(session, { runnerOnline });
+  const { primary, secondary, more } = sessionStatusSummary(session, { runnerOnline });
   const title = sessionDisplayTitle(session.title);
   const branchState = sessionBranchState(session);
   const branch = branchState.kind === "branch" ? branchState.worktree.branch : null;
@@ -90,8 +90,9 @@ export function SessionPreviewBar({
       <header className="detail-bar session-preview-bar">
         <div ref={headingRef} className="detail-bar-heading">
           <h2 className="detail-bar-title" title={title}><SessionTypeIcon session={session} />{title}</h2>
-          <span className="detail-bar-status" title={`${primary.meta.label}${more > 0 ? ` and ${more} more` : ""}`}>
+          <span className="detail-bar-status" title={`${primary.meta.label}${secondary ? `, ${secondary.meta.label}` : ""}${more > 0 ? ` and ${more} more` : ""}`}>
             <ConditionBadge condition={primary} />
+            {secondary && <ConditionBadge condition={secondary} />}
             {more > 0 && (
               <>
                 <span className="session-status-more" aria-hidden="true">+{more}</span>

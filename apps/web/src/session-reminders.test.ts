@@ -124,7 +124,7 @@ test("acknowledged blocked results reveal other status without retaining attenti
   assert.equal(sessionVisibleForReminderMode(candidate, reminder(candidate.id), "ordinary"), false);
   candidate.backgroundDeliveries!.push({ parentTurnId: "turn-2", jobCount: 1, terminalCount: 1,
     watchdogState: "accepted_without_result", continuationId: "missing", missingResultAt: 2_000 });
-  assert.equal(sessionStatusSummary(candidate).primary.meta.label, "Result Missing");
+  assert.equal(sessionStatusSummary(candidate).secondary?.meta.label, "Result Missing");
   assert.equal(snoozedSessionAttentionReason(candidate)?.label, "Result Missing");
 });
 
@@ -159,7 +159,7 @@ test("snoozed attention names the delivery the session bar names when there are 
   const both = session("pending-then-blocked", "idle", { backgroundDeliveries: [pending, blocked] });
   assert.equal(snoozedSessionAttentionReason(both)?.label, "Result Blocked");
   assert.equal(snoozedSessionAttentionReason(both)?.severity, "blocked");
-  assert.equal(snoozedSessionAttentionReason(both)?.label, sessionStatusSummary(both).primary.meta.label);
+  assert.equal(snoozedSessionAttentionReason(both)?.label, sessionStatusSummary(both).secondary?.meta.label);
   const passive = session("pending-only", "idle", { backgroundDeliveries: [pending, delayed] });
   assert.equal(snoozedSessionAttentionReason(passive)?.label, "Notification Pending", "the first, as before");
 });

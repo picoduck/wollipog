@@ -801,21 +801,14 @@ extending the settled one-bar session chrome app-wide.
   only here, never as a bar button; it is left out where the session can never fork. Every
   disabled item says why on its second line, and results are toasts (§13.1), never a note in the
   bar.
-- The Session Status control (`SessionStatusButton`, #2182) is the bar's one status: a `.btn.ghost`
-  holding one status badge and, when other conditions need the person, a plain "+N". Its accessible
-  name says both ("Session Status: Approval Required and 1 More"). `sessionStatusSummary()` in
-  `status-meta.ts` chooses the badge, the first that applies: each attention kind in
-  `sessionAttentionBreakdown()` order, then human-owned campaign requests, then descendant requests,
-  then a background result that waits on the person (Result Blocked, Result Missing; #2275);
-  Background Work Lost; Disconnected; Waiting on External Job while the session otherwise awaits its
-  next prompt; the lifecycle, including Stop Pending and Stop Failed, and Archived for an archived
-  session that has stopped with no Stop pending or failed (`sessionArchivedAtRest()`). "+N" counts
-  only the other conditions that need the person, never passive states (Result Pending, Transcript
-  Delayed and Notification Pending are passive), so it is the same at every width. The Sessions rows,
-  the preview bar and the Board cards use the same function. The Sessions preview bar (#2210) shows
-  its first badge and "+N" exactly; a row (`sessionRowStatus()`, #2209) shows the same badge with
-  three exceptions of its own: no badge for Awaiting Prompt, Returned for a fired reminder, and a
-  stalled session's badge in the danger tone, reading Stalled in place of a busy lifecycle (#2215).
+- The Session Status control (`SessionStatusButton`, #4167) keeps the lifecycle badge first,
+  followed by at most one secondary condition. Requests rank first, then recovery and lost work,
+  Disconnected, background work and passive context. The primary badge keeps its own tone.
+  A plain "+N" counts additional actionable conditions only; all conditions remain in the popover.
+  Headers, previews, Sessions rows and Board cards share this presentation. At-rest results may
+  add Ready for Review; reminders and family context can supply a row's secondary condition.
+  Disconnected explains that the last reported lifecycle may be stale and suppresses progress pulses.
+  Transcript silence never establishes a session failure or a Stalled status.
 - It opens the Session Status popover (§9.2, 340px; a bottom sheet on phones): the title, then one
   row per condition with its badge, one sentence and the action that resolves it where one exists
   (Review Request, Answer, Sign In…, Open for Background Work, Open Agents, Open Requests). Result
@@ -1321,7 +1314,7 @@ time under column tabs instead (§15.1, #2216).
 | Single-line | `--row-h` 40 | `[16 icon] Title ........ [meta] [badge] [action]` |
 | Two-line | `--row-h-2` 56 | Line 1: title (`--type-body-strong`, 1 line, ellipsis) + trailing status badge or time. Line 2: meta or description (`--type-small`, `--text-dim`, **1 line, ellipsis**). |
 | Dense (trees, file lists) | `--row-h-dense` 32 | `.row.dense`: `[16 icon] Name ........ [meta]`, one line, `--type-body`. **Fine pointers only**: on coarse pointers the token is 44px, so a touch tree is never denser than a menu. Only for trees and file lists, where 40px rows would show too few items (the Files tree shows 16 at 40px). Never for lists of entities, except a confirmation's read-only list of what it affects (§7.4). |
-| Card row (sessions list) | `--row-h-2` on desktop and tablet; the three-line card on phone | **Desktop and tablet (#2209):** two lines, exactly `--row-h-2` whatever the row carries, with no gap between rows. Line 1, the status line: agent icon and "Agent · Project" (gives up width first), the branch only when there is one and the list is 600px or wider (`BranchIcon`, its base as "from <ref>", a pull request as `PullRequestIcon` and its state word), then trailing: the one status badge with a neutral "+N" (§11.1), the activity strip, the flags (pin, unread dot) and the time (tabular, `--text-faint`; a snoozed row shows its return time after an alarm clock instead). Line 2, the title line: the title (`--type-body-strong`, one line, ellipsis, `sessionDisplayTitle()`) and the family chip, nothing else. **Phone:** the three-line card (#882, #934): the sender with the flags, the title, then the status line with the badge, the strip, the branch and the time. **Activity strip:** 48×12px, bars in `--blue`, `role="img"` named "Tool activity in the last 30 minutes", only while the session is Running or Starting or had tool activity in the last 10 minutes; always on the status line after the badge, never on the title line, and idle rows reserve no space for it. **Selected:** `--surface-selected` and the 2px `--accent` leading bar. **Unread:** an 8px `--blue` dot in the flags and a 600-weight title, never a fill, border or bar; a row that is both shows both. **Focus:** while the list has keyboard focus, its active row shows one inset `--focus` ring. Phones show no selected row. In the stacked layout, when the list is 880px or wider, the same two lines move status, activity, flags and time into fixed trailing columns, with the actions in a column of their own, and a parent's family chip moves under its status badge (§6.3, #2218, #3175). No row repeats a transcript excerpt or request after its title (#3175). **Snoozed time:** the return time reads in the zone the Snooze dialog names (`reminderDisplayZone()`, the browser's), whatever zone the reminder was saved from, in the row, its tooltip and the dialog alike. **Actions (#2214):** Snooze, Archive (`sessionArchiveControlLabel()`: "Archive", "Archive and Stop…", "Retry Stop…") and ⋯, trailing at the end of the title line over the row's own fill, so the status and time stay in view; on fine pointers on hover or focus-within, on coarse pointers only ⋯, always, at 44px in a column the row keeps free. Each tooltip names its key. ⋯, right-click, long-press and Shift+F10 open the session's context menu, which on desktop selects the row first, so the menu, the preview and the keys act on one session. The menu, in order, each item after its 16px icon with its keycap trailing: Reply (R), Rename Session…, Pin Session / Unpin Session (S), Mark Unread / Mark Read (U), Fork Conversation… (F; absent where the session can never fork, disabled with its reason otherwise), the reminder item (H), Dismiss Reminder (a returned reminder only), a separator, Copy Session ID (#3897; offered to everyone, a Viewer included, its toast showing the copied id in mono), a separator, then the archive item (E). There is no shortcut rail or activity footer: counts live on the tabs and the rail, keys on tooltips, menu keycaps and the Keyboard Shortcuts reference. |
+| Card row (sessions list) | `--row-h-2` on desktop and tablet; the three-line card on phone | **Desktop and tablet (#2209):** two lines, exactly `--row-h-2` whatever the row carries, with no gap between rows. Line 1, the status line: agent icon and "Agent · Project" (gives up width first), the branch only when there is one and the list is 600px or wider (`BranchIcon`, its base as "from <ref>", a pull request as `PullRequestIcon` and its state word), then trailing: the lifecycle and secondary badges with a neutral "+N" (§11.1), the activity strip, the flags (pin, unread dot) and the time (tabular, `--text-faint`; a snoozed row shows its return time after an alarm clock instead). Line 2, the title line: the title (`--type-body-strong`, one line, ellipsis, `sessionDisplayTitle()`) and the family chip, nothing else. **Phone:** the card (#882, #934): the sender with the flags, the title, then the status line with lifecycle and secondary badges, the strip, the branch and the time. Dense status lines wrap to keep labels readable. **Activity strip:** 48×12px, bars in `--blue`, `role="img"` named "Tool activity in the last 30 minutes", only while the session is Running or Starting or had tool activity in the last 10 minutes; always on the status line after the badge, never on the title line, and idle rows reserve no space for it. **Selected:** `--surface-selected` and the 2px `--accent` leading bar. **Unread:** an 8px `--blue` dot in the flags and a 600-weight title, never a fill, border or bar; a row that is both shows both. **Focus:** while the list has keyboard focus, its active row shows one inset `--focus` ring. Phones show no selected row. In the stacked layout, when the list is 880px or wider, the same two lines move status, activity, flags and time into fixed trailing columns, with the actions in a column of their own, and a parent's family chip moves under its status badge (§6.3, #2218, #3175). No row repeats a transcript excerpt or request after its title (#3175). **Snoozed time:** the return time reads in the zone the Snooze dialog names (`reminderDisplayZone()`, the browser's), whatever zone the reminder was saved from, in the row, its tooltip and the dialog alike. **Actions (#2214):** Snooze, Archive (`sessionArchiveControlLabel()`: "Archive", "Archive and Stop…", "Retry Stop…") and ⋯, trailing at the end of the title line over the row's own fill, so the status and time stay in view; on fine pointers on hover or focus-within, on coarse pointers only ⋯, always, at 44px in a column the row keeps free. Each tooltip names its key. ⋯, right-click, long-press and Shift+F10 open the session's context menu, which on desktop selects the row first, so the menu, the preview and the keys act on one session. The menu, in order, each item after its 16px icon with its keycap trailing: Reply (R), Rename Session…, Pin Session / Unpin Session (S), Mark Unread / Mark Read (U), Fork Conversation… (F; absent where the session can never fork, disabled with its reason otherwise), the reminder item (H), Dismiss Reminder (a returned reminder only), a separator, Copy Session ID (#3897; offered to everyone, a Viewer included, its toast showing the copied id in mono), a separator, then the archive item (E). There is no shortcut rail or activity footer: counts live on the tabs and the rail, keys on tooltips, menu keycaps and the Keyboard Shortcuts reference. |
 
 Rules
 
@@ -1331,7 +1324,7 @@ Rules
 - Text clamps: titles 1 line; descriptions 1 line in rows, 2 lines in cards (`line-clamp: 2`), full
   text only in the detail view.
 - Metadata placement: identity (agent icon, machine, project) on line 2, left; time and counts
-  trailing, tabular, `--text-faint`; status badge trailing on line 1. At most one status badge per row.
+  trailing, tabular, `--text-faint`; status badge trailing on line 1. At most two session status badges per row.
 - Meta items are separated by 12px space, each prefixed by a 14px icon or a short label, not by
   middle dots.
 - Hover: `--bg-elev-2` (fine pointers only). Selected: `--surface-selected` fill plus a 2px
@@ -1369,8 +1362,7 @@ Rules
   Children indent under a 2px `--border-strong` spine with a tick into each row. A child's review or
   child indents one more step under its own spine (#4077); anything deeper indents no further. A
   spine ends at its last sibling, a child with descendants collapses like a top-level parent, and the
-  family chip names direct reviews as reviews ("2 Children · 1 Review"). A stalled parent or
-  child says so once, with its one status badge (§11.1); there is no stalled rail or border, because
+  family chip names direct reviews as reviews ("2 Children · 1 Review"). A parent or child preserves its lifecycle and secondary condition (§11.1), because
   the leading edge is the selection bar.
 
 ### 5.3 Cards (Grid)
@@ -1406,7 +1398,7 @@ behind Show Details. The tab is not shown at 760px and below (#2984).
   icon and "Agent · Project" (it gives up width first), then the machine as quiet meta after its 14px icon
   (only when there is more than one machine), the pin, the time and ⋯. ⋯ shows on hover and focus on
   fine pointers and is always there on touch. It opens the session's context menu (§5.2). Next comes the
-  title, clamped to 2 lines, then a status line that is always present: the one status badge by
+  title, clamped to 2 lines, then a status line that is always present: the lifecycle and secondary badges by
   `sessionRowStatus()`, then the activity strip under the row's rule. A parent shows its family chip
   in place of the strip: an image named by the whole rollup, with that tooltip. It shows its words only
   while they fit beside the badge in the card, measured on the card's own width rather than the list
@@ -1686,7 +1678,7 @@ master-detail pages stay side by side.
   badge, at one x down the list, and a long rollup runs on over the empty cells after it. The title
   takes the whole line, or the line up to the chip. Line 1's trailing cluster becomes fixed
   columns, 12px apart and the same on every row, so the badges start and the times end at one x
-  down the list: **status** (184px: the one badge and "+N"; a longer label clips), **activity**
+  down the list: **status** (184px: the lifecycle and secondary badges and "+N"; a longer label clips), **activity**
   (48px: the strip, only under #2209's rule, so an idle row leaves it empty and the strip never
   moves to the title line), **flags** (32px: pin and unread), **time** (96px, right-aligned,
   tabular; the issue's 64px could not hold a snoozed row's return time after its alarm clock, up to
@@ -2393,16 +2385,11 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 - The dot pulses only for Running/Starting.
 - Inline variant `.status.inline`: dot + label with no pill, for dense rows and tables.
 - Label is Title Case from one vocabulary (§11.2), never raw enum text, never uppercased by CSS.
-- **One status badge per entity per surface.** Attention outranks lifecycle: if the session needs the
-  user, show only the attention badge, not "Awaiting Input" as well. A Sessions row (#2209) shows the
-  top attention kind with a neutral "+N" for the others (listed in its tooltip), on the session bar's
-  ranking (`sessionRowStatus()` over `sessionStatusSummary()`), and no badge for Awaiting Prompt.
-  Stalled is not a second badge: the row's badge takes the danger tone, stops pulsing, and its tooltip
-  says how long the session has been silent. Where that badge would be a busy lifecycle (Queued,
-  Starting, Running) it reads **Stalled** (#2215), named "Status: Stalled, Running" with the tooltip
-  "Running, but no activity for 14 minutes.", so forced colors and readers without colour vision
-  still tell a stalled row from a working one. An attention badge keeps its own label (attention
-  outranks lifecycle) and adds ", Stalled" to its accessible name. No rail, border or second pill.
+- **Sessions show lifecycle plus at most one secondary badge per surface.** Lifecycle is always
+  visible, including Awaiting Prompt, and keeps its own tone when a request appears. Suppress
+  duplicate labels. Additional actionable conditions use plain "+N"; passive conditions do not
+  inflate that count. Status details list every condition with its explanation.
+  Other entities keep one status badge.
 
 ### 11.2 One Vocabulary and Tone Table
 
@@ -2412,9 +2399,9 @@ Examples: List / Board, Active / Snoozed, Theme, Unified / Split diff.
 | Session attention | Recovery Required | danger |
 | Session lifecycle | Starting, Running, Stopping | info (pulse on Running/Starting) |
 | Session family | Children Working | info (pulse while descendants progress) |
-| Session family | Child Work Pending | neutral (no pulse; unfinished descendants are stalled or blocked) |
+| Session family | Child Work Pending | neutral (no pulse; unfinished descendants are blocked) |
 | Session lifecycle | Awaiting Prompt | neutral |
-| Session lifecycle | Stalled, Failed, Stop Failed | danger |
+| Session lifecycle | Failed, Stop Failed | danger |
 | Session lifecycle | Stopped, Archived, Snoozed | neutral |
 | Session lifecycle | Completed | success |
 | Session result | Ready for Review | review (purple, no pulse) |
@@ -2640,8 +2627,7 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 - **Rail attention (`railAttention`, #1967).** Each destination carries at most one mark, and the
   same one on the desktop rail, the phone tab bar and a More sheet row, so a reordered destination
   carries it with it:
-  - Sessions: one count badge of blocked plus stalled sessions, danger when any is stalled and
-    warning otherwise.
+  - Sessions: one warning count badge of sessions waiting for input.
   - Connections: never a count. An 8px dot in the warning tone (`.rail-attention-dot`) while a
     machine needs the user: it is offline while a session assigned to it has work in flight, or its
     runner is outdated (Update Required). Machines that are online, idle, or offline with nothing
@@ -2652,7 +2638,7 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
     when a Sessions badge behind it is red, `t-warning` otherwise). Never a count: a sum would mix
     sessions with machines. Its accessible name stays "More Destinations" (or "…, <destination>
     selected"); its description names each destination behind it with its breakdown, in sheet
-    order: "Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update". A
+    order: "Sessions: 12 waiting on you. Connections: 1 machine needs an update". A
     destination on the bar contributes nothing to it.
 
   The mark sits on the icon's shoulder in the 64px rail and on a phone tab, and inline after the
@@ -2661,7 +2647,7 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
   than the glyph, so the badge stays under the bar's clipped top edge. The ring is the item's fill:
   `--bg-elev` at rest, `--bg-elev-2` on hover, `--surface-selected` on the current item, and the
   bar's `--bg-elev` on a phone tab. The accessible name stays the destination's name; the
-  breakdown in sentence case ("12 waiting on you, 3 stalled", "1 machine needs an update") is the
+  breakdown in sentence case ("12 waiting on you", "1 machine needs an update") is the
   item's description and the rail tooltip's second line.
 - Inline by default, in the text flow of a list-foot row, a menu row or a tab. `.count-badge.on-icon`
   places it on an icon's top-right shoulder (the icon's wrapper is the positioned box), growing
@@ -2680,7 +2666,7 @@ meta (§11.3). This table lives in code as one `statusMeta(domain, value) → {l
 - Draw it with `CountBadge` (`count`, `tone: "warning" | "danger"`, `onIcon`), never by hand. The
   badge is `aria-hidden` and holds only the number; the control that shows it states the count in
   its accessible name or description.
-- Zero is never shown in color ("0 Stalled" is not red): `CountBadge` renders nothing for a count
+- Zero is never shown in color ("0 Blocked" is not amber): `CountBadge` renders nothing for a count
   of zero or less.
 
 ### 11.5 Keycap

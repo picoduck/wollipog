@@ -309,8 +309,6 @@ export function Shell() {
   // The shell shows no live counter or preview, so a streaming-only upsert does not render it (#2763).
   const sessions = useStoreSelector((s) => s.sessions, sessionsEqualIgnoringStreaming);
   const reminders = useStoreSelector((s) => s.reminders);
-  const stalledSessionIds = useStoreSelector((s) => s.stalledSessionIds);
-  const stalledRevision = useStoreSelector((s) => s.stalledRevision);
   const experiments = useExperiments();
   const openExperimentalSettings = () => navigate({ name: "settings", section: "experimental" });
   const activeSession = view.name === "session" ? sessions.get(view.id) : undefined;
@@ -750,10 +748,6 @@ export function Shell() {
     () => activeSessions.filter(isInboxBlocked).length,
     [activeSessions],
   );
-  const stalledSessions = useMemo(
-    () => activeSessions.filter((session) => stalledSessionIds.has(session.id)).length,
-    [activeSessions, stalledRevision, stalledSessionIds],
-  );
 
   // Codex-style session control cluster. Desktop includes the host-side Open destination picker
   // inside SessionDetail. Mobile keeps only panel toggles in the app topbar: launching an editor
@@ -802,7 +796,6 @@ export function Shell() {
       <Rail
         view={view}
         blockedCount={blockedSessions}
-        stalledCount={stalledSessions}
         machines={railMachines}
         onNavigate={navigate}
         {...(isMobile ? {} : {

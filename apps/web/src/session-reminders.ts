@@ -108,7 +108,7 @@ export function sortSessionsForReminders(
             result: { revision: FIRED_REMINDER_RESULT_REVISION, at: reminder.firedAt ?? session.createdAt, owner: "human" as const },
             acknowledgedRevision: null } } : session;
     });
-    return sortInboxSessions(withDueFollowUp, pins, new Set(), familySessions).map((session) => original.get(session.id)!);
+    return sortInboxSessions(withDueFollowUp, pins, familySessions).map((session) => original.get(session.id)!);
   }
   return [...sessions].sort((left, right) => {
     const leftPinned = pins.has(left.id);

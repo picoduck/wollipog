@@ -413,7 +413,7 @@ test.describe("with a row in every status", () => {
         await expect(page.locator(".inbox-row-time.snoozed")).toHaveCount(2);
         await expect(page.locator(".inbox-row-shell.selected.unread")).toHaveCount(1);
         await expect(page.locator(".inbox-row-shell.unread:not(.selected)")).toHaveCount(2);
-        await expect(page.locator(".inbox-row-shell.stalled .status.t-danger")).toHaveCount(1);
+        await expect(page.locator(".inbox-row-shell.stalled")).toHaveCount(0);
         const rows = await rowHeights(page);
         for (const row of rows) expect(row, row.id).toMatchObject({ height: token, pitch: token });
       });
@@ -447,7 +447,8 @@ test.describe("with a row in every status", () => {
           time: inside(".inbox-row-time"),
           strip: inside(".inbox-row-activity"),
           badge: badge ? inside(".row-status .status")
-            && badge.getBoundingClientRect().right <= next.getBoundingClientRect().left + 0.5 : null,
+            && (badge.getBoundingClientRect().right <= next.getBoundingClientRect().left + 0.5
+              || badge.getBoundingClientRect().bottom <= next.getBoundingClientRect().top + 0.5) : null,
           badgeWhole: badge ? badge.scrollWidth <= badge.clientWidth + 0.5 : null,
         };
       }));
@@ -470,13 +471,13 @@ test.describe("with a row in every status", () => {
   test("a selected stalled row shows the selection bar and no stalled rail", async ({ page }) => {
     await page.setViewportSize({ width: 1440, height: 900 });
     await page.goto(`${ROWS}?selected=session-stalled`);
-    const shell = page.locator(".inbox-row-shell", { hasText: "Stalled:" });
+    const shell = page.locator(".inbox-row-shell", { hasText: "Long Wait:" });
     await expect(shell).toHaveClass(/selected/);
     expect(await shell.evaluate((node) => ({
       rail: getComputedStyle(node, "::before").content,
       bar: getComputedStyle(node.querySelector(".inbox-row-primary-cell")!, "::after").content,
       danger: node.querySelectorAll(".status.t-danger").length,
-    }))).toEqual({ rail: "none", bar: "\"\"", danger: 1 });
+    }))).toEqual({ rail: "none", bar: "\"\"", danger: 0 });
   });
 
   test("the branch shows only where the list is 600px or wider", async ({ page }) => {

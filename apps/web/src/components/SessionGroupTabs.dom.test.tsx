@@ -37,7 +37,6 @@ function split(key: InboxSplitKey, name: string, count: number, blockedCount = 0
     sessions: [{ status: "running" } as SessionView],
     count,
     blockedCount,
-    stalledCount,
   };
 }
 
@@ -82,7 +81,7 @@ test("zero attention counts draw nothing, and a tab's name, count and badges sit
   const view = await mount(false);
   const alpha = view.tab("Alpha");
   assert.deepEqual([...alpha.children].map((child) => child.className), [
-    "group-name", "count", "count-badge", "count-badge danger", "sr-only",
+    "group-name", "count", "count-badge", "sr-only",
   ]);
   assert.deepEqual([...view.tab("Beta").children].map((child) => child.className), ["group-name", "count"]);
   await view.unmount();
@@ -103,7 +102,7 @@ test("All Groups follows the tab row, opens from the keyboard and lists every gr
   });
   const rows = [...domWindow.document.querySelectorAll('[role="menu"][aria-label="All Groups"] [role="menuitemradio"]')] as unknown as HTMLButtonElement[];
   assert.deepEqual(rows.map((row) => row.getAttribute("aria-label")), [
-    "All, 5, 1 Blocked, 1 Stalled", "Alpha, 3, 1 Blocked, 1 Stalled", "Beta, 0",
+    "All, 5, 1 Blocked", "Alpha, 3, 1 Blocked", "Beta, 0",
   ]);
   assert.equal(trigger.getAttribute("aria-expanded"), "true");
   await act(async () => { rows[2]!.click(); });

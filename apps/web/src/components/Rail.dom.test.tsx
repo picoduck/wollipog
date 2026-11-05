@@ -86,7 +86,6 @@ test("rail exposes every destination, nested active states, live badges, and per
       <Rail
         view={view}
         blockedCount={blockedCount}
-        stalledCount={stalledCount}
         machines={machines}
         onNavigate={(destination) => navigated.push(destination)}
         instanceControl={<button type="button">Switch Instance</button>}
@@ -118,8 +117,8 @@ test("rail exposes every destination, nested active states, live badges, and per
   // The attention is the item's description and the tooltip's second line, not part of its name.
   const described = (link: HTMLAnchorElement) =>
     container.querySelector(`[id="${link.getAttribute("aria-describedby")}"]`)?.textContent;
-  assert.equal(described(links[0]!), "2 waiting on you, 1 stalled");
-  assert.equal(links[0]!.getAttribute("data-rail-note"), "2 waiting on you, 1 stalled");
+  assert.equal(described(links[0]!), "2 waiting on you");
+  assert.equal(links[0]!.getAttribute("data-rail-note"), "2 waiting on you");
   assert.equal(described(links[5]!), "1 machine is offline with active sessions");
   assert.equal(links[5]!.getAttribute("data-rail-note"), "1 machine is offline with active sessions");
   for (const index of [1, 2, 3, 4, 6, 7, 8]) {
@@ -131,8 +130,8 @@ test("rail exposes every destination, nested active states, live badges, and per
   // One badge on the icon's shoulder: the total, red because a session is stalled (§11.4).
   const sessionBadges = links[0]!.querySelectorAll(".count-badge");
   assert.equal(sessionBadges.length, 1);
-  assert.equal(sessionBadges[0]!.className, "count-badge danger on-icon");
-  assert.equal(sessionBadges[0]!.textContent, "3");
+  assert.equal(sessionBadges[0]!.className, "count-badge on-icon");
+  assert.equal(sessionBadges[0]!.textContent, "2");
   assert.equal(sessionBadges[0]!.getAttribute("aria-hidden"), "true");
   assert.equal(sessionBadges[0]!.parentElement?.className, "rail-icon", "the icon's box is the positioned wrapper");
   // Connections carries a dot, never a count.
@@ -141,7 +140,7 @@ test("rail exposes every destination, nested active states, live badges, and per
   assert.equal(links[5]!.querySelector(".rail-attention-dot")?.getAttribute("aria-hidden"), "true");
   const summary = container.querySelector<HTMLElement>('[role="status"]')!;
   assert.equal(summary.getAttribute("aria-live"), "polite");
-  assert.match(summary.textContent ?? "", /Sessions: 2 Blocked, 1 Stalled/);
+  assert.match(summary.textContent ?? "", /Sessions: 2 Blocked/);
 
   // Blocked alone is amber; with nothing waiting and every machine fine, nothing is drawn at all.
   await render({ name: "projects" }, 12, { offlineWithActiveSessions: 0, updateRequired: 0 }, 0);
@@ -153,7 +152,7 @@ test("rail exposes every destination, nested active states, live badges, and per
   assert.equal(container.querySelectorAll(".rail-destinations .count-badge, .rail-destinations .rail-attention-dot").length, 0,
     "zero is never shown");
   assert.equal(container.querySelectorAll(".rail-destinations [aria-describedby], .rail-destinations [data-rail-note]").length, 0);
-  assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /Sessions: 0 Blocked, 0 Stalled/,
+  assert.match(container.querySelector('[role="status"]')?.textContent ?? "", /Sessions: 0 Blocked/,
     "the polite live region stays");
 
   await render({ name: "run", id: "run-1" });
@@ -218,7 +217,6 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       <Rail
         view={view}
         blockedCount={12}
-        stalledCount={3}
         machines={{ offlineWithActiveSessions: 0, updateRequired: 1 }}
         onNavigate={(next) => navigated.push(next)}
       />,
@@ -248,10 +246,10 @@ test("the phone rail hosts destinations plus routed Settings and no nested layer
       container.querySelector(`[id="${link.getAttribute("aria-describedby")}"]`)?.textContent;
     const sessionsTab = bar.querySelector<HTMLAnchorElement>('a[href="/"]')!;
     assert.equal(sessionsTab.getAttribute("aria-label"), "Sessions");
-    assert.equal(phoneDescribed(sessionsTab), "12 waiting on you, 3 stalled");
+    assert.equal(phoneDescribed(sessionsTab), "12 waiting on you");
     const tabBadge = sessionsTab.querySelector(".count-badge")!;
-    assert.equal(tabBadge.className, "count-badge danger on-icon");
-    assert.equal(tabBadge.textContent, "15");
+    assert.equal(tabBadge.className, "count-badge on-icon");
+    assert.equal(tabBadge.textContent, "12");
     assert.equal(tabBadge.parentElement?.className, "rail-icon", "the badge sits on the icon box's shoulder");
     assert.equal(tabBadge.parentElement?.parentElement?.className, "rail-tab-pill");
     const connections = bar.querySelector<HTMLAnchorElement>('a[href="/connections/machines"]')!;
@@ -331,7 +329,6 @@ test("More closes when the viewport leaves the phone breakpoint", async () => {
       <Rail
         view={{ name: "inbox" }}
         blockedCount={0}
-        stalledCount={0}
         onNavigate={() => undefined}
       />,
     );
@@ -376,7 +373,6 @@ test("More reports the current page when an overflow destination is selected", a
         <Rail
           view={{ name: "usage" }}
           blockedCount={0}
-          stalledCount={0}
           onNavigate={() => undefined}
         />,
       );
@@ -407,7 +403,6 @@ test("only one element claims the current page while More is open", async () => 
         <Rail
           view={{ name: "usage" }}
           blockedCount={0}
-          stalledCount={0}
           onNavigate={() => undefined}
         />,
       );
@@ -443,7 +438,6 @@ test("the phone More trigger reads as current on the Settings route and the row 
         <Rail
           view={{ name: "settings", section: "appearance" }}
           blockedCount={0}
-          stalledCount={0}
           onNavigate={(destination) => navigated.push(destination)}
         />,
       );
@@ -502,7 +496,6 @@ test("crossing to desktop from the Settings row hands focus to the desktop gear"
       <Rail
         view={{ name: "settings", section: "network" }}
         blockedCount={0}
-        stalledCount={0}
         onNavigate={() => undefined}
         settingsControl={<button type="button" className="rail-item">Settings</button>}
       />,
@@ -552,7 +545,6 @@ test("hiding and reordering renumber the surviving destinations", async () => {
       <Rail
         view={{ name: "inbox" }}
         blockedCount={0}
-        stalledCount={0}
         onNavigate={() => undefined}
       />,
     );
@@ -588,9 +580,9 @@ test("More carries the attention of the destinations behind it in their most sev
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
-  const render = (view: View, blocked: number, stalled: number, machines: MachineAttention) => act(async () => {
+  const render = (view: View, blocked: number, machines: MachineAttention) => act(async () => {
     root.render(
-      <Rail view={view} blockedCount={blocked} stalledCount={stalled} machines={machines} onNavigate={() => {}} />,
+      <Rail view={view} blockedCount={blocked} machines={machines} onNavigate={() => {}} />,
     );
   });
   const trigger = () => container.querySelector<HTMLButtonElement>(".rail-more-trigger")!;
@@ -603,28 +595,28 @@ test("More carries the attention of the destinations behind it in their most sev
     saveInstanceStorageValue(RAIL_PREFERENCES_STORAGE_KEY,
       JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["projects", "automations", "skills", "usage"] }));
     resetRailPreferencesForTest();
-    await render({ name: "projects" }, 12, 3, updateRequired);
+    await render({ name: "projects" }, 12, updateRequired);
     assert.equal(mark().length, 1, "one mark, however many destinations need the user");
-    assert.equal(mark()[0]!.className, "rail-attention-dot t-danger on-icon", "stalled sessions outrank a machine update");
+    assert.equal(mark()[0]!.className, "rail-attention-dot t-warning on-icon", "stalled sessions outrank a machine update");
     assert.equal(mark()[0]!.getAttribute("aria-hidden"), "true");
     assert.equal(mark()[0]!.parentElement?.className, "rail-icon", "on the icon box's shoulder, like a destination tab's");
     assert.equal(mark()[0]!.parentElement?.parentElement?.className, "rail-tab-pill");
     assert.equal(trigger().getAttribute("aria-label"), "More Destinations", "the name is unchanged");
-    assert.equal(described(), "Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+    assert.equal(described(), "Sessions: 12 waiting on you. Connections: 1 machine needs an update");
 
     // Standing on a destination behind More keeps the "…, <destination> selected" name.
-    await render({ name: "archived" }, 12, 3, updateRequired);
+    await render({ name: "archived" }, 12, updateRequired);
     assert.equal(trigger().getAttribute("aria-label"), "More Destinations, Archived Sessions selected");
-    assert.equal(described(), "Sessions: 12 waiting on you, 3 stalled. Connections: 1 machine needs an update");
+    assert.equal(described(), "Sessions: 12 waiting on you. Connections: 1 machine needs an update");
 
     // Only the machine behind More: amber.
-    await render({ name: "projects" }, 0, 0, updateRequired);
+    await render({ name: "projects" }, 0, updateRequired);
     assert.equal(mark().length, 1);
     assert.equal(mark()[0]!.className, "rail-attention-dot t-warning on-icon");
     assert.equal(described(), "Connections: 1 machine needs an update");
 
     // Nothing behind More needs the user.
-    await render({ name: "projects" }, 0, 0, { offlineWithActiveSessions: 0, updateRequired: 0 });
+    await render({ name: "projects" }, 0, { offlineWithActiveSessions: 0, updateRequired: 0 });
     assert.equal(mark().length, 0);
     assert.equal(trigger().hasAttribute("aria-describedby"), false);
 
@@ -632,7 +624,7 @@ test("More carries the attention of the destinations behind it in their most sev
     saveInstanceStorageValue(RAIL_PREFERENCES_STORAGE_KEY,
       JSON.stringify({ v: 1, order: [], hidden: [], phoneBar: ["inbox", "projects", "automations", "usage"] }));
     resetRailPreferencesForTest();
-    await render({ name: "projects" }, 12, 3, { offlineWithActiveSessions: 0, updateRequired: 0 });
+    await render({ name: "projects" }, 12, { offlineWithActiveSessions: 0, updateRequired: 0 });
     assert.equal(container.querySelectorAll('.rail-destinations > a[href="/"] .count-badge').length, 1);
     assert.equal(mark().length, 0);
     assert.equal(trigger().hasAttribute("aria-describedby"), false);
@@ -660,7 +652,6 @@ test("overflowed destinations keep their attention and Sessions keeps its saved 
       <Rail
         view={{ name: "projects" }}
         blockedCount={2}
-        stalledCount={1}
         machines={{ offlineWithActiveSessions: 1, updateRequired: 0 }}
         onNavigate={(destination) => navigated.push(destination)}
       />,
@@ -682,11 +673,11 @@ test("overflowed destinations keep their attention and Sessions keeps its saved 
     const sheetDescribed = (row: Element) =>
       (domWindow.document as unknown as Document).getElementById(row.getAttribute("aria-describedby") ?? "")?.textContent;
     assert.equal(sessionsRow.getAttribute("aria-label"), "Sessions");
-    assert.equal(sheetDescribed(sessionsRow), "2 waiting on you, 1 stalled");
+    assert.equal(sheetDescribed(sessionsRow), "2 waiting on you");
     const rowBadges = sessionsRow.querySelectorAll(".menu-trail > .count-badge");
     assert.equal(rowBadges.length, 1);
-    assert.equal(rowBadges[0]!.className, "count-badge danger", "inline in the row, not on the icon");
-    assert.equal(rowBadges[0]!.textContent, "3");
+    assert.equal(rowBadges[0]!.className, "count-badge", "inline in the row, not on the icon");
+    assert.equal(rowBadges[0]!.textContent, "2");
     const connectionsRow = [...sheet.querySelectorAll<HTMLElement>(".menu-item")]
       .find((row) => row.querySelector(".menu-text")?.textContent === "Connections")!;
     assert.equal(connectionsRow.getAttribute("aria-label"), "Connections");
@@ -740,7 +731,6 @@ async function mountPhoneRail(view: View, navigated: View[] = []) {
       <Rail
         view={view}
         blockedCount={0}
-        stalledCount={0}
         onNavigate={(destination) => navigated.push(destination)}
       />,
     );
@@ -912,7 +902,6 @@ async function mountDesktopRail(view: View = { name: "inbox" }, { disabled = fal
       <Rail
         view={next}
         blockedCount={disabled ? 3 : 0}
-        stalledCount={0}
         onNavigate={(destination) => navigated.push(destination)}
         settingsControl={<SettingsTrigger active={next.name === "settings"} onOpen={() => settingsOpened.push(1)} disabled={disabled} />}
         onSearch={() => searches.push(1)}
@@ -1303,7 +1292,6 @@ test("the labelled rail keeps Sessions' badge and Connections' dot inline after 
         <Rail
           view={{ name: "inbox" }}
           blockedCount={2}
-          stalledCount={1}
           machines={{ offlineWithActiveSessions: 0, updateRequired: 2 }}
           onNavigate={() => undefined}
         />,
@@ -1311,7 +1299,7 @@ test("the labelled rail keeps Sessions' badge and Connections' dot inline after 
     });
     const parts = (label: string) => railItemParts(container.querySelector(`[aria-label="${label}"]`)!);
     assert.deepEqual(parts("Sessions"),
-      ["svg", "rail-item-label", "count-badge danger", "rail-item-keys", "sr-only"]);
+      ["svg", "rail-item-label", "count-badge", "rail-item-keys", "sr-only"]);
     assert.deepEqual(parts("Connections"), ["svg", "rail-item-label", "rail-attention-dot t-warning", "rail-item-keys", "sr-only"]);
   } finally {
     await act(async () => { root.unmount(); });
@@ -1330,7 +1318,7 @@ test("a phone ignores a stored labelled rail", async () => {
   const root = createRoot(container);
   try {
     await act(async () => {
-      root.render(<Rail view={{ name: "inbox" }} blockedCount={0} stalledCount={0} onNavigate={() => undefined} />);
+      root.render(<Rail view={{ name: "inbox" }} blockedCount={0} onNavigate={() => undefined} />);
     });
     assert.equal(container.querySelector(".app-rail")!.classList.contains("labelled"), false,
       "no 208px column beside the phone tab bar");

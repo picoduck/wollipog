@@ -2,7 +2,6 @@ import type { SessionEvent, SessionStatus, SessionView } from "@wollipog/protoco
 
 export const ACTIVITY_BUCKET_COUNT = 30;
 export const ACTIVITY_BUCKET_MS = 60_000;
-export const STALL_THRESHOLD_MS = 600_000;
 
 interface ActivityBucket {
   /** Absolute minute tag. Tags make modulo-slot reuse safe for delayed events. */
@@ -15,8 +14,6 @@ export interface SessionActivity {
   latestMinute: number | null;
   buckets: readonly ActivityBucket[];
   lastEventAt: number | null;
-  /** Start of the current uninterrupted busy period; null while not busy. */
-  busySince: number | null;
 }
 
 const HEARTBEAT_BUSY_STATUSES = new Set<SessionStatus>([
@@ -30,13 +27,12 @@ function emptyBuckets(): ActivityBucket[] {
   return Array.from({ length: ACTIVITY_BUCKET_COUNT }, () => ({ minute: -1, count: 0 }));
 }
 
-export function emptySessionActivity(eventEpoch = 0, busySince: number | null = null): SessionActivity {
+export function emptySessionActivity(eventEpoch = 0): SessionActivity {
   return {
     eventEpoch,
     latestMinute: null,
     buckets: emptyBuckets(),
     lastEventAt: null,
-    busySince,
   };
 }
 
@@ -61,11 +57,10 @@ export function recordSessionActivity(
   existing: SessionActivity | undefined,
   ts: number,
   eventEpoch = existing?.eventEpoch ?? 0,
-  busySince = existing?.busySince ?? null,
 ): SessionActivity {
   const base = existing?.eventEpoch === eventEpoch
     ? existing
-    : emptySessionActivity(eventEpoch, busySince);
+    : emptySessionActivity(eventEpoch);
   if (!validTimestamp(ts)) return base;
 
   const minute = Math.floor(ts / ACTIVITY_BUCKET_MS);
@@ -89,18 +84,16 @@ export function recordSessionActivity(
     latestMinute: latestMinute === null ? minute : Math.max(latestMinute, minute),
     buckets,
     lastEventAt: base.lastEventAt === null ? ts : Math.max(base.lastEventAt, ts),
-    busySince,
   };
 }
 
 export function rebuildSessionActivity(
   events: readonly SessionEvent[],
   eventEpoch: number,
-  busySince: number | null = null,
 ): SessionActivity {
-  let activity = emptySessionActivity(eventEpoch, busySince);
+  let activity = emptySessionActivity(eventEpoch);
   for (const event of events) {
-    activity = recordSessionActivity(activity, event.ts, eventEpoch, busySince);
+    activity = recordSessionActivity(activity, event.ts, eventEpoch);
   }
   return activity;
 }
@@ -108,7 +101,7 @@ export function rebuildSessionActivity(
 /** Reconcile authoritative session metadata, compressing missed activity to one tagged pulse. */
 export function reconcileSessionActivity(
   existing: SessionActivity | undefined,
-  previous: SessionView | undefined,
+  _previous: SessionView | undefined,
   next: SessionView,
 ): SessionActivity {
   const eventEpoch = next.eventEpoch ?? 0;
@@ -120,22 +113,9 @@ export function reconcileSessionActivity(
   // explicit without double-counting a timestamp already seen live.
   if (metadataLastEventAt !== null &&
       (base.lastEventAt === null || metadataLastEventAt > base.lastEventAt)) {
-    base = recordSessionActivity(base, metadataLastEventAt, eventEpoch, base.busySince);
+    base = recordSessionActivity(base, metadataLastEventAt, eventEpoch);
   }
-  const nextBusy = isHeartbeatBusy(next.status);
-  const wasBusy = previous ? isHeartbeatBusy(previous.status) : false;
-  // Waiting for a person is observable, but resuming execution is a new progress window.
-  // Unchanged busy metadata must still preserve the anchor so chatter cannot mask a real stall.
-  const resumedFromInput = previous?.status === "input_required" && next.status !== "input_required";
-  const busySince = nextBusy
-    ? (wasBusy && !resumedFromInput && base.busySince !== null
-        ? base.busySince
-        : validTimestamp(next.updatedAt) ? next.updatedAt : null)
-    : null;
-  const lastEventAt = base.lastEventAt;
-
-  if (base.busySince === busySince && base.lastEventAt === lastEventAt) return base;
-  return { ...base, busySince, lastEventAt };
+  return base;
 }
 
 /** Oldest-to-newest counts for the thirty one-minute buckets ending at `now`. */
@@ -169,23 +149,4 @@ export function hasRecentActivity(activity: SessionActivity | undefined, now: nu
  */
 export function showsActivityStrip(status: SessionStatus, activity: SessionActivity | undefined, now: number): boolean {
   return status === "running" || status === "starting" || hasRecentActivity(activity, now);
-}
-
-export function isSessionStalled(
-  session: Pick<SessionView, "status" | "lastEventAt" | "updatedAt">,
-  activity: SessionActivity | undefined,
-  now: number,
-  observable = true,
-  observationStartedAt?: number | null,
-): boolean {
-  if (!observable || !isHeartbeatBusy(session.status) || !validTimestamp(now)) return false;
-  const anchors = [
-    activity?.lastEventAt,
-    session.lastEventAt,
-    activity?.busySince ?? session.updatedAt,
-    observationStartedAt,
-  ]
-    .filter(validTimestamp);
-  if (anchors.length === 0) return false;
-  return now - Math.max(...anchors) >= STALL_THRESHOLD_MS;
 }

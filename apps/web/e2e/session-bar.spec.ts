@@ -44,15 +44,15 @@ async function setTitle(page: Page, title: string) {
   }, title);
 }
 
-const STATUS_NAME = "Session Status: 1 Child Request";
+const STATUS_NAME = "Session Status: Awaiting Prompt, 1 Child Request";
 
 /** The bar shows one status (#2182): the child request that needs the person, as one badge (#2206). */
 async function expectOneStatus(page: Page) {
   const bar = page.locator("header.session-bar");
   const control = bar.locator(".session-status-button");
   await expect(control).toHaveAccessibleName(STATUS_NAME);
-  await expect(bar.locator(".status")).toHaveCount(1);
-  await expect(control.locator(".status")).toContainText("1 Child Request");
+  await expect(bar.locator(".status")).toHaveCount(2);
+  await expect(control.locator(".status").last()).toContainText("1 Child Request");
   // The facts the bar used to carry are in the Pinned Summary, and the rest is in the popover.
   await expect(bar.getByText(/Ready for Review|Uncommitted Changes|Changes Present|Orchestrator Action/)).toHaveCount(0);
 }
@@ -385,7 +385,7 @@ test("at 940px a long title keeps 200px: the badge keeps its label only while it
   await signInRequired(page);
   await setTitle(page, LONG_TITLE);
   const control = page.locator("header.session-bar .session-status-button");
-  await expect(control).toHaveAccessibleName("Session Status: Authentication Required");
+  await expect(control).toHaveAccessibleName("Session Status: Awaiting Input, Authentication Required");
   await expect(control).toHaveAttribute("data-compact", "");
   const geometry = await statusGeometry(page);
   expect(geometry.title).toBeGreaterThanOrEqual(200);
@@ -393,7 +393,7 @@ test("at 940px a long title keeps 200px: the badge keeps its label only while it
   if (await control.getAttribute("data-dot") !== null) {
     await expect(control).toHaveAttribute("title", "Authentication Required");
   } else {
-    await expect(control.locator(".status")).toHaveText("Authentication Required");
+    await expect(control.locator(".status").last()).toHaveText("Authentication Required");
   }
 });
 
@@ -404,17 +404,17 @@ test("in the compact tier a long title collapses the status badge to its dot bef
   await signInRequired(page);
   const control = page.locator("header.session-bar .session-status-button");
   await setTitle(page, "Fix it");
-  await expect(control).toHaveAccessibleName("Session Status: Authentication Required");
+  await expect(control).toHaveAccessibleName("Session Status: Awaiting Input, Authentication Required");
   await expect(control).not.toHaveAttribute("data-dot");
   // Dot and label, without the pill, where the label fits.
   await expect(control).toHaveAttribute("data-compact", "");
-  await expect(control.locator(".status")).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-  await expect(control.locator(".status")).toHaveText("Authentication Required");
+  await expect(control.locator(".status").last()).toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+  await expect(control.locator(".status").last()).toHaveText("Authentication Required");
 
   await setTitle(page, LONG_TITLE);
   await expect(control).toHaveAttribute("data-dot", "");
   await expect(control).toHaveAttribute("title", "Authentication Required");
-  await expect(control).toHaveAccessibleName("Session Status: Authentication Required");
+  await expect(control).toHaveAccessibleName("Session Status: Awaiting Input, Authentication Required");
   const geometry = await statusGeometry(page);
   expect(geometry.title).toBeGreaterThanOrEqual(200);
   expect(geometry.badge).toBe(6);
@@ -436,8 +436,8 @@ for (const width of [1100, 1440]) {
     await expect(control).not.toHaveAttribute("data-dot");
     await expect(control).not.toHaveAttribute("data-compact");
     await expect(control).not.toHaveAttribute("title");
-    await expect(control.locator(".status")).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
-    const badge = await control.locator(".status").evaluate((element) => ({
+    await expect(control.locator(".status").last()).not.toHaveCSS("background-color", "rgba(0, 0, 0, 0)");
+    const badge = await control.locator(".status").last().evaluate((element) => ({
       width: element.getBoundingClientRect().width,
       clipped: element.scrollWidth > element.clientWidth + 0.5,
     }));

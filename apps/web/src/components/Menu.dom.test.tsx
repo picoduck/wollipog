@@ -280,7 +280,7 @@ test("every More Actions state separates its groups and ends with the destructiv
 test("the rail's More menu keeps the menu keyboard contract and opens as a sheet", async () => {
   const restore = stubViewport(true);
   const mounted = await mount(
-    <Rail view={{ name: "inbox" }} blockedCount={0} stalledCount={0} onNavigate={() => undefined} />,
+    <Rail view={{ name: "inbox" }} blockedCount={0} onNavigate={() => undefined} />,
   );
   try {
     const trigger = mounted.container.querySelector<HTMLButtonElement>(".rail-more-trigger");

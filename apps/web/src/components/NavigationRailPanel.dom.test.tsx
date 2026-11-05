@@ -82,7 +82,6 @@ async function mount(withRail = false): Promise<{ container: HTMLDivElement; roo
           <Rail
             view={{ name: "settings", section: "appearance" }}
             blockedCount={0}
-            stalledCount={0}
             onNavigate={() => undefined}
           />
         )}

@@ -129,9 +129,9 @@ export function SessionStatusButton({
   small?: boolean;
   actions: SessionStatusActions;
 }) {
-  const { primary, more, conditions } = summary;
-  const name = `Session Status: ${conditionName(primary)}${more > 0 ? ` and ${more} More` : ""}`;
-  const tooltip = `${primary.meta.label}${more > 0 ? ` and ${more} more` : ""}`;
+  const { primary, secondary, more, conditions } = summary;
+  const name = `Session Status: ${conditionName(primary)}${secondary ? `, ${conditionName(secondary)}` : ""}${more > 0 ? ` and ${more} More` : ""}`;
+  const tooltip = `${primary.meta.label}${secondary ? `, ${secondary.meta.label}` : ""}${more > 0 ? ` and ${more} more` : ""}`;
   // Phones have no title in this bar, so only a desktop bar in the compact tier ever measures.
   const compact = useIsCompact() && titleRef !== undefined;
 
@@ -178,7 +178,7 @@ export function SessionStatusButton({
       observer?.disconnect();
       renamed?.disconnect();
     };
-  }, [compact, tooltip, primary.count, popover.triggerRef, titleRef]);
+  }, [compact, tooltip, primary.count, secondary?.count, popover.triggerRef, titleRef]);
 
   // A popover with nothing to act on holds focus itself, so Escape and Tab still work from it.
   useLayoutEffect(() => {
@@ -236,6 +236,7 @@ export function SessionStatusButton({
         onKeyDown={onTriggerKeyDown}
       >
         <ConditionBadge condition={primary} />
+            {secondary && <ConditionBadge condition={secondary} />}
         {more > 0 && <span className="session-status-more" aria-hidden="true">+{more}</span>}
       </button>
       {open && (

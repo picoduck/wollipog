@@ -78,7 +78,6 @@ for (const { experiment, view, path, content } of cases) {
         <Rail
           view={view}
           blockedCount={0}
-          stalledCount={0}
           onNavigate={(destination) => navigated.push(destination)}
           instanceControl={<button type="button">Switch Instance</button>}
           settingsControl={<button type="button">Settings</button>}

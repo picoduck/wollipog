@@ -32,7 +32,7 @@ import { ActivityStrip } from "./ActivityStrip.js";
 import { AgentIcon } from "./AgentIcon.js";
 import { CountBadge } from "./CountBadge.js";
 import { inboxRowReadsClock } from "./InboxList.js";
-import { inboxRowTimestamp, sessionStalledForMs, SessionRowTime } from "./InboxRow.js";
+import { inboxRowTimestamp, SessionRowTime } from "./InboxRow.js";
 import { MenuItem, MenuSeparator, MenuSurface } from "./Menu.js";
 import { Notice } from "./Notice.js";
 import { SessionRowStatusBadge } from "./SessionRowStatusBadge.js";
@@ -69,10 +69,9 @@ export function openingBoardColumn(byColumn: ReadonlyMap<BoardColumn, readonly u
  * menu buttons live in the Sessions tab row (`BoardFilterTools`, #2201), and on a phone in the app
  * bar's Filters sheet (#2216). A phone shows one column at a time under a strip of column tabs.
  */
-export function Board({ sessions: scoped, reminders = new Map(), stalledSessionIds = new Set(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu, column, onColumnChange }: {
+export function Board({ sessions: scoped, reminders = new Map(), pinnedSessionIds = new Set(), searchActive, onShowAll, onNewSession, onSessionMenu, column, onColumnChange }: {
   /** Already scoped by the Sessions toolbar: unarchived, split, query, and reminder mode. */
   sessions: SessionView[];
-  stalledSessionIds?: ReadonlySet<string>;
   reminders?: ReadonlyMap<string, SessionReminderView>;
   pinnedSessionIds?: ReadonlySet<string>;
   /** True while the shared search or a non-All split narrows the scope (changes the empty state). */
@@ -167,10 +166,10 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
   // The family chip on a parent's card (#896). The Board does not nest, and a parent's children
   // are usually in other columns, so the rollup is read off the whole scope rather than a column.
   const threadChildren = useMemo(() => new Map(
-    threadInboxRows(scoped.map((session) => ({ session })), new Set(), stalledSessionIds, [...allSessions.values()])
+    threadInboxRows(scoped.map((session) => ({ session })), new Set(), [...allSessions.values()])
       .filter((row) => row.thread.children !== null)
       .map((row) => [row.session.id, row.thread.children!]),
-  ), [scoped, stalledSessionIds, allSessions]);
+  ), [scoped, allSessions]);
 
   // Drag a card onto a column to file the session there manually (server-side
   // setColumn override). Depth counter per column: dragleave fires when crossing
@@ -253,7 +252,6 @@ export function Board({ sessions: scoped, reminders = new Map(), stalledSessionI
       sessions={list}
       pinnedSessionIds={pinnedSessionIds}
       reminders={reminders}
-      stalledSessionIds={stalledSessionIds}
       projectName={projectName}
       machineName={machineName}
       runnerStatus={(runnerId) => runners.get(runnerId)?.status}
@@ -402,7 +400,7 @@ function BoardColumnBody({
   sessions,
   pinnedSessionIds,
   reminders,
-  stalledSessionIds,
+
   projectName,
   machineName,
   runnerStatus,
@@ -415,7 +413,6 @@ function BoardColumnBody({
   sessions: SessionView[];
   pinnedSessionIds: ReadonlySet<string>;
   reminders: ReadonlyMap<string, SessionReminderView>;
-  stalledSessionIds: ReadonlySet<string>;
   projectName: (session: SessionView) => string;
   machineName: (runnerId: string) => string | null;
   runnerStatus: (runnerId: string) => string | undefined;
@@ -441,7 +438,6 @@ function BoardColumnBody({
             machineName={machineName(session.runnerId)}
             runnerOnline={runnerStatus(session.runnerId) === "online"}
             runnerConnected={runnerStatus(session.runnerId) !== "offline"}
-            stalled={stalledSessionIds.has(session.id)}
             onOpen={() => onOpen(session.id)}
             threadChildren={threadChildren.get(session.id) ?? null}
             onDragStart={onDragStart}
@@ -469,7 +465,7 @@ function SessionCard({
   machineName,
   runnerOnline,
   runnerConnected,
-  stalled,
+
   onOpen,
   threadChildren,
   onDragStart,
@@ -486,7 +482,6 @@ function SessionCard({
   runnerOnline: boolean;
   /** The machine is not known to be offline: the status reads as the row's does (#2209). */
   runnerConnected: boolean;
-  stalled: boolean;
   onOpen: () => void;
   threadChildren: InboxThreadChildren | null;
   onDragStart: () => void;
@@ -496,7 +491,7 @@ function SessionCard({
   // The card reads its own activity, as a list row does, so one session's tool calls re-render one card.
   const activity = useStoreSelector((state) => state.activity.get(session.id));
   const activityNow = useStoreSelector((state) =>
-    inboxRowReadsClock(session, state.activity.get(session.id), stalled, state.activityNow) ? state.activityNow : 0);
+    inboxRowReadsClock(session, state.activity.get(session.id), state.activityNow) ? state.activityNow : 0);
   const lastActivityAt = inboxRowTimestamp(session, activity);
   const status = sessionRowStatus(session, {
     runnerOnline: runnerConnected,
@@ -504,7 +499,6 @@ function SessionCard({
     familyWorking: threadChildren?.hasActiveWork,
     familyProgressing: (threadChildren?.working ?? 0) > 0,
     familyFollowUpLabel: threadChildren?.followUpLabel,
-    stalledForMs: sessionStalledForMs(stalled, activityNow, lastActivityAt),
   });
   const strip = showsActivityStrip(session.status, activity, activityNow);
   const agent = sessionAgentLabel(session.agentName, session.driver, session.agentId);

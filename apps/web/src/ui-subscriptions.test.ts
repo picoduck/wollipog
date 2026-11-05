@@ -9,7 +9,6 @@ import {
 } from "@wollipog/protocol";
 import {
   eventHighWater,
-  isSessionActivityObservable,
   MAX_UI_SESSION_SUBSCRIPTIONS,
   subscriptionRecoveryRevision,
   UI_SUBSCRIPTION_PACE_BURST,
@@ -192,24 +191,6 @@ test("required streams remain observable at the subscription cap", () => {
   });
   assert.equal(result.sessionIds.length, MAX_UI_SESSION_SUBSCRIPTIONS);
   assert.equal(result.sessionIds[0], "selected-last");
-});
-
-test("activity observability requires a legacy stream or an applied targeted selection", () => {
-  assert.equal(isSessionActivityObservable({
-    mode: "legacy", requestedRevision: 0, appliedRevision: 0, sessionIds: [], podIds: [],
-  }, "s1"), true);
-  assert.equal(isSessionActivityObservable({
-    mode: "targeted", requestedRevision: 2, appliedRevision: 1, sessionIds: ["s1"], podIds: [],
-  }, "s1"), true, "the old applied selection remains observable while its replacement is pending");
-  assert.equal(isSessionActivityObservable({
-    mode: "targeted", requestedRevision: 2, appliedRevision: 1, sessionIds: ["s1"], podIds: [],
-  }, "s2"), false, "a newly requested id is not observable before its acknowledgement");
-  assert.equal(isSessionActivityObservable({
-    mode: "targeted", requestedRevision: 2, appliedRevision: 2, sessionIds: ["s1"], podIds: [],
-  }, "s1"), true);
-  assert.equal(isSessionActivityObservable({
-    mode: "unknown", requestedRevision: 0, appliedRevision: 0, sessionIds: [], podIds: [],
-  }, "s1"), false);
 });
 
 test("subscription pacing keeps continuous switching inside the server window, with jitter margin", () => {

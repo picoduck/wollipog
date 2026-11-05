@@ -41,7 +41,6 @@ import {
 import { backgroundDeliveryNotifyDecisions, notifier, notifyDecision, type NotifyPayload } from "./notify.js";
 import {
   ACTIVITY_BUCKET_MS,
-  isSessionStalled,
   rebuildSessionActivity,
   reconcileSessionActivity,
   recordSessionActivity,
@@ -76,7 +75,6 @@ import {
   eventHighWater,
   UiSubscriptionPacer,
   UiSubscriptionSynchronizer,
-  isSessionActivityObservable,
   type UiSubscriptionDeliveryState,
 } from "./ui-subscriptions.js";
 
@@ -395,13 +393,8 @@ export interface State {
   /** Fixed-size per-session heartbeat rings. Unlike full timelines, these survive view changes.
    * Updated in place; a batch of socket frames waiting to be published works on its own copy. */
   activity: Map<string, SessionActivity>;
-  /** Shared minute clock and derived stall state. The stalled set is replaced only when its
-   * membership moves, together with `stalledRevision`. */
+  /** Shared minute clock for activity strips. */
   activityNow: number;
-  activityObservationStartedAt: Map<string, number>;
-  stalledSessionIds: Set<string>;
-  stalledRevision: number;
-  stalledCount: number;
   /** Event-log epoch associated with each cached timeline. A reprocess increments the epoch and
    * invalidates seq cursors even when the replacement log reuses or exceeds the old sequence. */
   eventEpochs: Map<string, number>;
@@ -612,72 +605,6 @@ function sessionEventEpoch(session: SessionView | undefined): number {
   return session?.eventEpoch ?? 0;
 }
 
-function sessionIsStalled(state: State, session: SessionView, now = state.activityNow): boolean {
-  const observable = state.conn === "online" &&
-    isSessionActivityObservable(state.streamSubscriptions, session.id);
-  return isSessionStalled(
-    session,
-    state.activity.get(session.id),
-    now,
-    observable,
-    state.activityObservationStartedAt.get(session.id),
-  );
-}
-
-/** Replaces the derived set only when membership moves, with scalar revision/count changes. A
- * published state keeps the set it was published with while later frames wait (#2763). */
-function updateSessionStall(state: State, sessionId: string, now = state.activityNow): State {
-  const session = state.sessions.get(sessionId);
-  const stalled = session !== undefined && !session.archived && sessionIsStalled(state, session, now);
-  const wasStalled = state.stalledSessionIds.has(sessionId);
-  if (stalled === wasStalled) return state;
-  const stalledSessionIds = new Set(state.stalledSessionIds);
-  if (stalled) stalledSessionIds.add(sessionId);
-  else stalledSessionIds.delete(sessionId);
-  return {
-    ...state,
-    stalledSessionIds,
-    stalledRevision: state.stalledRevision + 1,
-    stalledCount: stalledSessionIds.size,
-  };
-}
-
-function clearSessionStall(state: State, sessionId: string): State {
-  if (!state.stalledSessionIds.has(sessionId)) return state;
-  const stalledSessionIds = new Set(state.stalledSessionIds);
-  stalledSessionIds.delete(sessionId);
-  return {
-    ...state,
-    stalledSessionIds,
-    stalledRevision: state.stalledRevision + 1,
-    stalledCount: stalledSessionIds.size,
-  };
-}
-
-/** Rare lifecycle/minute-clock scan. The session-event hot path never calls this. */
-function scanSessionStalls(state: State, now = state.activityNow): State {
-  let stalledSessionIds: Set<string> | null = null;
-  const writable = () => (stalledSessionIds ??= new Set(state.stalledSessionIds));
-  for (const sessionId of state.stalledSessionIds) {
-    if (!state.sessions.has(sessionId)) writable().delete(sessionId);
-  }
-  for (const session of state.sessions.values()) {
-    const stalled = !session.archived && sessionIsStalled(state, session, now);
-    const wasStalled = (stalledSessionIds ?? state.stalledSessionIds).has(session.id);
-    if (stalled === wasStalled) continue;
-    if (stalled) writable().add(session.id);
-    else writable().delete(session.id);
-  }
-  return stalledSessionIds
-    ? {
-        ...state,
-        stalledSessionIds,
-        stalledRevision: state.stalledRevision + 1,
-        stalledCount: (stalledSessionIds as Set<string>).size,
-      }
-    : state;
-}
-
 function captureRecoveryCursors(state: State, sessionIds: Iterable<string>): Map<string, number> {
   return new Map([...sessionIds].map((sessionId) => {
     const events = state.events.get(sessionId);
@@ -866,20 +793,12 @@ function reducer(state: State, action: Action): State {
           streamSubscriptions: EMPTY_UI_SUBSCRIPTION_DELIVERY,
           streamRecoveryCursors: new Map<string, number>(),
           pendingStreamRecovery: null,
-          activityObservationStartedAt: new Map<string, number>(),
         }),
         // A successful connect proves the credential works; otherwise latch an explicit flag
         // and carry the previous one through the retry cycle's connecting/offline states.
         authRequired: action.conn === "online" ? false : (action.authRequired ?? state.authRequired),
       };
-      if (action.conn !== "online" && state.stalledSessionIds.size > 0) {
-        next = {
-          ...next,
-          stalledSessionIds: new Set<string>(),
-          stalledRevision: state.stalledRevision + 1,
-          stalledCount: 0,
-        };
-      }
+
       return next;
     }
     case "activity_tick": {
@@ -887,7 +806,7 @@ function reducer(state: State, action: Action): State {
       if (Math.floor(action.now / ACTIVITY_BUCKET_MS) === Math.floor(state.activityNow / ACTIVITY_BUCKET_MS)) {
         return state;
       }
-      return scanSessionStalls({ ...state, activityNow: action.now }, action.now);
+      return { ...state, activityNow: action.now };
     }
     case "navigate": {
       // Drop off-screen streams from visible state. Store retains eligible reader windows in its
@@ -999,7 +918,6 @@ function reducer(state: State, action: Action): State {
         const rebuiltActivity = rebuildSessionActivity(
           merged,
           action.eventEpoch,
-          priorActivity?.busySince ?? null,
         );
         state.activity.set(action.sessionId, session
           ? reconcileSessionActivity(rebuiltActivity, session, session)
@@ -1037,13 +955,13 @@ function reducer(state: State, action: Action): State {
           action.sessionId,
           contiguousEventHighWater(merged, windowContiguityStart(eventWindows, action.sessionId, action.eventEpoch, frozen)),
         );
-        return updateSessionStall({
+        return {
           ...state, events, eventEpochs, eventHistory, eventWindows, streamRecoveryCursors,
-        }, action.sessionId);
+        };
       }
-      return updateSessionStall({
+      return {
         ...state, events, eventEpochs, eventHistory, eventWindows,
-      }, action.sessionId);
+      };
     }
     case "events_older_loading": {
       const window = state.eventWindows.get(action.sessionId);
@@ -1256,7 +1174,6 @@ function reducer(state: State, action: Action): State {
             activityNow: messageNow,
             // Legacy delivery is already global and the snapshot's lastEventAt is authoritative;
             // only newly acknowledged targeted streams need an observation barrier.
-            activityObservationStartedAt: new Map<string, number>(),
             streamRecoveryCursors: new Map(),
             pendingStreamRecovery: null,
             snapshotLoaded: msg.sessionsComplete !== false,
@@ -1296,24 +1213,16 @@ function reducer(state: State, action: Action): State {
             // cache after the reconnect snapshot proves that pod no longer exists.
             podContext: new Map([...state.podContext].filter(([podId]) => pods.has(podId))),
           });
-          return scanSessionStalls(withLegacyRecovery(next), messageNow);
+          return withLegacyRecovery(next);
         }
         case "session_subscriptions_applied": {
           const pending = state.pendingStreamRecovery;
           if (!pending || pending.revision !== msg.revision) return state;
           const messageNow = Number.isSafeInteger(action.now) && action.now! >= 0 ? action.now! : state.activityNow;
           const accepted = new Set(msg.sessionIds);
-          const activityObservationStartedAt = new Map<string, number>();
-          for (const sessionId of msg.sessionIds) {
-            const priorStart = isSessionActivityObservable(state.streamSubscriptions, sessionId)
-              ? state.activityObservationStartedAt.get(sessionId)
-              : undefined;
-            activityObservationStartedAt.set(sessionId, priorStart ?? messageNow);
-          }
           const next: State = {
             ...state,
             activityNow: messageNow,
-            activityObservationStartedAt,
             streamSubscriptions: {
               mode: "targeted",
               requestedRevision: msg.revision,
@@ -1324,7 +1233,7 @@ function reducer(state: State, action: Action): State {
             streamRecoveryCursors: new Map([...pending.cursors].filter(([sessionId]) => accepted.has(sessionId))),
             pendingStreamRecovery: null,
           };
-          return scanSessionStalls(next, messageNow);
+          return next;
         }
         case "runner_upsert": {
           const runners = new Map(state.runners);
@@ -1445,7 +1354,7 @@ function reducer(state: State, action: Action): State {
           const cachedEpoch = state.eventEpochs.get(msg.session.id) ?? 0;
           const historyEpoch = state.eventHistory.get(msg.session.id)?.eventEpoch ?? cachedEpoch;
           if (cachedEpoch === nextEpoch && historyEpoch === nextEpoch) {
-            return updateSessionStall({ ...state, sessions }, msg.session.id);
+            return { ...state, sessions };
           }
           const events = new Map(state.events);
           events.delete(msg.session.id);
@@ -1455,7 +1364,7 @@ function reducer(state: State, action: Action): State {
           eventHistory.delete(msg.session.id);
           const eventWindows = new Map(state.eventWindows);
           eventWindows.delete(msg.session.id);
-          return updateSessionStall({
+          return {
             ...state,
             sessions,
             events,
@@ -1463,7 +1372,7 @@ function reducer(state: State, action: Action): State {
             eventHistory,
             eventWindows,
             ...invalidateRecoveryCursor(state, msg.session.id),
-          }, msg.session.id);
+          };
         }
         case "session_reminder_upsert": {
           const current = state.reminders.get(msg.reminder.sessionId);
@@ -1493,8 +1402,6 @@ function reducer(state: State, action: Action): State {
           const events = new Map(state.events);
           events.delete(msg.sessionId);
           state.activity.delete(msg.sessionId);
-          const activityObservationStartedAt = new Map(state.activityObservationStartedAt);
-          activityObservationStartedAt.delete(msg.sessionId);
           const eventEpochs = new Map(state.eventEpochs);
           eventEpochs.delete(msg.sessionId);
           const eventHistory = new Map(state.eventHistory);
@@ -1517,18 +1424,17 @@ function reducer(state: State, action: Action): State {
                 selectedBySplit,
               }
             : state.inbox;
-          return clearSessionStall({
+          return {
             ...state,
             sessions,
             reminders,
             events,
-            activityObservationStartedAt,
             eventEpochs,
             eventHistory,
             eventWindows,
             shellOutput,
             inbox,
-          }, msg.sessionId);
+          };
         }
         case "session_event": {
           const session = state.sessions.get(msg.event.sessionId);
@@ -1541,7 +1447,6 @@ function reducer(state: State, action: Action): State {
                 priorActivity,
                 msg.event.ts,
                 eventEpoch,
-                priorActivity?.busySince ?? null,
               )
             : priorActivity;
           if (nextActivity !== undefined && nextActivity !== priorActivity) {
@@ -1550,7 +1455,7 @@ function reducer(state: State, action: Action): State {
           // Publish a fresh state object even though the activity registry itself stays stable;
           // per-session selectors observe the new immutable value at this key.
           const heartbeatState = session
-            ? updateSessionStall({ ...state }, msg.event.sessionId)
+            ? { ...state }
             : state;
           if (!relevantSessions(state).has(msg.event.sessionId)) {
             return heartbeatState;
@@ -1588,7 +1493,6 @@ function reducer(state: State, action: Action): State {
           const rebuiltActivity = rebuildSessionActivity(
             msg.events,
             eventEpoch,
-            state.activity.get(msg.sessionId)?.busySince ?? null,
           );
           // The metadata upsert for this epoch may be coalesced behind the reset. Preserve the
           // current busy period, but never seed the replacement ring from the old epoch's
@@ -1599,13 +1503,13 @@ function reducer(state: State, action: Action): State {
             { ...currentSession, eventEpoch, lastEventAt: null },
           ));
           if (!relevantSessions(state).has(msg.sessionId)) {
-            if (sessionEventEpoch(currentSession) === eventEpoch) return updateSessionStall({ ...state }, msg.sessionId);
+            if (sessionEventEpoch(currentSession) === eventEpoch) return { ...state };
             // pruneViewStreams does NOT clear streamRecoveryCursors, so a session viewed earlier can
             // reach this non-relevant branch still holding a frozen cursor from the old epoch. Adopt
             // the new epoch AND drop that cursor, else reopening pages above a stale seq (issue #78).
             const sessions = new Map(state.sessions);
             sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
-            return updateSessionStall({ ...state, sessions, ...invalidateRecoveryCursor(state, msg.sessionId) }, msg.sessionId);
+            return { ...state, sessions, ...invalidateRecoveryCursor(state, msg.sessionId) };
           }
           const events = new Map(state.events);
           events.set(msg.sessionId, tagRebuilt([...msg.events].sort((a, b) => a.seq - b.seq)));
@@ -1619,17 +1523,17 @@ function reducer(state: State, action: Action): State {
           eventWindows.delete(msg.sessionId);
           const recoveryReset = invalidateRecoveryCursor(state, msg.sessionId);
           if (sessionEventEpoch(currentSession) === eventEpoch) {
-            return updateSessionStall({
+            return {
               ...state, events, eventEpochs, eventHistory, eventWindows, ...recoveryReset,
-            }, msg.sessionId);
+            };
           }
           // Writer coalescing may move the matching metadata upsert after this durable reset. Move
           // the local row to the reset generation now so stale in-flight history cannot land first.
           const sessions = new Map(state.sessions);
           sessions.set(msg.sessionId, { ...currentSession, eventEpoch });
-          return updateSessionStall({
+          return {
             ...state, sessions, events, eventEpochs, eventHistory, eventWindows, ...recoveryReset,
-          }, msg.sessionId);
+          };
         }
         case "shell_output": {
           // Ephemeral console stream — only buffered for sessions the current view shows.
@@ -1753,10 +1657,6 @@ function initialState(
     events: new Map(),
     activity: new Map(),
     activityNow: Date.now(),
-    activityObservationStartedAt: new Map(),
-    stalledSessionIds: new Set(),
-    stalledRevision: 0,
-    stalledCount: 0,
     eventEpochs: new Map(),
     eventHistory: new Map(),
     eventWindows: new Map(),
@@ -3103,7 +3003,7 @@ export function StoreProvider({
     };
   }, [connection.runtimeKey, store]);
 
-  // One shared clock drives every stall transition. Align to wall-clock minute boundaries so the
+  // One shared clock drives activity-strip expiry. Align to wall-clock minute boundaries so the
   // store scans the session map once per minute rather than once per card/component.
   useEffect(() => {
     let timer: number | null = null;

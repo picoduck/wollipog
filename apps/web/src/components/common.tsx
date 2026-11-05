@@ -17,7 +17,7 @@ import { BACKGROUND_DELIVERY_STATUS, backgroundDeliveryAccessibleName } from "..
 import {
   childRequestsLabel,
   quarantinedStatusMeta,
-  queueReasonLabel,
+  sessionStatusSummary,
   sessionLifecycleMeta,
   statusMeta,
   type StatusMeta,
@@ -219,12 +219,6 @@ export function SessionStatusBadge({ status, archiveStatus, archiveOperation, st
   return <StatusBadge meta={meta} title={operation?.failure?.message} ariaLabel={ariaLabel} />;
 }
 
-/** One status badge per entity (docs/design-system.md §11.1): attention outranks lifecycle, so when
- * an attention badge already says the session needs the user, "Awaiting Input" is not said again. */
-export function lifecycleRepeatsAttention(lifecycle: StatusMeta, attention: unknown): boolean {
-  return Boolean(attention) && lifecycle.label === statusMeta("session", "input_required").label;
-}
-
 export function AttentionBadge({ session, ariaLabel, onOpen }: {
   session: Pick<SessionView, "status" | "pendingApproval"> &
     Partial<Pick<SessionView, "orchestratorCampaign" | "campaignRequests" | "pendingRequestOwners">>;
@@ -239,27 +233,15 @@ export function AttentionBadge({ session, ariaLabel, onOpen }: {
   );
 }
 
-/**
- * Whether the session's attention is only its campaign's: no request of its own needs the person,
- * so the protocol's "Needs Your Input" stands for the human-owned child requests, which the one
- * "N Child Requests" status says instead (#2206).
- */
-function attentionIsChildRequestsOnly(session: Parameters<typeof sessionAttentionBreakdown>[0]): boolean {
-  return (sessionCampaignRequests(session)?.human ?? 0) > 0 &&
-    sessionAttentionBreakdown(session).every((group) => group.count === 0);
-}
-
 /** One child's dot on a parent's family chip (#896). Literal class names, so the stylesheet guard can
  * see every state rendered; the state itself comes off the wire. */
-export function ThreadDot({ state, title }: { state: "blocked" | "stalled" | "running" | "done" | "idle"; title: string }) {
+export function ThreadDot({ state, title }: { state: "blocked" | "running" | "done" | "idle"; title: string }) {
   return <i
     className={state === "blocked"
       ? "inbox-thread-dot blocked"
-      : state === "stalled"
-        ? "inbox-thread-dot stalled"
-        : state === "running"
-          ? "inbox-thread-dot running"
-          : state === "done" ? "inbox-thread-dot done" : "inbox-thread-dot"}
+      : state === "running"
+        ? "inbox-thread-dot running"
+        : state === "done" ? "inbox-thread-dot done" : "inbox-thread-dot"}
     title={title}
   />;
 }
@@ -334,57 +316,17 @@ export function SessionStatusIndicators({
   const storedRunnerStatus = useOptionalStoreSelector((state) =>
     session.runnerId === undefined ? undefined : state.runners.get(session.runnerId)?.status ?? "unknown");
   const runnerOnline = storedRunnerStatus === undefined ? !disconnected : storedRunnerStatus !== "offline";
-  const lifecycle = sessionLifecycleMeta(session.status, {
-    archiveStatus: session.archiveStatus,
-    archiveOperation: session.archiveOperation,
-    stopOperation: session.stopOperation,
-    historyQuarantine: session.historyQuarantine,
-    runnerOnline,
-  });
-  // Child requests are one status, "N Child Requests", whatever else the session needs (#2206). The
-  // Orchestrator's own share is counted only inside the Requests panel.
-  const childRequests = sessionCampaignRequests(session)?.human ?? 0;
-  const attentionStatus = attentionIsChildRequestsOnly(session) ? null : sessionAttentionStatus(session);
-  const queueHoldReason = session.status === "queued" && !session.capacityWait && session.queueHold
-    ? session.holds?.find((hold) => hold.holdId === session.queueHold?.holdId)?.reason
-    : undefined;
-  return (
-    <span className="session-status-indicators" role="group" aria-label="Session Status">
-      {!lifecycleRepeatsAttention(lifecycle, attentionStatus) && <SessionStatusBadge
-        status={session.status}
-        archiveStatus={session.archiveStatus}
-        archiveOperation={session.archiveOperation}
-        stopOperation={session.stopOperation}
-        historyQuarantine={session.historyQuarantine}
-        runnerOnline={runnerOnline}
-        ariaLabel={`Activity: ${lifecycle.label}`}
-      />}
-      {session.status === "queued" && session.capacityWait && (
-        <StatusBadge tone="neutral" label={queueReasonLabel(session.capacityWait.kind)}
-          title={session.capacityWait.description}
-          ariaLabel={`Queue Reason: ${session.capacityWait.description}`} />
-      )}
-      {session.status === "queued" && !session.capacityWait && session.queueHold && (
-        <StatusBadge tone="neutral"
-          label={session.queueHold.kind === "worktree_rebind" ? "Worktree Handoff" : "Account Handoff"}
-          title={queueHoldReason}
-          ariaLabel={`Queue Reason: ${queueHoldReason ?? "A handoff is waiting on background work."}`} />
-      )}
-      {attentionStatus && (attention === "pills"
-        ? <AttentionPills session={session} />
-        : <AttentionBadge session={session} ariaLabel={`Attention: ${attentionStatus.label}`} onOpen={onOpenAttention} />)}
-      {childRequests > 0 && (
-        <StatusBadge tone="warning" label={childRequestsLabel(childRequests)}
-          title={`${childRequests} ${childRequests === 1 ? "request from a child session needs" : "requests from child sessions need"} your input.`}
-          ariaLabel={childRequestsLabel(childRequests)}
-          onClick={onOpenChildRequests ?? onOpenAttention} />
-      )}
-      {disconnected && (
-        <StatusBadge tone="danger" label="Disconnected" title="The session runner is disconnected."
-          ariaLabel="Health: Disconnected" />
-      )}
-    </span>
-  );
+  const summary = sessionStatusSummary(session, { runnerOnline, disconnected: disconnected || !runnerOnline });
+  return <span className="session-status-indicators" role="group" aria-label="Session Status">
+    {[summary.primary, ...(summary.secondary ? [summary.secondary] : [])].map((condition, index) =>
+      <StatusBadge key={index} meta={condition.meta} title={condition.description}
+        ariaLabel={condition.kind === "lifecycle" ? "Activity: " + condition.meta.label :
+          condition.kind === "attention" ? "Attention: " + condition.meta.label :
+          condition.kind === "disconnected" ? "Health: Disconnected" :
+          condition.kind === "queue_reason" ? "Queue Reason: " + condition.description : condition.meta.label}
+        onClick={condition.kind === "child_requests" ? onOpenChildRequests ?? onOpenAttention : condition.needsYou ? onOpenAttention : undefined} />)}
+    {summary.more > 0 && <span title={summary.conditions.filter((condition) => condition.needsYou && condition !== summary.secondary).map((condition) => condition.meta.label).join("; ")}>+{summary.more}</span>}
+  </span>;
 }
 
 /** The accessible name of a background-work badge: "Background Work:" and the state, as every other

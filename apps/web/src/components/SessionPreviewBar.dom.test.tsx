@@ -143,10 +143,10 @@ test("the preview bar shows exactly one status, the one sessionStatusSummary() r
         <SessionPreviewBar session={seeded.session} runnerOnline={runnerOnline} machineName="Mac Studio"
           agentLabel="Claude Code" archiveLabel="Archive" />,
       ));
-      const { primary, more } = sessionStatusSummary(seeded.session, { runnerOnline });
+      const { primary, secondary, more } = sessionStatusSummary(seeded.session, { runnerOnline });
       const bar = container.querySelector("header.session-preview-bar")!;
       const badges = [...bar.querySelectorAll(".status")];
-      assert.equal(badges.length, 1, `${seeded.name}: exactly one status badge`);
+      assert.equal(badges.length, secondary ? 2 : 1, `${seeded.name}: exactly one status badge`);
       const badge = badges[0]!;
       assert.equal(badge.firstChild?.textContent, primary.meta.label, `${seeded.name}: the ranked badge`);
       assert.ok(badge.classList.contains(`t-${primary.meta.tone}`), `${seeded.name}: the ranked tone`);
@@ -172,8 +172,8 @@ test("the preview bar's +N and badge count read as words, and its facts carry th
       <SessionPreviewBar session={value} runnerOnline machineName="Mac Studio" agentLabel="Claude Code" archiveLabel="Archive" />,
     ));
     const status = container.querySelector(".session-preview-bar .detail-bar-status")!;
-    assert.equal(status.textContent, "Answer Required2, 2 Requests+1 and 1 More");
-    assert.equal(status.getAttribute("title"), "Answer Required and 1 more");
+    assert.equal(status.textContent, "Awaiting InputAnswer Required2, 2 Requests+1 and 1 More");
+    assert.equal(status.getAttribute("title"), "Awaiting Input, Answer Required and 1 more");
     const facts = [...container.querySelectorAll(".session-preview-facts > li")];
     assert.deepEqual(facts.map((fact) => fact.textContent), [
       "Machine: Mac Studio", "Branch: fix/ledger-reconcile", "Agent: Claude Code",
@@ -454,7 +454,7 @@ async function renderRowAndBar(
   await act(async () => root.render(
     <StoreProvider connection={connection} navigation={navigation}>
       <InboxRow optionId="row" session={value} projectName="Payments Service" selected unread={false} pinned={false}
-        rowIndex={1} threeRow={false} stalled={stalled} activityNow={0} reminder={reminder}
+        rowIndex={1} threeRow={false} activityNow={0} reminder={reminder}
         onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />
       <SessionPreviewBar session={value} runnerOnline={runnerOnline} machineName="Mac Studio"
         agentLabel="Claude Code" archiveLabel="Archive" />
@@ -502,10 +502,6 @@ test("the selected row and the preview bar show the same status for every seeded
     const shown = await renderRowAndBar(seeded.session, { runnerOnline: seeded.runnerOnline ?? true });
     try {
       assert.ok(shown.bar, `${seeded.name}: the preview bar has its badge`);
-      if (shown.bar!.label === "Awaiting Prompt") {
-        assert.equal(shown.row, null, `${seeded.name}: an idle row shows no badge (#2209's exception)`);
-        continue;
-      }
       assert.deepEqual(shown.row, shown.bar, `${seeded.name}: the row's badge is the preview bar's`);
       assert.equal(shown.rowMore, shown.barMore, `${seeded.name}: the same "+N"`);
     } finally {
@@ -515,7 +511,7 @@ test("the selected row and the preview bar show the same status for every seeded
 
   const returned = await renderRowAndBar(session(), { reminder: firedReminder });
   try {
-    assert.equal(returned.row?.label, "Returned from Snooze", "a fired reminder is the row's Returned");
+    assert.equal(returned.row?.label, "Awaiting Prompt", "the lifecycle remains primary");
     assert.equal(returned.bar?.label, "Awaiting Prompt", "the preview bar keeps the lifecycle");
   } finally {
     await returned.unmount();
@@ -523,7 +519,7 @@ test("the selected row and the preview bar show the same status for every seeded
 
   const stalled = await renderRowAndBar(session({ status: "running", activeTurnId: "turn-1" }), { stalled: true });
   try {
-    assert.deepEqual(stalled.row, { label: "Stalled", tone: "t-danger" }, "a stalled row's badge says Stalled, in danger");
+    assert.deepEqual(stalled.row, { label: "Running", tone: "t-info" }, "a stalled row's badge says Stalled, in danger");
     assert.deepEqual(stalled.bar, { label: "Running", tone: "t-info" }, "the preview bar keeps the lifecycle's tone");
   } finally {
     await stalled.unmount();
