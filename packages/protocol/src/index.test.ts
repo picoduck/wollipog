@@ -360,6 +360,9 @@ test("session restart capability overlays controls without freezing the agent ca
 
 test("PROTOCOL_VERSION is 294", () => {
   assert.equal(PROTOCOL_VERSION, 294);
+  // Selection floors read issue facts from a v291 runner (#4103).
+  assert.equal(runnerSupportsProtocol(290, "campaignIssueFacts"), false);
+  assert.equal(runnerSupportsProtocol(291, "campaignIssueFacts"), true);
   // A regular session's Location switch needs a v287 runner and control plane (#4138), and
   // Switch and Continue of the live session a v289 runner.
   assert.equal(runnerSupportsProtocol(286, "sessionLocationSwitch"), false);

@@ -17312,6 +17312,31 @@ export class ControlPlaneDb {
     return [...roots].flatMap((id) => { const root=this.getSession(id); return root?.orchestratorPolicy?.issueScope ? [root] : []; });
   }
 
+  /** Issues the root's applied selection-lineage scope changes added (#4103), counted once each and
+   * never given back by a later removal. A scope change is applied and consumed in one step, and a
+   * pending one is superseded by the next proposal, so only consumed changes hold a slot. */
+  consumedSelectionAdditions(rootId: string): number[] {
+    const added = new Set<number>();
+    for (const row of this.stmt("SELECT occurrence_id FROM workflow_decisions WHERE controlling_session_id=? AND category='campaign_issue_scope' AND status='consumed'")
+      .all(rootId) as Array<{ occurrence_id: string }>) {
+      const snapshot = this.workflowDecisionByOccurrence(row.occurrence_id)?.resourceSnapshot;
+      if (snapshot?.category === "campaign_issue_scope" && snapshot.lineage?.kind === "selection") for (const n of snapshot.additions) added.add(n);
+    }
+    return [...added].sort((a, b) => a - b);
+  }
+
+  /** Whether another active campaign holds `issue` (#4103): an active root campaign other than
+   * `rootId` whose scope names it, or whose work ledger has a committed work item for it. */
+  issueHeldByOtherCampaign(rootId: string, repository: string, issue: number): boolean {
+    const wanted = repository.toLowerCase();
+    const active = new Set(this.listOrchestratorCampaignSessionIds().filter((id) => id !== rootId));
+    for (const id of active) {
+      const scope = this.getSession(id)?.orchestratorPolicy?.issueScope;
+      if (scope && scope.repository.toLowerCase() === wanted && scope.issueNumbers.includes(issue)) return true;
+    }
+    return this.campaignWorkLedger.campaignsWithCommittedIssue(wanted, issue).some((id) => active.has(id));
+  }
+
   /** Campaign Status's repository boundary (#4117): each entry's Locations with their current
    * availability and default marker, read live, so a Location that left the Project shows as
    * removed while its repository keeps its entry. */

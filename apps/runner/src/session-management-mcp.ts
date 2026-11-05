@@ -1443,13 +1443,14 @@ export const TOOLS: McpTool[] = [
   },
   {
     name: "request_campaign_issue_scope_change",
-    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
+    description: "Propose exact repository-qualified issue additions/removals at the current scope revision. Custom requires a human. A human-established Full Control issue boundary admits verified epic or exact published follow-up lineage within its limits. When the owner's first message asked the campaign to choose issues (a selection grant), propose the issues you chose with lineage {kind:\"selection\"} and your ranking as the explanation, additions only: the server refuses, with a fixed code and no model call, an issue outside the campaign's repositories, a pull request, a closed issue, one already in scope, one in another active campaign's scope, one past the selection count or Maximum Issues, and one with a Human Required label; otherwise the owner decides. Resolution atomically applies and consumes scope; do not consume it yourself. Pending, denied, stale and replayed requests never widen authority.",
     inputSchema: { type: "object", properties: {
       requestId: { type: "string" }, expectedRevision: { type: "integer", minimum: 0 }, explanation: { type: "string", minLength: 1, maxLength: 4000 },
       additions: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       removals: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: { type: "string" }, number: { type: "integer", minimum: 1 } }, required: ["repository", "number"], additionalProperties: false } },
       lineage: { oneOf: [ { type: "object", properties: { kind: { const: "epic" }, epic: { type: "integer", minimum: 1 } }, required: ["kind", "epic"], additionalProperties: false },
-        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false } ] },
+        { type: "object", properties: { kind: { const: "follow_up" }, publicationOccurrenceId: { type: "string" } }, required: ["kind", "publicationOccurrenceId"], additionalProperties: false },
+        { type: "object", properties: { kind: { const: "selection" } }, required: ["kind"], additionalProperties: false } ] },
     }, required: ["requestId", "expectedRevision", "explanation", "additions", "removals"], additionalProperties: false },
     handler: async (args, deps) => {
       if (!deps.selfSessionId) return errorResult("this tool requires a session identity");

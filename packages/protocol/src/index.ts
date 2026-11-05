@@ -890,12 +890,18 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
 //      row only under a consumed switch naming exactly that Location.
+// 291: issue facts for selection scope (#4103). A `campaign_issue_scope` inspection may ask for
+//      `facts`; a v291 runner then answers `issueFacts` for each requested number: whether it is
+//      an issue or a pull request, its state, labels, assignees, title and a bounded body excerpt.
+//      A pull request is reported there instead of failing the read. The control plane's
+//      selection floors read these facts; an older runner reports none, so its selection
+//      proposals take the owner's route. (290 is claimed by an open pull request.)
 // 294: campaign repository additions (#4117). A campaign root asks its owner to add one Project
 //      Location's repository with request_campaign_repository_addition (`wollipog campaign
 //      repository-addition`); the control plane inspects the Location first and creates a
 //      human-owned `campaign_repository_addition` decision, and the root carries out the exact
 //      approved Location with execute_campaign_repository_addition. Older runners and control
-//      planes refuse the tools by name. (290 to 293 are claimed by open pull requests.)
+//      planes refuse the tools by name. (292 and 293 are claimed by open pull requests.)
 export const PROTOCOL_VERSION = 294;
 
 export * from "./campaign-authority.js";
@@ -1452,6 +1458,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   capacityLockDiagnostics: 137,
   /** v288 validates a Full Control boundary's `repositories` list (#4117). */
   campaignRepositoryBoundary: 288,
+  /** v291 reports issue facts (kind, state, labels, assignees) for selection scope (#4103). */
+  campaignIssueFacts: 291,
   /** v294 asks for and carries out a campaign repository addition (#4117). */
   campaignRepositoryAddition: 294,
 } as const;
@@ -5282,7 +5290,9 @@ export interface CampaignIssueScopeRequest {
   additions: CampaignIssueRef[];
   removals: CampaignIssueRef[];
   explanation: string;
-  lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string };
+  /** `selection` fills the owner's selection from the first message's scope grant (#4103). Under a
+   * healthy selection grant a proposal without lineage takes the same route. */
+  lineage?: { kind: "epic"; epic: number } | { kind: "follow_up"; publicationOccurrenceId: string } | { kind: "selection" };
 }
 
 export interface CampaignIssueAdmission {
@@ -5407,7 +5417,9 @@ export type CampaignIssueScopeMessage = {
   type: "campaign_issue_scope";
   requestId: string;
   sessionId: string;
-} & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] } } |
+} & ({ operation: "inspect"; epic?: number; issues?: number[]; publication?: { sanitizedTitle: string; sanitizedBody: string; labels: string[] };
+       /** v291 (#4103): also report `issueFacts` for each of `issues`. */
+       facts?: true } |
      { operation: "publication_inspect"; sanitizedTitle: string; sanitizedBody: string; labels: string[] } |
      { operation: "synchronize"; scope: CampaignIssueScope; control?: CampaignControl });
 
@@ -5434,10 +5446,43 @@ export interface CampaignIssueScopeResultMessage {
   candidates?: CampaignIssueScopeView["candidates"];
   error?: string;
   publicationDigest?: string;
+  /** v291 (#4103): the facts of each requested issue, when the inspection asked for them. */
+  issueFacts?: CampaignIssueFacts[];
   /** Duplicate inspection searched and compared titles by their subject, without a type tag
    * (#2940). Older runners omit it: their search and comparison keep the tag, so they can miss an
    * existing issue that differs only by it, and no bounded publication is admitted through them. */
   duplicateSearch?: "subject";
+}
+
+/** What the forge reports about one requested number (#4103), for the selection floors and the
+ * Decision Model's review. Title, labels and body are the forge's untrusted text. */
+export interface CampaignIssueFacts {
+  number: number;
+  kind: "issue" | "pull_request";
+  state: "open" | "closed";
+  /** Every label, never truncated: the Human Required label floor reads them all. An issue with
+   * more than `CAMPAIGN_ISSUE_FACT_LIMITS.labels` labels, or a longer name than `labelChars`, fails
+   * the read instead. */
+  labels: string[];
+  assignees: string[];
+  title: string;
+  /** The body's first `CAMPAIGN_ISSUE_FACT_LIMITS.bodyExcerptChars` characters. */
+  bodyExcerpt: string;
+}
+
+export const CAMPAIGN_ISSUE_FACT_LIMITS = { labels: 100, labelChars: 255, assignees: 20, titleChars: 512, bodyExcerptChars: 2000 } as const;
+
+/** Whether one reported fact is within its bounds, with every label complete (#4103). */
+export function validCampaignIssueFacts(value: unknown): value is CampaignIssueFacts {
+  const limits = CAMPAIGN_ISSUE_FACT_LIMITS;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const strings = (list: unknown, max: number, chars: number) => Array.isArray(list) && list.length <= max &&
+    list.every((item) => typeof item === "string" && item.length <= chars);
+  return Number.isSafeInteger(v.number) && (v.number as number) > 0 && (v.kind === "issue" || v.kind === "pull_request") &&
+    (v.state === "open" || v.state === "closed") && strings(v.labels, limits.labels, limits.labelChars) &&
+    strings(v.assignees, limits.assignees, 100) && typeof v.title === "string" && v.title.length <= limits.titleChars &&
+    typeof v.bodyExcerpt === "string" && v.bodyExcerpt.length <= limits.bodyExcerptChars;
 }
 
 export interface GithubIssueClosureInspection {
@@ -5986,6 +6031,10 @@ export interface GovernancePolicyConditions {
   minToolCalls?: number;
   maxToolCalls?: number;
   escalated?: boolean;
+  /** Issue labels, matched case-insensitively (#4103). Only a Human Required ask rule may set them,
+   * and such a rule never matches a tool request: it keeps an Orchestrator from admitting an issue
+   * with one of these labels into its own scope, which stays the owner's to add. */
+  issueLabels?: string[];
 }
 
 export type GovernancePolicyEffect = "allow" | "deny" | "ask";
