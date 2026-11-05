@@ -99,6 +99,9 @@ export interface LocationSwitchRequest {
   /** The task, written for whoever continues it: shown on the card and sent to a new session. */
   handoff: string;
   trigger?: LocationSwitchTrigger;
+  /** An existing branch of the target repository that already holds this task's work, such as a
+   * pull request's head branch. Switch and Continue continues on it after the runner verifies it. */
+  recoverBranch?: string;
 }
 
 export interface LocationSwitchSnapshot {
@@ -107,6 +110,8 @@ export interface LocationSwitchSnapshot {
   reason: string;
   handoff: string;
   trigger: LocationSwitchTrigger;
+  /** The existing target branch Switch and Continue continues on, when the request named one. */
+  recoverBranch?: string;
   projectId: string;
   projectName: string;
   current: LocationSwitchPlace;
@@ -117,6 +122,52 @@ export interface LocationSwitchSnapshot {
   /** Binds the inspected Locations, the requester's agent and settings; never a credential. */
   targetDigest: string;
   expiresAt: number;
+}
+
+/** The live session's Location switch as its people see it (#4138): approved and waiting for the
+ * provider's turn to end, or failed with the session still in its previous Location. A completed
+ * switch leaves no state; the session's Location simply changed. */
+export interface LocationSwitchStateView {
+  state: "pending" | "failed";
+  repository: string;
+  workspaceId: string;
+  locationName: string;
+  /** A failed switch's fixed, non-sensitive reason. */
+  reason?: string;
+  at: number;
+}
+
+/** Control plane → the session's own runner: move the live session into this verified Location
+ * at its next turn boundary, keeping the provider conversation. The runner re-verifies that the
+ * workspace is its own, that its path is the one approved and that its origin is `repository`. */
+export interface SessionLocationSwitchMessage {
+  type: "session_location_switch";
+  requestId: string;
+  sessionId: string;
+  workspaceId: string;
+  workspacePath: string;
+  repository: string;
+  locationName: string;
+  /** The approved occurrence; the runner records it with the switch for attribution. */
+  occurrenceId: string;
+  /** Sent to the provider once it resumes in the new Location. */
+  continuation: string;
+  /** An existing branch of the target repository to continue on instead of a new one. */
+  recoverBranch?: string;
+}
+
+export interface SessionLocationSwitchResultMessage {
+  type: "session_location_switch_result";
+  requestId: string;
+  sessionId: string;
+  ok: boolean;
+  error?: string;
+}
+
+/** A branch name a request may ask to recover: Git's own rules are applied again by the runner. */
+export function validLocationSwitchBranch(value: unknown): value is string {
+  return typeof value === "string" && value.length > 0 && value.length <= 255 && !value.startsWith("-") &&
+    !/[\s~^:?*[\\\u0000-\u001f\u007f]|\.\.|@\{|\/\/|\/$|\.lock$|^\/|\.$/u.test(value);
 }
 
 export interface LocationSwitchResult {

@@ -28,6 +28,50 @@ for (const width of [1440, 390]) {
     ]);
   });
 
+  test(`a Location on this machine offers Switch and Continue for the live session at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    await page.goto("/request-surfaces-e2e.html?scenario=location-switch&live=1&branch=1&locations=2");
+    const details = page.getByRole("region", { name: "Location Switch Details" });
+    await expect(details).toContainText("Existing Branch");
+    await expect(details).toContainText("fix/install-link");
+    await expect(details).toContainText("Switch and Continue moves this session to that Location: it keeps its conversation");
+    const foot = page.locator(".request-dock .request-card-foot");
+    for (const name of ["Stay Here", "Start a New Session", "Switch and Continue"]) {
+      await expect(foot.getByRole("button", { name, exact: true })).toBeVisible();
+    }
+    if (evidenceDir) {
+      await page.screenshot({ path: join(evidenceDir, `location-switch-live-${width}.png`), fullPage: true });
+      await page.setViewportSize({ width, height: 1900 });
+      await page.screenshot({ path: join(evidenceDir, `location-switch-live-tall-${width}.png`), fullPage: true });
+    }
+    // The other machine's Location offers only a new session.
+    await page.getByRole("radiogroup", { name: "Proposed Location" }).getByText("Docs Site (Laptop)").click();
+    await expect(foot.getByRole("button", { name: "Switch and Continue", exact: true })).toHaveCount(0);
+    await page.getByRole("radiogroup", { name: "Proposed Location" }).getByRole("radio", { name: /^Docs Site This Machine/ }).check();
+    await foot.getByRole("button", { name: "Switch and Continue", exact: true }).click();
+    await expect.poll(() => page.evaluate(() => window.__WOLLIPOG_REQUEST_SURFACES_E2E__.submissions())).toEqual([
+      { requestId: "evidence-occurrence", optionId: "switch:loc-docs" },
+    ]);
+  });
+
+  test(`Session Detail says where a pending switch moves the session, and why a failed one stayed, at ${width}px`, async ({ page }) => {
+    await page.setViewportSize({ width, height: 900 });
+    for (const state of ["pending", "failed"] as const) {
+      await page.goto(`/command-inbox-projects-e2e.html?scenario=location-switch-notice&state=${state}`);
+      await page.getByRole("button", { name: /Alpha Session/ }).click();
+      const open = page.getByRole("button", { name: "Open Session", exact: true });
+      if (await open.isVisible()) await open.click();
+      const label = state === "pending" ? "Location Switch Pending" : "Location Switch Failed";
+      const notice = page.locator(`[aria-label="${label}"]`);
+      await expect(notice).toBeVisible();
+      await expect(notice).toContainText(state === "pending"
+        ? "This session moves to Location “Docs Site” (acme/docs) when its current turn ends, then continues the task there."
+        : "The switch to Location “Docs Site” (acme/docs) didn’t finish. The target worktree could not be prepared");
+      await expect(notice.getByRole("button", { name: "Dismiss Notice", exact: true })).toHaveCount(state === "failed" ? 1 : 0);
+      if (evidenceDir) await page.screenshot({ path: join(evidenceDir, `location-switch-notice-${state}-${width}.png`), fullPage: true });
+    }
+  });
+
   test(`several matching Locations are chosen from, and Start a New Session uses the chosen one at ${width}px`, async ({ page }) => {
     await page.setViewportSize({ width, height: 900 });
     await page.goto("/request-surfaces-e2e.html?scenario=location-switch&locations=2");

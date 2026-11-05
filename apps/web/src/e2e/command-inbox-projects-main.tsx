@@ -705,6 +705,17 @@ function initialModel(): FixtureModel {
       },
     });
   }
+  if (SCENARIO === "location-switch-notice") {
+    // An approved Location switch waiting for the turn to end, or one that didn't finish (#4138).
+    const failed = FIXTURE_QUERY.get("state") === "failed";
+    Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {
+      status: failed ? "idle" : "running", activeTurnId: failed ? null : "turn-alpha",
+      locationSwitch: {
+        state: failed ? "failed" : "pending", repository: "acme/docs", workspaceId: "docs", locationName: "Docs Site", at: 5,
+        ...(failed ? { reason: "the target worktree could not be prepared: branch fix/install-link is checked out in another worktree" } : {}),
+      },
+    });
+  }
   if (SCENARIO === "session-notices") {
     // Three problem states at once (#1966): the slot shows the quarantine, the rest behind +2 More.
     Object.assign(initial.sessions.find((candidate) => candidate.id === "session-alpha")!, {

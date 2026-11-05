@@ -138,6 +138,37 @@ test("several matching Locations need a choice, and every control, including A, 
   }
 });
 
+test("where the live session can move, Switch and Continue is the primary and Start a New Session stays beside it", async () => {
+  const pending = request(1);
+  const snap = pending.workflowDecision!.resourceSnapshot as LocationSwitchSnapshot;
+  snap.candidates[0]!.actions = ["switch", "new_session"];
+  snap.recoverBranch = "fix/install-link";
+  snap.options = [{ optionId: "switch:loc-1", label: "Switch and Continue", description: "Docs Site on Workstation" }, ...snap.options];
+  pending.options = [{ optionId: "switch:loc-1", name: "Switch and Continue", kind: "allow_once" }, ...pending.options];
+  const decisions: unknown[] = [];
+  function Harness() {
+    const intentRef = useRef<RequestIntentHandler | null>(null);
+    return <>
+      <RequestCard session={session(pending)} request={pending} runnerOnline presentation="dock" showKeyHints intentRef={intentRef} />
+      <button type="button" data-press-a="" onClick={() => intentRef.current?.("approve")}>Press A</button>
+    </>;
+  }
+  const view = await render(<Harness />, { approve: async (_id, body) => { decisions.push(body); return session(null); } });
+  try {
+    // With two ways to approve, A picks neither: the person clicks the one they mean.
+    assert.deepEqual(footer(view.container), ["Stay HereD", "Start a New Session", "Switch and Continue (primary)"]);
+    const text = view.container.textContent ?? "";
+    assert.match(text, /Existing Branch\s*fix\/install-link/u);
+    assert.match(text, /Switch and Continue moves this session to that Location: it keeps its conversation/u);
+    await act(async () => { view.container.querySelector<HTMLButtonElement>("[data-press-a]")!.click(); await tick(); });
+    assert.deepEqual(decisions, []);
+    await act(async () => { view.container.querySelector<HTMLButtonElement>(".request-card-foot > button.primary")!.click(); await tick(); });
+    assert.deepEqual(decisions, [{ requestId: "switch", optionId: "switch:loc-1" }]);
+  } finally {
+    await view.unmount();
+  }
+});
+
 test("the card's options for a Location are its own actions and Stay Here, never another Location's", () => {
   const options = request(2).options;
   assert.deepEqual(locationSwitchOptions(options, "loc-2").map((option) => option.optionId), ["new_session:loc-2", "__workflow_deny__"]);
