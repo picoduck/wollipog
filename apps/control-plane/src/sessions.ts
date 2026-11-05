@@ -885,6 +885,8 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
       break;
     case "ui_evidence_approval":
       for (const item of snapshot.evidence) targets.push(`${snapshot.category}:evidence:${item.sha256}`);
+      // A video stored as its derived frames still names the video it came from (#4137 review).
+      if (snapshot.videoReview) targets.push(`${snapshot.category}:evidence:${snapshot.videoReview.sourceSha256}`);
       break;
     case "campaign_issue_scope":
       targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:+${[...snapshot.additions].sort((a, b) => a - b).join(",")}` +
@@ -11005,6 +11007,12 @@ export class SessionsService {
         }
         if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
         return ok(previous);
+      }
+      // A video the owner kept, by a rule or a handoff (#4137, #4064), stays theirs under a new
+      // requestId or key: the ordinary route matches the original evidence, before frame derivation
+      // would replace it, and carries the rule over.
+      if (this.ownerKept(controller.session.id, normalized.data.category, request.resourceKey, normalized.data)) {
+        return this.createWorkflowDecision(sessionId, request, canAccess);
       }
     }
     // Eligibility is the same direct authority that resolution checks: the saved owner under Custom,

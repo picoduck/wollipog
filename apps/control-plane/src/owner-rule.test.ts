@@ -248,6 +248,29 @@ test("a video request's rule is compared before an earlier occurrence is replaye
   } finally { h.db.close(); }
 });
 
+test("a ruled video stored as its derived frames still keeps its source video for the owner (#4137 review)", () => {
+  const h = harness();
+  try {
+    const source = "e".repeat(64);
+    const frames = [0, 1].map((index) => ({ evidenceId: `frame-${index}`, artifactId: `art_frame_${index}`,
+      sha256: String(index).repeat(64), mediaType: "image/png" }));
+    const stored = { category: "ui_evidence_approval" as const, evidence: frames,
+      videoReview: { sourceEvidenceId: "clip", sourceArtifactId: "art_clip", sourceSha256: source, originalRequestSha256: "f".repeat(64),
+        profile: "short-silent-webm-vp9-v1" as const, manifestSha256: "a".repeat(64),
+        frames: frames.map((frame, index) => ({ ...frame, index, ptsMs: index * 100 })) } };
+    assert.ok(h.db.createWorkflowDecision({ requestId: "video-frames", occurrenceId: "workflow_video_frames", sessionId: "child",
+      controllingSessionId: "root", category: "ui_evidence_approval", resourceKey: "evidence", resourceSnapshot: stored as never,
+      resourceDigest: auditDigest(stored)!, policyRevision: h.db.getSession("root")!.parentControlPolicy!.revision, authority: "human",
+      ownerRule: RULE, createdAt: 5 }));
+    // The same source video, named by its own sha256 under a new key and without the rule.
+    const again = h.svc.createWorkflowDecision("child", { requestId: "video-again", resourceKey: "another-key",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [{ evidenceId: "clip", sha256: source,
+        uri: "https://evidence.example/clip.webm", mediaType: "video/webm" }] } });
+    assert.ok(again.ok && again.data, again.error ?? "requested");
+    assert.deepEqual([again.data.authority, again.data.ownerRule], ["human", RULE]);
+  } finally { h.db.close(); }
+});
+
 test("a credential-screen classification never releases a ruled question to the Orchestrator (#4137)", () => {
   const h = harness();
   try {
