@@ -1910,6 +1910,7 @@ app.register(async (instance) => {
       case "workspace_worktree_setup_result":
       case "logout_agent_result":
       case "switch_session_provider_account_result":
+      case "session_location_switch_result":
       case "session_role_result":
       case "inspect_provider_authentication_result":
       case "select_provider_authentication_account_result":
@@ -4731,6 +4732,14 @@ registerLocationSwitchRoutes(app, { requestPrincipal, service: new LocationSwitc
     const ownership = resolveSessionCreationOwnership(db, human, body);
     if (!ownership.ok) return { ok: false, status: ownership.status, error: ownership.error };
     return svc.createSession(ownership.body, undefined, ownership.scope, false, false, false, { defaultOwnerUserId: human.userId });
+  },
+  // The session's own runner re-verifies the target and records the switch before answering.
+  switchSession: async (runnerId, message) => {
+    const reply = await hub.requestFromRunner(runnerId, message.requestId, message, 120_000);
+    if (reply.type !== "session_location_switch_result" || reply.requestId !== message.requestId || reply.sessionId !== message.sessionId) {
+      throw new Error("unexpected runner reply");
+    }
+    return { ok: reply.ok, ...(reply.error ? { error: reply.error } : {}) };
   },
 }) });
 

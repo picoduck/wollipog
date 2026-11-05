@@ -3661,6 +3661,10 @@ function SessionDetailLoaded({
   const [dismissedAccountSwitchFailureKey, setDismissedAccountSwitchFailureKey] = useState<string | null>(null);
   const accountSwitchFailure = accountSwitchFailureKey !== dismissedAccountSwitchFailureKey
     ? session.providerAccountSwitchFailure : undefined;
+  // An approved Location switch waiting for the turn to end, or one that failed (#4138).
+  const locationSwitchKey = session.locationSwitch ? `${session.id}:${session.locationSwitch.state}:${session.locationSwitch.at}` : null;
+  const [dismissedLocationSwitchKey, setDismissedLocationSwitchKey] = useState<string | null>(null);
+  const locationSwitch = locationSwitchKey !== dismissedLocationSwitchKey ? session.locationSwitch : undefined;
   // The failed switch's notice opens the same dialog as More Actions → Switch Account….
   const [switchAccountOpen, setSwitchAccountOpen] = useState(false);
   const switchAccountButtonRef = useRef<HTMLButtonElement | null>(null);
@@ -5124,6 +5128,24 @@ function SessionDetailLoaded({
           trailing={trailing}
           details={<div className="code-well"><code>{configError}</code></div>}>
           <p>Wollipog can&rsquo;t read the setup configuration this worktree was created from, so its setup didn&rsquo;t run.</p>
+        </Notice>
+      ),
+    });
+  }
+  if (locationSwitch && locationSwitchKey) {
+    const failed = locationSwitch.state === "failed";
+    const title = failed ? "Location Switch Failed" : "Location Switch Pending";
+    sessionNotices.push({
+      key: `location-switch:${locationSwitchKey}`, severity: failed ? "warning" : "info", rank: SESSION_NOTICE_RANK.locationSwitch,
+      title,
+      render: ({ trailing }) => (
+        <Notice tone={failed ? "warning" : "neutral"} role="status" ariaLabel={title} title={title} trailing={trailing}
+          {...(failed ? { dismissLabel: "Dismiss Notice", onDismiss: () => setDismissedLocationSwitchKey(locationSwitchKey) } : {})}>
+          <p>{failed
+            ? <>The switch to Location &ldquo;{locationSwitch.locationName}&rdquo; ({locationSwitch.repository}) didn&rsquo;t finish.
+              {" "}{asSentence(locationSwitch.reason ?? "", true)}</>
+            : <>This session moves to Location &ldquo;{locationSwitch.locationName}&rdquo; ({locationSwitch.repository}) when its
+              current turn ends, then continues the task there.</>}</p>
         </Notice>
       ),
     });

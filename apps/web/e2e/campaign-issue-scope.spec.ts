@@ -71,6 +71,36 @@ for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844
   });
 }
 
+for (const viewport of [{ width: 1440, height: 1100 }, { width: 390, height: 844 }]) {
+  for (const [scope, rows, notice] of [
+    ["grant", { "Named Issues": "team/repo#123, team/repo#124", "Selection Count": "5", "Selection Constraints": "open; UI only",
+      "Maximum Issues": "9 Derived", "Withheld by Your Message": "PR Merge, Merged Branch Deletion",
+      "Decision Model": "claude-haiku-4-5 (low) · Claude Code on Studio" }, null],
+    ["grant-default", { "Named Issues": "None", "Selection Count": "3 Defaulted", "Selection Criteria": "highest priority" }, null],
+    ["grant-failed", { "Named Issues": "None", "Selection Count": "None", "Failure": "The Decision Model's provider was overloaded." }, "Scope Grant Unavailable"],
+    ["grant-uncertain", { "Named Issues": "None", "Reason": "The message doesn't say whether #12 is a request or background." }, "Scope Grant Uncertain"],
+  ] as const) {
+    test(`Campaign Status shows the ${scope} Scope Grant at ${viewport.width}px (#4102)`, async ({ page }, info) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&scope=${scope}`);
+      const grant = page.getByRole("region", { name: "Scope Grant" });
+      await expect(grant).toBeVisible();
+      for (const [term, value] of Object.entries(rows)) {
+        await expect(grant.locator("dl.facts > div").filter({ has: page.getByRole("term").getByText(term, { exact: true }) }).locator("dd")).toHaveText(value);
+      }
+      if (notice) {
+        await expect(grant.locator(".notice").filter({ hasText: notice })).toContainText("The Orchestrator's scope proposal comes to you for approval.");
+      } else await expect(grant.locator(".notice")).toHaveCount(0);
+      // The Scope Grant sits above the authorized scope it established.
+      await expect(page.getByRole("region", { name: "Authorized Issue Scope" })).toBeVisible();
+      const geometry = await grant.evaluate((element) => ({ client: element.clientWidth, scroll: element.scrollWidth }));
+      expect(geometry.scroll).toBeLessThanOrEqual(geometry.client + 1);
+      await grant.scrollIntoViewIfNeeded();
+      await page.screenshot({ path: info.outputPath(`scope-grant-${scope}-${viewport.width}.png`), fullPage: true });
+    });
+  }
+}
+
 for (const [scope, requirement] of [
   ["outdated-runner", campaignIssueScopeChangesRequirement(207)],
   ["issue-limits", campaignIssueLimitsRequirement(216)],

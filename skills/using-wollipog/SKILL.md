@@ -560,17 +560,28 @@ the task names with your session's own. When they differ, call `request_location
 (`owner/name`, or `host/group/project` for GitLab), a one-sentence `reason`, and a `handoff`
 that states the task, what is done, any branches or pull requests, and what remains. Use
 `trigger` `worktree_attach` or `review` when attaching a worktree or requesting a review is
-refused because the repository differs; those refusals say so.
+refused because the repository differs; those refusals say so. When the target repository
+already has a branch with this task's work (for example an open pull request's head branch),
+name it as `recoverBranch` so the work continues there instead of starting over.
 
 The control plane inspects every Location of your Project and shows your person a card with
 the verified Locations of that repository, your current Location, and the reasons any
-Location could not be used. Only your person chooses: **Start a New Session** continues the
-task in the chosen Location with your handoff, on this machine or another one, and **Stay
-Here** keeps you where you are with your repository and permissions unchanged. Agent text
-never approves it. End your turn after requesting; the outcome resumes you. After approval,
-call `execute_location_switch` with the occurrence and its `resourceDigest`
+Location could not be used. Only your person chooses: **Switch and Continue** moves this
+session to a Location on the same machine, keeping its conversation; **Start a New Session**
+continues the task in the chosen Location with your handoff, on this machine or another one;
+and **Stay Here** keeps you where you are with your repository and permissions unchanged.
+Agent text never approves it. End your turn after requesting; the outcome resumes you. After
+approval, call `execute_location_switch` with the occurrence and its `resourceDigest`
 (`location-switch execute <id> --digest <digest>`): the Location is verified again, then the
-new session starts. Tell your person where the task continues and stop working on it here.
+choice is carried out.
+
+- After **Start a New Session**, tell your person where the task continues and stop working on
+  it here.
+- After **Switch and Continue**, end your turn. When it ends, this session moves into a
+  worktree of the target repository (on the branch you named, or a new one), reloads that
+  repository's instructions and permissions, and continues the task on its own. Your work in
+  the earlier Location stays there. If the switch fails, you stay where you were, and the
+  session shows why.
 
 Orchestrators never switch: they stay in their Location and dispatch a child to a Location of
 that repository. A child session keeps the repository it was assigned and reports the
@@ -783,7 +794,10 @@ Custom requires an authenticated human to approve the exact change. In Full Cont
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
-objective also qualifies. The server
+objective also qualifies. When the owner's first message set the scope and its Scope Grant in Campaign
+Status failed, was uncertain, or asked the campaign to select issues, propose the issues you chose
+without lineage: the proposal goes to the owner as one typed approval, so put your rationale in
+`explanation`. The server
 refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
 failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve

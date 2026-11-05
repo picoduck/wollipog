@@ -91,6 +91,32 @@ import { RetentionResponse, scanRetentionSources } from "./history-retention.js"
 import type { WorktreeHookSnapshot } from "./worktree-setup.js";
 import { SESSION_COMMAND_AUTHORITY_PROTOCOL_VERSION } from "./session-command-authority.js";
 
+/** An approved, runner-verified Location switch waiting for the provider's turn to end (#4138). */
+export interface PendingLocationSwitch {
+  requestId: string;
+  occurrenceId: string;
+  workspaceId: string;
+  /** Canonical path of the target repository, verified when the switch was accepted. */
+  repoPath: string;
+  repository: string;
+  locationName: string;
+  continuation: string;
+  recoverBranch?: string;
+  requestedAt: number;
+}
+
+/** A Location a session left (#4138), kept for attribution and cleanup of its worktrees. */
+export interface LocationHistoryEntry {
+  occurrenceId: string;
+  workspaceId: string | null;
+  repoPath: string;
+  worktreePath: string | null;
+  worktreeBranch?: string;
+  worktrees: SessionWorktreeView[];
+  switchedAt: number;
+  toWorkspaceId: string;
+}
+
 /** A session's persisted metadata (superset of the protocol SessionSnapshot with runner-only fields). */
 export interface SessionMeta {
   /** Derived semantic anchor in the local log; never a CP event identity. Missing after an
@@ -144,6 +170,17 @@ export interface SessionMeta {
   automaticProviderAccountCooldowns?: Record<string, number>;
   automaticProviderAccountLastSwitchAt?: number;
   providerAccountSwitchFailure?: ProviderAccountSwitchFailureView;
+  /** (#4138) An approved Location switch, verified on this runner, that moves the live session at
+   * its next turn boundary. Durable so a runner restart neither loses nor half-applies it. */
+  pendingLocationSwitch?: PendingLocationSwitch;
+  /** (#4138) The automatic turn a completed move owes the session, written with the move itself.
+   * It is consumed when the relaunched provider queues it; a runner that stopped first resumes it. */
+  pendingLocationContinuation?: { occurrenceId: string; text: string; path: string; branch: string; locationName: string; repository: string };
+  /** (#4138) The last Location switch that failed; the session stayed in its previous Location. */
+  locationSwitchFailure?: import("@wollipog/protocol").LocationSwitchStateView;
+  /** (#4138) Each Location this session left, with the worktrees it owned there. They stay
+   * attributed to that repository, and deletion still retires them from it. */
+  locationHistory?: LocationHistoryEntry[];
   /** The provider-HOME lease refusal that stopped the last launch (#3240); cleared by the next. */
   providerHomeRefusal?: ProviderHomeLaunchRefusalView;
   /** Discovered adapter/CLI version, refreshed before launch for capability gates and telemetry; never an auth source. */
@@ -4318,6 +4355,12 @@ export function metaToSnapshot(
       controlPlaneProtocolVersion >= RUNNER_CAPABILITY_MIN_PROTOCOL.sessionProviderAccountSwitch
       ? m.providerAccountSwitchFailure ?? null
       : undefined,
+    ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "sessionLocationSwitchLive") ? {
+      locationSwitch: m.pendingLocationSwitch
+        ? { state: "pending" as const, repository: m.pendingLocationSwitch.repository, workspaceId: m.pendingLocationSwitch.workspaceId,
+            locationName: m.pendingLocationSwitch.locationName, at: m.pendingLocationSwitch.requestedAt }
+        : m.locationSwitchFailure ?? null,
+    } : {}),
     ...(runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeLaunchRefusals")
       ? { providerHomeRefusal: m.providerHomeRefusal
         ? runnerSupportsProtocol(controlPlaneProtocolVersion, "providerHomeRecoveryDetails")

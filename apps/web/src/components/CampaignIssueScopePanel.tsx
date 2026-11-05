@@ -5,10 +5,12 @@ import { Checkbox } from "./ui/ChoiceControls.js";
 import { useApi } from "../api-context.js";
 import { Notice } from "./Notice.js";
 import { BusyButton } from "./ui/BusyButton.js";
+import { CampaignScopeGrantSection, ScopeGrantReviewFacts } from "./CampaignScopeGrant.js";
 
 export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssueScopeSnapshot }) {
   const refs = (numbers: number[]) => numbers.length ? numbers.map((n) => `${snapshot.repository}#${n}`).join(", ") : "None";
   return <>
+    {snapshot.grantReview && <ScopeGrantReviewFacts review={snapshot.grantReview} />}
     <p>{snapshot.explanation}</p>
     <dl className="facts">
       <div><dt>Scope Revision</dt><dd>{snapshot.expectedRevision} to {snapshot.expectedRevision + 1}</dd></div>
@@ -83,7 +85,8 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
     } catch (e) { setError(e instanceof Error ? e.message : "Could not resolve epic members."); }
     finally { setBusy(false); }
   };
-  return <section className="campaign-detail-section" aria-labelledby={headingId}>
+  return <>{view?.scopeGrant && <CampaignScopeGrantSection grant={view.scopeGrant} />}
+  <section className="campaign-detail-section" aria-labelledby={headingId}>
     <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"
       actions={<button className="btn sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>}>{error}</Notice>}
@@ -127,5 +130,5 @@ export function CampaignIssueScopePanel({ session, campaignId }: { session: Sess
         {pending && <p role="status">Scope is unchanged. Review the exact additions and removals in the campaign's approval request.</p>}
       </> : <p>Only the campaign owner can request issue scope changes here.</p>}
     </> : !error && <p role="status">Loading authorized issue scope…</p>}
-  </section>;
+  </section></>;
 }

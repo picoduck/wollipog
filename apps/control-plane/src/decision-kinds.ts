@@ -1,21 +1,24 @@
 import { createHash } from "node:crypto";
 import type { DecisionKind } from "@wollipog/protocol";
 import { DECISION_INPUT_MAX_CHARS } from "@wollipog/protocol";
+import { FULL_CONTROL_LAUNCH_OPERATIONS } from "./campaign-launch-admission.js";
 
 /** Longest reason a verdict may carry. The audit stores it, so it stays bounded. */
 export const DECISION_REASON_MAX_CHARS = 300;
 
 /** The subset of JSON Schema a Decision output may use. Every property is required, so the same
  * schema is accepted by Claude Code's `--json-schema` and Codex's strict `outputSchema`. */
-export type DecisionFieldSchema =
+export type DecisionScalarSchema =
   | { type: "string"; maxLength: number; enum?: readonly string[] }
   | { type: "integer"; minimum: number; maximum: number }
-  | { type: "boolean" }
-  | {
-      type: "array";
-      maxItems: number;
-      items: { type: "integer"; minimum: number; maximum: number } | { type: "string"; maxLength: number };
-    };
+  | { type: "boolean" };
+
+/** An array item: a scalar, or an object of scalars whose properties are all required. */
+export type DecisionItemSchema = DecisionScalarSchema | { type: "object"; properties: Readonly<Record<string, DecisionScalarSchema>> };
+
+export type DecisionFieldSchema =
+  | DecisionScalarSchema
+  | { type: "array"; maxItems: number; items: DecisionItemSchema };
 
 /** One decision kind: a fixed, versioned prompt and an output schema. Callers (#4102–#4104) add a
  * kind by adding a definition here; the runtime, audit and retries are shared. */
@@ -60,6 +63,57 @@ const PROBE: DecisionKindDefinition = {
   dataFields: ["request", "boundary"],
 };
 
+const ISSUE_NUMBER = { type: "integer", minimum: 1, maximum: Number.MAX_SAFE_INTEGER } as const;
+const REPOSITORY = { type: "string", maxLength: 200 } as const;
+
+/** The owner's first message read into a typed scope grant (#4102). The model sees only that exact
+ * message: no tools, no repository and no issue content. The server's floors decide what the answer
+ * can grant; see `scope-grant.ts`. */
+const SCOPE_GRANT: DecisionKindDefinition = {
+  kind: "scope_grant",
+  promptVersion: "scope_grant.v1",
+  instructions:
+    "You read the first message a campaign owner sent to an orchestrating agent and report which issues the " +
+    "owner asks the campaign to work on. Read only the owner's message. Report what it says; never add an issue, " +
+    "a count or a permission it does not state.\n" +
+    "- `explicit`: every issue the owner asks the campaign to act on by its number, in any notation: `#4090`, " +
+    "`issue 4090`, a bare `4090` that names an issue, or an issue URL. Give `repository` as `owner/name` when the " +
+    "message names one for that issue, otherwise an empty string. Never list a number written only as a count, a " +
+    "version, a pull request, a time or anything other than an issue.\n" +
+    "- `ranges`: each range of issues the owner asks for, such as `#2997–#3005` or `issues 10 through 14`, as its " +
+    "first and last number. Do not also list a range's numbers in `explicit`.\n" +
+    "- `context`: issue numbers the message mentions without asking the campaign to act on them: background, " +
+    "citations, examples, history, issues someone else handles, and issues the owner says not to touch.\n" +
+    "- `selectionRequested`: true when the owner asks the campaign to choose issues itself, for example \"find the " +
+    "5 highest-priority issues and fix them\". Then `selectionCount` is the number of issues the owner states, or 0 " +
+    "when it states none; `selectionCriteria` is a short paraphrase of how to choose (\"highest priority\"); " +
+    "`selectionConstraints` lists each stated limit (\"open\", \"UI only\", \"skip anything labeled security\"); " +
+    "`selectionRepository` is the repository the owner names for the selection, or an empty string. When there is " +
+    "no selection, use false, 0, empty strings and an empty list.\n" +
+    "- `narrowsOperations`: true only when the message withholds actions, for example \"fix but don't merge\". " +
+    "Then `operations` lists every action the message still allows from this list: implementation_question, " +
+    "pr_merge, merged_branch_deletion, follow_up_issue_publication, ui_evidence_approval, issue_closure, " +
+    "campaign_issue_scope, question, tool_approval, policy_ask. Otherwise false and an empty list.\n" +
+    "A message may ask for named issues, a selection, both, or neither. Answer `grant` with these fields, or " +
+    "`uncertain` with empty fields when you cannot tell what the owner asks for. " + DATA_RULES,
+  verdicts: ["grant", "uncertain"],
+  fields: {
+    explicit: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: REPOSITORY, number: ISSUE_NUMBER } } },
+    ranges: { type: "array", maxItems: 20, items: { type: "object", properties: { repository: REPOSITORY, first: ISSUE_NUMBER, last: ISSUE_NUMBER } } },
+    context: { type: "array", maxItems: 100, items: { type: "object", properties: { repository: REPOSITORY, number: ISSUE_NUMBER } } },
+    selectionRequested: { type: "boolean" },
+    selectionRepository: REPOSITORY,
+    selectionCount: { type: "integer", minimum: 0, maximum: 100 },
+    selectionCriteria: { type: "string", maxLength: 300 },
+    selectionConstraints: { type: "array", maxItems: 10, items: { type: "string", maxLength: 200 } },
+    narrowsOperations: { type: "boolean" },
+    operations: { type: "array", maxItems: FULL_CONTROL_LAUNCH_OPERATIONS.length,
+      items: { type: "string", maxLength: 64, enum: FULL_CONTROL_LAUNCH_OPERATIONS } },
+  },
+  ownerMessage: true,
+  dataFields: [],
+};
+
 /** The Full Control question and credential screen (#4104). It runs only on text the deterministic
  * floor left open, and it may only decline or leave a request to the Orchestrator: `ask` declines,
  * `discusses` lets the Orchestrator decide, `uncertain` goes to the owner to classify. */
@@ -87,6 +141,7 @@ const CREDENTIAL_SCREEN: DecisionKindDefinition = {
 
 export const DECISION_KINDS: Readonly<Record<DecisionKind, DecisionKindDefinition>> = {
   probe: PROBE,
+  scope_grant: SCOPE_GRANT,
   credential_screen: CREDENTIAL_SCREEN,
 };
 
@@ -108,11 +163,19 @@ export function decisionOutputSchema(definition: DecisionKindDefinition): Record
   };
   for (const [name, field] of Object.entries(definition.fields ?? {})) {
     properties[name] = field.type === "array"
-      ? { type: "array", maxItems: field.maxItems, items: { ...field.items } }
-      : field.type === "string" && field.enum
-        ? { ...field, enum: [...field.enum] }
-        : { ...field };
+      ? { type: "array", maxItems: field.maxItems, items: itemSchema(field.items) }
+      : scalarSchema(field);
   }
+  return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
+}
+
+function scalarSchema(field: DecisionScalarSchema): Record<string, unknown> {
+  return field.type === "string" && field.enum ? { ...field, enum: [...field.enum] } : { ...field };
+}
+
+function itemSchema(item: DecisionItemSchema): Record<string, unknown> {
+  if (item.type !== "object") return scalarSchema(item);
+  const properties = Object.fromEntries(Object.entries(item.properties).map(([name, field]) => [name, scalarSchema(field)]));
   return { type: "object", properties, required: Object.keys(properties), additionalProperties: false };
 }
 
@@ -153,7 +216,7 @@ export function renderDecisionInput(definition: DecisionKindDefinition, inputs: 
       `<owner_message>\n${quoted(inputs.ownerMessage)}\n</owner_message>`,
     );
   }
-  parts.push("Quoted data, each value a JSON string:");
+  if (definition.dataFields.length) parts.push("Quoted data, each value a JSON string:");
   for (const name of definition.dataFields) {
     parts.push(`<untrusted_data name="${name}">\n${quoted(inputs.data[name]!)}\n</untrusted_data>`);
   }
@@ -187,7 +250,7 @@ export interface ValidatedDecisionOutput {
   fields: Record<string, unknown>;
 }
 
-function validField(schema: DecisionFieldSchema, value: unknown): boolean {
+function validField(schema: DecisionFieldSchema | DecisionItemSchema, value: unknown): boolean {
   switch (schema.type) {
     case "string":
       return typeof value === "string" && value.length <= schema.maxLength &&
@@ -200,7 +263,20 @@ function validField(schema: DecisionFieldSchema, value: unknown): boolean {
     case "array":
       return Array.isArray(value) && value.length <= schema.maxItems &&
         value.every((item) => validField(schema.items, item));
+    case "object":
+      return Boolean(value) && typeof value === "object" && !Array.isArray(value) &&
+        Object.entries(schema.properties).every(([name, field]) =>
+          Object.hasOwn(value as object, name) && validField(field, (value as Record<string, unknown>)[name]));
   }
+}
+
+/** A validated field's value with only its schema's properties: an object item keeps nothing else. */
+function keptValue(schema: DecisionFieldSchema, value: unknown): unknown {
+  if (schema.type !== "array") return value;
+  const items = schema.items;
+  return (value as unknown[]).map((item) => items.type === "object"
+    ? Object.fromEntries(Object.keys(items.properties).map((name) => [name, (item as Record<string, unknown>)[name]]))
+    : item);
 }
 
 /** Strictly parse and validate one attempt's output. The text must be one JSON object; anything
@@ -227,7 +303,7 @@ export function validateDecisionOutput(
   const fields: Record<string, unknown> = {};
   for (const [name, schema] of Object.entries(definition.fields ?? {})) {
     if (!Object.hasOwn(value, name) || !validField(schema, value[name])) return null;
-    fields[name] = Array.isArray(value[name]) ? [...(value[name] as unknown[])] : value[name];
+    fields[name] = keptValue(schema, value[name]);
   }
   return { verdict, reason: normalizedReason, fields };
 }
