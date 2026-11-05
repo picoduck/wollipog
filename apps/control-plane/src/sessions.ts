@@ -5201,7 +5201,12 @@ export class SessionsService {
       ? campaignController.orchestratorPolicy?.issueNumbers
       : undefined;
     // A campaign whose first message predates the epic seed gets its seed now (#4258), before the hold is read.
-    const scopeController = campaignController ? this.seedPreUpgradeCampaign(campaignController) : undefined;
+    // A prepared media child is created inside a ledger transaction, which never starts a reading:
+    // a campaign whose recorded first message needs one is held, and the next ordinary check seeds it.
+    if (campaignController && capture && this.preUpgradeIssueScopeSeed(campaignController)?.seed.state === "pending") {
+      return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
+    }
+    const scopeController = campaignController && !capture ? this.seedPreUpgradeCampaign(campaignController) : campaignController;
     if (scopeController && campaignNeedsEpicScope(scopeController)) {
       const unsupported = scopeCompatibility(this.db, scopeController);
       if (unsupported) return capabilityFail(unsupported);
@@ -5989,15 +5994,22 @@ export class SessionsService {
    * approves a scope or continues without an epic. Returns the root as it now reads.
    */
   private seedPreUpgradeCampaign(root: SessionView): SessionView {
-    if (!this.unseededCustomCampaign(root)) return root;
-    const text = this.db.initialUserMessageText(root.id)?.trim();
-    if (!text) return root;
-    const seed = customCampaignIssueScopeSeed(text);
+    const preUpgrade = this.preUpgradeIssueScopeSeed(root);
+    if (!preUpgrade) return root;
+    const { text, seed } = preUpgrade;
     if (!this.db.beginCampaignIssueScopeSeed(root.id, seed, Date.now())) return this.db.getSession(root.id) ?? root;
     this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_pre_upgrade", sessionId: root.id, state: seed.state }));
     this.hub.sessionChangedById(root.id);
     if (seed.state === "pending") this.startCampaignIssueScopeSeed(root.id, text);
     return this.db.getSession(root.id) ?? root;
+  }
+
+  /** The seed a pre-upgrade campaign's recorded first message would start (#4258), written by
+   * nobody: null for any campaign that already has a seed or can't get one. */
+  private preUpgradeIssueScopeSeed(root: SessionView): { text: string; seed: { state: "pending" | "none"; messageDigest: string } } | null {
+    if (!this.unseededCustomCampaign(root)) return null;
+    const text = this.db.initialUserMessageText(root.id)?.trim();
+    return text ? { text, seed: customCampaignIssueScopeSeed(text) } : null;
   }
 
   /** Start reading a Custom campaign's first message for its epic seed (#4104), once per root. */
