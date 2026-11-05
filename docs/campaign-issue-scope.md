@@ -8,7 +8,9 @@ its issue scope is authorized. Custom campaigns require the existing human appro
 The epic seed comes from the Decision Model, not from a regular expression (#4104, see
 [Custom Epic Seed](decision-model.md#custom-epic-seed-issue_scope_seed-4104)). A first message that
 writes a digit string but names no explicit issue list gets a pending seed (`issueScopeSeed`), and
-delegation waits while it is pending. One `scope_grant` reading then decides it:
+delegation waits while it is pending. The first message is the launch prompt or, for a campaign
+launched without one, the person's first prompt; any other first message is recorded as `none`, so no
+later message counts as the first. One `scope_grant` reading then decides it:
 
 | Reading | Seed | Delegation |
 |---|---|---|

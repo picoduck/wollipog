@@ -17310,6 +17310,18 @@ export class ControlPlaneDb {
     return this.sessionOrchestratorPolicy(id)?.issueNumbers ?? null;
   }
 
+  /** Record what a Custom campaign's first message, sent after an empty launch, asks of its epic seed
+   * (#4104): `pending` for a reading, or `none`. Compare-and-set: only a campaign with no seed, no
+   * scope and no seeded epic gets one, so only its first message ever does. */
+  beginCampaignIssueScopeSeed(id: string, seed: { state: "pending" | "none"; messageDigest: string }, now: number): boolean {
+    const policy = this.sessionOrchestratorPolicy(id);
+    if (!policy || policy.issueScopeSeed || policy.issueScope || policy.issueScopeProposalEpic !== undefined) return false;
+    const previous = JSON.stringify(policy);
+    policy.issueScopeSeed = { state: seed.state, messageDigest: seed.messageDigest };
+    return Number(this.stmt("UPDATE sessions SET orchestrator_policy=?, updated_at=? WHERE id=? AND orchestrator_policy=?")
+      .run(JSON.stringify(policy), now, id, previous).changes) === 1;
+  }
+
   /** Settle a Custom campaign's epic seed (#4104), compare-and-set on the policy: only a seed still in
    * `from` (pending, unless the owner releases an `owner` seed) for this exact message changes, and
    * only `seeded` names the epic. A scope a person approved meanwhile leaves the seed as it was; it

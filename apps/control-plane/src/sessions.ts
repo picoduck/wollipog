@@ -5211,9 +5211,12 @@ export class SessionsService {
     }
     // A Custom campaign's epic seed (#4104): the Decision Model reads the first message once the
     // session starts, and delegation waits for that reading. Nothing is parsed from the text here.
+    // A first message that needs no reading is recorded as `none`, so no later message counts as
+    // the first; with no first message yet, the person's first prompt decides (`promptFromHuman`).
     if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand &&
-        !creationContext.humanCampaignLaunch && !inheritedIssueScope && needsCampaignIssueScopeSeed(requestedText, orchestratorIssueNumbers)) {
-      orchestratorPolicy.issueScopeSeed = { state: "pending", messageDigest: firstMessageDigest(requestedText) };
+        !creationContext.humanCampaignLaunch && !inheritedIssueScope && requestedText) {
+      orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText, orchestratorIssueNumbers) ? "pending" : "none",
+        messageDigest: firstMessageDigest(requestedText) };
     }
     // Provenance for Full Control enable (#2940): these numbers came from the authenticated Human's
     // own create request, not an inherited scope, a snapshot, a staged delivery or a later backfill.
@@ -5702,7 +5705,15 @@ export class SessionsService {
     if (!this.awaitingFirstMessage(this.db.getSession(sessionId))) {
       const authorityRefusal = this.restoreHumanCampaignAuthority(principal, sessionId);
       if (authorityRefusal) return authorityRefusal;
-      return this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+      // A Custom campaign launched without a message gets its epic seed from the first one (#4104),
+      // decided before this message is recorded and kept only once it is admitted.
+      const seed = slashCommand ? null : this.firstMessageIssueScopeSeed(sessionId, text);
+      const admitted = await this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+      if (admitted.ok && seed && this.db.beginCampaignIssueScopeSeed(sessionId, seed, Date.now())) {
+        this.hub.sessionChangedById(sessionId);
+        if (seed.state === "pending") this.startCampaignIssueScopeSeed(sessionId, text.trim());
+      }
+      return admitted;
     }
     if (this.firstMessagesInFlight.has(sessionId)) return fail("This campaign's first message is still being delivered; wait for it to appear.", 409);
     this.firstMessagesInFlight.add(sessionId);
@@ -5926,6 +5937,20 @@ export class SessionsService {
       this.log.warn(JSON.stringify({ event: "full_control_scope_grant_unavailable", sessionId: session.id, error: (error as Error).message.slice(0, 200) }));
       return null;
     }
+  }
+
+  /** The epic seed a person's message would start, when it is the first message of a Custom campaign
+   * they launched without one (#4104): no seed, scope or epic yet, and no user message recorded.
+   * Null otherwise. The message is read like a launch prompt: `none` when it needs no reading. */
+  private firstMessageIssueScopeSeed(sessionId: string, text: string): { state: "pending" | "none"; messageDigest: string } | null {
+    const root = this.db.getSession(sessionId);
+    const policy = root?.orchestratorPolicy;
+    const trimmed = text.trim();
+    if (!root || !policy || !trimmed || root.parentSessionId || policy.control?.mode === "full_control" || policy.issueScopeSeed ||
+        policy.issueScope || policy.issueScopeProposalEpic !== undefined || policy.issueNumbers?.length ||
+        !this.db.sessionWasHumanCreatedOrchestrator(root.id) || this.db.initialUserMessageText(root.id) !== null) return null;
+    return { state: needsCampaignIssueScopeSeed(trimmed, orchestratorIssueNumbersFromInitialPrompt(trimmed)) ? "pending" : "none",
+      messageDigest: firstMessageDigest(trimmed) };
   }
 
   /** Start reading a Custom campaign's first message for its epic seed (#4104), once per root. */

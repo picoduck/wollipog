@@ -144,8 +144,8 @@ and #4061 regression cases run through `scopeGrantCandidates` in `scope-grant.te
 ### Custom Epic Seed (`issue_scope_seed`, #4104)
 
 A Custom campaign's epic seed uses the same `scope_grant` reading in place of the
-`initialCampaignEpic` regular expression. The reading starts once the session is created, so creation
-adds no wait.
+`initialCampaignEpic` regular expression. The reading starts once the session is created, or once the
+person's first prompt is admitted when the campaign was launched without one, so neither adds a wait.
 
 Its outcome:
 

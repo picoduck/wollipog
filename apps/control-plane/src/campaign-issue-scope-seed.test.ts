@@ -190,6 +190,41 @@ test("the owner may continue without an epic when the seed is theirs; nobody els
   } finally { seeded.db.close(); }
 });
 
+test("a Custom campaign launched without a message gets its seed from the person's first message, and only from that one (review round 1)", async () => {
+  const h = harness("", () => named(40));
+  try {
+    assert.equal(h.policy().issueScopeSeed, undefined, "no message yet, nothing to read");
+    assert.equal(h.fake.calls.length, 0);
+    const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: h.db.localIdentityContext().userId };
+    h.db.updateSessionStatus(h.id, "idle", Date.now());
+    const first = await h.svc.promptFromHuman(principal, h.id, "Orchestrate epic #40.");
+    assert.ok(first.ok, first.error ?? "first message");
+    assert.equal(h.policy().issueScopeSeed!.state, "pending");
+    assert.equal(h.delegate().ok, false, "delegation waits for the reading");
+    await h.settled();
+    assert.equal(h.policy().issueScopeSeed!.state, "seeded");
+    assert.equal(h.policy().issueScopeProposalEpic, 40);
+    const held = h.delegate();
+    assert.equal(held.ok, false);
+    assert.match(held.error!, /Confirm the epic's authorized issue scope/u, "a verified epic still needs the person's scope approval");
+    assert.equal(h.fake.calls.length, 1);
+  } finally { h.db.close(); }
+  // A later message never counts as the first: a campaign whose first message needs no reading keeps `none`.
+  const later = harness("", () => named(40));
+  try {
+    const principal = { ...later.db.localIdentityContext(), kind: "human" as const, actorId: later.db.localIdentityContext().userId };
+    later.db.updateSessionStatus(later.id, "idle", Date.now());
+    assert.ok((await later.svc.promptFromHuman(principal, later.id, "Coordinate the release checklist.")).ok);
+    assert.equal(later.policy().issueScopeSeed!.state, "none");
+    later.db.updateSessionStatus(later.id, "idle", Date.now());
+    assert.ok((await later.svc.promptFromHuman(principal, later.id, "Now orchestrate epic #40.")).ok);
+    await later.settled();
+    assert.equal(later.policy().issueScopeSeed!.state, "none");
+    assert.equal(later.fake.calls.length, 0, "no reading of a later message");
+    assert.equal(later.delegate().ok, true);
+  } finally { later.db.close(); }
+});
+
 test("a transient failure that succeeds on retry seeds the epic with nobody asked", async () => {
   const h = harness("Orchestrate epic #40.", (_message, attempt) => attempt === 1 ? { errorClass: "rate_limited" } : named(40));
   try {
