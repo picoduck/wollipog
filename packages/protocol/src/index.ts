@@ -877,14 +877,19 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      executes the exact approved option. Orchestrators and child sessions are refused with their
 //      role's guidance. Older runners and control planes refuse the tool by name. (286 is claimed
 //      by an open pull request.)
+// 288: multi-repository campaign boundaries (#4117). A Full Control boundary may carry
+//      `repositories`, one entry per verified repository of the campaign's Project with its
+//      ordered Location ids. A launch inspects every Project Location; only a v288 root runner
+//      receives the list, and a Location whose runner is older is excluded as too old. Older
+//      roots keep single-repository boundaries, and stored boundaries read as one entry. (It
+//      was first claimed as 286, which no released version uses.)
 // 289: Switch and Continue (#4138). A same-runner `location_switch` approval can name the action
 //      `switch`; the control plane sends `session_location_switch` to the session's runner, which
 //      re-verifies the target workspace, path and origin, records `pendingLocationSwitch` durably,
 //      and at the next turn boundary moves the live session into a new (or recovered-branch)
 //      worktree of the target repository, carries the provider conversation over and continues.
 //      Snapshots carry `locationSwitch` (pending or failed); the control plane moves the session
-//      row only under a consumed switch naming exactly that Location. (288 is claimed by an open
-//      pull request.)
+//      row only under a consumed switch naming exactly that Location.
 export const PROTOCOL_VERSION = 289;
 
 export * from "./campaign-authority.js";
@@ -1438,6 +1443,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   runnerCapacityDimensions: 135,
   /** Exact transient cross-process capacity-mutation lock diagnostics. */
   capacityLockDiagnostics: 137,
+  /** v288 validates a Full Control boundary's `repositories` list (#4117). */
+  campaignRepositoryBoundary: 288,
 } as const;
 
 /* ========================================================================== */
@@ -3002,6 +3009,9 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   behaviorRevision?: number;
   /** Server-owned human authorization. Never accepted from child config or ordinary prompts. */
   control?: CampaignControl;
+  /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
+   * its fixed reason. Server-owned and informational: it grants nothing. */
+  excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
   issueScopeProposalEpic?: number;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */

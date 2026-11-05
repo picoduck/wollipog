@@ -34,6 +34,54 @@ export interface CampaignAuthorityBoundary {
   budgetAuthority?: CampaignBudgetAuthority;
   /** Narrowed destination/provider disclosure. UI Evidence Approval remains the sole authority. */
   evidenceAuthority?: CampaignEvidenceAuthority;
+  /** Every verified repository of the campaign's Project (#4117), one entry per repository, the
+   * launch Location's first; the first entry's repository is `repository`. Omitted on boundaries
+   * minted before v288 or for a pre-v288 root runner: those read as one entry of `repository`. */
+  repositories?: CampaignBoundaryRepository[];
+}
+
+/** One boundary repository and its verified Project Locations, by Location id: the Project's
+ * default Location first, then the rest in Project order. */
+export interface CampaignBoundaryRepository {
+  repository: string;
+  locationIds: string[];
+}
+
+export const CAMPAIGN_BOUNDARY_REPOSITORIES_MAX = 50;
+export const CAMPAIGN_BOUNDARY_LOCATIONS_MAX = 100;
+
+/** The boundary's repositories, with a boundary that predates the list read as its one entry. */
+export function campaignBoundaryRepositories(boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">): CampaignBoundaryRepository[] {
+  return boundary.repositories?.map((entry) => ({ repository: entry.repository, locationIds: [...entry.locationIds] }))
+    ?? [{ repository: boundary.repository, locationIds: [] }];
+}
+
+/** The boundary entry for a repository, compared case-insensitively. */
+export function campaignBoundaryRepository(boundary: Pick<CampaignAuthorityBoundary, "repository" | "repositories">,
+  repository: string): CampaignBoundaryRepository | null {
+  const wanted = repository.toLowerCase();
+  return campaignBoundaryRepositories(boundary).find((entry) => entry.repository.toLowerCase() === wanted) ?? null;
+}
+
+function validBoundaryRepositories(value: unknown, repository: string): boolean {
+  if (!Array.isArray(value) || value.length < 1 || value.length > CAMPAIGN_BOUNDARY_REPOSITORIES_MAX) return false;
+  const repositories = new Set<string>();
+  const locations = new Set<string>();
+  for (const entry of value as CampaignBoundaryRepository[]) {
+    if (!entry || typeof entry !== "object" || Array.isArray(entry) ||
+        Object.keys(entry).some((key) => key !== "repository" && key !== "locationIds") ||
+        typeof entry.repository !== "string" || campaignRepositoryLocation(entry.repository) === null ||
+        !Array.isArray(entry.locationIds)) return false;
+    const name = entry.repository.toLowerCase();
+    if (repositories.has(name)) return false;
+    repositories.add(name);
+    for (const id of entry.locationIds) {
+      if (typeof id !== "string" || !id || id.length > 256 || /[\x00-\x1f\x7f]/u.test(id) || locations.has(id)) return false;
+      locations.add(id);
+    }
+  }
+  return locations.size <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX &&
+    (value as CampaignBoundaryRepository[])[0]!.repository.toLowerCase() === repository.toLowerCase();
 }
 
 export type CampaignControl = { mode: "custom" } | { mode: "full_control"; boundary: CampaignAuthorityBoundary };
@@ -125,8 +173,9 @@ export function validCampaignControl(value: unknown): value is CampaignControl {
   const b = control.boundary;
   const bounded = (v: unknown, max: number) => typeof v === "string" && v.trim().length > 0 && v.length <= max && !/[\x00-\x1f\x7f]/u.test(v);
   return Boolean(b && !Array.isArray(b) && b.version === 1 &&
-    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority"].includes(key)) &&
+    Object.keys(b).every((key) => ["version", "revision", "issueScopeRevision", "repository", "objective", "authorizedByUserId", "authorizedAt", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority", "evidenceAuthority", "repositories"].includes(key)) &&
     (b.issueAuthority === undefined || validIssueAuthority(b.issueAuthority)) &&
+    (b.repositories === undefined || typeof b.repository === "string" && validBoundaryRepositories(b.repositories, b.repository)) &&
     (b.budgetAuthority === undefined || validCampaignBudgetAuthority(b.budgetAuthority)) &&
     Number.isSafeInteger(b.revision) && b.revision > 0 && bounded(b.repository, 256) && campaignRepositoryLocation(b.repository) !== null &&
     Number.isSafeInteger(b.issueScopeRevision) && b.issueScopeRevision > 0 &&
@@ -660,6 +709,9 @@ export function campaignAuthorityPreflight(control: CampaignControl | undefined,
     }
     return { supported: false,
       reason: "Production evidence authority requires the exact private media contract; compatibility metadata does not establish runtime readiness." };
+  }
+  if (control.boundary.repositories && !runnerSupportsProtocol(protocolVersion, "campaignRepositoryBoundary")) {
+    return olderRunner(runnerCapabilityRequirementError(protocolVersion, "campaignRepositoryBoundary", "multi-repository campaign boundaries"));
   }
   if (control.boundary.budgetAuthority && !runnerSupportsProtocol(protocolVersion, "campaignBudgetAdmission")) {
     return olderRunner(runnerCapabilityRequirementError(protocolVersion, "campaignBudgetAdmission", "campaign limits"));

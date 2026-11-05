@@ -9,12 +9,13 @@ import {
   type CampaignLaunchProposal, type CampaignLaunchInspectionResult, type ChildSessionDefaults,
   type OrchestratorCampaignBudgetDefault,
   type CreateSessionRequest, type FullControlEnableRequest, type FullControlLaunchOverrides, type FullControlLaunchRequest,
-  type PreparedCampaignLaunch, type RunnerView,
+  type PreparedCampaignLaunch, type ProjectLocationInspection, type RunnerView,
 } from "@wollipog/protocol";
 import type { UiEvidenceReviewEvaluation } from "./ui-evidence-review.js";
+import { launchBoundaryRepositories, type CampaignProjectLocation } from "./campaign-repository-boundary.js";
 import { issueReferenceSpans, MAX_MESSAGE_ISSUES } from "./first-message-issue-intent.js";
 
-const keys = ["repository", "issueNumbers", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"];
+const keys = ["repository", "repositories", "issueNumbers", "objective", "operations", "delegatablePolicyIds", "issueAuthority", "budgetAuthority"];
 
 /** The derived default: every operation Full Control can own. Overrides may only narrow it. */
 export const FULL_CONTROL_LAUNCH_OPERATIONS: readonly CampaignAuthorityOperation[] = [
@@ -37,7 +38,8 @@ export function parseCampaignLaunchProposal(value: unknown): CampaignLaunchPropo
   // Reuse the foundation's exact schema validation. This temporary validation value is never
   // persisted, returned as authority, or used as a principal or a consumable grant.
   if (!validCampaignControl(schemaControl(p))) return null;
-  return structuredClone({ ...p, repository: p.repository.toLowerCase(), issueNumbers: [...p.issueNumbers].sort((a, b) => a - b) });
+  return structuredClone({ ...p, repository: p.repository.toLowerCase(), issueNumbers: [...p.issueNumbers].sort((a, b) => a - b),
+    ...(p.repositories ? { repositories: p.repositories.map((entry) => ({ repository: entry.repository.toLowerCase(), locationIds: [...entry.locationIds] })) } : {}) });
 }
 
 function schemaControl(p: CampaignLaunchProposal) {
@@ -45,6 +47,7 @@ function schemaControl(p: CampaignLaunchProposal) {
     version: 1 as const, revision: 1, issueScopeRevision: 1, authorizedByUserId: "schema_validation", authorizedAt: 1,
     repository: p.repository, objective: p.objective, operations: p.operations,
     delegatablePolicyIds: p.delegatablePolicyIds, issueAuthority: p.issueAuthority, budgetAuthority: p.budgetAuthority,
+    ...(p.repositories !== undefined ? { repositories: p.repositories } : {}),
   } };
 }
 
@@ -228,6 +231,10 @@ export interface CampaignLaunchFacts {
   campaignScope?: { repository: string; issueNumbers: number[]; authorizedByCaller: boolean } | null;
   /** Enabling on an existing campaign: a live participant already holds its own cost or tool limit. */
   participantCeiling?: boolean;
+  /** A launch in a Project (#4117): its active Locations in Project order and each one's own
+   * inspection. The launch Location is verified by `inspection`, never by this map. */
+  projectLocations?: { launchLocationId: string | null; locations: CampaignProjectLocation[];
+    inspections: ReadonlyMap<string, ProjectLocationInspection> } | null;
 }
 
 function canonical(value: unknown): string {
@@ -287,6 +294,12 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
       typeof inspection.repository === "string" && /^[a-f0-9]{64}$/.test(inspection.digest ?? "") &&
       canonical(inspection.issueNumbers) === canonical(issueNumbers);
   const repository = verified ? (campaignScope?.repository ?? inspection!.repository!).toLowerCase() : null;
+  // Only a v288 root runner validates a boundary with a repository list; older roots keep today's
+  // single-repository boundary.
+  const boundary = repository && !campaignScope && facts.projectLocations &&
+    runnerSupportsProtocol(runner.protocolVersion, "campaignRepositoryBoundary")
+    ? launchBoundaryRepositories({ launchRepository: repository, ...facts.projectLocations }) : null;
+  const locationName = new Map(facts.projectLocations?.locations.map((location) => [location.id, location.name]) ?? []);
 
   const acceptedFollowUps = overrides.budget?.acceptedFollowUps ??
     (behavior.followUps === "execute_approved" ? Math.min(MAX_DERIVED_FOLLOW_UPS, Math.max(1, issueNumbers.length)) : 0);
@@ -323,7 +336,7 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const delegatablePolicyIds = overrides.delegatablePolicyIds ?? [];
 
   const proposal = repository ? parseCampaignLaunchProposal({
-    repository, issueNumbers, objective, operations, delegatablePolicyIds,
+    repository, ...(boundary ? { repositories: boundary.repositories } : {}), issueNumbers, objective, operations, delegatablePolicyIds,
     issueAuthority: { epics: issueNumbers, relatedFollowUps, maxIssues, closureReasons },
     budgetAuthority: { version: 1, ...(costUsd !== undefined ? { costUsd } : {}), ...(toolCalls !== undefined ? { toolCalls } : {}),
       concurrency, acceptedFollowUps,
@@ -423,7 +436,13 @@ export function campaignLaunchPreflight(facts: CampaignLaunchFacts): { preflight
   const envelope = Boolean(ready && facts.pacedVideoPeer && facts.disclosuresAvailable && imageDelegated && plan.config.model);
   const humanRequiredRequests = authority.supported ? fullControlStandingHumanRequired(facts.humanRequiredRules ?? true) : [];
   const summary: CampaignLaunchPreflight["summary"] = {
-    repository, issueNumbers, objective,
+    repository,
+    ...(boundary ? {
+      repositories: boundary.repositories.map((entry) => ({ repository: entry.repository,
+        locations: entry.locationIds.map((locationId) => ({ locationId, name: locationName.get(locationId) ?? locationId })) })),
+      excludedLocations: boundary.excluded,
+    } : {}),
+    issueNumbers, objective,
     root: { agentId: plan.agentId, driver: plan.driver, model: plan.config.model ?? null, effort: plan.config.effort ?? null,
       isolation: isolation ? { mode: isolation.mode, network: isolation.network } : null,
       strictProjectIsolation: plan.policy.execution.strictProjectIsolation, integrationIsolation: plan.policy.execution.integrationIsolation,

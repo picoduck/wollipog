@@ -1,4 +1,5 @@
 import { CAMPAIGN_PARKED_CHILDREN_LIMIT, normalizeGithubIssueClosureRefusal, REVIEW_JOBS_RETIRED_REASON, agentAvailableForImplicitLaunch, providerForDriver, type GithubIssueClosureResult, type GithubIssueClosureSnapshot, type ProviderCredentialImportSource } from "@wollipog/protocol";
+import { CAMPAIGN_BOUNDARY_LOCATIONS_MAX, PROJECT_LOCATION_INSPECTION_FAILURES } from "@wollipog/protocol";
 import { safeReviewSessionCapability } from "./review-session-capability.js";
 import { projectBackgroundRetryExhaustionForUi } from "./background-retry-exhaustion-compatibility.js";
 import { projectCampaignHandoffsForUi } from "./campaign-status-compatibility.js";
@@ -33848,6 +33849,18 @@ function validContextIssueNumbers(value: unknown): value is number[] {
     value.every((n) => Number.isSafeInteger(n) && n > 0);
 }
 
+function validExcludedLocations(value: unknown): boolean {
+  return Array.isArray(value) && value.length <= CAMPAIGN_BOUNDARY_LOCATIONS_MAX && value.every((item) => {
+    const entry = item as Record<string, unknown> | null;
+    return Boolean(entry && typeof entry === "object" && !Array.isArray(entry) &&
+      Object.keys(entry).every((key) => ["locationId", "name", "failure", "reason"].includes(key)) &&
+      typeof entry.locationId === "string" && entry.locationId.length > 0 && entry.locationId.length <= 256 &&
+      typeof entry.name === "string" && entry.name.length <= 256 &&
+      typeof entry.failure === "string" && Object.hasOwn(PROJECT_LOCATION_INSPECTION_FAILURES, entry.failure) &&
+      entry.reason === PROJECT_LOCATION_INSPECTION_FAILURES[entry.failure as keyof typeof PROJECT_LOCATION_INSPECTION_FAILURES]);
+  });
+}
+
 function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCampaignPolicy | null {
   const value = parseJson<OrchestratorCampaignPolicy>(raw);
   if (!value || value.version !== 1 ||
@@ -33925,6 +33938,8 @@ function orchestratorCampaignPolicyFromJson(raw: string | null): OrchestratorCam
         /^first_message_[a-f0-9-]{36}$/.test(first.deliveryId) && limits(first.derivedLimits) && context(first.contextIssueNumbers) ||
       first.state === "established" && digest(first.messageDigest) && Number.isSafeInteger(first.establishedAt) && context(first.contextIssueNumbers)))) return null;
   if (value.issueNumbersSource !== undefined && value.issueNumbersSource !== "human_launch_request") return null;
+  // Informational only (#4117): a malformed list is dropped instead of discarding the policy.
+  if (value.excludedLocations !== undefined && !validExcludedLocations(value.excludedLocations)) delete value.excludedLocations;
   const validSources = new Set([
     "system_default", "user_default", "session_override", "compatibility_fallback", "legacy_session", "active_campaign",
   ]);

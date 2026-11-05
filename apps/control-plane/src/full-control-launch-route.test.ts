@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import Fastify from "fastify";
 import {
-  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, WORKFLOW_DECISION_CATEGORIES,
+  CAMPAIGN_EVIDENCE_RETENTION_DISCLOSURE, CONTROLLED_REVIEW_PROFILE, FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE, DEFAULT_ORCHESTRATOR_DEFAULTS, HUMAN_ONLY_PARENT_CONTROL_POLICY, PROTOCOL_VERSION, RUNNER_CAPABILITY_MIN_PROTOCOL, WORKFLOW_DECISION_CATEGORIES,
   campaignWorkflowOwner,
   type CampaignLaunchInspectionResult, type CampaignLaunchPreflight, type CampaignLaunchProposal, type ControlledReviewCapability,
   type CampaignWorkItemDetail, type ControlPlaneToRunner, type CreateSessionRequest, type FullControlLaunchRequest, type GithubIssueClosureSnapshot, type RunnerMetadata, type RunnerRuntimeInfo,
@@ -12,7 +12,7 @@ import { Hub } from "./hub.js";
 import { SessionsService } from "./sessions.js";
 import { fakeScreenRuntime } from "./credential-screen-test-fixture.js";
 import { OrchestratorSettings, resolveOrchestratorCampaignPolicy } from "./orchestrator-settings.js";
-import { authorizeFullControl, campaignBoundaryCurrent, evaluateCampaignAuthority } from "./campaign-authority.js";
+import { authorizeFullControl, campaignBoundaryCurrent, campaignControlForRunner, evaluateCampaignAuthority } from "./campaign-authority.js";
 import { firstMessageBoundary, firstMessageDigest, firstMessageObjective } from "./campaign-launch-admission.js";
 import { campaignBehaviorValues } from "./campaign-behavior.js";
 import { randomUUID } from "node:crypto";
@@ -23,7 +23,7 @@ import { syntheticInspectedVideoRuns, syntheticMediaReviewerAttestation, synthet
 import type { AuthPrincipal, HumanPrincipal } from "./identity.js";
 import { registerFullControlLaunchRoutes } from "./full-control-launch-route.js";
 import { inspectCampaignWorkspace } from "./project-location-inspection.js";
-import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS } from "@wollipog/protocol";
+import { CAMPAIGN_LAUNCH_INSPECTION_ERRORS, PROJECT_LOCATION_INSPECTION_FAILURES, campaignBoundaryRepositories, validCampaignControl, type CampaignControl } from "@wollipog/protocol";
 import type { SessionPromptOutbox } from "./session-prompt-outbox.js";
 import { resolveSessionCreationOwnership } from "./session-creation-route.js";
 
@@ -77,12 +77,12 @@ function fixture(options: { runtime?: RunnerRuntimeInfo; protocolVersion?: numbe
     // Each epic's sub-issues, read as the runner reads them; an epic not listed has none.
     epics: new Map<number, number[]>() };
   let receipts: ((message: Extract<Parameters<SessionsService["onDurablePromptReceipt"]>[1], { type: "durable_session_command_result" }>) => void) | null = null;
-  hub.sendToRunner = (_, message) => {
+  hub.sendToRunner = (runnerId, message) => {
     sent.push(message);
     if (message.type === "start_session") starts.push(message);
     if (message.type === "campaign_launch_inspect") {
       const answer = state.inspect(message);
-      if (answer) queueMicrotask(() => hub.resolveRunnerRequest(answer, "r"));
+      if (answer) queueMicrotask(() => hub.resolveRunnerRequest(answer, runnerId));
     }
     if (message.type === "durable_session_command" && message.command.type === "prompt_session" && issues.ackDurable) {
       const acknowledge = { type: "durable_session_command_result" as const, requestId: message.requestId, commandId: message.commandId,
@@ -2004,5 +2004,205 @@ test("context-only references stay disjoint from the scope, survive delivery, an
     assert.deepEqual(policy.firstMessageScope, { state: "established", messageDigest: firstMessageDigest(next),
       establishedAt: (policy.firstMessageScope as { establishedAt: number }).establishedAt, contextIssueNumbers: [13, 14] });
     assert.deepEqual((await f.sessions.campaignIssueScope(id)).data!.contextIssueNumbers, [13, 14]);
+  } finally { await server.close(); f.db.close(); }
+});
+
+/** A Project with Locations in two repositories across machines, plus one Location for each
+ * exclusion reason (#4117). Paths decide what the fixture runner answers. */
+function multiRepositoryProject(f: ReturnType<typeof fixture>) {
+  const register = (runnerId: string, workspaces: Array<{ id: string; path: string }>, options: { protocolVersion?: number; inspection?: 1 | 2 | 3 } = {}) =>
+    f.db.registerRunner({ runnerId, hostname: runnerId, os: "linux", version: "test", agents: [],
+      workspaces: workspaces.map((workspace) => ({ ...workspace, name: `${runnerId} ${workspace.id}` })),
+      runtime: { ...runtime, campaignLaunchInspection: { version: options.inspection ?? 3 } } }, Date.now(), options.protocolVersion ?? PROTOCOL_VERSION);
+  // The root's runner keeps its fixture registration; its second folder is a managed Workspace.
+  const plainFolder = f.db.createWorkspace("r", { name: "r plain", path: "/fixture/plain-folder" }, f.scope);
+  register("r2", [{ id: "a", path: "/fixture/two/other" }, { id: "b", path: "/fixture/two/repository" }]);
+  register("offline", [{ id: "o", path: "/fixture/offline" }]);
+  register("old", [{ id: "x", path: "/fixture/old" }], { protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1 });
+  register("v2", [{ id: "y", path: "/fixture/v2" }], { inspection: 2 });
+  const online = f.hub.isRunnerOnline;
+  f.hub.isRunnerOnline = (runnerId) => runnerId !== "offline" && online(runnerId);
+  const repositories: Record<string, string> = { "/fixture/repository": "owner/repo", "/fixture/two/other": "other/repo",
+    "/fixture/two/repository": "Owner/Repo", "/fixture/old": "owner/repo", "/fixture/v2": "owner/repo", "/fixture/offline": "owner/repo" };
+  f.state.inspect = (message) => {
+    const repository = repositories[message.workspacePath ?? ""];
+    return repository
+      ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: true, repository,
+        issueNumbers: message.issueNumbers, digest: "d".repeat(64) }
+      : { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: false,
+        failure: "not_repository", error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS.not_repository };
+  };
+  const project = f.db.createProject({ name: "Multi", scope: f.scope });
+  const add = (runnerId: string, workspaceId: string) => f.db.addProjectLocation(project.id, { runnerId, workspaceId });
+  const launchLocation = add("r", "w");
+  const other = add("r2", "a");
+  const twin = add("r2", "b");
+  const plain = add("r", plainFolder.id);
+  const offline = add("offline", "o");
+  const old = add("old", "x");
+  const v2 = add("v2", "y");
+  // The twin on the second machine is the Project's default, so it leads its repository's entry.
+  f.db.setProjectDefaultLocation(project.id, twin.id);
+  return { project, launchLocation, other, twin, plain, offline, old, v2,
+    body: { ...launch, projectId: project.id, projectLocationId: launchLocation.id } satisfies FullControlLaunchRequest };
+}
+
+test("a launch builds one boundary entry per verified Project repository and excludes failed Locations with their reasons (#4117)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  try {
+    const { response, preflight: checked } = await preflight(server, p.body);
+    assert.equal(response.statusCode, 200, response.body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.equal(checked!.summary.repository, "owner/repo");
+    // The launch Location's repository comes first; the same repository on two machines is one
+    // entry, with the Project's default Location first.
+    assert.deepEqual(checked!.summary.repositories, [
+      { repository: "owner/repo", locations: [{ locationId: p.twin.id, name: "r2 b" }, { locationId: p.launchLocation.id, name: "Fixture Repo" }] },
+      { repository: "other/repo", locations: [{ locationId: p.other.id, name: "r2 a" }] },
+    ]);
+    const excluded = Object.fromEntries(checked!.summary.excludedLocations!.map((item) => [item.locationId, item]));
+    assert.deepEqual(Object.keys(excluded).sort(), [p.plain.id, p.offline.id, p.old.id, p.v2.id].sort());
+    assert.deepEqual([excluded[p.plain.id]!.failure, excluded[p.offline.id]!.failure, excluded[p.old.id]!.failure, excluded[p.v2.id]!.failure],
+      ["not_repository", "runner_offline", "runner_too_old", "runner_too_old"]);
+    for (const item of Object.values(excluded)) assert.equal(item.reason, PROJECT_LOCATION_INSPECTION_FAILURES[item.failure]);
+    // Each Location is inspected in its own path, with no issue read; failing runners are never asked.
+    const inspected = f.sent.filter((message) => message.type === "campaign_launch_inspect") as Array<Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }>>;
+    assert.deepEqual(inspected.filter((message) => message.issueNumbers.length === 0).map((message) => message.workspacePath).sort(),
+      ["/fixture/plain-folder", "/fixture/two/other", "/fixture/two/repository"]);
+    assert.doesNotMatch(JSON.stringify(checked!.summary), /\/fixture\//, "no local path reaches the preflight summary");
+
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...p.body, requestId: "multi-repository", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const policy = f.db.getSession(admitted.json().id)!.orchestratorPolicy!;
+    const boundary = (policy.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    assert.equal(boundary.repository, "owner/repo");
+    assert.deepEqual(boundary.repositories, [
+      { repository: "owner/repo", locationIds: [p.twin.id, p.launchLocation.id] },
+      { repository: "other/repo", locationIds: [p.other.id] },
+    ]);
+    assert.deepEqual(policy.excludedLocations, checked!.summary.excludedLocations);
+    const start = f.starts.find((message) => message.type === "start_session");
+    assert.deepEqual(start?.type === "start_session" && (start.spec.orchestrator?.control as typeof policy.control | undefined),
+      policy.control, "a v288 root runner receives the whole boundary");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a Project Location the launching person cannot reach is never inspected or named (#4117)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const access = f.db.canAccessWorkspace.bind(f.db);
+  f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => !(runnerId === "r2" && workspaceId === "a") && access(principal, runnerId, workspaceId);
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.deepEqual(checked!.summary.repositories!.map((entry) => entry.repository), ["owner/repo"]);
+    assert.doesNotMatch(JSON.stringify(checked!.summary), new RegExp(p.other.id));
+    assert.equal(f.sent.some((message) => message.type === "campaign_launch_inspect" &&
+      (message as { workspacePath?: string }).workspacePath === "/fixture/two/other"), false);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("secondary Locations that change while the launch inspection is still pending never enter the boundary (#4117)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const inspect = f.state.inspect;
+  let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+  // The launch Location answers last: every secondary inspection has already succeeded.
+  f.state.inspect = (message) => message.workspacePath === "/fixture/repository" ? (held = message, null) : inspect(message);
+  const access = f.db.canAccessWorkspace.bind(f.db);
+  const { server } = await app(f);
+  try {
+    const pending = preflight(server, p.body);
+    for (let tick = 0; tick < 50 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    assert.ok(held, "the launch inspection is pending");
+    // Meanwhile: one secondary Location leaves the Project, one leaves the person's reach, and one
+    // is repointed at another folder.
+    f.db.removeProjectLocation(p.other.id);
+    f.db.canAccessWorkspace = (principal, runnerId, workspaceId) => !(runnerId === "r2" && workspaceId === "b") && access(principal, runnerId, workspaceId);
+    f.db.registerRunner({ runnerId: "v2", hostname: "v2", os: "linux", version: "test", agents: [],
+      workspaces: [{ id: "y", name: "v2 y", path: "/fixture/v2-moved" }], runtime: { ...runtime, campaignLaunchInspection: { version: 3 } } },
+    Date.now(), PROTOCOL_VERSION);
+    const launchMessage = held!;
+    f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: launchMessage.requestId, workspaceId: launchMessage.workspaceId,
+      ok: true, repository: "owner/repo", issueNumbers: launchMessage.issueNumbers, digest: "d".repeat(64) }, "r");
+    const { response, preflight: checked } = await pending;
+    assert.equal(response.statusCode, 200, response.body);
+    assert.deepEqual(checked!.summary.repositories, [{ repository: "owner/repo", locations: [{ locationId: p.launchLocation.id, name: "Fixture Repo" }] }]);
+    assert.deepEqual(checked!.advanced.proposal!.repositories, [{ repository: "owner/repo", locationIds: [p.launchLocation.id] }]);
+    const summary = JSON.stringify(checked!.summary);
+    assert.doesNotMatch(summary, new RegExp(p.other.id), "a removed Location is not named");
+    assert.doesNotMatch(summary, new RegExp(p.twin.id), "a Location out of reach is not named");
+    assert.equal(checked!.summary.excludedLocations!.find((item) => item.locationId === p.v2.id)?.failure, "read_failed",
+      "a repointed Location is not the one that was inspected");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a launch Location that fails inspection still fails the launch with #4090's reason (#4117)", async () => {
+  const f = fixture();
+  const p = multiRepositoryProject(f);
+  const inspect = f.state.inspect;
+  f.state.inspect = (message) => message.workspacePath === "/fixture/repository"
+    ? { type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId, ok: false,
+      failure: "unsupported_origin", error: CAMPAIGN_LAUNCH_INSPECTION_ERRORS.unsupported_origin }
+    : inspect(message);
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    assert.equal(checked!.ready, false);
+    assert.equal(checked!.summary.blockers.find((item) => item.capability === "Repository and Issue Scope")!.reason,
+      CAMPAIGN_LAUNCH_INSPECTION_ERRORS.unsupported_origin);
+    assert.equal(checked!.summary.repositories, undefined, "other repositories never stand in for the launch Location");
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a pre-v288 root keeps a single-repository boundary and inspects only its launch Location (#4117)", async () => {
+  const f = fixture({ protocolVersion: RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1 });
+  const p = multiRepositoryProject(f);
+  const { server } = await app(f);
+  try {
+    const { preflight: checked } = await preflight(server, p.body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.equal(checked!.summary.repositories, undefined);
+    assert.equal(checked!.summary.excludedLocations, undefined);
+    assert.deepEqual(f.sent.filter((message) => message.type === "campaign_launch_inspect").map((message) =>
+      (message as { workspacePath?: string }).workspacePath), ["/fixture/repository"]);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...p.body, requestId: "older-root", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const control = f.db.getSession(admitted.json().id)!.orchestratorPolicy!.control as Extract<CampaignControl, { mode: "full_control" }>;
+    assert.equal(control.boundary.repositories, undefined);
+  } finally { await server.close(); f.db.close(); }
+});
+
+test("a one-Location Project yields a one-entry boundary that reads like today's, and stored boundaries load as one entry (#4117)", async () => {
+  const f = fixture();
+  const project = f.db.createProject({ name: "Single", scope: f.scope });
+  const location = f.db.addProjectLocation(project.id, { runnerId: "r", workspaceId: "w" });
+  const { server } = await app(f);
+  try {
+    const body = { ...launch, projectId: project.id, projectLocationId: location.id };
+    const { preflight: checked } = await preflight(server, body);
+    assert.equal(checked!.ready, true, JSON.stringify(checked!.summary.blockers));
+    assert.deepEqual(checked!.summary.excludedLocations, []);
+    const admitted = await server.inject({ method: "POST", url: "/api/full-control-campaigns", headers: { authorization: "Bearer human" },
+      payload: { ...body, requestId: "single-location", preflightDigest: checked!.digest } });
+    assert.equal(admitted.statusCode, 201, admitted.body);
+    const policy = f.db.getSession(admitted.json().id)!.orchestratorPolicy!;
+    const boundary = (policy.control as Extract<CampaignControl, { mode: "full_control" }>).boundary;
+    assert.deepEqual(boundary.repositories, [{ repository: "owner/repo", locationIds: [location.id] }]);
+    assert.equal(policy.excludedLocations, undefined);
+    assert.ok(campaignBoundaryCurrent(f.db.getSession(admitted.json().id)!));
+    // A boundary stored before the list existed is valid and reads as its one repository.
+    const { repositories: _omitted, ...stored } = boundary;
+    assert.ok(validCampaignControl({ mode: "full_control", boundary: stored }));
+    assert.deepEqual(campaignBoundaryRepositories(stored), [{ repository: "owner/repo", locationIds: [] }]);
+    // A pre-v288 runner's diagnostic copy drops the list; v288 keeps it.
+    assert.deepEqual(campaignControlForRunner(policy.control!, RUNNER_CAPABILITY_MIN_PROTOCOL.campaignRepositoryBoundary - 1), { mode: "full_control", boundary: stored });
+    assert.equal(campaignControlForRunner(policy.control!, PROTOCOL_VERSION), policy.control);
   } finally { await server.close(); f.db.close(); }
 });

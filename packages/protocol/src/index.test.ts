@@ -370,6 +370,8 @@ test("PROTOCOL_VERSION is 289", () => {
   assert.equal(runnerSupportsProtocol(285, "decisionModel"), true);
   assert.equal(runnerSupportsProtocol(283, "forgeDecisionActions"), false);
   assert.equal(runnerSupportsProtocol(284, "forgeDecisionActions"), true);
+  assert.equal(runnerSupportsProtocol(287, "campaignRepositoryBoundary"), false);
+  assert.equal(runnerSupportsProtocol(288, "campaignRepositoryBoundary"), true);
   // Every name Git accepts is tracked, including `+`, `#` and non-ASCII (#4067).
   for (const name of ["agent/s_f0be1d3165d8", "fix/4067-branches", "release/v0.33.0", "feature/foo+bar", "fix/issue#4067", "ok/é"]) {
     assert.equal(forgeActionBranchName(name), true, name);
