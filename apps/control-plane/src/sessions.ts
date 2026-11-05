@@ -32,7 +32,7 @@ import { acknowledgementRepairFrame } from "./claude-cost-repair.js";
 import type { AgentPrincipal, HumanPrincipal } from "./identity.js";
 import type { PreparedCampaignLaunch } from "@wollipog/protocol";
 import type { CampaignDeliveryEvidence, CampaignWorkLedgerStore } from "./campaign-work-ledger-store.js";
-import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl } from "./campaign-authority.js";
+import { evaluateCampaignAuthority, campaignBoundaryCurrent, authorizeFullControl, campaignControlForRunner } from "./campaign-authority.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, ownerDecisionProtected, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective } from "./campaign-launch-admission.js";
 import { firstMessageIssueIntent, firstMessageTargetEpics } from "./first-message-issue-intent.js";
@@ -4401,6 +4401,8 @@ export class SessionsService {
         principal: HumanPrincipal; requestId: string; digest: string;
         control: Extract<import("@wollipog/protocol").CampaignControl, { mode: "full_control" }>;
         issueScope: import("@wollipog/protocol").CampaignIssueScope;
+        /** Project Locations the reviewed launch inspection left out of the boundary (#4117). */
+        excludedLocations?: import("@wollipog/protocol").CampaignExcludedLocation[];
         /** Minted against the new root id only when every launch peer declares the private
          * media contract; screenshot review never depends on it. */
         evidenceAuthority?: EvidenceAuthorityProposal;
@@ -5298,6 +5300,7 @@ export class SessionsService {
         return fail("a first-message launch starts with a task-only scope and no initial prompt", 409);
       }
       orchestratorPolicy.control = control;
+      if (humanLaunch.excludedLocations?.length) orchestratorPolicy.excludedLocations = structuredClone(humanLaunch.excludedLocations);
       orchestratorPolicy.issueScope = structuredClone(humanLaunch.issueScope);
       orchestratorPolicy.issueNumbers = [...humanLaunch.issueScope.issueNumbers];
       if (humanLaunch.firstMessage) orchestratorPolicy.firstMessageScope = { state: "pending", derivedLimits: { ...humanLaunch.firstMessage.derivedLimits } };
@@ -5330,7 +5333,7 @@ export class SessionsService {
         ...orchestratorPolicy.execution,
         ...(orchestratorIssueNumbers.length || orchestratorPolicy.issueScope ? { issueNumbers: orchestratorPolicy.issueNumbers ?? orchestratorIssueNumbers } : {}),
         ...(orchestratorPolicy.issueScope ? { issueScope: orchestratorPolicy.issueScope } : {}),
-        ...(orchestratorPolicy.control ? { control: orchestratorPolicy.control } : {}),
+        ...(orchestratorPolicy.control ? { control: campaignControlForRunner(orchestratorPolicy.control, runner.protocolVersion) } : {}),
       } } : {}),
       acpSessionContext,
       ...(creationContext?.review ? { review: creationContext.review.policy } : {}),
@@ -11213,7 +11216,8 @@ export class SessionsService {
         const requestId = `issue_scope_sync_${randomUUID()}`;
         const result = await this.hub.requestFromRunner(member.runnerId, requestId,
           { type: "campaign_issue_scope", operation: "synchronize", requestId, sessionId: member.id, scope,
-            ...(member.orchestratorPolicy?.control === undefined ? {} : { control: member.orchestratorPolicy.control }) }, 30_000);
+            ...(member.orchestratorPolicy?.control === undefined ? {} : {
+              control: campaignControlForRunner(member.orchestratorPolicy.control, this.db.getRunner(member.runnerId)?.protocolVersion) }) }, 30_000);
         if (result.type !== "campaign_issue_scope_result" || !result.ok || result.sessionId !== member.id || result.revision !== scope.revision) synchronized = false;
       } catch { synchronized = false; }
     }

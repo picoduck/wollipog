@@ -864,7 +864,12 @@ import { PACED_VIDEO_REVIEW_MIN_PROTOCOL, type DelegatedVideoEvidenceReference }
 //      projection lists `mergedBranches`; a pending merged branch keeps a campaign from
 //      `verified_complete`. Older runners never receive the action, and their campaigns keep
 //      today's completion.
-export const PROTOCOL_VERSION = 284;
+// 286: multi-repository campaign boundaries (#4117). A Full Control boundary may carry
+//      `repositories`, one entry per verified repository of the campaign's Project with its
+//      ordered Location ids. A launch inspects every Project Location; only a v286 root runner
+//      receives the list, and a Location whose runner is older is excluded as too old. Older
+//      roots keep single-repository boundaries, and stored boundaries read as one entry.
+export const PROTOCOL_VERSION = 286;
 
 export * from "./campaign-authority.js";
 export * from "./closing-references.js";
@@ -1408,6 +1413,8 @@ export const RUNNER_CAPABILITY_MIN_PROTOCOL = {
   runnerCapacityDimensions: 135,
   /** Exact transient cross-process capacity-mutation lock diagnostics. */
   capacityLockDiagnostics: 137,
+  /** v286 validates a Full Control boundary's `repositories` list (#4117). */
+  campaignRepositoryBoundary: 286,
 } as const;
 
 /* ========================================================================== */
@@ -2965,6 +2972,9 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   behaviorRevision?: number;
   /** Server-owned human authorization. Never accepted from child config or ordinary prompts. */
   control?: CampaignControl;
+  /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
+   * its fixed reason. Server-owned and informational: it grants nothing. */
+  excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
   issueScopeProposalEpic?: number;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
