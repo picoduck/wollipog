@@ -58,6 +58,7 @@ import { DetailSkeleton, Skeleton } from "./common.js";
 import { ChevronLeftIcon } from "./Icons.js";
 import { CampaignIssueScopePanel } from "./CampaignIssueScopePanel.js";
 import { CampaignFollowUpLimit } from "./CampaignFollowUpLimit.js";
+import { CampaignDecisions } from "./CampaignDecisions.js";
 import { CampaignDecisionModelChecks } from "./CampaignDecisionModelChecks.js";
 import { CampaignRecoveryNotice } from "./CampaignRecoveryNotice.js";
 import { Notice } from "./Notice.js";
@@ -291,6 +292,7 @@ function AvailableCampaignStatus({
                 />
               )}
               <CampaignIssueScopePanel session={session} campaignId={availability.campaignSessionId} />
+              <CampaignDecisions campaignId={availability.campaignSessionId} />
               <CampaignWorkList
                 data={data}
                 filters={memory.filters}
