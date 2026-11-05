@@ -2990,7 +2990,8 @@ CREATE TABLE IF NOT EXISTS campaign_decision_subjects (
   occurrence_id       TEXT PRIMARY KEY,
   campaign_session_id TEXT NOT NULL,
   session_id          TEXT NOT NULL,
-  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision')),
+  surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
+                        'follow_up_publication','issue_closure')),
   request_id          TEXT NOT NULL,
   classification      TEXT CHECK (classification IN ('decline','orchestrator')),
   classified_by       TEXT,
@@ -5806,6 +5807,49 @@ function preserveCampaignFollowUpOrigins(db: DatabaseSync): void {
   }
 }
 
+/**
+ * Admit the follow-up relatedness and closure-reason subjects (#4104 Slice B). A table written by
+ * the question screen's release checked its surface against the four question surfaces; SQLite
+ * cannot alter a CHECK, so that table is rebuilt with the wider check. Every row is preserved.
+ */
+function widenCampaignDecisionSubjects(db: DatabaseSync): void {
+  const schema = db.prepare(
+    "SELECT sql FROM sqlite_master WHERE type='table' AND name='campaign_decision_subjects'",
+  ).get() as { sql?: string } | undefined;
+  if (!schema?.sql || schema.sql.includes("'issue_closure'")) return;
+  db.exec("PRAGMA foreign_keys = OFF;");
+  try {
+    db.exec("BEGIN;");
+    db.exec(`
+      CREATE TABLE campaign_decision_subjects_v2 (
+        occurrence_id       TEXT PRIMARY KEY,
+        campaign_session_id TEXT NOT NULL,
+        session_id          TEXT NOT NULL,
+        surface             TEXT NOT NULL CHECK (surface IN ('implementation_question','provider_question','tool_request','owner_decision',
+                              'follow_up_publication','issue_closure')),
+        request_id          TEXT NOT NULL,
+        classification      TEXT CHECK (classification IN ('decline','orchestrator')),
+        classified_by       TEXT,
+        classified_at       INTEGER,
+        created_at          INTEGER NOT NULL,
+        FOREIGN KEY (occurrence_id) REFERENCES decision_occurrences(occurrence_id) ON DELETE CASCADE
+      );
+      INSERT INTO campaign_decision_subjects_v2
+        (occurrence_id, campaign_session_id, session_id, surface, request_id, classification, classified_by, classified_at, created_at)
+        SELECT occurrence_id, campaign_session_id, session_id, surface, request_id, classification, classified_by, classified_at, created_at
+        FROM campaign_decision_subjects;
+      DROP TABLE campaign_decision_subjects;
+      ALTER TABLE campaign_decision_subjects_v2 RENAME TO campaign_decision_subjects;
+    `);
+    db.exec("COMMIT;");
+  } catch (error) {
+    try { db.exec("ROLLBACK;"); } catch { /* no active transaction */ }
+    throw error;
+  } finally {
+    db.exec("PRAGMA foreign_keys = ON;");
+  }
+}
+
 /** Session-row assignment that folds a cached event's time into its last activity, binding
  * (ts, ts). Last activity keeps the later time, so replayed history, a restored control-plane
  * event, or a runner clock that trails the control plane's never moves it backward. The first
@@ -7402,6 +7446,7 @@ export class ControlPlaneDb {
       ON workflow_decisions(controlling_session_id) WHERE category='pr_merge' AND forge_action IS NOT NULL`);
     admitChildBlockedCampaignEvents(db);
     preserveCampaignFollowUpOrigins(db);
+    widenCampaignDecisionSubjects(db);
     // An early v147 iteration used one-admission-per-turn uniqueness. Event-order correlation is
     // narrower and permits multiple distinct invocations in one provider turn.
     db.exec("DROP INDEX IF EXISTS idx_workflow_decisions_provider_turn_action");
@@ -12444,6 +12489,20 @@ export class ControlPlaneDb {
         classification: "decline" | "orchestrator" | null } | undefined;
     return row ? { campaignSessionId: row.campaign_session_id, sessionId: row.session_id, surface: row.surface,
       requestId: row.request_id, ...(row.classification ? { classification: row.classification } : {}) } : null;
+  }
+
+  /** The latest check of one subject that did not confirm it (#4104): a refusing verdict, an
+   * uncertain one or a failure. Such an outcome sticks to the server-owned subject, so rewording the
+   * request's text never buys a second verdict. */
+  latestUnconfirmedCampaignCheck(campaignSessionId: string, surface: CampaignDecisionSubject["surface"], requestId: string,
+    kind: string, refuse: string): DecisionOccurrenceRecord | null {
+    const row = this.stmt(
+      `SELECT d.* FROM campaign_decision_subjects s JOIN decision_occurrences d ON d.occurrence_id = s.occurrence_id
+       WHERE s.campaign_session_id=? AND s.surface=? AND s.request_id=? AND d.kind=?
+         AND (d.state IN ('uncertain','failed') OR (d.state='decided' AND d.verdict=?))
+       ORDER BY d.created_at DESC, d.occurrence_id DESC LIMIT 1`,
+    ).get(campaignSessionId, surface, requestId, kind, refuse) as DecisionOccurrenceRow | undefined;
+    return row ? this.decisionOccurrenceFromRow(row) : null;
   }
 
   /** The owner's one classification of an uncertain or failed screen, by compare-and-set: only an

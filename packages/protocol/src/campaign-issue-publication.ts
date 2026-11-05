@@ -31,12 +31,14 @@ export function campaignPublicationTitle(title: string): string {
 export type CampaignPublicationAdmissionFailure =
   | "no_issue_boundary" | "requester_outside_campaign" | "unsafe_payload" | "recommendation_not_found"
   | "recommendation_not_accepted" | "recommendation_spent" | "title_mismatch" | "origin_outside_scope"
-  | "capacity_exhausted" | "inspection_failed" | "evidence_changed" | "recommendation_missing" | "authority_unavailable";
+  | "capacity_exhausted" | "inspection_failed" | "evidence_changed" | "recommendation_missing" | "authority_unavailable"
+  // #4104: the Decision Model found the follow-up unrelated to what the owner asked for, or could not tell.
+  | "unrelated_follow_up" | "relatedness_unconfirmed";
 
 /** Failures the requester can correct in one step (#4065). Under Full Control such a request is
  * refused with its fixed sentence: no decision is created, nobody is asked, and nothing is granted. */
 export const CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES: ReadonlySet<CampaignPublicationAdmissionFailure> =
-  new Set(["title_mismatch", "recommendation_not_found", "recommendation_not_accepted", "recommendation_spent"]);
+  new Set(["title_mismatch", "recommendation_not_found", "recommendation_not_accepted", "recommendation_spent", "unrelated_follow_up"]);
 
 /** One fixed sentence per failure: what failed and the route that resolves it. Correctable ones are
  * the refusal returned to the requester; the rest are recorded beside the code on the person's
@@ -62,4 +64,8 @@ export const CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES: Readonly<Record<CampaignPu
   inspection_failed: "inspection_failed: the root's runner could not complete the duplicate and content inspection, so a person reviews it.",
   evidence_changed: "evidence_changed: the campaign's recommendation or scope changed during inspection, so a person reviews it.",
   authority_unavailable: "authority_unavailable: the current campaign authority could not own this publication, so a person reviews it.",
+  unrelated_follow_up: "unrelated_follow_up: the Decision Model found this follow-up unrelated to the work the campaign's owner asked for. " +
+    "Do not publish it as a campaign follow-up; report it in your final report instead. Nothing was created.",
+  relatedness_unconfirmed: "relatedness_unconfirmed: the Decision Model could not confirm that this follow-up is related to the work the " +
+    "campaign's owner asked for, so a person reviews it.",
 };

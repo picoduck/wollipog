@@ -110,6 +110,8 @@ export const ISSUE_CLOSURE_DELIVERY_GAP_CODES = [
   "epic_member_unreadable",
   /** Epic source: the runner could not read the issue's sub-issues or member checklist in full. */
   "epic_members_unreadable",
+  /** #4104: the Decision Model could not confirm that the stated reason fits the issue and its evidence. */
+  "reason_unconfirmed",
 ] as const;
 
 export type IssueClosureDeliveryGapCode = typeof ISSUE_CLOSURE_DELIVERY_GAP_CODES[number];
@@ -163,6 +165,7 @@ const GAP_ACTION: Record<IssueClosureDeliveryGapCode, IssueClosureGapAction> = {
   epic_member_outside_scope: "person_decides",
   epic_member_unreadable: "request_again",
   epic_members_unreadable: "request_again",
+  reason_unconfirmed: "person_decides",
 };
 
 const ACTION_TEXT: Record<IssueClosureGapAction, string> = {
@@ -219,6 +222,7 @@ function gapText(code: IssueClosureDeliveryGapCode, item: string, prs: string, m
     case "epic_member_outside_scope": return `Members of this epic are outside the campaign's scope: ${members || "unnamed"}`;
     case "epic_member_unreadable": return `The runner could not read these members of this epic: ${members || "unnamed"}`;
     case "epic_members_unreadable": return "The runner could not read this issue's sub-issues and member checklist in full";
+    case "reason_unconfirmed": return "The Decision Model could not confirm that the stated reason fits the issue and its evidence";
   }
 }
 

@@ -41,6 +41,7 @@ import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
 import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
+import { runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
 import type { CampaignScopeGrantReview, DecisionErrorClass, FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
@@ -64,7 +65,7 @@ import { normalizeLocationSwitchSnapshot } from "./location-switch-snapshot.js";
 import { INTENDED_CLOSURES_LIMIT, normalizeIntendedClosures, prMergeClosureMismatch, unscopedClosureRefusal, validClosingReferenceCheck } from "./pr-merge-closures.js";
 import { observeReconciliationSnapshot, reconciliationSnapshotAvailable, correctionFrame, latestReconciliationRepair, normalizeReconciledSnapshot, reconciliationRevision } from "./claude-cost-reconciliation.js";
 import type { GithubIssueClosureRequest, GithubIssueClosureResult, GithubIssueClosureSnapshot, IssueClosureProofGapNotice } from "@wollipog/protocol";
-import { issueClosureDeliveryFailure, issueClosureProofGapNotice } from "@wollipog/protocol";
+import { issueClosureDeliveryFailure, issueClosureDeliveryGap, issueClosureProofGapNotice } from "@wollipog/protocol";
 /**
  * Session orchestration: the control-plane brain that turns UI commands into
  * runner commands, and ingests runner events back into the DB + UI broadcasts.
@@ -917,6 +918,13 @@ function issueClosureNotApprovedMessage(decision: WorkflowDecisionView): string 
     "authorization, and no person will approve it. Approve it yourself with resolve_descendant_workflow_decision " +
     `(sessionId ${decisionLiteral(decision.sessionId)}, your own session; occurrenceId ${decisionLiteral(decision.occurrenceId)}; ` +
     "outcome \"approve\"), then call close_github_issue again with the same occurrenceId and resourceDigest.";
+}
+
+/** #4104: a closure whose proof rests on a disposition rather than on delivery gets the Decision
+ * Model's closure-reason check: a not-planned closure, or one that names a recommendation. A
+ * completed closure proven by delivery or by its epic's members is not a choice of reason. */
+function closureReasonChecked(snapshot: Pick<GithubIssueClosureSnapshot, "reason" | "dispositionRecommendationId">): boolean {
+  return snapshot.reason === "not_planned" || Boolean(snapshot.dispositionRecommendationId);
 }
 
 /** #4104: a question the Decision Model could not screen waits for its owner's classification. */
@@ -10955,7 +10963,7 @@ export class SessionsService {
       // a Full Control issue boundary reaches these checks. A replayed requestId keeps its decision.
       if ("failure" in admitted && CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES.has(admitted.failure) &&
           boundedDecisionString(request.requestId, 256) && !this.db.workflowDecisionByRequestId(sessionId, request.requestId)) {
-        return this.refuseCorrectablePublication(sessionId, normalized.data.recommendationId, admitted.failure);
+        return this.refuseCorrectablePublication(sessionId, normalized.data.recommendationId, admitted.failure, admitted.reason);
       }
       // Recommendation metadata is a claim. When it cannot establish bounded admission,
       // preserve the original configured/human request path without a standing issue grant,
@@ -11161,7 +11169,7 @@ export class SessionsService {
    * for the root's recovery, which wakes the root as for any child request needing it; the root's
    * own refusal reaches it directly. */
   private refuseCorrectablePublication(sessionId: string, recommendationId: string,
-    failure: CampaignPublicationAdmissionFailure): ServiceResult<WorkflowDecisionView> {
+    failure: CampaignPublicationAdmissionFailure, modelReason?: string): ServiceResult<WorkflowDecisionView> {
     const rootId = this.db.campaignRootForMember(sessionId);
     const root = rootId && rootId !== sessionId ? this.db.getSession(rootId) : null;
     if (root) {
@@ -11170,7 +11178,69 @@ export class SessionsService {
         failure, root.parentControlPolicy?.revision ?? 0, now);
       this.campaignRecovery.synchronize(root, now);
     }
-    return { ok: false, status: 409, error: CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure], errorDetails: { code: failure } };
+    // A Decision Model refusal (#4104) carries the model's bounded reason, so the Orchestrator sees why.
+    return { ok: false, status: 409, error: CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES[failure] +
+      (modelReason ? ` The Decision Model's reason: ${modelReason}` : ""), errorDetails: { code: failure } };
+  }
+
+  /** The Decision Model's closure-reason check (#4104) for a closure the floor proved: the issue,
+   * the stated reason and explanation, and the dispositions the campaign recorded. */
+  private async closureReasonCheck(root: SessionView, snapshot: GithubIssueClosureSnapshot,
+    proof: NonNullable<ReturnType<typeof closureEvidence>>): Promise<CampaignCheckOutcome> {
+    const organizationId = this.db.sessionScope(root.id)?.organizationId;
+    if (!organizationId) return { outcome: "owner", occurrenceId: "", cause: "failed", failureClass: "configuration" };
+    const named = snapshot.dispositionRecommendationId
+      ? this.db.campaignWorkLedger.recommendation(root.id, snapshot.dispositionRecommendationId) : null;
+    const items = (proof as { items?: Array<{ id: string; commitmentRecord?: { state: string; reason: string | null } }> }).items ?? [];
+    return runCampaignCheck(this.db, this.decisionRuntime, {
+      kind: "closure_reason", confirm: "fits", refuse: "does_not_fit", organizationId, root, sessionId: root.id,
+      surface: "issue_closure", requestId: `${snapshot.repository.toLowerCase()}#${snapshot.issue}:${snapshot.reason}`,
+      inputs: {
+        data: {
+          closure: JSON.stringify({ issue: `${snapshot.repository}#${snapshot.issue}`, title: snapshot.title, reason: snapshot.reason,
+            explanation: snapshot.explanation, agentEvidence: snapshot.evidence }),
+          evidence: JSON.stringify({
+            workItems: items.map((item) => ({ workItem: this.db.campaignWorkLedger.detail(root.id, item.id, Date.now())?.title ?? item.id,
+              ...(item.commitmentRecord ? { commitment: item.commitmentRecord.state, recordedReason: item.commitmentRecord.reason ?? "" }
+                : { delivered: true }) })),
+            ...(named ? { recommendation: { title: named.title, disposition: named.disposition, recordedReason: named.dispositionReason ?? "" } } : {}),
+          }),
+        },
+      },
+    });
+  }
+
+  /** The Decision Model's follow-up relatedness check (#4104) for a publication the floor admitted:
+   * the owner's own words, what their request covers, the origin work and the follow-up itself. */
+  private async followUpRelatedness(root: SessionView, sessionId: string,
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>,
+    evidence: { recommendation: import("@wollipog/protocol").CampaignRecommendation }): Promise<CampaignCheckOutcome> {
+    const control = root.orchestratorPolicy?.control;
+    const organizationId = this.db.sessionScope(root.id)?.organizationId;
+    const recommendationId = snapshot.recommendationId ?? evidence.recommendation.id;
+    if (control?.mode !== "full_control" || !organizationId) {
+      return { outcome: "owner", occurrenceId: "", cause: "failed", failureClass: "configuration" };
+    }
+    const grant = root.orchestratorPolicy?.firstMessageScope?.state === "established" ? root.orchestratorPolicy.firstMessageScope.grant : undefined;
+    const origins = evidence.recommendation.originWorkItemIds.map((id) => {
+      const item = this.db.campaignWorkLedger.detail(root.id, id, Date.now());
+      return { workItem: item?.title ?? id, ...(item?.issue ? { issue: `${item.issue.repository}#${item.issue.number}` } : {}) };
+    });
+    return runCampaignCheck(this.db, this.decisionRuntime, {
+      kind: "follow_up_relatedness", confirm: "related", refuse: "unrelated", organizationId, root, sessionId,
+      surface: "follow_up_publication", requestId: recommendationId,
+      inputs: {
+        ownerMessage: control.boundary.objective,
+        data: {
+          grant: JSON.stringify({ repositories: boundaryRepositories(control.boundary), issues: root.orchestratorPolicy?.issueNumbers ?? [],
+            ...(grant?.selection ? { selection: { count: grant.selection.count, criteria: grant.selection.criteria,
+              constraints: grant.selection.constraints } } : {}) }),
+          origins: JSON.stringify(origins),
+          follow_up: JSON.stringify({ title: snapshot.sanitizedTitle, body: snapshot.sanitizedBody,
+            accepted: { title: evidence.recommendation.title, reason: evidence.recommendation.dispositionReason ?? "" } }),
+        },
+      },
+    });
   }
 
   /** Admits a publication of an accepted related recommendation as Orchestrator-owned. The root or
@@ -11178,16 +11248,16 @@ export class SessionsService {
    * refusal names its condition, logged here and recorded on the human-owned fallback (#2940). */
   private async admitCampaignPublication(sessionId: string, request: CreateWorkflowDecisionRequest,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "follow_up_issue_publication" }>, canAccess: (id: string) => boolean,
-  ): Promise<ServiceResult<WorkflowDecisionView> | { failure: CampaignPublicationAdmissionFailure }> {
+  ): Promise<ServiceResult<WorkflowDecisionView> | { failure: CampaignPublicationAdmissionFailure; reason?: string }> {
     const caller = this.db.getSession(sessionId);
     const rootId = this.db.campaignRootForMember(sessionId);
     const root = rootId ? this.db.getSession(rootId) : null;
-    const refused = (failure: CampaignPublicationAdmissionFailure, boundaryRevision?: number) => {
+    const refused = (failure: CampaignPublicationAdmissionFailure, boundaryRevision?: number, reason?: string) => {
       this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "publication_proposal", sessionId, requestId: request.requestId,
         ...(root ? { controllingSessionId: root.id } : {}), ...(boundaryRevision === undefined ? {} : { boundaryRevision }),
         recommendationId: snapshot.recommendationId, outcome: CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES.has(failure) ? "refused" : "human_fallback",
         reason: failure }));
-      return { failure };
+      return { failure, ...(reason ? { reason } : {}) };
     };
     if (!caller || !root || !canAccess(sessionId) || !canAccess(root.id)) return refused("requester_outside_campaign");
     if (!issueBoundary(root) || scopeCompatibility(this.db, root)) return refused("no_issue_boundary");
@@ -11198,6 +11268,12 @@ export class SessionsService {
     const checked = publicationEvidenceCheck(this.db, root, snapshot);
     if (!("evidence" in checked)) return refused(checked.failure, boundaryRevision);
     const evidence = checked.evidence;
+    // After the structural floor, the Decision Model checks the follow-up belongs to the work the
+    // owner asked for (#4104). It can only refuse: unrelated goes back to the requester with the
+    // model's reason, and an uncertain or failed check makes the publication the owner's.
+    const related = await this.followUpRelatedness(root, sessionId, snapshot, evidence);
+    if (related.outcome === "refused") return refused("unrelated_follow_up", boundaryRevision, related.reason);
+    if (related.outcome === "owner") return refused("relatedness_unconfirmed", boundaryRevision);
     let publicationDigest: string;
     try {
       // Inspection and consumption both run as the root, whose runner and repository own the boundary.
@@ -11597,10 +11673,26 @@ export class SessionsService {
           else if (epic) { snapshot = epic; proof = closureEvidence(this.db, this.db.getSession(sessionId)!, snapshot); }
         }
         const commentSafe = !request.comment || campaignPublicationSafe("Closure", `## Problem\n${request.comment}\n## Proposed Behavior\nClose\n## Acceptance Criteria\n- Verified\n## Security and Compatibility\nNone`, []);
-        if (proof && commentSafe) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
+        // A proof that rests on a disposition rather than delivery (a not-planned closure, or one naming
+        // a recommendation) is checked once more: does the stated reason fit the issue and its evidence
+        // (#4104)? The model can only refuse. A misfit goes back to the Orchestrator with the model's
+        // reason, and an uncertain or failed check leaves the closure the person's.
+        let reasonGap: ReturnType<typeof issueClosureDeliveryGap> | undefined;
+        if (proof && commentSafe && closureReasonChecked(snapshot)) {
+          const check = await this.closureReasonCheck(session, snapshot, proof);
+          if (check.outcome === "refused") {
+            this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,
+              boundaryRevision: fullBoundary.revision, outcome: "refused", reason: "closure_reason_does_not_fit", occurrenceId: check.occurrenceId }));
+            return fail(`The Decision Model found that the reason "${snapshot.reason}" does not fit issue #${snapshot.issue} and its evidence, ` +
+              `so no closure was requested. Its reason: ${check.reason} This refusal stands for this issue and reason; leave the issue open and report it for the campaign's owner to decide.`, 409);
+          }
+          if (check.outcome === "owner") reasonGap = issueClosureDeliveryGap("reason_unconfirmed");
+        }
+        if (proof && commentSafe && !reasonGap) snapshot.issueAdmission = { boundaryRevision: fullBoundary.revision, evidenceDigest: issueEvidenceDigest(proof) };
         else {
           // The person-owned route stays, but names every gap and what would fix it (#4058).
-          const gaps = closureDeliveryGaps(this.db, this.db.getSession(sessionId)!, snapshot, { proven: Boolean(proof), commentSafe, membersUnreadable });
+          const gaps = reasonGap ? [reasonGap]
+            : closureDeliveryGaps(this.db, this.db.getSession(sessionId)!, snapshot, { proven: Boolean(proof), commentSafe, membersUnreadable });
           if (gaps) snapshot.deliveryGaps = gaps;
           snapshot.deliveryFailure = gaps ? issueClosureDeliveryFailure(gaps) : "outside_boundary";
           this.log.info(JSON.stringify({ event: "campaign_issue_admission", entryPoint: "closure_proposal", sessionId, requestId: request.requestId,

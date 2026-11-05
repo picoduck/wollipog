@@ -513,6 +513,20 @@ let screenDecisions: import("@wollipog/protocol").CampaignDecisionsResponse["dec
   ...(params.get("owner") === "1" ? [{ occurrenceId: "dec_owner", kind: "credential_screen" as const, promptVersion: "credential_screen.v1",
     state: "uncertain" as const, verdict: "uncertain", reason: "It may ask the owner to sign in to the provider.", inputDigests: {}, attempts: [],
     usage: decisionUsage, createdAt: NOW - 30_000, subject: { sessionId: "s_root", surface: "owner_decision" as const, requestId: "owner" } }] : []),
+] : params.get("checks") === "1" ? [
+  // `checks=1`: follow-up relatedness and closure-reason checks (#4104 Slice B).
+  { occurrenceId: "rel_related", kind: "follow_up_relatedness", promptVersion: "follow_up_relatedness.v1", state: "decided", verdict: "related",
+    reason: "It removes a temp file the crash fix exposed.", inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 300_000,
+    subject: { sessionId: "s_child", surface: "follow_up_publication", requestId: "rec_1" } },
+  { occurrenceId: "rel_unrelated", kind: "follow_up_relatedness", promptVersion: "follow_up_relatedness.v1", state: "decided", verdict: "unrelated",
+    reason: "It starts a dark-mode theme the owner did not ask for.", inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 240_000,
+    subject: { sessionId: "s_child", surface: "follow_up_publication", requestId: "rec_2" } },
+  { occurrenceId: "why_misfit", kind: "closure_reason", promptVersion: "closure_reason.v1", state: "decided", verdict: "does_not_fit",
+    reason: "The recorded reason says the work is only paused.", inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 180_000,
+    subject: { sessionId: "s_root", surface: "issue_closure", requestId: "team/repo#123" } },
+  { occurrenceId: "why_failed", kind: "closure_reason", promptVersion: "closure_reason.v1", state: "failed", failureClass: "timed_out",
+    inputDigests: {}, attempts: [], usage: decisionUsage, createdAt: NOW - 60_000,
+    subject: { sessionId: "s_root", surface: "issue_closure", requestId: "team/repo#124" } },
 ] : [];
 
 const client = {
