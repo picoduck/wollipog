@@ -7443,8 +7443,9 @@ export interface CampaignDecisionSubject {
    * is the owner's Continue Without an Epic. */
   classification?: "decline" | "orchestrator";
   /** An `issue_scope_seed` subject's seed state, when this occurrence is the campaign's current
-   * reading. Server-derived for Campaign Status; never stored on the subject. */
-  seed?: CampaignIssueScopeSeed["state"];
+   * reading, or `scoped` once the person approved a scope, which ends any hold the seed placed.
+   * Server-derived for Campaign Status; never stored on the subject. */
+  seed?: CampaignIssueScopeSeed["state"] | "scoped";
 }
 
 /** Owner classification of a question the Decision Model could not screen (#4104). It never

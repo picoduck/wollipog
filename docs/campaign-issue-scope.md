@@ -24,7 +24,9 @@ reading recorded as failed. A message without digits makes no Decision call.
 Approving a scope needs at least one issue, and a campaign whose message names none would otherwise
 wait forever. So the owner may also release an `owner` seed: **Continue Without an Epic** on its
 Epic Seed row in Campaign Status (the classification route, `orchestrator`). The seed becomes `none`.
-Releasing seeds, scopes and grants nothing, and a `seeded` epic cannot be released.
+Releasing seeds, scopes and grants nothing, and a `seeded` epic cannot be released. Once a scope is
+approved, the seed holds nothing: its row reads as approved (`scoped` in the decisions response) and
+offers no release.
 
 Campaign Status exposes Authorized Issue Scope, revision, and recorded work outside authority. A campaign
 owner can inspect an epic's umbrella and members, select candidates, and request exact additions/removals.

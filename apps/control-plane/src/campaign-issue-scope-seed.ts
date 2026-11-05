@@ -22,6 +22,16 @@ export function seedEpicCandidate(fields: Pick<ScopeGrantFields, "explicit" | "r
   return fields.explicit[0]!.number;
 }
 
+/** What Campaign Status shows for one epic seed reading: the seed's state when that reading is the
+ * campaign's current one, or `scoped` once the person approved a scope, which ends any hold the seed
+ * placed (review round 2). Undefined for any other occurrence. */
+export function campaignSeedSubjectState(policy: Pick<OrchestratorCampaignPolicy, "issueScope" | "issueScopeSeed"> | undefined,
+  occurrenceId: string): CampaignIssueScopeSeed["state"] | "scoped" | undefined {
+  const seed = policy?.issueScopeSeed;
+  if (!seed || seed.occurrenceId !== occurrenceId) return undefined;
+  return policy?.issueScope && seed.state !== "none" ? "scoped" : seed.state;
+}
+
 /** Whether delegation waits for the person to approve the campaign's issue scope: an epic was
  * seeded, the seed is still being read, or the reading failed or was uncertain. */
 export function campaignSeedHoldsDelegation(policy: Pick<OrchestratorCampaignPolicy, "issueScope" | "issueScopeProposalEpic" | "issueScopeSeed"> | undefined): boolean {

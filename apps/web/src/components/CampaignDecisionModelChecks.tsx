@@ -69,6 +69,7 @@ function seedOutcomeText(decision: CampaignDecision): string {
     case "seeded": return "It seeded the epic's issues; approve the issue scope before work is delegated.";
     case "none": return "It named no epic, so nothing waits.";
     case "owner": return "Waiting for you: approve the campaign's issue scope, or continue without an epic.";
+    case "scoped": return "You approved the campaign's issue scope, so nothing waits.";
     default: return decision.state === "pending" ? "Work waits to be delegated until the check finishes." : "A later reading replaced it.";
   }
 }

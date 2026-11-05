@@ -139,8 +139,9 @@ test("a Custom campaign's epic seed shows its reading beside the scope it affect
     decision("seed_failed", { kind: "scope_grant", state: "failed", failureClass: "authentication", subject: { ...seed, seed: "owner" } }),
     decision("seed_released", { kind: "scope_grant", state: "uncertain", verdict: "uncertain", reason: "Unclear.",
       subject: { ...seed, seed: "none", classification: "orchestrator" } }),
+    decision("seed_scoped", { kind: "scope_grant", state: "failed", failureClass: "timed_out", subject: { ...seed, seed: "scoped" } }),
     decision("grant_full_control", { kind: "scope_grant", verdict: "grant", reason: "Named issues." }),
-  ], usage: { ...usage, calls: 6, unpricedCalls: 0 } });
+  ], usage: { ...usage, calls: 7, unpricedCalls: 0 } });
   const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
   try {
     const items = [...view.container.querySelectorAll("li")];
@@ -150,11 +151,12 @@ test("a Custom campaign's epic seed shows its reading beside the scope it affect
       ["Epic Seed", "Work waits to be delegated until the check finishes.", "Checking"],
       ["Epic Seed", "Waiting for you: approve the campaign's issue scope, or continue without an epic.", "None"],
       ["Epic Seed", "You let the Orchestrator delegate without an epic.", "Uncertain"],
+      ["Epic Seed", "You approved the campaign's issue scope, so nothing waits.", "None"],
     ]);
     assert.equal(facts(items[3]!).Failure, "Sign-In Required");
     assert.deepEqual(items.map((item) => [...item.querySelectorAll("button")].map((node) => node.textContent)), [
-      ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Open Session"],
-    ], "only a seed left to the owner offers to continue without an epic");
+      ["Open Session"], ["Open Session"], ["Open Session"], ["Continue Without an Epic", "Open Session"], ["Open Session"], ["Open Session"],
+    ], "only a seed still left to the owner offers to continue without an epic");
   } finally {
     view.unmount();
     api.campaignDecisions = read;

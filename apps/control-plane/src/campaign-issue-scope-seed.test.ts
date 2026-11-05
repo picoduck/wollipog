@@ -5,7 +5,7 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { PROTOCOL_VERSION, type CampaignIssueScopeView, type RunDecisionMessage, type RunnerMetadata } from "@wollipog/protocol";
-import { campaignSeedHoldsDelegation, needsCampaignIssueScopeSeed, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
+import { campaignSeedHoldsDelegation, campaignSeedSubjectState, needsCampaignIssueScopeSeed, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { firstMessageDigest } from "./campaign-launch-admission.js";
 import { fakeDecisionKind, fakeDecisionRuntime, HEALTHY_VERDICTS, type FakeDecisionStep } from "./credential-screen-test-fixture.js";
 import { ControlPlaneDb } from "./db.js";
@@ -35,7 +35,12 @@ function harness(prompt: string, reading: Reading, members: Record<number, Campa
   const inspections: number[] = [];
   hub.isRunnerOnline = () => true; hub.sessionChangedById = () => {}; hub.sendToRunner = () => true;
   hub.requestFromRunner = async (_runner, requestId, message) => {
-    if (message.type !== "campaign_issue_scope" || message.operation !== "inspect") throw new Error("Unexpected runner command");
+    if (message.type !== "campaign_issue_scope") throw new Error("Unexpected runner command");
+    if (message.operation === "synchronize") return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true,
+      repository: "team/repo", revision: message.scope.revision };
+    if (message.operation !== "inspect") throw new Error("Unexpected runner command");
+    if (message.issues?.length) return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: true, repository: "team/repo",
+      candidates: message.issues.map((number) => ({ issue: { repository: "team/repo", number }, title: `Issue ${number}`, source: "member_checklist" as const })) };
     if (message.epic !== undefined) inspections.push(message.epic);
     const epic = message.epic;
     if (epic === 13) return { type: "campaign_issue_scope_result", requestId, sessionId: message.sessionId, ok: false };
@@ -223,6 +228,36 @@ test("a Custom campaign launched without a message gets its seed from the person
     assert.equal(later.fake.calls.length, 0, "no reading of a later message");
     assert.equal(later.delegate().ok, true);
   } finally { later.db.close(); }
+});
+
+test("once the person approves a scope, Campaign Status shows no hold from the seed and offers no release (review round 2)", async () => {
+  for (const [name, prompt, reading] of [
+    ["an owner seed", "Orchestrate epic #40.", () => ({ errorClass: "authentication" })],
+    ["a seeded epic", "Orchestrate epic #40.", () => named(40)],
+  ] as Array<[string, string, Reading]>) {
+    const h = harness(prompt, reading);
+    try {
+      await h.settled();
+      const seed = h.policy().issueScopeSeed!;
+      assert.notEqual(campaignSeedSubjectState(h.policy(), seed.occurrenceId!), "scoped", name);
+      const owner = { kind: "human" as const, id: h.db.localIdentityContext().userId };
+      const principal = { ...h.db.localIdentityContext(), kind: "human" as const, actorId: owner.id };
+      const proposed = await h.svc.proposeCampaignIssueScope(h.id, { requestId: `approve-${name}`, expectedRevision: 0,
+        additions: [{ repository: "team/repo", number: 40 }], removals: [], explanation: "The epic" }, () => true, principal);
+      assert.ok(proposed.ok, proposed.error ?? name);
+      assert.ok(h.svc.resolveWorkflowDecision(h.id, h.id, proposed.data!.occurrenceId, { outcome: "approve" }, "human", owner, () => true).ok, name);
+      assert.deepEqual(h.policy().issueScope!.issueNumbers, [40], name);
+      assert.equal(campaignSeedSubjectState(h.policy(), seed.occurrenceId!), "scoped", `${name}: the row reads as approved`);
+      assert.equal(h.delegate().ok, true, `${name}: nothing holds delegation`);
+      assert.equal(h.svc.classifyCampaignDecision(h.id, seed.occurrenceId!, { classification: "orchestrator" }, owner).status, 409,
+        `${name}: there is nothing left to release`);
+    } finally { h.db.close(); }
+  }
+  // A reading that seeded nothing reads the same before and after; another occurrence reads as none of the campaign's.
+  const digest = "a".repeat(64);
+  const scope = { repository: "team/repo", issueNumbers: [40], revision: 1, authorizedByUserId: "u", authorizedAt: 1 };
+  assert.equal(campaignSeedSubjectState({ issueScope: scope, issueScopeSeed: { state: "none", messageDigest: digest, occurrenceId: "dec_1" } }, "dec_1"), "none");
+  assert.equal(campaignSeedSubjectState({ issueScopeSeed: { state: "owner", messageDigest: digest, occurrenceId: "dec_1" } }, "dec_2"), undefined);
 });
 
 test("a transient failure that succeeds on retry seeds the epic with nobody asked", async () => {
