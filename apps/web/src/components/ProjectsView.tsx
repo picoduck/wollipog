@@ -82,6 +82,7 @@ export function ProjectsView({
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
   const projectCreationRetrySupported = useStoreSelector(projectCreationRetryAvailable);
   const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
+  const renameProjectLocationsSupported = useStoreSelector((state) => state.renameProjectLocationsSupported);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
   const snapshotLoaded = useStoreSelector((state) => state.snapshotLoaded);
   const runners = useStoreSelector((state) => state.runners);
@@ -275,6 +276,13 @@ export function ProjectsView({
         "Couldn't remove the location.");
       showToast("Location removed. The folder and sessions were not deleted.");
     } catch { /* inline error */ }
+  };
+  /** Rename Location…'s save. Its dialog shows the failure and keeps the name for another try. */
+  const renameLocation = async (location: ProjectLocationView, name: string) => {
+    if (!selected) return;
+    const project = await runProjectMutation(`rename:${location.id}`,
+      async () => (await api.renameProjectLocation(selected.id, location.id, name)).project, null);
+    if (!project) throw new Error("Another change to this project is still saving.");
   };
   const makeDefault = async (location: ProjectLocationView) => {
     if (!selected) return;
@@ -605,6 +613,9 @@ export function ProjectsView({
                         })}
                         onReveal={() => void reveal(location)}
                         onCopyPath={() => void copyFromMenu(location.path, "Path copied.", "Couldn't copy the path.")}
+                        {...(renameProjectLocationsSupported
+                          ? { onRename: (name: string) => renameLocation(location, name) }
+                          : {})}
                         onMakeDefault={() => void makeDefault(location)}
                         onRemove={(choice) => void removeLocation(location, choice)}
                         onAccessChanged={() => void refreshSelectedProject()}
