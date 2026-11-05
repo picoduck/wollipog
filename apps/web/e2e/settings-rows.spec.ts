@@ -2486,11 +2486,6 @@ test.describe("Decision Model group", () => {
       await page.mouse.move(0, 0);
       const group = decisionGroup(page);
       await group.scrollIntoViewIfNeeded();
-      // TEMPORARY (reverted before merge): dump CI's own render to create the committed baseline.
-      if (process.env.CI) {
-        const png = await page.screenshot({ ...PIXELS, clip: await snappedClip(group) });
-        console.error(`DECISION_MODEL_BASELINE ${process.platform} ${theme} ${png.toString("base64")}`);
-      }
       await expect(page).toHaveScreenshot(`decision-model-${theme}.png`, {
         ...PIXELS,
         clip: await snappedClip(group),
