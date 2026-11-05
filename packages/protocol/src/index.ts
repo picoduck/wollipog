@@ -3012,6 +3012,10 @@ export interface OrchestratorCampaignPolicy extends OrchestratorDefaults {
   /** Project Locations the launch inspection left out of the repository boundary (#4117), each with
    * its fixed reason. Server-owned and informational: it grants nothing. */
   excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
+  /** Locations other people added mid-campaign, waiting for the owner's Include in Campaign (#4117). */
+  pendingLocations?: import("./project-location-inspection.js").CampaignPendingLocation[];
+  /** The Locations that joined the boundary after launch, newest last, bounded (#4117). */
+  locationJoins?: import("./project-location-inspection.js").CampaignLocationJoin[];
   /** Human initial epic request, persisted before runner echo; this is a proposal seed, never authority. */
   issueScopeProposalEpic?: number;
   /** Finite GitHub issue-write scope admitted from the initial request or an exact human-approved scope change. */
@@ -3205,6 +3209,9 @@ export interface UiEvidenceReviewDelivery {
 export interface OrchestratorCampaignProjection {
   /** Current authorized root control, paired with policyRevision; child snapshots may be stale. */
   control?: CampaignControl;
+  /** The repository boundary's Locations, exclusions and joins (#4117). Omitted for a campaign
+   * whose boundary predates the repository list. */
+  repositoryBoundary?: import("./project-location-inspection.js").CampaignRepositoryBoundaryView;
   budget?: import("./campaign-budget.js").CampaignBudgetView;
   status: OrchestratorCampaignStatus;
   /** Durable content-safe recovery state; control-plane-owned, never an execution grant. */

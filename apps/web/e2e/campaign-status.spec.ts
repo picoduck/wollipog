@@ -183,6 +183,36 @@ for (const theme of ["dark", "light"] as const) {
   }
 }
 
+// UI evidence for #4117: set CAMPAIGN_REPOSITORIES_EVIDENCE_DIR to capture the Repositories section.
+const REPOSITORIES_EVIDENCE_DIR = process.env.CAMPAIGN_REPOSITORIES_EVIDENCE_DIR;
+for (const theme of ["dark", "light"] as const) {
+  for (const [device, viewport] of [["desktop", { width: 1440, height: 900 }], ["phone", { width: 390, height: 844 }]] as const) {
+    test(`Repositories lists the boundary and includes a waiting Location on a ${device} ${theme} viewport (#4117)`, async ({ page }) => {
+      await page.setViewportSize(viewport);
+      await page.goto(`/campaign-status-e2e.html?scenario=campaign&repositories=1&theme=${theme}`);
+      const section = page.locator("section.campaign-detail-section", { has: page.locator("h3", { hasText: /^Repositories$/ }) });
+      await expect(section).toBeVisible();
+      await expect(section.locator("dt")).toHaveText(["picoduck/wollipog", "picoduck/dev-box-setup", "picoduck/notes-site", "Boundary Revision"]);
+      await expect(section.getByRole("list", { name: "Locations of picoduck/wollipog" })).toContainText("Wollipog on Laptop");
+      await expect(section.getByRole("list", { name: "Locations of picoduck/wollipog" })).toContainText("Default");
+      await expect(section.getByRole("list", { name: "Locations of picoduck/notes-site" })).toContainText("Removed");
+      await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("Scratch Folder");
+      await expect(section.getByRole("list", { name: "Excluded Locations" })).toContainText("not a git repository");
+      await expect(section).toContainText("Joined at boundary revision 6.");
+      await section.scrollIntoViewIfNeeded();
+      await assertNoHorizontalOverflow(page, ".campaign-status");
+      if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-${device}-${theme}.png` });
+      const include = section.getByRole("button", { name: "Include Shared Docs in Campaign" });
+      await expect(include).toHaveText("Include in Campaign");
+      await include.click();
+      expect(await page.evaluate(() => (window as unknown as { __INCLUDED_LOCATION__?: string }).__INCLUDED_LOCATION__)).toBe("loc_shared");
+      await expect(section.getByRole("list", { name: "Locations of picoduck/shared-docs" })).toContainText("Shared Docs");
+      await expect(section.getByRole("button", { name: "Include Shared Docs in Campaign" })).toHaveCount(0);
+      if (REPOSITORIES_EVIDENCE_DIR) await section.screenshot({ path: `${REPOSITORIES_EVIDENCE_DIR}/repositories-included-${device}-${theme}.png` });
+    });
+  }
+}
+
 // UI evidence for #3539 and #3600: set CAMPAIGN_GITLAB_EVIDENCE_DIR to capture the GitLab refs.
 const GITLAB_EVIDENCE_DIR = process.env.CAMPAIGN_GITLAB_EVIDENCE_DIR;
 test("GitLab issue and merge request refs link to their host and show observed GitLab facts in GitLab's terms", async ({ page }) => {
