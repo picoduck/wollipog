@@ -1,3 +1,4 @@
+import { normalizeWorkflowDecisionOwnerRule, sameWorkflowDecisionOwnerRule } from "@wollipog/protocol";
 import { normalizeDeliveryVerificationFailure } from "@wollipog/protocol";
 import { agentAvailableForImplicitLaunch } from "@wollipog/protocol";
 import { runnerSupportsReviewQuestionPreservation } from "./review-session-capability.js";
@@ -852,8 +853,9 @@ function decisionLiteral(value: string): string {
  * provider turn, so a child that ended its turn behind the card has nothing else to wake it. The
  * decision record stays authoritative: a child polling inside its turn may already have read it. */
 function workflowDecisionResolutionPrompt(decision: WorkflowDecisionView): string {
-  // A decision the owner kept (#4064) is answered by that owner, never by an agent or a reviewer.
-  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined;
+  // A decision the owner kept (#4064), or an owner rule kept for them (#4137), is answered by that
+  // owner, never by an agent or a reviewer.
+  const ownerKept = decision.category === "owner_decision" || decision.ownerHandoff !== undefined || decision.ownerRule !== undefined;
   const resolver = decision.withdrawal || decision.authority === "orchestrator" ? "Your Orchestrator"
     : ownerKept && decision.status !== "revoked" ? "Your campaign's owner" : "A human reviewer";
   // A withdrawal's own reason replaces the message an earlier approval left (#3917), and the option
@@ -903,6 +905,8 @@ function ownerKeptTargets(category: WorkflowDecisionCategory, resourceKey: strin
       break;
     case "ui_evidence_approval":
       for (const item of snapshot.evidence) targets.push(`${snapshot.category}:evidence:${item.sha256}`);
+      // A video stored as its derived frames still names the video it came from (#4137 review).
+      if (snapshot.videoReview) targets.push(`${snapshot.category}:evidence:${snapshot.videoReview.sourceSha256}`);
       break;
     case "campaign_issue_scope":
       targets.push(`${snapshot.category}:${snapshot.repository.toLowerCase()}:+${[...snapshot.additions].sort((a, b) => a - b).join(",")}` +
@@ -11153,7 +11157,7 @@ export class SessionsService {
       return this.createWorkflowDecisionWithVideoInner(sessionId, request, canAccess);
     }
     const key = `${sessionId}:${request.requestId}`;
-    const requestDigest = auditDigest({ resourceKey: request.resourceKey, snapshot: snapshot.data })!;
+    const requestDigest = auditDigest({ resourceKey: request.resourceKey, snapshot: snapshot.data, ownerRule: request.ownerRule ?? null })!;
     const existing = SessionsService.inFlightVideoDecisions.get(key);
     if (existing) return existing.requestDigest === requestDigest
       ? existing.result : fail("requestId was already used for different workflow decision content", 409);
@@ -11167,6 +11171,9 @@ export class SessionsService {
     request: CreateWorkflowDecisionRequest,
     canAccess: (sessionId: string) => boolean,
   ): Promise<ServiceResult<WorkflowDecisionView>> {
+    // A malformed owner rule (#4137) is refused before any inspection or GitHub read it would waste.
+    const ownerRule = normalizeWorkflowDecisionOwnerRule(request?.ownerRule);
+    if (!ownerRule.ok) return fail(ownerRule.message, 400);
     const normalized = normalizeWorkflowDecisionSnapshot(request?.resourceSnapshot);
     if (normalized.ok && normalized.data?.category === "follow_up_issue_publication" && normalized.data.recommendationId) {
       if (normalized.data.issueAdmission) return this.createWorkflowDecision(sessionId, request, canAccess);
@@ -11207,6 +11214,9 @@ export class SessionsService {
     }
     const video = normalized.data.evidence.filter((item) => item.mediaType?.startsWith("video/"));
     if (!video.length) return this.createWorkflowDecision(sessionId, request, canAccess);
+    // A video an owner rule keeps for a person (#4137) is theirs to review: no delegated frame
+    // review applies, and the ordinary route compares the rule before any replay can return.
+    if (ownerRule.rule) return this.createWorkflowDecision(sessionId, request, canAccess);
     if (!this.videoFrameReviewCandidateEnabled) {
       return this.createWorkflowDecision(sessionId, request, canAccess, {
         videoFallbackReason: "Delegated video-frame review awaits live App Server delivery and model-cost validation.",
@@ -11237,6 +11247,12 @@ export class SessionsService {
         }
         if (previous.status === "pending") this.restorePendingWorkflowDecisionCards(sessionId);
         return ok(previous);
+      }
+      // A video the owner kept, by a rule or a handoff (#4137, #4064), stays theirs under a new
+      // requestId or key: the ordinary route matches the original evidence, before frame derivation
+      // would replace it, and carries the rule over.
+      if (this.ownerKept(controller.session.id, normalized.data.category, request.resourceKey, normalized.data)) {
+        return this.createWorkflowDecision(sessionId, request, canAccess);
       }
     }
     // Eligibility is the same direct authority that resolution checks: the saved owner under Custom,
@@ -12419,6 +12435,8 @@ export class SessionsService {
     if (!boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return fail("requestId and resourceKey are required bounded identifiers", 400);
     }
+    const ownerRule = normalizeWorkflowDecisionOwnerRule(request.ownerRule);
+    if (!ownerRule.ok) return fail(ownerRule.message, 400);
     const normalized = normalizeWorkflowDecisionSnapshot(request.resourceSnapshot, internal?.trustedDerivedVideo);
     if (!normalized.ok || !normalized.data) return failAs(normalized);
     // An item naming an artifact is reviewed as that artifact's checked bytes, so the human review
@@ -12537,9 +12555,25 @@ export class SessionsService {
     }
     // A resource its owner kept stays theirs (#4064): a later request for it, under any key and from
     // any campaign member, is the person's too, so withdrawing and asking again cannot move it back.
-    if (authority === "orchestrator" && this.ownerKept(controller.session.id, category, request.resourceKey, normalized.data)) {
+    const kept = this.ownerKeptBy(controller.session.id, category, request.resourceKey, normalized.data);
+    if (authority === "orchestrator" && kept.length) {
       authority = "human";
       Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+    }
+    // An installed or user-authored rule that keeps the gate for a person (#4137) makes it theirs at
+    // creation, under any mode, grant or category. It only narrows: a question the owner must first
+    // classify stays held for that. A later request for the same resource keeps the rule it matched,
+    // so the person's card still says why it is theirs.
+    const keptRule = ownerRule.rule ?? [...kept].reverse().find((decision) => decision.ownerRule)?.ownerRule;
+    if (ownerRule.rule) {
+      authority = "human";
+      if (authorityEvaluation.reason !== "credential_screen_review") {
+        Object.assign(authorityEvaluation, { owner: "human", basis: "human_required", reason: "owner_kept" });
+      }
+      const prior = this.db.workflowDecisionByRequestId(sessionId, request.requestId);
+      if (prior && !sameWorkflowDecisionOwnerRule(prior.ownerRule, ownerRule.rule)) {
+        return fail("requestId was already used for different workflow decision content", 409);
+      }
     }
     if (category === "follow_up_issue_publication" && normalized.data.category === category && authority === "human") {
       // Under an issue boundary no person-owned publication is recorded without its reason (#4065):
@@ -12587,6 +12621,7 @@ export class SessionsService {
       ...(evaluated.effectiveOwner === "human" && evaluated.fallback ? { humanFallback: evaluated.fallback } : {}),
       ...(category === "pr_merge" && internal?.closingReferenceCheck ? { closingReferenceCheck: internal.closingReferenceCheck } : {}),
       ...(retired.length ? { alsoSupersede: retired } : {}),
+      ...(keptRule && authority === "human" ? { ownerRule: keptRule } : {}),
       createdAt: now,
     });
     if (!created) return fail("requestId was already used for different workflow decision content", 409);
@@ -12740,8 +12775,10 @@ export class SessionsService {
         const control = root.orchestratorPolicy?.control;
         const boundaryRevision = control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {};
         // An owner decision stays the owner's: classifying it only lets the owner choose an option.
-        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, ownerDecision ? "human" : "orchestrator", ownerDecision
-          ? { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision", credentialScreen: screen, ...boundaryRevision }
+        // So does a question an owner rule kept for them (#4137).
+        const keptForOwner = ownerDecision || decision.ownerRule !== undefined;
+        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, keptForOwner ? "human" : "orchestrator", keptForOwner
+          ? { owner: "human", basis: "human_required", reason: "owner_kept", operation: decision.category, credentialScreen: screen, ...boundaryRevision }
           : { owner: "orchestrator", basis: decision.sessionId === root.id ? "standing_authorization" : "campaign_delegation",
             reason: "authorized_operation", operation: "implementation_question", credentialScreen: screen, ...boundaryRevision });
         if (!released) return fail("this question changed concurrently; read it again", 409);
@@ -12749,7 +12786,7 @@ export class SessionsService {
         this.db.setPendingApproval(released.sessionId, appendPendingApproval(
           removePendingRequest(this.db.getSession(released.sessionId)?.pendingApproval, released.occurrenceId),
           this.workflowDecisionApproval(released)));
-        this.recordWorkflowDecisionAudit(released, "pending", actor, now, ownerDecision
+        this.recordWorkflowDecisionAudit(released, "pending", actor, now, keptForOwner
           ? "Owner classified the question: answer it themselves." : "Owner classified the question: Let the Orchestrator Answer.");
       }
     } else {
@@ -12876,7 +12913,7 @@ export class SessionsService {
         !canAccess(root.id) || !canAccess(requesterId) || !this.workflowDecisionRelationship(root.id, requesterId)) {
       return fail("workflow decision not found", 404);
     }
-    if (decision.ownerHandoff || decision.category === "owner_decision") {
+    if (decision.ownerHandoff || decision.ownerRule || decision.category === "owner_decision") {
       return fail("this decision is already your campaign owner's", 409);
     }
     if (decision.status !== "pending") {
@@ -12918,13 +12955,20 @@ export class SessionsService {
   }
 
   /** Whether the campaign's owner kept this resource (#4064): its root handed an occurrence for it
-   * to the owner. See ownerKeptTargets for what counts as the same resource. */
+   * to the owner, or an owner rule kept one for a person (#4137). See ownerKeptTargets for what
+   * counts as the same resource. */
   private ownerKept(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
     snapshot: WorkflowDecisionResourceSnapshot): boolean {
-    const handed = this.db.ownerHandedWorkflowDecisions(controllerId);
-    if (!handed.length) return false;
+    return this.ownerKeptBy(controllerId, category, resourceKey, snapshot).length > 0;
+  }
+
+  /** The occurrences, oldest first, through which the owner kept this resource. */
+  private ownerKeptBy(controllerId: string, category: WorkflowDecisionCategory, resourceKey: string,
+    snapshot: WorkflowDecisionResourceSnapshot): WorkflowDecisionView[] {
+    const kept = this.db.ownerKeptWorkflowDecisions(controllerId);
+    if (!kept.length) return [];
     const targets = new Set(ownerKeptTargets(category, resourceKey, snapshot));
-    return handed.some((decision) =>
+    return kept.filter((decision) =>
       ownerKeptTargets(decision.category, decision.resourceKey, decision.resourceSnapshot).some((target) => targets.has(target)));
   }
 
@@ -13113,7 +13157,7 @@ export class SessionsService {
     }
     // A decision the campaign's owner kept (#4064) is theirs alone: never an agent's, and not any
     // other person's who can open the session.
-    if ((decision.category === "owner_decision" || decision.ownerHandoff ||
+    if ((decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
         this.ownerKept(decision.controllingSessionId, decision.category, decision.resourceKey, decision.resourceSnapshot)) &&
         (authority !== "human" || actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(decision.controllingSessionId, actor.id))) {
       return fail("Only the campaign's owner can decide a decision the owner kept", 403);
@@ -15134,7 +15178,7 @@ export class SessionsService {
       // A root's own decision its owner kept (#4064) waits for that person without parking the root:
       // the root keeps working, and campaign continuations keep reaching it.
       ...(decision.sessionId === decision.controllingSessionId && decision.authority === "human" &&
-        (decision.category === "owner_decision" || decision.ownerHandoff ||
+        (decision.category === "owner_decision" || decision.ownerHandoff || decision.ownerRule ||
           decision.authorityEvaluation?.reason === "owner_kept" ||
           decision.authorityEvaluation?.reason === "credential_screen_review") ? { async: true } : {}),
       context: {
@@ -16217,7 +16261,7 @@ export class SessionsService {
         return fail("workflow decision not found", 404);
       }
       if (decision.status !== "pending") return fail("only pending workflow requests can be withdrawn", 409);
-      if (decision.authority !== "human" || decision.category !== "review_round_extension" || decision.ownerHandoff) {
+      if (decision.authority !== "human" || decision.category !== "review_round_extension" || decision.ownerHandoff || decision.ownerRule) {
         return fail("this category is not designated for Orchestrator withdrawal", 403);
       }
       if (!boundedDecisionString(resolution.reason, WORKFLOW_DECISION_CHILD_MESSAGE_MAX_CHARS)) {

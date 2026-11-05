@@ -1569,3 +1569,35 @@ test("decisions the owner kept are listed as waiting for them, and each opens it
     await panel.dispose();
   }
 });
+
+test("a decision an owner rule kept is waiting for you with the rule's source and quote, as plain text (#4137)", async () => {
+  harnessRequests.descendants = [pendingRequest("s_child", "occ_kept")];
+  const { client } = fakeClient(() => ({ revision: 1, items: [], nextCursor: null }), {});
+  const quote = "Merging requires per-PR user authorization <b>through the structured question tool</b>.";
+  const root = session({
+    orchestratorCampaign: campaignProjection(workSummary(), {
+      status: "waiting_human",
+      ownerDecisions: { total: 1, items: [
+        { occurrenceId: "occ_kept", sessionId: "s_child", category: "pr_merge", summary: "Merge picoduck/wollipog#9", handedOff: false,
+          ownerRule: { source: "~/.claude/skills/issue-workflow/SKILL.md", quote }, createdAt: NOW },
+      ] },
+    }),
+  });
+  const panel = await mount({ initial: root, client });
+  try {
+    await act(async () => panel.state.show("campaign"));
+    await settle();
+    const section = [...panel.container.querySelectorAll("section")]
+      .find((candidate) => candidate.querySelector("h3")?.textContent === "Waiting for You")!;
+    assert.ok(section, "Waiting for You is shown");
+    const facts = [...section.querySelectorAll("dt")].map((term) => [term.textContent, term.nextElementSibling?.textContent]);
+    assert.deepEqual(facts.map(([term]) => term), ["Kept by Rule", "Rule Source", "Rule"]);
+    assert.match(facts[0]![1]!, /^Merge picoduck\/wollipog#9Requested under a rule/u);
+    assert.equal(facts[1]![1], "~/.claude/skills/issue-workflow/SKILL.md");
+    assert.equal(facts[2]![1], quote, "the quote renders as its exact text");
+    assertNoDomNode(section.querySelector("b"), "markup in the quote is never rendered");
+    assert.ok(section.querySelector("button[aria-label='Open Request: Merge picoduck/wollipog#9']"));
+  } finally {
+    await panel.dispose();
+  }
+});

@@ -25432,6 +25432,36 @@ test("operator video validation is confined to one controller and revokes review
   } finally { h.db.close(); }
 });
 
+test("a video an owner rule kept is never derived into Orchestrator-owned frames under a new key (#4137 review)", async (t) => {
+  if (!await shortVideoDecoderAvailable()) {
+    assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");
+    return t.skip("no isolated video decoder on this host");
+  }
+  const h = uiEvidenceReviewHarness(PROTOCOL_VERSION, true, undefined, true);
+  const inside = new SessionsService(h.db, h.hub as unknown as Hub, NOOP_LOG,
+    undefined, undefined, undefined, undefined, undefined, undefined, true, h.parent.id);
+  try {
+    const child = h.createChild("Ruled Video Child");
+    const attached = h.svc.attachSessionVideo(child.id, {
+      name: "kept.webm", mimeType: "video/webm", data: transientVideoBytes().toString("base64"),
+    }, { kind: "agent", id: child.id });
+    assert.ok(attached.ok && attached.data, attached.error);
+    const item = { evidenceId: "kept", artifactId: attached.data.artifactId, sha256: attached.data.sha256, mediaType: "video/webm" };
+    const ownerRule = { source: "AGENTS.md", quote: "A person reviews every video before merge." };
+    const ruled = await inside.createWorkflowDecisionWithVideo(child.id, { requestId: "ruled-video", resourceKey: "ruled-video",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] }, ownerRule });
+    assert.ok(ruled.ok && ruled.data, ruled.error);
+    assert.deepEqual([ruled.data.authority, ruled.data.ownerRule], ["human", ownerRule]);
+    // The same video under a new requestId and key, without the rule, still goes to the owner.
+    const again = await inside.createWorkflowDecisionWithVideo(child.id, { requestId: "same-video", resourceKey: "another-key",
+      resourceSnapshot: { category: "ui_evidence_approval", evidence: [item] } });
+    assert.ok(again.ok && again.data, again.error);
+    assert.deepEqual([again.data.authority, again.data.ownerRule], ["human", ownerRule]);
+    assert.equal(again.data.resourceSnapshot.category === "ui_evidence_approval" && again.data.resourceSnapshot.videoReview, undefined,
+      "no frames are derived for the Orchestrator");
+  } finally { h.db.close(); }
+});
+
 test("validated local video path binds all source frames, ordered receipts, source digest, and exact occurrence", async (t) => {
   if (!await shortVideoDecoderAvailable()) {
     assert.notEqual(process.env.CI, "true", "CI must provision an executable isolated FFmpeg decoder");

@@ -388,8 +388,11 @@ const projectionFor = (rev: number) => campaignProjection(
   },
 );
 
-/** `owners=after` (#4064): the root's question for its owner, and a child's merge handed to them. */
-const ownerScenario = params.get("owners") === "before" || params.get("owners") === "after" ? params.get("owners") as "before" | "after" : null;
+/** `owners=after` (#4064): the root's question for its owner, and a child's merge handed to them.
+ * `owners=rule` (#4137): the child filed its merge with the installed rule that keeps it for the owner. */
+const ownerScenario = ["before", "after", "rule"].includes(params.get("owners") ?? "") ? params.get("owners") as "before" | "after" | "rule" : null;
+const ownerRule = { source: "~/.codex/skills/issue-workflow/SKILL.md",
+  quote: "Never merge a pull request without per-PR user authorization through the structured question tool." };
 const ownerSnapshot = { category: "owner_decision" as const, question: "Which credential design should the provider bridge use?",
   material: "PR picoduck/wollipog#4141 at head 3f9c2e1. Both designs pass CI; the broker adds a helper process the owner would run.",
   recommendedOptionId: "lease", options: [
@@ -409,6 +412,9 @@ const ownerCard: import("@wollipog/protocol").PendingApproval | null = ownerScen
 const ownerProjection = ownerScenario === "after" ? { status: "waiting_human" as const, ownerDecisions: { total: 2, items: [
   { occurrenceId: "workflow_owner_1", sessionId: "s_root", category: "owner_decision" as const, summary: ownerSnapshot.question, handedOff: false, createdAt: NOW - 4 * MINUTE },
   { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: true, createdAt: NOW - 8 * MINUTE },
+] } } : ownerScenario === "rule" ? { status: "waiting_human" as const, ownerDecisions: { total: 1, items: [
+  { occurrenceId: "occ_1", sessionId: "s_child_3", category: "pr_merge" as const, summary: "Merge picoduck/wollipog#4141", handedOff: false,
+    ownerRule, createdAt: NOW - 8 * MINUTE },
 ] } } : {};
 
 /** The root's own Pending Decision cards for the follow-ups past the limit (`followUps=pending`). */
@@ -457,9 +463,9 @@ function sessionsFor(rev: number): SessionView[] {
 const mergeSnapshot = { category: "pr_merge" as const, repository: "picoduck/wollipog", pullRequest: 4141, headSha: "3f9c2e1".padEnd(40, "0"),
   reviewResult: "merge_with_acknowledged_risk" as const, requiredChecks: { headSha: "3f9c2e1".padEnd(40, "0"), status: "passed" as const, checkedAt: NOW - 9 * MINUTE,
     checks: [{ name: "Typecheck, Test & Sidecar Bundle", state: "passed" as const }] } };
-const ownerRequests = (owners: "before" | "after"): DescendantRequestView[] => {
+const ownerRequests = (owners: "before" | "after" | "rule"): DescendantRequestView[] => {
   const handed = owners === "after";
-  const evaluation = handed
+  const evaluation = owners !== "before"
     ? { owner: "human" as const, basis: "human_required" as const, reason: "owner_kept" as const, operation: "pr_merge" as const }
     : { owner: "orchestrator" as const, basis: "campaign_delegation" as const, reason: "authorized_operation" as const, operation: "pr_merge" as const };
   const merge: DescendantRequestView = {
@@ -471,7 +477,8 @@ const ownerRequests = (owners: "before" | "after"): DescendantRequestView[] => {
       workflowDecision: { requestId: "merge-4141", occurrenceId: "occ_1", sessionId: "s_child_3", controllingSessionId: "s_root", category: "pr_merge",
         resourceKey: "picoduck/wollipog#4141", resourceSnapshot: mergeSnapshot, resourceDigest: "a".repeat(64), policyRevision: 1,
         authority: evaluation.owner, authorityEvaluation: evaluation, status: "pending", createdAt: NOW - 8 * MINUTE,
-        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}) } },
+        ...(handed ? { ownerHandoff: { bySessionId: "s_root", at: NOW - 5 * MINUTE, reason: "The owner kept risk consent for this merge." } } : {}),
+        ...(owners === "rule" ? { ownerRule } : {}) } },
   };
   return ownerCard ? [{ sessionId: "s_root", sessionTitle: "Full Control Campaign", runnerId: "runner-1", runnerOnline: true, eventEpoch: 1,
     createdAt: NOW - 4 * MINUTE, responseOwner: "human", authorityEvaluation: ownerCard.workflowDecision!.authorityEvaluation,
