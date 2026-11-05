@@ -15,6 +15,8 @@ import {
 import { plainFailure, type PlainFailure } from "./session-titles.js";
 
 const TEST_DESCRIPTION = "Runs one fixed decision and reports its verdict, latency and attempts.";
+/** The Model Source row's busy announcement while the setting loads; the select keeps its label. */
+const LOADING_ANNOUNCEMENT = "Loading the Decision Model…";
 
 /**
  * Settings › Orchestrator › Decision Model (#4101), for the organization: a Model Source row
@@ -164,7 +166,7 @@ export function DecisionModelPanel() {
           disabled={!settings || loading || saving || !canManage}
           disabledReason={settings && !canManage ? DECISION_MODEL_NO_PERMISSION : undefined}
           busy={loading || saving}
-          busyLabel={loading ? "Loading the Decision Model…" : undefined}
+          busyLabel={loading ? LOADING_ANNOUNCEMENT : undefined}
           saved={saved}
           onChange={(value) => choose(value as DecisionModelSource)}
           menuWidth={360}

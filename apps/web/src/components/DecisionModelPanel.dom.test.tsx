@@ -9,6 +9,7 @@ import { ApiProvider } from "../api-context.js";
 import type { ApiTransport } from "../api-transport.js";
 import { FeedbackProvider } from "./FeedbackProvider.js";
 import { DecisionModelPanel } from "./DecisionModelPanel.js";
+import { assertNoDomNode } from "../dom-test-assertions.js";
 
 const domWindow = new Window({ url: "http://localhost/settings/orchestrator" });
 const previous = new Map<string, unknown>();
@@ -208,7 +209,7 @@ test("an administrator chooses an agent in the dialog, and Automatic saves at on
       runnerId: "runner-studio", agentId: "claude-code", driver: "claude-code", model: "haiku", effort: "low",
     });
     assert.ok((mounted.container.textContent ?? "").includes("Claude Code on Studio Workstation"));
-    assert.equal(body().querySelector('[role="dialog"]'), null);
+    assertNoDomNode(body().querySelector('[role="dialog"]'), "the dialog closes after it saves");
 
     await selectOption(mounted.container, "Model Source", "Automatic");
     assert.ok(calls.some((call) => call.method === "DELETE" && call.path === "/api/decision-model"));
