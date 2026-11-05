@@ -4,13 +4,12 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 /**
  * #784 and #2182: background work is a status like any other, and it has to look like one.
  *
- * The Session bar shows ONE status, chosen by `sessionStatusSummary()` rather than by how much room
- * a row has, so what it shows is the same at every width:
+ * The Session bar keeps lifecycle beside one secondary chosen by `sessionStatusSummary()`:
  *
  *  - PLACEMENT. One status control sits on the bar's line at every width, and on a phone it leads
  *    the second line beside Share and More Actions without pushing them. Attention comes first;
  *    with nothing needing the person, running background work leads while the session awaits its
- *    next prompt. The header is exactly as tall while a job is running as it is when none is.
+ *    next prompt. Only wrapping the readable labels may grow a phone header.
  *  - GEOMETRY. The background-work badge is the same height, type size, weight, vertical padding
  *    and dot size as any other badge, in the bar and in the Session Status popover, and the same
  *    size as the card's Running pill in the Sessions list.
@@ -140,7 +139,7 @@ for (const width of WIDTHS) {
     await loadInbox(page, width);
     await openSession(page);
     const control = page.locator(".session-bar .session-status-button");
-    // The approval needs the person, so it is the badge at every width; background work waits in the
+    // The approval needs the person, so it is the secondary at every width; background work waits in the
     // popover, and its live region still announces it.
     await expect(control).toHaveAccessibleName("Session Status: Awaiting Prompt, Approval Required");
     await expect(page.locator('.session-bar [data-live="background-work"]'))
@@ -177,6 +176,7 @@ for (const width of WIDTHS) {
     await page.evaluate(() => window.__WOLLIPOG_PROJECT_INBOX_E2E__.setRunnerStatus("offline"));
     await expect(control.locator(".status")).toHaveText(["Running", "Disconnected"]);
     await expect(control.locator(".pulse")).toHaveCount(0);
+    await expect(page.locator(".working-dots")).toHaveCount(0);
     await control.click();
     await expect(page.getByRole("dialog", { name: "Session Status" })).toContainText("status may not be current");
     await capture(page, "disconnected");
@@ -221,14 +221,14 @@ for (const width of [390, 1280] as const) {
         rowHeight: element.getBoundingClientRect().height,
       };
     });
-    // #2209: a running session's background work is not a second badge; the bar's popover lists it.
+    // Running remains primary while background work occupies the secondary badge.
     await applyStatuses(page, { status: "running", backgroundWorkState: "running", approval: false });
     await expect(row.locator(".status")).toHaveCount(2);
     const running = await read();
     // Transcript silence never changes the lifecycle or its tone.
     expect(running.names).toHaveLength(2);
     expect(running.names[0]).toMatch(/^Status: Running$/);
-    // While the session awaits its next prompt, the work is the one status, drawn like Running.
+    // Awaiting Prompt remains primary after the foreground turn ends.
     await applyStatuses(page, { status: "idle", backgroundWorkState: "running", approval: false });
     await expect(row.getByLabel("Status: Waiting on External Job")).toBeVisible();
     const waiting = await read();

@@ -207,13 +207,13 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
   await expect(parentRow(page).locator(".inbox-thread-family-text")).toBeHidden();
   await expect(parentRow(page).locator(".status").last()).toHaveText("Needs Your Input");
   await expect(parentRow(page).locator(".status").last()).toBeVisible();
-  // One status on a phone as on a desktop (#2209): the top-priority kind and "+1" for the other kind.
+  // Lifecycle and the top request remain visible; +1 preserves the other actionable kind.
   const approval = page.locator(".inbox-row-shell", { hasText: "Approval Session" });
   await expect(approval.locator(".status")).toHaveCount(2);
   await expect(approval.locator(".status").last()).toHaveAttribute("aria-label", "Status: Answer Required");
   await expect(approval.locator(".row-status-more > [aria-hidden='true']")).toHaveText("+1");
   const geometry = await page.locator(".inbox-row-shell").evaluateAll(measureLineOne);
-  // Every phone card measures the same, whatever its pills (#917), and indenting changes nothing.
+  // Dense cards may grow while preserving touch targets and thread indentation.
   expect(geometry.every((row) => row.height >= 44), "dense cards may grow while preserving touch targets").toBe(true);
   for (const row of geometry) expect(row.left - geometry[0]!.left).toBe(row.child ? 14 : 0);
   // The time moved to line three's trailing edge (#934), once per card and with its suffix back.
@@ -224,8 +224,7 @@ test("a phone narrows the spine and keeps the family chip's dots", async ({ page
     expect(row.timeHeight, "the time is on one line").toBeLessThanOrEqual(20);
     expect(row.timeOverflowRight).toBeLessThanOrEqual(0.5);
   }
-  // Line one carries only the sender and its flags (#2209), so even the crowded card (#603: Approval
-  // Required, stalled, so the one badge is in the danger tone rather than a second Stalled badge) shows
+  // Line one carries only the sender and its flags, so even a quiet child with an approval (#603) shows
   // the agent's whole first word beside the icon. Asserted against the word's own rendered width, so
   // CI's wider fallback face cannot make it a pixel argument.
   const three = geometry.find((row) => row.title?.startsWith("#603"))!;

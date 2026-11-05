@@ -883,5 +883,5 @@ export function sessionStatusSummary(
 /** A compact signal (member tab dot or action description) keeps requests and health visible. */
 export function sessionStatusSignal(session: SessionStatusSource, context: SessionStatusContext = {}): SessionCondition {
   const summary = sessionStatusSummary(session, context);
-  return summary.conditions[0]!;
+  return summary.conditions.find((condition) => condition.needsYou) ?? summary.conditions[0]!;
 }

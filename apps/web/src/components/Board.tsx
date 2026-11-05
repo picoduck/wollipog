@@ -593,7 +593,7 @@ function SessionCard({
         {/* A parent shows its family chip where another card shows the strip (#2222). */}
         {threadChildren
           ? <CardFamilyChip family={threadChildren} besideKey={[status.badge?.ariaLabel ?? "", ...status.others].join("\n")} />
-          : strip && <ActivityStrip activity={activity} now={activityNow} compact />}
+          : strip && <ActivityStrip activity={activity} now={activityNow} compact animate={runnerConnected} />}
       </div>
       {/* No transcript excerpt (#3175): a card ends on its status line unless a request needs a
           decision here. */}

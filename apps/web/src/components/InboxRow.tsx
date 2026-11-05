@@ -224,7 +224,7 @@ function InboxRowInner({
   ) : null;
   const badge = <SessionRowStatusBadge status={status} />;
   const activityStrip = strip
-    ? <ActivityStrip activity={activity} now={activityNow} compact className="inbox-row-activity" />
+    ? <ActivityStrip activity={activity} now={activityNow} compact animate={runnerOnline} className="inbox-row-activity" />
     : null;
   const flags = pinned || containsPinned || unread ? (
     <span className="inbox-row-flags">

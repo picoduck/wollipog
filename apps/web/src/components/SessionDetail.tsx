@@ -7599,6 +7599,7 @@ function SessionDetailLoaded({
               {sentMessageReceipts}
               {transcriptRowsShown && activeTurnVisible && (
                 <WorkingIndicator
+                  connected={runnerOnline}
                   label={workingLabel}
                   progress={activeTurnProgress}
                   onRevealCurrentOperation={revealCurrentOperation}

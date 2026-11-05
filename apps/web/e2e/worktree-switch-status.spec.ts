@@ -18,7 +18,7 @@ for (const width of [390, 1280]) for (const theme of ["dark", "light"] as const)
     for (const item of cases) {
       await page.goto(`/session-usage-e2e.html?driver=claude-code&width=${width}&height=844&worktree-switch=${item.phase}`);
       await page.evaluate((value) => { document.documentElement.dataset.theme = value; }, theme);
-      const status = page.getByRole("button", { name: "Session Status: Awaiting Prompt, Switching Worktree", exact: true });
+      const status = page.getByRole("button", { name: `Session Status: ${item.phase === "pending" ? "Awaiting Prompt" : "Starting"}, Switching Worktree`, exact: true });
       await expect(status).toBeVisible();
       await expect(status).toContainText("Switching Worktree");
       expect((await status.boundingBox())!.width).toBeLessThanOrEqual(width);

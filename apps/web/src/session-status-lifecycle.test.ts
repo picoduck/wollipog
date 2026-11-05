@@ -69,10 +69,12 @@ test("compact member signals preserve requests and disconnected staleness", () =
 });
 
 test("family input outranks the parent's own review result and keeps that result discoverable", () => {
-  const row = sessionRowStatus(session({ status: "idle", attention: {
+  const ready = session({ status: "idle", attention: {
     version: 1, humanActions: [], meaningfulAt: 1,
     result: { revision: "result", at: 1, owner: "human" }, acknowledgedRevision: null,
-  } }), { familyFollowUpLabel: "Needs Your Input", familyWorking: false });
+  } });
+  assert.equal(sessionStatusSignal(ready).meta.label, "Ready for Review");
+  const row = sessionRowStatus(ready, { familyFollowUpLabel: "Needs Your Input", familyWorking: false });
   assert.equal(row.lifecycle.meta.label, "Awaiting Prompt");
   assert.equal(row.badge?.meta.label, "Needs Your Input");
   assert.deepEqual(row.others, ["Ready for Review"]);
