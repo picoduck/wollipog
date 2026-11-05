@@ -40,11 +40,13 @@ function repository(root: string, name: string, origin: string): string {
 function fakeProvider(options: { failLaunch?: number } = {}) {
   const prompts: Array<{ cwd: string; text: string }> = [];
   const resumed: Array<string | undefined> = [];
+  const callbacks: DriverCallbacks[] = [];
   let launches = 0;
   const factory = (_driver: unknown, launch: { cwd: string; resumeId?: string }, cb: DriverCallbacks) => {
     launches++;
     const generation = launches;
     resumed.push(launch.resumeId);
+    callbacks.push(cb);
     return {
       pid: launches, newSession: async () => {}, close: async () => {},
       initialize: async () => { if (generation === options.failLaunch) throw new Error("provider failed to start"); },
@@ -58,7 +60,7 @@ function fakeProvider(options: { failLaunch?: number } = {}) {
       agentSessionId: () => "provider-session-id",
     };
   };
-  return { factory, prompts, resumed, launches: () => launches };
+  return { factory, prompts, resumed, callbacks, launches: () => launches };
 }
 
 interface Harness {
@@ -300,6 +302,38 @@ test("a Stop while the target is being prepared wins: nothing moves or relaunche
     assert.ok(git(h.docs, "rev-parse", "--verify", "refs/heads/fix/install-link"), "the branch to recover stays");
     // The approved switch stays owed, as it is when Stop lands before preparation starts.
     assert.equal(meta.pendingLocationSwitch?.occurrenceId, "occurrence-1");
+  });
+});
+
+test("a provider-initiated turn that begins during preparation defers the switch, and its settlement carries it out", async () => {
+  await withSession("provider-turn-during-prepare", async (h) => {
+    await establishConversation(h);
+    const worktrees = () => git(h.docs, "worktree", "list", "--porcelain").split("\n").filter((line) => line.startsWith("worktree ")).length;
+    // The provider starts a turn of its own (a background task finishing, say) while the target is
+    // being prepared: the first readiness check that finds the target checked out sees it begin.
+    const manager = h.manager as unknown as { worktreeRebindCanProceed: (sessionId: string, entry: unknown) => boolean };
+    const canProceed = manager.worktreeRebindCanProceed.bind(h.manager);
+    let started = false;
+    manager.worktreeRebindCanProceed = (sessionId, entry) => {
+      if (!started && worktrees() > 1) {
+        started = true;
+        h.fake.callbacks[0]!.onProviderInitiatedTurn?.("started", "provider-turn-1");
+      }
+      return canProceed(sessionId, entry);
+    };
+    assert.deepEqual(await h.manager.requestLocationSwitch(h.message()), { ok: true });
+    await waitFor(() => started, "the target was never prepared");
+    await waitFor(() => worktrees() === 1, "the deferred switch did not give its worktree back");
+    await new Promise<void>((resolve) => setTimeout(resolve, 100));
+    assert.equal(h.store.readMeta(h.sessionId)?.repoPath, h.app, "nothing moves while the provider's own turn runs");
+    assert.equal(h.fake.launches(), 1);
+    // Settling the provider's turn, with nothing else happening, carries the switch out.
+    h.fake.callbacks[0]!.onProviderInitiatedTurn?.("settled", "provider-turn-1");
+    await waitFor(() => h.fake.prompts.length === 2, "the switch did not run after the provider's turn settled");
+    const meta = h.store.readMeta(h.sessionId)!;
+    assert.equal(meta.repoPath, h.docs);
+    assert.equal(meta.pendingLocationSwitch, undefined);
+    assert.deepEqual(h.fake.prompts[1], { cwd: meta.worktreePath, text: "Continue the docs fix here." });
   });
 });
 

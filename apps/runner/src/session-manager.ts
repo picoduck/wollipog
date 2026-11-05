@@ -20946,11 +20946,14 @@ export class SessionManager {
       this.emitStatus(sessionId, pendingRequests(pending).some((request) => !request.async)
         ? "input_required" : state === "started" ? "running" : "idle");
       if (interrupted &&
-          (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind)) {
+          (live.queue.length || live.pendingProviderAccountSwitch || live.pendingWorktreeRebind || live.pendingLocationSwitch)) {
         setImmediate(() => this.scheduleDrain(sessionId));
       } else if (state === "settled" && this.requestRetiredWorktreeRebind(sessionId, live)) {
         // Every worktree rebind waits for this turn (#3402, #3424); nothing else wakes it on normal
         // settlement.
+        setImmediate(() => this.scheduleDrain(sessionId));
+      } else if (state === "settled" && live.pendingLocationSwitch) {
+        // An approved Location switch (#4138) waits for this turn too, and nothing else wakes it.
         setImmediate(() => this.scheduleDrain(sessionId));
       }
     }
