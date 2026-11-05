@@ -53,7 +53,7 @@ interface FakeControlPlane {
 export async function startFakeControlPlane(options: {
   pongAfterPingCount?: number;
   protocolVersion?: (connection: number) => number;
-  onMessage?: (socket: import("ws").WebSocket, message: { type: string; barrierId?: number; snapshot?: { id: string } }, connection: number) => void;
+  onMessage?: (socket: import("ws").WebSocket, message: { type: string; sessionId?: string; barrierId?: number; snapshot?: { id: string } }, connection: number) => void;
 } = {}): Promise<FakeControlPlane> {
   const port = await reservePort();
   const instanceId = randomUUID();
@@ -107,7 +107,7 @@ export async function startFakeControlPlane(options: {
           }));
         }
         if (message && typeof message === "object" && "type" in message) {
-          options.onMessage?.(ws, message as { type: string; barrierId?: number; snapshot?: { id: string } }, index);
+          options.onMessage?.(ws, message as { type: string; sessionId?: string; barrierId?: number; snapshot?: { id: string } }, index);
         }
       });
       waiters.get(index)?.();

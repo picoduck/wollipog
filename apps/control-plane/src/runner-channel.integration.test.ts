@@ -7,7 +7,7 @@ import { connect, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { monitorEventLoopDelay } from "node:perf_hooks";
-import { test } from "node:test";
+import { test, type TestContext } from "node:test";
 import { setTimeout as delay } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { PROTOCOL_VERSION } from "@wollipog/protocol";
@@ -18,6 +18,8 @@ import { hashToken } from "./auth.js";
 import { ControlPlaneDb } from "./db.js";
 import { MAX_RUNNER_CLIENT_MESSAGE_BYTES, MAX_RUNNER_CONNECTIONS_PER_IP } from "./runner-channel.js";
 import { ProcessingWindow } from "../../runner/src/processing-window.js";
+import { projectReconnectOutboxMessage, republishReconnectState } from "../../runner/src/reconnect-republish.js";
+import { Outbox, flushProjectedOutbox } from "../../runner/src/outbox.js";
 import { RunnerFrameQueue, setRunnerReceivePressure } from "./runner-frame-queue.js";
 
 const REPO_ROOT = resolve(fileURLToPath(new URL("../../..", import.meta.url)));
@@ -358,7 +360,10 @@ test("1500 retained campaign children reconcile while real HTTP and heartbeat po
   assert.doesNotMatch(output, /runner frame handler threw|runner_frame_queue_closed/);
 });
 
-test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, async (t) => {
+test("2100 retained children with bidirectional bulk reconcile while real HTTP and heartbeat pongs make progress", { timeout: 180_000 }, (t) => retainedBulk(t));
+test("2444 retained children with small reconnect queue frames keep pongs and the first processing ACK responsive", { timeout: 180_000 }, (t) => retainedBulk(t, true));
+
+async function retainedBulk(t: TestContext, smallFrames = false): Promise<void> {
   const port = await reservePort();
   const temp = mkdtempSync(join(tmpdir(), "wollipog-reconcile-responsive-"));
   const databasePath = join(temp, "control-plane.db");
@@ -379,7 +384,7 @@ test("2100 retained children with bidirectional bulk reconcile while real HTTP a
   for (let i = 0; i < 10; i++) seed.createSession({ ...base, id: `campaign-${i}`,
     orchestratorPolicy: resolveOrchestratorCampaignPolicy(DEFAULT_ORCHESTRATOR_DEFAULTS, "system_default") });
   const snapshots: SessionSnapshot[] = [];
-  for (let i = 0; i < 2100; i++) {
+  for (let i = 0; i < (smallFrames ? 2444 : 2100); i++) {
     const id = `child-${i}`;
     seed.createSession({ ...base, id, parentSessionId: `campaign-${i % 10}` });
     seed.updateSessionStatus(id, "completed", 2);
@@ -396,6 +401,7 @@ import { createRequire } from 'node:module';
 import { skillVersionDigest } from ${JSON.stringify(new URL("../../../packages/protocol/src/skills-digest.ts", import.meta.url).href)};
 import { setTimeout as delay } from 'node:timers/promises';
 import { RunnerFrameQueue } from ${JSON.stringify(new URL("./runner-frame-queue.ts", import.meta.url).href)};
+import { SessionsService } from ${JSON.stringify(new URL("./sessions.ts", import.meta.url).href)};
 const req = createRequire(${JSON.stringify(import.meta.url)});
 const ws = createRequire(req.resolve('@fastify/websocket'))('ws').WebSocket;
 const send = ws.prototype.send;
@@ -419,6 +425,16 @@ ws.prototype.send = function(data, ...args) {
   return result;
 };
 const enqueue = RunnerFrameQueue.prototype.enqueue;
+const smallFrames = ${smallFrames};
+if (smallFrames) {
+  const hydrate = SessionsService.prototype.hydrateRunnerSessionsCooperatively;
+  SessionsService.prototype.hydrateRunnerSessionsCooperatively = async function(...args) {
+    // An early registration ACK admits republish before inventory completes. Keep HTTP/pongs
+    // running while making that initial registration exceed the inter-window stall budget.
+    await delay(16000);
+    return Reflect.apply(hydrate, this, args);
+  };
+}
 const wrapped = new WeakSet();
 RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
   if (!wrapped.has(this)) {
@@ -426,12 +442,20 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     const handle = runs.handle;
     runs.handle = async function(messages) { if(messages[0]?.type==='session_runtime_updated') await delay(350); return Reflect.apply(handle,this,[messages]); };
     const pressure = Reflect.get(this,'onPressure');
-    Reflect.set(this,'onPressure',(paused)=>{ console.error('BULK_PRESSURE='+JSON.stringify({paused,at:Date.now(),bytes:Reflect.get(this,'bytes')})); return pressure(paused); });
+    Reflect.set(this,'onPressure',(paused)=>{ console.error('BULK_PRESSURE='+JSON.stringify({paused,at:Date.now(),...this.pressureStats})); return pressure(paused); });
+    if (smallFrames) {
+      const handleSingle = Reflect.get(this,'handle');
+      Reflect.set(this,'handle',async (message, preparation) => {
+        if (message.type === 'session_queue') await delay(2);
+        return handleSingle(message, preparation);
+      });
+    }
     wrapped.add(this);
   }
   return Reflect.apply(enqueue,this,[message,bytes]);
 };
 `);
+  let runnerOnlineAt: number | undefined;
   let output = "";
   let reconciliationCompleted = false;
   const trace = new ReconciliationDiagnostics();
@@ -449,6 +473,7 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     captureStdout(chunk);
     output = (output + String(chunk)).slice(-128_000);
     reconciliationCompleted ||= output.includes("runner_reconciliation_completed");
+    if (output.includes("runner online:")) runnerOnlineAt ??= performance.now();
   });
   child.stderr?.on("data", (chunk) => { captureStderr(chunk); output = (output + String(chunk)).slice(-128_000); });
   const sockets: StrictSocket[] = [];
@@ -483,10 +508,15 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     let barrierSupported = false;
     let processingAcknowledgements = 0;
     let lastProcessingAckAt = performance.now();
+    let republishStarted = 0;
+    let firstAckMs: number | undefined;
+    let firstAckAt: number | undefined;
     socket.on("message", (raw) => {
       const message = JSON.parse(raw.toString());
       if (message.type === "registered") barrierSupported = message.protocolVersion >= 270;
       if (message.type === "runner_processing_ack") {
+        firstAckMs ??= performance.now() - republishStarted;
+        firstAckAt ??= performance.now();
         window?.acknowledge(message.barrierId);
         processingAcknowledgements++;
         lastProcessingAckAt = performance.now();
@@ -521,9 +551,23 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     assert.ok(maxHandshakeMs < 2000, `Agent Control handshake latency exceeded 2s\n${failureContext(pass, handshakeStarted)}`);
     // The real runner republishes negotiated metadata for every retained session immediately
     // after registration. Exercise that burst, not just one isolated live update.
-    const current = new Map<string, SessionSnapshot>(snapshots.map((snapshot) => [snapshot.id, { ...snapshot, preview: "x".repeat(15000) }]));
+    const current = new Map<string, SessionSnapshot>(snapshots.map((snapshot) => [snapshot.id, { ...snapshot, preview: "x".repeat(smallFrames ? 100 : 15000) }]));
+    if (smallFrames) {
+      // A full disconnected outbox followed by reportQueues' authoritative inventory. Both
+      // carry real, small queue frames. The per-frame delay above models FULL-write contention.
+      const outbox = new Outbox<{ type: "session_queue"; sessionId: string; queue: [] }>();
+      for (const snapshot of snapshots.slice(0, 1000)) outbox.enqueue({ type: "session_queue", sessionId: snapshot.id, queue: [] });
+      flushProjectedOutbox(outbox, (message) => projectReconnectOutboxMessage(message, barrierSupported, (value) => value),
+        (message) => socket.send(JSON.stringify(message)), () => assert.fail("projection failed"), () => assert.fail("send failed"));
+    }
+    republishStarted = performance.now();
     if (barrierSupported) {
-      window = new ProcessingWindow(snapshots.map((snapshot) => snapshot.id), (id) => {
+      window = smallFrames ? republishReconnectState({
+        republishSessionIds: () => snapshots.map((snapshot) => snapshot.id),
+        republishSessionSnapshot: (id) => current.get(id),
+        republishSessionQueue: (id) => ({ type: "session_queue", sessionId: id, queue: [] }),
+      }, (message) => message, (wire) => socket.send(wire), () => socket.terminate(),
+      (details) => t.diagnostic(JSON.stringify(details))) : new ProcessingWindow(snapshots.map((snapshot) => snapshot.id), (id) => {
         const snapshot = current.get(id);
         return snapshot ? JSON.stringify({ type: "session_runtime_updated", snapshot }) : null;
       }, (wire) => socket.send(wire), () => socket.terminate(), (details) => t.diagnostic(JSON.stringify(details)));
@@ -589,7 +633,13 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
         convergenceOutcome = "converged";
         break;
       }
-      if (window && !window.complete && performance.now() - lastProcessingAckAt > 15_000) {
+      // The early registration ACK admits the first window before the inventory is applied.
+      // Its credit is not eligible until runner online; subsequent credits retain the existing
+      // inter-window watchdog. Keep the first-ACK acceptance budget at five seconds after online.
+      const creditStalled = smallFrames && processingAcknowledgements === 0
+        ? runnerOnlineAt !== undefined && performance.now() - runnerOnlineAt > 5000
+        : performance.now() - lastProcessingAckAt > 15_000;
+      if (window && !window.complete && creditStalled) {
         convergenceOutcome = "stalled";
         break;
       }
@@ -610,9 +660,17 @@ RunnerFrameQueue.prototype.enqueue = function(message,bytes) {
     assert.ok(maxHealthMs < 2000);
     assert.ok(maxPongMs < 2000);
     assert.equal(reconciliationCompleted, true);
-    t.diagnostic(`2100 children: HTTP ${Math.round(maxHealthMs)}ms, pong ${Math.round(maxPongMs)}ms, convergence ${Math.round(maxConvergenceMs)}ms, receive pause 0ms`);
+    if (smallFrames) {
+      assert.ok(firstAckAt !== undefined && runnerOnlineAt !== undefined);
+      const firstAckAfterOnlineMs = Math.max(0, firstAckAt - runnerOnlineAt);
+      assert.ok(firstAckAfterOnlineMs < 5000, `first processing ACK after runner online took ${firstAckAfterOnlineMs}ms`);
+      t.diagnostic(`2444 children: first ACK ${Math.round(firstAckAfterOnlineMs)}ms after runner online, ${Math.round(firstAckMs!)}ms after republish start`);
+      t.diagnostic("Initial registration includes a test-only asynchronous 16000ms wait before hydration; the trace below measures hydration separately.");
+      t.diagnostic(`Registration measured separately: ${trace.summary()}`);
+    }
+    t.diagnostic(`${snapshots.length} children: HTTP ${Math.round(maxHealthMs)}ms, pong ${Math.round(maxPongMs)}ms, convergence ${Math.round(maxConvergenceMs)}ms, receive pause 0ms`);
   }
-});
+}
 
 test("a receive-paused runner stays online while authenticated replay advances, then expires when idle", { timeout: 60_000 }, async (t) => {
   const port = await reservePort();

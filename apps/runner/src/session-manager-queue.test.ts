@@ -1113,6 +1113,10 @@ test("reportQueues re-emits every non-empty, held, or active queue (reconnect re
   const { sm, queues, cleanup } = harness();
   try {
     sm.prompt("s_q", "held");
+    const projectionBefore = queues().length;
+    assert.deepEqual(sm.republishSessionQueue("s_q")?.queue.map((q) => q.text), ["held"]);
+    assert.equal(queues().length, projectionBefore, "reading reconnect state must not publish an unpaced queue frame");
+    assert.equal(sm.republishSessionQueue("not-retained"), null);
     const before = queues().length;
     sm.reportQueues(); // what index.ts calls after a fresh `registered` ack
     assert.equal(queues().length, before + 1);

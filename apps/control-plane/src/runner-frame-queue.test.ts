@@ -5,6 +5,24 @@ import { MAX_RUNNER_CLIENT_MESSAGE_BYTES } from "./runner-channel.js";
 
 const tick = () => new Promise<void>((resolve) => setImmediate(resolve));
 
+test("pressure diagnostics count fixed frame categories without frame contents", async () => {
+  let release!: () => void;
+  const held = new Promise<void>((resolve) => { release = resolve; });
+  const queue = new RunnerFrameQueue<unknown>(async () => { await held; }, () => assert.fail("overflow"));
+  queue.enqueue({ type: "register" }, 1);
+  queue.enqueue({ type: "session_queue", sessionId: "private", queue: ["private"] }, 12);
+  queue.enqueue({ type: "session_queue" }, 3);
+  queue.enqueue({ type: "private arbitrary type string" }, 4);
+  queue.enqueue(null, 5);
+  assert.deepEqual(queue.pressureStats, {
+    frames: 4, bytes: 24, frameTypes: { session_queue: 2, other: 2 },
+  });
+  queue.close();
+  assert.deepEqual(queue.pressureStats, { frames: 0, bytes: 0, frameTypes: {} });
+  release();
+  await tick();
+});
+
 test("count pressure leaves room for the entire negotiated inventory and ordinary replay headroom", async () => {
   let release!: () => void;
   const held = new Promise<void>((resolve) => { release = resolve; });

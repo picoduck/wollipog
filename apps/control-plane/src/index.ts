@@ -2094,8 +2094,9 @@ app.register(async (instance) => {
       receivePressureWarned = warn;
       if (warn) receivePressureWarningAt = now;
     }
+    const stats = frameQueue.pressureStats;
     app.log[warn ? "warn" : "debug"]({ event: "runner_frame_backpressure", entryPoint: "runner_socket", runnerId, paused,
-      durationMs, queuedBytes: frameQueue.pressureStats.bytes, queuedFrames: frameQueue.pressureStats.frames },
+      durationMs, queuedBytes: stats.bytes, queuedFrames: stats.frames, queuedFrameTypes: stats.frameTypes },
       "runner receive flow control changed");
   }, {
     // A large event payload starts becoming durable off the event loop as soon as it is queued,
