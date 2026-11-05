@@ -231,3 +231,69 @@ test("an unconfirmed retirement keeps its slot until the provider's exit proves 
     h.child("replacement");
   } finally { runner.shutdownAll(); h.cleanup(); }
 });
+
+test("each exited provider of one campaign generation must be proven gone before the slot is released (#3788)", async () => {
+  for (const proofs of [["first", "second"], ["second", "first"], ["second-only"]] as const) {
+    const h = harness();
+    const runner = h.manager();
+    try {
+      // The first provider exits; the session resumes under the same generation and exits again.
+      const first = await h.launch(runner);
+      first.callbacks.onExit(3);
+      const second = await h.launch(runner);
+      second.callbacks.onExit(3);
+      const providers = { first, second };
+      const settle = () => new Promise((resolve) => setImmediate(resolve));
+      if (proofs[0] === "second-only") {
+        first.treeGone(false);
+        second.treeGone(true);
+        await settle();
+        assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false, "the first provider's tree may still run");
+        assert.equal(h.occupied(), 1);
+        h.refused("so the slot stays held");
+        continue;
+      }
+      providers[proofs[0]].treeGone(true);
+      await settle();
+      assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false, `${proofs[0]} alone proves nothing`);
+      assert.equal(h.occupied(), 1);
+      h.refused("the other provider's tree may still run");
+      providers[proofs[1]].treeGone(true);
+      await settle();
+      assert.ok(h.statuses.at(-1)!.campaignBudgetCheckpoint, "both proofs release the slot");
+      assert.equal(h.occupied(), 0);
+      h.child("replacement");
+    } finally { runner.shutdownAll(); h.cleanup(); }
+  }
+});
+
+test("a fence an earlier runner process left is never lifted by a later process's proofs (#3788)", async () => {
+  const h = harness();
+  let restarted: SessionManager | undefined;
+  try {
+    const first = h.manager();
+    await h.launch(first);
+    assert.ok(h.svc.stop("worker").ok);
+    first.stop("worker");
+    assert.equal(first.shutdownAll(), true);
+    first.recordShutdownRetirementCheckpoints(false);
+
+    // The restarted runner resumes the session under the same generation, and that provider exits
+    // with its own tree proven gone. The interrupted retirement's provider is still unproven.
+    restarted = h.manager();
+    await h.reconnect(restarted);
+    const resumed = await h.launch(restarted);
+    resumed.callbacks.onExit(3);
+    resumed.treeGone(true);
+    await new Promise((resolve) => setImmediate(resolve));
+    assert.equal(h.statuses.some((status) => status.campaignBudgetCheckpoint), false);
+    assert.equal(h.occupied(), 1, "the earlier process's provider may still run");
+    h.refused("so a replacement is refused");
+    // Even a reaping shutdown of the later process proves nothing about the earlier one.
+    assert.equal(restarted.shutdownAll(), true);
+    restarted.recordShutdownRetirementCheckpoints(true);
+    const meta = new SessionStore(h.dir).readMeta("worker")!;
+    assert.equal(meta.retiringProviderGeneration, h.db.campaignBudgets.dispatch("worker")!.generation, "the fence stays");
+    assert.equal(h.manager().snapshotForControlPlane(meta).campaignBudgetCheckpoint, undefined);
+  } finally { restarted?.shutdownAll(); h.cleanup(); }
+});
