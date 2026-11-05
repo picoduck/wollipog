@@ -312,10 +312,15 @@ test("a Full Control root and its descendants reach the organization runner thei
   assert.match(refusedGrandchild.text, /HTTP 404: runner not found/u);
   const lineage = ControlPlaneDb.attach(s.databasePath);
   try {
+    // #3676: the allowance every member's spend and review is admitted against is the root's, which
+    // the administrator authorized; reaching the organization runner never moves a charge elsewhere.
+    const control = lineage.getSession(rootId)!.orchestratorPolicy?.control;
+    assert.equal(control?.mode === "full_control" ? control.boundary.authorizedByUserId : null, admin);
     for (const id of [rootId, childId, grandchildId]) {
       assert.equal(lineage.getSession(id)!.projectId, projectId, `${id} is in the organization Project`);
       assert.deepEqual(lineage.sessionScope(id), { organizationId: org, owner: { kind: "user", userId: admin } },
         `${id} keeps the Human's ownership`);
+      assert.equal(lineage.campaignBudgets.governingRoot(id), rootId, `${id} is charged to the root's allowance`);
     }
   } finally { lineage.close(); }
 

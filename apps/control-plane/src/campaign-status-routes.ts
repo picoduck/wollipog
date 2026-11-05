@@ -23,6 +23,7 @@ import type {
   CampaignWorkSummaryResponse,
 } from "@wollipog/protocol";
 import { FORGE_NOT_AUTHORIZED } from "./campaign-forge-observations.js";
+import { campaignSeedSubjectState } from "./campaign-issue-scope-seed.js";
 import type { ControlPlaneDb } from "./db.js";
 import { decisionOccurrenceView } from "./decision-runtime.js";
 import type { AuthPrincipal } from "./identity.js";
@@ -201,13 +202,18 @@ export function registerCampaignStatusRoutes(
     const { id } = req.params as { id: string };
     const read = reader(req, reply, id);
     if (!read) return reply;
+    const policy = db.getSession(read.rootId)?.orchestratorPolicy;
     const response: CampaignDecisionsResponse = {
       campaignSessionId: read.rootId,
       decisions: db.listCampaignDecisionOccurrences(read.rootId).map((occurrence) => {
         // What the decision affected (#4104), so its verdict reads beside that request.
         const { campaignSessionId: _root, ...subject } = db.campaignDecisionSubject(occurrence.occurrenceId) ?? {};
+        // An epic seed's reading shows what it did to the seed, which its verdict alone cannot tell.
+        const state = "sessionId" in subject && subject.surface === "issue_scope_seed"
+          ? campaignSeedSubjectState(policy, occurrence.occurrenceId) : undefined;
+        const seedState = state ? { seed: state } : {};
         return { ...decisionOccurrenceView(occurrence, db.listDecisionAttempts(occurrence.occurrenceId)),
-          ...("sessionId" in subject ? { subject: subject as CampaignDecisionSubject } : {}) };
+          ...("sessionId" in subject ? { subject: { ...subject as CampaignDecisionSubject, ...seedState } } : {}) };
       }),
       usage: db.campaignDecisionUsage(read.rootId),
     };

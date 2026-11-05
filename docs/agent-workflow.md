@@ -104,8 +104,11 @@ close, fix or resolve (any tense, even negated as in "does not close" or hyphena
 "auto-close") directly before an issue reference that must stay open, in a PR description, title or
 commit message. Code spans do not close an issue, but paraphrase rather than rely on them. Check a
 draft with `wollipog pr closures --file <draft>` and an open PR with `wollipog pr closures <url>`. A
-GitHub `pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge
-would close (#3713). Delivery comments compare every
+`pr_merge` decision is refused unless its `intendedClosures` lists exactly what the merge would close
+(#3713). The rule covers GitLab merge requests too (#3762), whose closing pattern is wider: it also
+accepts implement and "-ing" forms ("closing", "implements"), closes every reference in a list after
+one keyword, reads code and the title, and may differ per instance, so GitLab's own list of the issues
+a merge request closes decides where it disagrees with Wollipog's match. Delivery comments compare every
 acceptance criterion and cite the actual merge commit; report remaining original work candidly.
 
 Use `wollipog review session run` (MCP `request_review_session`) for your own pushed PR's required

@@ -574,7 +574,9 @@ derivation, refresh) and `apps/runner/src/campaign-forge-status.ts` (the read).
   **unfinished** items whose last read, successful or not (a timed-out or rejected read included),
   finished more than `backgroundIntervalMs` (5 minutes) ago,
   oldest first, at most `backgroundRefsPerTick` (32) per pass, skipping a pull request last seen
-  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived.
+  merged or closed (on-demand reads still refresh it) and campaigns whose root is archived. A
+  merged pull request whose branch cleanup is still owed (#4067) is not skipped. That includes one
+  read before its runner reported head branches, until that runner, now v284, reads it once (#4145).
 - **Bounds:** one pull request is read at most once per `minIntervalMs` (30 seconds, counted from
   when the previous read finished) whoever asks;
   a read already in flight is shared; at most `concurrentRequests` (2) runner requests run at once,

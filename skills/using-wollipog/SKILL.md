@@ -29,8 +29,8 @@ wollipog session unarchive <session-id> --json
 wollipog session stop-job <session-id> <job-id> --json
 wollipog session release-hold <session-id> <hold-id> --json
 wollipog pr wait <number|owner/name#number|host/group/project!iid|url> [--head <sha>] [--timeout <ms>] --json
-wollipog pr closures <number|owner/name#number|url> [--intended <issue>]... --json
-wollipog pr closures --file <description.md> [--repo <owner/name>] [--intended <issue>]... --json
+wollipog pr closures <number|owner/name#number|host/group/project!iid|url> [--intended <issue>]... --json
+wollipog pr closures --file <description.md> [--repo <owner/name|gitlab-host/group/project>] [--intended <issue>]... --json
 wollipog review session run --repo <owner/name|gitlab-host/group/project> --pr <number> --head <sha> --brief-file <path> [--full-reason <text>] --json
 wollipog review session get <review-session-id> --json
 wollipog artifact attach --file <absolute-path> [--name <display-name>] --json
@@ -384,20 +384,29 @@ or resolve, in any tense or case) directly before the issue's reference, whateve
 "does not close #12", "must not auto-close #12" and "doesn't resolve #12's cause" all close #12. An
 issue linked in the pull request's Development section closes too.
 
+The same rule covers GitLab merge requests, with a wider pattern. GitLab closes an issue when a merge
+request reaches the default branch and its title, description or a commit message puts close, fix,
+resolve or implement, in any form ("closing", "fixing", "implements"), before the reference, even
+negated, and in code too. One keyword closes every reference in a list: "Closes #1, #2 and
+group/project#3" closes all three. An instance may configure its own pattern; GitLab's own list of
+the issues a merge request closes then decides.
+
 - Write "Refs #N" for every issue that must stay open, in the description, the title and commit
-  messages. Never put a closing verb directly before such a reference, not even in an example that
+  messages. Never put a closing verb before such a reference, not even in an example that
   describes this rule; paraphrase it instead.
 - Check a draft description before publishing it with `wollipog pr closures --file <draft> --json`,
-  and an open pull request with `wollipog pr closures <pr> --json`. Pass each issue the merge should
-  close with `--intended`. Exit status 3 lists `undeclared` closures and `unmade` declarations; 0
-  means the merge closes exactly the intended issues.
-- A GitHub `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
-  `owner/repo#N`, or an issue URL); omit it when the merge must close none. A current runner reads
-  the pull request before the decision is created and again before it is armed. If GitHub would
-  close anything else, or not close a declared issue, the request is refused with each reference and
-  its line, and a changed description revokes an approval at consume. Fix the text or the
-  declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what the
-  merge closes; it is absent when the child's runner predates the check.
+  and an open pull request with `wollipog pr closures <pr> --json`. A GitLab merge request works the
+  same way: name it by URL or `<host>/group/project!<iid>`, or pass `--repo <host>/group/project` with
+  `--file`. Pass each issue the merge should close with `--intended`. Exit status 3 lists
+  `undeclared` closures and `unmade` declarations; 0 means the merge closes exactly the intended issues.
+- A `pr_merge` snapshot names the issues the merge should close in `intendedClosures` (`#N`,
+  `owner/repo#N`, or an issue URL; for GitLab `#N`, `group/project#N`, `<host>/group/project#N`, or an
+  issue URL on that instance); omit it when the merge must close none. A current runner (GitLab from
+  v295) reads the pull or merge request before the decision is created and again before it is armed.
+  If the forge would close anything else, or not close a declared issue, the request is refused with
+  each reference and its line, and a changed description revokes an approval at consume. Fix the text
+  or the declaration and request again. The decision's `closingReferenceCheck` shows its reviewer what
+  the merge closes; it is absent ("Not checked") when the child's runner predates the check.
 
 ## Review Sessions
 
@@ -820,7 +829,7 @@ Humans can inspect, resolve epic candidates, and request changes in Campaign Sta
 Scope changes preserve conversation and work history. Removals display affected assignments and revoke
 outstanding action decisions; issue closure retains its separate exact decision. Every active
 Orchestrator participant must run in a Location of one of the campaign's repositories, and stores only
-its own repository's issues; one outside the launch repository needs protocol v293. Updates require protocol v208
+its own repository's issues; one outside the launch repository needs protocol v299. Updates require protocol v208
 on the control plane and participating runners; unsupported peers must be updated and reconnected.
 The authoritative revision is persisted on both sides, delivered on reconnect and restart, and checked
 again by closure execution. An offline or unsynchronized runner cannot execute a revised closure.

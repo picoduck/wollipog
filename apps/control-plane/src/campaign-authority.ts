@@ -112,10 +112,11 @@ export function campaignDispatchScopeRefusal(policy: SessionView["orchestratorPo
 }
 
 /** Under Full Control a merge may close only issues in the campaign's current issue scope (#4062).
- * A GitHub merge's `intendedClosures` are exactly what GitHub would close: a v242 runner reads that
- * before the merge is requested and again before it is armed, and a mismatch refuses it (#3713).
- * Nothing reads a GitLab merge's closures, or a GitHub merge's from an older runner, so such a merge
- * is never assumed to close nothing, and its declaration proves nothing either: it is the person's. */
+ * A merge's `intendedClosures` are exactly what the forge would close: the child's runner reads that
+ * before the merge is requested and again before it is armed, and a mismatch or an unreadable forge
+ * refuses it (#3713 for GitHub from v242, #3762 for GitLab from v295). A merge from an older runner
+ * is not read, so it is never assumed to close nothing, and its declaration proves nothing either:
+ * it is the person's. */
 function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: number | null | undefined,
   snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>): Pick<CampaignAuthorityEvaluation, "reason" | "unscopedClosures"> | null {
   const declared = snapshot.intendedClosures ?? [];
@@ -124,7 +125,8 @@ function mergeClosureScope(policy: SessionView["orchestratorPolicy"], protocol: 
     return !campaignIssueInScope(policy, { repository: reference.slice(0, separator), number: Number(reference.slice(separator + 1)) });
   });
   if (unscoped.length) return { reason: "outside_issue_scope", unscopedClosures: unscoped };
-  const read = snapshot.mergeMethod === undefined && runnerSupportsProtocol(protocol, "githubMergeClosingReferences");
+  const read = runnerSupportsProtocol(protocol,
+    snapshot.mergeMethod === undefined ? "githubMergeClosingReferences" : "gitlabMergeClosingReferences");
   return read ? null : { reason: "unverified_closures" };
 }
 

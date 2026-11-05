@@ -5,7 +5,7 @@ import { campaignIssueLimitsRequirement, campaignIssueScopeChangesRequirement, c
   type CampaignIssueScopeRequest, type CampaignIssueScopeSnapshot, type CampaignIssueScopeView, type SessionView, type WorkflowDecisionView, isTerminal } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { issueClosureActiveChildren } from "./github-issue-closure.js";
-import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
+import { campaignSeedHoldsDelegation } from "./campaign-issue-scope-seed.js";
 import { campaignLaunchRepository, campaignScopeRepositories } from "./campaign-authority.js";
 
 export function scopeParticipants(db: ControlPlaneDb, root: SessionView): SessionView[] {
@@ -13,7 +13,7 @@ export function scopeParticipants(db: ControlPlaneDb, root: SessionView): Sessio
 }
 
 /** Why an Orchestrator participant cannot hold the campaign's scope (#4118), or null. It must be in
- * a Location of a boundary repository; outside the launch repository its runner needs v293. */
+ * a Location of a boundary repository; outside the launch repository its runner needs v299. */
 export function participantScopeRefusal(db: ControlPlaneDb, root: SessionView, member: Pick<SessionView, "id" | "runnerId" | "workspaceId">):
   { error: string; status: number; capability?: RunnerCapabilityRequirementDetails } | null {
   // The root's own workspace always qualifies, even before the campaign records its repository.
@@ -228,6 +228,6 @@ function scopeChangeAffectsDecision(db: ControlPlaneDb, rootId: string, reposito
   return decision.sessionId === rootId || db.initialUserMessageText(decision.sessionId) === null || !unrelated.has(decision.sessionId);
 }
 
-export function campaignNeedsEpicScope(db: ControlPlaneDb, root: SessionView): boolean {
-  return !root.orchestratorPolicy?.issueScope && (root.orchestratorPolicy?.issueScopeProposalEpic !== undefined || initialCampaignEpic(db.initialUserMessageText(root.id) ?? "") !== null);
+export function campaignNeedsEpicScope(root: SessionView): boolean {
+  return campaignSeedHoldsDelegation(root.orchestratorPolicy);
 }

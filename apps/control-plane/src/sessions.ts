@@ -40,13 +40,15 @@ import { DecisionModelSettings } from "./decision-model-settings.js";
 import { campaignAuthorityPreflight, controlledReviewCapabilityKey, FULL_CONTROL_DECLINED_CLASSES, FULL_CONTROL_ROOT_QUESTION_MESSAGE, FULL_CONTROL_ROOT_QUESTION_OWNER_ROUTE_MESSAGE, credentialFormFloor, type CredentialScreenFact, FULL_CONTROL_UNRESOLVED_DECLINE_MESSAGE, fullControlAutomaticResponse, type CampaignAuthorityEvaluation, type FullControlAutomaticResponse, type CampaignAuthorityBoundary, type CampaignControl, type CampaignIssueScope } from "@wollipog/protocol";
 import { awaitsFirstMessage, firstMessageBoundary, firstMessageDigest, firstMessageIssues, firstMessageObjective, issueReferencesInMessage } from "./campaign-launch-admission.js";
 import { firstMessageTargetEpics } from "./first-message-issue-intent.js";
-import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, type ScopeGrantFields } from "./scope-grant.js";
-import { runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
+import { boundaryRepositories, grantOperations, grantReviewMaxIssues, grantSelection, scopeGrantCandidates, writtenAsDigits,
+  type ScopeGrantFields } from "./scope-grant.js";
+import { recordUnfinishedDecision, runCampaignCheck, type CampaignCheckOutcome } from "./campaign-decision-checks.js";
+import { DecisionInputError } from "./decision-kinds.js";
 import { boundedIssueNumbers, validCampaignIssueFacts, type CampaignIssueFacts, type CampaignScopeGrantReview, type DecisionErrorClass, type FullControlScopeGrant } from "@wollipog/protocol";
 import { CampaignRecoveryService, recoveryCoordinate } from "./campaign-recovery.js";
 import { scopeView, scopeSnapshot, scopeParticipants, scopeCompatibility, compatibilityFields, campaignNeedsEpicScope, gitlabIssueCompatibility,
   everyOutstandingScopeDecision, participantScope, participantScopeRefusal, repositoryOutsideBoundary, scopeRequestOutsideBoundary } from "./campaign-issue-scope.js";
-import { initialCampaignEpic } from "./campaign-issue-scope-seed.js";
+import { needsCampaignIssueScopeSeed, seedEpicCandidate } from "./campaign-issue-scope-seed.js";
 import { CAMPAIGN_SCOPE_ADMISSION_REFUSALS, type CampaignScopeAdmissionFailure, campaignScopeTargetFailureMessage, issueBoundary, issueEvidenceDigest, closureCandidateRefs, closureDeliveryPullRequests, closureDeliveryGaps, closureEvidence, closureExcludedRefs, epicSourceApplies, publicationEvidence, publicationEvidenceCheck, reservedPublicationSlots, scopePublicationRecommendation, scopeSettlements } from "./campaign-issue-authority.js";
 import { CODEX_EXEC_RETIRED_REASON, githubIssueClosureRefusal, isRetiredCodexExec, validIssueAdmission, campaignPublicationSafe, type CampaignPublicationAdmissionFailure,
   CAMPAIGN_PUBLICATION_ADMISSION_MESSAGES, CAMPAIGN_PUBLICATION_CORRECTABLE_FAILURES, type CampaignPullRequestRef } from "@wollipog/protocol";
@@ -199,6 +201,7 @@ import { type PolicyDecision, type PolicyRule, type PolicyRuleKind, type RunnerG
   type RecordWorkflowActionAdmissionMessage,
   type GitLabMergePreflightResultMessage,
   type GithubMergePreflightResultMessage,
+  type GitLabMergeClosuresResultMessage,
   type PullRequestClosingReferenceCheck,
   type ReconcileWorkflowActionMessage,
   type PodContextEntry,
@@ -444,6 +447,9 @@ export const GITLAB_MERGE_PREFLIGHT_TIMEOUT_MS = 50_000;
 /** The child runner's GitHub read for a merge's closing references (#3713): one `gh` call of at
  * most 30 seconds. The session tools wait 75 seconds for a merge request or consume. */
 export const GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS = 45_000;
+/** The child runner's GitLab read for a merge's closing references (#3762): two `glab` calls of at
+ * most 15 seconds each. Arming runs it alongside the GitLab merge preflight, inside that 75. */
+export const GITLAB_MERGE_CLOSURES_TIMEOUT_MS = 40_000;
 /** #4067: one GraphQL read (30s), an origin check and a push (60s each), or a `gh pr merge` (30s). */
 export const FORGE_DECISION_ACTION_RUNNER_TIMEOUT_MS = 120_000;
 
@@ -488,6 +494,11 @@ function boundedCampaignEventText(text: string): string {
 }
 
 /** One member's correctable publication refusal for one recommendation (#4065), hashed. */
+/** The one Decision occurrence that reads a Custom campaign's first message for its epic seed (#4104). */
+function issueScopeSeedKey(rootId: string, messageDigest: string): string {
+  return `scope_grant:issue_scope_seed:${rootId}:${messageDigest}`;
+}
+
 function publicationRefusalCoordinate(sessionId: string, recommendationId: string): string {
   return recoveryCoordinate(`publication_refusal:${sessionId}:${recommendationId}`);
 }
@@ -1238,14 +1249,14 @@ export function normalizeWorkflowDecisionSnapshot(
         !Array.isArray(checks.checks) || checkRows.length !== checks.checks.length || checkRows.length < 1) {
       return fail("merge decisions require an exact repository, PR, reviewed head, and passing required checks for that head");
     }
-    // #3713: the issues a GitHub merge is meant to close; the runner's check compares them with
-    // what GitHub would close. Omitted when none are declared, so earlier digests are unchanged.
-    if (gitlab && value.intendedClosures !== undefined) {
-      return fail("intendedClosures applies only to a GitHub merge decision");
-    }
-    const intendedClosures = gitlab ? undefined : normalizeIntendedClosures(value.intendedClosures, repo);
+    // #3713: the issues a merge is meant to close; the runner's check compares them with what the
+    // forge would close (GitLab too since #3762). Omitted when none are declared, so earlier
+    // digests are unchanged.
+    const intendedClosures = normalizeIntendedClosures(value.intendedClosures, repo);
     if (intendedClosures === null) {
-      return fail(`intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
+      return fail(gitlab
+        ? `intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, group/project#N, host/group/project#N, or an issue URL on the project's GitLab instance`
+        : `intendedClosures must list at most ${INTENDED_CLOSURES_LIMIT} issues as #N, owner/repo#N, or a GitHub issue URL`);
     }
     return ok({ category, repository: repo, pullRequest, headSha,
       ...(typeof value.reviewSessionId === "string" ? { reviewSessionId: value.reviewSessionId } : {}),
@@ -1979,6 +1990,16 @@ function boundedProviderCorrelationId(value: unknown): value is string {
     !/[\x00-\x1f\x7f]/u.test(value);
 }
 
+/** A refused App Server admission arms nothing and revokes nothing (#4054). Name the runner's cause
+ * and the way forward, so the agent retries instead of stopping the session, which would revoke it. */
+export function workflowActionAdmissionRefusal(cause: unknown): string {
+  const reason = typeof cause === "string" ? cause.trim().replace(/\.+$/u, "") : "";
+  const named = reason && reason.length <= 300 && !/[\x00-\x1f\x7f]/u.test(reason) ? `: ${reason}` : "";
+  return `The runner could not arm this App Server action${named}. Nothing was armed and the approval ` +
+    "is still approved, so consume it again. If the refusal repeats, finish this turn and consume the " +
+    "approval in the session's next turn; stopping the session would revoke it.";
+}
+
 function validatedGuardianApprovalReviewReceipt(value: unknown): ReviewDecisionApprovalReviewReceipt | null {
   if (!value || typeof value !== "object") return null;
   const candidate = value as Record<string, unknown>;
@@ -2200,6 +2221,8 @@ export class SessionsService {
   /** The Decision Model runtime (#4101) the Full Control screens use (#4104). The server shares
    * its own; tests replace it with a fake harness. */
   private decisionRuntime: DecisionRuntime;
+  /** Custom epic seeds being read, by campaign root (#4104). */
+  private readonly issueScopeSeeds = new Map<string, Promise<void>>();
   /** Generic request screens in flight, by session and occurrence, so a restored card never starts two. */
   private readonly credentialScreensInFlight = new Set<string>();
 
@@ -5171,10 +5194,6 @@ export class SessionsService {
     const requestedText = snapshotCommand?.type === "start_session"
       ? (snapshotCommand.initialPrompt ?? "")
       : (req.prompt?.trim() ?? "");
-    if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand) {
-      const epic = initialCampaignEpic(requestedText);
-      if (epic !== null) orchestratorPolicy.issueScopeProposalEpic = epic;
-    }
     const sharesControllerWorkspace = campaignController?.runnerId === req.runnerId &&
         campaignController.workspaceId === workspaceId &&
         (workspaceId !== null || this.db.getAdHocWorkspacePath(campaignController.id) === workspacePath);
@@ -5191,9 +5210,13 @@ export class SessionsService {
         !runnerSupportsProtocol(runner.protocolVersion, "repositoryQualifiedIssueScope")) {
       return capabilityFail(runnerCapabilityRequirementError(runner.protocolVersion, "repositoryQualifiedIssueScope", "issue scope in another campaign repository"));
     }
-    if (campaignController && campaignNeedsEpicScope(this.db, campaignController)) {
+    if (campaignController && campaignNeedsEpicScope(campaignController)) {
       const unsupported = scopeCompatibility(this.db, campaignController);
       if (unsupported) return capabilityFail(unsupported);
+      this.settleInterruptedIssueScopeSeed(campaignController);
+      if (this.db.getSession(campaignController.id)?.orchestratorPolicy?.issueScopeSeed?.state === "pending") {
+        return fail("The Decision Model is still reading this campaign's first message for the epic to seed its issue scope. Retry delegating in a moment.", 409);
+      }
       return fail("Confirm the epic's authorized issue scope in Campaign Status before delegating work. Use get_campaign_issue_scope and request_campaign_issue_scope_change, then wait for human approval.", 409);
     }
     const controllerScope = campaignController?.orchestratorPolicy?.issueScope;
@@ -5215,6 +5238,15 @@ export class SessionsService {
     }
     if (orchestratorPolicy && (orchestratorIssueNumbers.length || inheritedIssueScope)) {
       orchestratorPolicy.issueNumbers = [...orchestratorIssueNumbers];
+    }
+    // A Custom campaign's epic seed (#4104): the Decision Model reads the first message once the
+    // session starts, and delegation waits for that reading. Nothing is parsed from the text here.
+    // A first message that needs no reading is recorded as `none`, so no later message counts as
+    // the first; with no first message yet, the person's first prompt decides (`promptFromHuman`).
+    if (orchestratorPolicy && creationContext?.defaultOwnerUserId && !parentSessionId && !snapshotCommand &&
+        !creationContext.humanCampaignLaunch && !inheritedIssueScope && requestedText) {
+      orchestratorPolicy.issueScopeSeed = { state: needsCampaignIssueScopeSeed(requestedText, orchestratorIssueNumbers) ? "pending" : "none",
+        messageDigest: firstMessageDigest(requestedText) };
     }
     // Provenance for Full Control enable (#2940): these numbers came from the authenticated Human's
     // own create request, not an inherited scope, a snapshot, a staged delivery or a later backfill.
@@ -5599,6 +5631,7 @@ export class SessionsService {
     if (!capture) this.log.info(`session created ${id} on ${req.runnerId} (${req.agentId} @ ${req.workspaceId})`);
     if (!capture && session.reviewPolicy) this.log.info(JSON.stringify({ event: "campaign_child_review_policy_snapshot",
       entryPoint: "create_session", sessionId: id, parentSessionId, ...session.reviewPolicy }));
+    if (!capture && session.orchestratorPolicy?.issueScopeSeed?.state === "pending") this.startCampaignIssueScopeSeed(id, requestedText);
     return ok(this.db.getSession(id)!, 201);
   }
 
@@ -5702,7 +5735,15 @@ export class SessionsService {
     if (!this.awaitingFirstMessage(this.db.getSession(sessionId))) {
       const authorityRefusal = this.restoreHumanCampaignAuthority(principal, sessionId);
       if (authorityRefusal) return authorityRefusal;
-      return this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+      // A Custom campaign launched without a message gets its epic seed from the first one (#4104),
+      // decided before this message is recorded and kept only once it is admitted.
+      const seed = slashCommand ? null : this.firstMessageIssueScopeSeed(sessionId, text);
+      const admitted = await this.promptFromUser(principal.userId, sessionId, text, images, slashCommand, config, reviewedResultRevision);
+      if (admitted.ok && seed && this.db.beginCampaignIssueScopeSeed(sessionId, seed, Date.now())) {
+        this.hub.sessionChangedById(sessionId);
+        if (seed.state === "pending") this.startCampaignIssueScopeSeed(sessionId, text.trim());
+      }
+      return admitted;
     }
     if (this.firstMessagesInFlight.has(sessionId)) return fail("This campaign's first message is still being delivered; wait for it to appear.", 409);
     this.firstMessagesInFlight.add(sessionId);
@@ -5926,6 +5967,122 @@ export class SessionsService {
       this.log.warn(JSON.stringify({ event: "full_control_scope_grant_unavailable", sessionId: session.id, error: (error as Error).message.slice(0, 200) }));
       return null;
     }
+  }
+
+  /** The epic seed a person's message would start, when it is the first message of a Custom campaign
+   * they launched without one (#4104): no seed, scope or epic yet, and no user message recorded.
+   * Null otherwise. The message is read like a launch prompt: `none` when it needs no reading. */
+  private firstMessageIssueScopeSeed(sessionId: string, text: string): { state: "pending" | "none"; messageDigest: string } | null {
+    const root = this.db.getSession(sessionId);
+    const policy = root?.orchestratorPolicy;
+    const trimmed = text.trim();
+    if (!root || !policy || !trimmed || root.parentSessionId || policy.control?.mode === "full_control" || policy.issueScopeSeed ||
+        policy.issueScope || policy.issueScopeProposalEpic !== undefined || policy.issueNumbers?.length ||
+        !this.db.sessionWasHumanCreatedOrchestrator(root.id) || this.db.initialUserMessageText(root.id) !== null) return null;
+    return { state: needsCampaignIssueScopeSeed(trimmed, orchestratorIssueNumbersFromInitialPrompt(trimmed)) ? "pending" : "none",
+      messageDigest: firstMessageDigest(trimmed) };
+  }
+
+  /** Start reading a Custom campaign's first message for its epic seed (#4104), once per root. */
+  private startCampaignIssueScopeSeed(rootId: string, text: string): void {
+    if (this.issueScopeSeeds.has(rootId)) return;
+    const run = this.seedCampaignIssueScope(rootId, text).catch((error: unknown) => {
+      this.log.warn(JSON.stringify({ event: "campaign_issue_scope_seed_failed", sessionId: rootId, error: String((error as Error)?.message ?? error).slice(0, 200) }));
+    }).finally(() => this.issueScopeSeeds.delete(rootId));
+    this.issueScopeSeeds.set(rootId, run);
+  }
+
+  /** Resolves once a root's in-flight epic seed has settled, at once when none is running. */
+  campaignIssueScopeSeedSettled(rootId: string): Promise<void> {
+    return this.issueScopeSeeds.get(rootId) ?? Promise.resolve();
+  }
+
+  /** A seed still pending with no reading in flight was interrupted (a control-plane restart): it is
+   * the owner's, like a failed reading. Never re-read from text another way. */
+  private settleInterruptedIssueScopeSeed(root: SessionView): void {
+    const seed = root.orchestratorPolicy?.issueScopeSeed;
+    if (seed?.state !== "pending" || this.issueScopeSeeds.has(root.id)) return;
+    // The interrupted reading is recorded as failed (joining its occurrence when it had one), so
+    // Campaign Status shows it and its owner can continue without an epic.
+    const organizationId = this.db.sessionScope(root.id)?.organizationId;
+    const now = Date.now();
+    let occurrenceId: string | undefined;
+    if (organizationId) {
+      occurrenceId = recordUnfinishedDecision(this.db, { kind: "scope_grant", organizationId, campaignSessionId: root.id,
+        occurrenceKey: issueScopeSeedKey(root.id, seed.messageDigest), inputs: { data: {} } }, "provider_failed", now);
+      this.db.recordCampaignDecisionSubject({ occurrenceId, campaignSessionId: root.id, sessionId: root.id, surface: "issue_scope_seed",
+        requestId: `issue_scope_seed:${seed.messageDigest}` }, now);
+    }
+    if (this.db.settleCampaignIssueScopeSeed(root.id, seed.messageDigest, { state: "owner", ...(occurrenceId ? { occurrenceId } : {}) }, now)) {
+      this.hub.sessionChangedById(root.id);
+    }
+  }
+
+  /**
+   * A Custom campaign's epic seed (#4104), replacing the `initialCampaignEpic` regex. The Decision
+   * Model reads the person's first message as a scope grant, with the same floors as Full Control's
+   * (`scopeGrantCandidates`). When it names exactly one issue, and nothing else to work on, the runner
+   * reads that issue: one with sub-issues or checklist members is the seeded epic; any other issue
+   * seeds nothing and holds nothing. A failed or uncertain reading, a floor that drops what the model
+   * named, or an issue the runner can't read leaves the seed with the owner: delegation waits for
+   * the person to approve a scope, as it did for every epic request before.
+   */
+  private async seedCampaignIssueScope(rootId: string, text: string): Promise<void> {
+    const root = this.db.getSession(rootId);
+    const pending = root?.orchestratorPolicy?.issueScopeSeed;
+    if (!root || pending?.state !== "pending") return;
+    const messageDigest = pending.messageDigest;
+    const settle = (next: Parameters<ControlPlaneDb["settleCampaignIssueScopeSeed"]>[2]) => {
+      if (this.db.settleCampaignIssueScopeSeed(rootId, messageDigest, next, Date.now())) this.hub.sessionChangedById(rootId);
+    };
+    const organizationId = this.db.sessionScope(rootId)?.organizationId;
+    if (!organizationId || firstMessageDigest(text) !== messageDigest) return settle({ state: "owner" });
+    const occurrenceKey = issueScopeSeedKey(rootId, messageDigest);
+    const inputs = { ownerMessage: text, data: {} };
+    let outcome: DecisionOutcome | null = null;
+    let occurrenceId: string;
+    try {
+      outcome = await this.decisionRuntime.decide({
+        organizationId, kind: "scope_grant", campaignSessionId: rootId, occurrenceKey,
+        automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null,
+        inputs, routeToHuman: () => null,
+      });
+      occurrenceId = outcome.occurrenceId;
+    } catch (error) {
+      // A message too large for one call is never read in part, and a reading the runtime can't
+      // finish is recorded as failed: either way the person approves the scope.
+      occurrenceId = recordUnfinishedDecision(this.db, { kind: "scope_grant", organizationId, campaignSessionId: rootId, occurrenceKey, inputs },
+        error instanceof DecisionInputError ? "configuration" : "provider_failed", Date.now());
+    }
+    this.db.recordCampaignDecisionSubject({ occurrenceId, campaignSessionId: rootId, sessionId: rootId, surface: "issue_scope_seed",
+      requestId: `issue_scope_seed:${messageDigest}` }, Date.now());
+    if (outcome?.outcome !== "verdict") return settle({ state: "owner", occurrenceId });
+    const fields = outcome.fields as unknown as ScopeGrantFields;
+    const epic = seedEpicCandidate(fields);
+    if (epic === null) return settle({ state: "none", occurrenceId });
+    // The floor that needs no runner runs first: a number the message never writes is not read at all.
+    if (!writtenAsDigits(text, epic)) return settle({ state: "owner", occurrenceId });
+    const inspected = await this.inspectSeedEpic(root, epic);
+    if (!inspected) return settle({ state: "owner", occurrenceId });
+    const kept = scopeGrantCandidates(text, fields, { repository: inspected.repository }).explicit;
+    if (kept.length !== 1 || kept[0] !== epic) return settle({ state: "owner", occurrenceId });
+    settle(inspected.members.length ? { state: "seeded", epic, occurrenceId } : { state: "none", occurrenceId });
+  }
+
+  /** The campaign repository and the members the runner reads for one issue: its sub-issues and
+   * checklist members in that repository. Null when the runner can't read it. */
+  private async inspectSeedEpic(root: SessionView, epic: number): Promise<{ repository: string; members: number[] } | null> {
+    const requestId = `issue_scope_seed_${randomUUID()}`;
+    try {
+      const response = await this.hub.requestFromRunner(root.runnerId, requestId,
+        { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, epic }, 30_000);
+      if (response.type !== "campaign_issue_scope_result" || response.sessionId !== root.id || !response.ok ||
+          !response.repository || !campaignRepositoryLocation(response.repository)) return null;
+      const repository = response.repository.toLowerCase();
+      const members = (response.candidates ?? []).filter((c) => c.issue.number !== epic && c.issue.repository.toLowerCase() === repository &&
+        (c.source === "sub_issue" || c.source === "member_checklist")).map((c) => c.issue.number);
+      return { repository, members };
+    } catch { return null; }
   }
 
   /** The stored scope grant (#4102): what the floors kept of a verdict, or the failure route's
@@ -11005,8 +11162,8 @@ export class SessionsService {
       return this.createWorkflowDecision(sessionId, request, canAccess,
         "failure" in admitted ? { publicationAdmissionFailure: admitted.failure } : undefined);
     }
-    if (normalized.ok && normalized.data?.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
-      return this.createGithubMergeDecision(sessionId, request, normalized.data, canAccess);
+    if (normalized.ok && normalized.data?.category === "pr_merge") {
+      return this.createMergeDecision(sessionId, request, normalized.data, canAccess);
     }
     if (normalized.ok && normalized.data?.category === "implementation_question") {
       const credentialScreen = await this.screenImplementationQuestion(sessionId, request, normalized.data);
@@ -11348,6 +11505,7 @@ export class SessionsService {
     const rootId = this.db.campaignRootForMember(sessionId);
     const root = rootId ? this.db.getSession(rootId) : null;
     if (!root?.orchestratorPolicy || !canAccess(root.id)) return fail("campaign not found", 404);
+    this.settleInterruptedIssueScopeSeed(root);
     const compatibility = scopeCompatibility(this.db, root);
     const stored = root.orchestratorPolicy.issueScope;
     if (compatibility) return ok({ ...scopeView(this.db, root, stored?.repository ?? ""), supported: false, ...compatibilityFields(compatibility) });
@@ -11357,7 +11515,7 @@ export class SessionsService {
     });
     try {
       const requestId = `issue_scope_inspect_${randomUUID()}`;
-      const seed = epic ?? (resolveInitialEpic && !stored ? root.orchestratorPolicy.issueScopeProposalEpic ?? initialCampaignEpic(this.db.initialUserMessageText(root.id) ?? "") ?? undefined : undefined);
+      const seed = epic ?? (resolveInitialEpic && !stored ? root.orchestratorPolicy.issueScopeProposalEpic : undefined);
       if (seed !== undefined && (!Number.isSafeInteger(seed) || seed < 1)) return fail("epic must be a positive issue number", 400);
       let response = await this.hub.requestFromRunner(root.runnerId, requestId,
         { type: "campaign_issue_scope", operation: "inspect", requestId, sessionId: root.id, ...(seed === undefined ? {} : { epic: seed }) }, 60_000);
@@ -12040,10 +12198,11 @@ export class SessionsService {
     return ok(this.db.workflowDecisionByOccurrence(occurrenceId)!);
   }
 
-  /** #3713: a GitHub merge is requested only after the child's runner reports the issues it would
-   * close, so a closure the snapshot does not declare is refused before anyone reviews it. A
-   * request the ordinary path refuses anyway, or one from a pre-v242 runner, is not checked. */
-  private async createGithubMergeDecision(
+  /** #3713: a merge is requested only after the child's runner reports the issues it would close,
+   * so a closure the snapshot does not declare is refused before anyone reviews it. A request the
+   * ordinary path refuses anyway, or one from a runner that predates the check (v242 for GitHub,
+   * v295 for GitLab, #3762), is not checked. */
+  private async createMergeDecision(
     sessionId: string,
     request: CreateWorkflowDecisionRequest,
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
@@ -12054,45 +12213,51 @@ export class SessionsService {
         !boundedDecisionString(request?.requestId, 256) || !boundedDecisionString(request?.resourceKey, 512)) {
       return this.createWorkflowDecision(sessionId, request, canAccess);
     }
-    const checked = await this.githubMergeClosures(child, snapshot);
+    const checked = await this.mergeClosures(child, snapshot);
     if (!checked.ok) return fail(checked.message, 409);
     return this.createWorkflowDecision(sessionId, request, canAccess,
       checked.check ? { closingReferenceCheck: checked.check } : undefined);
   }
 
-  /** What merging would close, read from GitHub through the child's runner and compared with the
-   * snapshot's `intendedClosures` (#3713). Without a check when the runner predates v242. `revoke`
-   * says the snapshot itself is wrong (a stale head or a different set of closures); otherwise
-   * GitHub could not be read and the same snapshot may be tried again. */
-  private async githubMergeClosures(
+  /** What merging would close, read from the forge through the child's runner and compared with the
+   * snapshot's `intendedClosures` (#3713; GitLab since #3762). Without a check when the runner
+   * predates it (v242 for GitHub, v295 for GitLab). `revoke` says the snapshot itself is wrong (a
+   * stale head or a different set of closures); otherwise the forge could not be read and the same
+   * snapshot may be tried again. An unread GitLab merge is refused like an unread GitHub one: a
+   * current runner's decision carries a check, which is what Full Control's ownership rests on. */
+  private async mergeClosures(
     child: { id: string; runnerId: string },
     snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "pr_merge" }>,
   ): Promise<{ ok: true; check?: PullRequestClosingReferenceCheck } | { ok: false; revoke: boolean; message: string }> {
+    const gitlab = snapshot.mergeMethod !== undefined;
+    const forge = gitlab ? "GitLab" : "GitHub";
     const runner = this.db.getRunner(child.runnerId);
-    if (!runner || !runnerSupportsProtocol(runner.protocolVersion, "githubMergeClosingReferences")) return { ok: true };
+    if (!runner || !runnerSupportsProtocol(runner.protocolVersion,
+      gitlab ? "gitlabMergeClosingReferences" : "githubMergeClosingReferences")) return { ok: true };
     const unreadable = (reason: string) => ({ ok: false as const, revoke: false,
-      message: `GitHub could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
-    const requestId = `github_merge_preflight_${randomUUID()}`;
+      message: `${forge} could not be read for the issues this merge would close, so nothing changed: ${reason} Try again.` });
+    const type = gitlab ? "gitlab_merge_closures" : "github_merge_preflight";
+    const requestId = `${type}_${randomUUID()}`;
     let answer: unknown;
     try {
       answer = await this.hub.requestFromRunner(child.runnerId, requestId, {
-        type: "github_merge_preflight", requestId, sessionId: child.id, repository: snapshot.repository,
+        type, requestId, sessionId: child.id, repository: snapshot.repository,
         pullRequest: snapshot.pullRequest, headSha: snapshot.headSha,
-      }, GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
+      }, gitlab ? GITLAB_MERGE_CLOSURES_TIMEOUT_MS : GITHUB_MERGE_PREFLIGHT_TIMEOUT_MS);
     } catch {
       return unreadable("the runner did not answer.");
     }
-    const result = answer as Partial<GithubMergePreflightResultMessage> | null;
-    const reason = typeof result?.reason === "string" && result.reason.length <= 300 ? result.reason : "GitHub could not be checked.";
-    if (result?.type !== "github_merge_preflight_result" || result.sessionId !== child.id) return unreadable("GitHub could not be checked.");
+    const result = answer as Partial<GithubMergePreflightResultMessage | GitLabMergeClosuresResultMessage> | null;
+    const reason = typeof result?.reason === "string" && result.reason.length <= 300 ? result.reason : `${forge} could not be checked.`;
+    if (result?.type !== `${type}_result` || result.sessionId !== child.id) return unreadable(`${forge} could not be checked.`);
     if (result.ok !== true) {
       return result.refusal === "stale_head"
-        ? { ok: false, revoke: true, message: `This merge no longer matches the pull request: ${reason}` }
+        ? { ok: false, revoke: true, message: `This merge no longer matches the ${gitlab ? "merge request" : "pull request"}: ${reason}` }
         : unreadable(reason);
     }
-    const check = validClosingReferenceCheck(result.check);
+    const check = validClosingReferenceCheck(result.check, gitlab ? snapshot.repository : undefined);
     if (!check) return unreadable("the runner's answer was incomplete.");
-    const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures);
+    const mismatch = prMergeClosureMismatch(snapshot.intendedClosures ?? [], check.closures, gitlab ? "gitlab" : "github");
     return mismatch ? { ok: false, revoke: true, message: mismatch } : { ok: true, check };
   }
 
@@ -12214,7 +12379,8 @@ export class SessionsService {
     if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
       this.log.info(JSON.stringify({ event: "campaign_authority_evaluated", entryPoint: "workflow_request_refused",
         sessionId, controllingSessionId: controller.session.id, requestId: request.requestId, ...authorityEvaluation }));
-      return fail(unscopedClosureRefusal(authorityEvaluation.unscopedClosures), 409);
+      return fail(unscopedClosureRefusal(authorityEvaluation.unscopedClosures,
+        normalized.data.category === "pr_merge" && normalized.data.mergeMethod !== undefined ? "gitlab" : "github"), 409);
     }
     // Full Control cannot supply credentials or sign-in, so it declines such a question once,
     // records it as blocked work, and creates no decision for anyone to answer (#2940).
@@ -12407,6 +12573,7 @@ export class SessionsService {
     if (actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(campaignSessionId, actor.id)) {
       return fail("Only the campaign's owner can classify a question the Decision Model could not screen", 403);
     }
+    if (subject.surface === "issue_scope_seed") return this.releaseCampaignIssueScopeSeed(campaignSessionId, occurrenceId, request, actor);
     if (occurrence.state !== "uncertain" && occurrence.state !== "failed") {
       return fail("the Decision Model already screened this request", 409);
     }
@@ -12468,6 +12635,28 @@ export class SessionsService {
     this.publishCampaignAttentionTransition(root);
     this.hub.sessionChangedById(session.id);
     if (session.id !== root.id) this.hub.sessionChangedById(root.id);
+    return ok(this.db.campaignDecisionSubject(occurrenceId)!);
+  }
+
+  /** The owner's Continue Without an Epic (#4104): an epic seed the Decision Model could not settle
+   * holds delegation until the owner approves an issue scope, which needs at least one issue. A
+   * campaign that names none would wait forever, so the owner may instead release the hold with no
+   * seed. It grants nothing: it only lets the Orchestrator delegate as a campaign without an epic. */
+  private releaseCampaignIssueScopeSeed(rootId: string, occurrenceId: string, request: ClassifyCampaignDecisionRequest,
+    actor: GovernanceActor): ServiceResult<CampaignDecisionSubject> {
+    if (request.classification !== "orchestrator") return fail("An epic seed can only be released: choose Continue Without an Epic", 400);
+    const root = this.db.getSession(rootId);
+    const seed = root?.orchestratorPolicy?.issueScopeSeed;
+    if (!root || root.orchestratorPolicy?.issueScope || seed?.state !== "owner" || seed.occurrenceId !== occurrenceId) {
+      return fail("This campaign's epic seed no longer waits for you", 409);
+    }
+    const now = Date.now();
+    if (!actor.id || !this.db.releaseCampaignIssueScopeSeedSubject(occurrenceId, actor.id, now) ||
+        !this.db.settleCampaignIssueScopeSeed(rootId, seed.messageDigest, { state: "none", occurrenceId }, now, "owner")) {
+      return fail("This campaign's epic seed changed concurrently; read it again", 409);
+    }
+    this.log.info(JSON.stringify({ event: "campaign_issue_scope_seed_released", campaignSessionId: rootId, occurrenceId }));
+    this.hub.sessionChangedById(rootId);
     return ok(this.db.campaignDecisionSubject(occurrenceId)!);
   }
 
@@ -13130,6 +13319,9 @@ export class SessionsService {
         }
       }
     }
+    // #3713: the description can change after approval, so the forge is read again before arming
+    // (GitLab too since #3762, alongside its merge preflight so both fit the consume's wait).
+    const closuresRead = action.data && normalized.data.category === "pr_merge" ? this.mergeClosures(child, normalized.data) : null;
     if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod) {
       // #3602: GitLab is read before arming, through the child's own glab login. A stale head or a
       // snapshot that does not fit the project (a direct merge around an enabled train, among
@@ -13161,11 +13353,10 @@ export class SessionsService {
         return fail(`GitLab refused this merge before it was armed: ${reason}`, 409);
       }
     }
-    if (action.data && normalized.data.category === "pr_merge" && normalized.data.mergeMethod === undefined) {
-      // #3713: the description can change after approval, so GitHub is read again before arming.
-      // A closure the approval does not describe revokes it; GitHub being unreadable proves
+    if (closuresRead) {
+      // A closure the approval does not describe revokes it; the forge being unreadable proves
       // nothing either way, so nothing is armed and the child may try again.
-      const checked = await this.githubMergeClosures(child, normalized.data);
+      const checked = await closuresRead;
       if (!checked.ok) {
         if (checked.revoke) this.revokeWorkflowDecision(decision, { reason: "consume_refused_stale", triggeredBy: { kind: "agent", id: sessionId } });
         return fail(checked.revoke
@@ -13224,7 +13415,11 @@ export class SessionsService {
                 !boundedProviderCorrelationId(recorded.providerThreadId) ||
                 !Number.isSafeInteger(recorded.historyEpoch) || recorded.historyEpoch! < 0 ||
                 !Number.isSafeInteger(recorded.eventSeq) || recorded.eventSeq! < 1) {
-              return fail("runner could not establish the App Server action admission boundary", 409);
+              const refusal = recorded.type === "workflow_action_admission_recorded" &&
+                recorded.sessionId === child.id && recorded.occurrenceId === occurrenceId && !recorded.accepted;
+              return fail(workflowActionAdmissionRefusal(refusal
+                ? recorded.error
+                : "the runner's admission record did not match this request"), 409);
             }
             providerFence = {
               armedAfterEventSeq: recorded.eventSeq,
@@ -13234,12 +13429,12 @@ export class SessionsService {
               runnerHistoryEpoch: recorded.historyEpoch,
             };
           } catch (error) {
+            const cause = isRunnerRequestTimeoutError(error) ? "the runner did not acknowledge it in time"
+              : isRunnerRequestNotSentError(error) ? "the runner is offline" : null;
             this.log.warn(`workflow action admission append failed for ${child.id}: ${
-              isRunnerRequestTimeoutError(error) ? "runner acknowledgement timed out"
-                : isRunnerRequestNotSentError(error) ? "runner is offline"
-                  : error instanceof Error ? error.message : "unknown runner error"
+              cause ?? (error instanceof Error ? error.message : "unknown runner error")
             }`);
-            return fail("runner could not establish the App Server action admission boundary", 409);
+            return fail(workflowActionAdmissionRefusal(cause), 409);
           }
         }
       }
@@ -13401,7 +13596,7 @@ export class SessionsService {
       };
       if (snapshot.category === "pr_merge") {
         // The description can change after arming, so GitHub is read again, as arming did (#3713).
-        const checked = await this.githubMergeClosures(child, snapshot);
+        const checked = await this.mergeClosures(child, snapshot);
         if (!checked.ok) {
           const reason: ForgeDecisionActionRefusalReason = checked.revoke ? "closure_mismatch" : "forge_unavailable";
           finish("refused", { reason, summary: boundedForgeSummary(checked.message) });
@@ -21342,10 +21537,12 @@ export class SessionsService {
     sessionId: string,
     query: string,
     match?: WorkspaceReferenceSearchMatch,
+    fuzzyWithDirectories = false,
   ): Promise<ServiceResult<{
     results: WorkspaceReferenceCandidate[];
     truncated: boolean;
     match?: WorkspaceReferenceSearchMatch;
+    fuzzyWithDirectories?: boolean;
     limit?: WorkspaceReferenceSearchLimit;
   }>> {
     const session = this.db.getSession(sessionId);
@@ -21356,15 +21553,21 @@ export class SessionsService {
     const requestId = `wsr_search_${randomUUID().slice(0, 8)}`;
     try {
       const res = await this.hub.requestFromRunner(session.runnerId, requestId, {
-        type: "search_workspace_references", requestId, sessionId, query, ...(match ? { match } : {}),
+        type: "search_workspace_references", requestId, sessionId, query,
+        ...(match ? { match } : {}),
+        ...(fuzzyWithDirectories ? { fuzzyWithDirectories: true } : {}),
       }, 20_000);
       if (res.type !== "search_workspace_references_result") return fail("unexpected runner reply", 502);
       if (!res.ok) return fail(res.error ?? "could not search workspace paths", 502);
-      // A runner that predates `match` answers without echoing it: its results contain the query.
+      // A runner that predates `match` or `fuzzyWithDirectories` answers without echoing it: its
+      // results contain the query.
+      const echoed = fuzzyWithDirectories
+        ? res.fuzzyWithDirectories === true && res.match === "fuzzy" ? { match: "fuzzy" as const, fuzzyWithDirectories: true } : {}
+        : match && res.match === match ? { match } : {};
       return ok({
         results: res.results ?? [],
         truncated: res.truncated === true,
-        ...(match && res.match === match ? { match } : {}),
+        ...echoed,
         ...(res.limit === "entries" || res.limit === "results" ? { limit: res.limit } : {}),
       });
     } catch (err) {
