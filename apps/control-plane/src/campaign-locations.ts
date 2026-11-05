@@ -1,6 +1,6 @@
 import type { FastifyInstance, FastifyRequest } from "fastify";
 import type {
-  CampaignExcludedLocation, CampaignLocationJoin, CampaignPendingLocation, ProjectLocationInspection, ProjectLocationView, SessionView,
+  CampaignExcludedLocation, CampaignLocationJoin, CampaignPendingLocation, ProjectLocationInspection, ProjectLocationView, SessionView, WorkflowDecisionView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import type { Hub } from "./hub.js";
@@ -27,6 +27,8 @@ export class CampaignLocations {
     db: ControlPlaneDb; hub: Hub;
     /** Sends each member's runner its re-minted boundary. */
     synchronize: (rootId: string) => Promise<unknown>;
+    /** Settles the decisions a boundary change revoked and publishes every member (Sessions). */
+    settle: (before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string, now: number) => void;
     log: { warn(message: string): void };
     inspectionTimeoutMs?: number;
   }) {}
@@ -80,7 +82,7 @@ export class CampaignLocations {
       const fresh = this.deps.db.getSession(rootId);
       if (!fresh || this.owner(fresh) !== principal.userId) return Promise.resolve({ ok: false as const, status: 409, error: "This campaign's authority changed; try again." });
       if (this.inBoundary(fresh, locationId)) return Promise.resolve({ ok: true as const, data: { joined: false, revision: this.revision(fresh) } });
-      return this.inspectAndRecord(fresh, [location], "owner_included");
+      return this.inspectAndRecord(fresh, [location], "owner_included", principal);
     });
   }
 
@@ -99,30 +101,63 @@ export class CampaignLocations {
     return control?.mode === "full_control" && Boolean(control.boundary.repositories?.some((entry) => entry.locationIds.includes(locationId)));
   }
 
-  private async inspectAndRecord(root: SessionView, locations: ProjectLocationView[], source: CampaignLocationJoin["source"]): Promise<Outcome> {
+  private async inspectAndRecord(root: SessionView, locations: ProjectLocationView[], source: CampaignLocationJoin["source"],
+    includer?: HumanPrincipal): Promise<Outcome> {
+    const { db } = this.deps;
+    const before = new Map(locations.map((location) => [location.id, { runnerId: location.runnerId, workspaceId: location.workspaceId,
+      addedBy: db.projectLocationAddedBy(location.id) }]));
     const results = await Promise.all(locations.map((location) => inspectProjectLocation(this.deps, location.id, {
       projectId: root.projectId ?? undefined, timeoutMs: this.deps.inspectionTimeoutMs, requireProtocol: "campaignRepositoryBoundary" })));
+    // The inspections ran on other machines. Everything the provenance rested on is read again here,
+    // and nothing is awaited between this check and the record below: a Location removed, moved
+    // away and back, re-added by someone else, or no longer reachable meanwhile is not recorded.
+    const fresh = db.getSession(root.id);
+    if (!fresh) return { ok: false, status: 409, error: "This campaign ended." };
+    const owner = this.owner(fresh);
     const joins: Array<{ locationId: string; name: string; repository: string; source: CampaignLocationJoin["source"] }> = [];
     const excluded: CampaignExcludedLocation[] = [];
+    let changed = false;
     results.forEach((result: ProjectLocationInspection, index) => {
       const location = locations[index]!;
+      const was = before.get(location.id)!;
+      const now = db.getProjectLocation(location.id);
+      const eligible = Boolean(owner && now && now.projectId === fresh.projectId && now.availability !== "runner_removed" &&
+        now.runnerId === was.runnerId && now.workspaceId === was.workspaceId && db.projectLocationAddedBy(location.id) === was.addedBy &&
+        !this.inBoundary(fresh, location.id) &&
+        (source !== "owner_added" || was.addedBy === owner) &&
+        (source !== "runner_reconnected" || fresh.orchestratorPolicy?.excludedLocations?.some((item) =>
+          item.locationId === location.id && RETRIED_ON_RECONNECT.has(item.failure))) &&
+        (source !== "owner_included" || Boolean(includer && includer.userId === owner &&
+          db.canAccessWorkspace(includer, now.runnerId, now.workspaceId))));
+      if (!eligible) { changed = true; return; }
       if (result.ok) joins.push({ locationId: location.id, name: location.name, repository: result.location.repository, source });
       else excluded.push({ locationId: location.id, name: location.name, failure: result.failure, reason: result.reason });
     });
-    return this.record(root, { joins, excluded, pending: [] });
+    if (changed && source === "owner_included") return { ok: false, status: 409, error: "That Location changed while it was inspected; try again." };
+    return this.record(fresh, { joins, excluded, pending: [] });
   }
 
   private async record(root: SessionView, update: { joins: Array<{ locationId: string; name: string; repository: string;
     source: CampaignLocationJoin["source"] }>; excluded: CampaignExcludedLocation[]; pending: CampaignPendingLocation[] }): Promise<Outcome> {
     const owner = this.owner(root);
     if (!owner) return { ok: false, status: 409, error: "This campaign has no Full Control owner." };
-    const result = this.deps.db.recordCampaignLocations(root.id, owner, update, Date.now());
+    if (!update.joins.length && !update.excluded.length && !update.pending.length) {
+      return { ok: true, data: { joined: false, revision: this.revision(root) } };
+    }
+    const now = Date.now();
+    const result = this.deps.db.recordCampaignLocations(root.id, owner, update, now);
     if (!result.ok) {
       this.deps.log.warn(JSON.stringify({ event: "campaign_locations_not_recorded", sessionId: root.id, status: result.status }));
       return result;
     }
-    if (result.joined) await this.deps.synchronize(root.id);
-    this.deps.hub.sessionChangedById(root.id);
+    if (result.joined) {
+      // A join is an owner-authorized boundary change: what it revoked leaves its pauses, and every
+      // member's runner gets the new boundary.
+      this.deps.settle(root, result.revoked, owner, now);
+      await this.deps.synchronize(root.id);
+    } else {
+      this.deps.hub.sessionChangedById(root.id);
+    }
     return { ok: true, data: { joined: result.joined, revision: result.revision } };
   }
 

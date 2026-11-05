@@ -1092,6 +1092,7 @@ registerReviewSettingsRoutes(app, new ReviewSettingsService(db), requestPrincipa
 registerFullControlLaunchRoutes(app, { db, hub, sessions: svc, settings: orchestratorSettings, requestPrincipal, evidenceDisclosures: evidenceAuthorityDisclosures,
   videoCertification: (runnerId) => videoEvidence.launchCertification(runnerId) });
 const campaignLocations = new CampaignLocations({ db, hub, synchronize: (rootId) => svc.synchronizeCampaignIssueScope(rootId),
+  settle: (before, revoked, owner, now) => svc.settleCampaignBoundaryChange(before, revoked, owner, now),
   log: { warn: (message) => app.log.warn(message) } });
 registerCampaignLocationRoutes(app, { campaignLocations, requestPrincipal });
 registerHostingVideoEvidenceRoutes(app, { video: videoEvidence, requestPrincipal });

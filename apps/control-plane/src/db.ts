@@ -9742,8 +9742,12 @@ export class ControlPlaneDb {
       ).run(targetProjectId, now, targetProjectId);
       this.stmt("UPDATE projects SET name_source='user' WHERE id IN (?, ?)")
         .run(sourceProjectId, targetProjectId);
-      // Moving a Location into a Project adds it there, by whoever moved it (#4117).
-      if (!targetLocation) this.stmt("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(movedByUserId ?? null, locationId);
+      // Moving a Location into a Project adds it there, by whoever moved it (#4117), so nothing a
+      // campaign recorded about its earlier life there survives the move.
+      if (!targetLocation) {
+        this.stmt("UPDATE project_locations SET added_by_user_id=? WHERE id=?").run(movedByUserId ?? null, locationId);
+        this.forgetCampaignLocation(targetProjectId, locationId, now);
+      }
     });
     return targetLocation ? this.projectLocation(targetLocation.id) : this.projectLocation(locationId);
   }
@@ -17246,7 +17250,9 @@ export class ControlPlaneDb {
       repositories: control.boundary.repositories.map((entry) => ({ repository: entry.repository,
         locations: entry.locationIds.map((locationId) => {
           const location = current.get(locationId);
-          return { locationId, name: location?.name ?? named.get(locationId) ?? this.projectLocation(locationId, true)?.name ?? "Removed Location",
+          // A Location outside the campaign's Project is never read live: it may now belong to a
+          // Project this campaign's readers can't see. Only the name the campaign recorded is shown.
+          return { locationId, name: location?.name ?? named.get(locationId) ?? "Removed Location",
             availability: location?.availability ?? "removed" as const, isDefault: location?.isDefault ?? false };
         }) })),
       excludedLocations: structuredClone(policy.excludedLocations ?? []),

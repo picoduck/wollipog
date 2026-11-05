@@ -2219,6 +2219,7 @@ async function launchedMultiRepositoryCampaign(f: ReturnType<typeof fixture>) {
   await launchServer.close();
   const rootId = admitted.json().id as string;
   const locations = new CampaignLocations({ db: f.db, hub: f.hub, synchronize: (id) => f.sessions.synchronizeCampaignIssueScope(id),
+    settle: (before, revoked, owner, now) => f.sessions.settleCampaignBoundaryChange(before, revoked, owner, now),
     log: { warn() {} } });
   const server = Fastify();
   registerCampaignLocationRoutes(server, { campaignLocations: locations, requestPrincipal: (req) =>
@@ -2382,5 +2383,69 @@ test("a Location another person or no person added waits for the owner's Include
     const foreign = await c.server.inject({ method: "POST", url: `/api/sessions/${c.rootId}/orchestrator-campaign/locations/${outside.id}/include`,
       headers: { authorization: "Bearer human" } });
     assert.equal(foreign.statusCode, 404);
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("an owner addition re-added by someone else while it is being inspected waits for the owner (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = c.boundary().revision;
+    const other: HumanPrincipal = { ...f.human, userId: "usr_other", actorId: "usr_other" };
+    const inspect = f.state.inspect;
+    let held: Extract<ControlPlaneToRunner, { type: "campaign_launch_inspect" }> | null = null;
+    f.state.inspect = (message) => message.workspacePath === "/fixture/two/third" ? (held = message, null) : inspect(message);
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    const ownerAddition = c.locations.locationAdded(third.id, f.human);
+    for (let tick = 0; tick < 50 && !held; tick += 1) await new Promise((resolve) => setTimeout(resolve, 10));
+    assert.ok(held, "the owner's addition is being inspected");
+    // Meanwhile another person moves it out of the Project and back: same id, runner, workspace and path.
+    const elsewhere = f.db.createProject({ name: "Elsewhere", scope: f.scope });
+    f.db.moveProjectLocation(third.id, elsewhere.id, Date.now(), other.userId);
+    f.db.moveProjectLocation(third.id, c.p.project.id, Date.now(), other.userId);
+    const theirAddition = c.locations.locationAdded(third.id, other);
+    const message = held!;
+    f.hub.resolveRunnerRequest({ type: "campaign_launch_inspection_result", requestId: message.requestId, workspaceId: message.workspaceId,
+      ok: true, repository: "third/repo", issueNumbers: [], digest: "d".repeat(64) }, "r2");
+    await Promise.all([ownerAddition, theirAddition]);
+    assert.equal(c.boundary().revision, before, "the owner's stale inspection never joins it");
+    assert.equal(c.boundary().repositories!.some((entry) => entry.locationIds.includes(third.id)), false);
+    assert.ok(c.policy().pendingLocations!.some((item) => item.locationId === third.id), "it waits for Include in Campaign");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("a join revokes the campaign's outstanding decisions through the boundary-change lifecycle (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const pending = f.sessions.createWorkflowDecision(c.rootId, { requestId: "q-1", resourceKey: "design-question",
+      resourceSnapshot: { category: "implementation_question", question: "Which design?",
+        options: [{ optionId: "a", label: "Option A" }, { optionId: "b", label: "Option B" }] } }, () => true);
+    assert.equal(pending.ok, true, pending.error ?? "");
+    const third = f.db.addProjectLocation(c.p.project.id, { runnerId: "r2", workspaceId: "c", addedByUserId: f.human.userId });
+    await c.locations.locationAdded(third.id, f.human);
+    assert.ok(c.boundary().repositories!.some((entry) => entry.repository === "third/repo"));
+    assert.equal(f.db.workflowDecisionByOccurrence(pending.data!.occurrenceId)!.status, "revoked");
+    assert.match(JSON.stringify(f.db.listGovernanceAudit(c.rootId)), /campaign_control_changed/u,
+      "the revocation is recorded with its reason");
+    assert.equal(f.db.getSession(c.rootId)!.pendingApproval?.requestId === pending.data!.occurrenceId, false,
+      "no card for the revoked decision remains");
+  } finally { await c.server.close(); f.db.close(); }
+});
+
+test("Campaign Status never reads a moved Location's name from another Project (#4117)", async () => {
+  const f = fixture();
+  const c = await launchedMultiRepositoryCampaign(f);
+  try {
+    const before = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
+    assert.ok(before.repositories.some((entry) => entry.locations.some((location) => location.locationId === c.p.other.id && location.name === "r2 a")));
+    // The launch Location of other/repo moves to someone's private Project and is renamed there.
+    const privateProject = f.db.createProject({ name: "Private", scope: f.scope });
+    f.db.moveProjectLocation(c.p.other.id, privateProject.id, Date.now(), "usr_other");
+    f.db.renameProjectLocation(privateProject.id, c.p.other.id, "Secret Client Repo");
+    const view = f.db.campaignProjection(c.rootId)!.repositoryBoundary!;
+    const entry = view.repositories.find((item) => item.repository === "other/repo")!;
+    assert.deepEqual(entry.locations, [{ locationId: c.p.other.id, name: "Removed Location", availability: "removed", isDefault: false }]);
+    assert.doesNotMatch(JSON.stringify(view), /Secret Client Repo/u);
   } finally { await c.server.close(); f.db.close(); }
 });
