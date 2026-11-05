@@ -104,7 +104,6 @@ function GroupPicker({ splits, labels, activeKey, snoozed, onSelectGroup }: Pick
         {!snoozed && (
           <>
             <CountBadge count={active.blockedCount} />
-            <CountBadge count={active.stalledCount} tone="danger" />
           </>
         )}
       </button>

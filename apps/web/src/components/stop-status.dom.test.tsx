@@ -119,7 +119,7 @@ async function mount(candidate: SessionView) {
       <StoreProvider connection={connection} navigation={navigation}>
         <div role="grid">
           <InboxRow optionId="row" session={candidate} projectName="Project" selected={false} unread={false}
-            pinned={false} rowIndex={1} stalled={false} activityNow={0} threeRow={false}
+            pinned={false} rowIndex={1} activityNow={0} threeRow={false}
             onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />
         </div>
         <HeaderStatuses candidate={candidate} />
@@ -163,7 +163,7 @@ test("a Stop waiting for an offline runner reads Stop Waiting for Runner, neutra
   const view = await mount(candidate);
   try {
     await act(async () => view.socket.push(snapshot("offline", candidate)));
-    expectBadge(view.surfaces().inbox, "Disconnected", "danger", false, "Status");
+    expectBadge(view.surfaces().inbox, "Stop Waiting for Runner", "neutral", false, "Status");
     expectBadge(view.surfaces().header, "Stop Waiting for Runner", "neutral", false);
     // The runner is gone, not the Stop: the header still says the runner is disconnected.
     assert.ok(domWindow.document.querySelector('[aria-label="Health: Disconnected"]'));
@@ -183,7 +183,7 @@ test("a runner this client has no record of is unknown, not offline, so the Stop
     await act(async () => view.socket.push(snapshot("absent", candidate)));
     // Both surfaces agree, although the header still reports the runner as disconnected.
     expectBadge(view.surfaces().inbox, "Stop Pending", "info", true, "Status");
-    expectBadge(view.surfaces().header, "Stop Pending", "info", true);
+    expectBadge(view.surfaces().header, "Stop Pending", "info", false);
     assert.ok(domWindow.document.querySelector('[aria-label="Health: Disconnected"]'));
   } finally {
     await view.unmount();
@@ -196,7 +196,7 @@ test("a failed Stop reads Stop Failed in danger whether or not the runner is onl
     const view = await mount(candidate);
     try {
       await act(async () => view.socket.push(snapshot(runnerStatus, candidate)));
-      expectBadge(view.surfaces().inbox, runnerStatus === "online" ? "Stop Failed" : "Disconnected", "danger", false, "Status");
+      expectBadge(view.surfaces().inbox, "Stop Failed", "danger", false, "Status");
       expectBadge(view.surfaces().header, "Stop Failed", "danger", false);
       assert.equal(view.surfaces().header!.getAttribute("title"), "Automatic retries were exhausted.");
     } finally {

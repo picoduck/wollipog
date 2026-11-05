@@ -2,7 +2,7 @@ import { PodsIcon } from "./Icons.js";
 import { Notice } from "./Notice.js";
 import { State } from "./State.js";
 import { StatusBadge, statusToneClass } from "./StatusBadge.js";
-import { sessionStatusSummary, statusMeta } from "../status-meta.js";
+import { sessionStatusSignal, statusMeta } from "../status-meta.js";
 import { useCallback, useContext, useEffect, useId, useLayoutEffect, useMemo, useRef, useState, type KeyboardEvent, type ReactNode } from "react";
 import { flushSync } from "react-dom";
 import type {
@@ -200,10 +200,12 @@ function MemberTab({ sessionId, index, selected, onSelect, onKeyDown }: {
     : true);
   if (!session) return null;
   const agentLabel = sessionAgentLabel(session.agentName, session.driver, session.agentId);
-  const status = sessionStatusSummary(session, { runnerOnline }).primary.meta;
+  const signal = sessionStatusSignal(session, { runnerOnline });
+  const status = signal.meta;
   return (
     <button
       id={memberTabId(index)}
+      title={signal.description}
       type="button"
       role="tab"
       aria-selected={selected}

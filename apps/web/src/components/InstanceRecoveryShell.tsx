@@ -277,7 +277,6 @@ export function InstanceRecoveryShell() {
       <Rail
         view={{ name: "inbox" }}
         blockedCount={0}
-        stalledCount={0}
         onNavigate={() => undefined}
         disabled
         instanceControl={<InstanceSelector />}

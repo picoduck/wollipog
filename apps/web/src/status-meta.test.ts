@@ -31,7 +31,6 @@ const TABLE: readonly Row[] = [
   ["session", "ready_for_review", "Ready for Review", "review"],
   ["session", "campaign_complete", "Campaign Complete", "success"],
   ["session", "campaign_active", "Campaign Active", "info"],
-  ["session", "stalled", "Stalled", "danger"],
   ["session", "failed", "Failed", "danger"],
   ["session", "stop_failed", "Stop Failed", "danger"],
   ["session", "stopped", "Stopped", "neutral"],
@@ -348,11 +347,11 @@ function deliverySession(
 
 test("an idle session with a blocked result shows Result Blocked as its status (#2275)", () => {
   const summary = sessionStatusSummary(deliverySession("continuation_blocked"));
-  assert.equal(summary.primary.kind, "background_delivery");
-  assert.equal(summary.primary.meta.label, "Result Blocked");
-  assert.equal(summary.primary.meta.tone, "warning");
-  assert.equal(summary.primary.needsYou, true);
-  assert.equal(summary.primary.delivery?.parentTurnId, "turn-1");
+  assert.equal(summary.conditions[0]!.kind, "background_delivery");
+  assert.equal(summary.conditions[0]!.meta.label, "Result Blocked");
+  assert.equal(summary.conditions[0]!.meta.tone, "warning");
+  assert.equal(summary.conditions[0]!.needsYou, true);
+  assert.equal(summary.conditions[0]!.delivery?.parentTurnId, "turn-1");
   assert.equal(summary.more, 0);
   // It needs the person, so it is the badge; the lifecycle is still listed after it (#3073).
   assert.deepEqual(summary.conditions.map((condition) => condition.meta.label), ["Result Blocked", "Awaiting Prompt"]);
@@ -363,18 +362,18 @@ test("a result its sibling still holds back reads Running in its turn, then Wait
   const waiting = { parentTurnId: "turn-1", jobCount: 1, terminalCount: 1, unfinishedSiblingJobs: 1 };
   const running = sessionStatusSummary({ status: "running", pendingApproval: null, attentionOwners: undefined,
     backgroundWorkState: "running", backgroundDeliveries: [waiting] });
-  assert.equal(running.primary.meta.label, "Running");
+  assert.equal(running.conditions[0]!.meta.label, "Running");
   assert.equal(running.more, 0);
   assert.deepEqual(running.conditions.map((condition) => [condition.meta.label, condition.needsYou]),
     [["Running", false], ["Waiting on External Job", false]], "in-flight work is a passive row");
   const ended = sessionStatusSummary({ status: "idle", pendingApproval: null, attentionOwners: undefined,
     backgroundWorkState: "running", backgroundDeliveries: [waiting] });
-  assert.equal(ended.primary.meta.label, "Waiting on External Job");
-  assert.equal(ended.primary.needsYou, false);
+  assert.equal(ended.conditions[0]!.meta.label, "Waiting on External Job");
+  assert.equal(ended.conditions[0]!.needsYou, false);
   assert.deepEqual(ended.conditions.map((condition) => condition.meta.label), ["Waiting on External Job", "Awaiting Prompt"]);
   // Past the bound it is Result Blocked, and the session's lifecycle stays in the popover.
   const blocked = sessionStatusSummary(deliverySession("continuation_blocked", { status: "running", backgroundWorkState: "running" }));
-  assert.equal(blocked.primary.meta.label, "Result Blocked");
+  assert.equal(blocked.conditions[0]!.meta.label, "Result Blocked");
   assert.equal(blocked.more, 0);
   assert.deepEqual(blocked.conditions.map((condition) => condition.meta.label),
     ["Result Blocked", "Running", "Waiting on External Job"]);
@@ -382,8 +381,8 @@ test("a result its sibling still holds back reads Running in its turn, then Wait
 
 test("an idle session with a missing result shows Result Missing as its status (#2275)", () => {
   const summary = sessionStatusSummary(deliverySession("accepted_without_result"));
-  assert.equal(summary.primary.meta.label, "Result Missing");
-  assert.equal(summary.primary.needsYou, true);
+  assert.equal(summary.conditions[0]!.meta.label, "Result Missing");
+  assert.equal(summary.conditions[0]!.needsYou, true);
   assert.equal(summary.more, 0);
 });
 
@@ -393,7 +392,7 @@ test("an approval leads a missing result, which counts as +1 (#2275)", () => {
     status: "input_required",
     pendingApproval: approval,
   }));
-  assert.equal(summary.primary.meta.label, "Approval Required");
+  assert.equal(summary.conditions[0]!.meta.label, "Approval Required");
   assert.equal(summary.more, 1);
   assert.deepEqual(summary.conditions.map((condition) => condition.meta.label),
     ["Approval Required", "Result Missing", "Awaiting Input"]);
@@ -416,7 +415,7 @@ test("a result still on its way back stays passive and leaves +N unchanged (#227
     ["dashboard_observation_pending", "Notification Pending"],
   ] as const) {
     const idle = sessionStatusSummary(deliverySession(state));
-    assert.equal(idle.primary.meta.label, "Awaiting Prompt", state);
+    assert.equal(idle.conditions[0]!.meta.label, "Awaiting Prompt", state);
     assert.equal(idle.more, 0, state);
     const row = idle.conditions.find((condition) => condition.kind === "background_delivery")!;
     assert.equal(row.meta.label, label);
@@ -424,7 +423,7 @@ test("a result still on its way back stays passive and leaves +N unchanged (#227
     assert.equal(row.needsYou, false);
     const approval: PendingApproval = { requestId: "approval-1", title: "Run the tests", options: [], kind: "permission" };
     const asking = sessionStatusSummary(deliverySession(state, { status: "input_required", pendingApproval: approval }));
-    assert.equal(asking.primary.meta.label, "Approval Required", state);
+    assert.equal(asking.conditions[0]!.meta.label, "Approval Required", state);
     assert.equal(asking.more, 0, state);
   }
 });
@@ -436,7 +435,7 @@ test("a delivery that waits on the person is the one shown, even after a passive
       { parentTurnId: "turn-2", jobCount: 2, terminalCount: 1, watchdogState: "continuation_blocked" },
     ],
   }));
-  assert.equal(summary.primary.meta.label, "Result Blocked");
+  assert.equal(summary.conditions[0]!.meta.label, "Result Blocked");
   assert.equal(summary.conditions.filter((condition) => condition.kind === "background_delivery").length, 1);
 });
 

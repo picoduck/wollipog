@@ -516,10 +516,13 @@ test("the phone Session status control leads its line without pushing the fixed 
   assert.deepEqual(status.get("min-width"), ["0"]);
   assert.deepEqual(status.get("max-width"), ["100%"],
     "a long label must not widen its track into Share and More Actions");
-  assert.deepEqual(status.get("height"), ["36px"], "the control is the line's small size, like Share");
+  assert.deepEqual(status.get("min-height"), ["36px"], "the control keeps Share's minimum target");
+  assert.deepEqual(status.get("height"), ["auto"], "whole labels may grow the leading track");
+  assert.deepEqual(status.get("flex-wrap"), ["wrap"], "lifecycle and secondary labels wrap rather than clip");
   assert.equal(status.has("overflow"), false, "clipping the button would clip its borrowed touch target");
-  assert.deepEqual(phoneRule.declarationsForSelector(".session-bar > .session-status-button > .status")
-    .get("overflow"), ["hidden"], "the badge clips inside its track instead");
+  const badge = phoneRule.declarationsForSelector(".session-bar > .session-status-button > .status");
+  assert.equal(badge.has("overflow"), false, "each badge keeps its full label");
+  assert.deepEqual(badge.get("flex"), ["none"], "badges wrap as whole labels");
   // The header badge is the one `.status` recipe (docs/design-system.md §11.1), so the phone keeps
   // its 11px type rather than dropping to the retired 10px `--text-2xs`.
   assert.equal(phoneRule.declarationsForSelector(".session-bar > .session-status-button > .status").has("font-size"),

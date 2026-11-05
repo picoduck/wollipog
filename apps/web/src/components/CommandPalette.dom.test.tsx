@@ -129,7 +129,6 @@ async function mount(options: {
         <Rail
           view={{ name: "inbox" }}
           blockedCount={0}
-          stalledCount={0}
           onNavigate={() => {}}
           onSearch={openPalette}
         />

@@ -58,7 +58,7 @@ test("the application shell is rail-first and the legacy sidebar is fully retire
     ["mam", "projects", "collapsed"].join("."),
   ]) assert.equal(combined.includes(retired), false, retired);
 
-  assert.match(app, /<Rail[\s\S]*blockedCount=\{blockedSessions\}[\s\S]*stalledCount=\{stalledSessions\}[\s\S]*machines=\{railMachines\}/);
+  assert.match(app, /<Rail[\s\S]*blockedCount=\{blockedSessions\}[\s\S]*machines=\{railMachines\}/);
   assert.match(app, /machineAttention\(runners\.values\(\), sessions\.values\(\)\)/,
     "Connections reads machines that need the user, never a count of online ones (#1967)");
   assert.doesNotMatch(app, /onlineRunners|onlineConnections/);
@@ -152,14 +152,14 @@ test("the desktop rail is grouped, searchable and has one current-page treatment
 
 test("heartbeat activity feeds cards, preview, split counts, and independent rail badges", () => {
   // #2214: the counts live on the tabs and the rail; the Sessions footer that restated them is gone.
-  assert.match(groupTabs, /<CountBadge count=\{split\.stalledCount\} tone="danger" \/>/);
+  assert.doesNotMatch(groupTabs, /stalledCount/);
   assert.doesNotMatch(inbox, /inbox-activity-footer/);
   assert.match(inboxList, /state\.activity\.get\(props\.session\.id\)/);
   // #2210: the Sessions preview shows one status and no activity strip; the rows carry it.
   assert.doesNotMatch(detail, /<ActivityStrip\b/, "the preview bar has no activity strip");
-  assert.match(app, /sessionVisibleForReminderMode\(session, reminders\.get\(session\.id\), "ordinary"\)[\s\S]*activeSessions\.filter\(isInboxBlocked\)[\s\S]*activeSessions\.filter\(\(session\) => stalledSessionIds\.has\(session\.id\)\)/,
+  assert.match(app, /sessionVisibleForReminderMode\(session, reminders\.get\(session\.id\), "ordinary"\)[\s\S]*activeSessions\.filter\(isInboxBlocked\)/,
     "the rail's Blocked and Stalled badges must derive from the same Active membership as Sessions");
-  assert.match(rail, /const attentionState = \{ blocked: blockedCount, stalled: stalledCount, machines \};/,
+  assert.match(rail, /const attentionState = \{ blocked: blockedCount, machines \};/,
     "the Sessions badge derives from the same Blocked and Stalled counts");
   assert.match(css, /prefers-reduced-motion: reduce[\s\S]*activity-strip/);
 });

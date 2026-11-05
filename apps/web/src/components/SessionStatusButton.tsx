@@ -98,7 +98,7 @@ export function ConditionBadge({ condition }: { condition: SessionCondition }) {
 
 /**
  * The Session Status control (docs/design-system.md §4.3, §9.2, #2182): one ghost button right
- * after the title holding the session's one status badge (`sessionStatusSummary()`) and, when other
+ * after the title holding the session's lifecycle and secondary badges (`sessionStatusSummary()`) and, when other
  * conditions need the person, a plain "+N". It opens the Session Status popover, which lists every
  * condition with one sentence and the action that resolves it; on a phone that is a bottom sheet.
  *
@@ -129,9 +129,9 @@ export function SessionStatusButton({
   small?: boolean;
   actions: SessionStatusActions;
 }) {
-  const { primary, more, conditions } = summary;
-  const name = `Session Status: ${conditionName(primary)}${more > 0 ? ` and ${more} More` : ""}`;
-  const tooltip = `${primary.meta.label}${more > 0 ? ` and ${more} more` : ""}`;
+  const { primary, secondary, more, conditions } = summary;
+  const name = `Session Status: ${conditionName(primary)}${secondary ? `, ${conditionName(secondary)}` : ""}${more > 0 ? ` and ${more} More` : ""}`;
+  const tooltip = `${primary.meta.label}${secondary ? `, ${secondary.meta.label}` : ""}${more > 0 ? ` and ${more} more` : ""}`;
   // Phones have no title in this bar, so only a desktop bar in the compact tier ever measures.
   const compact = useIsCompact() && titleRef !== undefined;
 
@@ -178,7 +178,7 @@ export function SessionStatusButton({
       observer?.disconnect();
       renamed?.disconnect();
     };
-  }, [compact, tooltip, primary.count, popover.triggerRef, titleRef]);
+  }, [compact, tooltip, primary.count, secondary?.count, popover.triggerRef, titleRef]);
 
   // A popover with nothing to act on holds focus itself, so Escape and Tab still work from it.
   useLayoutEffect(() => {
@@ -236,6 +236,7 @@ export function SessionStatusButton({
         onKeyDown={onTriggerKeyDown}
       >
         <ConditionBadge condition={primary} />
+            {secondary && <ConditionBadge condition={secondary} />}
         {more > 0 && <span className="session-status-more" aria-hidden="true">+{more}</span>}
       </button>
       {open && (

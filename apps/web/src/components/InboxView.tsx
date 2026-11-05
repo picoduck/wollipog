@@ -113,7 +113,6 @@ export function filterInboxSplitsForReminderMode(
   baseSplits: readonly InboxSplit[],
   reminders: ReadonlyMap<string, SessionReminderView>,
   mode: ReminderInboxMode,
-  stalledSessionIds: ReadonlySet<string>,
   pinnedSessions: ReadonlySet<string> = new Set(),
 ): InboxSplit[] {
   const familySessions = baseSplits.find((split) => split.kind === "all")?.sessions;
@@ -133,7 +132,6 @@ export function filterInboxSplitsForReminderMode(
       sessions: sortSessionsForReminders(visibleSessions, reminders, mode, pinnedSessions, familySessions),
       count,
       blockedCount: visibleSessions.reduce((total, session) => total + Number(isInboxBlocked(session)), 0),
-      stalledCount: visibleSessions.reduce((total, session) => total + Number(stalledSessionIds.has(session.id)), 0),
     };
   });
 }
@@ -231,8 +229,6 @@ export function InboxView({
   const accessScopeManagementSupported = useStoreSelector((state) => state.accessScopeManagementSupported);
   const projectCreationRetrySupported = useStoreSelector(projectCreationRetryAvailable);
   const stopBeforeArchiveSupported = useStoreSelector((state) => state.stopBeforeArchiveSupported);
-  const stalledIndex = useStoreSelector((state) => state.stalledSessionIds);
-  const stalledRevision = useStoreSelector((state) => state.stalledRevision);
   const runners = useStoreSelector((state) => state.runners);
   const boxes = useStoreSelector((state) => state.boxes);
   const worktreeSetupConfigSupported = useStoreSelector((state) => state.worktreeSetupConfigSupported);
@@ -481,22 +477,19 @@ export function InboxView({
     };
   }, []);
 
-  // The store mutates its bounded stall index in place for O(1) event updates. Snapshot it only
-  // when membership changes; ordinary heartbeat pulses never rebuild Inbox splits or rows.
-  const stalledSessionIds = useMemo(() => new Set(stalledIndex), [stalledIndex, stalledRevision]);
 
   const baseSplits = useMemo(() => buildInboxSplits(
     sessions.values(),
     pinnedProjects,
     pinnedSessions,
-    stalledSessionIds,
+
     projects.values(),
     projectsSupported,
-  ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions, stalledSessionIds]);
+  ), [pinnedProjects, pinnedSessions, projects, projectsSupported, sessions]);
   const reminderSplits = useMemo(() => ({
-    ordinary: filterInboxSplitsForReminderMode(baseSplits, reminders, "ordinary", stalledSessionIds, pinnedSessions),
-    snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", stalledSessionIds, pinnedSessions),
-  }), [baseSplits, reminders, stalledSessionIds, pinnedSessions]);
+    ordinary: filterInboxSplitsForReminderMode(baseSplits, reminders, "ordinary", pinnedSessions),
+    snoozed: filterInboxSplitsForReminderMode(baseSplits, reminders, "snoozed", pinnedSessions),
+  }), [baseSplits, reminders, pinnedSessions]);
   const splits = reminderSplits[reminderMode];
   const machineName = useMemo(() => {
     const boxByRunner = new Map([...boxes.values()].map((box) => [box.runnerId, box]));
@@ -568,8 +561,7 @@ export function InboxView({
     splits,
     normalizedQuery,
     (session) => inboxProjectName(session, projectsSupported ? projects : undefined),
-    stalledSessionIds,
-  ), [normalizedQuery, projects, projectsSupported, splits, stalledSessionIds]);
+  ), [normalizedQuery, projects, projectsSupported, splits]);
   const liveEntries = useMemo<InboxListEntry[]>(() => (activeSplit?.sessions ?? [])
     .filter((session) => sessionMatchesQuery(
       session,
@@ -641,14 +633,13 @@ export function InboxView({
   // the rows the user was browsing keep their places. Threading the live list before holding it
   // would have appended a re-expanded thread's children at the END of the held order instead.
   const canonicalEntries = useMemo(() => threadInboxRows(
-    liveEntries, collapsedThreads, stalledSessionIds, [...sessions.values()],
-  ), [collapsedThreads, liveEntries, stalledSessionIds, sessions]);
+    liveEntries, collapsedThreads, [...sessions.values()],
+  ), [collapsedThreads, liveEntries, sessions]);
   const entries = useMemo(() => {
     if (!displayedHeldOrder) return canonicalEntries;
     const heldEntries = threadInboxRows(
       reconcileInboxItems(displayedHeldOrder, liveEntries, (entry) => entry.session.id),
       collapsedThreads,
-      stalledSessionIds,
       [...sessions.values()],
     );
     // Starting or ending a hold usually changes no visible rows. Preserve their array identity:
@@ -657,7 +648,7 @@ export function InboxView({
     return heldEntries.length === canonicalEntries.length && heldEntries.every(
       (entry, index) => entry.session.id === canonicalEntries[index]?.session.id,
     ) ? canonicalEntries : heldEntries;
-  }, [canonicalEntries, collapsedThreads, displayedHeldOrder, liveEntries, stalledSessionIds, sessions]);
+  }, [canonicalEntries, collapsedThreads, displayedHeldOrder, liveEntries, sessions]);
   const displayedIds = useMemo(() => entries.map((entry) => entry.session.id), [entries]);
   // Selection repair reads the last committed list, never a speculative/Strict Mode render.
   useLayoutEffect(() => { displayedIdsRef.current = displayedIds; }, [displayedIds]);
@@ -1906,7 +1897,6 @@ export function InboxView({
             sessions={boardSessions}
             pinnedSessionIds={pinnedSessions}
             reminders={reminders}
-            stalledSessionIds={stalledSessionIds}
             searchActive={normalizedQuery.length > 0 || (activeSplit?.key ?? null) !== null || reminderMode === "snoozed"}
             onShowAll={() => {
               exitSearch();
@@ -1933,7 +1923,6 @@ export function InboxView({
                 selectedSessionId={displayedSelection}
                 pinnedSessionIds={pinnedSessions}
                 pinnedAncestorSessionIds={pinnedAncestorSessionIds}
-                stalledSessionIds={stalledSessionIds}
                 onSelect={handleSelect}
                 onExpand={expand}
                 onToggleThread={toggleThread}

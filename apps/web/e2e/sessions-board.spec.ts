@@ -629,13 +629,13 @@ function cardGeometry(page: Page) {
 
 /**
  * Every card's status line, measured: the badge never clips; a parent shows its chip and no strip; the
- * chip's words either fit whole or the chip is dots-only; and a strip that does not fit beside the
- * badge is wrapped out of sight rather than squeezing it.
+ * chip's words either fit whole or the chip is dots-only; and signals wrap to additional lines
+ * rather than squeezing lifecycle or secondary labels.
  */
 async function expectWholeStatusLines(page: Page) {
   const lines = await page.locator(".board").evaluate((board) => [...board.querySelectorAll<HTMLElement>(".card")].map((card) => {
     const line = card.querySelector<HTMLElement>(".card-status")!.getBoundingClientRect();
-    const badge = card.querySelector<HTMLElement>(".card-status .status");
+    const badges = [...card.querySelectorAll<HTMLElement>(".card-status .status")];
     const strip = card.querySelector<HTMLElement>(".card-status .activity-strip");
     const chip = card.querySelector<HTMLElement>(".card-status .inbox-thread-family");
     const words = chip?.querySelector<HTMLElement>(".inbox-thread-family-text");
@@ -644,10 +644,12 @@ async function expectWholeStatusLines(page: Page) {
     return {
       id: card.dataset.sessionId!,
       parent: card.dataset.sessionId === "s-parent",
-      hasBadge: Boolean(badge),
-      badgeClipped: badge ? badge.scrollWidth > badge.clientWidth + 0.5 || badge.getBoundingClientRect().right > line.right + 0.5 : false,
+      hasBadge: badges.length > 0,
+      badgeClipped: badges.some((badge) => badge.scrollWidth > badge.clientWidth + 0.5
+        || badge.getBoundingClientRect().right > line.right + 0.5
+        || badge.getBoundingClientRect().bottom > line.bottom + 0.5),
       hasStrip: Boolean(strip),
-      // On the line and whole, or wrapped below it, where the line clips it.
+      // Every shown signal fits its line, including wrapped lines.
       stripPlacement: !stripBox ? "none" : stripBox.top >= line.bottom - 0.5 ? "wrapped"
         : stripBox.right <= line.right + 0.5 ? "whole" : "squeezed",
       hasChip: Boolean(chip),
@@ -704,11 +706,11 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     expect(await idle.evaluate((card) => getComputedStyle(card).transform), "hovering moves nothing").toBe("none");
     expect(await idle.boundingBox()).toEqual(box);
 
-    // Cards in one column without a request differ in height only by their title's lines, whatever
-    // their status: the rest of each card is the same height. (A title's wrap depends on the fonts.)
+    // Titles and status labels may wrap; the rest of a request-free card keeps the same anatomy.
     const heights = await page.locator(".column.col-running .card").evaluateAll((cards) => cards.map((card) =>
-      Math.round(card.getBoundingClientRect().height - card.querySelector(".card-title")!.getBoundingClientRect().height)));
-    expect(new Set(heights).size, `running column heights without titles ${heights.join(", ")}`).toBe(1);
+      Math.round(card.getBoundingClientRect().height - card.querySelector(".card-title")!.getBoundingClientRect().height
+        - card.querySelector(".card-status")!.getBoundingClientRect().height)));
+    expect(new Set(heights).size, `running column heights without titles or status labels ${heights.join(", ")}`).toBe(1);
   });
 
   test("a permission card shows exactly Approve and Deny at equal width, and Approve answers the request", async ({ page }) => {
@@ -755,8 +757,10 @@ test.describe("Board cards at 1440×900 (#2222)", () => {
     // An idle parent surfaces its child's input request. Beside that badge, the chip keeps its
     // dots rather than ellipsizing the rollup and calling that a fit, and retains its whole name.
     const idleParent = narrow.find((line) => line.id === "s-idle-parent")!;
-    await expect(page.locator('.board .card[data-session-id="s-idle-parent"] .status'))
-      .toHaveAccessibleName("Status: Needs Your Input");
+    const idleParentBadges = page.locator('.board .card[data-session-id="s-idle-parent"] .status');
+    await expect(idleParentBadges).toHaveCount(2);
+    await expect(idleParentBadges.nth(0)).toHaveAccessibleName("Status: Awaiting Prompt");
+    await expect(idleParentBadges.nth(1)).toHaveAccessibleName("Status: Needs Your Input");
     expect({ badge: idleParent.hasBadge, dotsOnly: idleParent.chipDotsOnly, name: idleParent.chipName },
       "a 230px parent card keeps the child input badge and the chip's dots")
       .toEqual({ badge: true, dotsOnly: true, name: "4 Children · 1 Awaiting Input" });
@@ -789,7 +793,7 @@ test.describe("Board cards in wide columns (#2222)", () => {
 
   test("a parent card's chip shows its whole rollup when the card has room", async ({ page }) => {
     await openCards(page);
-    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 480px; min-width: 480px; max-width: 480px; }" });
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 640px; min-width: 640px; max-width: 640px; }" });
     await expect(page.locator('.board .card[data-session-id="s-parent"] .inbox-thread-family')).not.toHaveClass(/dots-only/u);
     const wide = await expectWholeStatusLines(page);
     expect(wide.find((line) => line.parent)!.chipWordsWhole).toBe(true);
@@ -810,7 +814,7 @@ test.describe("Board cards in wide columns (#2222)", () => {
     await noBadge.evaluate((style) => style.remove());
     await narrow.evaluate((style) => style.remove());
 
-    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 480px; min-width: 480px; max-width: 480px; }" });
+    await page.addStyleTag({ content: ".board .column:not(.is-empty) { flex: 0 0 640px; min-width: 640px; max-width: 640px; }" });
     await expect(chip).not.toHaveClass(/dots-only/u);
     // What sits beside the chip grows (a "+1" joining the badge) while the line keeps its size.
     const wider = await page.addStyleTag({ content: '.card[data-session-id="s-parent"] .card-status > .row-status { padding-right: 300px; }' });

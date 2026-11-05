@@ -102,7 +102,7 @@ function trigger(): HTMLButtonElement {
 
 /** The badges drawn in the bar itself; an open popover is portalled to <body>, outside it. */
 function barBadges(): string[] {
-  return [...body().querySelectorAll("header.session-bar .status")].map((badge) => badge.textContent ?? "");
+  return [...body().querySelectorAll("header.session-bar .status")].slice(-1).map((badge) => badge.textContent ?? "");
 }
 
 function popover(): HTMLElement | null {
@@ -212,7 +212,7 @@ test("an approval and an answer request show the breakdown's first kind with +1"
     const first = sessionAttentionBreakdown({ status: "input_required", pendingApproval })[0]!.label;
     assert.deepEqual(barBadges(), [first], "exactly one status badge is drawn in the bar");
     assert.equal(trigger().querySelector(".session-status-more")?.textContent, "+1");
-    assert.equal(trigger().getAttribute("aria-label"), `Session Status: ${first} and 1 More`);
+    assert.equal(trigger().getAttribute("aria-label"), `Session Status: Awaiting Input, ${first} and 1 More`);
     assert.equal(trigger().getAttribute("aria-haspopup"), "dialog");
     assert.equal(trigger().getAttribute("aria-expanded"), "false");
     assert.match(trigger().className, /\bbtn ghost\b/, "the control is a ghost button, not a pill");
@@ -228,8 +228,8 @@ test("8 human-owned and 4 Orchestrator-owned child requests are one 8 Child Requ
   }, { childRequests: 8 });
   try {
     assert.deepEqual(barBadges(), ["8 Child Requests"], "one status, and no other request badge");
-    assert.match(trigger().querySelector(".status")?.className ?? "", /\bt-warning\b/u);
-    assert.equal(trigger().getAttribute("aria-label"), "Session Status: 8 Child Requests");
+    assert.match(trigger().querySelector(".status:last-child")?.className ?? "", /\bt-warning\b/u);
+    assert.equal(trigger().getAttribute("aria-label"), "Session Status: Running, 8 Child Requests");
     await act(async () => { trigger().click(); });
     const rows = [...popover()!.querySelectorAll(".session-status-row")];
     assert.deepEqual(rows.map((row) => row.querySelector(".status")?.textContent), ["8 Child Requests", "Running"],
@@ -269,7 +269,7 @@ test("an idle session shows Waiting on External Job while background work runs, 
     try {
       assert.deepEqual(barBadges(), [label]);
       assertNoDomNode(trigger().querySelector(".session-status-more"), "nothing else needs the person");
-      assert.equal(trigger().getAttribute("aria-label"), `Session Status: ${label}`);
+      assert.equal(trigger().getAttribute("aria-label"), "Session Status: Awaiting Prompt" + (label === "Awaiting Prompt" ? "" : ", " + label));
     } finally {
       await cleanUp(root);
     }
@@ -297,7 +297,7 @@ test("background work changes are still announced, as text rather than a second 
     const live = body().querySelector('header.session-bar [role="status"][data-live="background-work"]');
     assert.equal(live?.textContent, "Background Work: Waiting on External Job");
     assert.equal(live?.getAttribute("aria-live"), "polite");
-    assert.deepEqual(barBadges(), ["Running"]);
+    assert.deepEqual(barBadges(), ["Waiting on External Job"]);
   } finally {
     await cleanUp(root);
   }
@@ -373,7 +373,7 @@ test("queue reasons are popover rows, not badges", async () => {
     capacityWait: { kind: "runner_capacity", description: "Waiting for a free runner slot." },
   } as Partial<SessionView>);
   try {
-    assert.deepEqual(barBadges(), ["Queued"]);
+    assert.deepEqual(barBadges(), ["Runner Capacity"]);
     await act(async () => { trigger().click(); });
     const fact = popover()!.querySelector(".session-status-fact");
     assert.equal(fact?.textContent, "Runner Capacity");

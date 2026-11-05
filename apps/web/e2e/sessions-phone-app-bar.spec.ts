@@ -50,8 +50,8 @@ test("the first row starts at most 56px below the top of the content: the 48px b
 
 test("the picker names the group and its attention, and choosing in its sheet switches the list", async ({ page }) => {
   await openGroups(page);
-  await expect(picker(page)).toHaveAccessibleName("All, 2 Blocked, 1 Stalled");
-  await expect(picker(page).locator(".count-badge")).toHaveText(["2", "1"]);
+  await expect(picker(page)).toHaveAccessibleName("All, 2 Blocked");
+  await expect(picker(page).locator(".count-badge")).toHaveText(["2"]);
   await picker(page).tap();
   const sheet = page.getByRole("menu", { name: "Session Groups" });
   await docked(sheet);
@@ -63,7 +63,7 @@ test("the picker names the group and its attention, and choosing in its sheet sw
 
   await sheet.getByRole("menuitemradio", { name: /^Billing, 2/ }).tap();
   await expect(sheet).toHaveCount(0);
-  await expect(picker(page)).toHaveAccessibleName("Billing, 1 Blocked, 1 Stalled");
+  await expect(picker(page)).toHaveAccessibleName("Billing, 1 Blocked");
   await expect(page.locator(".inbox-row-title")).toHaveText(["Billing Session", "Move the billing buckets to terraform"]);
   expect(harnessPath(page), "the group is in the URL (§10.1)").toMatch(/[?&]tab=/);
 });

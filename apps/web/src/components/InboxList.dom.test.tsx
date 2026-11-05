@@ -100,7 +100,6 @@ test("inbox list exposes selection semantics and mouse select/expand paths", asy
         selectedSessionId={first.id}
         pinnedSessionIds={new Set([first.id])}
         activityBySession={new Map()}
-        stalledSessionIds={new Set()}
         activityNow={60_000}
         onSelect={(id) => selected.push(id)}
         onExpand={(id) => expanded.push(id)}
@@ -156,7 +155,6 @@ test("inbox list keeps live row content and the visible touch target while inter
       selectedSessionId="target"
       pinnedSessionIds={new Set()}
       activityBySession={new Map()}
-      stalledSessionIds={new Set()}
       activityNow={60_000}
       onSelect={(sessionId) => selected.push(sessionId)}
       onExpand={() => undefined}
@@ -186,7 +184,7 @@ test("inbox list keeps live row content and the visible touch target while inter
   });
   // The status is the live row content now. #664 took the preview off the row, so the same
   // re-render is observed through the badge it also carried rather than through preview text.
-  assert.match(container.textContent ?? "", /Input Required/);
+  assert.match(container.textContent ?? "", /Awaiting Input/);
 
   await act(async () => {
     pointer("pointerup", 7, "touch");
@@ -200,7 +198,7 @@ test("inbox list keeps live row content and the visible touch target while inter
   container.remove();
 });
 
-test("busy rows show activity while stalled approval remains distinct and accessible", async () => {
+test("busy rows show activity while quiet approvals remain distinct and accessible", async () => {
   const container = domWindow.document.createElement("div") as unknown as HTMLDivElement;
   domWindow.document.body.append(container as never);
   const root = createRoot(container);
@@ -236,7 +234,6 @@ test("busy rows show activity while stalled approval remains distinct and access
         selectedSessionId={running.id}
         pinnedSessionIds={new Set()}
         activityBySession={activityBySession}
-        stalledSessionIds={new Set([stalled.id])}
         activityNow={now}
         onSelect={() => undefined}
         onExpand={() => undefined}
@@ -251,20 +248,20 @@ test("busy rows show activity while stalled approval remains distinct and access
   // and Awaiting Input alone no longer counts.
   assert.equal(container.querySelectorAll(".activity-strip").length, 1, "idle and quiet sessions have no activity strip");
   assert.notEqual(rows[0]!.querySelector(".activity-strip"), null);
-  assert.equal(rows[1]!.classList.contains("stalled"), true);
+  assert.equal(rows[1]!.classList.contains("stalled"), false);
   assert.match(rows[0]!.textContent ?? "", /Running/);
   // One status per entity, and attention outranks lifecycle (docs/design-system.md §11.1): the
   // approval badge already says the session needs the user, so "Awaiting Input" is not said again.
-  assert.doesNotMatch(rows[1]!.textContent ?? "", /Awaiting Input/);
+  assert.match(rows[1]!.textContent ?? "", /Awaiting Input/);
   // Stalled is not a second badge: the one badge turns danger and says so in its name.
-  const stalledBadges = [...rows[1]!.querySelectorAll<HTMLElement>(".status")];
+  const stalledBadges = [...rows[1]!.querySelectorAll<HTMLElement>(".status")].slice(1);
   assert.equal(stalledBadges.length, 1);
   assert.equal(stalledBadges[0]!.textContent, "Approval Required");
-  assert.ok(stalledBadges[0]!.classList.contains("t-danger"));
-  assert.equal(stalledBadges[0]!.getAttribute("aria-label"), "Status: Approval Required, Stalled");
+  assert.ok(stalledBadges[0]!.classList.contains("t-warning"));
+  assert.equal(stalledBadges[0]!.getAttribute("aria-label"), "Status: Approval Required");
   // An idle row shows no badge at all.
-  assert.equal(rows[2]!.querySelectorAll(".status").length, 0);
-  assert.doesNotMatch(rows[2]!.textContent ?? "", /Awaiting Prompt|Diff Ready|Ready for Review/);
+  assert.equal(rows[2]!.querySelectorAll(".status").length, 1);
+  assert.doesNotMatch(rows[2]!.textContent ?? "", /Diff Ready|Ready for Review/);
   assert.equal(rows[3]!.querySelector("[aria-label=\"Status: Authentication Required\"]")?.textContent?.trim(),
     "Authentication Required");
 
@@ -276,13 +273,12 @@ test("a row reads the minute clock only while time can change what it shows (#22
   const now = 1_000 * 60_000 + 30_000;
   const active = recordSessionActivity(undefined, now - 9 * 60_000);
   for (const status of ["running", "starting"] as const) {
-    assert.equal(inboxRowReadsClock({ status }, undefined, false, now), true, status);
+    assert.equal(inboxRowReadsClock({ status }, undefined, now), true, status);
   }
-  assert.equal(inboxRowReadsClock({ status: "idle" }, active, false, now), true, "its strip must lapse on time");
-  assert.equal(inboxRowReadsClock({ status: "idle" }, active, false, now + 60_000), false,
+  assert.equal(inboxRowReadsClock({ status: "idle" }, active, now), true, "its strip must lapse on time");
+  assert.equal(inboxRowReadsClock({ status: "idle" }, active, now + 60_000), false,
     "the tick on which it lapses flips the reading to 0, which re-renders the row without its strip");
-  assert.equal(inboxRowReadsClock({ status: "input_required" }, undefined, true, now), true, "a stalled row counts its silence");
   for (const status of ["idle", "queued", "input_required", "completed"] as const) {
-    assert.equal(inboxRowReadsClock({ status }, undefined, false, now), false, `${status} with nothing recent`);
+    assert.equal(inboxRowReadsClock({ status }, undefined, now), false, `${status} with nothing recent`);
   }
 });

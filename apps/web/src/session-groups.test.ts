@@ -65,8 +65,8 @@ test("the summary names nonzero parts in sentence case, and Snoozed counts only 
   const running = { status: "running" } as SessionView;
   const idle = { status: "idle" } as SessionView;
   const split = (count: number, blockedCount: number, stalledCount: number, sessions: SessionView[]) =>
-    ({ count, blockedCount, stalledCount, sessions });
-  assert.equal(sessionGroupSummary(split(9, 1, 1, [running, running, idle])), "9 sessions: 1 needs you, 1 stalled, 2 running");
+    ({ count, blockedCount, sessions });
+  assert.equal(sessionGroupSummary(split(9, 1, 1, [running, running, idle])), "9 sessions: 1 needs you, 2 running");
   assert.equal(sessionGroupSummary(split(4, 2, 0, [idle])), "4 sessions: 2 need you");
   assert.equal(sessionGroupSummary(split(1, 0, 0, [idle])), "1 session");
   assert.equal(sessionGroupSummary(split(0, 0, 0, [])), "0 sessions");
@@ -75,7 +75,7 @@ test("the summary names nonzero parts in sentence case, and Snoozed counts only 
 });
 
 test("attention words name only the nonzero counts", () => {
-  assert.equal(sessionGroupAttentionWords({ blockedCount: 2, stalledCount: 1 }), "2 Blocked, 1 Stalled");
-  assert.equal(sessionGroupAttentionWords({ blockedCount: 0, stalledCount: 1 }), "1 Stalled");
-  assert.equal(sessionGroupAttentionWords({ blockedCount: 0, stalledCount: 0 }), "");
+  assert.equal(sessionGroupAttentionWords({ blockedCount: 2 }), "2 Blocked");
+  assert.equal(sessionGroupAttentionWords({ blockedCount: 0 }), "");
+  assert.equal(sessionGroupAttentionWords({ blockedCount: 0 }), "");
 });

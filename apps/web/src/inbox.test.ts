@@ -178,7 +178,7 @@ test("a family's Ready for Review counts only descendants at rest, and a working
   // Running parent, at-rest child with a result: the parent shows its working status.
   const runningParent = family("running", "idle");
   assert.equal(runningParent.thread.children?.followUpLabel, undefined);
-  assert.equal(sessionRowStatus(runningParent.session, { familyFollowUpLabel: "Ready for Review" }).badge?.meta.label, "Running");
+  assert.equal(sessionRowStatus(runningParent.session, { familyFollowUpLabel: "Ready for Review" }).lifecycle.meta.label, "Running");
   // A family request that needs the person still shows on a working parent.
   const asking = threadInboxRows([{ session: session("parent", { status: "running" }) },
     { session: session("child", { status: "input_required", parentSessionId: "parent",
@@ -264,7 +264,6 @@ test("authoritative Project splits preserve empty Projects, exclude hidden tabs,
     sessions,
     new Set([legacyAlphaKey]),
     new Set(),
-    new Set(),
     [empty, hidden, sameName, alpha],
     true,
   );
@@ -299,7 +298,6 @@ test("new-session presets distinguish durable Projects, No Project, and All", ()
   };
   const splits = deriveInboxSplits(
     [],
-    new Set(),
     new Set(),
     new Set(),
     [project("project-1", { locations: [selectedLocation] })],
@@ -344,7 +342,7 @@ test("durable Project grouping follows stable Project IDs across Locations and m
   const splits = deriveInboxSplits([
     session("one", { projectId: "project-1", runnerId: "r1", workspaceId: "w1" }),
     session("two", { projectId: "project-1", runnerId: "r2", workspaceId: "w2" }),
-  ], new Set(), new Set(), new Set(), [durable], true);
+  ], new Set(), new Set(), [durable], true);
   const split = splits.find((candidate) => candidate.kind === "project")!;
   assert.deepEqual(split.sessions.map(({ id }) => id), ["one", "two"]);
   assert.equal(split.project?.kind === "durable" ? split.project.primaryLocation?.id : null, "loc-1",
@@ -364,7 +362,7 @@ test("Projects with multiple available Locations require an explicit or default 
     isDefault: false, createdAt: 1, updatedAt: 1,
   };
   const ambiguous = project("project-1", { locations: [locationOne, locationTwo] });
-  const ambiguousSplit = deriveInboxSplits([], new Set(), new Set(), new Set(), [ambiguous], true)
+  const ambiguousSplit = deriveInboxSplits([], new Set(), new Set(), [ambiguous], true)
     .find((candidate) => candidate.kind === "project")!;
   assert.equal(ambiguousSplit.project?.kind === "durable" ? ambiguousSplit.project.primaryLocation : undefined, null,
     "the Inbox must not make an arbitrary Location the Project default");
@@ -372,7 +370,7 @@ test("Projects with multiple available Locations require an explicit or default 
   const withDefault = project("project-1", {
     locations: [locationOne, { ...locationTwo, isDefault: true }],
   });
-  const defaultSplit = deriveInboxSplits([], new Set(), new Set(), new Set(), [withDefault], true)
+  const defaultSplit = deriveInboxSplits([], new Set(), new Set(), [withDefault], true)
     .find((candidate) => candidate.kind === "project")!;
   assert.equal(defaultSplit.project?.kind === "durable" ? defaultSplit.project.primaryLocation?.id : null, "loc-2");
 });
@@ -420,7 +418,7 @@ test("sortInboxSessions puts pins first, then input above work and quiet, indepe
     session("stalled-blocked", { status: "input_required", lastEventAt: 20 }),
     session("blocked-newer", { status: "input_required", lastEventAt: 35 }),
     session("pinned-settled", { status: "idle", lastEventAt: 1 }),
-  ], new Set(["pinned-settled"]), new Set(["stalled-blocked", "running"]));
+  ], new Set(["pinned-settled"]));
   assert.deepEqual(sorted.map(({ id }) => id),
     ["pinned-settled", "blocked", "blocked-newer", "stalled-blocked", "running", "settled-new"]);
 });
@@ -484,7 +482,7 @@ test("threadInboxRows nests children under a present parent and drops a collapse
     { session: session("lone", { status: "idle" }) },
     { session: session("orphan", { status: "idle", parentSessionId: "absent" }) },
   ];
-  const expanded = threadInboxRows(rows, new Set(), new Set(["a"]));
+  const expanded = threadInboxRows(rows, new Set());
   assert.deepEqual(expanded.map((row) => [row.session.id, row.thread.depth, row.thread.parentId, row.thread.last]), [
     ["parent", 0, null, false],
     ["a", 1, "parent", false],
@@ -496,7 +494,7 @@ test("threadInboxRows nests children under a present parent and drops a collapse
   const parent = expanded[0]!.thread;
   assert.equal(parent.collapsed, false);
   assert.deepEqual(parent.children, { followUpLabel: "Needs Your Input", count: 2, visibleCount: 2, hasActiveWork: true, working: 1, waiting: 1, children: [
-    { id: "a", title: "Child A", state: "stalled", statusLabel: "Input Required" },
+    { id: "a", title: "Child A", state: "blocked", statusLabel: "Awaiting Input" },
     { id: "b", title: "Child B", state: "done", statusLabel: "Completed" },
   ] });
   assert.equal(inboxThreadChildrenLabel(parent.children!), "2 Children · Needs Your Input · 1 Working");
@@ -612,11 +610,11 @@ test("a parent cycle and a child placed ahead of its parent both keep every sess
 });
 
 test("the family chip label leads with the count and follows with the most pressing fact", () => {
-  const child = (state: "blocked" | "stalled" | "running" | "done" | "idle") => ({ id: state, title: state, state });
+  const child = (state: "blocked" | "running" | "done" | "idle") => ({ id: state, title: state, state });
   assert.equal(inboxThreadChildrenLabel({ count: 1, waiting: 0, children: [child("running")] }), "1 Child · 1 Working");
   assert.equal(inboxThreadChildrenLabel({ count: 3, waiting: 0, children: [child("done"), child("done"), child("done")] }), "3 Children · 3 Completed");
   assert.equal(inboxThreadChildrenLabel({ count: 2, waiting: 0, children: [child("done"), child("idle")] }), "2 Children");
-  assert.equal(inboxThreadChildrenLabel({ count: 2, waiting: 2, children: [child("blocked"), child("stalled")] }), "2 Children · 2 Awaiting Input");
+  assert.equal(inboxThreadChildrenLabel({ count: 2, waiting: 2, children: [child("blocked"), child("blocked")] }), "2 Children · 2 Awaiting Input");
 });
 
 test("list summaries omit a separately rendered working count while full rollups keep it", () => {
@@ -643,16 +641,13 @@ test("split counts keep stalled sessions separate from blocked sessions", () => 
     session("stalled", { status: "running", workspaceId: "p1", workspaceName: "Project One" }),
     session("blocked", { status: "input_required", workspaceId: null, workspaceName: null }),
   ];
-  const splits = buildInboxSplits(sessions, new Set(), new Set(), new Set(["both", "stalled"]));
+  const splits = buildInboxSplits(sessions, new Set(), new Set());
   const all = splits[0]!;
   assert.equal(all.blockedCount, 2);
-  assert.equal(all.stalledCount, 2);
   const project = splits.find((split) => split.name === "Project One")!;
   assert.equal(project.blockedCount, 1);
-  assert.equal(project.stalledCount, 2);
   const chats = splits.find((split) => split.name === "Chats")!;
   assert.equal(chats.blockedCount, 1);
-  assert.equal(chats.stalledCount, 0);
 });
 
 test("status predicates distinguish active, running, and blocked states", () => {
@@ -868,9 +863,9 @@ test("collapsed families keep working counts and defer review until all descenda
   assert.equal(collapsed.length, 1);
   assert.equal(collapsed[0]!.thread.children?.working, 2);
   assert.match(inboxThreadChildrenLabel(collapsed[0]!.thread.children!), /^2 Children · 2 Working$/);
-  const stalled = threadInboxRows(rows, new Set(["parent"]), new Set(["grandchild"]));
-  assert.equal(stalled[0]!.thread.children?.working, 1, "a silent grandchild is not presented as working");
-  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /^2 Children · 1 Working$/);
+  const stalled = threadInboxRows(rows, new Set(["parent"]));
+  assert.equal(stalled[0]!.thread.children?.working, 2, "silence does not negate reported work");
+  assert.match(inboxThreadChildrenLabel(stalled[0]!.thread.children!), /^2 Children · 2 Working$/);
   const stopped = threadInboxRows(rows.map((row) => ({ session: { ...row.session,
     status: "completed" as const } })), new Set(["parent"]));
   assert.equal(stopped[0]!.thread.children?.working, 0);
@@ -925,7 +920,7 @@ test("background child dots and working counts follow job and continuation trans
 test("filtered-out descendants still prevent family review readiness (#3328)", () => {
   const parent = session("parent");
   const child = session("child", { parentSessionId: parent.id, status: "idle", backgroundWorkState: "running" });
-  const rows = threadInboxRows([{ session: parent }], new Set(), new Set(), [parent, child]);
+  const rows = threadInboxRows([{ session: parent }], new Set(), [parent, child]);
   assert.equal(rows.length, 1);
   assert.equal(rows[0]!.thread.children!.hasActiveWork, true);
   assert.equal(rows[0]!.thread.children!.working, 1);
@@ -936,14 +931,14 @@ test("filtered-out descendants still prevent family review readiness (#3328)", (
 test("an archived child does not reappear in the full-inventory family summary (#3328)", () => {
   const parent = session("parent");
   const child = session("child", { parentSessionId: parent.id, status: "completed", archived: true });
-  assert.equal(threadInboxRows([{ session: parent }], new Set(), new Set(), [parent, child])[0]!.thread.children, null);
+  assert.equal(threadInboxRows([{ session: parent }], new Set(), [parent, child])[0]!.thread.children, null);
 });
 
 
 test("a hidden child contributes status without creating an expandable empty thread (#3328)", () => {
   const parent = session("parent");
   const child = session("child", { parentSessionId: parent.id, status: "running" });
-  const row = threadInboxRows([{ session: parent }], new Set([parent.id]), new Set(), [parent, child])[0]!;
+  const row = threadInboxRows([{ session: parent }], new Set([parent.id]), [parent, child])[0]!;
   assert.equal(row.thread.children!.visibleCount, 0);
   assert.equal(row.thread.children!.hasActiveWork, true);
   assert.equal(row.thread.collapsed, false);
@@ -956,7 +951,7 @@ test("project and reminder ordering use children outside the visible split (#332
   const child = session("child", { status: "idle", projectId: "beta", parentSessionId: parent.id, backgroundWorkState: "running" });
   const result = session("result", { status: "idle", projectId: "alpha", attention: { ...attention,
     result: { ...attention.result, at: 1 } } });
-  const splits = deriveInboxSplits([parent, child, result], new Set(), new Set(), new Set(), [project("alpha"), project("beta")], true);
+  const splits = deriveInboxSplits([parent, child, result], new Set(), new Set(), [project("alpha"), project("beta")], true);
   const alpha = splits.find((split) => split.name === "alpha")!;
   assert.deepEqual(alpha.sessions.map(({ id }) => id), ["result", "parent"]);
   assert.deepEqual(sortSessionsForReminders(alpha.sessions, new Map(), "ordinary", new Set(), [parent, child, result])

@@ -76,7 +76,6 @@ const projectSplit: InboxSplit = {
   }) as SessionView),
   count: PROJECT_SESSIONS.length,
   blockedCount: 0,
-  stalledCount: 0,
 };
 
 const projectRunner: RunnerView = {
