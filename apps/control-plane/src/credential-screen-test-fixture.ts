@@ -30,7 +30,8 @@ export function fakeScreenRequest(message: RunDecisionMessage): FakeScreenReques
 
 /** A Decision runtime on the test's database whose harness answers through `answer`, with a fake
  * clock so backoff never sleeps. `calls` records every attempt the runtime sent. */
-export function fakeScreenRuntime(db: ControlPlaneDb, answer: (request: FakeScreenRequest, attempt: number) => FakeScreenStep) {
+export function fakeScreenRuntime(db: ControlPlaneDb,
+  answer: (request: FakeScreenRequest, attempt: number) => FakeScreenStep | Promise<FakeScreenStep>) {
   const calls: RunDecisionMessage[] = [];
   let clock = Date.now();
   const runtime = new DecisionRuntime({
@@ -39,7 +40,7 @@ export function fakeScreenRuntime(db: ControlPlaneDb, answer: (request: FakeScre
     transport: async (_runnerId, message) => {
       calls.push(message);
       clock += 100;
-      const step = answer(fakeScreenRequest(message), message.attempt);
+      const step = await answer(fakeScreenRequest(message), message.attempt);
       return "verdict" in step
         ? { type: "run_decision_result", requestId: message.requestId, ok: true, provider: "claude", model: "claude-haiku-4-5",
           outputText: JSON.stringify({ verdict: step.verdict, reason: step.reason ?? `The request ${step.verdict === "ask" ? "asks for" : "discusses"} access.` }),

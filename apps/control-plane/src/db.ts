@@ -22560,19 +22560,22 @@ export class ControlPlaneDb {
     });
   }
 
-  /** The owner's Let the Orchestrator Answer classification (#4104): the one write that moves a
-   * question held for classification from its owner to the Orchestrator. Only a pending, unconsumed
-   * implementation question held for that reason moves; nothing else can be released this way. */
+  /** The owner's classification releasing a question held for it (#4104): an implementation
+   * question moves to the Orchestrator, and an owner decision stays the owner's but may now be
+   * answered. Only a pending, unconsumed occurrence held for that reason changes; nothing else can
+   * be released this way, and an owner decision can never move to an agent. */
   releaseCredentialScreenReview(
     occurrenceId: string,
+    authority: "human" | "orchestrator",
     authorityEvaluation: NonNullable<WorkflowDecisionView["authorityEvaluation"]>,
   ): WorkflowDecisionView | null {
+    const category = authority === "orchestrator" ? "implementation_question" : "owner_decision";
     const changed = Number(this.stmt(
-      `UPDATE workflow_decisions SET authority='orchestrator', authority_evaluation=?
-       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category='implementation_question'
+      `UPDATE workflow_decisions SET authority=?, authority_evaluation=?
+       WHERE occurrence_id=? AND status='pending' AND authority='human' AND category=?
          AND owner_handoff IS NULL AND consumed_at IS NULL
          AND json_extract(authority_evaluation, '$.reason')='credential_screen_review'`,
-    ).run(JSON.stringify(authorityEvaluation), occurrenceId).changes) === 1;
+    ).run(authority, JSON.stringify(authorityEvaluation), occurrenceId, category).changes) === 1;
     return changed ? this.workflowDecisionByOccurrence(occurrenceId) : null;
   }
 

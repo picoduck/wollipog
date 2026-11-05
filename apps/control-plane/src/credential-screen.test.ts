@@ -17,7 +17,7 @@ import { DECISION_MAX_ATTEMPTS } from "./decision-runtime.js";
 import { credentialScreenKey, implementationQuestionScreenData } from "./credential-screen.js";
 import { fakeScreenRuntime, settleScreens, type FakeScreenRequest, type FakeScreenStep } from "./credential-screen-test-fixture.js";
 
-function harness(answer: (request: FakeScreenRequest, attempt: number) => FakeScreenStep = () => ({ verdict: "discusses" })) {
+function harness(answer: (request: FakeScreenRequest, attempt: number) => FakeScreenStep | Promise<FakeScreenStep> = () => ({ verdict: "discusses" })) {
   const db = ControlPlaneDb.open(":memory:");
   const identity = db.localIdentityContext();
   const principal: HumanPrincipal = { ...identity, kind: "human", actorId: identity.userId };
@@ -233,6 +233,76 @@ test("a child's provider question waits for its screen, then goes to the Orchest
     assert.equal(after.owner, "orchestrator");
     assert.ok(h.svc.resolveDescendantRequest("root", "child", "sessions", { action: "answer", answers: { choice: "Continue" } }, () => true).ok);
     assert.equal(h.screen.calls.filter((call) => call.attempt === 1).length, 3, "one occurrence per question");
+  } finally { h.db.close(); }
+});
+
+test("nobody answers or approves a request while its screen is still running, a person included (review round 1)", async () => {
+  let release!: (step: FakeScreenStep) => void;
+  const held = new Promise<FakeScreenStep>((resolve) => { release = resolve; });
+  const h = harness(() => held);
+  try {
+    h.provider("child", "pending-q", "Which layout?");
+    await settleScreens();
+    assert.equal(h.svc.answerQuestion("child", "pending-q", { choice: "Continue" }, h.owner).status, 409, "a person cannot answer it yet");
+    assert.equal(h.svc.resolveDescendantRequest("root", "child", "pending-q", { action: "answer", answers: { choice: "Continue" } }, () => true).status, 409);
+    assert.ok(!h.sent.some((m) => m.type === "answer_question" && m.requestId === "pending-q"), "no answer reached the runner");
+    release({ verdict: "discusses" });
+    await settleScreens();
+    assert.ok(h.svc.resolveDescendantRequest("root", "child", "pending-q", { action: "answer", answers: { choice: "Continue" } }, () => true).ok);
+  } finally { h.db.close(); }
+});
+
+test("a tool request a child's runner raises waits for its screen before a person can approve it (review round 1)", async () => {
+  let release!: (step: FakeScreenStep) => void;
+  const held = new Promise<FakeScreenStep>((resolve) => { release = resolve; });
+  const h = harness(() => held);
+  try {
+    h.svc.onSessionEvent("child", { kind: "permission_request", requestId: "notes", occurrenceId: "notes", requestSource: "provider_tool",
+      title: "Read Notes", context: { toolName: "Bash", input: "cat docs/notes.txt", operation: { kind: "command", input: "cat docs/notes.txt",
+        cwd: "/repos/test", filesystem: { cwd: "/repos/test", targets: [{ path: "docs/notes.txt", resolvedPath: "/repos/test/docs/notes.txt" }],
+          containment: { version: 1, root: "/repos/test", sessionRoot: "/repos/test" } } } },
+      options: [{ optionId: "once", name: "Allow Once", kind: "allow_once" }, { optionId: "no", name: "Reject", kind: "reject_once" }] });
+    await settleScreens();
+    assert.equal(h.svc.approve("child", "notes", "once", h.owner).status, 409, "no allow before the verdict");
+    assert.ok(!h.sent.some((m) => m.type === "resolve_permission" && m.requestId === "notes"));
+    release({ verdict: "discusses" });
+    await settleScreens();
+  } finally { h.db.close(); }
+});
+
+test("a screen that throws is recorded as a failure the owner can classify, never a hold with nothing to classify (review round 1)", async () => {
+  const h = harness(() => { throw new Error("the harness crashed"); });
+  try {
+    const asked = await h.ask("crashed", h.form(ISSUE_4126[3]!));
+    assert.ok(asked.ok, asked.error ?? "created");
+    assert.deepEqual([asked.data!.authority, asked.data!.authorityEvaluation?.reason], ["human", "credential_screen_review"]);
+    const [occurrence] = h.occurrences();
+    assert.deepEqual([occurrence!.state, occurrence!.failureClass], ["failed", "provider_failed"]);
+    assert.equal(h.db.campaignDecisionSubject(occurrence!.occurrenceId)?.requestId, "crashed");
+    assert.ok(h.svc.classifyCampaignDecision("root", occurrence!.occurrenceId, { classification: "orchestrator" }, h.owner).ok);
+    assert.equal(h.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!.authority, "orchestrator");
+  } finally { h.db.close(); }
+});
+
+test("an owner decision whose screen fails is classified before anyone can choose an option (review round 1)", async () => {
+  const h = harness(() => ({ verdict: "uncertain", reason: "It may ask the owner to sign in." }));
+  try {
+    const options = [{ optionId: "grant", label: "Grant" }, { optionId: "skip", label: "Skip" }];
+    const owner = (requestId: string, question: string) => h.svc.createOwnerDecision("root", { requestId, resourceKey: requestId, question, options });
+    for (const [requestId, classification] of [["release-owner", "orchestrator"], ["decline-owner", "decline"]] as const) {
+      const asked = await owner(requestId, `Should the provider bridge grant access for ${requestId}?`);
+      assert.ok(asked.ok, asked.error ?? "created");
+      assert.deepEqual([asked.data!.authority, asked.data!.authorityEvaluation?.reason], ["human", "credential_screen_review"]);
+      assert.equal(h.svc.approve("root", asked.data!.occurrenceId, "grant", h.owner).status, 409, "Grant cannot be chosen yet");
+      const screen = h.occurrences().find((o) => h.db.campaignDecisionSubject(o.occurrenceId)?.requestId === requestId)!;
+      assert.ok(h.svc.classifyCampaignDecision("root", screen.occurrenceId, { classification }, h.owner).ok);
+      const after = h.db.workflowDecisionByOccurrence(asked.data!.occurrenceId)!;
+      if (classification === "decline") assert.equal(after.status, "denied");
+      else {
+        assert.deepEqual([after.authority, after.authorityEvaluation?.reason], ["human", "owner_kept"], "still the owner's, never an agent's");
+        assert.ok(h.svc.approve("root", asked.data!.occurrenceId, "skip", h.owner).ok, "the owner may now choose");
+      }
+    }
   } finally { h.db.close(); }
 });
 

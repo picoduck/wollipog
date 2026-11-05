@@ -37,11 +37,14 @@ export const DECISION_FAILURE_LABELS: Record<DecisionErrorClass, string> = {
 /** What the screen's outcome did to the request it affected, in the order it happened. */
 function outcomeText(decision: CampaignDecision): string {
   const classification = decision.subject?.classification;
+  const ownerDecision = decision.subject?.surface === "owner_decision";
   if (classification === "decline") return "You declined it.";
-  if (classification === "orchestrator") return "You let the Orchestrator answer it.";
+  if (classification === "orchestrator") return ownerDecision ? "You chose to answer it yourself." : "You let the Orchestrator answer it.";
   if (decision.state === "pending") return "Nobody can answer it until the check finishes.";
-  if (decision.state === "decided") return decision.verdict === "ask" ? "Declined and recorded as blocked work." : "The Orchestrator decides it.";
-  if (decision.subject?.surface === "owner_decision") return "It went to you as an owner decision.";
+  if (decision.state === "decided") {
+    if (decision.verdict === "ask") return ownerDecision ? "Refused; nobody was asked." : "Declined and recorded as blocked work.";
+    return ownerDecision ? "It went to you as an owner decision." : "The Orchestrator decides it.";
+  }
   return "Waiting for you to classify it.";
 }
 
@@ -105,8 +108,9 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
       <ul className="campaign-detail-list">
         {(decisions ?? []).map((decision) => {
           const subject = decision.subject;
-          const awaiting = (decision.state === "uncertain" || decision.state === "failed") && !subject?.classification &&
-            subject?.surface !== "owner_decision";
+          const awaiting = (decision.state === "uncertain" || decision.state === "failed") && !subject?.classification;
+          // An owner decision stays the owner's: classifying it only lets them choose an option.
+          const ownerDecision = subject?.surface === "owner_decision";
           return (
             <li key={decision.occurrenceId}>
               <dl className="facts">
@@ -140,8 +144,11 @@ export function CampaignDecisionModelChecks({ sessionId, canClassify, refreshKey
                 <div className="actions">
                   <BusyButton className="btn sm" busy={busy === `${decision.occurrenceId}:decline`} progress="Declining the question…" disabled={busy !== null}
                     onClick={() => void classify(decision.occurrenceId, "decline")}>Decline</BusyButton>
-                  <BusyButton className="btn primary sm" busy={busy === `${decision.occurrenceId}:orchestrator`} progress="Handing the question to the Orchestrator…" disabled={busy !== null}
-                    onClick={() => void classify(decision.occurrenceId, "orchestrator")}>Let the Orchestrator Answer</BusyButton>
+                  <BusyButton className="btn primary sm" busy={busy === `${decision.occurrenceId}:orchestrator`}
+                    progress={ownerDecision ? "Opening the decision to you…" : "Handing the question to the Orchestrator…"} disabled={busy !== null}
+                    onClick={() => void classify(decision.occurrenceId, "orchestrator")}>
+                    {ownerDecision ? "Let Me Answer" : "Let the Orchestrator Answer"}
+                  </BusyButton>
                 </div>
               )}
             </li>

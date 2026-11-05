@@ -909,6 +909,12 @@ function issueClosureNotApprovedMessage(decision: WorkflowDecisionView): string 
 /** #4104: a question the Decision Model could not screen waits for its owner's classification. */
 const CREDENTIAL_SCREEN_CLASSIFY_FIRST = "Classify this question first in Campaign Status: Decline, or Let the Orchestrator Answer. " +
   "Nobody answers it until then.";
+/** #4104: a screen whose outcome, even a failure, could not be recorded admits nothing. */
+const CREDENTIAL_SCREEN_UNRECORDED = "Full Control could not record a credential screen for this question, so it was not " +
+  "created. Ask again in a moment; nobody answers it until a screen is recorded.";
+/** #4104: nobody answers a request before the Decision Model has screened it. */
+const CREDENTIAL_SCREEN_STILL_SCREENING = "This request is still being screened for credential, sign-in and access requests. " +
+  "Read it again in a moment; until then it can only be declined.";
 
 /** Why a session whose ancestry the campaign walk refuses can neither request nor keep a typed
  * workflow decision (#2451). No Orchestrator can be named as its controller. */
@@ -10801,6 +10807,7 @@ export class SessionsService {
     }
     if (normalized.ok && normalized.data?.category === "implementation_question") {
       const credentialScreen = await this.screenImplementationQuestion(sessionId, request, normalized.data);
+      if (credentialScreen === null) return fail(CREDENTIAL_SCREEN_UNRECORDED, 503);
       return this.createWorkflowDecision(sessionId, request, canAccess, credentialScreen ? { credentialScreen } : undefined);
     }
     if (!normalized.ok || normalized.data?.category !== "ui_evidence_approval") {
@@ -11708,6 +11715,11 @@ export class SessionsService {
       screenedQuestion ? internal?.credentialScreen ?? { state: "pending" } : undefined);
     // An unscreened, uncertain or failed screen leaves the question to its owner to classify (#4104).
     if (authorityEvaluation.reason === "credential_screen_review") authority = "human";
+    // An owner decision is already the owner's, but one whose screen failed is classified before
+    // anyone can choose one of its options.
+    if (category === "owner_decision" && internal?.credentialScreen && internal.credentialScreen.state !== "discusses") {
+      Object.assign(authorityEvaluation, { reason: "credential_screen_review", credentialScreen: { ...internal.credentialScreen, state: "review" } });
+    }
     // A refused scope change cannot be routed around through a merge's closing references (#4062):
     // the merge is refused with the issues named, rather than becoming a person's new decision.
     if (authorityEvaluation.reason === "outside_issue_scope" && authorityEvaluation.unscopedClosures?.length) {
@@ -11860,24 +11872,32 @@ export class SessionsService {
     const normalized = normalizeWorkflowDecisionSnapshot(snapshot);
     if (!normalized.ok || normalized.data?.category !== "owner_decision") return failAs(normalized);
     // Full Control never asks anyone for credentials or sign-in, the owner included (#4104): the floor
-    // first, then the Decision Model. An uncertain or failed screen still reaches only the owner, who
-    // can choose one offered option or decline; it never carries a value back.
+    // first, then the Decision Model. An uncertain or failed screen holds the decision for its owner
+    // to classify first; nobody can choose one of its options until then.
     const refused = (): ServiceResult<WorkflowDecisionView> => fail("Full Control never asks anyone for credentials, sign-in or wider access, so this owner decision was not " +
       "created. Ask about the design without requesting a value, or continue without it.", 403);
     if (credentialFormFloor(normalized.data)) return refused();
     if (!boundedDecisionString(request.requestId, 256)) return fail<WorkflowDecisionView>("requestId and resourceKey are required bounded identifiers", 400);
     const screen = await this.screenCredentialText(root.data, sessionId, "owner_decision", request.requestId,
       ownerDecisionScreenData(normalized.data));
+    if (screen === null) return fail<WorkflowDecisionView>(CREDENTIAL_SCREEN_UNRECORDED, 503);
     if (screen.state === "ask") return refused();
     return this.createWorkflowDecision(sessionId, { requestId: request.requestId, resourceKey: request.resourceKey,
-      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true });
+      resourceSnapshot: normalized.data }, canAccess, { trustedOwnerDecision: true, credentialScreen: screen });
   }
 
   /** Whether a Full Control request waits for its owner to classify an uncertain or failed screen. */
   private credentialScreenReviewHeld(session: SessionView, request: PendingApproval): boolean {
+    return this.credentialScreenHold(session, request) === "credential_screen_review";
+  }
+
+  /** Why nobody may answer a Full Control request yet (#4104): its screen is still running, or it
+   * waits for its owner's classification. Null when its screen settled or none applies. */
+  private credentialScreenHold(session: SessionView, request: PendingApproval): "credential_screen_pending" | "credential_screen_review" | null {
     const controller = this.orchestratorCampaignController(session);
-    return Boolean(controller && controller !== "refused" && controller.orchestratorPolicy?.control?.mode === "full_control" &&
-      this.genericCampaignAuthority(controller, session, request).reason === "credential_screen_review");
+    if (!controller || controller === "refused" || controller.orchestratorPolicy?.control?.mode !== "full_control") return null;
+    const reason = this.genericCampaignAuthority(controller, session, request).reason;
+    return reason === "credential_screen_pending" || reason === "credential_screen_review" ? reason : null;
   }
 
   /** The owner's classification of a question the Decision Model could not screen (#4104): Decline
@@ -11898,7 +11918,6 @@ export class SessionsService {
     if (actor.kind !== "human" || !actor.id || !this.db.campaignOwnerUser(campaignSessionId, actor.id)) {
       return fail("Only the campaign's owner can classify a question the Decision Model could not screen", 403);
     }
-    if (subject.surface === "owner_decision") return fail("an owner decision is already the owner's own question", 409);
     if (occurrence.state !== "uncertain" && occurrence.state !== "failed") {
       return fail("the Decision Model already screened this request", 409);
     }
@@ -11906,7 +11925,8 @@ export class SessionsService {
     const session = this.db.getSession(subject.sessionId);
     if (!root || !session) return fail("decision not found", 404);
     const now = Date.now();
-    if (subject.surface === "implementation_question") {
+    if (subject.surface === "implementation_question" || subject.surface === "owner_decision") {
+      const ownerDecision = subject.surface === "owner_decision";
       const decision = this.db.workflowDecisionByRequestId(subject.sessionId, subject.requestId);
       if (!decision || decision.status !== "pending" || decision.authority !== "human" ||
           decision.authorityEvaluation?.reason !== "credential_screen_review") {
@@ -11928,17 +11948,19 @@ export class SessionsService {
         this.campaignRecovery.synchronize(root, now);
       } else {
         const control = root.orchestratorPolicy?.control;
-        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, {
-          owner: "orchestrator", basis: decision.sessionId === root.id ? "standing_authorization" : "campaign_delegation",
-          reason: "authorized_operation", operation: "implementation_question", credentialScreen: screen,
-          ...(control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {}),
-        });
+        const boundaryRevision = control?.mode === "full_control" ? { boundaryRevision: control.boundary.revision } : {};
+        // An owner decision stays the owner's: classifying it only lets the owner choose an option.
+        const released = this.db.releaseCredentialScreenReview(decision.occurrenceId, ownerDecision ? "human" : "orchestrator", ownerDecision
+          ? { owner: "human", basis: "human_required", reason: "owner_kept", operation: "owner_decision", credentialScreen: screen, ...boundaryRevision }
+          : { owner: "orchestrator", basis: decision.sessionId === root.id ? "standing_authorization" : "campaign_delegation",
+            reason: "authorized_operation", operation: "implementation_question", credentialScreen: screen, ...boundaryRevision });
         if (!released) return fail("this question changed concurrently; read it again", 409);
-        // The requester keeps waiting on the same occurrence; its card now names the Orchestrator.
+        // The requester keeps waiting on the same occurrence; its card now names who answers it.
         this.db.setPendingApproval(released.sessionId, appendPendingApproval(
           removePendingRequest(this.db.getSession(released.sessionId)?.pendingApproval, released.occurrenceId),
           this.workflowDecisionApproval(released)));
-        this.recordWorkflowDecisionAudit(released, "pending", actor, now, "Owner classified the question: Let the Orchestrator Answer.");
+        this.recordWorkflowDecisionAudit(released, "pending", actor, now, ownerDecision
+          ? "Owner classified the question: answer it themselves." : "Owner classified the question: Let the Orchestrator Answer.");
       }
     } else {
       const pending = pendingRequests(session.pendingApproval).find((candidate) => (candidate.occurrenceId ?? candidate.requestId) === subject.requestId);
@@ -11994,23 +12016,26 @@ export class SessionsService {
    * The runtime is idempotent per occurrence, so a replay joins the recorded outcome and never
    * records a second verdict. A screen that cannot even start is a failure: the owner classifies. */
   private async screenCredentialText(root: SessionView, sessionId: string, surface: CredentialScreenSurface,
-    requestId: string, data: string): Promise<CredentialScreenFact> {
+    requestId: string, data: string): Promise<CredentialScreenFact | null> {
     const organizationId = this.db.sessionScope(root.id)?.organizationId;
-    if (!organizationId) return { state: "review", failureClass: "configuration" };
+    // With no organization there is no audit to hold a failure for its owner to classify, so the
+    // caller refuses the request and nobody can answer it.
+    if (!organizationId) return null;
     try {
+      // A screen the runtime cannot finish is recorded as an audited failure the owner classifies.
       return await screenCredentialRequest(this.db, this.decisionRuntime, { organizationId, campaignSessionId: root.id, sessionId,
         surface, requestId, data, automaticHarness: root.agentId ? { runnerId: root.runnerId, agentId: root.agentId, driver: root.driver } : null });
     } catch (error) {
-      this.log.warn(`credential screen for ${sessionId} could not run: ${(error as Error).message}`);
-      return { state: "review", failureClass: "configuration" };
+      this.log.warn(`credential screen for ${sessionId} could not be recorded: ${(error as Error).message}`);
+      return null;
     }
   }
 
   /** The typed route's screen of a Full Control implementation question, before it is admitted
-   * (#4104). Null when no screen applies: another mode, a request the floor declines, or a caller
-   * the inner route will refuse anyway. */
+   * (#4104). Undefined when no screen applies: another mode, a request the floor declines, or a
+   * caller the inner route will refuse anyway. Null when not even a failure could be recorded. */
   private async screenImplementationQuestion(sessionId: string, request: CreateWorkflowDecisionRequest,
-    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>): Promise<CredentialScreenFact | undefined> {
+    snapshot: Extract<WorkflowDecisionResourceSnapshot, { category: "implementation_question" }>): Promise<CredentialScreenFact | null | undefined> {
     const child = this.db.getSession(sessionId);
     const controller = child && this.workflowDecisionController(child, "implementation_question");
     if (!child || !controller || controller.session.orchestratorPolicy?.control?.mode !== "full_control" ||
@@ -15444,9 +15469,11 @@ export class SessionsService {
     }
     if (pending.expiresAt != null && pending.expiresAt <= Date.now()) return fail("question request has expired", 409);
     if (pending.kind !== "question") return fail("the pending approval is not a question", 409);
-    // A question the Decision Model could not screen is classified, never answered, by its owner (#4104).
-    if (action === "submit" && actor.kind === "human" && !resolvedByParentSessionId && this.credentialScreenReviewHeld(session, pending)) {
-      return fail(CREDENTIAL_SCREEN_CLASSIFY_FIRST, 409);
+    // Nobody answers a question before its screen settles, and one the Decision Model could not
+    // screen is classified, never answered, by its owner (#4104). Dismissing it stays available.
+    if (action === "submit" && actor.kind === "human" && !resolvedByParentSessionId) {
+      const hold = this.credentialScreenHold(session, pending);
+      if (hold) return fail(hold === "credential_screen_review" ? CREDENTIAL_SCREEN_CLASSIFY_FIRST : CREDENTIAL_SCREEN_STILL_SCREENING, 409);
     }
     // Answers ride verbatim into the agent's updatedInput — reject anything the pending card
     // never offered (unknown keys, wrong select shape, un-offered labels) WITHOUT clearing the
@@ -15644,9 +15671,9 @@ export class SessionsService {
     if (pending.requestId !== requestId) return fail("approval request id does not match the pending one", 409);
     if (pending.expiresAt != null && pending.expiresAt <= now) return fail("approval request has expired", 409);
     if (pending.kind !== "workflow_decision" && actor.kind === "human" &&
-        !pending.options.some((option) => option.optionId === optionId && option.kind?.startsWith("reject")) &&
-        this.credentialScreenReviewHeld(session, pending)) {
-      return fail(CREDENTIAL_SCREEN_CLASSIFY_FIRST, 409);
+        !pending.options.some((option) => option.optionId === optionId && option.kind?.startsWith("reject"))) {
+      const hold = this.credentialScreenHold(session, pending);
+      if (hold) return fail(hold === "credential_screen_review" ? CREDENTIAL_SCREEN_CLASSIFY_FIRST : CREDENTIAL_SCREEN_STILL_SCREENING, 409);
     }
 
     if (pending.kind === "workflow_decision") {

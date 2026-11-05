@@ -248,16 +248,19 @@ unverified tool effect is declined whatever it names, so it is not screened.
 - `discusses` leaves it to the Orchestrator. "Should importing copy the API key?" (#3844), a CI
   workflow's declared permissions or a quoted decline notice (#3913), and keyboard, cache or React
   keys and Wollipog sessions (#4126) are design subjects.
-- Until the screen settles (`credential_screen_pending`) nobody may answer the request; the
-  Orchestrator may only decline it.
+- Until the screen settles (`credential_screen_pending`) nobody may answer or approve the request,
+  a person included; it can only be declined or dismissed.
 - When retries are exhausted, the failure is not transient or the verdict is `uncertain`, the
   request becomes the owner's (`credential_screen_review`) and asks them only to classify it in
   Campaign Status: **Decline** or **Let the Orchestrator Answer**. It never asks for a value, and
   answering or approving it is refused until it is classified. Nothing falls back to text parsing.
+- Text too large for one Decision input is never screened by a prefix, and a screen the runtime
+  cannot finish is recorded as a failed occurrence too, so each is classified like any failure.
 - A root's own question is dismissed as before whatever the screen says; only the class its
   dismissal reports depends on the verdict, and a failed screen is reported as `root_questions`.
-- A root's owner decision is refused on `ask`. When its screen fails it still goes to the owner,
-  who can only choose one of its options.
+- A root's owner decision is refused on `ask`. When its screen fails it is held the same way: the
+  owner classifies it (**Decline** or **Let Me Answer**) before any of its options can be chosen,
+  and it stays the owner's either way.
 
 Each verdict, its reason and failure class appear in Campaign Status under Question Screen, beside
 the request it affected. The evaluation carries only the content-safe `credentialScreen` fact

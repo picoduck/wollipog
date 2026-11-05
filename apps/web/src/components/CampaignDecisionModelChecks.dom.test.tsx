@@ -81,6 +81,22 @@ test("Campaign Status shows each screen's verdict, reason and failure beside the
   }
 });
 
+test("an owner decision whose screen failed stays the owner's: they decline it or answer it themselves", async () => {
+  const read = api.campaignDecisions;
+  api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_owner", { state: "uncertain", verdict: "uncertain",
+    reason: "It may ask the owner to sign in.", subject: { sessionId: "root-1", surface: "owner_decision", requestId: "ask-owner" } })],
+    usage: { ...usage, calls: 1, unpricedCalls: 0 } });
+  const view = await render(<CampaignDecisionModelChecks sessionId="root-1" canClassify refreshKey={1} onOpenSession={() => {}} />);
+  try {
+    const item = view.container.querySelector("li")!;
+    assert.equal(facts(item)["Owner Decision"], "Open SessionWaiting for you to classify it.");
+    assert.deepEqual([...item.querySelectorAll("button")].map((node) => node.textContent), ["Open Session", "Decline", "Let Me Answer"]);
+  } finally {
+    view.unmount();
+    api.campaignDecisions = read;
+  }
+});
+
 test("a member session sees the checks but never the classification buttons", async () => {
   const read = api.campaignDecisions;
   api.campaignDecisions = async (id) => ({ campaignSessionId: id, decisions: [decision("dec_failed", { state: "uncertain", verdict: "uncertain", reason: "Unclear." })],

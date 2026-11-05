@@ -106,20 +106,19 @@ export interface CredentialScreenInput {
   routeToHuman?: (occurrence: DecisionOccurrenceRecord) => string | null;
 }
 
-/** Record an occurrence that could not be rendered for the model as a failed one, with no attempt
- * sent and the person-owned route already taken, so it reads as `review` like any other failure. */
-function failOversizedScreen(db: ControlPlaneDb, input: CredentialScreenInput, occurrenceKey: string,
-  inputs: { data: Record<string, string> }, at: number): string {
+/** Record a screen the runtime could not finish as a failed occurrence, with its route to a person
+ * already taken, so it reads as `review` like any other failure. An occurrence the runtime already
+ * settled keeps its outcome: the compare-and-set only settles one still pending. */
+function failScreenWithoutVerdict(db: ControlPlaneDb, input: CredentialScreenInput, occurrenceKey: string,
+  inputs: { data: Record<string, string> }, failureClass: "configuration" | "provider_failed", at: number): string {
   const definition = DECISION_KINDS.credential_screen;
-  const { occurrence, created } = db.createDecisionOccurrence({
+  const { occurrence } = db.createDecisionOccurrence({
     occurrenceId: `dec_${randomUUID()}`, organizationId: input.organizationId, campaignSessionId: input.campaignSessionId,
     occurrenceKey, kind: definition.kind, promptVersion: definition.promptVersion, inputDigests: decisionInputDigests(inputs),
-    inputDigest: createHash("sha256").update(`${definition.kind}\n${definition.promptVersion}\noversized\n${input.data}`, "utf8").digest("hex"),
+    inputDigest: createHash("sha256").update(`${definition.kind}\n${definition.promptVersion}\nunrendered\n${input.data}`, "utf8").digest("hex"),
     now: at,
   });
-  if (created) {
-    db.settleDecisionOccurrence(occurrence.occurrenceId, { state: "failed", failureClass: "configuration", now: at });
-  }
+  db.settleDecisionOccurrence(occurrence.occurrenceId, { state: "failed", failureClass, now: at });
   if (db.claimDecisionHumanRoute(occurrence.occurrenceId, at)) db.completeDecisionHumanRoute(occurrence.occurrenceId, null, at);
   return occurrence.occurrenceId;
 }
@@ -146,10 +145,11 @@ export async function screenCredentialRequest(db: ControlPlaneDb, runtime: Decis
       },
     })).occurrenceId;
   } catch (error) {
-    if (!(error instanceof DecisionInputError)) throw error;
-    // Text too large for one Decision input is never screened by a prefix: it fails closed as an
-    // audited, non-transient failure, so the owner classifies the whole request (#4104).
-    occurrenceId = failOversizedScreen(db, input, occurrenceKey, inputs, now());
+    // A screen that cannot run fails closed as an audited failure the owner can classify (#4104):
+    // text too large for one Decision input is never screened by a prefix, and any other error
+    // leaves a durable outcome rather than a request held with nothing to classify.
+    occurrenceId = failScreenWithoutVerdict(db, input, occurrenceKey, inputs,
+      error instanceof DecisionInputError ? "configuration" : "provider_failed", now());
   }
   subject(occurrenceId);
   const outcome = { occurrenceId };
