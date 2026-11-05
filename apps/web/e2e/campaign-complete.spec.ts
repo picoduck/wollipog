@@ -28,12 +28,12 @@ for (const viewport of [{ name: "desktop", width: 1440, height: 900 }, { name: "
       await expect(page.getByRole("grid", { name: "Sessions", exact: true })).toBeVisible();
       // Review work sorts first; the informational completion sorts with quiet sessions.
       await expect.poll(() => page.locator(".inbox-row-title").allTextContents()).toEqual([custom, blocked, complete, active]);
-      await expect(row(page, complete).locator(".status")).toHaveText("Campaign Complete");
-      await expect(row(page, active).locator(".status")).toHaveText("Campaign Active");
+      await expect(row(page, complete).locator(".status").last()).toHaveText("Campaign Complete");
+      await expect(row(page, active).locator(".status").last()).toHaveText("Campaign Active");
       await expect(row(page, active).getByText("Ready for Review", { exact: true })).toHaveCount(0);
       await expect(row(page, complete).getByText("Ready for Review", { exact: true })).toHaveCount(0);
-      await expect(row(page, custom).locator(".status")).toHaveText("Ready for Review");
-      await expect(row(page, blocked).locator(".status")).toHaveText("Ready for Review");
+      await expect(row(page, custom).locator(".status").last()).toHaveText("Ready for Review");
+      await expect(row(page, blocked).locator(".status").last()).toHaveText("Ready for Review");
       await settle(page);
       await page.screenshot({ path: `${SHOT}/${viewport.name}-${theme}-list.png` });
 

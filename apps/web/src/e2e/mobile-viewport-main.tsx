@@ -141,7 +141,6 @@ function Harness() {
   // `.app-rail:has(.count-badge) { opacity: 0 }` — any blocked session at all — erased the
   // production navigation while matching nothing here.
   const blocked = Number(query.get("blocked") ?? 0);
-  const stalled = Number(query.get("stalled") ?? 0);
 
   useEffect(() => {
     const viewport = new FakeVisualViewport(window.innerHeight - occludedAtInstall);
@@ -221,7 +220,6 @@ function Harness() {
       <Rail
         view={view}
         blockedCount={blocked}
-        stalledCount={stalled}
         machines={{ offlineWithActiveSessions: 0, updateRequired: machines }}
         // Recorded, not discarded. With a no-op the suite proved a destination could be tapped and
         // nothing about where the tap went: pointing every primary link at Inbox left it green.

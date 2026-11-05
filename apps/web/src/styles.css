@@ -377,7 +377,7 @@
   --inbox-row-pad-x: 11px;
   /* A wide Sessions list's fixed trailing columns (#2218, §6.3), the same in either density. The
      time column holds a snoozed row's longest return time after its alarm clock ("Wed 12:34 PM"). */
-  --inbox-row-col-status: 184px;
+  --inbox-row-col-status: 300px;
   --inbox-row-col-activity: 48px;
   --inbox-row-col-flags: 32px;
   --inbox-row-col-time: 96px;
@@ -1433,7 +1433,7 @@ kbd {
   align-items: center;
   gap: var(--space-2);
 }
-.detail-bar-status { display: inline-flex; }
+.detail-bar-status { display: inline-flex; gap: var(--space-1); }
 /* The compact tier (§15.2), and the Sessions preview's bar at any width (#2221): where the full badge
    would leave the title truncated below a readable width, DetailBar or SessionPreviewBar marks it and
    the badge becomes its dot, with the label in its tooltip. The label
@@ -3524,7 +3524,7 @@ textarea {
    A Board card (#2222; docs/design-system.md §5.3): an `<article>` whose title button is stretched
    over the whole card. Line 1 is the agent icon and "Agent · Project", the time and ⋯; then the title
    (2 lines), one status line, and the request when there is one; no transcript excerpt (#3175). Every
-   card in a column has this anatomy, so heights differ only by title lines and whether a request shows. Hover steps
+   card in a column has this anatomy; titles, wrapped status labels and requests determine height. Hover steps
    the fill up as a row does; nothing moves (§2.9). */
 .card {
   position: relative;
@@ -3623,20 +3623,18 @@ textarea {
   outline: var(--focus-width) solid var(--focus);
   outline-offset: 2px;
 }
-/* The status line is always there, empty or not, so idle cards are as tall as busy ones. It is one
-   20px line: nothing on it shrinks, and what does not fit beside the badge (the activity strip in a
-   narrow column) wraps onto a second line that the line clips, so the badge always reads whole and
-   the card's height never changes. */
+/* Keep lifecycle and secondary labels whole even in narrow columns. The status area grows by
+   whole lines rather than clipping the second badge or its neighbouring activity/family signal. */
 .card-status {
   display: flex;
   flex-wrap: wrap;
   align-items: center;
   gap: 0 var(--space-2);
   min-width: 0;
-  height: 20px;
-  overflow: hidden;
+  min-height: 20px;
 }
 .card-status > * { position: relative; flex: none; }
+.card-status > .row-status { min-width: 0; max-width: 100%; flex-wrap: wrap; }
 /* A parent's chip (in place of the strip) shows its words while they fit beside the badge in this
    card, and only its dots when they do not (`dots-only`, measured by the card, not the list pane), so
    the list's 600px rule does not apply here. The words stay measurable but out of sight. */
@@ -13274,7 +13272,6 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 .inbox-thread-dot.running { background: var(--teal); }
 .inbox-thread-dot.blocked { background: var(--accent-2); }
 .inbox-thread-dot.done { background: var(--green); }
-.inbox-thread-dot.stalled { background: var(--red); }
 .inbox-row {
   display: grid;
   width: 100%;
@@ -13354,11 +13351,11 @@ button.chip[aria-pressed="true"] { background: var(--surface-selected); }
 /* The phone card's first line: the sender and, trailing, the flags. */
 .inbox-row-sender-line > .inbox-row-flags { margin-left: auto; }
 /* The phone card's status line: the time is trailing, and the branch between gives way. */
+.stacked .inbox-row-status-line:has(.status + .status) { height: auto; min-height: var(--space-5); flex-wrap: wrap; }
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-time { margin-left: auto; }
-/* The densest phone line (a long badge, the strip and a weekday return time) does not fit 320px, so
-   the badge is what gives way: its label is clipped, and its accessible name and tooltip stay whole. */
-.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; }
-.inbox-row-shell.stacked .row-status > .status { min-width: 0; flex: 0 1 auto; overflow: hidden; padding-inline: var(--space-1); }
+/* Dense phone cards grow a status line rather than clipping either lifecycle or secondary label. */
+.inbox-row-shell.stacked .inbox-row-status-line > .row-status { flex: 0 1 auto; min-width: 0; max-width: 100%; flex-wrap: wrap; }
+.inbox-row-shell.stacked .row-status > .status { flex: none; padding-inline: var(--space-1); }
 /* The branch gives way long before the status does, as the sender does on the desktop status line. */
 .inbox-row-shell.stacked .inbox-row-status-line > .inbox-row-git { flex-shrink: 100000; }
 /* Meta (§11.3): plain text, each item after its 14px icon, 12px apart. */
@@ -15416,22 +15413,22 @@ button.review-finding-location {
     padding-right: var(--mobile-session-trailing-inset);
     border-bottom: 1px solid var(--border);
   }
-  /* The status control leads the line at the actions' 36px and never pushes Share and More
-     Actions: it keeps the full badge and its "+N" in the leading track, and the badge clips there
-     rather than widening it (§15.1). The button itself does not clip, so its touch target does
-     not either. */
+  /* Lifecycle and secondary labels may wrap in the leading track; Share and More Actions keep
+     their targets and neither label clips at narrow phone widths. */
   .session-bar > .session-status-button {
     grid-column: 1;
     grid-row: 1;
     justify-self: start;
     min-width: 0;
     max-width: 100%;
-    height: 36px;
+    min-height: 36px;
+    height: auto;
+    flex-wrap: wrap;
+    padding-block: var(--space-1);
   }
   .session-bar > .session-status-button > .status {
-    flex: 0 1 auto;
-    min-width: 0;
-    overflow: hidden;
+    flex: none;
+    padding-inline: var(--space-1);
   }
   .session-bar .session-header-action { width: 36px; height: 36px; }
   .session-bar .session-header-action svg { width: var(--icon); height: var(--icon); }

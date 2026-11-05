@@ -3,10 +3,10 @@ import { expect, test, type Locator, type Page } from "@playwright/test";
 /**
  * Thread families at a glance (#2215, docs/design-system.md §5.2, §5.5, §11.1, §18): the chevron is
  * the §5.5 icon in a small icon button, the family chip follows its parent's title directly and keeps
- * its dots and working count below a 600px list, and Stalled is said once, by the row's one badge, with no rail.
+ * its dots and working count below a 600px list, and quiet running children retain their lifecycle.
  * A list 880px or wider sets the chip on the title line under the parent's status badge (#3175).
  *
- * `session-rows-e2e.html?family=1` leads the list with a running parent and a waiting, a stalled, a
+ * `session-rows-e2e.html?family=1` leads the list with a running parent and a waiting, a quiet running, a
  * running and a completed child, threaded by `threadInboxRows()` as the Sessions page threads them.
  */
 const FAMILY = "/session-rows-e2e.html?family=1";
@@ -14,7 +14,7 @@ const FAMILY = "/session-rows-e2e.html?family=1";
 const parent = (page: Page) => page.locator(".inbox-row-shell", { hasText: "Family Parent:" });
 const childRow = (page: Page, prefix: string) => page.locator(".inbox-row-shell", { hasText: `${prefix} Child:` });
 const chip = (page: Page) => parent(page).locator(".inbox-thread-family");
-const LABEL = "4 Children · Needs Your Input · 1 Working";
+const LABEL = "4 Children · Needs Your Input · 2 Working";
 
 /** The horizontal gap from the end of the title's rendered box to the start of the chip. */
 const chipGap = (row: Locator) => row.evaluate((shell) => {
@@ -32,7 +32,7 @@ for (const length of ["short", "long"] as const) {
     await page.goto(`${FAMILY}${length === "long" ? "&familyTitle=long" : ""}`);
     await expect(chip(page)).toBeVisible();
     await expect(chip(page).locator(".inbox-thread-family-text")).toHaveText("4 Children · Needs Your Input");
-    await expect(chip(page).locator(".inbox-thread-working")).toHaveText("1 Working");
+    await expect(chip(page).locator(".inbox-thread-working")).toHaveText("2 Working");
     const { gap, chipLeft, chipRight, chipTop, lineRight, badgeLeft, badgeBottom } = await chipGap(parent(page));
     // A wide list sets the chip in the status column on the title line (#3175).
     expect(Math.abs(chipLeft - badgeLeft), "the chip starts where the status badge starts").toBeLessThan(0.5);
@@ -63,7 +63,7 @@ test("at 1440×900 a large family's chip stays under the badge and its dots give
   await expect(text).toHaveText("16 Children · Needs Your Input");
   expect(await text.evaluate((node) => node.scrollWidth <= node.clientWidth + 0.5), "the rollup is not clipped").toBe(true);
   const working = chip(page).locator(".inbox-thread-working");
-  await expect(working).toHaveText("13 Working");
+  await expect(working).toHaveText("14 Working");
   await expect(working).toBeVisible();
   expect(await working.evaluate((node) => node.scrollWidth <= node.clientWidth + 0.5), "the working count is not clipped").toBe(true);
 });
@@ -79,7 +79,7 @@ for (const shape of [
     await expect(chip(page).locator(".inbox-thread-dot")).toHaveCount(4);
     await expect(chip(page).locator(".inbox-thread-family-text")).toBeHidden();
     const working = chip(page).locator(".inbox-thread-working");
-    await expect(working).toHaveText("1 Working");
+    await expect(working).toHaveText("2 Working");
     await expect(working).toBeVisible();
     await parent(page).hover();
     const actions = parent(page).locator(".inbox-row-actions");
@@ -90,8 +90,8 @@ for (const shape of [
     expect(workingBox.x + workingBox.width).toBeLessThanOrEqual(actionsBox.x);
     await expect(chip(page)).toHaveAccessibleName(LABEL);
     await expect(chip(page)).toHaveAttribute("title", LABEL);
-    await expect(parent(page).locator(".status")).toHaveText("Needs Your Input");
-    await expect(parent(page).locator(".status")).toBeVisible();
+    await expect(parent(page).locator(".status")).toHaveText(["Running", "Needs Your Input"]);
+    for (const badge of await parent(page).locator(".status").all()) await expect(badge).toBeVisible();
     // The row's own name, which a screen reader reads for the row, keeps the rollup too.
     await expect(parent(page).locator(".inbox-row")).toHaveAccessibleName(new RegExp(LABEL));
     const { gap } = await chipGap(parent(page));
@@ -198,27 +198,21 @@ test("on touch the chevron is 36px to look and 44px to hit, around the same 14px
   await expect(toggle).toHaveAttribute("aria-expanded", "false");
 });
 
-// The accepted follow-up from #2209's forced-colors evidence: forced colors drops the danger tone, so a
-// stalled Running row has to differ from a working one in something other than colour.
+// Silence keeps the same truthful lifecycle even when forced colors removes tone differences.
 for (const width of [1440, 390] as const) {
-  test(`in forced colors at ${width}px a stalled row differs visibly from a running one`, async ({ page }) => {
+  test(`in forced colors at ${width}px quiet and recently active children both remain Running`, async ({ page }) => {
     await page.emulateMedia({ forcedColors: "active" });
     await page.setViewportSize({ width, height: 900 });
     await page.goto(`${FAMILY}&selected=family-parent`);
     expect(await page.evaluate(() => matchMedia("(forced-colors: active)").matches)).toBe(true);
-    const stalled = childRow(page, "Stalled").locator(".status");
-    const running = childRow(page, "Running").locator(".status");
-    await expect(stalled).toHaveText("Stalled");
-    await expect(running).toHaveText("Running");
-    await expect(stalled).toHaveAccessibleName("Status: Stalled, Running");
-    // What a person sees, not what the DOM says: the two badges' pixels differ.
-    const [stalledShot, runningShot] = [
-      await stalled.screenshot({ animations: "disabled" }),
-      await running.screenshot({ animations: "disabled" }),
-    ];
-    expect(stalledShot.equals(runningShot), "the stalled badge is drawn differently from the running one").toBe(false);
-    // The leading edge carries nothing for a stall; only the selected row's bar is there.
-    expect(await childRow(page, "Stalled").evaluate((shell) => getComputedStyle(shell, "::before").content)).toBe("none");
+    for (const prefix of ["Quiet", "Running"]) {
+      const child = childRow(page, prefix);
+      await expect(child.locator(".status")).toHaveText("Running");
+      await expect(child.locator(".status")).toHaveAccessibleName("Status: Running");
+      await expect(child.locator(".status.t-danger")).toHaveCount(0);
+      expect(await child.evaluate((shell) => getComputedStyle(shell, "::before").content)).toBe("none");
+    }
+    await expect(page.locator(".inbox-row .status").filter({ hasText: /^Stalled$/ })).toHaveCount(0);
   });
 }
 
@@ -250,18 +244,18 @@ test("in forced colors a dots-only chip keeps its dots and the thread keeps its 
   expect(paint.tick).not.toBe(paint.canvas);
 });
 
-test.describe("a stalled child", () => {
+test.describe("a quiet running child", () => {
   for (const width of [1440, 390] as const) {
-    test(`shows one danger badge and no rail or red border at ${width}px; selected, it keeps the accent bar`, async ({ page }) => {
+    test(`keeps one Running badge and no danger rail or border at ${width}px; selected, it keeps the accent bar`, async ({ page }) => {
       await page.setViewportSize({ width, height: 900 });
       await page.goto(`${FAMILY}&selected=family-stalled`);
-      const stalled = childRow(page, "Stalled");
-      await expect(stalled).toHaveClass(/thread-child/);
-      await expect(stalled.locator(".status")).toHaveCount(1);
-      await expect(stalled.locator(".status.t-danger")).toHaveCount(1);
-      await expect(stalled.locator(".status")).toHaveText("Stalled");
-      await expect(stalled.locator(".status")).toHaveAttribute("title", "Running, but no activity for 14 minutes.");
-      const paint = await stalled.evaluate((shell) => {
+      const quiet = childRow(page, "Quiet");
+      await expect(quiet).toHaveClass(/thread-child/);
+      await expect(quiet.locator(".status")).toHaveCount(1);
+      await expect(quiet.locator(".status.t-danger")).toHaveCount(0);
+      await expect(quiet.locator(".status")).toHaveText("Running");
+      await expect(quiet.locator(".status")).toHaveAccessibleName("Status: Running");
+      const paint = await quiet.evaluate((shell) => {
         const row = shell.querySelector<HTMLElement>(".inbox-row")!;
         const cell = shell.querySelector<HTMLElement>(".inbox-row-primary-cell")!;
         const style = getComputedStyle(row);
@@ -293,11 +287,11 @@ test.describe("a stalled child", () => {
       expect(paint.spine, "the spine is --border-strong").toBe(paint.borderStrong);
       expect(paint.tick, "the tick is --border-strong").toBe(paint.borderStrong);
       if (width > 760) {
-        await expect(stalled).toHaveClass(/selected/);
-        expect(paint.bar, "the selected stalled child keeps its accent bar").toBe("\"\"");
+        await expect(quiet).toHaveClass(/selected/);
+        expect(paint.bar, "the selected quiet child keeps its accent bar").toBe("\"\"");
       }
       // The waiting child next to it keeps its own warning badge.
-      await expect(childRow(page, "Waiting").locator(".status.t-warning")).toHaveCount(1);
+      await expect(childRow(page, "Waiting").locator(".status")).toHaveText(["Awaiting Input", "Answer Required"]);
     });
   }
 });
@@ -316,9 +310,9 @@ for (const shape of [
       await expect(parent(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
       await expect(page.locator(".inbox-row-shell.thread-child")).toHaveCount(0);
       await expect(chip(page).locator(".inbox-thread-dot")).toHaveCount(16);
-      await expect(chip(page)).toHaveAccessibleName("16 Children · Needs Your Input · 13 Working");
+      await expect(chip(page)).toHaveAccessibleName("16 Children · Needs Your Input · 14 Working");
       const working = chip(page).locator(".inbox-thread-working");
-      await expect(working).toHaveText("13 Working");
+      await expect(working).toHaveText("14 Working");
       if (!shape.touch) await parent(page).hover();
       await expect(working).toBeVisible();
       expect(await working.evaluate((label) => label.scrollWidth <= label.clientWidth)).toBe(true);
@@ -338,11 +332,11 @@ for (const listWidth of [600, 700, 900, 1440]) {
     test(`a large collapsed family protects its working count in a ${listWidth}px ${theme} list`, async ({ page }) => {
       await page.setViewportSize({ width: 1440, height: 900 });
       await page.goto(`/session-rows-e2e.html?family=large&collapsed=1&sort=1&listWidth=${listWidth}&theme=${theme}`);
-      const label = "16 Children · Needs Your Input · 13 Working";
+      const label = "16 Children · Needs Your Input · 14 Working";
       await expect(parent(page).locator(".inbox-thread-toggle")).toHaveAttribute("aria-expanded", "false");
       await expect(chip(page)).toHaveAccessibleName(label);
       await expect(chip(page)).toHaveAttribute("title", label);
-      const working = chip(page).getByText("13 Working", { exact: true });
+      const working = chip(page).getByText("14 Working", { exact: true });
       for (const hovered of [false, true]) {
         if (hovered) await parent(page).hover();
         await expect(working).toBeVisible();
@@ -376,6 +370,6 @@ for (const width of [1440, 390]) {
     const firstBox = (await firstRow.boundingBox())!;
     const parentBox = (await parent(page).boundingBox())!;
     expect(firstBox.y + firstBox.height).toBeLessThanOrEqual(parentBox.y);
-    await expect(parent(page).locator(".status")).toHaveText("Needs Your Input");
+    await expect(parent(page).locator(".status")).toHaveText(["Running", "Needs Your Input"]);
   });
 }

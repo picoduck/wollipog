@@ -351,14 +351,14 @@ test("session indicators preserve simultaneous lifecycle and attention dimension
     });
     assert.match(container.textContent ?? "", /Running/);
     assert.match(container.textContent ?? "", /Answer Required/);
-    assert.match(container.textContent ?? "", /Disconnected/);
+    assert.doesNotMatch(container.textContent ?? "", /Disconnected/);
     assert.ok(container.querySelector('[role="group"][aria-label="Session Status"]'));
     assert.equal(container.querySelector('[aria-label="Activity: Running"]')?.textContent?.trim(), "Running");
     assert.equal(container.querySelector('[aria-label="Attention: Answer Required"]')?.textContent?.trim(), "Answer Required");
     // Child requests are one status (#2206): the Orchestrator's share is counted only in the panel.
     assert.equal(container.querySelector('[aria-label="2 Child Requests"]')?.textContent?.trim(), "2 Child Requests");
     assert.doesNotMatch(container.textContent ?? "", /Orchestrator Action|Needs Your Input/u);
-    assert.equal(container.querySelector('[aria-label="Health: Disconnected"]')?.textContent?.trim(), "Disconnected");
+    assert.equal(container.querySelectorAll(".session-status-indicators")[0]!.querySelectorAll(".status").length, 2);
     assert.equal(
       container.querySelector('[aria-label="Queue Reason: Execution target cloud-a is using 2 of 2 slots"]')
         ?.textContent?.trim(),
@@ -402,15 +402,32 @@ test("direct attention and the one child-request badge keep distinct destination
       />);
     });
     const direct = container.querySelector('[aria-label="Attention: Answer Required"]') as HTMLButtonElement;
-    const childRequests = container.querySelector('[aria-label="2 Child Requests"]') as HTMLButtonElement;
-    assert.equal(container.querySelectorAll(".status").length, 2, "attention and child requests, nothing else");
-    assert.equal(childRequests.className.includes("t-warning"), true);
-    await act(async () => {
-      direct.click();
-      childRequests.click();
-    });
+    assert.equal(container.querySelectorAll(".status").length, 2, "lifecycle plus highest priority request");
+    assert.match(container.textContent ?? "", /\+1/);
+    assert.match(container.querySelector("[title='2 Child Requests']")?.textContent ?? "", /\+1/);
+    await act(async () => { direct.click();
+      (container.querySelector('[aria-label="1 More: 2 Child Requests"]') as HTMLButtonElement).click(); });
     assert.equal(directOpens, 1);
     assert.equal(campaignOpens, 1);
+  } finally {
+    await act(async () => root.unmount());
+    happyContainer.remove();
+  }
+});
+
+test("session indicators retain the count for requests of one kind", async () => {
+  const happyContainer = domWindow.document.createElement("div");
+  domWindow.document.body.append(happyContainer);
+  const container = happyContainer as unknown as HTMLDivElement;
+  const root = createRoot(container);
+  try {
+    await act(async () => root.render(<SessionStatusIndicators session={{
+      status: "running", pendingApproval: { requestId: "first", title: "Run?", options: [],
+        additionalRequests: [{ requestId: "second", title: "Also run?", options: [] }] },
+    }} />));
+    assert.equal(container.querySelectorAll(".status").length, 2);
+    const attention = container.querySelector('[aria-label="Attention: Approval Required, 2 Requests"]');
+    assert.equal(attention?.querySelector(".status-count")?.textContent, "2");
   } finally {
     await act(async () => root.unmount());
     happyContainer.remove();

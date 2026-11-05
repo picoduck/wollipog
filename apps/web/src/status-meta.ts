@@ -1,3 +1,4 @@
+import { sessionFollowUp } from "./session-follow-up.js";
 import { sessionCampaignRequests } from "@wollipog/protocol";
 /**
  * The one status vocabulary (docs/design-system.md §11.2).
@@ -73,7 +74,6 @@ const VOCABULARY = {
     /** An at-rest Full Control root whose campaign continues automatically: informational, not
      * review work or a prompt the person owes (#2938). No pulse, so it never reads as Running. */
     campaign_active: info("Campaign Active"),
-    stalled: danger("Stalled"),
     failed: danger("Failed"),
     completed: success("Completed"),
     stopped: neutral("Stopped"),
@@ -569,6 +569,7 @@ export type SessionConditionKind =
   /** The runner is relaunching the session in the worktree it switched to (#3810). */
   | "worktree_switch"
   /** The session lifecycle, including Stop Pending and Stop Failed. */
+  | "follow_up"
   | "lifecycle";
 
 /** One condition a session is in, as the Session Status control and its popover show it. */
@@ -590,14 +591,15 @@ export interface SessionCondition {
   fact?: boolean;
 }
 
-/** The session's one status, the number of other things that need the person, and every condition. */
+/** Lifecycle, one ranked secondary, additional actionable conditions, and the complete details. */
 export interface SessionStatusSummary {
-  /** The one badge a surface shows for the session. Always `conditions[0]`. */
+  /** Always the lifecycle, with its own tone. */
   primary: SessionCondition;
+  /** Highest priority additional condition; equivalent lifecycle labels are suppressed. */
+  secondary: SessionCondition | null;
   /** How many OTHER conditions need the person: the "+N". Never counts passive states. */
   more: number;
-  /** Every condition, in rank order, for the Session Status popover. The lifecycle is always
-   * listed: it is the badge only when nothing ranks above it. */
+  /** Every condition for the Session Status popover, including the lifecycle and passive context. */
   conditions: SessionCondition[];
 }
 
@@ -605,6 +607,8 @@ export interface SessionStatusSummary {
 export interface SessionStatusContext {
   /** The session's machine is connected. Unknown counts as connected; only offline is Disconnected. */
   runnerOnline?: boolean;
+  familyWorking?: boolean;
+  disconnected?: boolean;
   /** Unresolved human-owned requests of descendant sessions (the Requests panel's "Waiting for You"). */
   descendantRequests?: number;
   /** Live workers (the Agents panel's count). */
@@ -667,7 +671,6 @@ const LIFECYCLE_DESCRIPTIONS: Partial<Record<StatusValue<"session">, string>> = 
   stopping: "The agent is stopping.",
   input_required: "The agent is waiting for your input.",
   idle: "The agent finished its turn and is waiting for your next prompt.",
-  stalled: "The agent stopped reporting progress.",
   failed: "The session ended with an error.",
   completed: "The session finished.",
   stopped: "The session was stopped.",
@@ -715,27 +718,9 @@ export function queueReasonLabel(kind: NonNullable<SessionView["capacityWait"]>[
                 : "Queue Order";
 }
 
-/**
- * Which one status a session shows, and how many other things need the person (#2182). The Session
- * bar, and later the Sessions rows, the preview bar and the Board cards, all choose their badge here.
- *
- * The badge is the first of these that applies:
- * 1. What needs the person: each attention kind in `sessionAttentionBreakdown()` order (the Sessions
- *    list's priority), then human-owned child requests ("8 Child Requests", campaign and descendant
- *    together; #2206), then a background result that is blocked or missing (Result Blocked, Result
- *    Missing; #2275).
- * 2. Background Work Lost.
- * 3. Disconnected, when the session's machine is offline.
- * 4. Waiting on External Job (or Continuation Pending) while the session is otherwise awaiting its
- *    next prompt, so running background work stays visible at a glance (#784).
- * 5. The lifecycle, including Stop Pending and Stop Failed, and Archived for an archived session at
- *    rest (`sessionArchivedAtRest()`).
- *
- * `more` counts the other conditions in rule 1, never a passive state, so "+N" is the same at every
- * width. `conditions` lists everything in that order for the popover, followed by the passive rows
- * (background work while the agent is busy, a result still on its way back, workers and queue
- * reasons). Requests the Orchestrator owns are not a condition: their count is in the Requests panel.
- */
+/** Lifecycle stays primary; secondary ranks requests, recovery, disconnection, then passive
+ * context. The complete conditions remain in the popover. Only actionable extras count in +N. */
+
 /**
  * Between the turn that switched worktrees and the provider relaunched there, the session is not
  * idle but moving (#3810), so this outranks the lifecycle badge. A running turn is still the
@@ -824,7 +809,7 @@ export function sessionStatusSummary(
   const background = backgroundWorkCondition(session, runnerOnline);
   if (background?.needsYou) needs.push(background);
   const lost = backgroundState === "orphaned" ? background : null;
-  const disconnected: SessionCondition | null = runnerOnline ? null : {
+  const disconnected: SessionCondition | null = !(context.disconnected ?? !runnerOnline) ? null : {
     kind: "disconnected",
     meta: { label: "Disconnected", tone: "danger", pulse: false },
     description: "The session's machine is offline, so its status may not be current.",
@@ -840,7 +825,7 @@ export function sessionStatusSummary(
   const switching = worktreeSwitchCondition(session);
   if (switching) conditions.push(switching);
   // Listed even under a request, so the popover still says the agent is Running (#3073).
-  conditions.push({ kind: "lifecycle", meta: lifecycle, description: lifecycleDescription(lifecycle), needsYou: false });
+  conditions.push({ kind: "lifecycle", meta: lifecycle, description: session.stopOperation?.failure?.message ?? session.archiveOperation?.failure?.message ?? lifecycleDescription(lifecycle), needsYou: false });
   if (background && !background.needsYou && background !== lost && background !== waiting) conditions.push(background);
   if (delivery && !delivery.needsYou) conditions.push(delivery);
   const workers = context.activeWorkers ?? 0;
@@ -883,5 +868,20 @@ export function sessionStatusSummary(
       fact: true,
     });
   }
-  return { primary: conditions[0]!, more: Math.max(0, needs.length - 1), conditions };
+  if (session.attention && !switching && !session.stopOperation && lifecycle.tone !== "danger" && runnerOnline && !background && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking || (context.activeWorkers ?? 0) > 0 }).group === "ready_for_review") {
+    conditions.push({ kind: "follow_up", meta: statusMeta("session", "ready_for_review"),
+      description: "A new result is waiting for your assessment or next instructions.", needsYou: true });
+  }
+  const primary = conditions.find((condition) => condition.kind === "lifecycle")!;
+  if (disconnected) primary.meta = { ...primary.meta, pulse: false };
+  const equivalent = (condition: SessionCondition) => condition.meta.label === primary.meta.label ||
+    (session.status === "input_required" && condition.kind === "attention" && condition.attentionKind === "input_required");
+  const secondary = conditions.find((condition) => condition !== primary && !equivalent(condition)) ?? null;
+  return { primary, secondary, more: conditions.filter((condition) => condition.needsYou && condition !== secondary && !equivalent(condition)).length, conditions };
+}
+
+/** A compact signal (member tab dot or action description) keeps requests and health visible. */
+export function sessionStatusSignal(session: SessionStatusSource, context: SessionStatusContext = {}): SessionCondition {
+  const summary = sessionStatusSummary(session, context);
+  return summary.conditions.find((condition) => condition.needsYou) ?? summary.conditions[0]!;
 }

@@ -15,33 +15,33 @@ export interface SessionRowStatusContext {
   runnerOnline?: boolean;
   /** The session's reminder: a pending one lets its snoozed attention count, a fired one says Returned. */
   reminder?: SessionReminderView;
-  /** How long a stalled session has been silent, in milliseconds; absent while it is not stalled. */
-  stalledForMs?: number;
   /** A parent's human-owned descendant reason, visible even when its family chip is dots. */
   familyFollowUpLabel?: "Needs Your Input" | "Ready for Review";
   /** Any descendant still has work, including background jobs, blocked input, or a pending stop. */
   familyWorking?: boolean;
-  /** False when unfinished descendants are all stalled or blocked rather than progressing. */
+  /** False when unfinished descendants are blocked rather than progressing. */
   familyProgressing?: boolean;
 }
 
-/** The one badge a row draws. */
+/** One lifecycle or secondary badge. */
 export interface SessionRowBadge {
   meta: StatusMeta;
   /** Requests behind the badge, drawn as a count inside it. */
   count?: number;
-  /** The tooltip: one sentence saying what the status means, and how long a stalled session has been silent. */
+  /** The tooltip: one sentence saying what the status means, and its concrete condition. */
   title: string;
-  /** "Status: <label>", with the request count in words and ", Stalled" for a stalled session. */
+  /** Status label and request count in words. */
   ariaLabel: string;
 }
 
-/** A row's one status (#2209): the badge, or none, and the other things that need the person. */
+/** Lifecycle, one secondary badge, and additional actionable conditions for rows and cards. */
 export interface SessionRowStatus {
-  /** Null for a session Awaiting Prompt with nothing else to say: idle rows show no badge. */
+  /** Null when no secondary condition adds to the lifecycle. */
   badge: SessionRowBadge | null;
+  lifecycle: SessionRowBadge;
   /** The other kinds that need the person, in rank order: the "+N" and its tooltip. */
   others: readonly string[];
+  details: string;
 }
 
 function requests(count: number): string {
@@ -50,14 +50,6 @@ function requests(count: number): string {
 
 function conditionName(condition: SessionCondition): string {
   return condition.count === undefined ? condition.meta.label : `${condition.meta.label}, ${requests(condition.count)}`;
-}
-
-/** "14 minutes", "2 hours": how long a stalled session has been silent, in its tooltip. */
-export function silenceDuration(ms: number): string {
-  const minutes = Math.max(1, Math.floor(ms / 60_000));
-  if (minutes < 60) return `${minutes} ${minutes === 1 ? "minute" : "minutes"}`;
-  const hours = Math.floor(minutes / 60);
-  return `${hours} ${hours === 1 ? "hour" : "hours"}`;
 }
 
 /** The snoozed-attention reason a pending reminder keeps visible that the ranking does not already hold. */
@@ -73,72 +65,50 @@ function snoozedCondition(session: SessionStatusSource, needs: readonly SessionC
   };
 }
 
-/**
- * Which one status a Sessions row (and a Board card) shows (#2209), on #2182's ranking so the session
- * bar, the preview and the row agree:
- *
- * 1. The top kind that needs the person, with a neutral "+N" for the other kinds. A snoozed session's
- *    attention reasons count among them.
- * 2. Else Background Work Lost, Disconnected, then Waiting on External Job (`sessionStatusSummary()`).
- * 3. Else a fired reminder's Returned.
- * 4. Else an outstanding human result's Ready for Review, once the session has stopped working (#3074).
- *    A Full Control root the server reports Verified Complete shows an informational Campaign Complete
- *    instead: its normal completion is not review work (#2940). One the server reports Active, at rest
- *    with no human item, shows an informational Campaign Active: the campaign continues on its own,
- *    so neither its intermediate results nor an Awaiting Prompt state are the person's work (#2938).
- * 5. Else Children Working while an at-rest parent's descendants have unfinished work.
- * 6. Else the lifecycle status, except Awaiting Prompt, which shows no badge.
- *
- * A family's human-attention reason is visible on its parent's badge at every list width, including
- * narrow desktop columns where the chip shows only dots. The parent's own higher-ranked request wins,
- * and an unfinished family keeps its working status over Ready for Review (#3074, #3328).
- * Stalled is not a second badge (#2215). A stalled session whose badge would be its busy lifecycle
- * (Queued, Starting, Running) reads Stalled instead; an attention badge keeps its own label.
- * Either way the badge takes the danger tone, stops pulsing, and its tooltip says how long the session
- * has been silent.
- */
+/** Lifecycle stays visible; choose one secondary from requests, recovery and passive context. */
 export function sessionRowStatus(session: SessionStatusSource, context: SessionRowStatusContext = {}): SessionRowStatus {
-  const { reminder, stalledForMs } = context;
-  const summary = sessionStatusSummary(session, { runnerOnline: context.runnerOnline });
-  const needs = summary.conditions.filter((condition) => condition.needsYou);
+  const { reminder } = context;
+  const summary = sessionStatusSummary(session, { runnerOnline: context.runnerOnline, familyWorking: context.familyWorking });
+  const needs = summary.conditions.filter((condition) => condition.needsYou && !(session.status === "input_required" && condition.attentionKind === "input_required"));
   const snoozed = reminder?.state === "pending" ? snoozedCondition(session, needs) : null;
   if (snoozed) needs.push(snoozed);
 
-  let primary: SessionCondition | null = needs[0] ?? summary.primary;
-  if (primary.kind === "lifecycle") {
+  let secondary: SessionCondition | null = needs[0] ?? summary.secondary ?? summary.primary;
+  if (secondary.kind === "lifecycle") {
     if (reminder?.state === "fired") {
-      primary = {
+      secondary = {
         kind: "lifecycle",
         meta: { ...statusMeta("session", "snoozed"), label: reminderBadgeLabel(reminder) },
         description: reminderBadgeDescription(reminder),
         needsYou: false,
       };
-    } else if (primary.meta.label === statusMeta("session", "idle").label) {
-      primary = null;
+    } else if (secondary.meta.label === statusMeta("session", "idle").label) {
+      secondary = null;
     }
   }
-  if ((!primary || (primary.kind === "lifecycle" && primary.meta.tone !== "danger" && !session.stopOperation)) &&
+  if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.tone !== "danger" && !session.stopOperation)) &&
       needs.length === 0 && reminder?.state !== "fired" &&
       session.attention && sessionFollowUp(session as SessionView, { familyWorking: context.familyWorking }).group === "ready_for_review") {
-    primary = { kind: "lifecycle", meta: statusMeta("session", "ready_for_review"),
+    secondary = { kind: "lifecycle", meta: statusMeta("session", "ready_for_review"),
       description: "A new result is waiting for your assessment or next instructions.", needsYou: true };
-  } else if ((!primary || (primary.kind === "lifecycle" && primary.meta.label === statusMeta("session", "completed").label)) &&
+  } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.label === statusMeta("session", "completed").label)) &&
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && completedFullControlCampaign(session)) {
-    primary = { kind: "lifecycle", meta: statusMeta("session", "campaign_complete"),
+    secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_complete"),
       description: "This Full Control campaign finished and the server verified it. Its result is informational.", needsYou: false };
-  } else if ((!primary || (primary.kind === "lifecycle" && primary.meta.label === statusMeta("session", "completed").label)) &&
+  } else if ((!secondary || (secondary.kind === "lifecycle" && secondary.meta.label === statusMeta("session", "completed").label)) &&
       !session.stopOperation && needs.length === 0 && reminder?.state !== "fired" && !context.familyWorking &&
       !sessionWorking(session as SessionView) && activeFullControlCampaign(session)) {
-    primary = { kind: "lifecycle", meta: statusMeta("session", "campaign_active"),
+    secondary = { kind: "lifecycle", meta: statusMeta("session", "campaign_active"),
       description: "This Full Control campaign continues automatically. Its intermediate results are informational.", needsYou: false };
   }
   const others = needs.slice(1).map(conditionName);
   const familyLabel = context.familyFollowUpLabel;
-  if (familyLabel && primary?.meta.label !== familyLabel && needs.length === 0 &&
+  if (familyLabel && secondary?.meta.label !== familyLabel && needs.every((condition) => condition.kind === "follow_up") &&
       (familyLabel === "Needs Your Input" || (!context.familyWorking && !sessionWorking(session as SessionView))) &&
       (familyLabel === "Needs Your Input" ? 3 : 2) >= sessionFollowUp(session as SessionView).priority) {
-    const previous = primary;
+    const previous = secondary;
+    if (previous?.needsYou && previous.meta.label !== familyLabel) others.push(conditionName(previous));
     const keepPrevious = previous && previous.meta.label !== familyLabel &&
       (previous.kind !== "lifecycle" || previous.meta.tone === "danger" || previous.needsYou || session.stopOperation ||
         reminder?.state === "fired");
@@ -147,51 +117,20 @@ export function sessionRowStatus(session: SessionStatusSource, context: SessionR
       : "A result in this family is waiting for your assessment or next instructions.";
     const familyMeta = familyLabel === "Needs Your Input"
       ? statusMeta("attention", "input_required") : statusMeta("session", "ready_for_review");
-    primary = { kind: "lifecycle", meta: { ...familyMeta,
+    secondary = { kind: "lifecycle", meta: { ...familyMeta,
       tone: keepPrevious && previous.meta.tone === "danger" ? "danger" : familyMeta.tone },
       description: keepPrevious ? `${description} ${previous.description}` : description, needsYou: true };
   }
   if (context.familyWorking && needs.length === 0 && !sessionWorking(session as SessionView) &&
-      (!primary || (primary.kind === "lifecycle" && !primary.needsYou && primary.meta.tone !== "danger" &&
+      (!secondary || (secondary.kind === "lifecycle" && !secondary.needsYou && secondary.meta.tone !== "danger" &&
         !session.stopOperation && reminder?.state !== "fired"))) {
-    primary = { kind: "lifecycle", meta: statusMeta("session", context.familyProgressing === false ? "children_pending" : "children_working"),
+    secondary = { kind: "lifecycle", meta: statusMeta("session", context.familyProgressing === false ? "children_pending" : "children_working"),
       description: "Child sessions still have unfinished work.", needsYou: false };
   }
-  if (!primary) return { badge: null, others };
-
-  if (stalledForMs === undefined) {
-    return {
-      badge: { meta: primary.meta, count: primary.count, title: primary.description, ariaLabel: `Status: ${conditionName(primary)}` },
-      others,
-    };
-  }
-  const silence = silenceDuration(stalledForMs);
-  // A busy lifecycle status says Stalled in words (#2215), so a stalled row never reads like a
-  // working one where its tone does not show: in forced colors, or without colour vision.
-  if (primary.kind === "lifecycle" && STALLABLE_LIFECYCLE_LABELS.has(primary.meta.label)) {
-    return {
-      badge: {
-        meta: statusMeta("session", "stalled"),
-        title: `${primary.meta.label}, but no activity for ${silence}.`,
-        ariaLabel: `Status: Stalled, ${primary.meta.label}`,
-      },
-      others,
-    };
-  }
-  // Anything else keeps its own label, which already differs from a working session's.
-  return {
-    badge: {
-      meta: { ...primary.meta, tone: "danger", pulse: false },
-      count: primary.count,
-      title: `${primary.description} Stalled: no activity for ${silence}.`,
-      ariaLabel: `Status: ${conditionName(primary)}, Stalled`,
-    },
-    others,
-  };
+  const lifecycle = { meta: summary.primary.meta, title: summary.primary.description,
+    ariaLabel: `Status: ${conditionName(summary.primary)}` };
+  const badge = secondary && secondary !== summary.primary && secondary.meta.label !== lifecycle.meta.label
+    ? { meta: secondary.meta, count: secondary.count, title: secondary.description, ariaLabel: `Status: ${conditionName(secondary)}` } : null;
+  const details = [...new Set([...summary.conditions.map((condition) => condition.meta.label + ": " + condition.description), ...(badge ? [badge.title] : [])])].join("\n");
+  return { lifecycle, badge, others, details };
 }
-
-/** The busy lifecycle labels a stalled session can show (`isSessionStalled()`); a stalled Awaiting
- * Input session ranks as an attention kind instead, which keeps its label. */
-const STALLABLE_LIFECYCLE_LABELS: ReadonlySet<string> = new Set(
-  (["queued", "starting", "running"] as const).map((status) => statusMeta("session", status).label),
-);

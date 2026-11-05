@@ -57,7 +57,6 @@ const split: InboxSplit = {
   sessions: [session("session-1"), session("session-2")],
   count: 2,
   blockedCount: 0,
-  stalledCount: 0,
 };
 
 function runner(overrides: Partial<RunnerView> = {}): RunnerView {
@@ -502,7 +501,6 @@ test("durable zero-session Projects keep Project actions without inferring ident
     sessions: [],
     count: 0,
     blockedCount: 0,
-    stalledCount: 0,
   };
   const renamed: Array<[string, string]> = [];
   const pinned: boolean[] = [];
@@ -601,7 +599,6 @@ test("durable Project archive is atomic, restores only changed sessions, and hon
     sessions: [session("session-visible")],
     count: 2,
     blockedCount: 0,
-    stalledCount: 0,
   };
   const archivedProjects: string[] = [];
   const restored: Array<[string, boolean]> = [];

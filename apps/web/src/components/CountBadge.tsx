@@ -3,7 +3,7 @@ import React from "react";
 export interface CountBadgeProps {
   /** How many things need the user. Zero or less renders nothing: zero is never shown in colour. */
   count: number;
-  /** Amber by default; danger for counts that are failing rather than waiting (stalled, errored). */
+  /** Amber by default; danger for counts that are failing rather than waiting (errored). */
   tone?: "warning" | "danger";
   /** Places the badge on an icon's top-right shoulder. The icon's wrapper is the positioned box. */
   onIcon?: boolean;

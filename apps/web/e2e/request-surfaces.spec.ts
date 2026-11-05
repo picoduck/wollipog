@@ -581,8 +581,8 @@ for (const viewport of [
     await page.goto("/request-surfaces-e2e.html?scenario=descendants");
     await expect(page.locator(".descendant-request-region")).toHaveCount(0);
     // One "8 Child Requests" condition, and no other request badge in the bar.
-    await expect(statusControl(page)).toHaveAccessibleName("Session Status: 8 Child Requests");
-    await expect(page.locator("header.session-bar .status")).toHaveText(["8 Child Requests"]);
+    await expect(statusControl(page)).toHaveAccessibleName("Session Status: Running, 8 Child Requests");
+    await expect(page.locator("header.session-bar .status")).toHaveText(["Running", "8 Child Requests"]);
     await expect(page.locator("header.session-bar")).not.toContainText(/Orchestrator Action|Needs Your Input/u);
     await openRequests(page);
 

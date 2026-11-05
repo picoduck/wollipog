@@ -65,7 +65,7 @@ for (const viewport of [
         });
         expectGeometry(Math.abs(geometry.bar.bottom - geometry.bar.top - geometry.barH), `${title}: the bar is --bar-h tall`)
           .toBeLessThanOrEqual(0.61);
-        expect(geometry.badges, `${title}: one status badge`).toBe(1);
+        expect(geometry.badges, `${title}: lifecycle plus one secondary badge`).toBe(2);
         for (const item of [geometry.status, ...geometry.others]) {
           expectGeometry(geometry.bar.top - item.top, `${title}: every item sits inside the one row`).toBeLessThanOrEqual(0.61);
           expectGeometry(item.bottom - geometry.bar.bottom, `${title}: every item sits inside the one row`).toBeLessThanOrEqual(0.61);

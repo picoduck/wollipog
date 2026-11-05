@@ -44,8 +44,7 @@ async function withRow(
   const root = createRoot(container);
   const render = (extra: RowOptions) => act(async () => root.render(<InboxRow
     optionId="session-option" session={session} projectName="Project One"
-    selected={false} unread={false} pinned={false} rowIndex={1}
-    stalled={false} activityNow={NOW} threeRow={false}
+    selected={false} unread={false} pinned={false} rowIndex={1} activityNow={NOW} threeRow={false}
     onSelect={() => undefined} onExpand={() => undefined} onSessionMenu={() => undefined}
     {...options} {...extra}
   />));
@@ -58,24 +57,25 @@ async function withRow(
   }
 }
 
-const badges = (container: Element) => [...container.querySelectorAll<HTMLElement>(".status")];
+const allBadges = (container: Element) => [...container.querySelectorAll<HTMLElement>(".status")];
+const badges = (container: Element) => allBadges(container).slice(-1);
 const minutesAgo = (minutes: number): SessionActivity => recordSessionActivity(undefined, NOW - minutes * ACTIVITY_BUCKET_MS);
 
-test("a parent keeps its human family reason in the single badge across phone and desktop shapes", async () => {
+test("a parent keeps its human family reason beside lifecycle across phone and desktop shapes", async () => {
   // A working parent keeps its own Running over the family's Ready for Review (#3074).
   for (const [reason, status, shown] of [["Needs Your Input", "running", "Needs Your Input"],
     ["Ready for Review", "idle", "Ready for Review"], ["Ready for Review", "running", "Running"]] as const) {
     await withRow(baseSession({ status }), async (container, rerender) => {
-      assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown]);
+      assert.deepEqual(allBadges(container).map((badge) => badge.textContent), (shown === "Running" ? ["Running"] : [status === "running" ? "Running" : "Awaiting Prompt", shown]));
       await rerender({ threeRow: false });
-      assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown]);
+      assert.deepEqual(allBadges(container).map((badge) => badge.textContent), (shown === "Running" ? ["Running"] : [status === "running" ? "Running" : "Awaiting Prompt", shown]));
       assert.match(container.querySelector(".inbox-thread-family-text")?.textContent ?? "", new RegExp(reason));
     }, { threeRow: true, threadChildren: JSON.stringify({ count: 1, waiting: reason === "Needs Your Input" ? 1 : 0,
       followUpLabel: reason, children: [{ id: "child", title: "Child", state: reason === "Needs Your Input" ? "blocked" : "idle" }] }) });
   }
 });
 
-test("a blocked row with an approval and two questions shows one badge plus \"+1\" and no lifecycle badge", async () => {
+test("a blocked row with an approval and two questions keeps lifecycle beside its top request and +1", async () => {
   const session = baseSession({
     status: "input_required",
     pendingApproval: {
@@ -87,58 +87,59 @@ test("a blocked row with an approval and two questions shows one badge plus \"+1
   } as unknown as Partial<SessionView>);
   for (const threeRow of [false, true]) {
     await withRow(session, (container) => {
-      const shown = badges(container);
-      assert.equal(shown.length, 1, "one status badge per row");
-      assert.equal(shown[0]!.textContent, "Answer Required2");
-      assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Answer Required, 2 Requests");
+      const shown = allBadges(container);
+      assert.equal(shown.length, 2);
+      assert.equal(shown[0]!.textContent, "Awaiting Input");
+      assert.equal(shown[1]!.textContent, "Answer Required2");
+      assert.equal(shown[1]!.getAttribute("aria-label"), "Status: Answer Required, 2 Requests");
       assert.ok(shown[0]!.classList.contains("t-warning"));
       const more = container.querySelector<HTMLElement>(".row-status-more")!;
       assert.equal(more.querySelector('[aria-hidden="true"]')?.textContent, "+1");
       assert.equal(more.getAttribute("title"), "Approval Required");
       assert.match(more.textContent ?? "", /1 More: Approval Required/);
-      assert.doesNotMatch(container.textContent ?? "", /Awaiting Input/, "the lifecycle is not said as well");
+      assert.match(container.textContent ?? "", /Awaiting Input/);
     }, { threeRow });
   }
 });
 
-test("an idle row shows no status badge, no strip and no Git words", async () => {
+test("an idle row shows Awaiting Prompt without a strip or Git words", async () => {
   await withRow(baseSession(), (container) => {
-    assert.deepEqual(badges(container), []);
-    assertNoDomNode(container.querySelector(".row-status"));
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt"]);
     assertNoDomNode(container.querySelector(".activity-strip"));
     assertNoDomNode(container.querySelector(".inbox-row-git"), "the branch shows only when there is one");
-    assert.doesNotMatch(container.textContent ?? "", /Awaiting Prompt|No Branch|Branch Unavailable/);
+    assert.doesNotMatch(container.textContent ?? "", /No Branch|Branch Unavailable/);
   });
 });
 
-test("a stalled running row shows one badge, in the danger tone, saying how long it has been silent", async () => {
+test("a quiet running row retains its lifecycle, tone and pulse", async () => {
   const session = baseSession({ status: "running", lastEventAt: NOW - 14 * 60_000 });
   await withRow(session, (container) => {
     const shown = badges(container);
     assert.equal(shown.length, 1, "Stalled is not a second badge");
     // In words, not only the tone (#2215): forced colors and colour-blind readers see Stalled.
-    assert.equal(shown[0]!.textContent, "Stalled");
-    assert.ok(shown[0]!.classList.contains("t-danger"));
-    assert.ok(!shown[0]!.classList.contains("pulse"), "a stalled badge does not pulse");
-    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Stalled, Running");
-    assert.equal(shown[0]!.getAttribute("title"), "Running, but no activity for 14 minutes.");
-  }, { stalled: true });
+    assert.equal(shown[0]!.textContent, "Running");
+    assert.ok(shown[0]!.classList.contains("t-info"));
+    assert.ok(shown[0]!.classList.contains("pulse"));
+    assert.equal(shown[0]!.getAttribute("aria-label"), "Status: Running");
+    assert.equal(shown[0]!.getAttribute("title"), "The agent is working on its turn.");
+  }, {  });
 });
 
-test("meaningful work time labels the row while actual activity determines the stall duration", async () => {
+test("meaningful work time labels the row without inferring a stall", async () => {
   const session = baseSession({ status: "running", lastEventAt: NOW - 14 * 60_000,
     attention: { version: 1, humanActions: [], meaningfulAt: NOW - 40 * 60_000, result: null } });
   await withRow(session, (container) => {
-    assert.match(badges(container)[0]!.getAttribute("title") ?? "", /no activity for 14 minutes/);
+    assert.doesNotMatch(badges(container)[0]!.getAttribute("title") ?? "", /Stalled|silent/);
     assert.equal(container.querySelector("time")?.getAttribute("dateTime"), new Date(NOW - 40 * 60_000).toISOString());
-  }, { stalled: true });
+  }, {  });
 });
 
 test("a running row with background work shows Running and the strip", async () => {
   await withRow(baseSession({ status: "running", backgroundWorkState: "running" }), (container) => {
-    const shown = badges(container);
-    assert.equal(shown.length, 1);
+    const shown = allBadges(container);
+    assert.equal(shown.length, 2);
     assert.equal(shown[0]!.textContent, "Running");
+    assert.equal(shown[1]!.textContent, "Waiting on External Job");
     assert.ok(shown[0]!.classList.contains("pulse"));
     assert.notEqual(container.querySelector(".inbox-row-activity"), null);
     assertNoDomNode(container.querySelector('[data-group="background-work"]'), "no separate background-work badge");
@@ -163,7 +164,7 @@ test("an idle row with running background work shows Waiting on External Job", a
     backgroundWorkState: "running",
     pendingApproval: { kind: "permission", requestId: "approval", title: "Review external work", options: [] },
   } as unknown as Partial<SessionView>), (container) => {
-    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Approval Required"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Approval Required"]);
   });
 });
 
@@ -264,7 +265,7 @@ test("a stop-failed row shows Stop Failed and its time", async () => {
     },
   } as unknown as Partial<SessionView>);
   await withRow(session, (container) => {
-    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Stop Failed"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Stop Failed"]);
     const time = container.querySelector("time")!;
     assert.notEqual(time.textContent, "—");
     assert.equal(time.getAttribute("datetime"), new Date(NOW - 3 * 60_000).toISOString());
@@ -315,7 +316,7 @@ test("a fired reminder's row says Returned; snoozed rows show the return time to
       }).format(new Date(reminder.scheduledFor));
       for (const threeRow of [false, true]) {
         await withRow(baseSession(), (container) => {
-          assert.deepEqual(badges(container), [], "the reminder is the time cell, not a badge");
+          assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt"], "the reminder stays in the time cell");
           const cell = container.querySelector<HTMLElement>(".inbox-row-time.snoozed")!;
           assert.notEqual(cell.querySelector("svg"), null, "AlarmClockIcon");
           assert.equal(cell.textContent, `Snoozed Until ${returnTime}`);
@@ -367,7 +368,7 @@ test("a snoozed row's lost or missing background result counts toward its one st
     createdAt: 1, updatedAt: 1,
   } as SessionReminderView;
   await withRow(baseSession({ backgroundWorkState: "orphaned" }), (container) => {
-    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Background Work Lost"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Background Work Lost"]);
   }, { reminder: pending });
 });
 
@@ -443,7 +444,7 @@ test("a parent row carries the chevron and family chip, and a child row its thre
   ] });
   try {
     await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={1} stalled={false} activityNow={0}
+      selected={false} unread={false} pinned={false} rowIndex={1} activityNow={0}
       threeRow={false} threadChildren={children} threadCollapsed={false}
       onSelect={() => { selected++; }} onExpand={() => { selected++; }} onSessionMenu={() => {}}
       onToggleThread={(id) => toggled.push(id)} />));
@@ -474,7 +475,7 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     assert.equal(selected, 0, "toggling never selects or expands the row");
 
     await act(async () => root.render(<InboxRow optionId="row" session={parent} projectName="Project"
-      selected={false} unread={false} pinned={false} containsPinned rowIndex={1} stalled={false} activityNow={0}
+      selected={false} unread={false} pinned={false} containsPinned rowIndex={1} activityNow={0}
       threeRow={false} threadChildren={children} threadCollapsed
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.equal(container.querySelector(".inbox-thread-toggle")?.getAttribute("aria-label"), "Expand Thread");
@@ -486,7 +487,7 @@ test("a parent row carries the chevron and family chip, and a child row its thre
 
     const child = { ...parent, id: "c1", title: "Child One", parentSessionId: "parent" } as SessionView;
     await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={2} stalled={false} activityNow={0}
+      selected={false} unread={false} pinned={false} rowIndex={2} activityNow={0}
       threeRow={false} threadDepth={1} threadLast
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-last/);
@@ -497,14 +498,14 @@ test("a parent row carries the chevron and family chip, and a child row its thre
     // A review under a child (#4077): one step deeper, carrying the child's spine on to a later sibling.
     const review = { ...child, id: "r1", title: "Review", parentSessionId: "c1", kind: "review" } as SessionView;
     await act(async () => root.render(<InboxRow optionId="row" session={review} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={3} stalled={false} activityNow={0}
+      selected={false} unread={false} pinned={false} rowIndex={3} activityNow={0}
       threeRow={false} threadDepth={2} threadLast threadOuterSpine
       onSelect={() => {}} onExpand={() => {}} onSessionMenu={() => {}} />));
     assert.match(container.querySelector(".inbox-row-shell")!.className, /thread-child thread-depth-2 thread-last thread-outer/);
 
     // A child whose only descendant is its review names it as a review.
     await act(async () => root.render(<InboxRow optionId="row" session={child} projectName="Project"
-      selected={false} unread={false} pinned={false} rowIndex={2} stalled={false} activityNow={0}
+      selected={false} unread={false} pinned={false} rowIndex={2} activityNow={0}
       threeRow={false} threadDepth={1}
       threadChildren={JSON.stringify({ count: 1, reviews: 1, visibleCount: 1, waiting: 0, working: 0,
         children: [{ id: "r1", title: "Review", state: "idle" }] })}
@@ -541,12 +542,12 @@ test("a verified-complete Full Control root reads Campaign Complete in a success
     result: { revision: "r1", at: NOW, owner: "human" as const }, acknowledgedRevision: null };
   const campaign = (control: unknown) => ({ status: "verified_complete", policyRevision: 3, control }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
   await withRow(baseSession({ attention, orchestratorCampaign: campaign({ mode: "full_control", boundary: {} }) }), (container) => {
-    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Campaign Complete"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Campaign Complete"]);
     assert.ok(badges(container)[0]!.classList.contains("t-success"));
     assertNoDomNode(container.querySelector(".status.t-review"));
   });
   await withRow(baseSession({ attention, orchestratorCampaign: campaign({ mode: "custom" }) }), (container) => {
-    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Ready for Review"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Ready for Review"]);
   });
 });
 
@@ -557,13 +558,13 @@ test("an active Full Control root reads Campaign Active, then Campaign Complete 
   const campaign = (status: string) => ({ status, policyRevision: 3,
     control: { mode: "full_control", boundary: {} } }) as unknown as NonNullable<SessionView["orchestratorCampaign"]>;
   await withRow(baseSession({ attention, orchestratorCampaign: campaign("active") }), (container) => {
-    assert.deepEqual(badges(container).map((badge) => badge.textContent), ["Campaign Active"]);
+    assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", "Campaign Active"]);
     assert.ok(badges(container)[0]!.classList.contains("t-info"));
     assertNoDomNode(container.querySelector(".status.t-review"));
   });
   for (const [status, shown] of [["verified_complete", "Campaign Complete"], ["waiting_human", "Ready for Review"]] as const) {
     await withRow(baseSession({ attention, orchestratorCampaign: campaign(status) }), (container) => {
-      assert.deepEqual(badges(container).map((badge) => badge.textContent), [shown], status);
+      assert.deepEqual(allBadges(container).map((badge) => badge.textContent), ["Awaiting Prompt", shown], status);
     });
   }
 });
