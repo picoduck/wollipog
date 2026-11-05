@@ -22030,6 +22030,154 @@ test("capability gates reject old/unknown runners before requests or cache mutat
   assert.equal(files.capabilityRequirement?.requiredRunnerProtocolVersion, 16);
 });
 
+/* Workspace search options (#1263 match, #4129 fuzzyWithDirectories; pinned by #4254). */
+
+type WorkspaceSearchReply = Omit<Extract<RunnerRequestResult, { type: "search_workspace_references_result" }>, "type" | "requestId">;
+
+/** A seeded session whose runner answers every workspace search with `reply`; returns what it sent. */
+function workspaceSearchHarness(reply: WorkspaceSearchReply = { ok: true, results: [] }) {
+  const harness = makeHarness();
+  const sessionId = seedSession(harness.svc, harness.hub);
+  harness.hub.requestHandler = (message) => {
+    if (message.type !== "search_workspace_references") throw new Error(`unexpected request ${message.type}`);
+    return { type: "search_workspace_references_result", requestId: message.requestId, ...reply };
+  };
+  const sent = () => harness.hub.sentOfType("search_workspace_references")
+    .map(({ requestId, ...rest }) => {
+      assert.match(requestId, /^wsr_search_/u);
+      return rest;
+    });
+  return { ...harness, sessionId, sent };
+}
+
+test("workspace search forwards match and fuzzyWithDirectories only when given, so an older runner sees a substring request", async () => {
+  const { svc, sessionId, sent } = workspaceSearchHarness();
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "src/app")).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy")).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", undefined, true)).ok, true);
+  assert.equal((await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy", true)).ok, true);
+  assert.deepEqual(sent(), [
+    { type: "search_workspace_references", sessionId, query: "src/app" },
+    { type: "search_workspace_references", sessionId, query: "sapp", match: "fuzzy" },
+    { type: "search_workspace_references", sessionId, query: "sapp", fuzzyWithDirectories: true },
+    { type: "search_workspace_references", sessionId, query: "sapp", match: "fuzzy", fuzzyWithDirectories: true },
+  ]);
+  for (const message of sent().slice(0, 2)) {
+    assert.equal("fuzzyWithDirectories" in message, false, "an unrequested folder option is omitted, not false");
+  }
+  assert.equal("match" in sent()[0]!, false, "a substring search carries no match key");
+});
+
+test("workspace search echoes match only when the runner applied it", async () => {
+  const results = [{ path: "src/app.ts", isDirectory: false }];
+  const applied = workspaceSearchHarness({ ok: true, results, match: "fuzzy" });
+  assert.deepEqual(await applied.svc.searchWorkspaceReferences(applied.sessionId, "sapp", "fuzzy"),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy" } });
+
+  // A runner that predates `match` answers with substring results and no echo.
+  const older = workspaceSearchHarness({ ok: true, results });
+  assert.deepEqual(await older.svc.searchWorkspaceReferences(older.sessionId, "sapp", "fuzzy"),
+    { ok: true, status: 200, data: { results, truncated: false } });
+
+  // An echo nobody asked for is not reported either: the request was a substring search.
+  const unrequested = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await unrequested.svc.searchWorkspaceReferences(unrequested.sessionId, "app"),
+    { ok: true, status: 200, data: { results, truncated: false } });
+});
+
+test("workspace search echoes fuzzyWithDirectories only when the runner applied both it and fuzzy matching", async () => {
+  const results = [{ path: "src", isDirectory: true }, { path: "src/app.ts", isDirectory: false }];
+  const applied = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await applied.svc.searchWorkspaceReferences(applied.sessionId, "sapp", undefined, true),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy", fuzzyWithDirectories: true } });
+  const appliedWithMatch = workspaceSearchHarness({ ok: true, results, match: "fuzzy", fuzzyWithDirectories: true });
+  assert.deepEqual(await appliedWithMatch.svc.searchWorkspaceReferences(appliedWithMatch.sessionId, "sapp", "fuzzy", true),
+    { ok: true, status: 200, data: { results, truncated: false, match: "fuzzy", fuzzyWithDirectories: true } });
+
+  const partialReplies: WorkspaceSearchReply[] = [
+    // A runner that predates both options: a plain substring answer.
+    { ok: true, results },
+    // A runner that knows `match` but predates `fuzzyWithDirectories` echoes neither for this request.
+    { ok: true, results, match: "fuzzy" },
+    // A folder echo without the fuzzy echo is not an applied fuzzy search.
+    { ok: true, results, fuzzyWithDirectories: true },
+  ];
+  for (const reply of partialReplies) {
+    const { svc, sessionId } = workspaceSearchHarness(reply);
+    assert.deepEqual(await svc.searchWorkspaceReferences(sessionId, "sapp", undefined, true),
+      { ok: true, status: 200, data: { results, truncated: false } }, JSON.stringify(reply));
+    // Asking for match as well does not let a partial echo through as a plain fuzzy answer.
+    const withMatch = workspaceSearchHarness(reply);
+    assert.deepEqual(await withMatch.svc.searchWorkspaceReferences(withMatch.sessionId, "sapp", "fuzzy", true),
+      { ok: true, status: 200, data: { results, truncated: false } }, `match + ${JSON.stringify(reply)}`);
+  }
+});
+
+test("workspace search passes limit through only for entries or results, and truncated only when the runner says so", async () => {
+  const cases: Array<[reply: WorkspaceSearchReply, expected: Record<string, unknown>]> = [
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "entries" }, { truncated: true, limit: "entries" }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "results" }, { truncated: true, limit: "results" }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy" }, { truncated: true }],
+    [{ ok: true, results: [], truncated: true, match: "fuzzy", limit: "bytes" as never }, { truncated: true }],
+    [{ ok: true, results: [], truncated: "true" as never, match: "fuzzy", limit: "entries" }, { truncated: false, limit: "entries" }],
+    [{ ok: true, results: [], truncated: false, match: "fuzzy" }, { truncated: false }],
+    [{ ok: true, match: "fuzzy" }, { truncated: false }],
+  ];
+  for (const [reply, expected] of cases) {
+    const { svc, sessionId } = workspaceSearchHarness(reply);
+    assert.deepEqual(await svc.searchWorkspaceReferences(sessionId, "sapp", "fuzzy"),
+      { ok: true, status: 200, data: { results: [], match: "fuzzy", ...expected } }, JSON.stringify(reply));
+  }
+  // A substring search keeps a runner-reported limit as well; only the echo depends on the option.
+  const substring = workspaceSearchHarness({ ok: true, results: [], truncated: true, limit: "results" });
+  assert.deepEqual(await substring.svc.searchWorkspaceReferences(substring.sessionId, "app"),
+    { ok: true, status: 200, data: { results: [], truncated: true, limit: "results" } });
+});
+
+test("workspace search keeps its 404, 409, capability, 502 and 504 failure statuses", async () => {
+  const missing = workspaceSearchHarness();
+  assert.deepEqual(await missing.svc.searchWorkspaceReferences("no-such-session", "app", "fuzzy"),
+    { ok: false, status: 404, error: "session not found" });
+  assert.deepEqual(missing.sent(), []);
+
+  const offline = workspaceSearchHarness();
+  offline.hub.online = false;
+  assert.deepEqual(await offline.svc.searchWorkspaceReferences(offline.sessionId, "app", "fuzzy"),
+    { ok: false, status: 409, error: "runner is offline" });
+  assert.deepEqual(offline.sent(), []);
+
+  const old = workspaceSearchHarness();
+  old.db.registerRunner(runnerMeta(), Date.now(), RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences - 1);
+  const unsupported = await old.svc.searchWorkspaceReferences(old.sessionId, "app", undefined, true);
+  assert.equal(unsupported.ok, false);
+  assert.equal(unsupported.status, 409);
+  assert.match(unsupported.error ?? "", /workspace references/u);
+  assert.equal(unsupported.capabilityRequirement?.requiredRunnerProtocolVersion, RUNNER_CAPABILITY_MIN_PROTOCOL.workspaceReferences);
+  assert.deepEqual(old.sent(), [], "an unsupported runner is never asked");
+
+  const refused = workspaceSearchHarness({ ok: false, error: "workspace root is unavailable" });
+  assert.deepEqual(await refused.svc.searchWorkspaceReferences(refused.sessionId, "app", "fuzzy"),
+    { ok: false, status: 502, error: "workspace root is unavailable" });
+  const refusedSilently = workspaceSearchHarness({ ok: false });
+  assert.deepEqual(await refusedSilently.svc.searchWorkspaceReferences(refusedSilently.sessionId, "app"),
+    { ok: false, status: 502, error: "could not search workspace paths" });
+
+  const mismatched = workspaceSearchHarness();
+  mismatched.hub.requestHandler = (message) => ({
+    type: "list_session_files_result", requestId: message.type === "search_workspace_references" ? message.requestId : "x", ok: true,
+  }) as RunnerRequestResult;
+  assert.deepEqual(await mismatched.svc.searchWorkspaceReferences(mismatched.sessionId, "app"),
+    { ok: false, status: 502, error: "unexpected runner reply" });
+
+  const timedOut = workspaceSearchHarness();
+  timedOut.hub.requestHandler = () => { throw new RunnerRequestTimeoutError(); };
+  const timeout = await timedOut.svc.searchWorkspaceReferences(timedOut.sessionId, "app", "fuzzy");
+  assert.equal(timeout.ok, false);
+  assert.equal(timeout.status, 504);
+  assert.equal(timeout.error, new RunnerRequestTimeoutError().message);
+  assert.equal(timedOut.sent().length, 1);
+});
+
 test("Pi discovery and adoption fail closed until the runner supports managed transcript copies", async () => {
   const { db, hub, svc } = makeHarness();
   const metadata = runnerMeta();
