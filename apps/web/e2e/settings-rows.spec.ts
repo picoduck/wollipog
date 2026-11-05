@@ -2417,3 +2417,80 @@ test.describe("the setting-row grid", () => {
     });
   });
 });
+
+/* Settings › Orchestrator › Decision Model (#4101): the organization's group after the Orchestrator
+ * defaults, its rows, the read-only state for a member without admin permission, and its baselines. */
+test.describe("Decision Model group", () => {
+  const decisionGroup = (page: Page) => page.locator("section.settings-group")
+    .filter({ has: page.getByRole("heading", { name: "Decision Model", exact: true }) });
+  const openDecision = async (page: Page, theme: Theme, decision?: string) => {
+    await page.goto(`/settings-rows-e2e.html?theme=${theme}&section=orchestrator${decision ? `&decision=${decision}` : ""}`);
+    await expectTheme(page, theme);
+    await expect(page.locator("#settings-panel-heading")).toHaveText("Orchestrator");
+    await expect(decisionGroup(page)).toBeVisible();
+  };
+
+  test("follows the Orchestrator defaults with an organization scope, its rows and the provider disclosure", async ({ page }) => {
+    await openDecision(page, "dark");
+    const headings = await page.locator(".settings-group-head h2, .settings-group-head h3").allTextContents();
+    expect(headings.indexOf("Decision Model")).toBeGreaterThan(headings.indexOf("Decision Delegation"));
+    const group = decisionGroup(page);
+    await expect(group.locator(".settings-group-head")).toContainText("This Organization");
+    await expect(group.locator(".setting-row-title")).toHaveText(["Model Source", "Test Decision Model"]);
+    await expect(group.getByRole("button", { name: /^Model Source: Automatic/ })).toBeEnabled();
+    await expect(group.getByRole("button", { name: /^Run Test/ })).toBeEnabled();
+    await expect(group.getByText("to the selected agent's provider")).toBeVisible();
+    await group.getByRole("button", { name: /^Run Test/ }).click();
+    await expect(group.getByText(/^Verdict: Confirm\. 3\.2 s, 1 attempt on Claude Code \(Haiku, Low effort\)\.$/)).toBeVisible();
+  });
+
+  test("a member without admin permission sees Edit… and Run Test disabled in the disabled ink", async ({ page }) => {
+    await openDecision(page, "dark", "viewer");
+    const group = decisionGroup(page);
+    await expect(group.locator(".setting-row-title")).toHaveText(["Model Source", "Claude Code on Studio Workstation", "Test Decision Model"]);
+    const edit = group.getByRole("button", { name: /^Edit…/ });
+    const run = group.getByRole("button", { name: /^Run Test/ });
+    await expect(edit).toBeDisabled();
+    await expect(run).toBeDisabled();
+    // Disabled is text only in this design system (§ .btn:disabled): the label takes --text-faint,
+    // which is not the enabled label's ink.
+    const faint = await page.evaluate(() => getComputedStyle(document.documentElement).getPropertyValue("--text-faint").trim());
+    const ink = async (locator: Locator) => locator.evaluate((element) => getComputedStyle(element).color);
+    const enabled = await page.evaluate(() => {
+      const probe = document.createElement("button");
+      probe.className = "btn";
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    });
+    const resolvedFaint = await page.evaluate((value) => {
+      const probe = document.createElement("span");
+      probe.style.color = value;
+      document.body.append(probe);
+      const color = getComputedStyle(probe).color;
+      probe.remove();
+      return color;
+    }, faint);
+    for (const button of [edit, run]) {
+      expect(await ink(button)).toBe(resolvedFaint);
+      expect(await ink(button)).not.toBe(enabled);
+    }
+    await expect(group.getByText("Only an organization owner or admin can change this.").first()).toBeVisible();
+  });
+
+  for (const theme of THEMES) {
+    test(`the Decision Model group matches its ${theme} baseline`, async ({ page }) => {
+      skipWithoutBaselines();
+      await openDecision(page, theme, "chosen");
+      await page.mouse.move(0, 0);
+      const group = decisionGroup(page);
+      await group.scrollIntoViewIfNeeded();
+      await expect(page).toHaveScreenshot(`decision-model-${theme}.png`, {
+        ...PIXELS,
+        clip: await snappedClip(group),
+        maxDiffPixelRatio: 0.02,
+      });
+    });
+  }
+});

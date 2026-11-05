@@ -41,14 +41,17 @@ export function compatibilityFields({ error, ...versions }: { error: string } & 
 export function scopeView(db: ControlPlaneDb, root: SessionView, repository: string): CampaignIssueScopeView {
   const numbers = root.orchestratorPolicy?.issueNumbers ?? [];
   const outsideScope: CampaignIssueScopeView["outsideScope"] = [];
+  const unverifiedWork: NonNullable<CampaignIssueScopeView["unverifiedWork"]> = [];
   let cursor: string | undefined;
   do {
     const result = db.campaignWorkLedger.page(root.id, { limit: 100, ...(cursor ? { cursor } : {}) }, Date.now());
     if (!result.ok) throw new Error(result.error);
     for (const item of result.data.items) {
-      if (item.issue && (item.issue.repository.toLowerCase() !== repository.toLowerCase() || !numbers.includes(item.issue.number))) {
-        outsideScope.push({ workItemId: item.id, title: item.title ?? item.key, issue: item.issue, sessionId: item.currentAttempt?.sessionId ?? null });
-      }
+      if (!item.issue) continue;
+      const entry = { workItemId: item.id, title: item.title ?? item.key, issue: item.issue, sessionId: item.currentAttempt?.sessionId ?? null };
+      // An unknown repository (#2664) is no mismatch: only a number outside the saved list is.
+      if (!numbers.includes(item.issue.number) || repository && item.issue.repository.toLowerCase() !== repository.toLowerCase()) outsideScope.push(entry);
+      else if (!repository) unverifiedWork.push(entry);
     }
     cursor = result.data.nextCursor ?? undefined;
   } while (cursor);
@@ -71,7 +74,8 @@ export function scopeView(db: ControlPlaneDb, root: SessionView, repository: str
     ...(root.orchestratorPolicy?.issueScope ? { authorization: root.orchestratorPolicy.issueScope } : {}),
     supported: !requirement, ...(requirement ? compatibilityFields(requirement) : {}), canPropose: false,
     ...(context.length ? { contextIssueNumbers: context } : {}),
-    ...(scopeGrant ? { scopeGrant, policyRevision: root.parentControlPolicy?.revision ?? 0 } : {}), outsideScope };
+    ...(scopeGrant ? { scopeGrant, policyRevision: root.parentControlPolicy?.revision ?? 0 } : {}),
+    ...(unverifiedWork.length ? { unverifiedWork } : {}), outsideScope };
 }
 
 export function scopeSnapshot(db: ControlPlaneDb, root: SessionView, repository: string, request: CampaignIssueScopeRequest): CampaignIssueScopeSnapshot | null {

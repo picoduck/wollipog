@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import type { CampaignIssueScopeSnapshot, CampaignIssueScopeView, SessionView } from "@wollipog/protocol";
 import { browserRandomUUID } from "../browser-crypto.js";
 import { Checkbox } from "./ui/ChoiceControls.js";
@@ -24,6 +24,9 @@ export function CampaignIssueScopeSummary({ snapshot }: { snapshot: CampaignIssu
   </>;
 }
 
+/** How often a panel showing a disconnected runner's saved scope checks for reconnection. */
+export const SCOPE_RECONNECT_POLL_MS = 10_000;
+
 export function CampaignIssueScopePanel({ session, campaignId, policyRevision }: {
   session: SessionView;
   campaignId: string;
@@ -48,15 +51,30 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision }:
   const selectable = context.length > 0 && Boolean(view?.supported && view.canPropose);
   const contextLabelId = useId();
   const contextHelpId = useId();
+  const reading = useRef(false);
   useEffect(() => {
     const controller = new AbortController();
     setError(null);
+    reading.current = true;
     void api.campaignIssueScope(campaignId, undefined, controller.signal).then((next) => {
-      if (!controller.signal.aborted) { setView(next); setPending(false); setSelected([]); }
-    }).catch((e: unknown) => { if (!controller.signal.aborted) setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); });
+      if (!controller.signal.aborted) { reading.current = false; setView(next); setPending(false); setSelected([]); }
+    }).catch((e: unknown) => { if (!controller.signal.aborted) { reading.current = false; setError(e instanceof Error ? e.message : "Could not load campaign issue scope."); } });
     return () => controller.abort();
     // A change to the campaign's authority (such as another tab's selection count) reloads it too.
   }, [api, campaignId, revision, policyRevision, reload]);
+  // A disconnected runner leaves the revision unchanged when it returns, so poll the saved scope
+  // (no runner call) until the view verifies again (#2664). A returning tab refreshes at once. A
+  // poll never replaces a read still in flight: a reconnected runner's inspection can outlast it.
+  const disconnected = Boolean(view?.runnerDisconnected);
+  useEffect(() => {
+    if (!disconnected) return;
+    const poll = () => { if (document.visibilityState !== "hidden" && !reading.current) setReload((n) => n + 1); };
+    const timer = window.setInterval(poll, SCOPE_RECONNECT_POLL_MS);
+    document.addEventListener("visibilitychange", poll);
+    return () => { window.clearInterval(timer); document.removeEventListener("visibilitychange", poll); };
+  }, [disconnected]);
+  const refreshButton = <button className="btn sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>;
+  const unverified = view?.unverifiedWork ?? [];
 
   const parse = (text: string) => {
     const result = text.split(/[\s,]+/u).filter(Boolean).map((ref) => {
@@ -102,7 +120,7 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision }:
   <section className="campaign-detail-section" aria-labelledby={headingId}>
     <h3 id={headingId} className="section-title">Authorized Issue Scope</h3>
     {error && <Notice tone="danger" role="alert" title="Couldn't Load or Update Issue Scope"
-      actions={<button className="btn sm" type="button" onClick={() => setReload((n) => n + 1)}>Refresh Scope</button>}>{error}</Notice>}
+      actions={refreshButton}>{error}</Notice>}
     {view ? <>
       <dl className="facts">
         <div><dt>Repository</dt><dd>{view.repository || "Not Verified"}</dd></div>
@@ -111,12 +129,19 @@ export function CampaignIssueScopePanel({ session, campaignId, policyRevision }:
         {context.length > 0 && !selectable && <div><dt>Context-Only References</dt><dd>{context.map((n) => `${view.repository}#${n}`).join(", ")}</dd></div>}
       </dl>
       {view.candidateMessage && <Notice tone="warning" title="Epic Members Need Review">{view.candidateMessage}</Notice>}
+      {!view.repository && view.issueNumbers.length > 0 && <Notice tone="info" title="Repository Not Verified">
+        The saved issue numbers are shown without a repository because this campaign never recorded one. They are not confirmed to belong to any repository until the campaign runner verifies it.
+      </Notice>}
+      {unverified.length > 0 && <Notice tone="neutral" title="Work Awaiting Repository Verification">
+        <ul className="campaign-detail-list">{unverified.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
+        Their issue numbers are in the saved scope, but the campaign repository is not verified, so this work is neither confirmed in scope nor outside it.
+      </Notice>}
       {!view.issueNumbers.length && <Notice tone="info" title="Issue Scope Needs Confirmation">Confirm the umbrella issue and intended members before delegating issue work. Recorded work and issue mentions do not grant authority.</Notice>}
       {view.outsideScope.length > 0 && <Notice tone="warning" title="Work Outside Authorized Scope">
         <ul className="campaign-detail-list">{view.outsideScope.map((item) => <li key={item.workItemId}>{item.issue.repository}#{item.issue.number}: {item.title}</li>)}</ul>
         Add the intended issues through a scope approval to enable their closure requests.
       </Notice>}
-      {!view.supported ? <Notice tone="neutral" title="Scope Changes Unavailable">{view.compatibilityMessage}</Notice> : view.canPropose ? <>
+      {!view.supported ? <Notice tone="neutral" title="Scope Changes Unavailable" actions={error ? undefined : refreshButton}>{view.compatibilityMessage}</Notice> : view.canPropose ? <>
         {view.candidates && view.candidates.length > 0 && <fieldset className="field"><legend>Proposed Epic Members</legend>
           <p>Choose the umbrella issue and intended members. Dependencies and incidental references are excluded.</p>
           <ul className="campaign-detail-list">{view.candidates.map((candidate) => <li key={candidate.issue.number}><Checkbox

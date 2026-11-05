@@ -827,6 +827,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   provider_account_label TEXT,
   provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1)),
   provider_account_switch_failure TEXT,
+  location_switch TEXT,
   provider_profile_id TEXT,
   provider_home_refusal TEXT,
   provider_home_wait TEXT,
@@ -3421,6 +3422,7 @@ interface SessionRow {
   provider_account_label: string | null;
   provider_account_automatically_selected: number;
   provider_account_switch_failure: string | null;
+  location_switch?: string | null;
   provider_profile_id: string | null;
   provider_home_refusal: string | null;
   provider_home_wait: string | null;
@@ -7557,6 +7559,8 @@ export class ControlPlaneDb {
       "provider_account_label TEXT",
       "provider_account_automatically_selected INTEGER NOT NULL DEFAULT 0 CHECK (provider_account_automatically_selected IN (0, 1))",
       "provider_account_switch_failure TEXT",
+      // #4138: the runner's pending or failed Location switch for the live session.
+      "location_switch TEXT",
       // Provider profiles (#3239): the profile the session's account binding recorded.
       "provider_profile_id TEXT",
       // The provider-HOME lease refusal that stopped the session's last launch (#3240).
@@ -18346,6 +18350,14 @@ export class ControlPlaneDb {
         authoritativeProjectLocation?.id ?? null,
         id,
       );
+    } else if (existing && snap.workspaceId && snap.workspaceId !== existing.workspace_id) {
+      // A live session its runner moved under an approved Location switch (#4138). A runner never
+      // moves the session row by itself: only a consumed switch naming exactly this Location does.
+      const target = this.approvedLocationSwitchTarget(id, existing.runner_id, snap.workspaceId);
+      if (target) {
+        this.stmt("UPDATE sessions SET workspace_id=?, project_id=?, project_location_id=? WHERE id=?")
+          .run(target.workspaceId, target.projectId, target.id, id);
+      }
     }
     this.stmt(
       `UPDATE sessions SET status=?, title=?, title_source=?, semantic_title=?, provider_updated_at=?, background_work_state=?, background_follow_up=?, background_work_tracking=COALESCE(?, background_work_tracking), history_quarantine=NULLIF(COALESCE(?, history_quarantine), ''), worktree_recovery=NULLIF(COALESCE(?, worktree_recovery), ''), queue_hold=NULLIF(COALESCE(?, queue_hold), ''), capacity_wait=?, preview=?, pending_approval=?, worktree_path=?, worktrees=?, workspace_path=?, use_worktree=?,
@@ -18424,6 +18436,10 @@ export class ControlPlaneDb {
         .run(snap.providerAccountSwitchFailure
           ? JSON.stringify(snap.providerAccountSwitchFailure)
           : null, id);
+    }
+    if (snap.locationSwitch !== undefined) {
+      this.stmt("UPDATE sessions SET location_switch=? WHERE id=?")
+        .run(snap.locationSwitch ? JSON.stringify(snap.locationSwitch) : null, id);
     }
     if (snap.executionTarget) {
       this.stmt("UPDATE sessions SET execution_target=? WHERE id=?")
@@ -23581,11 +23597,12 @@ export class ControlPlaneDb {
   }
 
   /** Mark an approved switch as being carried out. Fails once any attempt has claimed it. */
-  claimLocationSwitch(occurrenceId: string, resourceDigest: string, now: number): boolean {
+  claimLocationSwitch(occurrenceId: string, resourceDigest: string, now: number,
+    target?: { action: "switch" | "new_session"; locationId: string }): boolean {
     return Number(this.stmt(`UPDATE workflow_decisions SET location_switch_result=?
       WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
         AND resource_digest=? AND location_switch_approved_by IS NOT NULL AND location_switch_result IS NULL`)
-      .run(JSON.stringify({ state: "starting", claimedAt: now }), occurrenceId, resourceDigest).changes) === 1;
+      .run(JSON.stringify({ state: "starting", claimedAt: now, ...target }), occurrenceId, resourceDigest).changes) === 1;
   }
 
   /** An attempt that started nothing gives its claim back, so the approval can be retried. */
@@ -23600,6 +23617,31 @@ export class ControlPlaneDb {
       WHERE occurrence_id=? AND category='location_switch' AND authority='human' AND status='approved'
         AND resource_digest=? AND json_extract(location_switch_result, '$.state')='starting'`)
       .run(now, JSON.stringify(result), occurrenceId, resourceDigest).changes) === 1;
+  }
+
+  /** The Project Location a consumed Switch and Continue approval moved `sessionId` to, when it is
+   * exactly (runner, workspace); otherwise null (#4138). */
+  approvedLocationSwitchTarget(sessionId: string, runnerId: string, workspaceId: string): ProjectLocationView | null {
+    // A claimed switch whose runner reply was lost counts too: the runner may have recorded it and
+    // moved the session, and the row must follow. Moving here completes that claim's receipt.
+    const rows = this.stmt(`SELECT occurrence_id AS occurrenceId, status, location_switch_result AS result FROM workflow_decisions
+      WHERE session_id=? AND category='location_switch' AND json_extract(location_switch_result, '$.action')='switch'
+        AND (status='consumed' OR (status='approved' AND json_extract(location_switch_result, '$.state')='starting'))
+      ORDER BY COALESCE(consumed_at, resolved_at) DESC LIMIT 5`).all(sessionId) as Array<{ occurrenceId: string; status: string; result: string }>;
+    for (const row of rows) {
+      const claim = parseJson<{ locationId?: unknown; claimedAt?: unknown }>(row.result);
+      const location = typeof claim?.locationId === "string" ? this.projectLocation(claim.locationId) : null;
+      if (!location || location.runnerId !== runnerId || location.workspaceId !== workspaceId) continue;
+      if (row.status === "approved") {
+        const completedAt = typeof claim!.claimedAt === "number" ? claim!.claimedAt : Date.now();
+        this.stmt(`UPDATE workflow_decisions SET status='consumed', consumed_at=?, location_switch_result=?
+          WHERE occurrence_id=? AND status='approved' AND json_extract(location_switch_result, '$.state')='starting'`)
+          .run(completedAt, JSON.stringify({ action: "switch", locationId: location.id, sessionId,
+            navigationPath: `/sessions/~${Buffer.from(sessionId, "utf16le").toString("base64url")}`, completedAt }), row.occurrenceId);
+      }
+      return location;
+    }
+    return null;
   }
 
   /** An active member of the organization who may still mutate its resources, so a member demoted
@@ -27757,6 +27799,7 @@ export class ControlPlaneDb {
       providerAccountAutomaticallySelected: row.provider_account_automatically_selected === 1 || undefined,
       providerAccountSwitchFailure:
         parseJson<ProviderAccountSwitchFailureView>(row.provider_account_switch_failure) ?? undefined,
+      ...(row.location_switch ? { locationSwitch: parseJson<NonNullable<SessionView["locationSwitch"]>>(row.location_switch) ?? undefined } : {}),
       ...(row.provider_profile_id ? { providerProfileId: row.provider_profile_id } : {}),
       ...providerHomeRefusalField(row.provider_home_refusal),
       ...providerHomeWaitField(status, row.provider_home_wait),
