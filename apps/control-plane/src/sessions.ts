@@ -10131,6 +10131,18 @@ export class SessionsService {
   /** The campaign owner's change to how many follow-ups its Full Control campaign accepts without
    * approval (#2940), `null` for no limit. Human-only, compare-and-set on the policy revision; the
    * boundary is re-minted around it (`ControlPlaneDb.setCampaignFollowUpLimit`). */
+  /** Settle a repository-boundary change the campaign's owner authorized (#4117): each decision it
+   * revoked leaves its requester's pause and records why, exactly as any boundary change does, and
+   * every member sees the new boundary. `before` is the root as it read before the change. */
+  settleCampaignBoundaryChange(before: SessionView, revoked: WorkflowDecisionView[], ownerUserId: string, now = Date.now()): void {
+    for (const decision of revoked) {
+      this.settleWorkflowDecisionPause(decision.sessionId, decision.occurrenceId, now);
+      this.recordWorkflowDecisionRevocation(decision, { reason: "campaign_control_changed", triggeredBy: { kind: "human", id: ownerUserId } }, now);
+    }
+    for (const id of [before.id, ...this.db.campaignDescendantIds(before.id)]) this.hub.sessionChangedById(id);
+    this.publishCampaignAttentionTransition(before);
+  }
+
   setCampaignFollowUpLimit(sessionId: string, request: SetCampaignFollowUpLimitRequest, principal: HumanPrincipal): ServiceResult<SessionView> {
     const session = this.db.getSession(sessionId);
     if (!session || principal.kind !== "human" || !this.db.isSessionOwner(principal, sessionId)) return fail("campaign not found", 404);
