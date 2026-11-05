@@ -783,7 +783,10 @@ Custom requires an authenticated human to approve the exact change. In Full Cont
 human-established issue boundary, use `lineage: {kind: "epic", epic: <number>}` for verified intended
 members or `{kind: "follow_up", publicationOccurrenceId: <id>}` for an exact authorized publication.
 A publication the boundary's author or a campaign owner approved as a person under the current
-objective also qualifies. The server
+objective also qualifies. When the owner's first message set the scope and its Scope Grant in Campaign
+Status failed, was uncertain, or asked the campaign to select issues, propose the issues you chose
+without lineage: the proposal goes to the owner as one typed approval, so put your rationale in
+`explanation`. The server
 refuses incidental references, foreign repositories and changes beyond human-set limits, naming the
 failed condition in a bounded `code`; a campaign owner can still propose the change from Campaign Status.
 Resolution applies and consumes scope atomically; do not separately consume it. A root can resolve

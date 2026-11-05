@@ -49,7 +49,7 @@ export function epicChecklistMembers(body: string, repository: string): number[]
 }
 
 export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknown>): CampaignIssueScopeSnapshot | null {
-  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage)) return null;
+  if (!validIssueAdmission(input.issueAdmission) || !validIssueLineage(input.lineage) || !validScopeGrantReview(input.grantReview)) return null;
   if (input.verifiedPublications !== undefined && (!Array.isArray(input.verifiedPublications) || input.verifiedPublications.length > 100 ||
       input.verifiedPublications.some((p) => !p || typeof p !== "object" || Object.keys(p).length !== 2 || typeof p.publicationOccurrenceId !== "string" ||
         !p.publicationOccurrenceId || p.publicationOccurrenceId.length > 256 || !Number.isSafeInteger(p.issue) || p.issue < 1 ||
@@ -85,7 +85,8 @@ export function normalizeCampaignIssueScopeSnapshot(input: Record<string, unknow
     explanation: input.explanation, affectedAssignments, activeChildren, affectedDecisions: [...input.affectedDecisions] as string[],
     ...(input.lineage === undefined ? {} : { lineage: structuredClone(input.lineage) as CampaignIssueScopeSnapshot["lineage"] }),
     ...(input.issueAdmission === undefined ? {} : { issueAdmission: structuredClone(input.issueAdmission) as CampaignIssueScopeSnapshot["issueAdmission"] }),
-    ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }) };
+    ...(input.verifiedPublications === undefined ? {} : { verifiedPublications: structuredClone(input.verifiedPublications) as CampaignIssueScopeSnapshot["verifiedPublications"] }),
+    ...(input.grantReview === undefined ? {} : { grantReview: structuredClone(input.grantReview) as CampaignIssueScopeSnapshot["grantReview"] }) };
 }
 
 export function validIssueAdmission(value: unknown): boolean {
@@ -99,6 +100,28 @@ export function validIssueAdmission(value: unknown): boolean {
       typeof p.objectiveDigest === "string" && /^[0-9a-f]{64}$/u.test(p.objectiveDigest))) &&
     Number.isSafeInteger(v.boundaryRevision) && (v.boundaryRevision as number) > 0 &&
     typeof v.evidenceDigest === "string" && /^[0-9a-f]{64}$/u.test(v.evidenceDigest);
+}
+
+const GRANT_REVIEW_CAUSES = ["grant_failed", "grant_uncertain", "selection"];
+const boundedText = (value: unknown, max: number) => typeof value === "string" && value.length <= max &&
+  !/[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(value);
+
+/** The exact shape of a scope proposal's grant review (#4102): server-derived, bounded, and with
+ * nothing outside it. */
+export function validScopeGrantReview(value: unknown): boolean {
+  if (value === undefined) return true;
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const v = value as Record<string, unknown>;
+  const s = v.selection as Record<string, unknown> | undefined;
+  return Object.keys(v).every((key) => ["cause", "ownerMessage", "messageDigest", "grantOccurrenceId", "failureClass", "reason", "selection"].includes(key)) &&
+    GRANT_REVIEW_CAUSES.includes(v.cause as string) && boundedText(v.ownerMessage, 4000) &&
+    typeof v.messageDigest === "string" && /^[0-9a-f]{64}$/u.test(v.messageDigest) &&
+    (v.grantOccurrenceId === undefined || boundedText(v.grantOccurrenceId, 256) && (v.grantOccurrenceId as string).length > 0) &&
+    (v.failureClass === undefined || typeof v.failureClass === "string" && /^[a-z_]{1,64}$/u.test(v.failureClass)) &&
+    (v.reason === undefined || boundedText(v.reason, 300)) &&
+    (s === undefined || Boolean(s && typeof s === "object" && !Array.isArray(s) && Object.keys(s).length === 4 &&
+      Number.isSafeInteger(s.count) && (s.count as number) >= 0 && (s.count as number) <= 100 && typeof s.defaulted === "boolean" &&
+      boundedText(s.criteria, 300) && Array.isArray(s.constraints) && s.constraints.length <= 10 && s.constraints.every((c) => boundedText(c, 200))));
 }
 
 export function validIssueLineage(value: unknown): boolean {

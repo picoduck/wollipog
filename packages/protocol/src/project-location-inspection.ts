@@ -24,6 +24,15 @@ export interface VerifiedProjectLocation {
   verifiedAt: number;
 }
 
+/** A Project Location left out of a campaign's repository boundary (#4117), with its fixed reason. */
+export interface CampaignExcludedLocation {
+  locationId: string;
+  /** The Location's name when it was inspected. */
+  name: string;
+  failure: ProjectLocationInspectionFailure;
+  reason: string;
+}
+
 export type ProjectLocationInspection =
   | { ok: true; location: VerifiedProjectLocation }
   | { ok: false; locationId: string; failure: ProjectLocationInspectionFailure; reason: string };

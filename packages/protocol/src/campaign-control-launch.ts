@@ -21,6 +21,8 @@ export const FULL_CONTROL_FIRST_MESSAGE_OBJECTIVE = "The task its owner sends as
 /** Plain Human intent. The authenticated server constructs all authority provenance. */
 export interface CampaignLaunchProposal {
   repository: string;
+  /** Verified Project repositories (#4117); the first entry's repository is `repository`. */
+  repositories?: CampaignAuthorityBoundary["repositories"];
   issueNumbers: number[];
   objective: string;
   operations: CampaignAuthorityBoundary["operations"];
@@ -143,6 +145,11 @@ export interface CampaignLaunchCapability {
 
 export interface CampaignLaunchSummary {
   repository: string | null;
+  /** Every verified repository of the campaign's Project with its Locations, the launch
+   * Location's first (#4117). Omitted when only the launch Location is inspected. */
+  repositories?: Array<{ repository: string; locations: Array<{ locationId: string; name: string }> }>;
+  /** Project Locations left out of the boundary, each with its fixed reason. They never block launch. */
+  excludedLocations?: import("./project-location-inspection.js").CampaignExcludedLocation[];
   issueNumbers: number[];
   objective: string;
   root: { agentId: string; driver: string; model: string | null; effort: string | null;

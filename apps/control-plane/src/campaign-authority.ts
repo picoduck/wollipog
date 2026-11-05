@@ -10,7 +10,7 @@ import type { HumanPrincipal } from "./identity.js";
 export function authorizeFullControl(
   principal: HumanPrincipal,
   scope: NonNullable<NonNullable<SessionView["orchestratorPolicy"]>["issueScope"]>,
-  proposal: Pick<CampaignAuthorityBoundary, "objective" | "operations" | "delegatablePolicyIds" | "issueAuthority" | "budgetAuthority">,
+  proposal: Pick<CampaignAuthorityBoundary, "objective" | "operations" | "delegatablePolicyIds" | "issueAuthority" | "budgetAuthority" | "repositories">,
   revision: number,
   now: number,
 ): CampaignControl | null {
@@ -21,8 +21,21 @@ export function authorizeFullControl(
     version: 1, revision, issueScopeRevision: scope.revision, repository: scope.repository,
     authorizedByUserId: principal.userId, authorizedAt: now,
     ...(proposal.issueAuthority === undefined ? {} : { issueAuthority: proposal.issueAuthority }),
+    // The verified Project repositories the reviewed launch inspected; validation requires the
+    // first to be the scope's repository.
+    ...(proposal.repositories === undefined ? {} : { repositories: structuredClone(proposal.repositories) }),
   } };
   return validCampaignControl(control) ? structuredClone(control) : null;
+}
+
+/** The runner's diagnostic copy of a campaign's control. A pre-v288 runner rejects a boundary with
+ * a `repositories` list (#4117), so it receives the boundary without it, which names the same first
+ * repository. The server keeps and enforces the full boundary. */
+export function campaignControlForRunner(control: CampaignControl, protocolVersion: number | null | undefined): CampaignControl {
+  if (control.mode !== "full_control" || control.boundary.repositories === undefined ||
+      runnerSupportsProtocol(protocolVersion, "campaignRepositoryBoundary")) return control;
+  const { repositories: _repositories, ...boundary } = control.boundary;
+  return { mode: "full_control", boundary };
 }
 
 /** The boundary a Human's own approval of an issue scope establishes (#2940): the same grants,

@@ -1,8 +1,8 @@
 import { randomUUID } from "node:crypto";
 import {
-  PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation,
+  PROJECT_LOCATION_INSPECTION_FAILURES, campaignRepositoryLocation, runnerSupportsProtocol,
   type CampaignLaunchInspectionFailure, type CampaignLaunchInspectionResult, type ProjectLocationInspection,
-  type ProjectLocationInspectionFailure, type RunnerView,
+  type ProjectLocationInspectionFailure, type RunnerProtocolCapability, type RunnerView,
 } from "@wollipog/protocol";
 import type { ControlPlaneDb } from "./db.js";
 import { RunnerRequestTimeoutError, type Hub } from "./hub.js";
@@ -57,7 +57,9 @@ const RUNNER_FAILURES: Partial<Record<CampaignLaunchInspectionFailure, ProjectLo
 export async function inspectProjectLocation(
   dependencies: { db: ControlPlaneDb; hub: Hub },
   locationId: string,
-  options: { projectId?: string; signal?: AbortSignal; timeoutMs?: number; now?: () => number } = {},
+  options: { projectId?: string; signal?: AbortSignal; timeoutMs?: number; now?: () => number;
+    /** A runner below this protocol capability is too old for what the caller will use it for. */
+    requireProtocol?: RunnerProtocolCapability } = {},
 ): Promise<ProjectLocationInspection> {
   const { db, hub } = dependencies;
   const fail = (failure: ProjectLocationInspectionFailure): ProjectLocationInspection =>
@@ -72,7 +74,8 @@ export async function inspectProjectLocation(
   if (!location) return fail("unknown_location");
   const runner = db.getRunner(location.runnerId);
   if (!runner || !hub.isRunnerOnline(location.runnerId)) return fail("runner_offline");
-  if ((runner.runtime?.campaignLaunchInspection?.version ?? 0) < PROJECT_LOCATION_INSPECTION_MIN_VERSION) return fail("runner_too_old");
+  if ((runner.runtime?.campaignLaunchInspection?.version ?? 0) < PROJECT_LOCATION_INSPECTION_MIN_VERSION ||
+      (options.requireProtocol && !runnerSupportsProtocol(runner.protocolVersion, options.requireProtocol))) return fail("runner_too_old");
   const workspacePath = db.getWorkspacePath(location.runnerId, location.workspaceId);
   if (!workspacePath) return fail("path_missing");
   const result = await inspectCampaignWorkspace(hub, runner, location.workspaceId, [],

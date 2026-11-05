@@ -466,6 +466,31 @@ let selectedRequestKey: string | null = null;
 const visibleItems = scenario === "planless" ? items.filter((item) => item.id === "cwi_2" || item.id === "cwi_3") : items;
 
 // The same sentence and versions the control plane returns (campaign-issue-scope.ts).
+const SCOPE_GRANT_TARGET = { source: "automatic", runnerId: "r", machineName: "Studio", agentId: "claude", harnessName: "Claude Code",
+  driver: "claude-code", provider: "claude", model: "claude-haiku-4-5", effort: "low" } as const;
+const LAUNCH_OPERATIONS: import("@wollipog/protocol").CampaignAuthorityOperation[] = ["implementation_question", "pr_merge",
+  "merged_branch_deletion", "follow_up_issue_publication", "ui_evidence_approval", "issue_closure", "campaign_issue_scope", "question",
+  "tool_approval", "policy_ask"];
+const launchCeilings = (maxIssues: number) => ({ repositories: ["team/repo"], maxIssues, maxIssuesSource: "derived" as const, operations: LAUNCH_OPERATIONS });
+const scopeGrantFixture: import("@wollipog/protocol").FullControlScopeGrant | null = params.get("scope") === "grant" ? {
+  version: 1, status: "granted", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET,
+  reason: "The owner names #123 and #124, cites #126 as background, and asks for the 5 highest-priority open UI issues without merging.",
+  namedIssues: [123, 124], dropped: [{ repository: "team/repo", number: 999, reason: "not_in_message" }],
+  selection: { repository: "team/repo", count: 5, defaulted: false, requestedCount: 5, criteria: "highest priority", constraints: ["open", "UI only"] },
+  ceilings: { ...launchCeilings(9), operations: LAUNCH_OPERATIONS.filter((operation) => operation !== "pr_merge" && operation !== "merged_branch_deletion"),
+    removedOperations: ["pr_merge", "merged_branch_deletion"] },
+} : params.get("scope") === "grant-default" ? {
+  version: 1, status: "granted", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET,
+  reason: "The owner asks the campaign to choose the highest-priority issues and gives no count.", namedIssues: [],
+  selection: { repository: "team/repo", count: 3, defaulted: true, criteria: "highest priority", constraints: [] }, ceilings: launchCeilings(4),
+} : params.get("scope") === "grant-failed" ? {
+  version: 1, status: "failed", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, failureClass: "provider_overloaded", namedIssues: [],
+  ceilings: launchCeilings(1),
+} : params.get("scope") === "grant-uncertain" ? {
+  version: 1, status: "uncertain", occurrenceId: "dec_fixture", target: SCOPE_GRANT_TARGET, namedIssues: [],
+  reason: "The message doesn't say whether #12 is a request or background.", ceilings: launchCeilings(1),
+} : null;
+
 const scopeRequirement = params.get("scope") === "outdated-runner" ? campaignIssueScopeChangesRequirement(207)
   : params.get("scope") === "issue-limits" ? campaignIssueLimitsRequirement(216) : null;
 const scopeCompatibility = scopeRequirement ? (({ error, ...versions }) =>
@@ -516,6 +541,10 @@ const client = {
     ...(params.get("scope") === "first-message" ? {
       issueNumbers: [123, 124, 125], revision: 2, outsideScope: [], candidates: [], contextIssueNumbers: [126, 127],
     } : {}),
+    // The first message's scope grant (#4102): named issues with a selection, a defaulted selection
+    // count, and the failure route.
+    ...(scopeGrantFixture ? { issueNumbers: scopeGrantFixture.namedIssues, revision: 2, outsideScope: [], candidates: [],
+      ...(params.get("scope") === "grant" ? { contextIssueNumbers: [126] } : {}), scopeGrant: scopeGrantFixture } : {}),
     ...(params.get("completedChildren") === "1" && recoveryRecord?.reason === "failed_checks" ? {
       // Disclosed static scope data, not a live mint/approval or supported-profile assertion.
       issueNumbers: [123], revision: 1, canPropose: false, outsideScope: [], candidates: [],
