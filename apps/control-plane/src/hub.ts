@@ -947,6 +947,7 @@ export class Hub {
         sessionReminders: true,
         indefiniteSessionReminders: true,
         worktreeSetupConfig: true,
+        renameProjectLocations: true,
         orchestratorRole: true,
         sessionRoleConversion: true,
       },

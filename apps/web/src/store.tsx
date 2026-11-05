@@ -377,6 +377,8 @@ export interface State {
   /** True when reminder writes may omit a timer and use the explicit Someday schedule kind. */
   indefiniteSessionRemindersSupported: boolean;
   worktreeSetupConfigSupported: boolean;
+  /** True when a Location can be renamed within its Project (#4151). */
+  renameProjectLocationsSupported: boolean;
   /** True when session creation accepts a Session Role independent of the provider permission mode. */
   orchestratorRoleSupported: boolean;
   sessionRoleConversionSupported: boolean;
@@ -1275,6 +1277,7 @@ function reducer(state: State, action: Action): State {
             sessionRemindersSupported: msg.capabilities?.sessionReminders === true,
             indefiniteSessionRemindersSupported: msg.capabilities?.indefiniteSessionReminders === true,
             worktreeSetupConfigSupported: msg.capabilities?.worktreeSetupConfig === true,
+            renameProjectLocationsSupported: msg.capabilities?.renameProjectLocations === true,
             orchestratorRoleSupported: msg.capabilities?.orchestratorRole === true,
             sessionRoleConversionSupported: msg.capabilities?.sessionRoleConversion === true,
             runners: new Map(msg.runners.map((r) => [r.runnerId, r])),
@@ -1739,6 +1742,7 @@ function initialState(
     sessionRemindersSupported: false,
     indefiniteSessionRemindersSupported: false,
     worktreeSetupConfigSupported: false,
+    renameProjectLocationsSupported: false,
     orchestratorRoleSupported: false,
     sessionRoleConversionSupported: false,
     runners: new Map(),

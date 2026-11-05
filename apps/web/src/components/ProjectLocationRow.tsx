@@ -17,6 +17,7 @@ import { CheckIcon, ComputerIcon, ErrorIcon, FolderIcon, ServerIcon, WrenchIcon 
 import { Notice } from "./Notice.js";
 import { ActionsMenu, type ActionsMenuChoice, type PageMenuAction } from "./PageHeader.js";
 import { PROJECT_BUSY_REASON } from "./ProjectDetailHeader.js";
+import { RenameLocationDialog } from "./RenameLocationDialog.js";
 import { Spinner } from "./common.js";
 import { StatusBadge } from "./StatusBadge.js";
 import { useIsCompact, useIsMobile } from "./useIsMobile.js";
@@ -53,6 +54,8 @@ function revealReason(location: ProjectLocationView, runner: RunnerView | undefi
 export interface ProjectLocationMenuState {
   /** False for a viewer: the items that change the project are not offered (§3.3). */
   canManage: boolean;
+  /** The server can rename a location within its project (#4151). */
+  renameSupported: boolean;
   /** Under 1100px, where New Session Here leaves the row for ⋯. */
   narrow: boolean;
   /** A phone has no file manager of its own to reveal in, so Reveal is not offered. */
@@ -74,14 +77,16 @@ function item(label: string, onClick: PageMenuAction["onClick"], reason: string 
 
 /**
  * A location's ⋯ items (#2961), in order: New Session Here (under 1100px only), Reveal in File
- * Manager (not on phones), Copy Path, Make Default, Change Location Access…, Create Starter Setup
- * File, then Remove Location… last, after a separator, in danger text (§3.3). A disabled item says
- * why as its second line (§9.1). A viewer gets only the items that change nothing.
+ * Manager (not on phones), Copy Path, Rename Location… (#4151), Make Default, Change Location
+ * Access…, Create Starter Setup File, then Remove Location… last, after a separator, in danger text
+ * (§3.3). A disabled item says why as its second line (§9.1). A viewer gets only the items that
+ * change nothing. Renaming needs no machine: the name is the project's own.
  */
 export function projectLocationMenu(location: ProjectLocationView, state: ProjectLocationMenuState, actions: {
   onNewSession: () => void;
   onReveal: () => void;
   onCopyPath: () => void;
+  onRename: () => void;
   onMakeDefault: () => void;
   onChangeAccess: () => void;
   onCreateSetup: () => void;
@@ -93,6 +98,7 @@ export function projectLocationMenu(location: ProjectLocationView, state: Projec
   items.push(item("Copy Path", actions.onCopyPath, null));
   if (!state.canManage) return items;
   const busy = state.busy ? PROJECT_BUSY_REASON : null;
+  if (state.renameSupported) items.push(item("Rename Location…", actions.onRename, busy));
   items.push(item("Make Default", actions.onMakeDefault, location.isDefault ? ALREADY_DEFAULT : state.hostReason ?? busy));
   if (state.access) items.push(item("Change Location Access…", actions.onChangeAccess, state.access.reason ?? busy));
   if (state.createSetup) items.push(item("Create Starter Setup File", actions.onCreateSetup, state.createSetup.reason));
@@ -172,6 +178,7 @@ export function ProjectLocationRow({
   onNewSession,
   onReveal,
   onCopyPath,
+  onRename,
   onMakeDefault,
   onRemove,
   onAccessChanged,
@@ -190,6 +197,8 @@ export function ProjectLocationRow({
   onNewSession: () => void;
   onReveal: () => void;
   onCopyPath: () => void;
+  /** Saves the location's name in this project; absent where the server can't rename locations. */
+  onRename?: (name: string) => Promise<void>;
   onMakeDefault: () => void;
   /** Called with ⋯'s choice, so the confirmation can bring the row's ⋯ back as its phone Back (§7.5). */
   onRemove: (choice: ActionsMenuChoice) => void;
@@ -200,6 +209,7 @@ export function ProjectLocationRow({
   const phone = useIsMobile();
   const narrow = useIsCompact() || phone;
   const [changingAccess, setChangingAccess] = useState(false);
+  const [renaming, setRenaming] = useState(false);
   const [creatingSetup, setCreatingSetup] = useState(false);
   const hostReason = locationHostReason(location, runner);
   const [setup, reread] = useLocationSetup(project, location, runner, setupSupported, hostReason === null);
@@ -235,6 +245,7 @@ export function ProjectLocationRow({
 
   const menu = projectLocationMenu(location, {
     canManage,
+    renameSupported: onRename !== undefined,
     narrow,
     phone,
     hostReason,
@@ -246,6 +257,7 @@ export function ProjectLocationRow({
     onNewSession,
     onReveal,
     onCopyPath,
+    onRename: () => setRenaming(true),
     onMakeDefault,
     onChangeAccess: () => setChangingAccess(true),
     onCreateSetup: () => void createSetup(),
@@ -287,6 +299,9 @@ export function ProjectLocationRow({
           details={<div className="code-well"><code>{invalid}</code></div>}>
           {`The setup file can't be used: ${invalid.split("\n")[0]}`}
         </Notice>
+      )}
+      {renaming && onRename && (
+        <RenameLocationDialog currentName={location.name} rename={onRename} onClose={() => setRenaming(false)} />
       )}
       {changingAccess && identity && location.scope && (
         <AccessScopeChangeDialog
