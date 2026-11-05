@@ -5231,7 +5231,9 @@ export class SessionsService {
       const accountingError = this.db.campaignBudgetAccountingError(launch.driver, config.model, view.authority.costUsd !== undefined);
       if (req.launchSurface === "native_tui" || accountingError) return fail(accountingError ?? "Campaign limits cannot admit unmetered Native TUI workers.", 409);
       try {
-        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits);
+        // Its review record is not written yet, so say whether this session is a reviewer (#3618).
+        const allocation = this.db.campaignBudgets.prepare(budgetRoot, id, campaignBudgetUserLimits,
+          Boolean(creationContext?.review || creationContext?.delegatedImageReview));
         if (allocation.costUsd !== undefined) config.costBudgetUsd = allocation.costUsd;
         if (allocation.toolCalls !== undefined) config.maxToolCalls = allocation.toolCalls;
       } catch (error) { return fail((error as Error).message, 409); }
